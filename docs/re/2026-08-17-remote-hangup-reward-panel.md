@@ -82,10 +82,9 @@ Battle object `+0x474` 的自动标志并设 phase `8`；`type=0` 清掉标志�
 
 `25/2(type=1)` 的解析效果来自原始模块 `mmBattleMstarWqvga.cbm`（SHA256
 `2d08c215...`）的完整 parser 分支，而非写客户状态：`0x8996` 精确读取
-`result` 与 `type`，`0x5E92` 是独立于手动 `0x60C8` 的 `25/5` 发送点。由于启动包
-此前明确缺少该对象，缺包本身是最早的协议偏离点。现在仅由
-`vm_net_mock_build_hangup_battle_start_response` 在场景挂机启动和 scene-poll 重启包中，
-按 `4/5 + 4/11 + 25/2` 顺序追加：
+`result` 与 `type`，`0x5E92` 是独立于手动 `0x60C8` 的 `25/5` 发送点。它不能出现在
+启动包：该时序会让战斗在目标列表尚未创建时进入自动出口路径。现在由终局状态构造器仅在
+最后 `4/6` 与胜利 `4/7` 已排队后追加：
 
 ```text
 1/25/2 {
@@ -128,11 +127,11 @@ BattleScene 的 `BattleAutoAction_TimerTick(0x2952)` 发送 `4/12`，从而自�
 `make -j2` 已通过，且源码、脚本和文档中不存在该变量的残留引用。新的隔离场景
 `hangup-native-auto-exit-v1` 显式设置 `CBE_HANGUP_AUTO_CONFIRM=0`，并要求以下全部证据：
 
-1. 启动响应中实际收到 `25/2 {result=1,type=1}`，且执行 `mmBattle:0x8996`。
-2. 最终结算 `4/7` 后执行 `mmBattle:0x5E92`，由客户端实际发送 `25/5`；不得执行手动
+1. 终局响应在最后 `4/6` 与 `4/7` 后实际收到 `25/2 {result=1,type=1}`，且执行 `mmBattle:0x8996`。
+2. 最终结算后执行 `mmBattle:0x5E92`，由客户端实际发送 `25/5`；不得执行手动
    入口 `0x60C8`，也不得出现宿主 `reward_auto_confirm_input`。
 3. 服务端记录 `scene_hangup_round_complete`，随后 scene poll 发送新的
-   `4/5 + 4/11 + 25/2`，客户端再次通过 `0x66CC` 并收到下一场 `4/6`。
+   `4/5 + 4/11`；下一场终局才会再次发送 `25/2`，客户端再次通过 `0x66CC` 并收到下一场 `4/6`。
 
 运行器使用唯一的 `jh_online_autotest_<uuid>` 数据库，仍要求
 `CBE_AUTOMATION_MYSQL_PASSWORD`。缺少该凭据时它会按隔离规则拒绝启动，不能将构建成功

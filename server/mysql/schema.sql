@@ -193,6 +193,24 @@ CREATE TABLE IF NOT EXISTS `account_roles` (
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- `account_role_state.role_count` is a derived value.  The service installs
+-- the enforcing triggers at startup so existing deployments can fail closed
+-- when a trigger is missing or has been replaced.  This table keeps the
+-- attempted value and connection identity when a direct state write is
+-- corrected by those triggers.
+CREATE TABLE IF NOT EXISTS `account_role_count_write_audit` (
+  `audit_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `operation` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `attempted_role_count` INT UNSIGNED NOT NULL,
+  `authoritative_role_count` INT UNSIGNED NOT NULL,
+  `connection_id` BIGINT UNSIGNED NOT NULL,
+  `database_user` VARCHAR(288) CHARACTER SET utf8mb4 NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`audit_id`),
+  KEY `idx_role_count_write_audit_account` (`account_id`, `created_at`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `account_role_transfer_codes` (
   `verification_code` CHAR(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `source_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -593,4 +611,17 @@ CREATE TABLE IF NOT EXISTS `account_role_state_payload_backup` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`)
+) ENGINE=InnoDB;
+
+-- 管理后台从历史 SQL 备份覆盖装备强化字段时写入的审计记录。
+-- 恢复器只更新三个强化列，绝不执行上传 SQL 的其他语句。
+CREATE TABLE IF NOT EXISTS `server_admin_enhancement_restore_audit` (
+  `audit_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `source_name` VARCHAR(127) NOT NULL,
+  `source_row_count` INT UNSIGNED NOT NULL,
+  `matched_row_count` INT UNSIGNED NOT NULL,
+  `changed_row_count` INT UNSIGNED NOT NULL,
+  `missing_row_count` INT UNSIGNED NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`audit_id`)
 ) ENGINE=InnoDB;

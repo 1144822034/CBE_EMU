@@ -503,13 +503,9 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
     vm_client_close_socket(sock);
     if (ok && eventType != NULL && *eventType == 7 && responseLen != NULL &&
         followup != NULL && followupLen != NULL)
-    {
-        if (vm_client_extract_item_followup(response, responseLen,
-                                            followup, followupCap, followupLen,
-                                            NULL))
-        {
-        }
-    }
+        (void)vm_client_extract_item_followup(response, responseLen,
+                                              followup, followupCap, followupLen,
+                                              NULL);
     return ok;
 }
 

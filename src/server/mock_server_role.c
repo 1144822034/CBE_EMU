@@ -318,7 +318,7 @@ static bool g_vm_mock_account_wcoin_wallet_migrated = false;
 
 typedef struct
 {
-    u8 seenMask;
+    u16 seenMask;
     bool invalid;
 } vm_mock_mysql_authority_engine_context;
 
@@ -348,7 +348,8 @@ static bool vm_mock_mysql_authority_engine_row(void *context_value,
         "account_roles",
         "account_role_equipment",
         "account_role_backpack",
-        "server_data_migrations"
+        "server_data_migrations",
+        "account_role_count_write_audit"
     };
     vm_mock_mysql_authority_engine_context *context =
         (vm_mock_mysql_authority_engine_context *)context_value;
@@ -369,7 +370,7 @@ static bool vm_mock_mysql_authority_engine_row(void *context_value,
         (context->seenMask & (1u << matched)) != 0 ||
         lengths[1] != 6 || memcmp(values[1], "InnoDB", 6) != 0)
         goto invalid;
-    context->seenMask |= (u8)(1u << matched);
+    context->seenMask |= (u16)(1u << matched);
     return true;
 
 invalid:
@@ -422,7 +423,7 @@ static bool vm_mock_service_mysql_authority_prepare(void)
 {
     vm_mock_mysql_authority_engine_context engine_context;
     vm_mock_mysql_authority_marker_context marker_context;
-    const u8 expected_mask = (u8)((1u << 8) - 1u);
+    const u16 expected_mask = (u16)((1u << 9) - 1u);
 
     if (g_vm_mock_mysql_authority_prepared)
         return true;
@@ -454,17 +455,37 @@ static bool vm_mock_service_mysql_authority_prepare(void)
         return false;
     }
 
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_count_write_audit ("
+            "audit_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "operation VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "attempted_role_count INT UNSIGNED NOT NULL,"
+            "authoritative_role_count INT UNSIGNED NOT NULL,"
+            "connection_id BIGINT UNSIGNED NOT NULL,"
+            "database_user VARCHAR(288) CHARACTER SET utf8mb4 NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(audit_id),"
+            "KEY idx_role_count_write_audit_account(account_id,created_at)"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] mysql_authority_prepare role_count_audit_schema error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+
     memset(&engine_context, 0, sizeof(engine_context));
     if (!vm_mysql_query(
             "SELECT TABLE_NAME,ENGINE FROM information_schema.TABLES "
             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "
             "('accounts','account_wallets','friendships','account_role_state','account_roles',"
-            "'account_role_equipment','account_role_backpack','server_data_migrations')",
+            "'account_role_equipment','account_role_backpack','server_data_migrations',"
+            "'account_role_count_write_audit')",
             vm_mock_mysql_authority_engine_row, &engine_context) ||
         engine_context.invalid || engine_context.seenMask != expected_mask)
     {
         printf("[error][mock-service] mysql_authority_prepare engine "
-               "required=InnoDB seen_mask=0x%02x expected_mask=0x%02x error=%s\n",
+               "required=InnoDB seen_mask=0x%04x expected_mask=0x%04x error=%s\n",
                engine_context.seenMask, expected_mask, vm_mysql_last_error());
         return false;
     }
@@ -533,6 +554,248 @@ static bool vm_mock_service_role_count_query_u32(const char *query, u32 *valueOu
     return true;
 }
 
+typedef struct
+{
+    const char *name;
+    const char *event;
+    const char *table;
+    const char *timing;
+    const char *action;
+    const char *createSql;
+} vm_mock_role_count_trigger_spec;
+
+typedef struct
+{
+    const vm_mock_role_count_trigger_spec *spec;
+    bool found;
+    bool invalid;
+} vm_mock_role_count_trigger_context;
+
+static bool vm_mock_role_count_trigger_text_equal(const char *actual,
+                                                   size_t actualLength,
+                                                   const char *expected)
+{
+    size_t actualOffset = 0;
+    size_t expectedOffset = 0;
+
+    if (actual == NULL || expected == NULL)
+        return false;
+    for (;;)
+    {
+        while (actualOffset < actualLength &&
+               (actual[actualOffset] == ' ' || actual[actualOffset] == '\t' ||
+                actual[actualOffset] == '\r' || actual[actualOffset] == '\n'))
+        {
+            ++actualOffset;
+        }
+        while (expected[expectedOffset] == ' ' || expected[expectedOffset] == '\t' ||
+               expected[expectedOffset] == '\r' || expected[expectedOffset] == '\n')
+        {
+            ++expectedOffset;
+        }
+        if (actualOffset == actualLength || expected[expectedOffset] == 0)
+            return actualOffset == actualLength && expected[expectedOffset] == 0;
+        if (actual[actualOffset] != expected[expectedOffset])
+            return false;
+        ++actualOffset;
+        ++expectedOffset;
+    }
+}
+
+static bool vm_mock_role_count_trigger_row(void *contextValue,
+                                           unsigned int columnCount,
+                                           const char *const *values,
+                                           const size_t *lengths)
+{
+    vm_mock_role_count_trigger_context *context =
+        (vm_mock_role_count_trigger_context *)contextValue;
+    const vm_mock_role_count_trigger_spec *spec = context ? context->spec : NULL;
+
+    if (context == NULL || spec == NULL || context->found || columnCount != 4 ||
+        !vm_mock_role_count_trigger_text_equal(values[0], lengths[0], spec->event) ||
+        !vm_mock_role_count_trigger_text_equal(values[1], lengths[1], spec->table) ||
+        !vm_mock_role_count_trigger_text_equal(values[2], lengths[2], spec->timing) ||
+        !vm_mock_role_count_trigger_text_equal(values[3], lengths[3], spec->action))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+/* Keep the derived count correct even when an older service binary, a
+ * maintenance script, or an external role importer writes the state table.
+ * The application still reads COUNT(account_roles) before committing a role
+ * snapshot, but that check alone cannot protect the database from a second
+ * writer.  MySQL 5.7 has no CREATE TRIGGER IF NOT EXISTS, so install these
+ * narrowly named triggers and verify their full contract on every startup. */
+static bool vm_mock_service_role_count_triggers_prepare(void)
+{
+    static const vm_mock_role_count_trigger_spec triggers[] = {
+        {
+            "cbe_role_count_state_bi", "INSERT", "account_role_state", "BEFORE",
+            "BEGIN "
+            "DECLARE authoritative_count INT UNSIGNED DEFAULT 0; "
+            "SELECT COUNT(*) INTO authoritative_count FROM account_roles "
+            "WHERE account_id=NEW.account_id; "
+            "IF NEW.role_count<>authoritative_count THEN "
+            "INSERT INTO account_role_count_write_audit "
+            "(account_id,operation,attempted_role_count,authoritative_role_count,"
+            "connection_id,database_user) VALUES "
+            "(NEW.account_id,'INSERT',NEW.role_count,authoritative_count,"
+            "CONNECTION_ID(),USER()); "
+            "END IF; "
+            "SET NEW.role_count=authoritative_count; "
+            "END",
+            "CREATE TRIGGER cbe_role_count_state_bi "
+            "BEFORE INSERT ON account_role_state FOR EACH ROW "
+            "BEGIN "
+            "DECLARE authoritative_count INT UNSIGNED DEFAULT 0; "
+            "SELECT COUNT(*) INTO authoritative_count FROM account_roles "
+            "WHERE account_id=NEW.account_id; "
+            "IF NEW.role_count<>authoritative_count THEN "
+            "INSERT INTO account_role_count_write_audit "
+            "(account_id,operation,attempted_role_count,authoritative_role_count,"
+            "connection_id,database_user) VALUES "
+            "(NEW.account_id,'INSERT',NEW.role_count,authoritative_count,"
+            "CONNECTION_ID(),USER()); "
+            "END IF; "
+            "SET NEW.role_count=authoritative_count; "
+            "END"
+        },
+        {
+            "cbe_role_count_state_bu", "UPDATE", "account_role_state", "BEFORE",
+            "BEGIN "
+            "DECLARE authoritative_count INT UNSIGNED DEFAULT 0; "
+            "SELECT COUNT(*) INTO authoritative_count FROM account_roles "
+            "WHERE account_id=NEW.account_id; "
+            "IF NEW.role_count<>authoritative_count THEN "
+            "INSERT INTO account_role_count_write_audit "
+            "(account_id,operation,attempted_role_count,authoritative_role_count,"
+            "connection_id,database_user) VALUES "
+            "(NEW.account_id,'UPDATE',NEW.role_count,authoritative_count,"
+            "CONNECTION_ID(),USER()); "
+            "END IF; "
+            "SET NEW.role_count=authoritative_count; "
+            "END",
+            "CREATE TRIGGER cbe_role_count_state_bu "
+            "BEFORE UPDATE ON account_role_state FOR EACH ROW "
+            "BEGIN "
+            "DECLARE authoritative_count INT UNSIGNED DEFAULT 0; "
+            "SELECT COUNT(*) INTO authoritative_count FROM account_roles "
+            "WHERE account_id=NEW.account_id; "
+            "IF NEW.role_count<>authoritative_count THEN "
+            "INSERT INTO account_role_count_write_audit "
+            "(account_id,operation,attempted_role_count,authoritative_role_count,"
+            "connection_id,database_user) VALUES "
+            "(NEW.account_id,'UPDATE',NEW.role_count,authoritative_count,"
+            "CONNECTION_ID(),USER()); "
+            "END IF; "
+            "SET NEW.role_count=authoritative_count; "
+            "END"
+        },
+        {
+            "cbe_role_count_roles_ai", "INSERT", "account_roles", "AFTER",
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=NEW.account_id) "
+            "WHERE account_id=NEW.account_id",
+            "CREATE TRIGGER cbe_role_count_roles_ai "
+            "AFTER INSERT ON account_roles FOR EACH ROW "
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=NEW.account_id) "
+            "WHERE account_id=NEW.account_id"
+        },
+        {
+            "cbe_role_count_roles_ad", "DELETE", "account_roles", "AFTER",
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=OLD.account_id) "
+            "WHERE account_id=OLD.account_id",
+            "CREATE TRIGGER cbe_role_count_roles_ad "
+            "AFTER DELETE ON account_roles FOR EACH ROW "
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=OLD.account_id) "
+            "WHERE account_id=OLD.account_id"
+        },
+        {
+            "cbe_role_count_roles_au", "UPDATE", "account_roles", "AFTER",
+            "BEGIN "
+            "IF OLD.account_id<>NEW.account_id THEN "
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=OLD.account_id) "
+            "WHERE account_id=OLD.account_id; "
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=NEW.account_id) "
+            "WHERE account_id=NEW.account_id; "
+            "END IF; "
+            "END",
+            "CREATE TRIGGER cbe_role_count_roles_au "
+            "AFTER UPDATE ON account_roles FOR EACH ROW "
+            "BEGIN "
+            "IF OLD.account_id<>NEW.account_id THEN "
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=OLD.account_id) "
+            "WHERE account_id=OLD.account_id; "
+            "UPDATE account_role_state SET role_count="
+            "(SELECT COUNT(*) FROM account_roles WHERE account_id=NEW.account_id) "
+            "WHERE account_id=NEW.account_id; "
+            "END IF; "
+            "END"
+        }
+    };
+
+    for (u32 i = 0; i < sizeof(triggers) / sizeof(triggers[0]); ++i)
+    {
+        char query[512];
+        vm_mock_role_count_trigger_context context;
+
+        memset(&context, 0, sizeof(context));
+        context.spec = &triggers[i];
+        snprintf(query, sizeof(query),
+                 "SELECT EVENT_MANIPULATION,EVENT_OBJECT_TABLE,ACTION_TIMING,ACTION_STATEMENT "
+                 "FROM information_schema.TRIGGERS "
+                 "WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME='%s'",
+                 triggers[i].name);
+        if (!vm_mysql_query(query, vm_mock_role_count_trigger_row, &context))
+        {
+            printf("[error][mock-service] role_count_trigger_prepare name=%s "
+                   "stage=inspect error=%s\n",
+                   triggers[i].name, vm_mysql_last_error());
+            return false;
+        }
+        if (!context.found && !context.invalid)
+        {
+            if (!vm_mysql_exec(triggers[i].createSql))
+            {
+                printf("[error][mock-service] role_count_trigger_prepare name=%s "
+                       "stage=create error=%s\n",
+                       triggers[i].name, vm_mysql_last_error());
+                return false;
+            }
+            printf("[info][mock-service] role_count_trigger_prepare name=%s "
+                   "action=created\n", triggers[i].name);
+            memset(&context, 0, sizeof(context));
+            context.spec = &triggers[i];
+            if (!vm_mysql_query(query, vm_mock_role_count_trigger_row, &context))
+            {
+                printf("[error][mock-service] role_count_trigger_prepare name=%s "
+                       "stage=verify-query error=%s\n",
+                       triggers[i].name, vm_mysql_last_error());
+                return false;
+            }
+        }
+        if (!context.found || context.invalid)
+        {
+            printf("[error][mock-service] role_count_trigger_prepare name=%s "
+                   "stage=verify error=definition-mismatch\n",
+                   triggers[i].name);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* account_roles owns role identity; account_role_state.role_count is only a
  * cached aggregate.  Repair that aggregate before any client can observe the
  * database, and couple the one-time marker to the same InnoDB transaction. */
@@ -549,6 +812,7 @@ static bool vm_mock_service_role_count_authority_prepare_and_migrate(void)
 
     mysqlError[0] = 0;
     if (!vm_mock_service_mysql_authority_prepare() ||
+        !vm_mock_service_role_count_triggers_prepare() ||
         !vm_mysql_exec("START TRANSACTION"))
     {
         snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
@@ -563,16 +827,6 @@ static bool vm_mock_service_role_count_authority_prepare_and_migrate(void)
     {
         goto failed;
     }
-    if (markerCount != 0)
-    {
-        if (!vm_mysql_exec("COMMIT"))
-            goto failed;
-        transaction = false;
-        printf("[info][mock-service] role_count_authority_migration marker=%s action=already-applied\n",
-               VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION);
-        return true;
-    }
-
     if (!vm_mock_service_role_count_query_u32(
             "SELECT COALESCE(MAX(actual_count),0) FROM "
             "(SELECT COUNT(*) AS actual_count FROM account_roles GROUP BY account_id) "
@@ -637,17 +891,20 @@ static bool vm_mock_service_role_count_authority_prepare_and_migrate(void)
                  verifiedMismatchCount);
         goto failed;
     }
-    if (!vm_mysql_exec(
-            "INSERT INTO server_data_migrations(migration_name) VALUES('"
-            VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "')") ||
+    if ((markerCount == 0 &&
+         !vm_mysql_exec(
+             "INSERT INTO server_data_migrations(migration_name) VALUES('"
+             VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "')")) ||
         !vm_mysql_exec("COMMIT"))
     {
         goto failed;
     }
     transaction = false;
-    printf("[info][mock-service] role_count_authority_migration marker=%s corrected_accounts=%u max_roles=%u action=committed\n",
+    printf("[info][mock-service] role_count_authority_migration marker=%s "
+           "corrected_accounts=%u max_roles=%u action=%s\n",
            VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION, mismatchCount,
-           maximumRoleCount);
+           maximumRoleCount, markerCount == 0 ? "committed" :
+           (mismatchCount != 0 ? "runtime-reconciled" : "already-applied"));
     return true;
 
 failed:
@@ -6553,11 +6810,15 @@ static bool vm_mock_mysql_schema_column_row(void *context_value,
 }
 
 static bool vm_net_mock_role_ensure_equipment_instance_column(
-    const char *table_name, const char *column_name, const char *alter_sql)
+    const char *table_name, const char *column_name, const char *alter_sql,
+    bool require_empty_table, bool *added_out)
 {
     char query[512];
     vm_mock_mysql_schema_column_context context;
+    u32 rowCount = 0;
 
+    if (added_out)
+        *added_out = false;
     if (table_name == NULL || column_name == NULL || alter_sql == NULL)
         return false;
     memset(&context, 0, sizeof(context));
@@ -6571,7 +6832,30 @@ static bool vm_net_mock_role_ensure_equipment_instance_column(
     {
         return false;
     }
-    return context.found || vm_mysql_exec(alter_sql);
+    if (context.found)
+        return true;
+    if (require_empty_table)
+    {
+        snprintf(query, sizeof(query), "SELECT COUNT(*) FROM %s", table_name);
+        if (!vm_mock_service_role_count_query_u32(query, &rowCount))
+            return false;
+        if (rowCount != 0)
+        {
+            printf("[error][mock-service] equipment_instance_schema_prepare "
+                   "table=%s column=%s rows=%u action=refuse-default-zero-migration\n",
+                   table_name, column_name, rowCount);
+            vm_autotest_note("mock_equipment_instance_schema_migration_blocked "
+                             "table=%s column=%s rows=%u "
+                             "action=refuse-default-zero-migration\n",
+                             table_name, column_name, rowCount);
+            return false;
+        }
+    }
+    if (!vm_mysql_exec(alter_sql))
+        return false;
+    if (added_out)
+        *added_out = true;
+    return true;
 }
 
 /* Relational saves become the sole live authority for an equipment instance.
@@ -6595,39 +6879,45 @@ static bool vm_net_mock_role_prepare_equipment_instance_schema(void)
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_equipment", "enhance_level",
             "ALTER TABLE account_role_equipment ADD COLUMN enhance_level "
-            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER item_id") ||
+            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER item_id",
+            true, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_equipment", "enhance_affix_types",
             "ALTER TABLE account_role_equipment ADD COLUMN enhance_affix_types "
-            "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
+            "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level", false, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_equipment", "enhance_affix_values",
             "ALTER TABLE account_role_equipment ADD COLUMN enhance_affix_values "
-            "BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_affix_types") ||
+            "BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_affix_types", false, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_equipment", "durability",
             "ALTER TABLE account_role_equipment ADD COLUMN durability "
-            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
+            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level", false, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_equipment", "durability_max",
             "ALTER TABLE account_role_equipment ADD COLUMN durability_max "
-            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER durability") ||
+            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER durability", false, NULL) ||
+        !vm_net_mock_role_ensure_equipment_instance_column(
+            "account_role_backpack", "enhance_level",
+            "ALTER TABLE account_role_backpack ADD COLUMN enhance_level "
+            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER item_count",
+            true, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_backpack", "durability",
             "ALTER TABLE account_role_backpack ADD COLUMN durability "
-            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
+            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level", false, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_backpack", "enhance_affix_types",
             "ALTER TABLE account_role_backpack ADD COLUMN enhance_affix_types "
-            "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
+            "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level", false, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_backpack", "enhance_affix_values",
             "ALTER TABLE account_role_backpack ADD COLUMN enhance_affix_values "
-            "BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_affix_types") ||
+            "BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_affix_types", false, NULL) ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_backpack", "durability_max",
             "ALTER TABLE account_role_backpack ADD COLUMN durability_max "
-            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER durability"))
+            "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER durability", false, NULL))
     {
         printf("[error][mock-service] equipment_instance_schema_prepare error=%s\n",
                vm_mysql_last_error());
@@ -7403,6 +7693,10 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     u32 scoped_role_id = 0;
     u32 wallet_balance = 0;
     u32 durable_role_count = 0;
+    u32 persisted_enhanced_rows = 0;
+    u32 projected_enhanced_rows = 0;
+    u32 persisted_enhanced_level_sum = 0;
+    u32 projected_enhanced_level_sum = 0;
     mysql_error[0] = 0;
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
@@ -7461,6 +7755,89 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         goto failed;
     }
     transaction_started = true;
+    /* A full snapshot replaces every instance row for the account.  Never let
+     * a stale or partially migrated in-memory image silently reduce persisted
+     * enhancement state.  Legitimate role deletion is the one operation whose
+     * contract is to remove that state, so it is explicitly exempt. */
+    if (full_snapshot &&
+        (reason == NULL || strcmp(reason, "role-delete") != 0))
+    {
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            const vm_net_mock_role_state *role =
+                &g_vm_net_mock_role_db.roles[i];
+            for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+            {
+                if (role->equippedItems[slot].itemId != 0 &&
+                    role->equippedItems[slot].enhanceLevel != 0)
+                {
+                    ++projected_enhanced_rows;
+                    projected_enhanced_level_sum +=
+                        role->equippedItems[slot].enhanceLevel;
+                }
+            }
+            for (u32 slot = 0; slot < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++slot)
+            {
+                if (role->backpackItems[slot].itemId != 0 &&
+                    role->backpackItems[slot].enhanceLevel != 0)
+                {
+                    ++projected_enhanced_rows;
+                    projected_enhanced_level_sum +=
+                        role->backpackItems[slot].enhanceLevel;
+                }
+            }
+        }
+        snprintf(query, sizeof(query),
+                 "SELECT (SELECT COUNT(*) FROM account_role_equipment "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND enhance_level>0)+"
+                 "(SELECT COUNT(*) FROM account_role_backpack "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND enhance_level>0)",
+                 account_hex, account_hex);
+        if (!vm_mock_service_role_count_query_u32(
+                query, &persisted_enhanced_rows))
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "%s",
+                     vm_mysql_last_error());
+            goto failed;
+        }
+        snprintf(query, sizeof(query),
+                 "SELECT COALESCE((SELECT SUM(enhance_level) "
+                 "FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR)),0)+"
+                 "COALESCE((SELECT SUM(enhance_level) FROM account_role_backpack "
+                 "WHERE account_id=CAST(X'%s' AS CHAR)),0)",
+                 account_hex, account_hex);
+        if (!vm_mock_service_role_count_query_u32(
+                query, &persisted_enhanced_level_sum))
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "%s",
+                     vm_mysql_last_error());
+            goto failed;
+        }
+        if (projected_enhanced_rows < persisted_enhanced_rows ||
+            projected_enhanced_level_sum < persisted_enhanced_level_sum)
+        {
+            snprintf(mysql_error, sizeof(mysql_error),
+                     "enhancement state regression blocked persisted_rows=%u "
+                     "projected_rows=%u persisted_level_sum=%u projected_level_sum=%u",
+                     persisted_enhanced_rows, projected_enhanced_rows,
+                     persisted_enhanced_level_sum, projected_enhanced_level_sum);
+            printf("[error][mock-service] equipment_enhancement_persist_blocked "
+                   "account=%s reason=%s persisted_rows=%u projected_rows=%u "
+                   "persisted_level_sum=%u projected_level_sum=%u action=rollback\n",
+                   account_id ? account_id : "-", reason ? reason : "state",
+                   persisted_enhanced_rows, projected_enhanced_rows,
+                   persisted_enhanced_level_sum, projected_enhanced_level_sum);
+            vm_autotest_note("mock_equipment_enhancement_persist_blocked "
+                             "account=%s reason=%s persisted_rows=%u projected_rows=%u "
+                             "persisted_level_sum=%u projected_level_sum=%u action=rollback\n",
+                             account_id ? account_id : "-",
+                             reason ? reason : "state", persisted_enhanced_rows,
+                             projected_enhanced_rows,
+                             persisted_enhanced_level_sum,
+                             projected_enhanced_level_sum);
+            goto failed;
+        }
+    }
     /* account_roles owns the membership set.  A non-full save only changes
      * one existing role's detail rows, so a different durable count proves
      * that this account cache is stale.  Repair the cached aggregate, reject

@@ -62,6 +62,13 @@ static bool expect_policy(u32 itemId, bool expectedTaskMaterial,
 
 int main(void)
 {
+    u32 oneEnemyResult = 0;
+    u32 threeEnemyResult = 0;
+    u32 guaranteedOneEnemyResult = 0;
+    u32 guaranteedThreeEnemyResult = 0;
+    u32 oneEnemyRng = 0;
+    u32 threeEnemyRng = 0;
+
     reset_fixture();
     if (!expect_policy(42, true, 0, "task-category-without-acceptance"))
         return 1;
@@ -89,6 +96,35 @@ int main(void)
     g_vm_net_mock_task_state_request_cache.rows[0].progress1 = 1;
     if (!expect_policy(304, true, 3, "custom-cross-category-task-item"))
         return 1;
+
+    /* The configured percentage is rolled once per battle.  Enemy count only
+     * multiplies the quantity after a hit; resetting the RNG proves that a
+     * 1-enemy and 3-enemy battle make the same hit/miss decision. */
+    g_vm_net_mock_battle_reward_rng = 0x12345678u;
+    oneEnemyResult = vm_net_mock_battle_drop_count_for_battle(5, 1);
+    oneEnemyRng = g_vm_net_mock_battle_reward_rng;
+    g_vm_net_mock_battle_reward_rng = 0x12345678u;
+    threeEnemyResult = vm_net_mock_battle_drop_count_for_battle(5, 3);
+    threeEnemyRng = g_vm_net_mock_battle_reward_rng;
+    if (!((oneEnemyResult == 0 && threeEnemyResult == 0) ||
+          (oneEnemyResult == 1 && threeEnemyResult == 3)) ||
+        oneEnemyRng != threeEnemyRng ||
+        vm_net_mock_battle_drop_count_for_battle(0, 3) != 0u)
+    {
+        fprintf(stderr,
+                "battle drop roll was scaled by enemy count: one=%u three=%u\n",
+                oneEnemyResult, threeEnemyResult);
+        return 1;
+    }
+    guaranteedOneEnemyResult = vm_net_mock_battle_drop_count_for_battle(100, 1);
+    guaranteedThreeEnemyResult = vm_net_mock_battle_drop_count_for_battle(100, 3);
+    if (guaranteedOneEnemyResult != 1u || guaranteedThreeEnemyResult != 3u)
+    {
+        fprintf(stderr,
+                "battle drop quantity multiplier failed: one=%u three=%u\n",
+                guaranteedOneEnemyResult, guaranteedThreeEnemyResult);
+        return 1;
+    }
 
     g_vm_net_mock_task_catalog[0].enabled = false;
     if (!expect_policy(304, true, 0, "disabled-task-cannot-enable-drop"))

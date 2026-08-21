@@ -415,6 +415,7 @@ typedef struct
     u32 releaseAtMs;
     u32 confirmPressCount;
     u32 clientExitCount;
+    u32 battleModuleR9;
 } vm_hangup_auto_confirm_state;
 
 static vm_hangup_auto_confirm_state g_vmHangupAutoConfirm;
@@ -652,6 +653,10 @@ u32 g_hangupSceneModeWatchAddress = 0;
 u32 g_hangupSceneModeWatchWriteCount = 0;
 u32 g_hangupBusinessDelegateWatchAddress = 0;
 u32 g_hangupBusinessDelegateWatchWriteCount = 0;
+u32 g_hangupAutoCandidateWatchAddress = 0;
+u32 g_hangupAutoCandidateWatchWriteCount = 0;
+u32 g_hangupAutoBattleInitWatchAddress = 0;
+u32 g_hangupAutoBattleInitWatchWriteCount = 0;
 /* Automation-only, read-only watch for the shared game-context flag consumed
  * by mmBattle:BattleScene_MainLoop at gameState+1133.  It is armed before
  * the shop round trip so the actual writer can be attributed to a client
@@ -3048,6 +3053,8 @@ static void vm_hangup_protocol_parser_trace_end(
         g_hangupBattleStateWatchAddress = 0;
         g_hangupSceneModeWatchAddress = 0;
         g_hangupBusinessDelegateWatchAddress = 0;
+        g_hangupAutoCandidateWatchAddress = 0;
+        g_hangupAutoBattleInitWatchAddress = 0;
     }
 }
 
@@ -3085,6 +3092,476 @@ static void vm_hangup_battle_state_watch_note_pc(u32 pc)
             "addr=%08x state=%u pc=%08x\n",
             g_hangupBattleStateWatchGeneration,
             g_hangupBattleStateWatchAddress, state, pc);
+    fflush(trace);
+    fclose(trace);
+}
+
+/* SetMapCtrlField6180 is the CBE-side callback setter used while a screen
+ * module is selected.  The previous write watch begins only after
+ * HandleBattleEnterReq, but this setter may install the battle callback
+ * earlier in the transition.  Observe this single instruction directly so
+ * the module caller can be attributed without changing its callback, state,
+ * packet, or timing. */
+static void vm_hangup_delegate_register_trace_note_pc(u32 pc)
+{
+    u32 r0 = 0;
+    u32 lr = 0;
+    u32 r9 = 0;
+    u32 sp = 0;
+    u32 stackWords[4] = {0, 0, 0, 0};
+    FILE *trace;
+
+    if (pc != 0x0101808EU)
+        return;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    if (sp != 0)
+        (void)uc_mem_read(MTK, sp, stackWords, sizeof(stackWords));
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_business_delegate_setter "
+            "pc=%08x callback=%08x lr=%08x r9=%08x sp=%08x "
+            "stack=%08x,%08x,%08x,%08x\n",
+            pc, r0, lr, r9, sp, stackWords[0], stackWords[1],
+            stackWords[2], stackWords[3]);
+    fflush(trace);
+    fclose(trace);
+}
+
+/* The missing summary panel must be selected by the game's own UI dispatch,
+ * not by host-side state changes.  These five mmBattle entry points cover
+ * that selection and its native 25-series request/response handlers.  Keep
+ * this probe read-only and tightly capped: it records whether the real input
+ * path reaches them, with the game flags it observes at entry. */
+static void vm_hangup_ui_dispatch_trace_note_pc(u32 pc)
+{
+    static u8 entryCount[5] = {0, 0, 0, 0, 0};
+    static const u32 localPcs[5] = {0x1064Au, 0xA4D4u, 0xAB76u, 0xBFE6u, 0x8996u};
+    u32 codeBase = g_hangupProtocolParserTrace.mmBattleCodeBase;
+    u32 localPc;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 r9 = 0;
+    u32 lr = 0;
+    u32 gameState = 0;
+    u8 gameFlags[5] = {0xff, 0xff, 0xff, 0xff, 0xff};
+    FILE *trace;
+    u32 index;
+
+    if (codeBase == 0)
+        codeBase = g_hangupBattleRenderTrace.codeBase;
+    if (codeBase == 0 || !vm_is_pool_entry(pc) || pc < codeBase)
+        return;
+    localPc = pc - codeBase;
+    for (index = 0; index < (u32)(sizeof(localPcs) / sizeof(localPcs[0])); ++index)
+    {
+        if (localPc == localPcs[index])
+            break;
+    }
+    if (index == (u32)(sizeof(localPcs) / sizeof(localPcs[0])) ||
+        entryCount[index] >= 4)
+    {
+        return;
+    }
+    ++entryCount[index];
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (r9 != 0 &&
+        uc_mem_read(MTK, r9 + 8272u, &gameState, sizeof(gameState)) == UC_ERR_OK &&
+        gameState != 0)
+    {
+        (void)uc_mem_read(MTK, gameState + 1136u, gameFlags,
+                          sizeof(gameFlags));
+    }
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_ui_dispatch entry=%u local_pc=%04x "
+            "base=%08x args=%08x/%08x/%08x/%08x r9=%08x lr=%08x "
+            "game=%08x flags=%u/%u/%u/%u/%u\n",
+            entryCount[index], localPc, codeBase, r0, r1, r2, r3, r9, lr,
+            gameState, gameFlags[0], gameFlags[1], gameFlags[2],
+            gameFlags[3], gameFlags[4]);
+    fflush(trace);
+    fclose(trace);
+}
+
+/* The CBE arithmetic exception is raised inside RandRange when its inclusive
+ * upper bound is below its lower bound.  Record the original caller and
+ * bounds once per process; this is a read-only crash forensics point and does
+ * not alter the calculation or allow the guest to continue past it. */
+static void vm_hangup_rand_range_trace_note_pc(u32 pc)
+{
+    static u8 captured = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r9 = 0;
+    u32 lr = 0;
+    u32 gameState = 0;
+    u8 gameFlags[5] = {0xff, 0xff, 0xff, 0xff, 0xff};
+    FILE *trace;
+
+    if (captured || pc != 0x01004CC2u)
+        return;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    /* RandRange divides by (upper - lower + 1).  Capture only the exact
+     * empty inclusive range that makes that divisor zero, not harmless
+     * startup randomisation. */
+    if (r1 + 1u != r0)
+        return;
+    captured = 1;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (r9 != 0 &&
+        uc_mem_read(MTK, r9 + 8272u, &gameState, sizeof(gameState)) == UC_ERR_OK &&
+        gameState != 0)
+    {
+        (void)uc_mem_read(MTK, gameState + 1136u, gameFlags,
+                          sizeof(gameFlags));
+    }
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_rand_range caller=%08x bounds=%d/%d "
+            "r9=%08x game=%08x flags=%u/%u/%u/%u/%u\n",
+            lr, (int)r0, (int)r1, r9, gameState, gameFlags[0],
+            gameFlags[1], gameFlags[2], gameFlags[3], gameFlags[4]);
+    fflush(trace);
+    fclose(trace);
+}
+
+/*
+ * `combatinfo` is parsed in the mmBattle 0x78E0-0x79DA settlement range.
+ * The service already records the authoritative per-battle reward before it
+ * sends that field, but the visible panel is still assigning the decoded
+ * words incorrectly.  Observe the guest's own writes immediately after that
+ * parser runs.  This is intentionally read-only and bounded: it neither
+ * changes the stream, client state, registers, nor any UI/battle scheduling.
+ *
+ * Keep the values anonymous (slot520, etc.) here.  Their semantics must come
+ * from the client's actual writes, not from a guessed wire layout.
+ */
+typedef struct
+{
+    u8 active;
+    u8 sampleCount;
+    u8 valid;
+    u32 codeBase;
+    u32 game;
+    u16 slot516;
+    u16 slot518;
+    u32 slot520;
+    u32 slot524;
+    u32 slot528;
+    u32 slot532;
+    u16 slot536;
+    u16 slot538;
+    u8 slot1205;
+} vm_hangup_combatinfo_read_trace;
+
+static vm_hangup_combatinfo_read_trace g_hangupCombatinfoReadTrace;
+
+/* The packaged CBM is packed, while this exact parser executes from the VM
+ * pool.  Export only the small, already-loaded instruction range needed to
+ * resolve its cursor advances.  The artifact is a read-only diagnostic code
+ * slice; it contains neither player state nor packet payloads. */
+static void vm_hangup_combatinfo_dump_parser_once(u32 codeBase)
+{
+    static u8 attempted = 0;
+    u8 code[0x180];
+    FILE *dump;
+    FILE *trace;
+
+    if (attempted || codeBase == 0)
+        return;
+    attempted = 1;
+    if (uc_mem_read(MTK, codeBase + 0x78E0u, code, sizeof(code)) != UC_ERR_OK)
+        return;
+    dump = fopen("logs/hangup-combatinfo-parser-current.bin", "wb");
+    if (dump == NULL)
+        return;
+    if (fwrite(code, 1, sizeof(code), dump) != sizeof(code))
+    {
+        fclose(dump);
+        return;
+    }
+    fflush(dump);
+    fclose(dump);
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_combatinfo_parser_dump "
+            "base=%08x local=78e0-7a5f bytes=%u path=logs/hangup-combatinfo-parser-current.bin\n",
+            codeBase, (u32)sizeof(code));
+    fflush(trace);
+    fclose(trace);
+}
+
+/* At 0x7908 the initialized stream object is in R4 and its generic numeric
+ * reader is the vtable entry at R5+0x20.  Its implementation owns the wire
+ * cursor contract, so export only that function's loaded instructions once.
+ * This remains a host-side read of executable pages. */
+static void vm_hangup_combatinfo_dump_reader_once(void)
+{
+    static u8 attempted = 0;
+    u32 r4 = 0;
+    u32 r5 = 0;
+    u32 r6 = 0;
+    u32 r7 = 0;
+    u32 reader = 0;
+    u8 code[0x100];
+    FILE *dump;
+    FILE *trace;
+
+    if (attempted)
+        return;
+    attempted = 1;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    if (r5 == 0 ||
+        uc_mem_read(MTK, r5 + 0x20u, &reader, sizeof(reader)) != UC_ERR_OK ||
+        reader == 0 ||
+        uc_mem_read(MTK, reader & ~1u, code, sizeof(code)) != UC_ERR_OK)
+    {
+        return;
+    }
+    dump = fopen("logs/hangup-combatinfo-reader-current.bin", "wb");
+    if (dump == NULL)
+        return;
+    if (fwrite(code, 1, sizeof(code), dump) != sizeof(code))
+    {
+        fclose(dump);
+        return;
+    }
+    fflush(dump);
+    fclose(dump);
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_combatinfo_reader_dump "
+            "r4=%08x r5=%08x r6=%08x r7=%08x reader=%08x bytes=%u "
+            "path=logs/hangup-combatinfo-reader-current.bin\n",
+            r4, r5, r6, r7, reader, (u32)sizeof(code));
+    fflush(trace);
+    fclose(trace);
+}
+
+static void vm_hangup_combatinfo_read_trace_note_pc(u32 pc)
+{
+    vm_hangup_combatinfo_read_trace current;
+    u32 codeBase = g_hangupProtocolParserTrace.mmBattleCodeBase;
+    u32 localPc;
+    u32 r9 = 0;
+    u32 game = 0;
+    FILE *trace;
+    int changed;
+
+    if (codeBase == 0)
+        codeBase = g_hangupBattleRenderTrace.codeBase;
+    if (codeBase == 0 || !vm_is_pool_entry(pc) || pc < codeBase)
+        return;
+    localPc = pc - codeBase;
+    if (localPc == 0x78E0u)
+    {
+        memset(&g_hangupCombatinfoReadTrace, 0,
+               sizeof(g_hangupCombatinfoReadTrace));
+        g_hangupCombatinfoReadTrace.active = 1;
+        g_hangupCombatinfoReadTrace.codeBase = codeBase;
+        vm_hangup_combatinfo_dump_parser_once(codeBase);
+    }
+    if (!g_hangupCombatinfoReadTrace.active ||
+        g_hangupCombatinfoReadTrace.codeBase != codeBase ||
+        localPc < 0x78E0u || localPc > 0x7A20u ||
+        g_hangupCombatinfoReadTrace.sampleCount >= 14u)
+    {
+        return;
+    }
+    if (localPc == 0x7908u)
+        vm_hangup_combatinfo_dump_reader_once();
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0 ||
+        uc_mem_read(MTK, r9 + 8272u, &game, sizeof(game)) != UC_ERR_OK ||
+        game == 0)
+    {
+        return;
+    }
+    memset(&current, 0, sizeof(current));
+    current.active = 1;
+    current.codeBase = codeBase;
+    current.game = game;
+    if (uc_mem_read(MTK, game + 516u, &current.slot516,
+                    sizeof(current.slot516)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 518u, &current.slot518,
+                    sizeof(current.slot518)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 520u, &current.slot520,
+                    sizeof(current.slot520)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 524u, &current.slot524,
+                    sizeof(current.slot524)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 528u, &current.slot528,
+                    sizeof(current.slot528)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 532u, &current.slot532,
+                    sizeof(current.slot532)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 536u, &current.slot536,
+                    sizeof(current.slot536)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 538u, &current.slot538,
+                    sizeof(current.slot538)) != UC_ERR_OK ||
+        uc_mem_read(MTK, game + 1205u, &current.slot1205,
+                    sizeof(current.slot1205)) != UC_ERR_OK)
+    {
+        return;
+    }
+    changed = !g_hangupCombatinfoReadTrace.valid ||
+        current.game != g_hangupCombatinfoReadTrace.game ||
+        current.slot516 != g_hangupCombatinfoReadTrace.slot516 ||
+        current.slot518 != g_hangupCombatinfoReadTrace.slot518 ||
+        current.slot520 != g_hangupCombatinfoReadTrace.slot520 ||
+        current.slot524 != g_hangupCombatinfoReadTrace.slot524 ||
+        current.slot528 != g_hangupCombatinfoReadTrace.slot528 ||
+        current.slot532 != g_hangupCombatinfoReadTrace.slot532 ||
+        current.slot536 != g_hangupCombatinfoReadTrace.slot536 ||
+        current.slot538 != g_hangupCombatinfoReadTrace.slot538 ||
+        current.slot1205 != g_hangupCombatinfoReadTrace.slot1205;
+    if (!changed)
+        return;
+    current.valid = 1;
+    current.sampleCount = g_hangupCombatinfoReadTrace.sampleCount + 1u;
+    g_hangupCombatinfoReadTrace = current;
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_combatinfo_client_write "
+            "local_pc=%04x r9=%08x game=%08x slots="
+            "%u/%u/%u/%u/%u/%u/%u/%u/%u sample=%u\n",
+            localPc, r9, game, current.slot516, current.slot518,
+            current.slot520, current.slot524, current.slot528,
+            current.slot532, current.slot536, current.slot538,
+            current.slot1205, current.sampleCount);
+    fflush(trace);
+    fclose(trace);
+}
+
+/* The reported null-address fault is mmBattle+0x2908, reached while the
+ * native 25/2 candidate builder is still running (before any 4/7 settlement
+ * can be parsed).  Capture the exact instruction window and the candidate
+ * node immediately before executing it.  This does not alter the object,
+ * callback, scene list, registers or input path. */
+static void vm_hangup_candidate_fault_trace_note_pc(u32 pc)
+{
+    int appIndex;
+    u32 codeBase = 0;
+    u32 regs[8] = {0};
+    u32 lr = 0;
+    u8 code[0x80];
+    u8 argumentObject[0x80];
+    u8 node[0x40];
+    FILE *dump;
+    FILE *trace;
+
+    /* A native 25/2 can begin after the previous battle trace was retired.
+     * Its owner is still unambiguous: derive the base from the loaded module
+     * containing the current PC, rather than borrowing a prior callback's
+     * lifecycle state. */
+    appIndex = vm_dl_find_loaded_index_by_pc(pc);
+    if (appIndex >= 0)
+        codeBase = g_vmDlLoadedApps[appIndex].buffer;
+    if (codeBase == 0 || pc != codeBase + 0x2908u)
+        return;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R4, &regs[4]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &regs[5]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R6, &regs[6]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R7, &regs[7]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    memset(argumentObject, 0, sizeof(argumentObject));
+    memset(node, 0, sizeof(node));
+    if (regs[2] != 0)
+        (void)uc_mem_read(MTK, regs[2], argumentObject,
+                          sizeof(argumentObject));
+    if (regs[4] != 0)
+        (void)uc_mem_read(MTK, regs[4], node, sizeof(node));
+    if (uc_mem_read(MTK, codeBase + 0x28C0u, code, sizeof(code)) == UC_ERR_OK)
+    {
+        dump = fopen("logs/hangup-candidate-fault-current.bin", "wb");
+        if (dump != NULL)
+        {
+            (void)fwrite(code, 1, sizeof(code), dump);
+            (void)fwrite(argumentObject, 1, sizeof(argumentObject), dump);
+            (void)fwrite(node, 1, sizeof(node), dump);
+            fflush(dump);
+            fclose(dump);
+        }
+    }
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_candidate_fault_preexec "
+            "local_pc=2908 app=%u base=%08x regs=%08x/%08x/%08x/%08x/"
+            "%08x/%08x/%08x/%08x lr=%08x node=%02x%02x%02x%02x"
+            "%02x%02x%02x%02x path=logs/hangup-candidate-fault-current.bin\n",
+            g_vmDlLoadedApps[appIndex].appId, codeBase, regs[0], regs[1],
+            regs[2], regs[3], regs[4], regs[5],
+            regs[6], regs[7], lr, node[0], node[1], node[2], node[3],
+            node[4], node[5], node[6], node[7]);
+    fflush(trace);
+    fclose(trace);
+}
+
+/* mmBattle:sub_716E chooses the next automatic action from the byte at
+ * module+13392.  Its zero value is the first invalid state observed at the
+ * crash.  Arm observation-only watches as the response callback begins, so
+ * both the candidate rebuild and the preceding battle-control initializer
+ * retain their original writer. */
+static void vm_hangup_auto_candidate_watch_note_pc(u32 pc)
+{
+    u32 codeBase = g_hangupProtocolParserTrace.mmBattleCodeBase;
+    u32 r9 = 0;
+    u32 current = 0xff;
+    FILE *trace;
+
+    if (codeBase == 0)
+        codeBase = g_hangupBattleRenderTrace.codeBase;
+    if (codeBase == 0 || pc != codeBase + 0x17ACu)
+        return;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        return;
+    g_hangupAutoCandidateWatchAddress = r9 + 13392u;
+    g_hangupAutoCandidateWatchWriteCount = 0;
+    g_hangupAutoBattleInitWatchAddress = r9 + 10303u;
+    g_hangupAutoBattleInitWatchWriteCount = 0;
+    (void)uc_mem_read(MTK, g_hangupAutoCandidateWatchAddress,
+                      &current, sizeof(current));
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_auto_candidate_watch_arm "
+            "module=%08x candidate_addr=%08x candidate_initial=%u "
+            "init_addr=%08x\n",
+            r9, g_hangupAutoCandidateWatchAddress, current & 0xffu,
+            g_hangupAutoBattleInitWatchAddress);
     fflush(trace);
     fclose(trace);
 }
@@ -3651,6 +4128,25 @@ static void vm_hangup_battle_render_trace_note_pc(u32 pc)
     if (!vm_is_pool_entry(pc) || pc < g_hangupBattleRenderTrace.codeBase)
         return;
     localPc = pc - g_hangupBattleRenderTrace.codeBase;
+    if (localPc == 0x5E16u && g_vmHangupAutoConfirm.enabled &&
+        g_vmHangupAutoConfirm.hangupAutoActive &&
+        g_vmHangupAutoConfirm.settlementPending)
+    {
+        u32 moduleR9 = 0;
+        u32 gameState = 0;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0 &&
+            uc_mem_read(MTK, moduleR9 + 8272u, &gameState,
+                        sizeof(gameState)) == UC_ERR_OK &&
+            gameState != 0)
+        {
+            /* DrawBattleMain owns these offsets.  Cache only the active
+             * module base so the confirmation helper can later read the
+             * rendered phase without confusing it with main CBE's R9. */
+            g_vmHangupAutoConfirm.battleModuleR9 = moduleR9;
+        }
+    }
     if (!g_hangupBattleRenderTrace.firstPoolPcSeen)
     {
         g_hangupBattleRenderTrace.firstPoolPcSeen = 1;
@@ -5866,15 +6362,16 @@ static void vm_autotest_release_tap(void)
 static bool vm_hangup_auto_confirm_read_result_state(u16 *phaseOut,
                                                      u8 *resultOut)
 {
+    u32 moduleR9 = g_vmHangupAutoConfirm.battleModuleR9;
     u32 gameState = 0;
     u16 phase = 0;
     u8 result = 0;
 
-    if (Global_R9 == 0 ||
-        uc_mem_read(MTK, Global_R9 + 8272u, &gameState,
+    if (moduleR9 == 0 ||
+        uc_mem_read(MTK, moduleR9 + 8272u, &gameState,
                     sizeof(gameState)) != UC_ERR_OK ||
         gameState == 0 ||
-        uc_mem_read(MTK, Global_R9 + 13412u, &phase,
+        uc_mem_read(MTK, moduleR9 + 13412u, &phase,
                     sizeof(phase)) != UC_ERR_OK ||
         uc_mem_read(MTK, gameState + 1138u, &result,
                     sizeof(result)) != UC_ERR_OK)
@@ -5906,6 +6403,7 @@ static void vm_hangup_auto_confirm_clear_pending(const char *reason)
     g_vmHangupAutoConfirm.settlementSequence = 0;
     g_vmHangupAutoConfirm.settlementFrame = 0;
     g_vmHangupAutoConfirm.confirmNotBeforeTick = 0;
+    g_vmHangupAutoConfirm.battleModuleR9 = 0;
 }
 
 static void vm_hangup_auto_confirm_note_network_response(
@@ -6926,6 +7424,43 @@ static void vm_hangup_vital_forensics_capture_response(const u8 *packet,
     g_vmHangupVitalForensics.recoveryMp = recoveryMp;
     g_vmHangupVitalForensics.responsePtr = responsePtr;
     g_vmHangupVitalForensics.callback = callback;
+    {
+        FILE *trace = fopen("logs/hangup-protocol.log", "ab");
+        u32 objectOffset = 5;
+
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_terminal_packet "
+                    "sequence=%u objects=%u order=",
+                    sequence, objectCount);
+            for (u8 index = 0; index < objectCount; ++index)
+            {
+                u16 objectLen;
+
+                if (objectOffset + 6u > packetLen)
+                {
+                    fprintf(trace, " malformed");
+                    break;
+                }
+                objectLen = (u16)(((u16)packet[objectOffset + 4] << 8) |
+                                  packet[objectOffset + 5]);
+                if (objectLen < 6u || objectOffset + objectLen > packetLen)
+                {
+                    fprintf(trace, " malformed");
+                    break;
+                }
+                fprintf(trace, "%s%u/%u[%u]",
+                        index == 0 ? "" : ",",
+                        packet[objectOffset + 1], packet[objectOffset + 2],
+                        objectLen);
+                objectOffset += objectLen;
+            }
+            fprintf(trace, "\n");
+            fflush(trace);
+            fclose(trace);
+        }
+    }
     vm_hangup_vital_forensics_log_scene_nodes("queued-before-4-7");
 }
 
@@ -8230,40 +8765,12 @@ static void vm_autotest_parse_actions(const char *script)
 
 static void vm_hangup_auto_confirm_init(int argc, char *args[])
 {
-    const char *configured = getenv("CBE_HANGUP_AUTO_CONFIRM");
-    const char *configurationSource =
-        configured != NULL ? "environment" : "disabled-by-default";
-    bool enabled = false;
-
-    for (int i = 1; i < argc; ++i)
-    {
-        static const char option[] = "--hangup-auto-confirm=";
-        if (strcmp(args[i], "--hangup-auto-confirm") == 0)
-        {
-            configured = "1";
-            configurationSource = "cli";
-        }
-        else if (strncmp(args[i], option, sizeof(option) - 1u) == 0)
-        {
-            configured = args[i] + sizeof(option) - 1u;
-            configurationSource = "cli";
-        }
-    }
-    if (configured != NULL && configured[0] != 0 &&
-        strcmp(configured, "0") != 0 &&
-        strcmp(configured, "off") != 0 &&
-        strcmp(configured, "false") != 0)
-    {
-        enabled = true;
-    }
+    (void)argc;
+    (void)args;
     memset(&g_vmHangupAutoConfirm, 0, sizeof(g_vmHangupAutoConfirm));
-    g_vmHangupAutoConfirm.enabled = enabled ? 1u : 0u;
-    if (enabled)
-    {
-        printf("[info][hangup] reward_auto_confirm enabled "
-               "mode=hardware-input-after-rendered-4/7 source=%s\n",
-               configurationSource ? configurationSource : "config");
-    }
+    g_vmHangupAutoConfirm.enabled = 1;
+    printf("[info][hangup] reward_auto_confirm enabled "
+           "mode=hardware-input-after-rendered-4/7 source=normal-hangup\n");
 }
 
 static void vm_automation_init_config(int argc, char *args[])
@@ -20118,8 +20625,14 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_shop_return_forensics_note_mmgame_input_pc((u32)address & ~1u);
     vm_hangup_protocol_parser_trace_note_pc((u32)address & ~1u);
     vm_hangup_battle_state_watch_note_pc((u32)address & ~1u);
+    vm_hangup_delegate_register_trace_note_pc((u32)address & ~1u);
+    vm_hangup_ui_dispatch_trace_note_pc((u32)address & ~1u);
+    vm_hangup_rand_range_trace_note_pc((u32)address & ~1u);
+    vm_hangup_auto_candidate_watch_note_pc((u32)address & ~1u);
     vm_hangup_transition_trace_note_pc((u32)address & ~1u);
     vm_hangup_battle_module_trace_note_pc((u32)address & ~1u);
+    vm_hangup_combatinfo_read_trace_note_pc((u32)address & ~1u);
+    vm_hangup_candidate_fault_trace_note_pc((u32)address & ~1u);
     vm_automation_note_battle_native_exit_pc((u32)address & ~1u);
     vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
     vm_hangup_vital_forensics_note_pc((u32)address & ~1u);

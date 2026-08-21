@@ -518,6 +518,34 @@ static u32 vm_net_mock_equipment_enhance_money_cost(u8 level)
     return ((u32)level + 1u) * 100u;
 }
 
+typedef bool (*vm_net_mock_equipment_enhance_save_callback)(const char *reason);
+
+/* Enhancement spends several independent fields in one request: crystals,
+ * copper, level, and generated affixes.  The role snapshot is the transaction
+ * boundary at this layer; a failed durable save must not leave any of those
+ * fields changed in the live session while the database still has the old
+ * instance.  `result=0` is deliberately reserved for this infrastructure
+ * failure because the native 29/3 parser treats it as a cancelled action and
+ * does not apply the material-consuming result=1/2 branch. */
+static bool vm_net_mock_equipment_enhance_persist_or_rollback(
+    vm_net_mock_role_state *role,
+    const vm_net_mock_role_state *before,
+    const char *saveReason,
+    vm_net_mock_equipment_enhance_save_callback saveCallback)
+{
+    if (saveReason == NULL || saveReason[0] == 0)
+        saveReason = "equipment-enhance";
+    bool saved = saveCallback != NULL
+                     ? saveCallback(saveReason)
+                     : vm_net_mock_role_db_save(saveReason);
+
+    if (saved)
+        return true;
+    if (role != NULL && before != NULL)
+        *role = *before;
+    return false;
+}
+
 static bool vm_net_mock_build_equipment_enhance_material_blob(
     u8 *out,
     u32 outCap,
@@ -544,11 +572,12 @@ static bool vm_net_mock_build_equipment_enhance_material_blob(
     return true;
 }
 
-static u32 vm_net_mock_build_equipment_enhance_response(
+static u32 vm_net_mock_build_equipment_enhance_response_with_save_callback(
     const u8 *request,
     u32 requestLen,
     u8 *out,
-    u32 outCap)
+    u32 outCap,
+    vm_net_mock_equipment_enhance_save_callback saveCallback)
 {
     vm_net_mock_equipment_enhance_request parsed;
     vm_net_mock_role_state *role = NULL;
@@ -573,6 +602,8 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     u8 responseObjectCount = 1;
     bool materialsValid = false;
     bool enhancementSucceeded = false;
+    bool roleSnapshotValid = false;
+    vm_net_mock_role_state roleBeforeEnhancement;
     const char *reason = "ok";
 
     memset(&parsed, 0, sizeof(parsed));
@@ -646,6 +677,8 @@ static u32 vm_net_mock_build_equipment_enhance_response(
         }
         else
         {
+            roleBeforeEnhancement = *role;
+            roleSnapshotValid = true;
             for (u32 i = 0; i < parsed.materialRows; ++i)
             {
                 u32 remaining = 0;
@@ -670,6 +703,8 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                 if (!vm_net_mock_role_consume_backpack_item(
                         role, itemIds[i], 0, consumeCount, &remaining))
                 {
+                    if (roleSnapshotValid)
+                        *role = roleBeforeEnhancement;
                     result = vm_net_mock_equipment_enhance_reject_result(
                         parsed.subtype,
                         VM_NET_MOCK_EQUIP_ENHANCE_REJECT_CRYSTAL_INSUFFICIENT);
@@ -734,10 +769,29 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                                      primaryAfter, primaryAfter - primaryBefore,
                                      stageThreshold, stageType, stageValue);
                 }
-                vm_net_mock_role_db_save(enhancementSucceeded
-                                             ? "equipment-enhance-success"
-                                             : "equipment-enhance-failed");
-                reason = enhancementSucceeded ? "success" : "failed-roll";
+                if (!vm_net_mock_equipment_enhance_persist_or_rollback(
+                        role, &roleBeforeEnhancement,
+                        enhancementSucceeded ? "equipment-enhance-success"
+                                              : "equipment-enhance-failed",
+                        saveCallback))
+                {
+                    enhancementSucceeded = false;
+                    result = 0;
+                    reason = "persistence-failed";
+                    printf("[error][network] mock_equipment_enhance_persist_failed "
+                           "seq=%u item=%u level_before=%u action=rollback "
+                           "response_result=0 evidence=JianghuOL.CBE:0x01028C7C\n",
+                           parsed.equipSeq, equipmentItemId, currentLevel);
+                    vm_autotest_note(
+                        "mock_equipment_enhance_persist_failed seq=%u item=%u "
+                        "level_before=%u action=rollback response_result=0 "
+                        "evidence=JianghuOL.CBE:0x01028C7C\n",
+                        parsed.equipSeq, equipmentItemId, currentLevel);
+                }
+                else
+                {
+                    reason = enhancementSucceeded ? "success" : "failed-roll";
+                }
             }
         }
     }
@@ -831,6 +885,16 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                      parsed.materialRows, materialPower, successRate, moneyCost,
                      enhancementSucceeded ? 1 : 0, reason, parsed.subtype);
     return pos;
+}
+
+static u32 vm_net_mock_build_equipment_enhance_response(
+    const u8 *request,
+    u32 requestLen,
+    u8 *out,
+    u32 outCap)
+{
+    return vm_net_mock_build_equipment_enhance_response_with_save_callback(
+        request, requestLen, out, outCap, NULL);
 }
 
 typedef struct
@@ -1283,6 +1347,19 @@ static bool vm_net_mock_battle_roll_percent(u32 percent)
     return (vm_net_mock_battle_reward_rand() % 100u) < percent;
 }
 
+/* A configured drop percentage belongs to the battle, not to each enemy row.
+ * Enemy count scales only the awarded quantity after that one roll succeeds.
+ * Keeping this rule in one helper makes it impossible for a 5% drop to become
+ * three independent 5% chances merely because the encounter spawned three
+ * copies of the same monster. */
+static u32 vm_net_mock_battle_drop_count_for_battle(u32 percent,
+                                                    u32 enemyCount)
+{
+    if (enemyCount == 0)
+        return 0;
+    return vm_net_mock_battle_roll_percent(percent) ? enemyCount : 0;
+}
+
 static u32 vm_net_mock_battle_reward_exp_for_enemy(u32 enemyId)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
@@ -1443,6 +1520,7 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         bool dropIsTaskMaterial = false;
         bool dropPolicyOk = false;
         bool dropEligible = false;
+        bool dropRollHit = false;
 
         if (configured->itemId != 0 && configured->ratePercent != 0 &&
             configured->ratePercent <= 100u && role != NULL)
@@ -1455,21 +1533,21 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         }
         if (dropEligible)
         {
-            for (u32 enemy = 0; enemy < enemyCount; ++enemy)
-            {
-                if (vm_net_mock_battle_roll_percent(configured->ratePercent))
-                    ++grantedCount;
-            }
-            rolledDropCount = grantedCount;
+            rolledDropCount = vm_net_mock_battle_drop_count_for_battle(
+                configured->ratePercent, enemyCount);
+            dropRollHit = rolledDropCount != 0;
+            grantedCount = rolledDropCount;
             if (dropIsTaskMaterial && grantedCount > taskMaterialRemaining)
                 grantedCount = taskMaterialRemaining;
         }
         printf("[info][network] mock_battle_drop_gate enemy=%u role=%u slot=%u item=%u rate=%u "
-               "task_material=%u remaining=%u policy=%s eligible=%u rolled=%u grant=%u\n",
+               "task_material=%u remaining=%u policy=%s eligible=%u rolls=%u "
+               "roll_hit=%u quantity_multiplier=%u rolled=%u grant=%u\n",
                g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
                (u32)dropIndex + 1u, configured->itemId, configured->ratePercent,
                dropIsTaskMaterial ? 1u : 0u, taskMaterialRemaining,
                dropPolicyOk ? "ok" : "unavailable", dropEligible ? 1u : 0u,
+               dropEligible ? 1u : 0u, dropRollHit ? 1u : 0u, enemyCount,
                rolledDropCount, grantedCount);
         if (grantedCount == 0)
         {
@@ -2694,6 +2772,15 @@ typedef struct vm_mock_service_client_session
     u32 sceneHangupBattleSessionSerial;
     u32 sceneHangupRestartNotBeforeTick;
     u16 sceneHangupCompletedBattles;
+    /* The session-owned ceiling is 64 normally or 200 with Battle Insight.
+     * It is a snapshot because 4/7.combatinfo redraws the native panel after
+     * every completed battle. */
+    u16 sceneHangupMaxBattles;
+    u32 sceneHangupTotalExp;
+    u32 sceneHangupTotalGold;
+    u32 sceneHangupTotalHpRecovered;
+    u32 sceneHangupTotalMpRecovered;
+    u32 sceneHangupLastAccountedBattleSerial;
     char sceneHangupScene[64];
     /* The native action=4 task path carries only task_id after the NPC dialog.
      * Retain the server-observed offer/submit source so a later 6/11 accept or
@@ -4986,6 +5073,12 @@ static void vm_mock_service_session_clear_scene_hangup(
     session->sceneHangupBattleSessionSerial = 0;
     session->sceneHangupRestartNotBeforeTick = 0;
     session->sceneHangupCompletedBattles = 0;
+    session->sceneHangupMaxBattles = 0;
+    session->sceneHangupTotalExp = 0;
+    session->sceneHangupTotalGold = 0;
+    session->sceneHangupTotalHpRecovered = 0;
+    session->sceneHangupTotalMpRecovered = 0;
+    session->sceneHangupLastAccountedBattleSerial = 0;
     session->sceneHangupScene[0] = 0;
 }
 
