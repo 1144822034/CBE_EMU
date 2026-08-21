@@ -312,16 +312,16 @@ itemId:u32, seq:i16, count:u32, common item/equipment extra
 ```text
 1/7/4   result=1              结束物品操作等待
 1/7/11  chest seq/count       原地同步或删除宝箱行
-1/7/11  key seq/count         原地同步或删除钥匙行
-1/7/15  result=1,total=1      原生奖励增量并显示“获得N个物品”
+1/7/15  result=1,total=1      原生奖励增量并显示“获得N个物品”；key 仅由原生开箱路径扣一次
 ```
 
 `7/15` 替换 `7/7 type=1 + 7/7 type=3`，而不是与它们叠加，因此奖励只进入客户端
 一次。mmGame 的 `type=1` 已移除，也就不会重新置位其等待状态，不再需要 `type=3`
 终结对象。提交后的系统聊天奖励消息同步移除；世界公告仍是独立、仅按后台配置启用的
-通道。宝箱和钥匙继续只用 `7/11`，不会重新引入 category 15 物理槽泄漏。
+通道。宝箱继续只用 `7/11` 按序号同步；钥匙已由 `7/15 {box,key}` 原生路径消耗，不能再
+下发第二个钥匙 `7/11`，否则会可见地重复扣减。
 
-定向回归 `scripts/chest-open-reward-notice-regression.c` 已验证四对象顺序、字段类型、
+定向回归 `scripts/chest-open-reward-notice-regression.c` 已验证三对象顺序、字段类型、
 `total=1`，以及无前置行数的 `itemId -> seq -> count -> common extra` 字节顺序。
 `make -j2` 和回归均通过。真实客户端仍需确认提示可见、确认键只关闭游戏提示、奖励与
 消耗各发生一次，以及连续开箱不再出现等待层。

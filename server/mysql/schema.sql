@@ -456,7 +456,7 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
 
 -- Direct NPC dialog services are a set, not a replacement for task bindings.
 -- service_kind=0 is the explicit “configured but no direct service” marker;
--- 1..7 are the existing parser-backed action=1 service kinds.  Rows are
+-- 1..9 are the parser-backed action=1 service kinds.  Rows are
 -- shared by dynamic NPCs and scene-native NPC overrides, so no foreign key is
 -- used here: native actors do not have a server_dynamic_npcs parent row.
 CREATE TABLE IF NOT EXISTS `server_npc_services` (
@@ -611,6 +611,47 @@ CREATE TABLE IF NOT EXISTS `account_role_state_payload_backup` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_global_reward_mails` (
+  `mail_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `title` VARBINARY(63) NOT NULL,
+  `body` VARBINARY(255) NOT NULL,
+  `status` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=草稿,1=已发放,2=已撤回',
+  `recipient_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `sent_at` TIMESTAMP NULL DEFAULT NULL,
+  `revoked_at` TIMESTAMP NULL DEFAULT NULL,
+  PRIMARY KEY (`mail_id`),
+  KEY `idx_global_reward_mails_status` (`status`, `mail_id`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_global_reward_mail_items` (
+  `mail_id` INT UNSIGNED NOT NULL,
+  `reward_order` TINYINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `item_count` INT UNSIGNED NOT NULL,
+  PRIMARY KEY (`mail_id`, `reward_order`),
+  KEY `idx_global_reward_mail_items_item` (`item_id`),
+  CONSTRAINT `fk_global_reward_mail_items_mail`
+    FOREIGN KEY (`mail_id`) REFERENCES `server_global_reward_mails` (`mail_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `account_reward_mails` (
+  `mail_id` INT UNSIGNED NOT NULL,
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `claim_state` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=未领取,1=已领取,2=已撤回',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `claimed_at` TIMESTAMP NULL DEFAULT NULL,
+  PRIMARY KEY (`mail_id`, `account_id`),
+  KEY `idx_account_reward_mails_inbox` (`account_id`, `claim_state`, `mail_id`),
+  CONSTRAINT `fk_account_reward_mails_mail`
+    FOREIGN KEY (`mail_id`) REFERENCES `server_global_reward_mails` (`mail_id`)
+    ON DELETE CASCADE,
+  CONSTRAINT `fk_account_reward_mails_account`
+    FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`)
+    ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- 管理后台从历史 SQL 备份覆盖装备强化字段时写入的审计记录。

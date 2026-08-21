@@ -307,8 +307,9 @@
   内部的未恢复 mock 模型中。
 - `CBE_ACTOR_ATTR_STRENGTH`、`AGILITY`、`WISDOM` 继续作为明确的调试覆盖；旧的
   `ENDURANCE`、`CHARM`、`RESERVE` 覆盖不再冒充客户端定义的槽，改为
-  `HIT`、`SPEED`、`DEFENSE`、`RESIST` 四个与 wire slot 一一对应的名称。无语义的
-  `CBE_ACTOR_EXTRA132` 覆盖已删除，避免它绕开力量槽的唯一来源。
+  `HIT`、`SPEED`、`DEFENSE` 三个与 wire slot 一一对应的名称。无语义的
+  `CBE_ACTOR_EXTRA132` 覆盖已删除；`RESIST` 覆盖也已删除，避免它绕开由装备
+  `1/7/7` 记录提供的唯一抗性来源。
 - `vm_net_mock_role_derived_attr()` 只替换已经由上述函数确认的力量/敏捷/智慧成长；
   体质、魅力及 1 级截距没有证据，未猜测修改。
 - `tmp/actorinfo-attribute-contract-regression.c` 用互不相同的值断言标量与六词位置，

@@ -463,6 +463,37 @@ static bool vm_net_mock_equipment_enhance_decode_materials(
     return true;
 }
 
+/* A target-tier crystal represents one full attempt.  Each lower tier has one
+ * third of the immediately higher tier's contribution: with target +16, a
+ * level-15 crystal is 1/3 and a level-14 crystal is 1/9.  Powers of three
+ * retain those ratios exactly without floating point.  The 29/1 tables,
+ * 29/2 preview and 29/3 roll all use these helpers so the display cannot
+ * diverge from the committed result. */
+static u32 vm_net_mock_equipment_enhance_level_power(u32 level)
+{
+    u32 power = 1;
+
+    if (level == 0 || level > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL + 1u)
+        return 0;
+    for (u32 exponent = 1; exponent < level; ++exponent)
+        power *= 3u;
+    return power;
+}
+
+static u32 vm_net_mock_equipment_enhance_crystal_power(u32 tier)
+{
+    if (tier == 0 || tier > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
+        return 0;
+    return vm_net_mock_equipment_enhance_level_power(tier);
+}
+
+static u32 vm_net_mock_equipment_enhance_required_power(u8 currentLevel)
+{
+    u32 targetLevel = (u32)currentLevel + 1u;
+
+    return vm_net_mock_equipment_enhance_level_power(targetLevel);
+}
+
 static bool vm_net_mock_equipment_enhance_validate_materials(
     vm_net_mock_role_state *role,
     const vm_net_mock_equipment_enhance_request *parsed,
@@ -490,10 +521,13 @@ static bool vm_net_mock_equipment_enhance_validate_materials(
         material = vm_net_mock_role_find_backpack_item(role, itemIds[i], 0);
         if (material == NULL || material->count < requestedCount)
             return false;
-        if (0xffffffffu - power < tier * 100u * counts[i])
+        u32 crystalPower = vm_net_mock_equipment_enhance_crystal_power(tier);
+        uint64_t addedPower = (uint64_t)crystalPower * counts[i];
+
+        if (addedPower > 0xffffffffull - power)
             power = 0xffffffffu;
         else
-            power += tier * 100u * counts[i];
+            power += (u32)addedPower;
     }
     if (powerOut)
         *powerOut = power;
@@ -502,15 +536,36 @@ static bool vm_net_mock_equipment_enhance_validate_materials(
 
 static u32 vm_net_mock_equipment_enhance_success_rate(u8 level, u32 power)
 {
-    u32 required = ((u32)level + 1u) * 100u;
-    u32 rate = 0;
+    u32 required = vm_net_mock_equipment_enhance_required_power(level);
+    uint64_t rate = 0;
 
     if (required == 0)
         return 0;
     if (power >= required)
         return 100;
-    rate = (power * 100u) / required;
+    rate = ((uint64_t)power * 100u) / required;
     return rate > 100 ? 100 : rate;
+}
+
+/* 29/2.value is an integral percentage, but 29/3 keeps the exact fractional
+ * probability by drawing from the same power denominator.  Mix the existing
+ * deterministic scheduler/sequence inputs before the modulus: using the raw
+ * (small) tick directly would bias high-denominator attempts toward success. */
+static u32 vm_net_mock_equipment_enhance_roll(u16 equipSeq, u8 currentLevel,
+                                              u32 denominator)
+{
+    u32 state = g_schedulerTick;
+
+    if (denominator == 0)
+        return 0;
+    state ^= (u32)equipSeq * 0x9e3779b9u;
+    state ^= (u32)currentLevel * 0x85ebca6bu;
+    state ^= state >> 16;
+    state *= 0x7feb352du;
+    state ^= state >> 15;
+    state *= 0x846ca68bu;
+    state ^= state >> 16;
+    return state % denominator;
 }
 
 static u32 vm_net_mock_equipment_enhance_money_cost(u8 level)
@@ -714,11 +769,11 @@ static u32 vm_net_mock_build_equipment_enhance_response_with_save_callback(
             }
             if (result == 1)
             {
-                u32 roll = (g_schedulerTick +
-                            (u32)parsed.equipSeq * 17u +
-                            (u32)currentLevel * 31u) % 100u;
+                u32 roll = vm_net_mock_equipment_enhance_roll(
+                    parsed.equipSeq, currentLevel,
+                    vm_net_mock_equipment_enhance_required_power(currentLevel));
                 role->money -= moneyCost;
-                enhancementSucceeded = roll < successRate;
+                enhancementSucceeded = roll < materialPower;
                 result = enhancementSucceeded ? 1 : 2;
                 equipment = vm_net_mock_role_find_backpack_item(
                     role, 0, parsed.equipSeq);
@@ -814,14 +869,16 @@ static u32 vm_net_mock_build_equipment_enhance_response_with_save_callback(
                  level <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
             {
                 if (!vm_net_mock_seq_put_u32(data1, sizeof(data1), &data1Len,
-                                             (level + 1u) * 100u))
+                                             vm_net_mock_equipment_enhance_required_power(
+                                                 (u8)level)))
                     return 0;
             }
             for (u32 tier = 1;
                  tier <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++tier)
             {
                 if (!vm_net_mock_seq_put_u32(data2, sizeof(data2), &data2Len,
-                                             tier * 100u))
+                                             vm_net_mock_equipment_enhance_crystal_power(
+                                                 tier)))
                     return 0;
             }
         }

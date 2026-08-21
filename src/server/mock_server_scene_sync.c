@@ -2958,6 +2958,36 @@ static bool vm_net_mock_task_backpack_can_receive_rewards(
     return true;
 }
 
+/* task.dsh is an authored content source, but some historical rows award
+ * more EXP than several whole levels on the current curve (for example, a
+ * level-20 row awards 42,000).  Keep its zero/smaller rewards intact while
+ * making the progression budget deterministic: one completion can grant at
+ * most eight percent of the task's own level interval.  Using task.level,
+ * rather than the recipient's current level, prevents over-levelled hand-ins
+ * from scaling up and preserves the reward shown in awardinfo. */
+enum { VM_NET_MOCK_TASK_EXP_REWARD_CAP_BASIS_POINTS = 800 };
+
+static u32 vm_net_mock_task_effective_reward_exp(
+    const vm_net_mock_task_definition *task)
+{
+    u32 taskLevel = 1;
+    u32 interval = 0;
+    u32 cap = 0;
+
+    if (task == NULL || task->rewardExp == 0)
+        return 0;
+    taskLevel = task->level ? task->level : 1;
+    if (taskLevel > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        taskLevel = VM_NET_MOCK_ROLE_LEVEL_CAP;
+    interval = vm_net_mock_role_exp_interval_for_level(taskLevel);
+    cap = (u32)(((unsigned long long)interval *
+                 VM_NET_MOCK_TASK_EXP_REWARD_CAP_BASIS_POINTS + 9999ull) /
+                10000ull);
+    if (cap == 0)
+        cap = 1;
+    return task->rewardExp < cap ? task->rewardExp : cap;
+}
+
 static bool vm_net_mock_task_commit_reward(
     vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
     u16 rewardSeqOut[VM_NET_MOCK_TASK_REWARD_ITEM_MAX],
@@ -2966,6 +2996,7 @@ static bool vm_net_mock_task_commit_reward(
     u32 consumedIds[2] = {0, 0};
     u32 consumedCounts[2] = {0, 0};
     u32 consumedSlots = 0;
+    u32 rewardExp = 0;
     vm_net_mock_role_state before;
 
     if (rewardSeqOut != NULL)
@@ -2975,6 +3006,7 @@ static bool vm_net_mock_task_commit_reward(
         *rewardCountOut = 0;
     if (role == NULL || task == NULL)
         return false;
+    rewardExp = vm_net_mock_task_effective_reward_exp(task);
     if (!vm_net_mock_task_role_has_required_items(role, task) ||
         !vm_net_mock_task_backpack_can_receive_rewards(role, task))
     {
@@ -3029,7 +3061,7 @@ static bool vm_net_mock_task_commit_reward(
             rewardSeqOut[i] = rewardSeq;
     }
 
-    (void)vm_net_mock_role_add_exp(role, task->rewardExp);
+    (void)vm_net_mock_role_add_exp(role, rewardExp);
     role->money = (0xffffffffu - role->money < task->rewardMoney)
                       ? 0xffffffffu
                       : role->money + task->rewardMoney;
@@ -3042,8 +3074,9 @@ static bool vm_net_mock_task_commit_reward(
     }
     if (rewardCountOut != NULL)
         *rewardCountOut = task->rewardItemNum;
-    printf("[info][network] mock_task_reward task=%u role=%u exp=%u money=%u items=%u first_item=%u first_type=%u first_count=%u consumed=%u\n",
-           task->taskId, role->roleId, task->rewardExp, task->rewardMoney,
+    printf("[info][network] mock_task_reward task=%u role=%u exp=%u raw_exp=%u money=%u items=%u first_item=%u first_type=%u first_count=%u consumed=%u\n",
+           task->taskId, role->roleId, rewardExp, task->rewardExp,
+           task->rewardMoney,
            task->rewardItemNum, task->rewardItemId, task->rewardItemType,
            task->rewardItemCount, consumedSlots);
     return true;
@@ -3061,7 +3094,7 @@ static bool vm_net_mock_build_task_awardinfo(
     u8 rewardCount)
 {
     u32 pos = 0;
-    u32 rewardExp = task != NULL ? task->rewardExp : 0;
+    u32 rewardExp = vm_net_mock_task_effective_reward_exp(task);
     u32 rewardMoney = task != NULL ? task->rewardMoney : 0;
 
     if (blobLenOut != NULL)
@@ -3603,6 +3636,11 @@ static bool vm_net_mock_npc_service_option_default(
         name = "\xbf\xaa\xc9\xe8\xc0\xde\xcc\xa8"; /* 开设擂台 */
         description = "\xc9\xe8\xd6\xc3\xb1\xc8\xce\xe4\xb2\xce\xca\xfd"; /* 设置比武参数 */
         value = VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE;
+        break;
+    case VM_NET_MOCK_NPC_KIND_MAILBOX:
+        name = "\xd3\xca\xcf\xe4"; /* 邮箱 */
+        description = "\xc1\xec\xc8\xa1\xcf\xb5\xcd\xb3\xbd\xb1\xc0\xf8"; /* 领取系统奖励 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX;
         break;
     default:
         return false;
@@ -4850,6 +4888,9 @@ static bool vm_net_mock_npc_service_opcode_is_supported(u32 opcode)
     case VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE:
     case VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE:
     case VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_MAIL_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_CLAIM_MAIL_BASE:
         return true;
     default:
         return false;
@@ -5546,6 +5587,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     vm_mock_service_npc_transaction_context transaction;
     bool transactionConfirm = false;
     bool transactionCancel = false;
+    vm_net_mock_mailbox_dialog mailboxView;
+    bool mailboxHandled = false;
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
 
@@ -5565,6 +5608,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     value = serviceValue & VM_NET_MOCK_NPC_SERVICE_VALUE_MASK;
     shopContext = vm_net_mock_npc_service_context_get(session, role);
     memset(&transaction, 0, sizeof(transaction));
+    memset(&mailboxView, 0, sizeof(mailboxView));
     transactionConfirm = operation ==
                          (VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION &
                           VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK);
@@ -5646,7 +5690,27 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         vm_net_mock_npc_transaction_context_clear(session);
     }
 
-    if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
+    if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX_BASE ||
+        operation == VM_NET_MOCK_NPC_SERVICE_OPEN_MAIL_BASE ||
+        operation == VM_NET_MOCK_NPC_SERVICE_CLAIM_MAIL_BASE)
+    {
+        mailboxHandled = vm_net_mock_mailbox_build_dialog(
+            role, shopContext, operation, value, &mailboxView);
+        if (!mailboxHandled)
+            return 0;
+        dialogText = mailboxView.dialog;
+        optionCount = mailboxView.optionCount;
+        for (u32 i = 0; i < optionCount; ++i)
+        {
+            optionNames[i] = mailboxView.optionNames[i];
+            optionDescriptions[i] = mailboxView.optionDescriptions[i];
+            optionValues[i] = mailboxView.optionValues[i];
+        }
+        action = mailboxView.action;
+        result = mailboxView.result;
+        restoredListPage = mailboxView.page;
+    }
+    else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
     {

@@ -10,9 +10,9 @@
  *   continuous-hangup ceiling, exactly 200 battles.
  * - 聚元丹 (833): special 7/33 flow, not ordinary HP/MP consumption.
  * - 修炼天书 instance (921): transfer only when its level is higher than the
- *   recipient; the default generated record is level 10 / 1689 EXP.
+ *   recipient; the default generated record is level 10 / 43612 EXP.
  * - 行酒令、月饼、爱国之心 (804/812/938): stackable offline tokens, each
- *   funding one hour and using the existing 8 * level EXP/minute policy.
+ *   funding one hour at the normal-practise level-interval rate.
  */
 
 #include <stdio.h>
@@ -106,9 +106,9 @@ int main(void)
         return 1;
     }
 
-    expectedOfflineExp = 120u * 10u *
-                         VM_NET_MOCK_OFFLINE_EXP_PER_MINUTE_PER_LEVEL;
-    if (expectedOfflineExp != 9600u)
+    expectedOfflineExp = 120u * vm_net_mock_practise_exp_per_minute(
+                                   vm_net_mock_role_level_start_exp(60), false);
+    if (expectedOfflineExp != 19200u)
     {
         fprintf(stderr, "offline EXP policy mismatch: %u\n", expectedOfflineExp);
         return 1;

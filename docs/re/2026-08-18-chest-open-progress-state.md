@@ -29,8 +29,9 @@ mock_chest_open ... response=7/4-complete+7/11+7/11+7/7-type1+7/37
   正确结束等待，随后又被 `7/37` 建立的阻塞框覆盖；这解释了去掉 `7/37` 后仍需继续
   追踪 mmGame 等待状态的原因。
 - `mmGameMstarWqvga.cbm:sub_11CE(0x11CE)` 将 `7/7` 交给
-  `sub_D04(0x0D04)`；奖励继续使用 `type=1` 单次增量。宝箱和钥匙继续使用按序号的
-  `7/11`，避免 `type=2` 在 category 15 管理器中泄漏物理槽。
+`sub_D04(0x0D04)`；奖励继续使用 `type=1` 单次增量。宝箱使用按序号的 `7/11`，避免
+`type=2` 在 category 15 管理器中泄漏物理槽；钥匙由 `7/15 {box,key}` 原生路径扣一次，
+不能再附加钥匙 `7/11`。
 
 此前的第一次偏离发生在奖励增量对象：`sub_D04` 在 `0x1094` 将共享网络状态重新置
 为等待中。`sub_D04` 的 `type=3` 分支位于 `0x116C-0x1190`，会执行模块完成回调并
@@ -50,8 +51,7 @@ mock_chest_open ... response=7/4-complete+7/11+7/11+7/7-type1+7/37
 ```text
 1/7/4   result=1                 结束操作等待
 1/7/11  chest sequence/count     更新或删除所选宝箱行
-1/7/11  key sequence/count       更新或删除所选钥匙行
-1/7/15  result=1,total=1          单次加入抽中奖励并显示固件原生提示
+1/7/15  result=1,total=1          单次加入抽中奖励并显示固件原生提示；钥匙在原生路径中扣一次
 ```
 
 `7/15 iteminfo` 每行是 `itemId:u32, seq:i16, count:u32, common extra`，没有
@@ -67,7 +67,7 @@ screen 状态或输入队列。
 
 - `make -j2`
 - 编译并运行 `scripts/chest-open-reward-notice-regression.c`
-- 回归断言成功包为 `7/4, 7/11, 7/11, 7/15` 四个对象
+- 回归断言成功包为 `7/4, 7/11, 7/15` 三个对象
 - 回归断言 `7/15` 为 `result=1,total=1`，奖励行严格按
   `itemId -> seq -> 本次奖励数量 -> common extra` 编码且没有前置行数
 

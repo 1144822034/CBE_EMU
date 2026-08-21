@@ -200,6 +200,78 @@ static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 request
     return pos;
 }
 
+/* The friend screen sends the removal and its normal page reload together:
+ *
+ *   1/10/9 { id } + 1/10/1 { index, pageSize }
+ *
+ * The main CBE kind-10 dispatcher has no subtype-9 response branch.  Its
+ * page callback, however, consumes the following 10/1 response and clears the
+ * screen's network wait.  Preserve that client-owned lifecycle by returning
+ * only the post-transaction page object, never an invented 10/9 result. */
+static u32 vm_net_mock_build_friend_remove_and_page_response(const u8 *request,
+                                                              u32 requestLen,
+                                                              u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
+    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    vm_net_mock_request_object removeObject;
+    vm_net_mock_request_object pageObject;
+    u8 pageRequest[128];
+    u32 offset = 4;
+    u32 targetRoleId = 0;
+    u32 pageRequestLen = 0;
+    bool removed = false;
+    bool persisted = false;
+    u32 responseLen = 0;
+
+    if (request == NULL || requestLen < 9 || out == NULL || outCap < 5 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &removeObject) ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &pageObject) ||
+        offset != requestLen || removeObject.major != 1 || removeObject.kind != 10 ||
+        removeObject.subtype != 9 || pageObject.major != 1 || pageObject.kind != 10 ||
+        pageObject.subtype != 1 ||
+        !vm_net_mock_get_object_u32_field(removeObject.payload,
+                                          removeObject.payloadLen, "id", &targetRoleId) ||
+        targetRoleId == 0 || pageObject.payloadLen + 9u > sizeof(pageRequest))
+    {
+        return 0;
+    }
+
+    /* Rebuild only the already validated 10/1 request.  The existing page
+     * builder owns its exact allpgs/friendinfo format and reads the committed
+     * authoritative relationship snapshot. */
+    pageRequestLen = pageObject.payloadLen + 9u;
+    memset(pageRequest, 0, sizeof(pageRequest));
+    pageRequest[0] = 'W';
+    pageRequest[1] = 'T';
+    pageRequest[2] = (u8)(pageRequestLen >> 8);
+    pageRequest[3] = (u8)pageRequestLen;
+    memcpy(pageRequest + 4, pageObject.payload - 5, pageObject.payloadLen + 5u);
+
+    if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0)
+    {
+        persisted = vm_mock_service_friend_db_remove_pair(ownerAccountId,
+                                                           ownerRole->roleId,
+                                                           targetRoleId,
+                                                           &removed);
+    }
+    responseLen = vm_net_mock_build_friend_page_response(pageRequest,
+                                                          pageRequestLen,
+                                                          out, outCap);
+    if (responseLen == 0)
+        return 0;
+
+    printf("[info][network] mock_friend_remove owner=%s/%u target=%u persisted=%u removed=%u response=10/1 resp=%u "
+           "evidence=runtime:WT10/9+10/1;JianghuOL.CBE:0x01012E4C+0x010114FC\n",
+           ownerAccountId ? ownerAccountId : "-", ownerRole ? ownerRole->roleId : 0,
+           targetRoleId, persisted ? 1u : 0u, removed ? 1u : 0u, responseLen);
+    vm_autotest_note("mock_friend_remove owner=%u target=%u persisted=%u removed=%u response=10/1 evidence=WT10/9+10/1\n",
+                     ownerRole ? ownerRole->roleId : 0, targetRoleId,
+                     persisted ? 1u : 0u, removed ? 1u : 0u);
+    return responseLen;
+}
+
 static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outCap, u32 *pos,
                                                                u8 *objectCount, const char *sceneOverride,
                                                                bool includeSkillBooks,

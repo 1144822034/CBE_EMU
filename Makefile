@@ -8,6 +8,7 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock-server.c \
 	src/server/mock_server_core.c \
 	src/server/mock_server_catalog.c \
+	src/server/mock_server_mailbox.c \
 	src/server/mock_server_role.c \
 	src/server/mock_server_ranking.c \
 	src/server/mock_server_equipment_npc.c \
@@ -76,6 +77,7 @@ $(CLIENT_OBJDIR)/main.o: src/main.c src/network-client.c src/md5.h \
 $(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
 	src/web_admin_equipment_restore.inc.c \
+	src/web_admin_global_rewards.inc.c \
 	src/mysql-client.h src/config.h
 
 $(CLIENT_OBJDIR)/%.o: src/%.c | $(CLIENT_OBJDIR)
@@ -125,6 +127,7 @@ boundary-check: build
 $(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
 	src/web_admin_equipment_restore.inc.c \
+	src/web_admin_global_rewards.inc.c \
 	src/mysql-client.h src/config.h
 
 $(SERVER_OBJDIR)/%.o: src/%.c | $(SERVER_OBJDIR)

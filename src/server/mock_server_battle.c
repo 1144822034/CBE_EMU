@@ -830,7 +830,10 @@ static void vm_net_mock_battle_modifier_set_from_skill(
     modifier->dodgePercent = vm_net_mock_battle_skill_uses_percent_dodge(skill)
                                  ? skill->dodgeChange
                                  : 0;
-    modifier->resist = skill->resistChange;
+    /* Resistance is an equipment-only stat.  Preserve the native timed-skill
+     * action/effect lifecycle, but never transfer skill.dsh's resistance
+     * column into the server-side combat modifier. */
+    modifier->resist = 0;
 }
 
 /* `神臂担山` is a target-direction=2 group effect.  Its type-1 children carry

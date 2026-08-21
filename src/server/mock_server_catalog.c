@@ -959,17 +959,17 @@ static const char g_vm_net_mock_training_book_default_description[] =
     "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\n"
     "\xB4\xCB\xCA\xE9\xBC\xC7\xC2\xBC\xC1\xCB\xC7\xB0\xB1\xB2\xB5\xC4\xD0\xDE\xD0\xD0\xD0\xC4\xB5\xC3\xA1\xA3\n"
     "\xCC\xEC\xCA\xE9\xB5\xC8\xBC\xB6\xA3\xBA" "10\n"
-    "\xCB\xF9\xBA\xAC\xBE\xAD\xD1\xE9\xA3\xBA" "1689";
+    "\xCB\xF9\xBA\xAC\xBE\xAD\xD1\xE9\xA3\xBA" "43612";
 
 /* item.dsh gives no numeric book payload.  The default instance is therefore
  * an explicit server balance seed: level 10 and the current level-10 entry
- * threshold (1689 EXP on the shipped curve).  Per-instance DB values remain
+ * threshold (43,612 EXP on the V3 curve).  Per-instance DB values remain
  * authoritative and may be higher; this seed only prevents a newly granted
  * 921 from being an unuseable level-1/zero-EXP placeholder. */
 enum
 {
     VM_NET_MOCK_TRAINING_BOOK_DEFAULT_LEVEL = 10,
-    VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE = 1689
+    VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE = 43612
 };
 
 static bool vm_net_mock_training_book_schema_prepare(void)
@@ -1066,16 +1066,16 @@ static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_d
     /* Version one of this companion table was created before a transfer rule
      * existed and seeded every 921 as level 1 / zero EXP.  An early build of
      * this transfer implementation also paired level 10 with the level-9
-     * threshold 1303.  Neither payload can satisfy its claimed level, and
-     * both are server-generated placeholders rather than player-authored
-     * book progress, so migrate only those exact tuples to the baseline. */
+     * threshold 1303.  The former V1/V2 level-10 thresholds were 1689/3083.
+     * These are server-generated placeholders rather than player-authored
+     * book progress, so migrate only those exact tuples to the V3 baseline. */
     if (fullSnapshot)
     {
         snprintf(query, sizeof(query),
                  "UPDATE account_role_training_books SET book_level=%u,book_experience=%u "
                  "WHERE account_id=CAST(X'%s' AS CHAR) AND "
                  "((book_level=1 AND book_experience=0) OR "
-                 "(book_level=10 AND book_experience=1303))",
+                 "(book_level=10 AND book_experience IN (1303,1689,3083)))",
                  VM_NET_MOCK_TRAINING_BOOK_DEFAULT_LEVEL,
                  VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE, accountHex);
     }
@@ -1085,7 +1085,7 @@ static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_d
                  "UPDATE account_role_training_books SET book_level=%u,book_experience=%u "
                  "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND "
                  "((book_level=1 AND book_experience=0) OR "
-                 "(book_level=10 AND book_experience=1303))",
+                 "(book_level=10 AND book_experience IN (1303,1689,3083)))",
                  VM_NET_MOCK_TRAINING_BOOK_DEFAULT_LEVEL,
                  VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE,
                  accountHex, scopedRoleId);
@@ -6463,7 +6463,10 @@ static bool vm_net_mock_append_chest_open_reward15_object(
  *   rows by sequence without creating the success modal.
  *   This is the same no-popup contract already used for the small-horn item
  *   path in vm_net_mock_build_item_use_response().
- * - the same CBE parser consumes 1/7/11 to synchronize the item count.
+ * - the same CBE parser consumes 1/7/11 to synchronize the chest row.  The
+ *   native 7/15 {box,key} operation has already consumed the selected key in
+ *   its own client-owned path; sending a second sequence-keyed 7/11 for that
+ *   key makes the visible key count fall by two.
  * - JianghuOL.CBE:HandleShopBuyItem(0x01025AE6) has the native chest result
  *   branch at 0x01026152.  Its 1/7/15 success object both inserts the reward
  *   delta and formats the firmware-owned "获得%d个%s" prompt.  It replaces,
@@ -6577,9 +6580,6 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     if (!vm_net_mock_append_backpack_item_count11_object(
             out, outCap, &pos, &objectCount, chestItem->seq,
             chest->chestItemId, chestRemaining) ||
-        !vm_net_mock_append_backpack_item_count11_object(
-            out, outCap, &pos, &objectCount, keyItem->seq,
-            chest->keyItemId, keyRemaining) ||
         !vm_net_mock_append_chest_open_reward15_object(
             out, outCap, &pos, &objectCount, rewardItem, reward->count))
     {
@@ -6609,14 +6609,16 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         printf("[warn][mock-service] chest_world_broadcast_failed chest=%u reward=%u role=%u reason=world-chat-store-or-delivery\n",
                chest->chestItemId, reward->itemId, role->roleId);
     }
-    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/4-complete+2x(7/11-count-by-seq)+7/15-native-reward-notice evidence=JianghuOL.CBE:0x01033544+0x01025AE6@0x01026152-0x010262EC\n",
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u chest_remaining=%u key_remaining=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/4-complete+7/11-chest-count-by-seq+7/15-native-reward-notice key_count=client-native-once evidence=JianghuOL.CBE:0x01033544+0x01025AE6@0x01026152-0x010262EC\n",
            requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
-           keyItem->seq, reward->itemId, rewardSeq, reward->count,
+           keyItem->seq, chestRemaining, keyRemaining, reward->itemId, rewardSeq,
+           reward->count,
            reward->weight, totalWeight, draw,
            reward->worldBroadcast ? 1u : 0u);
-    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u draw=%u world_broadcast=%u response=7/4-complete+7/11-count-by-seq+7/11-count-by-seq+7/15-native-reward-notice evidence=JianghuOL.CBE:0x01033544+0x01025AE6@0x01026152-0x010262EC\n",
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u chest_remaining=%u key_remaining=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u draw=%u world_broadcast=%u response=7/4-complete+7/11-chest-count-by-seq+7/15-native-reward-notice key_count=client-native-once evidence=JianghuOL.CBE:0x01033544+0x01025AE6@0x01026152-0x010262EC\n",
                      requestSubtype, chest->chestItemId, chest->keyItemId,
-                     chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
+                     chestItem->seq, keyItem->seq, chestRemaining, keyRemaining,
+                     reward->itemId, rewardSeq,
                      reward->count, reward->weight, totalWeight, draw,
                      reward->worldBroadcast ? 1u : 0u);
     return pos;
