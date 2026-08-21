@@ -5583,6 +5583,27 @@ static const char *vm_net_mock_special_item_success_info(u32 itemId)
     }
 }
 
+static u16 vm_net_mock_battle_insight_use_maxnum(bool success)
+{
+    /* JianghuOL.CBE:0x01026574 reads 25/6.maxnum through the 16-bit
+     * accessor and stores it with STRH.  A tagged-u32 happens to look like a
+     * number in a dump but is not this parser contract, leaving the hangup
+     * panel at its zero/uninitialised state. */
+    return success ? (u16)VM_NET_MOCK_SCENE_HANGUP_INSIGHT_MAX_BATTLES : 0;
+}
+
+static bool vm_net_mock_append_battle_insight_use_fields(
+    u8 *out, u32 outCap, u32 *pos, bool success, const char *info)
+{
+    return vm_net_mock_put_object_u8(out, outCap, pos, "result",
+                                     success ? 1 : 2) &&
+           vm_net_mock_put_object_u16(
+               out, outCap, pos, "maxnum",
+               vm_net_mock_battle_insight_use_maxnum(success)) &&
+           vm_net_mock_put_object_string(out, outCap, pos, "iteminfo",
+                                         info ? info : "");
+}
+
 /* JianghuOL.CBE:0x01011A5E consumes `expinfo` from 1/7/31.  A non-empty
  * value also marks the client-side exp-card status as fresh; an empty value
  * is paired with 1/7/32 below to clear a card which expired while the player
@@ -5791,9 +5812,8 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
     else if (requestKind == 25 && requestSubtype == 6)
     {
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 25, 6, &objectStart) ||
-            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", success ? 1 : 2) ||
-            !vm_net_mock_put_object_u32(out, outCap, &pos, "maxnum", 0) ||
-            !vm_net_mock_put_object_string(out, outCap, &pos, "iteminfo", info))
+            !vm_net_mock_append_battle_insight_use_fields(out, outCap, &pos,
+                                                           success, info))
         {
             return 0;
         }

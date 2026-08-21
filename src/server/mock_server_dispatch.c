@@ -1205,6 +1205,24 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_scene_hangup_panel_response(request, requestLen,
+                                                               out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-hangup-panel", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_scene_hangup_mode_response(request, requestLen,
+                                                              out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-hangup-mode", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_hangup_battle_start_response(request, requestLen, out, outCap);
     if (hookedLen)
     {

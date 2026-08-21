@@ -20,6 +20,10 @@ extern u32 g_hangupSceneModeWatchAddress;
 extern u32 g_hangupSceneModeWatchWriteCount;
 extern u32 g_hangupBusinessDelegateWatchAddress;
 extern u32 g_hangupBusinessDelegateWatchWriteCount;
+extern u32 g_hangupAutoCandidateWatchAddress;
+extern u32 g_hangupAutoCandidateWatchWriteCount;
+extern u32 g_hangupAutoBattleInitWatchAddress;
+extern u32 g_hangupAutoBattleInitWatchWriteCount;
 extern u32 g_vmAutomationGameLoadingGateWatchAddress;
 extern u32 g_vmAutomationGameLoadingGateWatchWriteCount;
 extern u32 g_vmAutomationBattleAutoFlagWatchAddress;
@@ -328,18 +332,101 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (start < watchEnd && end > watchStart)
         {
             u32 pc = 0;
+            u32 lr = 0;
+            u32 r0 = 0;
+            u32 sp = 0;
+            u32 stackWords[4] = {0, 0, 0, 0};
             FILE *trace;
             uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+            uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+            if (sp != 0)
+                (void)uc_mem_read(uc, sp, stackWords, sizeof(stackWords));
             ++g_hangupBusinessDelegateWatchWriteCount;
             trace = fopen("logs/hangup-protocol.log", "ab");
             if (trace != NULL)
             {
                 fprintf(trace,
                         "[info][network] mock_hangup_business_delegate_write "
-                        "generation=%u count=%u pc=%08x last=%08x "
+                        "generation=%u count=%u pc=%08x lr=%08x r0=%08x "
+                        "sp=%08x stack=%08x,%08x,%08x,%08x last=%08x "
                         "addr=%08x size=%u value=%llx\n",
                         g_hangupBattleStateWatchGeneration,
-                        g_hangupBusinessDelegateWatchWriteCount, pc,
+                        g_hangupBusinessDelegateWatchWriteCount, pc, lr, r0,
+                        sp, stackWords[0], stackWords[1], stackWords[2],
+                        stackWords[3], lastAddress, start, size, value);
+                fflush(trace);
+                fclose(trace);
+            }
+        }
+    }
+    /* This is armed only while mmBattle is constructing the automatic-action
+     * list.  It records the native writer of the candidate-count byte; it
+     * never changes the guest state or the pending write. */
+    if (type == UC_MEM_WRITE && g_hangupAutoCandidateWatchAddress != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_hangupAutoCandidateWatchAddress;
+        u32 watchEnd = watchStart + sizeof(u8);
+        if (start < watchEnd && end > watchStart &&
+            g_hangupAutoCandidateWatchWriteCount < 24u)
+        {
+            u32 pc = 0;
+            u32 lr = 0;
+            u32 r0 = 0;
+            u32 r1 = 0;
+            u32 r2 = 0;
+            u32 r3 = 0;
+            u32 r9 = 0;
+            FILE *trace;
+            (void)uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            (void)uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+            (void)uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+            (void)uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+            (void)uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+            (void)uc_reg_read(uc, UC_ARM_REG_R9, &r9);
+            ++g_hangupAutoCandidateWatchWriteCount;
+            trace = fopen("logs/hangup-protocol.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "[info][network] mock_hangup_auto_candidate_write "
+                        "count=%u pc=%08x lr=%08x last=%08x addr=%08x "
+                        "size=%u value=%llx r0=%08x r1=%08x r2=%08x "
+                        "r3=%08x r9=%08x\n",
+                        g_hangupAutoCandidateWatchWriteCount, pc, lr,
+                        lastAddress, start, size, value, r0, r1, r2, r3, r9);
+                fflush(trace);
+                fclose(trace);
+            }
+        }
+    }
+    if (type == UC_MEM_WRITE && g_hangupAutoBattleInitWatchAddress != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_hangupAutoBattleInitWatchAddress;
+        u32 watchEnd = watchStart + sizeof(u8);
+        if (start < watchEnd && end > watchStart &&
+            g_hangupAutoBattleInitWatchWriteCount < 24u)
+        {
+            u32 pc = 0;
+            u32 lr = 0;
+            FILE *trace;
+            (void)uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            ++g_hangupAutoBattleInitWatchWriteCount;
+            trace = fopen("logs/hangup-protocol.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "[info][network] mock_hangup_auto_battle_init_write "
+                        "count=%u pc=%08x lr=%08x last=%08x addr=%08x "
+                        "size=%u value=%llx\n",
+                        g_hangupAutoBattleInitWatchWriteCount, pc, lr,
                         lastAddress, start, size, value);
                 fflush(trace);
                 fclose(trace);

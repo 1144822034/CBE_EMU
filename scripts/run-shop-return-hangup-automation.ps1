@@ -281,7 +281,7 @@ try {
         ).Count
         $scenePollStart = [regex]::Matches(
             $serverLog,
-            'mock_hangup_battle_start source=scene-poll .*native_exit25_2=1 '
+            'mock_hangup_battle_start source=scene-poll .*native_exit25_2=terminal-after-4/7 '
         ).Count
         $hostConfirm = [regex]::Matches(
             $clientLog,
@@ -335,6 +335,16 @@ try {
             'mock_battle_settle .*vitals=95/295,80/205 recover=15/10 auto_recover=0/0 configured_recover=15/10 .*role=810001'
         }
         $vitalRecoveryRows = [regex]::Matches($serverLog, $vitalRecoveryPattern).Count
+        # `4/7.combatinfo` is the client-owned Hangup information-panel
+        # state, distinct from fdata's reward-window text.  The raw tagged
+        # sequence has two i16 tallies, four u32 values, two reserved i16
+        # values and a terminal u8 flag: 43 bytes in total.  Require the
+        # service to construct it from the same applied recovery values as
+        # the normal 4/7 vitals, rather than accepting a text-only result.
+        $combatInfoRows = [regex]::Matches(
+            $serverLog,
+            'mock_scene_hangup_combatinfo .*tally=1/0 exp=\d+ gold=\d+ hp_recover=15 mp_recover=10 reserved=0/0 raw_len=43 '
+        ).Count
         $flaskConsumptionRows = [regex]::Matches(
             $serverLog,
             'mock_battle_auto_flask role=810001 hp=15 mp=10 rows=2 response=4/7\+7/11'
@@ -384,6 +394,7 @@ try {
             legacy_terminal_close = $legacyClose
             runtime_scene_starts = $runtimeSceneStarts
             vital_recovery_rows = $vitalRecoveryRows
+            combatinfo_rows = $combatInfoRows
             flask_consumption_rows = $flaskConsumptionRows
             next_battle_starts_from_recovered_vitals = $nextBattleStartsFromRecoveredVitals
             client_scene_vital_rows = $clientSceneVitalRows
@@ -398,9 +409,10 @@ try {
             throw 'hangup contract evidence missing: expected the required rewarded 4/7 settlements, no suppressed settlement, no 4/11+4/9 terminal close, and the required native runtime-index 4/5 starts'
         }
         if ($isVitalScenario -and
-            ($vitalRecoveryRows -lt 1 -or $clientSceneVitalRows -lt 1 -or
+            ($vitalRecoveryRows -lt 1 -or $combatInfoRows -lt 1 -or
+             $clientSceneVitalRows -lt 1 -or
              $terminalActionVitalRows -lt 1)) {
-            throw 'vital recovery contract evidence missing: expected matching terminal 4/6 teaminfo and 4/7 recovery plus the client scene actor HP/MP 95/295,80/205 after its native 25/5 exit'
+            throw 'vital recovery contract evidence missing: expected matching terminal 4/6 teaminfo, 4/7 recovery, tagged 4/7.combatinfo, and client scene actor HP/MP 95/295,80/205 after its native 25/5 exit'
         }
         if ($Scenario -eq 'hangup-auto-vitals-flask-v1' -and $flaskConsumptionRows -lt 1) {
             throw 'vital flask contract evidence missing: expected one 802/803 reservoir settlement with 15/10 recovery and two native 7/11 count updates'

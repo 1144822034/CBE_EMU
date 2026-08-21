@@ -5513,6 +5513,14 @@ static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
  * explicit recovery NPC and the Battle Insight full-bag auto-sale consume this
  * one authoritative percentage. */
 #define VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT 10u
+/* item.dsh row 828 explicitly grants this ceiling to the timed Battle
+ * Insight effect only.  It is shared by the special-item acknowledgement and
+ * the scene-hangup terminal owner, so it must not live in either builder. */
+#define VM_NET_MOCK_SCENE_HANGUP_INSIGHT_MAX_BATTLES 200u
+/* Ordinary scene hangup has a lower native-panel ceiling.  Battle Insight
+ * replaces this with its documented 200-battle ceiling for its active
+ * duration. */
+#define VM_NET_MOCK_SCENE_HANGUP_DEFAULT_MAX_BATTLES 64u
 
 /* Keep the exact pre-v6 binary layout for one-time nvram/payload migration.
  * Do not reuse this type for live state: it cannot represent durable
