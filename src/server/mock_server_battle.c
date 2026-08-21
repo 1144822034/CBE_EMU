@@ -5481,6 +5481,18 @@ static u16 vm_net_mock_scene_hangup_active_battle_limit(void)
                : (u16)VM_NET_MOCK_SCENE_HANGUP_DEFAULT_MAX_BATTLES;
 }
 
+/* The maximum is an invariant of an enabled hangup session, not merely a
+ * display field in 4/7.combatinfo.  A zero snapshot is invalid and must never
+ * mean unlimited: it is rejected at the next server-owned continuation
+ * boundary rather than allowing another automatic 4/5. */
+static bool vm_net_mock_scene_hangup_has_remaining_battles(
+    const vm_mock_service_client_session *session)
+{
+    return session != NULL && session->sceneHangupMaxBattles != 0 &&
+           session->sceneHangupCompletedBattles <
+               session->sceneHangupMaxBattles;
+}
+
 /* mmBattle:sub_7794 (4/7) clears gameState+516 then, while the native
  * auto-battle flag is set, opens the `combatinfo` raw field once and reads
  * eight tagged *u32* values in order:
@@ -8055,6 +8067,7 @@ static bool vm_net_mock_scene_hangup_restart_waiting(
 {
     return session != NULL && scene != NULL &&
            session->sceneHangupEnabled &&
+           vm_net_mock_scene_hangup_has_remaining_battles(session) &&
            session->sceneHangupRestartPending &&
            session->sceneHangupBattleSessionSerial != 0 &&
            session->sceneHangupBattleSessionSerial ==
@@ -8519,6 +8532,27 @@ static void vm_net_mock_scene_hangup_on_scene_default_event(void)
     if (session->sceneHangupCompletedBattles < 0xffffu)
         ++session->sceneHangupCompletedBattles;
 
+    /* `4/7.combatinfo` already carried this victory as completed/max.  Its
+     * native 25/5 close is the first safe server boundary to stop the loop;
+     * scheduling a poll after this point would create an (max + 1)th 4/5. */
+    if (!vm_net_mock_scene_hangup_has_remaining_battles(session))
+    {
+        printf("[info][mock-service] scene_hangup_limit_reached client=%08x "
+               "role=%u scene=%s battle=%u completed=%u max=%u "
+               "action=stop-no-next-battle evidence=4/7-panel->25/5\n",
+               session->clientId,
+               session->onlineRoleId,
+               session->sceneHangupScene,
+               session->sceneHangupBattleSessionSerial,
+               session->sceneHangupCompletedBattles,
+               session->sceneHangupMaxBattles);
+        vm_mock_service_session_clear_scene_hangup(
+            session,
+            session->sceneHangupMaxBattles == 0 ? "missing-battle-limit" :
+                                                   "battle-limit-reached");
+        return;
+    }
+
     session->sceneHangupRestartPending = true;
     session->sceneHangupRestartNotBeforeTick =
         g_schedulerTick + VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_TICKS;
@@ -8545,6 +8579,23 @@ static u32 vm_net_mock_build_pending_scene_hangup_battle_response(
         !observer->sceneHangupEnabled ||
         !observer->sceneHangupRestartPending)
     {
+        return 0;
+    }
+    /* This duplicates the 25/5-side gate deliberately: a queued scene poll
+     * may observe the session after a stale/older transition.  Never let that
+     * poll manufacture a battle after the confirmed maximum. */
+    if (!vm_net_mock_scene_hangup_has_remaining_battles(observer))
+    {
+        printf("[info][mock-service] scene_hangup_poll_suppressed client=%08x "
+               "role=%u completed=%u max=%u action=stop-no-next-battle\n",
+               observer->clientId,
+               observer->onlineRoleId,
+               observer->sceneHangupCompletedBattles,
+               observer->sceneHangupMaxBattles);
+        vm_mock_service_session_clear_scene_hangup(
+            observer,
+            observer->sceneHangupMaxBattles == 0 ? "missing-battle-limit" :
+                                                    "battle-limit-reached");
         return 0;
     }
     if (!vm_net_mock_scene_name_is_safe(observer->sceneHangupScene) ||
@@ -8610,6 +8661,7 @@ static bool vm_net_mock_scene_hangup_can_adopt_native_challenge(
     if (!useSceneMonsterStart || session == NULL || scene == NULL ||
         !vm_net_mock_scene_name_is_safe(scene) ||
         !session->sceneHangupEnabled ||
+        !vm_net_mock_scene_hangup_has_remaining_battles(session) ||
         !session->sceneHangupRestartPending ||
         !session->sceneVisibleReady || session->sceneVisiblePending ||
         session->onlineRoleId == 0 || roleId == 0 ||
@@ -8647,6 +8699,7 @@ static bool vm_net_mock_scene_hangup_can_begin_native_challenge(
     return useSceneMonsterStart && session != NULL && scene != NULL &&
            vm_net_mock_scene_name_is_safe(scene) &&
            session->sceneHangupEnabled &&
+           vm_net_mock_scene_hangup_has_remaining_battles(session) &&
            !session->sceneHangupRestartPending &&
            session->sceneHangupBattleSessionSerial == 0 &&
            session->sceneVisibleReady && !session->sceneVisiblePending &&
