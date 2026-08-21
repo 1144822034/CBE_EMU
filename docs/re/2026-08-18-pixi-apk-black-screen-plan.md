@@ -131,4 +131,6 @@ Phase C（refcount 限额）仅当 A+B 不足
 Phase D（压图 / 远距降级）并行资源
 ```
 
-当前仓库状态：已试跑官方 **GC + `source.unload`（png refcount）+ native skip sample**；禁止成功路径 `Assets.unload`。连续 3 次 recover 仍 lost 则软重载。浏览器务必回归附近翅/骑/称号后再打 APK。
+当前仓库状态：已试跑官方 **GC + `source.unload`（png refcount）+ native skip sample**；禁止成功路径 `Assets.unload`。
+
+2026-08-18 晚：截图确认「HTML 软键在、LCD 全黑」= 假恢复。已改：等 `contextrestored`、像素探针、8s watchdog 软重载、息屏停 TextureGC、地图贴图禁 GC。浏览器务必回归附近翅/骑/称号后再打 APK。

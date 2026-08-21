@@ -112,6 +112,8 @@ static bool vm_mock_arena_spar_forbidden_on_scene(const char *scene);
 static bool vm_mock_arena_entry_window_open(void);
 /* team_forbidden / rebind already declared before equipment_npc. */
 static void vm_mock_arena_tick(void);
+static void vm_mock_arena_catchup_phase_tip_session(
+    vm_mock_service_client_session *session);
 static void vm_mock_arena_on_duel_finished(vm_mock_service_duel *duel);
 static void vm_mock_arena_on_wager_duel_finished(vm_mock_service_duel *duel);
 static bool vm_net_mock_append_wager_event_object(u8 *out, u32 outCap, u32 *pos);

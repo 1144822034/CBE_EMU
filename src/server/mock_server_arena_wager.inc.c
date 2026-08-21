@@ -988,7 +988,7 @@ static bool vm_mock_wager_start_pair(vm_mock_wager_challenge *ch)
     if (a == NULL || b == NULL || vm_mock_wager_role_busy(a) ||
         vm_mock_wager_role_busy(b))
         return false;
-    duel = vm_mock_service_duel_begin(a, b);
+    duel = vm_mock_service_duel_begin(a, b, NULL);
     if (duel == NULL)
         return false;
     duel->wagerMode = true;

@@ -2309,6 +2309,7 @@ export class GameSession {
         score: this.arenaHud?.score ?? 0,
         job: this.arenaHud?.job ?? 0,
         bracket: this.arenaHud?.bracket ?? 0,
+        playoff: this.arenaHud?.playoff ?? 0,
       };
       this.cb.onArenaHud?.(this.arenaHud);
       console.info(

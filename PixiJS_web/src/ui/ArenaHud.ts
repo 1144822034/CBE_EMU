@@ -41,11 +41,12 @@ export class ArenaHud extends Container {
       this.lastKey = "";
       return;
     }
-    const key = `${state.status}|${state.round}|${state.roundRemain}|${state.eventRemain}|${state.score}`;
+    const key = `${state.status}|${state.round}|${state.roundRemain}|${state.eventRemain}|${state.score}|${state.playoff || 0}`;
     if (key === this.lastKey && this.visible) return;
     this.lastKey = key;
     this.visible = true;
-    const phase = state.status === 1 ? "进场" : "比赛";
+    const phase =
+      state.status === 1 ? "进场" : state.playoff ? "加赛" : "比赛";
     const text = `比武 ${phase} 第${state.round || 0}场 ${fmtSec(state.roundRemain)} 余${fmtSec(state.eventRemain)} 分${state.score}`;
     this.line.text = text;
     this.bg.clear();

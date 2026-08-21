@@ -13,6 +13,8 @@ export class TouchControls {
   private center: HTMLButtonElement;
   private status: HTMLElement;
   private held = new Set<TouchDir>();
+  /** Softkey/OK buttons that still hold pointer capture after GL death. */
+  private captured = new Map<HTMLButtonElement, number>();
 
   onSoftkey: ((which: "left" | "center" | "right") => void) | null = null;
   /** D-pad center OK — keyboard F, not left softkey (Q). */
@@ -27,16 +29,20 @@ export class TouchControls {
     this.center = el("sk-center");
     this.status = document.getElementById("touch-status") ?? document.body;
 
-    wireSoft(this.left, () => this.onSoftkey?.("left"));
-    wireSoft(this.right, () => this.onSoftkey?.("right"));
-    wireSoft(this.center, () => this.onSoftkey?.("center"));
+    wireSoft(this.left, () => this.onSoftkey?.("left"), this.captured);
+    wireSoft(this.right, () => this.onSoftkey?.("right"), this.captured);
+    wireSoft(this.center, () => this.onSoftkey?.("center"), this.captured);
 
     const okBtn = document.querySelector<HTMLButtonElement>(".dpad .ok");
     if (okBtn) {
-      wireSoft(okBtn, () => {
-        dismissOverlayIme();
-        this.onOk?.();
-      });
+      wireSoft(
+        okBtn,
+        () => {
+          dismissOverlayIme();
+          this.onOk?.();
+        },
+        this.captured,
+      );
     }
 
     for (const btn of document.querySelectorAll<HTMLButtonElement>(".dpad .pad")) {
@@ -93,6 +99,15 @@ export class TouchControls {
     for (const btn of document.querySelectorAll(".dpad .pad.is-down")) {
       btn.classList.remove("is-down");
     }
+    // After WebGL loss / recover, a stuck setPointerCapture can swallow all taps.
+    for (const [btn, id] of [...this.captured]) {
+      try {
+        btn.releasePointerCapture(id);
+      } catch {
+        /* ignore */
+      }
+      this.captured.delete(btn);
+    }
   }
 }
 
@@ -117,16 +132,27 @@ function setBtn(btn: HTMLButtonElement, label: string | undefined): void {
   else btn.textContent = "中软";
 }
 
-function wireSoft(btn: HTMLButtonElement, fn: () => void): void {
+function wireSoft(
+  btn: HTMLButtonElement,
+  fn: () => void,
+  captured: Map<HTMLButtonElement, number>,
+): void {
   btn.addEventListener("pointerdown", (ev) => {
     ev.preventDefault();
     if (btn.disabled) return;
     try {
       btn.setPointerCapture(ev.pointerId);
+      captured.set(btn, ev.pointerId);
     } catch {
       /* ignore */
     }
     fn();
   });
+  const clearCap = (ev: PointerEvent) => {
+    if (captured.get(btn) === ev.pointerId) captured.delete(btn);
+  };
+  btn.addEventListener("pointerup", clearCap);
+  btn.addEventListener("pointercancel", clearCap);
+  btn.addEventListener("lostpointercapture", clearCap);
   btn.addEventListener("contextmenu", (e) => e.preventDefault());
 }

@@ -44,6 +44,8 @@ export type ArenaHud = {
   score: number;
   job: number;
   bracket: number;
+  /** 1 = past matchEnd, same job×bracket score ties still fighting. */
+  playoff: number;
 };
 
 export type ArenaRankRow = {
@@ -146,6 +148,7 @@ export function parseArenaHud(packet: WtPacket): ArenaHud | null {
     score: fieldU32(obj, "score"),
     job: fieldU32(obj, "job"),
     bracket: fieldU32(obj, "bracket"),
+    playoff: fieldU32(obj, "playoff"),
   };
 }
 

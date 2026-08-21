@@ -196,6 +196,7 @@ export class BattleScreen extends Container {
   private timerSec = TURN_SECONDS;
   private timerAcc = 0;
   private battleMapFile = "";
+  private battleMapWorld = "";
   private playbackGen = 0;
   /** Drop stale async map loads when show() races. */
   private mapLoadGen = 0;
@@ -535,7 +536,6 @@ export class BattleScreen extends Container {
     this.timerSec = TURN_SECONDS;
     this.timerAcc = 0;
     this.clearFloats();
-    this.clearPoseTexCache();
     this.fxHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     void this.loadBattleMapBg(this.visuals.worldScene || "");
@@ -680,13 +680,7 @@ export class BattleScreen extends Container {
     this.units = [];
     this.fxHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
-    this.clearPoseTexCache();
     this.refreshAutoBannerVisibility();
-  }
-
-  private clearPoseTexCache(): void {
-    for (const tex of this.poseTexCache.values()) tex.destroy(true);
-    this.poseTexCache.clear();
   }
 
   /**
@@ -1441,6 +1435,13 @@ export class BattleScreen extends Container {
   }
 
   private async loadBattleMapBg(worldScene: string): Promise<void> {
+    if (
+      this.mapSprite &&
+      this.battleMapFile &&
+      this.battleMapWorld === worldScene
+    ) {
+      return;
+    }
     const gen = ++this.mapLoadGen;
     // Keep the previous battle map (if any) while the next b_*.sce loads.
     // Clearing to a green full-screen tint flashed the LCD on every encounter.
@@ -1466,6 +1467,7 @@ export class BattleScreen extends Container {
       return;
     }
     this.battleMapFile = sce;
+    this.battleMapWorld = worldScene;
     try {
       const scene = await loadSceneMap(sce);
       if (gen !== this.mapLoadGen) return;
@@ -1586,7 +1588,15 @@ export class BattleScreen extends Container {
       view.loaded = loaded;
       const frame = composeBattlePose(loaded, facingRight, "idle", 0);
       if (!frame) return;
-      const spr = new Sprite(rgbaToTexture(frame.width, frame.height, frame.rgba));
+      const key = `${loaded.name}|idle|${facingRight ? 1 : 0}|0|${frame.width}x${frame.height}`;
+      let tex = this.poseTexCache.get(key);
+      if (!tex) {
+        tex = rgbaToTexture(frame.width, frame.height, frame.rgba);
+        this.poseTexCache.set(key, tex);
+        this.evictUnusedPoseTextures();
+      }
+      const spr = new Sprite(tex);
+      this.poseTexKey.set(spr, key);
       spr.anchor.set(0.5, 1);
       spr.scale.set(
         frame.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,

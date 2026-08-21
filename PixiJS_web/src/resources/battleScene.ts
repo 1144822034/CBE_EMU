@@ -42,13 +42,22 @@ export function battleSceCandidatesFromWorld(worldScene: string): string[] {
   return out;
 }
 
+const battleSceResolveCache = new Map<string, string | null>();
+
 /** Pick first candidate that exists via probe (async). */
 export async function resolveBattleSce(
   worldScene: string,
   exists: (name: string) => Promise<boolean>,
 ): Promise<string | null> {
+  const key = worldScene.replace(/^.*[/\\]/, "").trim().toLowerCase();
+  if (battleSceResolveCache.has(key)) return battleSceResolveCache.get(key)!;
+  let found: string | null = null;
   for (const cand of battleSceCandidatesFromWorld(worldScene)) {
-    if (await exists(cand)) return cand;
+    if (await exists(cand)) {
+      found = cand;
+      break;
+    }
   }
-  return null;
+  battleSceResolveCache.set(key, found);
+  return found;
 }

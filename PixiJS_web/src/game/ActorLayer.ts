@@ -42,6 +42,22 @@ import {
   releasePoseTextureKey,
 } from "../render/poseTextureCache";
 
+function isNativePlatform(): boolean {
+  try {
+    const cap = (
+      globalThis as unknown as {
+        Capacitor?: { isNativePlatform?: () => boolean };
+      }
+    ).Capacitor;
+    return !!cap?.isNativePlatform?.();
+  } catch {
+    return false;
+  }
+}
+
+/** APK: only the nearest N peers keep wing/mount GPU. Titles stay. */
+const NATIVE_PEER_HEAVY_CAP = 6;
+
 const NPC_CYAN = 0x80e8ff;
 const PEER_GREEN = 0xa8e6a1;
 /** Map peer nameplate when pk_points >= 60. */
@@ -223,9 +239,17 @@ export class ActorLayer {
     number,
     { eqChenghao: number; eqWing: number; eqMount: number }
   >();
+  private viewerX = 0;
+  private viewerY = 0;
+  private heavyBudgetAcc = 0;
 
   constructor(parent: Container) {
     this.root = parent;
+  }
+
+  setViewer(x: number, y: number): void {
+    this.viewerX = x;
+    this.viewerY = y;
   }
 
   /** Wire MAP collision for wild-monster patrol (clear with null on scene drop). */
@@ -238,6 +262,11 @@ export class ActorLayer {
       releasePoseTextureKey(m.poseKey);
       m.poseKey = "";
     }
+    // Must release plist refcounts before destroy — otherwise every unique
+    // wing/mount PNG stays on GPU after the peer leaves (APK contextlost).
+    m.wing?.clear();
+    m.mount?.clear();
+    m.chenghao?.clear();
     m.root.destroy({ children: true });
   }
 
@@ -533,8 +562,43 @@ export class ActorLayer {
       return;
     }
     void this.refreshPeerTitle(m);
+    this.applyPeerHeavyCosmetics(m, this.peerHeavyAllowed().has(m.id));
+  }
+
+  private peerHeavyAllowed(): Set<number> {
+    const ids: { id: number; d2: number }[] = [];
+    for (const m of this.markers.values()) {
+      if (m.kind !== "peer" || !(m.eqWing || m.eqMount)) continue;
+      const dx = m.x - this.viewerX;
+      const dy = m.y - this.viewerY;
+      ids.push({ id: m.id, d2: dx * dx + dy * dy });
+    }
+    if (!isNativePlatform() || ids.length <= NATIVE_PEER_HEAVY_CAP) {
+      return new Set(ids.map((p) => p.id));
+    }
+    ids.sort((a, b) => a.d2 - b.d2);
+    return new Set(ids.slice(0, NATIVE_PEER_HEAVY_CAP).map((p) => p.id));
+  }
+
+  private applyPeerHeavyCosmetics(m: Marker, allow: boolean): void {
+    if (!allow) {
+      m.wing?.clear();
+      m.mount?.clear();
+      if (m.sprite) m.sprite.y = 0;
+      this.layoutNameplate(m);
+      return;
+    }
     void this.refreshPeerWing(m);
     void this.refreshPeerMount(m);
+  }
+
+  private refreshPeerHeavyCosmetics(): void {
+    if (!isPeerCosmeticsVisible()) return;
+    const allow = this.peerHeavyAllowed();
+    for (const m of this.markers.values()) {
+      if (m.kind !== "peer") continue;
+      this.applyPeerHeavyCosmetics(m, allow.has(m.id));
+    }
   }
 
   /** DevTools / CDP probe: peer cosmetics vs markers. */
@@ -611,6 +675,11 @@ export class ActorLayer {
   tick(dtMs: number): void {
     const dt = Math.min(dtMs, 50);
     this.tickSuppressedRespawns();
+    this.heavyBudgetAcc += dt;
+    if (this.heavyBudgetAcc >= 500) {
+      this.heavyBudgetAcc = 0;
+      this.refreshPeerHeavyCosmetics();
+    }
     for (const m of this.markers.values()) {
       if (m.kind === "monster" && m.source === "sce") {
         this.tickPatrol(m, dt);

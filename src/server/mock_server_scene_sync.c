@@ -2741,7 +2741,7 @@ static u32 vm_net_mock_role_backpack_item_total(vm_net_mock_role_state *role,
                                                  u32 itemId)
 {
     u32 total = 0;
-    u8 itemCount = 0;
+    u32 itemCount = 0;
 
     if (role == NULL || itemId == 0)
         return 0;
@@ -2914,7 +2914,7 @@ static bool vm_net_mock_task_backpack_can_receive(
     vm_net_mock_role_state *role, u32 itemId, u32 count,
     const vm_net_mock_task_definition *consumedByTask)
 {
-    u8 itemCount = 0;
+    u32 itemCount = 0;
 
     if (itemId == 0 || count == 0)
         return true;

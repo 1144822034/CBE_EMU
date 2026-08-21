@@ -85,9 +85,13 @@ static void vm_mock_service_duel_clear_finished_hold_for_client(
 {
     vm_mock_service_duel *duel = vm_mock_service_duel_find_for_client(clientId,
                                                                       NULL);
-    (void)reason;
-    if (duel != NULL && !duel->active)
+    if (duel != NULL && duel->active && duel->finished)
+    {
+        printf("[info][mock-service] duel_clear_finished_hold client=%08x "
+               "serial=%u reason=%s\n",
+               clientId, duel->serial, reason ? reason : "-");
         memset(duel, 0, sizeof(*duel));
+    }
 }
 
 static void vm_mock_service_clear_inflight_scene_transfer_globals(const char *reason)

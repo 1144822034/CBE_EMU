@@ -911,6 +911,554 @@ static void vm_client_finish_wt_packet(u8 *packet, u32 len, u8 objectCount)
     packet[4] = objectCount;
 }
 
+/*
+ * CBE InitTimerControl(64) only owns 64 logical bag slots.  Live server may
+ * publish Pixi-side capacity/rows up to 256.  Clamp downlink 17/1 + 30/21 to
+ * the first 64 client-grid rows before the guest parser runs; leave server
+ * storage untouched (docs/re/2026-08-20-cbe-emu-backpack-64-clamp.md).
+ */
+enum
+{
+    VM_CLIENT_CBE_BACKPACK_SLOTS = 64
+};
+
+static bool vm_client_seq_skip_tagged(const u8 *buf, u32 len, u32 *pos)
+{
+    u8 size;
+
+    if (buf == NULL || pos == NULL || *pos + 2u > len || buf[*pos] != 0)
+        return false;
+    size = buf[*pos + 1u];
+    if (size == 0 || *pos + 2u + size > len)
+        return false;
+    *pos += 2u + size;
+    return true;
+}
+
+static bool vm_client_seq_skip_common_extra(const u8 *buf, u32 len, u32 *pos)
+{
+    u8 attrCount;
+    u32 i;
+
+    if (!vm_client_seq_skip_tagged(buf, len, pos) ||
+        !vm_client_seq_skip_tagged(buf, len, pos))
+        return false;
+    if (*pos + 3u > len || buf[*pos] != 0 || buf[*pos + 1u] != 1)
+        return false;
+    attrCount = buf[*pos + 2u];
+    *pos += 3u;
+    for (i = 0; i < attrCount; ++i)
+    {
+        if (!vm_client_seq_skip_tagged(buf, len, pos) ||
+            !vm_client_seq_skip_tagged(buf, len, pos) ||
+            !vm_client_seq_skip_tagged(buf, len, pos) ||
+            !vm_client_seq_skip_tagged(buf, len, pos))
+            return false;
+    }
+    return true;
+}
+
+static bool vm_client_seq_read_row_count(const u8 *buf, u32 len, u32 *pos,
+                                         u32 *countOut, u8 *tagSizeOut)
+{
+    u8 size;
+
+    if (buf == NULL || pos == NULL || countOut == NULL || *pos + 2u > len ||
+        buf[*pos] != 0)
+        return false;
+    size = buf[*pos + 1u];
+    if (size == 1)
+    {
+        if (*pos + 3u > len)
+            return false;
+        *countOut = buf[*pos + 2u];
+        *pos += 3u;
+        if (tagSizeOut != NULL)
+            *tagSizeOut = 1;
+        return true;
+    }
+    if (size == 2)
+    {
+        if (*pos + 4u > len)
+            return false;
+        *countOut = ((u32)buf[*pos + 2u] << 8) | buf[*pos + 3u];
+        *pos += 4u;
+        if (tagSizeOut != NULL)
+            *tagSizeOut = 2;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_client_seq_write_row_count(u8 *out, u32 outCap, u32 *pos,
+                                          u32 count, u8 tagSize)
+{
+    if (out == NULL || pos == NULL)
+        return false;
+    if (tagSize == 1)
+    {
+        if (count > 0xffu || *pos + 3u > outCap)
+            return false;
+        out[(*pos)++] = 0;
+        out[(*pos)++] = 1;
+        out[(*pos)++] = (u8)count;
+        return true;
+    }
+    if (tagSize == 2)
+    {
+        if (count > 0xffffu || *pos + 4u > outCap)
+            return false;
+        out[(*pos)++] = 0;
+        out[(*pos)++] = 2;
+        out[(*pos)++] = (u8)(count >> 8);
+        out[(*pos)++] = (u8)count;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_client_decode_tagged_u32(const u8 *encoded, u16 encodedLen,
+                                        u32 *valueOut)
+{
+    if (encoded == NULL || valueOut == NULL || encodedLen < 3 ||
+        encoded[0] != 0)
+        return false;
+    if (encoded[1] == 1 && encodedLen == 3)
+    {
+        *valueOut = encoded[2];
+        return true;
+    }
+    if (encoded[1] == 2 && encodedLen == 4)
+    {
+        *valueOut = ((u32)encoded[2] << 8) | encoded[3];
+        return true;
+    }
+    if (encoded[1] == 4 && encodedLen == 6)
+    {
+        *valueOut = ((u32)encoded[2] << 24) | ((u32)encoded[3] << 16) |
+                    ((u32)encoded[4] << 8) | encoded[5];
+        return true;
+    }
+    return false;
+}
+
+static bool vm_client_encode_tagged_u16(u8 *out, u16 outCap, u16 *outLen,
+                                         u16 value, u8 preferSize)
+{
+    if (out == NULL || outLen == NULL)
+        return false;
+    if (preferSize == 1 || (preferSize == 0 && value <= 0xffu))
+    {
+        if (outCap < 3 || value > 0xffu)
+            return false;
+        out[0] = 0;
+        out[1] = 1;
+        out[2] = (u8)value;
+        *outLen = 3;
+        return true;
+    }
+    if (outCap < 4)
+        return false;
+    out[0] = 0;
+    out[1] = 2;
+    out[2] = (u8)(value >> 8);
+    out[3] = (u8)value;
+    *outLen = 4;
+    return true;
+}
+
+static bool vm_client_put_object_field(u8 *out, u32 outCap, u32 *pos,
+                                       const char *name, const u8 *value,
+                                       u16 valueLen)
+{
+    u32 nameLen = name ? (u32)strlen(name) : 0;
+
+    if (out == NULL || pos == NULL || nameLen == 0 || nameLen > 0xffu ||
+        value == NULL)
+        return false;
+    if (*pos + 1u + nameLen + 2u + valueLen > outCap)
+        return false;
+    out[(*pos)++] = (u8)nameLen;
+    memcpy(out + *pos, name, nameLen);
+    *pos += nameLen;
+    out[(*pos)++] = (u8)(valueLen >> 8);
+    out[(*pos)++] = (u8)valueLen;
+    memcpy(out + *pos, value, valueLen);
+    *pos += valueLen;
+    return true;
+}
+
+static bool vm_client_truncate_backpack17_iteminfo(const u8 *in, u16 inLen,
+                                                   u8 *out, u32 outCap,
+                                                   u16 *outLen, u16 maxRows,
+                                                   u16 *keptRows,
+                                                   bool *truncatedOut)
+{
+    u32 pos = 0;
+    u32 count = 0;
+    u8 tagSize = 0;
+    u32 outPos = 0;
+    u32 i;
+    u16 keep;
+
+    if (keptRows != NULL)
+        *keptRows = 0;
+    if (truncatedOut != NULL)
+        *truncatedOut = false;
+    if (in == NULL || out == NULL || outLen == NULL || maxRows == 0)
+        return false;
+    if (!vm_client_seq_read_row_count(in, inLen, &pos, &count, &tagSize))
+        return false;
+    keep = (u16)((count > maxRows) ? maxRows : count);
+    if (!vm_client_seq_write_row_count(out, outCap, &outPos, keep, tagSize))
+        return false;
+    for (i = 0; i < keep; ++i)
+    {
+        u32 start = pos;
+        u32 rowLen;
+
+        if (!vm_client_seq_skip_tagged(in, inLen, &pos) ||
+            !vm_client_seq_skip_common_extra(in, inLen, &pos))
+            return false;
+        rowLen = pos - start;
+        if (outPos + rowLen > outCap)
+            return false;
+        memcpy(out + outPos, in + start, rowLen);
+        outPos += rowLen;
+    }
+    *outLen = (u16)outPos;
+    if (keptRows != NULL)
+        *keptRows = keep;
+    if (truncatedOut != NULL)
+        *truncatedOut = (count > keep);
+    return true;
+}
+
+static bool vm_client_truncate_backpack30_iteminfo(const u8 *in, u16 inLen,
+                                                   u8 *out, u32 outCap,
+                                                   u16 *outLen, u16 maxRows,
+                                                   u16 *keptRows,
+                                                   bool *truncatedOut)
+{
+    u32 pos = 0;
+    u32 outPos = 0;
+    u16 kept = 0;
+    u16 total = 0;
+
+    if (keptRows != NULL)
+        *keptRows = 0;
+    if (truncatedOut != NULL)
+        *truncatedOut = false;
+    if (in == NULL || out == NULL || outLen == NULL || maxRows == 0)
+        return false;
+
+    while (pos < inLen)
+    {
+        u32 start = pos;
+        u32 rowLen;
+
+        if (!vm_client_seq_skip_tagged(in, inLen, &pos) ||
+            !vm_client_seq_skip_tagged(in, inLen, &pos) ||
+            !vm_client_seq_skip_tagged(in, inLen, &pos) ||
+            !vm_client_seq_skip_common_extra(in, inLen, &pos))
+            return false;
+        rowLen = pos - start;
+        ++total;
+        if (kept < maxRows)
+        {
+            if (outPos + rowLen > outCap)
+                return false;
+            memcpy(out + outPos, in + start, rowLen);
+            outPos += rowLen;
+            ++kept;
+        }
+    }
+    *outLen = (u16)outPos;
+    if (keptRows != NULL)
+        *keptRows = kept;
+    if (truncatedOut != NULL)
+        *truncatedOut = (total > kept);
+    return true;
+}
+
+static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_object *object,
+                                                  u8 *outObj, u32 outCap,
+                                                  u32 *outLen, bool *changedOut)
+{
+    const u8 *maxnumEnc = NULL;
+    const u8 *gridnumEnc = NULL;
+    const u8 *iteminfo = NULL;
+    u16 maxnumLen = 0;
+    u16 gridnumLen = 0;
+    u16 iteminfoLen = 0;
+    u8 newMaxnum[6];
+    u8 newGridnum[6];
+    u16 newMaxnumLen = 0;
+    u16 newGridnumLen = 0;
+    u8 *newIteminfo = NULL;
+    u16 newIteminfoLen = 0;
+    u16 keptRows = 0;
+    bool truncated = false;
+    bool changed = false;
+    u32 maxnumValue = 0;
+    u32 gridnumValue = 0;
+    u32 pos = 0;
+    u32 objectStart = 0;
+
+    if (changedOut != NULL)
+        *changedOut = false;
+    if (object == NULL || outObj == NULL || outLen == NULL || outCap < 6)
+        return false;
+
+    if (object->major == 1 && object->kind == 17 && object->subtype == 1)
+    {
+        if (!vm_client_response_object_field(object, "maxnum", &maxnumEnc,
+                                             &maxnumLen) ||
+            !vm_client_response_object_field(object, "iteminfo", &iteminfo,
+                                             &iteminfoLen))
+        {
+            return false;
+        }
+        if (!vm_client_decode_tagged_u32(maxnumEnc, maxnumLen, &maxnumValue))
+            return false;
+        if (maxnumValue > VM_CLIENT_CBE_BACKPACK_SLOTS)
+        {
+            if (!vm_client_encode_tagged_u16(newMaxnum, sizeof(newMaxnum),
+                                             &newMaxnumLen,
+                                             (u16)VM_CLIENT_CBE_BACKPACK_SLOTS,
+                                             maxnumEnc[1]))
+                return false;
+            changed = true;
+        }
+        else
+        {
+            if (maxnumLen > sizeof(newMaxnum))
+                return false;
+            memcpy(newMaxnum, maxnumEnc, maxnumLen);
+            newMaxnumLen = maxnumLen;
+        }
+        newIteminfo = (u8 *)malloc(iteminfoLen + 8u);
+        if (newIteminfo == NULL)
+            return false;
+        if (!vm_client_truncate_backpack17_iteminfo(
+                iteminfo, iteminfoLen, newIteminfo, iteminfoLen + 8u,
+                &newIteminfoLen, (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows,
+                &truncated))
+        {
+            free(newIteminfo);
+            return false;
+        }
+        if (truncated)
+            changed = true;
+        if (!changed)
+        {
+            free(newIteminfo);
+            return false;
+        }
+        objectStart = 0;
+        outObj[pos++] = object->major;
+        outObj[pos++] = object->kind;
+        outObj[pos++] = object->subtype;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        if (!vm_client_put_object_field(outObj, outCap, &pos, "maxnum",
+                                         newMaxnum, newMaxnumLen) ||
+            !vm_client_put_object_field(outObj, outCap, &pos, "iteminfo",
+                                         newIteminfo, newIteminfoLen))
+        {
+            free(newIteminfo);
+            return false;
+        }
+        free(newIteminfo);
+        outObj[objectStart + 4] = (u8)(pos >> 8);
+        outObj[objectStart + 5] = (u8)pos;
+        *outLen = pos;
+        if (changedOut != NULL)
+            *changedOut = true;
+        printf("[info][network] cbe_backpack_clamp object=17/1 maxnum=%u->%u "
+               "rows_kept=%u truncated=%u evidence=InitTimerControl(64)\n",
+               maxnumValue,
+               maxnumValue > VM_CLIENT_CBE_BACKPACK_SLOTS
+                   ? (u32)VM_CLIENT_CBE_BACKPACK_SLOTS
+                   : maxnumValue,
+               keptRows, truncated ? 1u : 0u);
+        return true;
+    }
+
+    if (object->major == 1 && object->kind == 30 && object->subtype == 21)
+    {
+        const u8 *resultEnc = NULL;
+        u16 resultLen = 0;
+
+        if (!vm_client_response_object_field(object, "result", &resultEnc,
+                                             &resultLen) ||
+            !vm_client_response_object_field(object, "gridnum", &gridnumEnc,
+                                             &gridnumLen) ||
+            !vm_client_response_object_field(object, "iteminfo", &iteminfo,
+                                             &iteminfoLen))
+        {
+            return false;
+        }
+        if (!vm_client_decode_tagged_u32(gridnumEnc, gridnumLen, &gridnumValue))
+            return false;
+        newIteminfo = (u8 *)malloc(iteminfoLen + 8u);
+        if (newIteminfo == NULL)
+            return false;
+        if (!vm_client_truncate_backpack30_iteminfo(
+                iteminfo, iteminfoLen, newIteminfo, iteminfoLen + 8u,
+                &newIteminfoLen, (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows,
+                &truncated))
+        {
+            free(newIteminfo);
+            return false;
+        }
+        if (gridnumValue > keptRows)
+            gridnumValue = keptRows;
+        if (gridnumValue > VM_CLIENT_CBE_BACKPACK_SLOTS)
+        {
+            gridnumValue = VM_CLIENT_CBE_BACKPACK_SLOTS;
+            changed = true;
+        }
+        if (truncated)
+            changed = true;
+        if (gridnumEnc[1] == 1 || gridnumEnc[1] == 2)
+        {
+            u32 decoded = 0;
+            if (vm_client_decode_tagged_u32(gridnumEnc, gridnumLen, &decoded) &&
+                decoded != gridnumValue)
+                changed = true;
+        }
+        if (!changed)
+        {
+            free(newIteminfo);
+            return false;
+        }
+        if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
+                                         &newGridnumLen, (u16)gridnumValue,
+                                         gridnumEnc[1]))
+        {
+            free(newIteminfo);
+            return false;
+        }
+        objectStart = 0;
+        outObj[pos++] = object->major;
+        outObj[pos++] = object->kind;
+        outObj[pos++] = object->subtype;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        if (!vm_client_put_object_field(outObj, outCap, &pos, "result",
+                                         resultEnc, resultLen) ||
+            !vm_client_put_object_field(outObj, outCap, &pos, "gridnum",
+                                         newGridnum, newGridnumLen) ||
+            !vm_client_put_object_field(outObj, outCap, &pos, "iteminfo",
+                                         newIteminfo, newIteminfoLen))
+        {
+            free(newIteminfo);
+            return false;
+        }
+        free(newIteminfo);
+        outObj[objectStart + 4] = (u8)(pos >> 8);
+        outObj[objectStart + 5] = (u8)pos;
+        *outLen = pos;
+        if (changedOut != NULL)
+            *changedOut = true;
+        printf("[info][network] cbe_backpack_clamp object=30/21 gridnum_kept=%u "
+               "rows_kept=%u truncated=%u evidence=InitTimerControl(64)\n",
+               gridnumValue, keptRows, truncated ? 1u : 0u);
+        return true;
+    }
+
+    return false;
+}
+
+static bool vm_client_cbe_clamp_backpack_packet(u8 *response, u32 *responseLen)
+{
+    u32 offset = 4;
+    u32 outPos = 5;
+    u8 objectCount = 0;
+    u8 *out = NULL;
+    u32 outCap = 0;
+    bool anyChanged = false;
+    vm_client_response_object object;
+
+    if (response == NULL || responseLen == NULL || *responseLen < 5 ||
+        response[0] != 'W' || response[1] != 'T')
+        return false;
+    outCap = *responseLen + 64u;
+    out = (u8 *)malloc(outCap);
+    if (out == NULL)
+        return false;
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = 0;
+    out[3] = 0;
+    out[4] = 0;
+
+    while (offset + 6u <= *responseLen &&
+           vm_client_next_response_object(response, *responseLen, &offset,
+                                           &object))
+    {
+        u8 *rewritten = NULL;
+        u32 rewrittenCap = (u32)object.payloadLen + 64u;
+        u32 rewrittenLen = 0;
+        bool changed = false;
+        const u8 *src = response + (offset - (object.payloadLen + 6u));
+        u32 srcLen = (u32)object.payloadLen + 6u;
+
+        if (rewrittenCap < 64u)
+            rewrittenCap = 64u;
+        rewritten = (u8 *)malloc(rewrittenCap);
+        if (rewritten != NULL &&
+            vm_client_rewrite_cbe_backpack_object(&object, rewritten,
+                                                  rewrittenCap, &rewrittenLen,
+                                                  &changed) &&
+            changed)
+        {
+            src = rewritten;
+            srcLen = rewrittenLen;
+            anyChanged = true;
+        }
+        if (outPos + srcLen > outCap || objectCount == 0xff)
+        {
+            free(rewritten);
+            free(out);
+            return false;
+        }
+        memcpy(out + outPos, src, srcLen);
+        outPos += srcLen;
+        ++objectCount;
+        free(rewritten);
+    }
+    if (offset != *responseLen)
+    {
+        free(out);
+        return false;
+    }
+    if (!anyChanged)
+    {
+        free(out);
+        return false;
+    }
+    vm_client_finish_wt_packet(out, outPos, objectCount);
+    if (outPos > *responseLen)
+    {
+        u8 *grown = (u8 *)realloc(response, outPos);
+        /*
+         * Caller owns malloc'd completion buffers.  In-place shrink is the
+         * common path; growth should not happen when only truncating rows.
+         */
+        (void)grown;
+        free(out);
+        return false;
+    }
+    memcpy(response, out, outPos);
+    *responseLen = outPos;
+    free(out);
+    return true;
+}
+
 /* Peel objects that must not share the item-op queue_data event that clears
  * the wait flag:
  *   7/1 use   → 17/1 capacity list, 26/1 warehouse dialog
@@ -2298,6 +2846,11 @@ static void vm_net_mock_async_drain_completions(void)
             vm_client_free_completion(completion);
             continue;
         }
+        (void)vm_client_cbe_clamp_backpack_packet(completion->response,
+                                                   &completion->responseLen);
+        if (completion->followup != NULL && completion->followupLen != 0)
+            (void)vm_client_cbe_clamp_backpack_packet(completion->followup,
+                                                       &completion->followupLen);
         responsePtr = vm_net_mock_sync_buffer_to_vm(completion->response,
                                                     completion->responseLen);
         if (responsePtr == 0)

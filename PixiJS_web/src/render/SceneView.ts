@@ -4,6 +4,7 @@ import { formatMonsterMapName } from "../resources/monsterLevels";
 import { ActorLayer } from "../game/ActorLayer";
 import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE } from "../ui/constants";
 import { BitmapLabel } from "../ui/BitmapLabel";
+import { sceneAssetCandidates } from "../net/protocol";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
 import { tryLoadUiTexture } from "../ui/UiAssets";
 import {
@@ -439,6 +440,15 @@ export class SceneView {
     this.decorSprites = [];
   }
 
+  /** True when the painted map shell is already this server scene key. */
+  showsSceneFile(scene: string): boolean {
+    if (!this.mapIdentity || !scene) return false;
+    const leaf = this.mapIdentity.split("|")[0] || "";
+    const norms = (s: string) =>
+      sceneAssetCandidates(s).map((c) => c.replace(/\.sce$/i, "").toLowerCase());
+    return norms(leaf).some((x) => norms(scene).includes(x));
+  }
+
   async showScene(scene: LoadedScene, spawnX?: number, spawnY?: number): Promise<void> {
     // Town maps share 400×400 dims — must key on scene/map leaf, not size alone.
     const identity = `${scene.sceneFile}|${scene.mapFile}|${scene.width}x${scene.height}`;
@@ -462,6 +472,8 @@ export class SceneView {
       );
       const texture = Texture.from(canvas);
       texture.source.scaleMode = "nearest";
+      // Map is always on-screen; TextureGC unload → empty LCD without contextlost.
+      texture.source.autoGarbageCollect = false;
       this.mapSprite = new Sprite(texture);
       this.mapSprite.zIndex = 0;
       this.mapSprite.eventMode = "none";
@@ -486,31 +498,32 @@ export class SceneView {
     this.player.position.set(this.playerX, this.playerY);
     this.player.zIndex = this.playerY | 0;
     this.applyCamera();
-    this.paintDecorations();
-    this.paintPortals();
-    // Wild monsters: SCE kind=3 dual = map sprite (ghostfire); primary = battle.
-    this.actors.setSceneMonsters(
-      (scene.combatSpawns ?? []).map((s, i) => ({
-        actorId: 0x70000000 + i,
-        x: s.x,
-        y: s.y,
-        name: formatMonsterMapName(s.name, s.sceActorId),
-        actorResource: s.mapActorResource,
-        battleActorResource: s.battleActorResource,
-        scriptName: `sce_combat_${s.sceActorId}`,
-        battleActorId: s.sceActorId,
-      })),
-    );
-    this.actors.setTeleportStones(
-      (scene.teleportStones ?? []).map((s, i) => ({
-        actorId: 0x60000000 + i,
-        x: s.x,
-        y: s.y,
-        name: s.name || "传送石",
-        actorResource: s.actorResource,
-        scriptName: s.scriptName || "telestone.xse",
-      })),
-    );
+    if (!sameMap) {
+      this.paintDecorations();
+      this.paintPortals();
+      this.actors.setSceneMonsters(
+        (scene.combatSpawns ?? []).map((s, i) => ({
+          actorId: 0x70000000 + i,
+          x: s.x,
+          y: s.y,
+          name: formatMonsterMapName(s.name, s.sceActorId),
+          actorResource: s.mapActorResource,
+          battleActorResource: s.battleActorResource,
+          scriptName: `sce_combat_${s.sceActorId}`,
+          battleActorId: s.sceActorId,
+        })),
+      );
+      this.actors.setTeleportStones(
+        (scene.teleportStones ?? []).map((s, i) => ({
+          actorId: 0x60000000 + i,
+          x: s.x,
+          y: s.y,
+          name: s.name || "传送石",
+          actorResource: s.actorResource,
+          scriptName: s.scriptName || "telestone.xse",
+        })),
+      );
+    }
     this.applyPlayerFrame(true);
     console.info(
       "[scene]",
@@ -1135,6 +1148,7 @@ export class SceneView {
     const now = performance.now();
     const dt = this.lastTick ? now - this.lastTick : 16;
     this.lastTick = now;
+    this.actors.setViewer(this.playerX, this.playerY);
     this.actors.tick(dt);
     this.plus16Sparkles.tick(dt);
     this.wingOverlay.tick(dt);

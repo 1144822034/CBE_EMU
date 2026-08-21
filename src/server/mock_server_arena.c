@@ -11,6 +11,9 @@ enum
     VM_MOCK_ARENA_STATUS_SETTLED = 3,
     VM_MOCK_ARENA_PARTICIPANT_MAX = 256,
     VM_MOCK_ARENA_REWARD_MAX = 512,
+    /* Cap concurrent LIVE arena fights (protocol-lock / battle fan-out).
+     * Excess seats defer until a slot frees — not bye. Global DUEL_MAX=64. */
+    VM_MOCK_ARENA_MAX_CONCURRENT_DUELS = 24,
     VM_MOCK_ARENA_WT_KIND = 41,
     VM_MOCK_ARENA_WT_STATUS = 1,
     VM_MOCK_ARENA_WT_RANK = 2,
@@ -23,6 +26,8 @@ enum
 /* GBK: c04比武擂台 / 比武 */
 static const char VM_MOCK_ARENA_DEFAULT_SCENE[] =
     "c04\xb1\xc8\xce\xe4\xc0\xde\xcc\xa8";
+static const char VM_MOCK_ARENA_DEFAULT_LEAVE_SCENE[] =
+    "c04\xc1\xd9\xb0\xb2\xb8\xae_01"; /* c04临安府_01 */
 static const char VM_MOCK_ARENA_DEFAULT_NPC_KEYWORD[] = "\xb1\xc8\xce\xe4";
 
 typedef struct
@@ -113,6 +118,11 @@ static u32 g_vm_mock_arena_rng = 0;
 static u8 g_vm_mock_arena_announced_status = 0xffu;
 /* LIVE 场次内：连胜档位 1..11 各只由全场首个达成者播报（bit0=敌将讨伐 … bit10=天下无敌）。 */
 static u32 g_vm_mock_arena_kill_streak_announced_mask = 0;
+/* Unmatched waiters left after last match pass (slot-full / retryable fail). */
+static u32 g_vm_mock_arena_deferred_unmatched = 0;
+/* Past matchEndMinute: same job×bracket×score>0 ties stay LIVE until resolved. */
+static bool g_vm_mock_arena_playoff = false;
+static bool g_vm_mock_arena_playoff_announced = false;
 
 /* Dedicated matchmaking RNG. Server-only builds never srand() libc rand();
  * relying on rand() alone yields a fixed sequence and sticky pairings. */
@@ -1411,6 +1421,11 @@ static void vm_mock_arena_rewrite_open_sessions_for_day(u32 dayYmd, u32 unixTs)
 static void vm_mock_arena_set_status(u8 status);
 static void vm_mock_arena_reconcile_status_from_desired(u32 minute);
 static void vm_mock_arena_settle(void);
+static void vm_mock_arena_try_settle_or_playoff(void);
+static void vm_mock_arena_match_playoff_ties(void);
+static void vm_mock_arena_grant_bye(vm_mock_arena_participant *bye, u32 roundIndex,
+                                   u32 poolCount);
+static void vm_mock_arena_evict_offline_from_venue(const char *reason);
 
 /* After admin saves minutes: push into runtime + today's open session rows. */
 static void vm_mock_arena_apply_config_schedule_now(void)
@@ -1432,7 +1447,9 @@ static void vm_mock_arena_apply_config_schedule_now(void)
         vm_mock_arena_reconcile_status_from_desired(minute);
 }
 
-/* Anyone already standing on the venue during ENTRY/LIVE must be matchable + HUD. */
+/* Anyone already standing on the venue during ENTRY/LIVE must be matchable + HUD.
+ * Use session online* fields only — trade_role_for_session can load roleDb and
+ * must not run for every online seat on the 1Hz tick (protocol-lock stall). */
 static void vm_mock_arena_sync_venue_participants(void)
 {
     vm_mock_service_client_session *session;
@@ -1444,7 +1461,6 @@ static void vm_mock_arena_sync_venue_participants(void)
     session = g_vm_mock_service_client_sessions;
     while (session != NULL)
     {
-        vm_net_mock_role_state *role;
         vm_mock_arena_participant *p;
         const char *scene;
 
@@ -1456,15 +1472,11 @@ static void vm_mock_arena_sync_venue_participants(void)
             if (vm_mock_arena_is_arena_scene(scene) ||
                 vm_mock_arena_is_arena_scene(session->onlineScene))
             {
-                role = vm_mock_service_trade_role_for_session(session, NULL);
-                if (role != NULL)
+                p = vm_mock_arena_ensure_participant(session, NULL);
+                if (p != NULL)
                 {
-                    p = vm_mock_arena_ensure_participant(session, role);
-                    if (p != NULL)
-                    {
-                        p->clientId = session->clientId;
-                        p->inArenaScene = 1;
-                    }
+                    p->clientId = session->clientId;
+                    p->inArenaScene = 1;
                 }
             }
         }
@@ -1547,22 +1559,23 @@ static void vm_mock_arena_announce_status(u8 status)
                (u32)status, recipients, worldRecipients);
 }
 
-/* Late joiners / missed edge: tip each online seat once for current phase. */
-static void vm_mock_arena_catchup_phase_tips(void)
+/* Late joiners / missed edge: tip this seat only (call from scene-sync poll). */
+static void vm_mock_arena_catchup_phase_tip_session(
+    vm_mock_service_client_session *session)
 {
     const char *msg;
-    vm_mock_service_client_session *session;
     u8 status = g_vm_mock_arena_rt.status;
 
+    if (session == NULL || g_vm_mock_arena_rt.sessionId == 0)
+        return;
+    if (status != VM_MOCK_ARENA_STATUS_ENTRY &&
+        status != VM_MOCK_ARENA_STATUS_LIVE &&
+        status != VM_MOCK_ARENA_STATUS_SETTLED)
+        return;
     msg = vm_mock_arena_phase_tip_gbk(status);
     if (msg == NULL)
         return;
-    session = g_vm_mock_service_client_sessions;
-    while (session != NULL)
-    {
-        vm_mock_arena_deliver_phase_tip_to_session(session, status, msg);
-        session = session->next;
-    }
+    vm_mock_arena_deliver_phase_tip_to_session(session, status, msg);
 }
 
 static void vm_mock_arena_ensure_session(u32 dayYmd, u8 slot, u32 unixTs)
@@ -1575,9 +1588,19 @@ static void vm_mock_arena_ensure_session(u32 dayYmd, u8 slot, u32 unixTs)
     u32 dayBase;
     struct tm tmDay;
     time_t dayStart;
+    bool created = false;
 
     if (dayYmd == 0)
         return;
+    /* Already bound for this day/slot: do not SELECT every tick (ENTRY window
+     * used to MySQL-query once/sec under protocol lock → admin 503 繁忙). */
+    if (g_vm_mock_arena_rt.sessionId != 0 &&
+        g_vm_mock_arena_rt.dayYmd == dayYmd &&
+        g_vm_mock_arena_rt.slot == slot)
+    {
+        vm_mock_arena_sync_schedule_timestamps(dayYmd, unixTs);
+        return;
+    }
     memset(&tmDay, 0, sizeof(tmDay));
     tmDay.tm_year = (int)(dayYmd / 10000) - 1900;
     tmDay.tm_mon = (int)((dayYmd / 100) % 100) - 1;
@@ -1603,6 +1626,7 @@ static void vm_mock_arena_ensure_session(u32 dayYmd, u8 slot, u32 unixTs)
                  dayYmd, (u32)slot, VM_MOCK_ARENA_STATUS_ENTRY, entryTs, matchTs, endTs);
         if (!vm_mysql_exec(query))
             return;
+        created = true;
         meta.sessionId = 0;
         meta.status = VM_MOCK_ARENA_STATUS_ENTRY;
         (void)vm_mysql_query(
@@ -1627,6 +1651,7 @@ static void vm_mock_arena_ensure_session(u32 dayYmd, u8 slot, u32 unixTs)
         g_vm_mock_arena_rt.matchStartTs = matchTs;
         g_vm_mock_arena_rt.matchEndTs = endTs;
         g_vm_mock_arena_rt.lastMatchRound = 0xffffffffu;
+        g_vm_mock_arena_deferred_unmatched = 0;
         vm_mock_arena_hydrate_parts_from_db();
         vm_mock_arena_refresh_nearby_for_arena_clients("arena-session-begin");
         printf("[info][mock-service] arena_session_bind session=%u status=%u "
@@ -1638,16 +1663,269 @@ static void vm_mock_arena_ensure_session(u32 dayYmd, u8 slot, u32 unixTs)
     {
         vm_mock_arena_sync_schedule_timestamps(dayYmd, unixTs);
     }
+    /* New day's first ENTRY row: leftover roles may still persist on the venue. */
+    if (created && g_vm_mock_arena_rt.sessionId != 0 &&
+        g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_ENTRY)
+        vm_mock_arena_evict_offline_from_venue("session-create-entry");
+}
+
+static void vm_mock_arena_reset_session_scores(const char *reason)
+{
+    char query[192];
+    u32 i;
+    u32 n;
+
+    if (g_vm_mock_arena_rt.sessionId == 0)
+        return;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_arena_scores WHERE session_id=%u",
+             g_vm_mock_arena_rt.sessionId);
+    (void)vm_mysql_exec(query);
+    n = g_vm_mock_arena_part_count;
+    for (i = 0; i < n; ++i)
+    {
+        vm_mock_arena_participant *p = &g_vm_mock_arena_parts[i];
+        p->score = 0;
+        p->wins = 0;
+        p->losses = 0;
+        p->draws = 0;
+        p->byes = 0;
+        p->rankPos = 0;
+        p->claimed = 0;
+        p->matchedThisRound = 0;
+        p->lastOpponentRoleId = 0;
+        p->killStreak = 0;
+    }
+    printf("[info][mock-service] arena_score_reset session=%u parts=%u reason=%s "
+           "evidence=new-entry-window\n",
+           g_vm_mock_arena_rt.sessionId, n, reason ? reason : "-");
+}
+
+enum { VM_MOCK_ARENA_EVICT_MAX = 512 };
+
+typedef struct
+{
+    char accountId[64];
+    u32 roleId;
+} vm_mock_arena_evict_row;
+
+typedef struct
+{
+    u32 count;
+    vm_mock_arena_evict_row rows[VM_MOCK_ARENA_EVICT_MAX];
+} vm_mock_arena_evict_scan;
+
+static bool vm_mock_arena_role_currently_online(u32 roleId)
+{
+    vm_mock_service_client_session *session;
+
+    if (roleId == 0)
+        return false;
+    session = g_vm_mock_service_client_sessions;
+    while (session != NULL)
+    {
+        if (session->roleOnline && session->onlineRoleId == roleId)
+            return true;
+        session = session->next;
+    }
+    return false;
+}
+
+static bool vm_mock_arena_persist_offline_exit(const char *accountId, u32 roleId,
+                                              const char *scene, u16 x, u16 y)
+{
+    char accountEsc[160];
+    char sceneHex[160];
+    char query[640];
+    size_t sceneLen;
+
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0 ||
+        scene == NULL || !vm_net_mock_scene_name_is_persistable(scene) ||
+        x == 0 || y == 0)
+        return false;
+    sceneLen = strlen(scene);
+    if (sceneLen == 0 || sceneLen >= 64 ||
+        vm_mysql_hex_encode(accountId, strlen(accountId), accountEsc,
+                            sizeof(accountEsc)) == 0 ||
+        vm_mysql_hex_encode(scene, sceneLen, sceneHex, sizeof(sceneHex)) == 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "UPDATE account_roles SET scene=X'%s',pos_x=%u,pos_y=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             sceneHex, (u32)x, (u32)y, accountEsc, roleId);
+    return vm_mysql_exec(query);
+}
+
+static void vm_mock_arena_patch_account_exit_scene(const char *accountId, u32 roleId,
+                                                   const char *scene, u16 x, u16 y)
+{
+    vm_mock_service_account_state *state;
+    u32 i;
+    bool changed = false;
+
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0 || scene == NULL)
+        return;
+    state = vm_mock_service_account_find(accountId);
+    if (state == NULL || !state->roleDbValid)
+        return;
+    for (i = 0; i < state->roleDb.roleCount && i < VM_NET_MOCK_ROLE_DB_MAX_ROLES; ++i)
+    {
+        vm_net_mock_role_state *role = &state->roleDb.roles[i];
+        if (role->roleId != roleId)
+            continue;
+        if (!vm_mock_arena_is_arena_scene(role->scene))
+            continue;
+        snprintf(role->scene, sizeof(role->scene), "%s", scene);
+        role->x = x;
+        role->y = y;
+        changed = true;
+    }
+    if (state->pendingSceneSaveValid &&
+        vm_mock_arena_is_arena_scene(state->pendingSceneSaveScene))
+    {
+        snprintf(state->pendingSceneSaveScene, sizeof(state->pendingSceneSaveScene),
+                 "%s", scene);
+        state->pendingSceneSaveX = x;
+        state->pendingSceneSaveY = y;
+        changed = true;
+    }
+    if (changed)
+        vm_mock_service_account_note_durable_role_write(
+            state->accountId, &state->roleDb, state->roleDbValid, &state->warehouse,
+            false, true, "arena-evict-offline");
+}
+
+static bool vm_mock_arena_evict_one_offline(const char *accountId, u32 roleId)
+{
+    vm_mock_arena_participant *p;
+    const char *scene;
+    u16 x;
+    u16 y;
+
+    if (roleId == 0 || vm_mock_arena_role_currently_online(roleId))
+        return false;
+    p = vm_mock_arena_find_part(roleId);
+    scene = VM_MOCK_ARENA_DEFAULT_LEAVE_SCENE;
+    x = 120;
+    y = 120;
+    if (p != NULL && p->returnScene[0] != 0 &&
+        !vm_mock_arena_is_arena_scene(p->returnScene))
+    {
+        scene = p->returnScene;
+        x = p->returnX ? p->returnX : 120;
+        y = p->returnY ? p->returnY : 120;
+    }
+    if (accountId != NULL && accountId[0] != 0)
+    {
+        if (!vm_mock_arena_persist_offline_exit(accountId, roleId, scene, x, y))
+        {
+            printf("[warn][mock-service] arena_evict_persist_fail role=%u "
+                   "account=%s dest=%s\n",
+                   roleId, accountId, scene);
+            return false;
+        }
+        vm_mock_arena_patch_account_exit_scene(accountId, roleId, scene, x, y);
+    }
+    if (p != NULL)
+        p->inArenaScene = 0;
+    printf("[info][mock-service] arena_evict_offline role=%u dest=%s pos=(%u,%u) "
+           "evidence=entry-kick-stale-venue\n",
+           roleId, scene, (u32)x, (u32)y);
+    return true;
+}
+
+static bool vm_mock_arena_evict_scan_row(void *contextValue, unsigned int columnCount,
+                                        const char *const *values, const size_t *lengths)
+{
+    vm_mock_arena_evict_scan *scan = (vm_mock_arena_evict_scan *)contextValue;
+    vm_mock_arena_evict_row *row;
+    u32 roleId = 0;
+    size_t acctLen;
+
+    (void)columnCount;
+    if (scan == NULL || values == NULL || lengths == NULL)
+        return false;
+    if (scan->count >= VM_MOCK_ARENA_EVICT_MAX)
+        return true;
+    if (!values[1] || !vm_mock_mysql_parse_u32(values[1], lengths[1], &roleId) ||
+        roleId == 0)
+        return true;
+    row = &scan->rows[scan->count];
+    memset(row, 0, sizeof(*row));
+    row->roleId = roleId;
+    acctLen = lengths[0];
+    if (values[0] && acctLen > 0)
+    {
+        if (acctLen >= sizeof(row->accountId))
+            acctLen = sizeof(row->accountId) - 1;
+        memcpy(row->accountId, values[0], acctLen);
+        row->accountId[acctLen] = 0;
+    }
+    scan->count++;
+    return true;
+}
+
+static void vm_mock_arena_evict_offline_from_venue(const char *reason)
+{
+    vm_mock_arena_evict_scan scan;
+    vm_mock_service_account_state *state;
+    u32 i;
+    u32 n = 0;
+
+    (void)vm_mock_arena_load_config(false);
+    memset(&scan, 0, sizeof(scan));
+    (void)vm_mysql_query(
+        "SELECT account_id,role_id FROM account_roles WHERE "
+        "HEX(scene) LIKE '%B1C8CEE4C0DECCA8%' OR "
+        "HEX(scene) LIKE '%E6AF94E6ADA6E69292E58FB0%'",
+        vm_mock_arena_evict_scan_row, &scan);
+    for (i = 0; i < scan.count; ++i)
+    {
+        if (vm_mock_arena_evict_one_offline(scan.rows[i].accountId,
+                                            scan.rows[i].roleId))
+            ++n;
+    }
+    state = g_vm_mock_service_accounts;
+    while (state != NULL)
+    {
+        if (state->roleDbValid)
+        {
+            for (i = 0; i < state->roleDb.roleCount &&
+                        i < VM_NET_MOCK_ROLE_DB_MAX_ROLES; ++i)
+            {
+                vm_net_mock_role_state *role = &state->roleDb.roles[i];
+                if (role->roleId == 0 ||
+                    !vm_mock_arena_is_arena_scene(role->scene))
+                    continue;
+                if (vm_mock_arena_evict_one_offline(state->accountId, role->roleId))
+                    ++n;
+            }
+        }
+        state = state->next;
+    }
+    for (i = 0; i < g_vm_mock_arena_part_count; ++i)
+    {
+        vm_mock_arena_participant *p = &g_vm_mock_arena_parts[i];
+        if (!p->inArenaScene || p->roleId == 0)
+            continue;
+        if (vm_mock_arena_evict_one_offline(p->accountId, p->roleId))
+            ++n;
+    }
+    printf("[info][mock-service] arena_evict_offline_done moved=%u reason=%s "
+           "evidence=prevent-stale-login-on-venue\n",
+           n, reason ? reason : "-");
 }
 
 static void vm_mock_arena_set_status(u8 status)
 {
     char query[256];
     u8 prev;
+    vm_mock_service_client_session *session;
 
     if (g_vm_mock_arena_rt.sessionId == 0 || g_vm_mock_arena_rt.status == status)
         return;
     prev = g_vm_mock_arena_rt.status;
+
     g_vm_mock_arena_rt.status = status;
     snprintf(query, sizeof(query),
              "UPDATE server_arena_sessions SET status=%u WHERE session_id=%u",
@@ -1655,10 +1933,36 @@ static void vm_mock_arena_set_status(u8 status)
     (void)vm_mysql_exec(query);
     printf("[info][mock-service] arena_status session=%u status=%u->%u\n",
            g_vm_mock_arena_rt.sessionId, (u32)prev, (u32)status);
+    if (status != VM_MOCK_ARENA_STATUS_SETTLED)
+    {
+        session = g_vm_mock_service_client_sessions;
+        while (session != NULL)
+        {
+            session->arenaHudSettlePushed = false;
+            session = session->next;
+        }
+    }
+    /* Each new entry window starts from 0; same-day SETTLED reopen must not
+     * carry last match's score/wins/claimed. LIVE from SETTLED skips ENTRY. */
+    if (status == VM_MOCK_ARENA_STATUS_ENTRY &&
+        prev != VM_MOCK_ARENA_STATUS_ENTRY)
+    {
+        vm_mock_arena_reset_session_scores("entry-begin");
+        vm_mock_arena_evict_offline_from_venue("entry-begin");
+    }
+    else if (status == VM_MOCK_ARENA_STATUS_LIVE &&
+             prev == VM_MOCK_ARENA_STATUS_SETTLED)
+    {
+        vm_mock_arena_reset_session_scores("settled-reopen-live");
+        vm_mock_arena_evict_offline_from_venue("settled-reopen-live");
+    }
     /* Fresh LIVE window must not inherit prior lastMatchRound skips. */
     if (status == VM_MOCK_ARENA_STATUS_LIVE && prev != VM_MOCK_ARENA_STATUS_LIVE)
     {
         g_vm_mock_arena_rt.lastMatchRound = 0xffffffffu;
+        g_vm_mock_arena_deferred_unmatched = 0;
+        g_vm_mock_arena_playoff = false;
+        g_vm_mock_arena_playoff_announced = false;
         /* 新比赛区间：连杀档位首杀播报重新计数；清比武文字称号。 */
         g_vm_mock_arena_kill_streak_announced_mask = 0;
         vm_mock_arena_clear_kill_streak_designations("live-begin");
@@ -1670,6 +1974,8 @@ static void vm_mock_arena_set_status(u8 status)
     {
         g_vm_mock_arena_announced_status = 0xffu;
         g_vm_mock_arena_rt.lastMatchRound = 0xffffffffu;
+        g_vm_mock_arena_playoff = false;
+        g_vm_mock_arena_playoff_announced = false;
         g_vm_mock_arena_kill_streak_announced_mask = 0;
         if (status == VM_MOCK_ARENA_STATUS_LIVE)
             vm_mock_arena_clear_kill_streak_designations("settled-reopen-live");
@@ -1681,6 +1987,8 @@ static void vm_mock_arena_set_status(u8 status)
 /*
  * Drive status from config minutes. Allow SETTLED→ENTRY/LIVE when admin
  * reopens the same-day window; otherwise phase tips never fire again.
+ * Clock past matchEnd: try settle, or enter/keep playoff while same
+ * job×bracket×score ties remain among online venue seats.
  */
 static void vm_mock_arena_reconcile_status_from_desired(u32 minute)
 {
@@ -1697,7 +2005,7 @@ static void vm_mock_arena_reconcile_status_from_desired(u32 minute)
         vm_mock_arena_set_status(VM_MOCK_ARENA_STATUS_LIVE);
     else if (desired == VM_MOCK_ARENA_STATUS_SETTLED &&
              g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_SETTLED)
-        vm_mock_arena_settle();
+        vm_mock_arena_try_settle_or_playoff();
 }
 
 static int vm_mock_arena_cmp_score_desc(const void *a, const void *b)
@@ -1755,6 +2063,31 @@ static void vm_mock_arena_apply_title(vm_mock_arena_participant *p, u8 place)
         snprintf(session->onlineRoleTitle, sizeof(session->onlineRoleTitle), "%s", title);
 }
 
+/* Force-teardown in-flight arena duels at settle — do not add score. */
+static void vm_mock_arena_abort_active_duels_on_settle(void)
+{
+    u32 i;
+    u32 n = 0;
+
+    for (i = 0; i < VM_MOCK_SERVICE_DUEL_MAX; ++i)
+    {
+        vm_mock_service_duel *duel = &g_vm_mock_service_duels[i];
+
+        if (!duel->active || !duel->arenaMode || duel->finished)
+            continue;
+        duel->arenaSettled = true;
+        duel->finished = true;
+        duel->terminalPendingMask = duel->startedMask ? duel->startedMask : 3u;
+        duel->terminalNotBeforeTick = g_schedulerTick;
+        vm_mock_service_duel_arm_both_exits(duel);
+        ++n;
+    }
+    if (n != 0)
+        printf("[info][mock-service] arena_settle_abort_duels count=%u "
+               "session=%u evidence=settled-with-active-fights\n",
+               n, g_vm_mock_arena_rt.sessionId);
+}
+
 static void vm_mock_arena_settle(void)
 {
     u32 i;
@@ -1762,6 +2095,9 @@ static void vm_mock_arena_settle(void)
 
     if (g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_SETTLED)
         return;
+    g_vm_mock_arena_playoff = false;
+    g_vm_mock_arena_playoff_announced = false;
+    vm_mock_arena_abort_active_duels_on_settle();
     vm_mock_arena_set_status(VM_MOCK_ARENA_STATUS_SETTLED);
     for (i = 0; i < g_vm_mock_arena_part_count; ++i)
         g_vm_mock_arena_parts[i].rankPos = 0;
@@ -1930,6 +2266,391 @@ static void vm_mock_arena_on_duel_finished(vm_mock_service_duel *duel)
     }
 }
 
+static void vm_mock_arena_shuffle_u32(u32 *idx, u32 n)
+{
+    u32 j;
+    if (idx == NULL || n < 2)
+        return;
+    for (j = n; j > 1; --j)
+    {
+        u32 k = vm_mock_arena_rng_below(j);
+        u32 tmp = idx[j - 1];
+        idx[j - 1] = idx[k];
+        idx[k] = tmp;
+    }
+}
+
+static u32 vm_mock_arena_active_fight_count(void)
+{
+    u32 n = 0;
+    u32 i;
+    for (i = 0; i < VM_MOCK_SERVICE_DUEL_MAX; ++i)
+    {
+        vm_mock_service_duel *duel = &g_vm_mock_service_duels[i];
+        if (duel->active && duel->arenaMode && !duel->finished)
+            ++n;
+    }
+    return n;
+}
+
+/* Arena match capacity: min(global free duel slots, arena concurrent remaining). */
+static u32 vm_mock_arena_match_slots_available(void)
+{
+    u32 freeGlobal = vm_mock_service_duel_free_slot_count();
+    u32 active = vm_mock_arena_active_fight_count();
+    u32 capLeft = (active < (u32)VM_MOCK_ARENA_MAX_CONCURRENT_DUELS)
+                      ? ((u32)VM_MOCK_ARENA_MAX_CONCURRENT_DUELS - active)
+                      : 0u;
+    return freeGlobal < capLeft ? freeGlobal : capLeft;
+}
+
+static const char *vm_mock_arena_match_block_reason(void)
+{
+    if (vm_mock_service_duel_free_slot_count() == 0)
+        return "no_slot";
+    if (vm_mock_arena_active_fight_count() >= (u32)VM_MOCK_ARENA_MAX_CONCURRENT_DUELS)
+        return "arena_cap";
+    return "no_slot";
+}
+
+static bool vm_mock_arena_part_on_venue_online(vm_mock_arena_participant *p)
+{
+    vm_mock_service_client_session *session;
+
+    if (p == NULL || p->roleId == 0 || p->score == 0)
+        return false;
+    session = vm_mock_arena_live_session_for_part(p);
+    if (session == NULL || !session->roleOnline)
+        return false;
+    if (!p->inArenaScene &&
+        !vm_mock_arena_is_arena_scene(session->sceneVisibleScene) &&
+        !vm_mock_arena_is_arena_scene(session->onlineScene))
+        return false;
+    p->inArenaScene = 1;
+    return true;
+}
+
+/* True when ≥2 online venue seats share the same job×bracket×score (>0). */
+static bool vm_mock_arena_has_resolvable_score_ties(void)
+{
+    u32 i;
+    u32 j;
+
+    for (i = 0; i < g_vm_mock_arena_part_count; ++i)
+    {
+        vm_mock_arena_participant *a = &g_vm_mock_arena_parts[i];
+        u32 sameOnline = 0;
+
+        if (a->score == 0 || a->job == 0 || a->bracket == 0)
+            continue;
+        if (!vm_mock_arena_part_on_venue_online(a))
+            continue;
+        sameOnline = 1;
+        for (j = 0; j < g_vm_mock_arena_part_count; ++j)
+        {
+            vm_mock_arena_participant *b = &g_vm_mock_arena_parts[j];
+            if (j == i || b->score != a->score || b->job != a->job ||
+                b->bracket != a->bracket)
+                continue;
+            if (!vm_mock_arena_part_on_venue_online(b))
+                continue;
+            sameOnline++;
+            if (sameOnline >= 2)
+                return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Same job×bracket×score group has ≥2 scored seats but only one still on the
+ * venue and free: that waiter gets a bye so ranking is not left to roleId.
+ */
+static u32 vm_mock_arena_grant_playoff_solo_byes(void)
+{
+    u32 i;
+    u32 j;
+    u32 n = 0;
+    u32 granted = 0;
+    u32 roleIds[VM_MOCK_ARENA_PARTICIPANT_MAX];
+    u32 roundIndex;
+
+    roundIndex = g_vm_mock_arena_rt.roundIndex ? g_vm_mock_arena_rt.roundIndex : 1u;
+    for (i = 0; i < g_vm_mock_arena_part_count; ++i)
+    {
+        vm_mock_arena_participant *seed = &g_vm_mock_arena_parts[i];
+        vm_mock_arena_participant *solo = NULL;
+        u32 countAll = 0;
+        u32 onlineCount = 0;
+        bool seen = false;
+
+        if (seed->score == 0 || seed->job == 0 || seed->bracket == 0)
+            continue;
+        for (j = 0; j < i; ++j)
+        {
+            vm_mock_arena_participant *prev = &g_vm_mock_arena_parts[j];
+            if (prev->job == seed->job && prev->bracket == seed->bracket &&
+                prev->score == seed->score)
+            {
+                seen = true;
+                break;
+            }
+        }
+        if (seen)
+            continue;
+        for (j = 0; j < g_vm_mock_arena_part_count; ++j)
+        {
+            vm_mock_arena_participant *cand = &g_vm_mock_arena_parts[j];
+            if (cand->job != seed->job || cand->bracket != seed->bracket ||
+                cand->score != seed->score || cand->score == 0)
+                continue;
+            countAll++;
+            if (!vm_mock_arena_part_on_venue_online(cand))
+                continue;
+            onlineCount++;
+            solo = cand;
+        }
+        if (countAll < 2 || onlineCount != 1 || solo == NULL)
+            continue;
+        if (vm_mock_service_duel_find_for_client(solo->clientId, NULL) != NULL)
+            continue;
+        roleIds[n++] = solo->roleId;
+    }
+    for (i = 0; i < n; ++i)
+    {
+        vm_mock_arena_participant *p = vm_mock_arena_find_part(roleIds[i]);
+        if (p == NULL)
+            continue;
+        p->matchedThisRound = 0;
+        vm_mock_arena_grant_bye(p, roundIndex, 1);
+        ++granted;
+        printf("[info][mock-service] arena_playoff_solo_bye role=%u "
+               "job=%u bracket=%u score=%u evidence=only-one-online-in-tie\n",
+               p->roleId, (u32)p->job, (u32)p->bracket, p->score);
+    }
+    return granted;
+}
+
+static void vm_mock_arena_announce_playoff(void)
+{
+    /* 比武加赛：同分需决出胜负！ */
+    static const char tipGbk[] =
+        "\xb1\xc8\xce\xe4\xbc\xd3\xc8\xfc\xa3\xba\xcd\xac\xb7\xd6\xd0\xe8\xbe\xf6"
+        "\xb3\xf6\xca\xa4\xb8\xba\xa3\xa1";
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    vm_mock_service_client_session *session;
+    u32 n = 0;
+
+    if (g_vm_mock_arena_playoff_announced)
+        return;
+    g_vm_mock_arena_playoff_announced = true;
+    session = g_vm_mock_service_client_sessions;
+    while (session != NULL)
+    {
+        if (session->clientId != 0 && session->roleOnline &&
+            session->onlineRoleId != 0)
+        {
+            if (vm_mock_service_session_enqueue_system_message(session, tipGbk))
+                ++n;
+        }
+        session = session->next;
+    }
+    (void)vm_mock_service_broadcast_world_chat_live(systemNameGbk, tipGbk);
+    printf("[info][mock-service] arena_playoff_begin session=%u tips=%u "
+           "evidence=same-job-bracket-score-tie\n",
+           g_vm_mock_arena_rt.sessionId, n);
+}
+
+/*
+ * Clock hit SETTLED: if same job×bracket players still share score>0 and ≥2
+ * are online on the venue, keep LIVE and run playoff duels. Otherwise settle.
+ * Wait for in-flight arena duels before ranking.
+ */
+static void vm_mock_arena_try_settle_or_playoff(void)
+{
+    if (g_vm_mock_arena_rt.sessionId == 0)
+        return;
+    if (g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_SETTLED)
+        return;
+    vm_mock_arena_sync_venue_participants();
+    if (vm_mock_arena_active_fight_count() != 0)
+    {
+        if (!g_vm_mock_arena_playoff && vm_mock_arena_has_resolvable_score_ties())
+        {
+            /* set_status(LIVE) clears playoff — set flags after status flip. */
+            if (g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_LIVE)
+                vm_mock_arena_set_status(VM_MOCK_ARENA_STATUS_LIVE);
+            g_vm_mock_arena_playoff = true;
+            vm_mock_arena_announce_playoff();
+        }
+        return;
+    }
+    if (vm_mock_arena_has_resolvable_score_ties())
+    {
+        if (g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_LIVE)
+            vm_mock_arena_set_status(VM_MOCK_ARENA_STATUS_LIVE);
+        g_vm_mock_arena_playoff = true;
+        vm_mock_arena_announce_playoff();
+        return;
+    }
+    /* Tie group still exists but only one seat is on the venue: bye, then
+     * re-check (bye may collide with another score group). */
+    if (vm_mock_arena_grant_playoff_solo_byes() != 0)
+    {
+        if (g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_LIVE)
+            vm_mock_arena_set_status(VM_MOCK_ARENA_STATUS_LIVE);
+        g_vm_mock_arena_playoff = true;
+        if (vm_mock_arena_has_resolvable_score_ties())
+        {
+            vm_mock_arena_announce_playoff();
+            return;
+        }
+    }
+    if (g_vm_mock_arena_playoff)
+        printf("[info][mock-service] arena_playoff_done session=%u "
+               "evidence=no-resolvable-tie\n",
+               g_vm_mock_arena_rt.sessionId);
+    g_vm_mock_arena_playoff = false;
+    g_vm_mock_arena_playoff_announced = false;
+    vm_mock_arena_settle();
+}
+
+/* Pair only within a single score-tie group; no bye points (wait for partner). */
+static void vm_mock_arena_match_playoff_ties(void)
+{
+    u32 i;
+    u32 j;
+    u32 pairs = 0;
+    u32 freeSlots;
+
+    if (!g_vm_mock_arena_playoff ||
+        g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_LIVE)
+        return;
+    freeSlots = vm_mock_arena_match_slots_available();
+    if (freeSlots == 0)
+        return;
+    vm_mock_arena_sync_venue_participants();
+    vm_mock_arena_rng_mix((u32)time(NULL));
+    vm_mock_arena_rng_mix(g_vm_mock_arena_rt.sessionId ^ 0xA11CEu);
+
+    for (i = 0; i < g_vm_mock_arena_part_count; ++i)
+    {
+        vm_mock_arena_participant *seed = &g_vm_mock_arena_parts[i];
+        vm_mock_arena_participant *pool[VM_MOCK_ARENA_PARTICIPANT_MAX];
+        u32 poolCount = 0;
+        bool seen = false;
+        u32 p;
+
+        if (seed->score == 0 || seed->job == 0 || seed->bracket == 0)
+            continue;
+        if (!vm_mock_arena_part_on_venue_online(seed))
+            continue;
+        if (vm_mock_service_duel_find_for_client(seed->clientId, NULL) != NULL)
+            continue;
+        for (j = 0; j < i; ++j)
+        {
+            vm_mock_arena_participant *prev = &g_vm_mock_arena_parts[j];
+            if (prev->job == seed->job && prev->bracket == seed->bracket &&
+                prev->score == seed->score &&
+                vm_mock_arena_part_on_venue_online(prev))
+            {
+                seen = true;
+                break;
+            }
+        }
+        if (seen)
+            continue;
+        for (j = 0; j < g_vm_mock_arena_part_count; ++j)
+        {
+            vm_mock_arena_participant *cand = &g_vm_mock_arena_parts[j];
+            if (cand->job != seed->job || cand->bracket != seed->bracket ||
+                cand->score != seed->score)
+                continue;
+            if (!vm_mock_arena_part_on_venue_online(cand))
+                continue;
+            if (vm_mock_service_duel_find_for_client(cand->clientId, NULL) != NULL)
+                continue;
+            pool[poolCount++] = cand;
+        }
+        if (poolCount < 2)
+            continue;
+        for (j = poolCount; j > 1; --j)
+        {
+            u32 k = vm_mock_arena_rng_below(j);
+            vm_mock_arena_participant *tmp = pool[j - 1];
+            pool[j - 1] = pool[k];
+            pool[k] = tmp;
+        }
+        for (p = 0; p + 1 < poolCount; p += 2)
+        {
+            const char *failReason = NULL;
+            vm_mock_service_client_session *inv;
+            vm_mock_service_client_session *resp;
+            vm_mock_service_duel *duel;
+            vm_mock_arena_participant *left = pool[p];
+            vm_mock_arena_participant *right = pool[p + 1];
+
+            if (vm_mock_arena_match_slots_available() == 0)
+                break;
+            inv = vm_mock_arena_live_session_for_part(left);
+            resp = vm_mock_arena_live_session_for_part(right);
+            if (inv == NULL || resp == NULL)
+                continue;
+            duel = vm_mock_service_duel_begin(inv, resp, &failReason);
+            if (duel == NULL)
+            {
+                printf("[info][mock-service] arena_playoff_duel_fail a=%u b=%u "
+                       "score=%u reason=%s\n",
+                       left->roleId, right->roleId, left->score,
+                       failReason ? failReason : "unknown");
+                if (failReason != NULL && strcmp(failReason, "no_slot") == 0)
+                    break;
+                continue;
+            }
+            duel->arenaMode = true;
+            duel->arenaSettled = false;
+            duel->arenaStartTick = g_schedulerTick;
+            left->lastOpponentRoleId = right->roleId;
+            right->lastOpponentRoleId = left->roleId;
+            ++pairs;
+            printf("[info][mock-service] arena_playoff_match a=%u b=%u "
+                   "score=%u job=%u bracket=%u serial=%u\n",
+                   left->roleId, right->roleId, left->score, (u32)left->job,
+                   (u32)left->bracket, duel->serial);
+        }
+    }
+    if (pairs != 0)
+        printf("[info][mock-service] arena_playoff_round_done pairs=%u "
+               "arena_fights=%u/%u\n",
+               pairs, vm_mock_arena_active_fight_count(),
+               (u32)VM_MOCK_ARENA_MAX_CONCURRENT_DUELS);
+}
+
+static void vm_mock_arena_grant_bye(vm_mock_arena_participant *bye, u32 roundIndex,
+                                     u32 poolCount)
+{
+    vm_mock_service_client_session *byeSess;
+    u32 byePts;
+    if (bye == NULL || bye->matchedThisRound)
+        return;
+    byeSess = vm_mock_service_find_client_session(bye->clientId);
+    byePts = g_vm_mock_arena_config.scoreBye;
+    bye->matchedThisRound = 1;
+    bye->byes += 1;
+    vm_mock_arena_add_score(bye, byePts, "bye");
+    printf("[info][mock-service] arena_bye round=%u role=%u pool=%u\n",
+           roundIndex, bye->roleId, poolCount);
+    if (byeSess != NULL)
+    {
+        vm_mock_arena_note_result(byeSess, bye, "bye", byePts);
+        /* No battle 4/7 for bye — deliver on next scene-sync like map tip
+         * (25/12 + 1/3/3). Immediate; do not use duel blank-4/8 delay. */
+        byeSess->sparResultMessageArmed = true;
+        byeSess->sparResultNotBeforeTick = 0;
+        byeSess->sparExitMessageQueued = false;
+    }
+}
+
 static void vm_mock_arena_match_round(void)
 {
     vm_mock_arena_participant *pool[VM_MOCK_ARENA_PARTICIPANT_MAX];
@@ -1944,6 +2665,9 @@ static void vm_mock_arena_match_round(void)
     u32 onlineOnVenue = 0;
     u32 matchedPairs = 0;
     u32 byeCount = 0;
+    u32 deferredCount = 0;
+    bool overflowRetry = false;
+    u32 freeSlotsAtStart = 0;
 
     vm_mock_arena_wall_clock(&dayYmd, &minute, NULL, &unixTs);
     /* Config minutes own the LIVE window; always repair stale session ts first. */
@@ -1975,8 +2699,15 @@ static void vm_mock_arena_match_round(void)
     roundIndex = 1u + elapsed / (g_vm_mock_arena_config.roundSeconds
                                      ? g_vm_mock_arena_config.roundSeconds
                                      : 300u);
-    if (g_vm_mock_arena_rt.lastMatchRound == roundIndex)
-        return;
+    overflowRetry = (g_vm_mock_arena_rt.lastMatchRound == roundIndex);
+    if (overflowRetry)
+    {
+        /* No deferred waiters, or no free duel slots: skip heavy re-pool. */
+        if (g_vm_mock_arena_deferred_unmatched == 0)
+            return;
+        if (vm_mock_arena_match_slots_available() == 0)
+            return;
+    }
     /* Re-bind anyone standing on the venue before pooling (hydrate leaves
      * inArenaScene=0). Without this, round 1 burns empty and tips already LIVE. */
     vm_mock_arena_sync_venue_participants();
@@ -1985,12 +2716,17 @@ static void vm_mock_arena_match_round(void)
     vm_mock_arena_rng_mix(g_vm_mock_arena_rt.sessionId);
     vm_mock_arena_rng_mix(roundIndex);
     vm_mock_arena_rng_mix(g_vm_mock_arena_part_count * 0x10001u);
+    vm_mock_arena_rng_mix(overflowRetry ? 0xA11CEu : 0x51A7u);
 
-    for (i = 0; i < g_vm_mock_arena_part_count; ++i)
-        g_vm_mock_arena_parts[i].matchedThisRound = 0;
+    if (!overflowRetry)
+    {
+        for (i = 0; i < g_vm_mock_arena_part_count; ++i)
+            g_vm_mock_arena_parts[i].matchedThisRound = 0;
+        g_vm_mock_arena_rt.roundIndex = roundIndex;
+        g_vm_mock_arena_rt.roundStartedTs = unixTs;
+    }
 
-    g_vm_mock_arena_rt.roundIndex = roundIndex;
-    g_vm_mock_arena_rt.roundStartedTs = unixTs;
+    freeSlotsAtStart = vm_mock_arena_match_slots_available();
 
     for (i = 0; i < g_vm_mock_arena_part_count; ++i)
     {
@@ -2063,24 +2799,28 @@ static void vm_mock_arena_match_round(void)
         {
             u32 candIdx[VM_MOCK_ARENA_PARTICIPANT_MAX];
             u32 preferIdx[VM_MOCK_ARENA_PARTICIPANT_MAX];
+            u32 orderIdx[VM_MOCK_ARENA_PARTICIPANT_MAX];
             u32 candCount = 0;
             u32 preferCount = 0;
-            u32 pickSlot;
-            u32 partnerPos;
+            u32 orderCount = 0;
             u32 t;
-            vm_mock_arena_participant *left;
-            vm_mock_arena_participant *right;
-            vm_mock_service_client_session *inv;
-            vm_mock_service_client_session *resp;
-            vm_mock_service_duel *duel;
-
-            left = pool[j];
+            u32 p;
+            u32 c;
+            vm_mock_arena_participant *left = pool[j];
             if (left == NULL || left->matchedThisRound)
                 continue;
-            for (t = j + 1; t < poolCount; ++t)
+            if (vm_mock_arena_match_slots_available() == 0)
+            {
+                printf("[info][mock-service] arena_match_defer round=%u role=%u "
+                       "pool=%u evidence=%s\n",
+                       roundIndex, left->roleId, poolCount,
+                       vm_mock_arena_match_block_reason());
+                break;
+            }
+            for (t = 0; t < poolCount; ++t)
             {
                 vm_mock_arena_participant *other = pool[t];
-                if (other == NULL || other->matchedThisRound)
+                if (t == j || other == NULL || other->matchedThisRound)
                     continue;
                 candIdx[candCount++] = t;
                 if (left->lastOpponentRoleId != 0 &&
@@ -2091,74 +2831,130 @@ static void vm_mock_arena_match_round(void)
             }
             if (candCount == 0)
                 continue;
-            pickSlot = preferCount > 0 ? preferIdx[vm_mock_arena_rng_below(preferCount)]
-                                       : candIdx[vm_mock_arena_rng_below(candCount)];
-            partnerPos = pickSlot;
-            right = pool[partnerPos];
-            if (right == NULL)
-                continue;
-            inv = vm_mock_service_find_client_session(left->clientId);
-            resp = vm_mock_service_find_client_session(right->clientId);
-            if (inv == NULL || resp == NULL)
-                continue;
-            duel = vm_mock_service_duel_begin(inv, resp);
-            if (duel == NULL)
+            vm_mock_arena_shuffle_u32(preferIdx, preferCount);
+            vm_mock_arena_shuffle_u32(candIdx, candCount);
+            for (p = 0; p < preferCount; ++p)
+                orderIdx[orderCount++] = preferIdx[p];
+            for (c = 0; c < candCount; ++c)
             {
-                printf("[info][mock-service] arena_match_duel_fail a=%u b=%u "
-                       "round=%u\n",
-                       left->roleId, right->roleId, roundIndex);
-                continue;
+                bool already = false;
+                for (p = 0; p < orderCount; ++p)
+                {
+                    if (orderIdx[p] == candIdx[c])
+                    {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already)
+                    orderIdx[orderCount++] = candIdx[c];
             }
-            duel->arenaMode = true;
-            duel->arenaSettled = false;
-            duel->arenaStartTick = g_schedulerTick;
-            left->matchedThisRound = 1;
-            right->matchedThisRound = 1;
-            /* Optimistic so a mid-round rematch path also avoids this pair. */
-            left->lastOpponentRoleId = right->roleId;
-            right->lastOpponentRoleId = left->roleId;
-            ++matchedPairs;
-            printf("[info][mock-service] arena_match round=%u a=%u b=%u serial=%u "
-                   "pool=%u avoided_rematch=%u evidence=rng+last-opponent\n",
-                   roundIndex, left->roleId, right->roleId, duel->serial, poolCount,
-                   preferCount > 0 ? 1u : 0u);
-        }
-        for (j = 0; j < poolCount; ++j)
-        {
-            vm_mock_arena_participant *bye = pool[j];
-            vm_mock_service_client_session *byeSess;
-            u32 byePts;
-            if (bye == NULL || bye->matchedThisRound)
-                continue;
-            byeSess = vm_mock_service_find_client_session(bye->clientId);
-            byePts = g_vm_mock_arena_config.scoreBye;
-            bye->matchedThisRound = 1;
-            bye->byes += 1;
-            vm_mock_arena_add_score(bye, byePts, "bye");
-            ++byeCount;
-            printf("[info][mock-service] arena_bye round=%u role=%u pool=%u\n",
-                   roundIndex, bye->roleId, poolCount);
-            if (byeSess != NULL)
+            for (p = 0; p < orderCount; ++p)
             {
-                vm_mock_arena_note_result(byeSess, bye, "bye", byePts);
-                /* No battle 4/7 for bye — deliver on next scene-sync like map tip
-                 * (25/12 + 1/3/3). Immediate; do not use duel blank-4/8 delay. */
-                byeSess->sparResultMessageArmed = true;
-                byeSess->sparResultNotBeforeTick = 0;
-                byeSess->sparExitMessageQueued = false;
+                const char *failReason = NULL;
+                vm_mock_arena_participant *right = pool[orderIdx[p]];
+                vm_mock_service_client_session *inv;
+                vm_mock_service_client_session *resp;
+                vm_mock_service_duel *duel;
+                if (right == NULL || right->matchedThisRound)
+                    continue;
+                if (vm_mock_arena_match_slots_available() == 0)
+                {
+                    printf("[info][mock-service] arena_match_duel_fail a=%u b=%u "
+                           "round=%u reason=%s\n",
+                           left->roleId, right->roleId, roundIndex,
+                           vm_mock_arena_match_block_reason());
+                    break;
+                }
+                inv = vm_mock_arena_live_session_for_part(left);
+                resp = vm_mock_arena_live_session_for_part(right);
+                if (inv == NULL || resp == NULL)
+                {
+                    printf("[info][mock-service] arena_match_duel_fail a=%u b=%u "
+                           "round=%u reason=session_missing\n",
+                           left->roleId, right->roleId, roundIndex);
+                    continue;
+                }
+                duel = vm_mock_service_duel_begin(inv, resp, &failReason);
+                if (duel == NULL)
+                {
+                    printf("[info][mock-service] arena_match_duel_fail a=%u b=%u "
+                           "round=%u reason=%s\n",
+                           left->roleId, right->roleId, roundIndex,
+                           failReason ? failReason : "unknown");
+                    if (failReason != NULL && strcmp(failReason, "no_slot") == 0)
+                        break;
+                    continue;
+                }
+                duel->arenaMode = true;
+                duel->arenaSettled = false;
+                duel->arenaStartTick = g_schedulerTick;
+                left->matchedThisRound = 1;
+                right->matchedThisRound = 1;
+                /* Optimistic so a mid-round rematch path also avoids this pair. */
+                left->lastOpponentRoleId = right->roleId;
+                right->lastOpponentRoleId = left->roleId;
+                ++matchedPairs;
+                printf("[info][mock-service] arena_match round=%u a=%u b=%u serial=%u "
+                       "pool=%u avoided_rematch=%u overflow=%u "
+                       "evidence=rng+retry-partners\n",
+                       roundIndex, left->roleId, right->roleId, duel->serial,
+                       poolCount, preferCount > 0 ? 1u : 0u,
+                       overflowRetry ? 1u : 0u);
+                break;
+            }
+        }
+        {
+            u32 unmatchedCount = 0;
+            u32 unmatchedIdx = 0;
+            for (j = 0; j < poolCount; ++j)
+            {
+                if (pool[j] != NULL && !pool[j]->matchedThisRound)
+                {
+                    unmatchedCount++;
+                    unmatchedIdx = j;
+                }
+            }
+            if (unmatchedCount == 1)
+            {
+                vm_mock_arena_grant_bye(pool[unmatchedIdx], roundIndex, poolCount);
+                ++byeCount;
+            }
+            else if (unmatchedCount > 1)
+            {
+                deferredCount += unmatchedCount;
+                /* Log once per new round pass; overflow retries stay quiet. */
+                if (!overflowRetry)
+                    printf("[info][mock-service] arena_match_defer_bucket round=%u "
+                           "job=%u bracket=%u unmatched=%u pool=%u match_slots=%u "
+                           "arena_fights=%u/%u evidence=wait-not-bye\n",
+                           roundIndex, (u32)seed->job, (u32)seed->bracket,
+                           unmatchedCount, poolCount,
+                           vm_mock_arena_match_slots_available(),
+                           vm_mock_arena_active_fight_count(),
+                           (u32)VM_MOCK_ARENA_MAX_CONCURRENT_DUELS);
             }
         }
     }
+    g_vm_mock_arena_deferred_unmatched = deferredCount;
+    if (overflowRetry && matchedPairs == 0 && byeCount == 0 && deferredCount == 0)
+        return;
     printf("[info][mock-service] arena_match_round_done round=%u parts=%u "
-           "venue_pool_seats=%u pairs=%u byes=%u match_ts=%u end_ts=%u\n",
+           "venue_pool_seats=%u pairs=%u byes=%u deferred=%u match_slots=%u/%u "
+           "arena_fights=%u/%u overflow=%u match_ts=%u end_ts=%u\n",
            roundIndex, g_vm_mock_arena_part_count, onlineOnVenue, matchedPairs,
-           byeCount, g_vm_mock_arena_rt.matchStartTs, g_vm_mock_arena_rt.matchEndTs);
+           byeCount, deferredCount, vm_mock_arena_match_slots_available(),
+           freeSlotsAtStart, vm_mock_arena_active_fight_count(),
+           (u32)VM_MOCK_ARENA_MAX_CONCURRENT_DUELS, overflowRetry ? 1u : 0u,
+           g_vm_mock_arena_rt.matchStartTs, g_vm_mock_arena_rt.matchEndTs);
     /*
      * Only consume the round when at least one online venue seat was eligible.
      * Empty pools used to set lastMatchRound first →「比赛开始」后整场空转到
      * 下一 5 分钟轮次 (2026-08-14 session=3 score 全 0).
+     * Deferred waiters still consume so matchedThisRound sticks; overflow ticks
+     * keep pairing them without resetting the round clock.
      */
-    if (onlineOnVenue > 0 || matchedPairs > 0 || byeCount > 0)
+    if (onlineOnVenue > 0 || matchedPairs > 0 || byeCount > 0 || deferredCount > 0)
         g_vm_mock_arena_rt.lastMatchRound = roundIndex;
     else
         printf("[info][mock-service] arena_match_round_retry round=%u "
@@ -2175,6 +2971,8 @@ static void vm_mock_arena_tick(void)
     u8 desired;
     u32 i;
     u32 timeoutSeconds;
+    u32 tickStartMs;
+    u32 tickMs;
 
     (void)vm_mock_arena_load_config(false);
     /* Wager idle-timeout must run even when tournament arena is disabled. */
@@ -2185,6 +2983,16 @@ static void vm_mock_arena_tick(void)
     if (unixTs == g_vm_mock_arena_last_tick_sec)
         return;
     g_vm_mock_arena_last_tick_sec = unixTs;
+    tickStartMs = scheduler_get_tick_ms();
+
+    /*
+     * After SETTLED: skip reconcile/match/duel-timeout under protocol lock.
+     * Old builds kept scanning duels + session sync for matchEnd+120min and
+     * starved admin/game (503 游戏服务繁忙).
+     */
+    if (g_vm_mock_arena_rt.sessionId != 0 &&
+        g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_SETTLED)
+        return;
 
     if ((g_vm_mock_arena_config.weekdayMask & weekdayBit) != 0 &&
         minute >= g_vm_mock_arena_config.entryStartMinute &&
@@ -2206,14 +3014,24 @@ static void vm_mock_arena_tick(void)
         vm_mock_arena_reconcile_status_from_desired(minute);
         vm_mock_arena_sync_venue_participants();
         if (g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_LIVE)
-            vm_mock_arena_match_round();
-        /* Re-announce if process rebound mid-phase without a status edge. */
-        if (g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_ENTRY ||
-            g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_LIVE ||
-            g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_SETTLED)
+        {
+            if (g_vm_mock_arena_playoff)
+                vm_mock_arena_match_playoff_ties();
+            else
+                vm_mock_arena_match_round();
+            /* After playoff duels end / ties clear, settle on the same tick. */
+            if (desired == VM_MOCK_ARENA_STATUS_SETTLED &&
+                g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_SETTLED)
+                vm_mock_arena_try_settle_or_playoff();
+        }
+        /* Only on unreannounced phase (rebound / status edge). Late joiners tip
+         * on their own HUD/poll path — do not walk all seats every second. */
+        if ((g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_ENTRY ||
+             g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_LIVE ||
+             g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_SETTLED) &&
+            g_vm_mock_arena_announced_status != g_vm_mock_arena_rt.status)
         {
             vm_mock_arena_announce_status(g_vm_mock_arena_rt.status);
-            vm_mock_arena_catchup_phase_tips();
         }
         /*
          * Once per ENTRY/LIVE bind: force peer resync so stale cross-bracket
@@ -2257,6 +3075,17 @@ static void vm_mock_arena_tick(void)
         if (ageSec >= timeoutSeconds)
             vm_mock_arena_force_duel_draw(duel);
     }
+    tickMs = scheduler_get_tick_ms() - tickStartMs;
+    if (tickMs > 50u)
+        printf("[warn][mock-service] arena_tick_slow ms=%u status=%u parts=%u "
+               "deferred=%u match_slots=%u arena_fights=%u/%u "
+               "evidence=protocol-lock-risk\n",
+               tickMs, (u32)g_vm_mock_arena_rt.status, g_vm_mock_arena_part_count,
+               g_vm_mock_arena_deferred_unmatched,
+               vm_mock_arena_match_slots_available(),
+               vm_mock_arena_active_fight_count(),
+               (u32)VM_MOCK_ARENA_MAX_CONCURRENT_DUELS);
+    (void)desired;
 }
 
 static vm_mock_arena_participant *vm_mock_arena_ensure_participant(
@@ -2264,28 +3093,48 @@ static vm_mock_arena_participant *vm_mock_arena_ensure_participant(
 {
     vm_mock_arena_participant *p;
     u16 bracket;
+    u32 roleId;
+    u8 job;
+    u32 level;
+    const char *name;
 
-    if (session == NULL || role == NULL || role->roleId == 0)
+    if (session == NULL)
         return NULL;
-    bracket = vm_mock_arena_bracket_for_level(role->level);
+    if (role != NULL && role->roleId != 0)
+    {
+        roleId = role->roleId;
+        job = role->job ? role->job : session->onlineJob;
+        level = role->level ? role->level : session->onlineLevel;
+        name = role->name[0] ? role->name : session->onlineRoleName;
+    }
+    else if (session->onlineRoleId != 0)
+    {
+        roleId = session->onlineRoleId;
+        job = session->onlineJob;
+        level = session->onlineLevel;
+        name = session->onlineRoleName;
+    }
+    else
+        return NULL;
+    bracket = vm_mock_arena_bracket_for_level(level);
     if (bracket == 0)
         return NULL;
-    p = vm_mock_arena_find_part(role->roleId);
+    p = vm_mock_arena_find_part(roleId);
     if (p == NULL)
     {
         if (g_vm_mock_arena_part_count >= VM_MOCK_ARENA_PARTICIPANT_MAX)
             return NULL;
         p = &g_vm_mock_arena_parts[g_vm_mock_arena_part_count++];
         memset(p, 0, sizeof(*p));
-        p->roleId = role->roleId;
+        p->roleId = roleId;
         snprintf(p->accountId, sizeof(p->accountId), "%s", session->accountId);
-        snprintf(p->roleName, sizeof(p->roleName), "%s",
-                 role->name[0] ? role->name : session->onlineRoleName);
+        snprintf(p->roleName, sizeof(p->roleName), "%s", name ? name : "");
     }
     p->clientId = session->clientId;
-    p->job = role->job ? role->job : session->onlineJob;
+    if (job != 0)
+        p->job = job;
     p->bracket = bracket;
-    p->level = (u16)(role->level ? role->level : session->onlineLevel);
+    p->level = (u16)level;
     return p;
 }
 
@@ -2381,10 +3230,10 @@ static u32 vm_net_mock_build_arena_leave_response(u8 *out, u32 outCap)
 /* Scene-sync idle fast-path must not starve arena HUD / settle clear. */
 static bool vm_mock_arena_poll_needs_body(vm_mock_service_client_session *session)
 {
-    vm_net_mock_role_state *role;
     vm_mock_arena_participant *p;
     const char *scene;
     u8 status;
+    const char *tip;
 
     if (session == NULL || g_vm_mock_arena_rt.sessionId == 0)
         return false;
@@ -2393,21 +3242,24 @@ static bool vm_mock_arena_poll_needs_body(vm_mock_service_client_session *sessio
         status != VM_MOCK_ARENA_STATUS_LIVE &&
         status != VM_MOCK_ARENA_STATUS_SETTLED)
         return false;
+    if (status == VM_MOCK_ARENA_STATUS_SETTLED && session->arenaHudSettlePushed)
+        return false;
     scene = session->sceneVisibleScene[0] ? session->sceneVisibleScene
                                           : session->onlineScene;
     if (!vm_mock_arena_is_arena_scene(scene) &&
         !vm_mock_arena_is_arena_scene(session->onlineScene))
         return false;
-    role = vm_mock_service_trade_role_for_session(session, NULL);
-    if (role == NULL)
-        return false;
-    p = vm_mock_arena_find_part(role->roleId);
+    /* Late joiner / missed edge: tip this seat only (no full-session walk). */
+    tip = vm_mock_arena_phase_tip_gbk(status);
+    if (tip != NULL)
+        vm_mock_arena_deliver_phase_tip_to_session(session, status, tip);
+    p = vm_mock_arena_find_part(session->onlineRoleId);
     if (p == NULL)
     {
         /* Standing on venue during ENTRY/LIVE: enroll so HUD/match can run. */
         if (status == VM_MOCK_ARENA_STATUS_ENTRY ||
             status == VM_MOCK_ARENA_STATUS_LIVE)
-            p = vm_mock_arena_ensure_participant(session, role);
+            p = vm_mock_arena_ensure_participant(session, NULL);
     }
     if (p == NULL)
         return false;
@@ -2422,9 +3274,6 @@ static bool vm_net_mock_append_arena_hud_object(u8 *out, u32 outCap, u32 *pos)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
-    vm_net_mock_role_state *role =
-        session ? vm_mock_service_trade_role_for_session(session, NULL)
-                : vm_net_mock_active_role();
     vm_mock_arena_participant *p;
     u32 objectStart = 0;
     u32 unixTs = 0;
@@ -2433,17 +3282,17 @@ static bool vm_net_mock_append_arena_hud_object(u8 *out, u32 outCap, u32 *pos)
     u32 roundSec;
     u8 status;
 
-    if (out == NULL || pos == NULL || role == NULL)
+    if (out == NULL || pos == NULL || session == NULL || session->onlineRoleId == 0)
         return false;
     if (g_vm_mock_arena_rt.sessionId == 0)
         return false;
     status = g_vm_mock_arena_rt.status;
-    p = vm_mock_arena_find_part(role->roleId);
+    p = vm_mock_arena_find_part(session->onlineRoleId);
     if (p == NULL || !p->inArenaScene)
     {
         /* Self-heal: poll_needs_body / sync_venue may have just enrolled. */
-        if (session != NULL && vm_mock_arena_poll_needs_body(session))
-            p = vm_mock_arena_find_part(role->roleId);
+        if (vm_mock_arena_poll_needs_body(session))
+            p = vm_mock_arena_find_part(session->onlineRoleId);
     }
     if (p == NULL || !p->inArenaScene)
         return false;
@@ -2478,9 +3327,13 @@ static bool vm_net_mock_append_arena_hud_object(u8 *out, u32 outCap, u32 *pos)
         !vm_net_mock_put_object_u32(out, outCap, pos, "eventRemain", eventRemain) ||
         !vm_net_mock_put_object_u32(out, outCap, pos, "score", p->score) ||
         !vm_net_mock_put_object_u32(out, outCap, pos, "job", p->job) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "bracket", p->bracket))
+        !vm_net_mock_put_object_u32(out, outCap, pos, "bracket", p->bracket) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "playoff",
+                                    g_vm_mock_arena_playoff ? 1u : 0u))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (status == VM_MOCK_ARENA_STATUS_SETTLED)
+        session->arenaHudSettlePushed = true;
     return true;
 }
 

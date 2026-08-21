@@ -44,7 +44,7 @@ const pngRetain = new Map<string, number>();
 const pngBase = new Map<string, Texture>();
 const unloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
 /** Delay so brief face/act churn does not thrash GPU re-upload. */
-const UNLOAD_DELAY_MS = 2500;
+const UNLOAD_DELAY_MS = isNativePlatform() ? 30_000 : 2500;
 
 function isNativePlatform(): boolean {
   try {
@@ -97,6 +97,11 @@ export function retainPlistAtlas(atlas: LoadedPlistAtlas | null | undefined): vo
   cancelScheduledUnload(url);
   pngBase.set(url, atlas.base);
   pngRetain.set(url, (pngRetain.get(url) ?? 0) + 1);
+  try {
+    atlas.base.source.autoGarbageCollect = false;
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Drop one display hold; GPU unload only when nobody retains the PNG. */
@@ -106,6 +111,11 @@ export function releasePlistAtlas(atlas: LoadedPlistAtlas | null | undefined): v
   const n = (pngRetain.get(url) ?? 0) - 1;
   if (n <= 0) {
     pngRetain.delete(url);
+    try {
+      atlas.base.source.autoGarbageCollect = true;
+    } catch {
+      /* ignore */
+    }
     scheduleGpuUnload(url);
   } else {
     pngRetain.set(url, n);
@@ -423,7 +433,7 @@ export function loadPlistAtlas(
       throw e;
     }
     base.source.scaleMode = "nearest";
-    // ImageSource defaults true; keep explicit so TextureGC/GCSystem can reclaim idle GPU.
+    // Idle sheets may GC; retainPlistAtlas sets false while displayed.
     base.source.autoGarbageCollect = true;
     if (isNativePlatform()) {
       base.source.autoGenerateMipmaps = false;

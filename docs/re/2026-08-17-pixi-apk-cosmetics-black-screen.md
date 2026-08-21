@@ -113,3 +113,55 @@
 ## 2026-08-18 玩家反馈：无本机翅/骑也会黑屏
 
 「自己没装」≠「场景无图集」（附近 peer 仍加载）。非妆容路径（姿态/UC3/战斗 FX）与「丢 GL 回不来」仍可能黑屏。取证快照含 `peersWithCos` / `plist`；连续 3 次 recover 仍 lost → 软重载。
+
+## 2026-08-18 截图：LCD 全黑、HTML 软键仍在
+
+玩家截图：画布区纯黑（Pixi clear `#05070a`），底栏「确定 / 方向 / 右软」与右上角 HTML 白点开关仍在。会话未崩。
+
+第一次偏离在 **恢复契约**，不是玩法假死：
+
+1. `webglcontextlost` 后 **50ms** 就 `recover`：此时上下文多半仍 lost；`restoreContext()` / `isContextLost()` 可能报「已恢复」，但 framebuffer 仍是清屏色。ticker 只看 `isContextLost()`，不再 nudge，于是 **假恢复 + 一直黑**。
+2. 息屏保活仍跑 ticker 时，Pixi `GCSystem`（native 20s）会把「未 touch」的地图/HUD ImageSource `unload`；亮屏后若 nudge 不全，同样整屏空。
+3. 地图 `Texture.from(canvas)` 默认可被 TextureGC 回收。
+
+修改（仍禁止对在用妆容 PNG `Assets.unload`）：
+
+- 丢上下文后等到 `contextrestored` 再 recover；8s 无 restored → 软重载（每页最多 2 次）。
+- recover 后 `renderer.resize` + 对 LCD 顶条 `extract.pixels`：仍接近清屏色则算失败（不单信 `isContextLost`）。
+- `document.hidden` 时关掉 `renderer.gc.enabled`；地图贴图 `autoGarbageCollect = false`。
+
+验证：城镇久挂 / 息屏再亮，偶发 `[gl] webglcontextlost` 后应 `[gl] webglcontextrestored` 并出图；若持续 `[gl] recover still blank` 应在约 8s 内软重载回登录，而不是卡死黑屏。
+
+## 2026-08-19 黑屏仍出现
+
+上一轮只修了「假恢复」探测，黑屏仍会发生。第一次偏离在 **GPU 生命周期 + 丢失后不主动 restore**：
+
+1. 附近玩家离开时 `destroyMarker` 直接 `root.destroy`，**没有** `wing/mount/chenghao.clear()` → plist refcount 永不归零 → 城镇见过的翅/骑 PNG 一直占 GPU → `webglcontextlost`。
+2. Pixi 8 只对 `forceContextLoss` 调 `restoreContext()`；自然 OOM 后 WebView 经常 **永不** `contextrestored`。上一轮还去掉了 lost 后 50ms recover，等于干等。
+3. Pixi ticker 在 lost 后可能停转，2s 检测失效。
+4. Native `resolution=3` + `gcMaxUnusedTime=20s` 加重预算与误卸。
+
+修改：
+
+- `destroyMarker` 先 `clear()` 妆容；APK 只给最近 6 名附近玩家上传翅/骑（称号仍全员）。
+- 显示中的 plist `autoGarbageCollect=false`；native 闲置卸 GPU 延迟 30s。
+- `powerPreference=low-power`、TextureGC 回到 60s。
+- `webglcontextlost` 立即 `WEBGL_lose_context.restoreContext()`；`setInterval` 不依赖 ticker；reload 上限 6。
+
+## 2026-08-19 LCD 分辨率与字体
+
+`resolution=1` 会把整块 240×400 画布（字 + 地图）一起拉伸，UC3 变糊。Framebuffer 相对妆容 PNG 很小，不是黑屏主因。
+
+已恢复 native LCD `resolution` 跟 CSS 缩放（上限 3），字体/HUD 与浏览器一致。画面侧 GPU 仍靠：离开玩家 `clear()` 妆容、附近翅/骑最多 6 人、plist 闲置 unload。
+
+验证：城镇地名条 / 菜单字应接近 HTML 软键清晰度；黑屏路径仍走上一节。
+
+## 2026-08-19 同场景 / 同战斗复用
+
+第一次偏离：同图也会 `invalidateMap` + 重解 SCE/MAP/GIF；挂机连战 `show`/`hide` 拆掉战斗底图和姿态贴图。
+
+- `loadSceneMap` 保留最近约 8 张已合成场景；再进同一 `.sce` 不再解包拼图。
+- `onEnterScene` 不再无条件拆地图；同图只改坐标，不重置野外怪/装饰/传送门。
+- 战斗：同 `b_*.sce` 不重绘底图；进出战斗保留姿态贴图缓存；`resolveBattleSce` 结果记住。
+
+验证：同图走动/战后回图不应再卡一下重绘；挂机连续遇敌战斗底图不闪、角色贴图不重新上传。

@@ -12,7 +12,7 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     u32 newItemId = 0;
     u32 oldItemId = 0;
     u8 slot = 0xff;
-    u8 itemCount = 0;
+    u32 itemCount = 0;
     vm_net_mock_role_state before;
 
     if (equippedItemIdOut)
@@ -3853,7 +3853,7 @@ enum
     VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX = 8,
     VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX = 2048,
     VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX = 512,
-    VM_MOCK_SERVICE_DUEL_MAX = 16,
+    VM_MOCK_SERVICE_DUEL_MAX = 64,
     VM_MOCK_SERVICE_DUEL_EVENT_MAX = 8,
     VM_MOCK_SERVICE_TRADE_MAX = 16,
     VM_MOCK_SERVICE_TRADE_ITEM_MAX = 10
@@ -4334,6 +4334,8 @@ typedef struct vm_mock_service_client_session
     char arenaResultFdata[96];
     /* Last arena phase tip delivered to this client (ENTRY/LIVE/SETTLED). */
     u8 arenaPhaseTipStatus;
+    /* SETTLED HUD (41/5 status=3) delivered once — stop idle poll body churn. */
+    bool arenaHudSettlePushed;
     u32 pendingTeamBattleSerial;
     /* HandleChallengeResponse(0x010395AA) first consumes 30/9 and its
      * confirmation callback sends 30/10 {agree}.  Keep the target on the
@@ -4724,6 +4726,8 @@ typedef struct
     bool arenaMode;
     bool arenaSettled;
     u32 arenaStartTick;
+    /* Arena-only: completed resolve rounds; damage/hit scale 2^n. */
+    u16 resolvedRoundCount;
     /* Pixi 赏金擂台: stake settle via wager; same death exemption as arena. */
     bool wagerMode;
     bool wagerSettled;
@@ -6878,7 +6882,7 @@ static bool vm_mock_service_trade_role_add_item(
     const vm_net_mock_enhance_wash_state *wash,
     u16 *destinationSeqOut)
 {
-    u8 itemCount = 0;
+    u32 itemCount = 0;
     bool isEquipment = false;
 
     if (destinationSeqOut)

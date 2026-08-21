@@ -10799,7 +10799,7 @@ static bool vm_net_mock_role_grant_durable_pass_remaining(
     u16 *seqOut,
     const char *reason)
 {
-    u8 itemCount = 0;
+    u32 itemCount = 0;
     u32 maxDur = 0;
     u32 freeSlots = 0;
     vm_net_mock_backpack_item_state *item = NULL;
@@ -10861,7 +10861,7 @@ static bool vm_net_mock_role_grant_flask_reservoir_points(
     u16 *seqOut,
     const char *reason)
 {
-    u8 itemCount = 0;
+    u32 itemCount = 0;
     vm_net_mock_backpack_item_state *existing = NULL;
     u16 keepSeq = 0;
     u32 beforePoints = 0;
@@ -10968,7 +10968,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
 {
     const vm_net_mock_item_effect_catalog_item *effect = NULL;
     u32 reservoirCapacity = 0;
-    u8 itemCount = 0;
+    u32 itemCount = 0;
     vm_net_mock_role_state before;
     u16 clampedEnhance = enhanceLevel;
 
@@ -11203,7 +11203,7 @@ static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_n
                                                                             u32 itemId,
                                                                             u16 seq)
 {
-    u8 itemCount = 0;
+    u32 itemCount = 0;
 
     if (role == NULL || (itemId == 0 && seq == 0))
         return NULL;
@@ -11236,7 +11236,7 @@ static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item_by_e
                                                                                       u32 mp,
                                                                                       u32 exp)
 {
-    u8 itemCount = 0;
+    u32 itemCount = 0;
 
     if (role == NULL || (hp == 0 && mp == 0 && exp == 0))
         return NULL;
@@ -11309,7 +11309,7 @@ static bool vm_net_mock_role_consume_backpack_item_amount(
     u32 need = amount;
     u32 syncCount = 0;
     u32 held = 0;
-    u8 itemCount = 0;
+    u32 itemCount = 0;
 
     if (syncCountOut)
         *syncCountOut = 0;
@@ -11362,7 +11362,7 @@ static u32 vm_net_mock_dream_purge_item_841(vm_net_mock_role_state *role,
                                             const char *reason)
 {
     u32 removed = 0;
-    u8 itemCount = 0;
+    u32 itemCount = 0;
 
     if (role == NULL)
         return 0;

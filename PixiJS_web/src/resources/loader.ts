@@ -36,6 +36,10 @@ type CacheEntry = {
 
 const cache = new Map<string, CacheEntry>();
 
+/** Composed scene RGBA + SCE parse — reuse when re-entering the same map. */
+const SCENE_COMPOSE_MAX = 16;
+const sceneComposeCache = new Map<string, LoadedScene>();
+
 /** Live CBMS exchange for WT18/7 (set from GameSession after connect). */
 let resourceExchange: ResourceExchange | null = null;
 
@@ -124,6 +128,7 @@ export function getCachedResourceStamp(name: string): string | null {
 export function invalidateResourceCache(name?: string): void {
   if (name) cache.delete(name);
   else cache.clear();
+  if (!name) sceneComposeCache.clear();
 }
 
 function cachePut(
@@ -338,8 +343,21 @@ export type LoadedScene = {
   teleportStones: SceInteractive[];
 };
 
+function sceneComposeKey(sceneFile: string): string {
+  return sceneFile.replace(/\\/g, "/").toLowerCase();
+}
+
 export async function loadSceneMap(sceneFile: string): Promise<LoadedScene> {
-  // Always version-check scene shell + map tiles when entering a map.
+  for (const alias of [sceneFile, ...sceneAssetCandidates(sceneFile)]) {
+    const hit = sceneComposeCache.get(sceneComposeKey(alias));
+    if (hit) {
+      sceneComposeCache.delete(sceneComposeKey(alias));
+      sceneComposeCache.set(sceneComposeKey(alias), hit);
+      return hit;
+    }
+  }
+
+  // First visit: version-check scene shell + map tiles (browser). APK bytes stay cached.
   const revalidate = true as const;
   const candidates = sceneAssetCandidates(sceneFile);
   let resolved = candidates[0]!;
@@ -414,7 +432,7 @@ export async function loadSceneMap(sceneFile: string): Promise<LoadedScene> {
     ...fromInteractive,
     ...fromScan.filter((s) => !stoneKeys.has(`${s.actorResource}@${s.x},${s.y}`)),
   ];
-  return {
+  const loaded: LoadedScene = {
     sceneFile: resolved,
     sce,
     map,
@@ -428,6 +446,14 @@ export async function loadSceneMap(sceneFile: string): Promise<LoadedScene> {
     interactives,
     teleportStones,
   };
+  sceneComposeCache.set(sceneComposeKey(resolved), loaded);
+  sceneComposeCache.set(sceneComposeKey(sceneFile), loaded);
+  while (sceneComposeCache.size > SCENE_COMPOSE_MAX) {
+    const oldest = sceneComposeCache.keys().next().value;
+    if (oldest == null) break;
+    sceneComposeCache.delete(oldest);
+  }
+  return loaded;
 }
 
 export type SceneIndex = {

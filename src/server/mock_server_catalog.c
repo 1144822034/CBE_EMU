@@ -6027,7 +6027,13 @@ enum
     VM_NET_MOCK_BRONZE_CHEST_KEY_ID = 813,
     VM_NET_MOCK_SILVER_CHEST_KEY_ID = 814,
     VM_NET_MOCK_GOLD_CHEST_KEY_ID = 815,
-    VM_NET_MOCK_CHEST_REWARD_MAX_ROWS = 4096
+    VM_NET_MOCK_CHEST_KIND_COUNT = 3,
+    /*
+     * Per-chest pools — never share one global row cap across 522/523/524.
+     * Old flat load (522 then 523 then 524) could leave 523/524 truncated in
+     * memory while MySQL still had the full table (523 always rolling 910).
+     */
+    VM_NET_MOCK_CHEST_REWARD_MAX_ROWS_PER_CHEST = 1536
 };
 
 typedef struct
@@ -6038,12 +6044,65 @@ typedef struct
     u8 enabled;
 } vm_net_mock_chest_reward_row;
 
+static const u32 g_vm_net_mock_chest_reward_chest_ids[VM_NET_MOCK_CHEST_KIND_COUNT] =
+    {
+        VM_NET_MOCK_BRONZE_CHEST_ITEM_ID,
+        VM_NET_MOCK_SILVER_CHEST_ITEM_ID,
+        VM_NET_MOCK_GOLD_CHEST_ITEM_ID,
+    };
+
 static u32 g_vm_net_mock_chest_open_rng = 0;
-static vm_net_mock_chest_reward_row
-    g_vm_net_mock_chest_rewards[VM_NET_MOCK_CHEST_REWARD_MAX_ROWS];
-static u32 g_vm_net_mock_chest_reward_count = 0;
+static vm_net_mock_chest_reward_row g_vm_net_mock_chest_rewards
+    [VM_NET_MOCK_CHEST_KIND_COUNT][VM_NET_MOCK_CHEST_REWARD_MAX_ROWS_PER_CHEST];
+static u32 g_vm_net_mock_chest_reward_count_by_chest[VM_NET_MOCK_CHEST_KIND_COUNT];
+static u32 g_vm_net_mock_chest_reward_skipped_by_chest[VM_NET_MOCK_CHEST_KIND_COUNT];
+static bool g_vm_net_mock_chest_reward_truncated[VM_NET_MOCK_CHEST_KIND_COUNT];
+static bool g_vm_net_mock_chest_reward_reload_attempted[VM_NET_MOCK_CHEST_KIND_COUNT];
 static bool g_vm_net_mock_chest_reward_db_loaded = false;
 static bool g_vm_net_mock_chest_reward_db_valid = false;
+
+static u32 vm_net_mock_chest_reward_kind_for_item(u32 chestItemId)
+{
+    for (u32 i = 0; i < VM_NET_MOCK_CHEST_KIND_COUNT; ++i)
+    {
+        if (g_vm_net_mock_chest_reward_chest_ids[i] == chestItemId)
+            return i;
+    }
+    return VM_NET_MOCK_CHEST_KIND_COUNT;
+}
+
+static u32 vm_net_mock_chest_reward_total_loaded(void)
+{
+    u32 total = 0;
+
+    for (u32 i = 0; i < VM_NET_MOCK_CHEST_KIND_COUNT; ++i)
+        total += g_vm_net_mock_chest_reward_count_by_chest[i];
+    return total;
+}
+
+static u32 vm_net_mock_chest_reward_total_skipped(void)
+{
+    u32 total = 0;
+
+    for (u32 i = 0; i < VM_NET_MOCK_CHEST_KIND_COUNT; ++i)
+        total += g_vm_net_mock_chest_reward_skipped_by_chest[i];
+    return total;
+}
+
+static u32 vm_net_mock_chest_reward_enabled_loaded(u32 chestItemId)
+{
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+    u32 enabled = 0;
+
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+        return 0;
+    for (u32 i = 0; i < g_vm_net_mock_chest_reward_count_by_chest[kind]; ++i)
+    {
+        if (g_vm_net_mock_chest_rewards[kind][i].enabled != 0)
+            ++enabled;
+    }
+    return enabled;
+}
 
 static u32 vm_net_mock_chest_key_for_box(u32 boxItemId)
 {
@@ -6129,6 +6188,7 @@ static bool vm_net_mock_chest_reward_item_eligible_legacy(u32 itemId)
 
 typedef struct
 {
+    u32 expectedChestItemId;
     u32 loaded;
     u32 skipped;
 } vm_net_mock_chest_reward_load_context;
@@ -6144,20 +6204,36 @@ static bool vm_net_mock_chest_reward_db_row(void *contextValue,
     u32 rewardItemId = 0;
     u32 weight = 1;
     u32 enabled = 1;
+    u32 kind = VM_NET_MOCK_CHEST_KIND_COUNT;
     vm_net_mock_chest_reward_row *dst = NULL;
 
     if (context == NULL || values == NULL || lengths == NULL || columnCount < 4)
         return false;
-    if (g_vm_net_mock_chest_reward_count >= VM_NET_MOCK_CHEST_REWARD_MAX_ROWS)
-    {
-        ++context->skipped;
-        return true;
-    }
     if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &chestItemId) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &rewardItemId) ||
         chestItemId == 0 || rewardItemId == 0 ||
         !vm_net_mock_chest_box_is_supported(chestItemId))
     {
+        ++context->skipped;
+        return true;
+    }
+    if (context->expectedChestItemId != 0 &&
+        chestItemId != context->expectedChestItemId)
+    {
+        ++context->skipped;
+        return true;
+    }
+    kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+    {
+        ++context->skipped;
+        return true;
+    }
+    if (g_vm_net_mock_chest_reward_count_by_chest[kind] >=
+        VM_NET_MOCK_CHEST_REWARD_MAX_ROWS_PER_CHEST)
+    {
+        ++g_vm_net_mock_chest_reward_skipped_by_chest[kind];
+        g_vm_net_mock_chest_reward_truncated[kind] = true;
         ++context->skipped;
         return true;
     }
@@ -6172,12 +6248,14 @@ static bool vm_net_mock_chest_reward_db_row(void *contextValue,
         ++context->skipped;
         return true;
     }
-    dst = &g_vm_net_mock_chest_rewards[g_vm_net_mock_chest_reward_count++];
+    dst = &g_vm_net_mock_chest_rewards[kind]
+               [g_vm_net_mock_chest_reward_count_by_chest[kind]];
     memset(dst, 0, sizeof(*dst));
     dst->chestItemId = chestItemId;
     dst->rewardItemId = rewardItemId;
     dst->weight = weight;
     dst->enabled = enabled != 0 ? 1 : 0;
+    ++g_vm_net_mock_chest_reward_count_by_chest[kind];
     ++context->loaded;
     return true;
 }
@@ -6190,8 +6268,14 @@ static bool vm_net_mock_chest_reward_db_load(void)
         return g_vm_net_mock_chest_reward_db_valid;
     g_vm_net_mock_chest_reward_db_loaded = true;
     g_vm_net_mock_chest_reward_db_valid = false;
-    g_vm_net_mock_chest_reward_count = 0;
-    memset(&context, 0, sizeof(context));
+    memset(g_vm_net_mock_chest_reward_count_by_chest, 0,
+           sizeof(g_vm_net_mock_chest_reward_count_by_chest));
+    memset(g_vm_net_mock_chest_reward_skipped_by_chest, 0,
+           sizeof(g_vm_net_mock_chest_reward_skipped_by_chest));
+    memset(g_vm_net_mock_chest_reward_truncated, 0,
+           sizeof(g_vm_net_mock_chest_reward_truncated));
+    memset(g_vm_net_mock_chest_reward_reload_attempted, 0,
+           sizeof(g_vm_net_mock_chest_reward_reload_attempted));
 
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_chest_rewards ("
@@ -6203,27 +6287,84 @@ static bool vm_net_mock_chest_reward_db_load(void)
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(chest_item_id,reward_item_id)"
-            ") ENGINE=InnoDB") ||
-        !vm_mysql_query(
-            "SELECT chest_item_id,reward_item_id,weight,enabled "
-            "FROM server_chest_rewards ORDER BY chest_item_id,reward_item_id",
-            vm_net_mock_chest_reward_db_row, &context))
+            ") ENGINE=InnoDB"))
     {
         printf("[error][mock-admin] chest_reward_db_load failed error=%s\n",
                vm_mysql_last_error());
         return false;
     }
+
+    for (u32 kind = 0; kind < VM_NET_MOCK_CHEST_KIND_COUNT; ++kind)
+    {
+        char query[256];
+        u32 chestItemId = g_vm_net_mock_chest_reward_chest_ids[kind];
+        u32 enabledLoaded = 0;
+
+        memset(&context, 0, sizeof(context));
+        context.expectedChestItemId = chestItemId;
+        snprintf(
+            query, sizeof(query),
+            "SELECT chest_item_id,reward_item_id,weight,enabled "
+            "FROM server_chest_rewards WHERE chest_item_id=%u "
+            "ORDER BY reward_item_id",
+            chestItemId);
+        if (!vm_mysql_query(query, vm_net_mock_chest_reward_db_row, &context))
+        {
+            printf("[error][mock-admin] chest_reward_db_load failed chest=%u "
+                   "error=%s\n",
+                   chestItemId, vm_mysql_last_error());
+            return false;
+        }
+        enabledLoaded = vm_net_mock_chest_reward_enabled_loaded(chestItemId);
+        printf("[info][mock-admin] chest_reward_db_load chest=%u rows=%u "
+               "enabled=%u skipped=%u truncated=%u\n",
+               chestItemId, g_vm_net_mock_chest_reward_count_by_chest[kind],
+               enabledLoaded, g_vm_net_mock_chest_reward_skipped_by_chest[kind],
+               g_vm_net_mock_chest_reward_truncated[kind] ? 1u : 0u);
+        if (g_vm_net_mock_chest_reward_truncated[kind])
+        {
+            printf("[error][mock-admin] chest_reward_db_load chest=%u "
+                   "reason=pool-truncated skipped=%u cap=%u "
+                   "evidence=per-chest-isolation\n",
+                   chestItemId,
+                   g_vm_net_mock_chest_reward_skipped_by_chest[kind],
+                   (u32)VM_NET_MOCK_CHEST_REWARD_MAX_ROWS_PER_CHEST);
+        }
+    }
+
     g_vm_net_mock_chest_reward_db_valid = true;
-    printf("[info][mock-admin] chest_reward_db_load rows=%u skipped=%u\n",
-           context.loaded, context.skipped);
+    printf("[info][mock-admin] chest_reward_db_load total_rows=%u total_skipped=%u "
+           "evidence=per-chest-pool\n",
+           vm_net_mock_chest_reward_total_loaded(),
+           vm_net_mock_chest_reward_total_skipped());
     return true;
+}
+
+static bool vm_net_mock_chest_reward_ensure_pool_fresh(u32 chestItemId)
+{
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+        return false;
+    if (!g_vm_net_mock_chest_reward_truncated[kind])
+        return true;
+    if (g_vm_net_mock_chest_reward_reload_attempted[kind])
+        return true;
+
+    g_vm_net_mock_chest_reward_reload_attempted[kind] = true;
+    printf("[warn][network] mock_chest_reward_reload chest=%u reason=truncated-pool "
+           "skipped=%u evidence=auto-heal-before-roll\n",
+           chestItemId, g_vm_net_mock_chest_reward_skipped_by_chest[kind]);
+    g_vm_net_mock_chest_reward_db_loaded = false;
+    return vm_net_mock_chest_reward_db_load();
 }
 
 static bool vm_net_mock_chest_reward_admin_reload(const char **errorOut)
 {
     g_vm_net_mock_chest_reward_db_loaded = false;
     g_vm_net_mock_chest_reward_db_valid = false;
-    g_vm_net_mock_chest_reward_count = 0;
+    memset(g_vm_net_mock_chest_reward_count_by_chest, 0,
+           sizeof(g_vm_net_mock_chest_reward_count_by_chest));
     if (!vm_net_mock_chest_reward_db_load())
     {
         if (errorOut)
@@ -6237,46 +6378,32 @@ static bool vm_net_mock_chest_reward_admin_reload(const char **errorOut)
 
 static u32 vm_net_mock_chest_reward_admin_count(u32 chestItemId)
 {
-    u32 count = 0;
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
 
     (void)vm_net_mock_chest_reward_db_load();
-    for (u32 i = 0; i < g_vm_net_mock_chest_reward_count; ++i)
-    {
-        if (g_vm_net_mock_chest_rewards[i].chestItemId == chestItemId)
-            ++count;
-    }
-    return count;
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+        return 0;
+    return g_vm_net_mock_chest_reward_count_by_chest[kind];
 }
 
 static u32 vm_net_mock_chest_reward_admin_enabled_count(u32 chestItemId)
 {
-    u32 count = 0;
-
     (void)vm_net_mock_chest_reward_db_load();
-    for (u32 i = 0; i < g_vm_net_mock_chest_reward_count; ++i)
-    {
-        if (g_vm_net_mock_chest_rewards[i].chestItemId == chestItemId &&
-            g_vm_net_mock_chest_rewards[i].enabled != 0)
-            ++count;
-    }
-    return count;
+    return vm_net_mock_chest_reward_enabled_loaded(chestItemId);
 }
 
 static const vm_net_mock_chest_reward_row *vm_net_mock_chest_reward_admin_row_at(
     u32 chestItemId, u32 ordinal)
 {
-    u32 matched = 0;
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
 
     (void)vm_net_mock_chest_reward_db_load();
-    for (u32 i = 0; i < g_vm_net_mock_chest_reward_count; ++i)
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT ||
+        ordinal >= g_vm_net_mock_chest_reward_count_by_chest[kind])
     {
-        if (g_vm_net_mock_chest_rewards[i].chestItemId != chestItemId)
-            continue;
-        if (matched == ordinal)
-            return &g_vm_net_mock_chest_rewards[i];
-        ++matched;
+        return NULL;
     }
-    return NULL;
+    return &g_vm_net_mock_chest_rewards[kind][ordinal];
 }
 
 static bool vm_net_mock_chest_reward_admin_upsert(u32 chestItemId,
@@ -6425,51 +6552,58 @@ static bool vm_net_mock_chest_reward_admin_batch_set_enabled(
         !vm_net_mock_chest_reward_admin_reload(errorOut))
         return false;
 
-    for (u32 i = 0; i < g_vm_net_mock_chest_reward_count; ++i)
     {
-        const vm_net_mock_chest_reward_row *row = &g_vm_net_mock_chest_rewards[i];
-        const vm_net_mock_shop_catalog_item *shop = NULL;
-        const vm_net_mock_equipment_catalog_item *equip = NULL;
-        bool ok = true;
+        u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+        u32 rowCount = 0;
 
-        if (row->chestItemId != chestItemId)
-            continue;
-        shop = vm_net_mock_find_shop_catalog_item(row->rewardItemId);
-        if (shop == NULL)
-            continue;
-        if (matchCategory)
+        if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+            return false;
+        rowCount = g_vm_net_mock_chest_reward_count_by_chest[kind];
+        for (u32 i = 0; i < rowCount; ++i)
         {
-            if ((shop->isEquip != 0) != categoryIsEquip ||
-                shop->category != category)
-                ok = false;
-        }
-        if (ok && matchQuality)
-        {
-            if (shop->isEquip == 0)
-                ok = false;
-            else
+            const vm_net_mock_chest_reward_row *row =
+                &g_vm_net_mock_chest_rewards[kind][i];
+            const vm_net_mock_shop_catalog_item *shop = NULL;
+            const vm_net_mock_equipment_catalog_item *equip = NULL;
+            bool ok = true;
+
+            shop = vm_net_mock_find_shop_catalog_item(row->rewardItemId);
+            if (shop == NULL)
+                continue;
+            if (matchCategory)
             {
-                equip = vm_net_mock_find_equipment_catalog_item(row->rewardItemId);
-                if (equip == NULL || equip->quality != quality)
+                if ((shop->isEquip != 0) != categoryIsEquip ||
+                    shop->category != category)
                     ok = false;
             }
-        }
-        if (!ok)
-            continue;
-        if ((row->enabled != 0) == enabled)
-            continue;
+            if (ok && matchQuality)
+            {
+                if (shop->isEquip == 0)
+                    ok = false;
+                else
+                {
+                    equip = vm_net_mock_find_equipment_catalog_item(row->rewardItemId);
+                    if (equip == NULL || equip->quality != quality)
+                        ok = false;
+                }
+            }
+            if (!ok)
+                continue;
+            if ((row->enabled != 0) == enabled)
+                continue;
 
-        snprintf(query, sizeof(query),
-                 "UPDATE server_chest_rewards SET enabled=%u "
-                 "WHERE chest_item_id=%u AND reward_item_id=%u",
-                 enabled ? 1u : 0u, chestItemId, row->rewardItemId);
-        if (!vm_mysql_exec(query))
-        {
-            if (errorOut)
-                *errorOut = vm_mysql_last_error();
-            return false;
+            snprintf(query, sizeof(query),
+                     "UPDATE server_chest_rewards SET enabled=%u "
+                     "WHERE chest_item_id=%u AND reward_item_id=%u",
+                     enabled ? 1u : 0u, chestItemId, row->rewardItemId);
+            if (!vm_mysql_exec(query))
+            {
+                if (errorOut)
+                    *errorOut = vm_mysql_last_error();
+                return false;
+            }
+            ++changed;
         }
-        ++changed;
     }
 
     if (changed != 0 && !vm_net_mock_chest_reward_admin_reload(errorOut))
@@ -6541,15 +6675,21 @@ static bool vm_net_mock_chest_roll_reward_from_db(u32 chestItemId,
     u64 totalWeight = 0;
     u64 pick = 0;
     u32 bound = 0;
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+    u32 rowCount = 0;
 
     if (itemIdOut)
         *itemIdOut = 0;
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+        return false;
     (void)vm_net_mock_chest_reward_db_load();
-    for (u32 i = 0; i < g_vm_net_mock_chest_reward_count; ++i)
+    (void)vm_net_mock_chest_reward_ensure_pool_fresh(chestItemId);
+    rowCount = g_vm_net_mock_chest_reward_count_by_chest[kind];
+    for (u32 i = 0; i < rowCount; ++i)
     {
-        const vm_net_mock_chest_reward_row *row = &g_vm_net_mock_chest_rewards[i];
-        if (row->chestItemId != chestItemId || row->enabled == 0 ||
-            row->weight == 0)
+        const vm_net_mock_chest_reward_row *row =
+            &g_vm_net_mock_chest_rewards[kind][i];
+        if (row->enabled == 0 || row->weight == 0)
             continue;
         totalWeight += row->weight;
     }
@@ -6557,11 +6697,11 @@ static bool vm_net_mock_chest_roll_reward_from_db(u32 chestItemId,
         return false;
     bound = totalWeight > 0xffffffffu ? 0xffffffffu : (u32)totalWeight;
     pick = vm_net_mock_chest_open_rand() % bound;
-    for (u32 i = 0; i < g_vm_net_mock_chest_reward_count; ++i)
+    for (u32 i = 0; i < rowCount; ++i)
     {
-        const vm_net_mock_chest_reward_row *row = &g_vm_net_mock_chest_rewards[i];
-        if (row->chestItemId != chestItemId || row->enabled == 0 ||
-            row->weight == 0)
+        const vm_net_mock_chest_reward_row *row =
+            &g_vm_net_mock_chest_rewards[kind][i];
+        if (row->enabled == 0 || row->weight == 0)
             continue;
         if (pick < row->weight)
         {

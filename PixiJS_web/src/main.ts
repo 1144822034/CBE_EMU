@@ -2,7 +2,7 @@ import { actorResourceForJobSex, uiActorResourceForJobSex } from "./resources/ac
 import { clearUc3TexCache, refreshAllUc3Labels } from "./ui/BitmapLabel";
 import { applyUc3FontId, currentUc3FontId, loadUc3Font } from "./resources/uc3Font";
 import { UC3_FONT_OPTIONS, type Uc3FontId } from "./resources/uiFontPreference";
-import { Application, Graphics } from "pixi.js";
+import { Application, Graphics, Rectangle } from "pixi.js";
 import { loadSceneIndex, loadSceneMap } from "./resources/loader";
 import {
   defaultMonsterLevelsUrl,
@@ -117,6 +117,16 @@ import {
 
 /** Cap GPU buffer; HTML softkeys stay native DPI regardless. */
 const LCD_RESOLUTION_CAP = 3;
+
+function isNativeGl(): boolean {
+  try {
+    return !!(
+      globalThis as { Capacitor?: { isNativePlatform?: () => boolean } }
+    ).Capacitor?.isNativePlatform?.();
+  } catch {
+    return false;
+  }
+}
 
 type Phase =
   | "splash"
@@ -451,6 +461,8 @@ async function main(): Promise<void> {
   const syncLcdResolution = (cssScale: number) => {
     setLcdDisplayScale(cssScale);
     if (!rendererReady) return;
+    // UC3 / HUD share this backing store with the map — do not drop native
+    // resolution or fonts bilinear-blur when CSS-scaled to the phone.
     const res = Math.min(LCD_RESOLUTION_CAP, Math.max(1, cssScale));
     if (Math.abs(app.renderer.resolution - res) < 0.05) return;
     app.renderer.resolution = res;
@@ -554,22 +566,24 @@ async function main(): Promise<void> {
     autoDensity: true,
     width: LCD_WIDTH,
     height: LCD_HEIGHT,
-    // Prefer discrete GPU retention hints on some WebViews (still may lose ctx).
-    powerPreference: "high-performance",
+    // Native: integrated GPU is less likely to be power-gated than high-performance.
+    powerPreference: isNativeGl() ? "low-power" : "high-performance",
     gcActive: true,
-    gcMaxUnusedTime: nativeGl ? 20_000 : 60_000,
-    gcFrequency: nativeGl ? 10_000 : 30_000,
+    gcMaxUnusedTime: 60_000,
+    gcFrequency: nativeGl ? 15_000 : 30_000,
     textureGCActive: true,
-    textureGCMaxIdle: nativeGl ? 1200 : 3600,
+    textureGCMaxIdle: nativeGl ? 3600 : 3600,
   });
   rendererReady = true;
   console.info(
     "[gl] TextureGC/GC",
     nativeGl ? "native" : "browser",
     "maxUnusedMs=",
-    nativeGl ? 20_000 : 60_000,
+    60_000,
     "freqMs=",
-    nativeGl ? 10_000 : 30_000,
+    nativeGl ? 15_000 : 30_000,
+    "res=",
+    Math.min(LCD_RESOLUTION_CAP, Math.max(1, bootScale)),
   );
   wrap.appendChild(app.canvas);
 
@@ -1294,21 +1308,26 @@ async function main(): Promise<void> {
   };
 
   const enterSceneFile = async (name: string, x?: number, y?: number) => {
-    // Clear outdoor combat markers before async SCE load so city hops cannot
-    // keep bee/ghostfire sprites or F-key targets from the previous map.
-    session.sceneMonsters = [];
-    view.actors.setSceneMonsters([]);
+    const same = view.showsSceneFile(name);
+    // Cross-map only: wiping monsters on the same shell would reset hangup
+    // respawn timers and force another SCE compose.
+    if (!same) {
+      session.sceneMonsters = [];
+      view.actors.setSceneMonsters([]);
+    }
     const scene = await loadSceneMap(name);
-    session.sceneMonsters = (scene.combatSpawns ?? []).map((s, i) => ({
-      actorId: 0x70000000 + i,
-      x: s.x,
-      y: s.y,
-      name: formatMonsterMapName(s.name, s.sceActorId),
-      actorResource: s.mapActorResource,
-      battleActorResource: s.battleActorResource,
-      scriptName: `sce_combat_${s.sceActorId}`,
-      battleActorId: s.sceActorId,
-    }));
+    if (!same) {
+      session.sceneMonsters = (scene.combatSpawns ?? []).map((s, i) => ({
+        actorId: 0x70000000 + i,
+        x: s.x,
+        y: s.y,
+        name: formatMonsterMapName(s.name, s.sceActorId),
+        actorResource: s.mapActorResource,
+        battleActorResource: s.battleActorResource,
+        scriptName: `sce_combat_${s.sceActorId}`,
+        battleActorId: s.sceActorId,
+      }));
+    }
     await view.showScene(scene, x, y);
   };
 
@@ -1448,8 +1467,7 @@ async function main(): Promise<void> {
     },
     onEnterScene: async (scene, x, y, opts) => {
       const hasPos = opts?.hasPos !== false;
-      // Always rebuild from the server scene key for this enter (no prior-role map).
-      view.invalidateMap();
+      // Same map: keep painted shell (role-switch already called invalidateMap).
       let loadedScene = scene;
       try {
         await enterSceneFile(
@@ -5697,13 +5715,30 @@ dialog.hide();
         app.renderer as unknown as {
           context?: {
             isLost?: boolean;
+            gl?: WebGLRenderingContext;
             extensions?: { loseContext?: { restoreContext: () => void } };
           };
         }
       ).context;
-      if (ctx?.isLost) ctx.extensions?.loseContext?.restoreContext();
+      const ext =
+        ctx?.extensions?.loseContext ??
+        ctx?.gl?.getExtension?.("WEBGL_lose_context") ??
+        (
+          app.canvas.getContext("webgl2") ||
+          app.canvas.getContext("webgl")
+        )?.getExtension("WEBGL_lose_context");
+      ext?.restoreContext();
     } catch (e) {
       console.warn("[gl] restoreContext", e);
+    }
+  };
+
+  const setTextureGcEnabled = (on: boolean): void => {
+    try {
+      const gc = (app.renderer as unknown as { gc?: { enabled: boolean } }).gc;
+      if (gc && gc.enabled !== on) gc.enabled = on;
+    } catch {
+      /* ignore */
     }
   };
 
@@ -5711,12 +5746,51 @@ dialog.hide();
    * Long-running APK (screen on or off): WebGL / layout can die while gateway
    * keepalive keeps the session online → blank LCD. Re-fit, restore GL,
    * rebake labels/sprites.
+   *
+   * Field issues after prior recover:
+   * - Probe only sampled HUD chrome (bgDeep) → false "OK", no reload, stuck black.
+   * - recoverInFlight / refreshAllUc3Labels hang → later recovers skipped; input dead.
+   * - Interval full-recover every 2s thrashed main thread (buttons unresponsive).
    */
   let recoverInFlight = false;
   let lastRecoverAt = 0;
-  /** Consecutive recovers that left GL still lost — triggers soft reload. */
+  /** Consecutive recovers that left GL still lost / visually blank. */
   let consecutiveLostRecovers = 0;
-  const GL_SOFT_RELOAD_AFTER = 3;
+  let glLostAt = 0;
+  let glWatchdogTimer = 0;
+  let glSoftReloadCount = 0;
+  let recoverHangTimer = 0;
+  const GL_SOFT_RELOAD_AFTER = 1;
+  const GL_RESTORE_WATCHDOG_MS = 5000;
+  const GL_RECOVER_HANG_MS = 8000;
+  const GL_RELOAD_CAP = 6;
+
+  const cancelGlRestoreWatchdog = (): void => {
+    if (glWatchdogTimer) {
+      window.clearTimeout(glWatchdogTimer);
+      glWatchdogTimer = 0;
+    }
+  };
+
+  const softReloadGl = (why: string): void => {
+    if (glSoftReloadCount >= GL_RELOAD_CAP) {
+      console.error("[gl] reload cap reached", why, glPressureSnapshot());
+      return;
+    }
+    glSoftReloadCount += 1;
+    console.error("[gl] soft reload", why, glSoftReloadCount, "/", GL_RELOAD_CAP);
+    window.location.reload();
+  };
+
+  const armGlRestoreWatchdog = (): void => {
+    cancelGlRestoreWatchdog();
+    glWatchdogTimer = window.setTimeout(() => {
+      glWatchdogTimer = 0;
+      if (!glLostAt) return;
+      console.error("[gl] restore watchdog", glPressureSnapshot());
+      softReloadGl("watchdog");
+    }, GL_RESTORE_WATCHDOG_MS);
+  };
 
   /** Forensic: black screen happens with or without self wing/mount. */
   const glPressureSnapshot = (): Record<string, unknown> => {
@@ -5744,15 +5818,150 @@ dialog.hide();
     }
   };
 
+  const regionLooksBlank = (frame: Rectangle): boolean => {
+    try {
+      const extract = (
+        app.renderer as unknown as {
+          extract?: {
+            pixels: (opts: unknown) => {
+              pixels?: Uint8ClampedArray;
+            };
+          };
+        }
+      ).extract;
+      if (!extract?.pixels) return true;
+      const out = extract.pixels({
+        target: app.stage,
+        frame,
+        resolution: 1,
+      });
+      const pixels = out?.pixels;
+      if (!pixels?.length) return true;
+      let maxC = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if ((pixels[i + 3] ?? 0) < 8) continue;
+        maxC = Math.max(
+          maxC,
+          pixels[i] ?? 0,
+          pixels[i + 1] ?? 0,
+          pixels[i + 2] ?? 0,
+        );
+        if (maxC >= 24) return false;
+      }
+      return maxC < 24;
+    } catch {
+      return true;
+    }
+  };
+
+  /**
+   * True when framebuffer presents only clear / HUD chrome.
+   * Must sample the map band — HUD bgDeep alone looked "alive" and cancelled reload.
+   */
+  const canvasLooksBlank = (): boolean => {
+    try {
+      if (isGlContextLost()) return true;
+      // Skip probe on title chrome where dark panels are normal.
+      if (
+        phase === "splash" ||
+        phase === "login" ||
+        phase === "register" ||
+        phase === "servers" ||
+        phase === "role" ||
+        phase === "create-role"
+      ) {
+        return false;
+      }
+      // Map / battle content sits below world HUD (~72px).
+      const mapBand = new Rectangle(20, 90, 120, 120);
+      return regionLooksBlank(mapBand);
+    } catch (e) {
+      console.warn("[gl] blank probe", e);
+      return true;
+    }
+  };
+
+  /** Unstick HTML softkeys / D-pad and Pixi hit-testing after GL death. */
+  const syncInputAfterGlRecover = (): void => {
+    try {
+      touch.releaseAll();
+      view.clearHeldKeys();
+      // Softkeys only — avoid showPhase() which closes overlays / resets menus.
+      if (phase === "splash") shell.setSoftkeys({ left: "确定", right: "" });
+      else if (phase === "login") shell.setSoftkeys({ left: "登录", right: "返回" });
+      else if (phase === "register") shell.setSoftkeys({ left: "注册", right: "返回" });
+      else if (phase === "servers") shell.setSoftkeys({ left: "继续", right: "返回" });
+      else if (phase === "role") shell.setSoftkeys({ left: "继续", right: "返回" });
+      else if (phase === "create-role") shell.setSoftkeys({ left: "确定", right: "返回" });
+      else if (phase === "world") {
+        syncWorldWalkInput();
+        if (approach.open) shell.setSoftkeys({ left: "确定", right: "取消" });
+        else if (entertainPanel.visible) shell.setSoftkeys(entertainPanel.softkeys());
+        else if (wingPanel.visible) shell.setSoftkeys(wingPanel.softkeys());
+        else if (mountPanel.visible) shell.setSoftkeys(mountPanel.softkeys());
+        else if (auctionPanel.visible) shell.setSoftkeys(auctionPanel.softkeys());
+        else if (wagerPanel.visible) shell.setSoftkeys(wagerPanel.softkeys());
+        else if (arenaPanel.visible) shell.setSoftkeys(arenaPanel.softkeys());
+        else shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      } else if (phase === "menu") {
+        shell.setSoftkeys({ left: "确定", right: "返回" });
+      } else if (phase === "battle") {
+        shell.setSoftkeys(
+          battle.isAwaitingRound() ||
+            battle.isHangupActive() ||
+            battle.isAutoBattleActive()
+            ? { left: "", right: "" }
+            : {
+                left: battle.softkeyLeftLabel(),
+                right: battle.softkeyRightLabel(),
+              },
+        );
+      } else if (phase === "wash") shell.setSoftkeys(washUi.softkeys());
+      else if (phase === "chat") shell.setSoftkeys({ left: "发送", right: "返回" });
+      else if (phase === "trade") shell.setSoftkeys(tradeUi.softkeys());
+      else if (phase === "dialog" || phase === "system" || phase === "enhance" ||
+        phase === "social" || phase === "quest" || phase === "guild" ||
+        phase === "map") {
+        shell.setSoftkeys({ left: "确定", right: "返回" });
+      }
+      if (entertainWeb.isExpanded()) {
+        shell.setSoftkeys({ left: "最小化", right: "关闭" });
+      }
+      app.ticker.start();
+      const events = (
+        app.renderer as unknown as {
+          events?: { setTargetElement?: (el: HTMLCanvasElement) => void };
+        }
+      ).events;
+      events?.setTargetElement?.(app.canvas as HTMLCanvasElement);
+    } catch (e) {
+      console.warn("[gl] sync input", e);
+    }
+  };
+
   const recoverDisplayAfterForeground = async (why: string): Promise<void> => {
     if (!rendererReady || recoverInFlight) return;
     const now = performance.now();
     // Debounce focus+visibility storms; allow immediate restore after lost.
-    if (why !== "contextrestored" && why !== "ticker-lost" && now - lastRecoverAt < 800) {
+    if (
+      why !== "contextrestored" &&
+      why !== "ticker-lost" &&
+      why !== "interval-lost" &&
+      why !== "interval-blank" &&
+      now - lastRecoverAt < 800
+    ) {
       return;
     }
     recoverInFlight = true;
     lastRecoverAt = now;
+    if (recoverHangTimer) window.clearTimeout(recoverHangTimer);
+    recoverHangTimer = window.setTimeout(() => {
+      recoverHangTimer = 0;
+      if (!recoverInFlight) return;
+      console.error("[gl] recover hung", why, glPressureSnapshot());
+      recoverInFlight = false;
+      softReloadGl("recover-hung");
+    }, GL_RECOVER_HANG_MS);
     try {
       const stillLostBefore = isGlContextLost();
       console.info(
@@ -5766,15 +5975,28 @@ dialog.hide();
       wrap.dataset.fitH = "0";
       fitPhoneWrap();
       tryRestoreGlContext();
+      try {
+        app.renderer.resize(LCD_WIDTH, LCD_HEIGHT);
+      } catch (e) {
+        console.warn("[gl] resize after resume", e);
+      }
       app.ticker.start();
       await new Promise<void>((r) => {
         requestAnimationFrame(() => r());
       });
-      clearUc3TexCache();
-      try {
-        await refreshAllUc3Labels();
-      } catch (e) {
-        console.warn("[gl] uc3 rebake", e);
+      // Only full UC3 rebake after a real restore — interval thrash froze input.
+      if (why === "contextrestored" || stillLostBefore || glLostAt > 0) {
+        clearUc3TexCache();
+        try {
+          await Promise.race([
+            refreshAllUc3Labels(),
+            new Promise<void>((_, rej) =>
+              window.setTimeout(() => rej(new Error("uc3-timeout")), 4000),
+            ),
+          ]);
+        } catch (e) {
+          console.warn("[gl] uc3 rebake", e);
+        }
       }
       try {
         view.nudgeAfterGpuResume();
@@ -5786,25 +6008,39 @@ dialog.hide();
       } catch (e) {
         console.warn("[gl] render after resume", e);
       }
-      if (isGlContextLost()) {
+      syncInputAfterGlRecover();
+      const probeBlank =
+        why === "contextrestored" ||
+        why === "ticker-lost" ||
+        why === "interval-lost" ||
+        why === "interval-blank" ||
+        glLostAt > 0;
+      const stillBroken =
+        isGlContextLost() || (probeBlank && canvasLooksBlank());
+      if (stillBroken) {
         consecutiveLostRecovers += 1;
         console.warn(
-          "[gl] recover still lost",
+          "[gl] recover still blank",
           consecutiveLostRecovers,
           "/",
           GL_SOFT_RELOAD_AFTER,
+          "lost=",
+          isGlContextLost(),
           glPressureSnapshot(),
         );
         if (consecutiveLostRecovers >= GL_SOFT_RELOAD_AFTER) {
-          // Industry fallback when WebView never restores: soft reload LCD.
-          // Gateway keepalive may keep the account online; player re-enters UI.
-          console.error("[gl] soft reload after failed recover");
-          window.location.reload();
+          softReloadGl("failed-recover");
         }
       } else {
         consecutiveLostRecovers = 0;
+        glLostAt = 0;
+        cancelGlRestoreWatchdog();
       }
     } finally {
+      if (recoverHangTimer) {
+        window.clearTimeout(recoverHangTimer);
+        recoverHangTimer = 0;
+      }
       recoverInFlight = false;
     }
   };
@@ -5813,11 +6049,16 @@ dialog.hide();
     "webglcontextlost",
     (ev) => {
       ev.preventDefault();
+      glLostAt = performance.now();
+      setTextureGcEnabled(false);
+      // Drop stuck D-pad / softkey pointer capture from the dying frame.
+      touch.releaseAll();
+      view.clearHeldKeys();
       console.warn("[gl] webglcontextlost", glPressureSnapshot());
-      // Screen-on hangup can lose GL without a visibility flip — arm restore.
-      window.setTimeout(() => {
-        void recoverDisplayAfterForeground("contextlost-deferred");
-      }, 50);
+      // Pixi only restoreContext() for *forced* loss. Natural OOM on WebView
+      // often never fires contextrestored unless we request it.
+      window.setTimeout(() => tryRestoreGlContext(), 0);
+      armGlRestoreWatchdog();
     },
     false,
   );
@@ -5825,6 +6066,7 @@ dialog.hide();
     "webglcontextrestored",
     () => {
       console.warn("[gl] webglcontextrestored");
+      setTextureGcEnabled(true);
       void recoverDisplayAfterForeground("contextrestored");
     },
     false,
@@ -5832,17 +6074,23 @@ dialog.hide();
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") {
+      // Keepalive still ticks; don't let TextureGC unload the live map/HUD.
+      setTextureGcEnabled(false);
       suspendBgm();
       // Immediate tick when leaving foreground — setInterval may freeze next.
       flushBattleSleepsForBackground();
       void session.backgroundKeepAliveTick();
+      touch.releaseAll();
+      view.clearHeldKeys();
       return;
     }
+    setTextureGcEnabled(true);
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("visibility");
     void resumeBgmAfterForeground();
   });
   window.addEventListener("focus", () => {
+    setTextureGcEnabled(true);
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("focus");
     void unlockAndResumeBgm();
@@ -5860,6 +6108,8 @@ dialog.hide();
     if (glWatchAcc >= 2000) {
       glWatchAcc = 0;
       if (isGlContextLost()) {
+        tryRestoreGlContext();
+      } else if (glLostAt > 0 && canvasLooksBlank()) {
         void recoverDisplayAfterForeground("ticker-lost");
       }
     }
@@ -5876,6 +6126,21 @@ dialog.hide();
       );
     }
   });
+
+  // Pixi ticker can stop on contextlost; WebView timers usually still run.
+  // While still lost: only poke restoreContext — full recover waits for restored
+  // (or blank probe after gl thinks it is alive) so we do not thrash UC3/main thread.
+  window.setInterval(() => {
+    if (!rendererReady) return;
+    if (document.visibilityState === "hidden") return;
+    if (isGlContextLost()) {
+      tryRestoreGlContext();
+      return;
+    }
+    if (glLostAt > 0 && !recoverInFlight) {
+      void recoverDisplayAfterForeground("interval-blank");
+    }
+  }, 2000);
 }
 
 main().catch((err) => {

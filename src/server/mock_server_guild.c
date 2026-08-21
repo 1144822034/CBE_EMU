@@ -1640,47 +1640,68 @@ static void vm_mock_service_duel_resolve_visual(
         *sexGroupOut = (u8)(sex + 1);
 }
 
+static u32 vm_mock_service_duel_free_slot_count(void)
+{
+    u32 n = 0;
+    u32 i;
+    for (i = 0; i < VM_MOCK_SERVICE_DUEL_MAX; ++i)
+    {
+        if (!g_vm_mock_service_duels[i].active)
+            ++n;
+    }
+    return n;
+}
+
 static vm_mock_service_duel *vm_mock_service_duel_begin(
     vm_mock_service_client_session *inviter,
-    vm_mock_service_client_session *responder)
+    vm_mock_service_client_session *responder,
+    const char **failReasonOut)
 {
     vm_mock_service_duel *slot = NULL;
     vm_mock_service_team *inviterTeam = NULL;
     vm_mock_service_team *responderTeam = NULL;
 
+    if (failReasonOut != NULL)
+        *failReasonOut = NULL;
     if (inviter == NULL || responder == NULL || inviter == responder ||
         inviter->clientId == 0 || responder->clientId == 0 ||
         !inviter->roleOnline || !responder->roleOnline ||
         inviter->onlineRoleId == 0 || responder->onlineRoleId == 0)
     {
+        if (failReasonOut != NULL)
+            *failReasonOut = (inviter == responder) ? "same_client" : "offline";
         return NULL;
     }
     /*
      * Arena auto-match must not wait on sceneVisibleReady: 30/1 settle after
      * NPC enter can lag past the LIVE second, and duel_begin used to return
      * NULL forever while tips already said「比武比赛开始」(2026-08-14).
+     * Match pool also accepts onlineScene=擂台; keep the same gate here.
      */
     {
-        bool bothOnArena =
-            vm_mock_arena_is_arena_scene(inviter->sceneVisibleScene) &&
-            vm_mock_arena_is_arena_scene(responder->sceneVisibleScene);
-        if (!bothOnArena)
+        bool invArena =
+            vm_mock_arena_is_arena_scene(inviter->sceneVisibleScene) ||
+            vm_mock_arena_is_arena_scene(inviter->onlineScene);
+        bool respArena =
+            vm_mock_arena_is_arena_scene(responder->sceneVisibleScene) ||
+            vm_mock_arena_is_arena_scene(responder->onlineScene);
+        if (invArena || respArena)
         {
-            if (!inviter->sceneVisibleReady || !responder->sceneVisibleReady ||
-                inviter->sceneVisiblePending || responder->sceneVisiblePending ||
-                !vm_mock_service_session_scene_is_visible(
-                    responder, inviter->sceneVisibleScene))
+            if (!invArena || !respArena)
+            {
+                if (failReasonOut != NULL)
+                    *failReasonOut = "arena_scene_mismatch";
                 return NULL;
+            }
         }
-        else if (inviter->sceneVisibleScene[0] == 0 ||
-                 responder->sceneVisibleScene[0] == 0 ||
-                 !vm_net_mock_scene_names_equal_loose(inviter->sceneVisibleScene,
-                                                     responder->sceneVisibleScene))
+        else if (!inviter->sceneVisibleReady || !responder->sceneVisibleReady ||
+                 inviter->sceneVisiblePending || responder->sceneVisiblePending ||
+                 !vm_mock_service_session_scene_is_visible(
+                     responder, inviter->sceneVisibleScene))
         {
-            /* Fallback: onlineScene when visible scene still empty mid-teleport. */
-            if (!vm_mock_arena_is_arena_scene(inviter->onlineScene) ||
-                !vm_mock_arena_is_arena_scene(responder->onlineScene))
-                return NULL;
+            if (failReasonOut != NULL)
+                *failReasonOut = "scene_not_ready";
+            return NULL;
         }
     }
     /* Rematch while prior duel is finished-hold-only must reclaim the slot. */
@@ -1691,6 +1712,8 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
     if (vm_mock_service_duel_find_for_client(inviter->clientId, NULL) != NULL ||
         vm_mock_service_duel_find_for_client(responder->clientId, NULL) != NULL)
     {
+        if (failReasonOut != NULL)
+            *failReasonOut = "busy_duel";
         return NULL;
     }
     /* New start must not fight leftover exit-operate redelivery. */
@@ -1705,6 +1728,8 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
         (responderTeam != NULL &&
          vm_mock_service_team_battle_in_progress(responderTeam)))
     {
+        if (failReasonOut != NULL)
+            *failReasonOut = "team_battle";
         return NULL;
     }
     for (u32 i = 0; i < VM_MOCK_SERVICE_DUEL_MAX; ++i)
@@ -1716,7 +1741,11 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
         }
     }
     if (slot == NULL)
+    {
+        if (failReasonOut != NULL)
+            *failReasonOut = "no_slot";
         return NULL;
+    }
 
     memset(slot, 0, sizeof(*slot));
     slot->active = true;
@@ -1725,7 +1754,9 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
         slot->serial = ++g_vm_mock_service_duel_serial;
     slot->clientIds[0] = inviter->clientId;
     slot->clientIds[1] = responder->clientId;
-    snprintf(slot->scene, sizeof(slot->scene), "%s", inviter->sceneVisibleScene);
+    snprintf(slot->scene, sizeof(slot->scene), "%s",
+             inviter->sceneVisibleScene[0] ? inviter->sceneVisibleScene
+                                           : inviter->onlineScene);
     slot->hpMax[0] = inviter->onlineHpMax ? inviter->onlineHpMax : 1;
     slot->hpMax[1] = responder->onlineHpMax ? responder->onlineHpMax : 1;
     slot->hp[0] = inviter->onlineHp ?
@@ -2019,7 +2050,8 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
         }
         else
         {
-            duel = vm_mock_service_duel_begin(sourceSession, targetSeed.session);
+            duel = vm_mock_service_duel_begin(sourceSession, targetSeed.session,
+                                             NULL);
             if (duel != NULL)
             {
                 result = 1;
@@ -2220,7 +2252,7 @@ static u32 vm_net_mock_build_spar_invite_reply_response(
                                                         responder->sceneVisibleScene);
     if (accepted && readyIncluded)
     {
-        duel = vm_mock_service_duel_begin(source, responder);
+        duel = vm_mock_service_duel_begin(source, responder, NULL);
         if (duel == NULL)
         {
             printf("[warn][network] mock_spar_reply_begin_failed source=%08x "
@@ -2329,7 +2361,7 @@ static u32 vm_net_mock_build_spar_ready_response(
         vm_mock_service_session_scene_is_visible(source,
                                                  responder->sceneVisibleScene))
     {
-        duel = vm_mock_service_duel_begin(source, responder);
+        duel = vm_mock_service_duel_begin(source, responder, NULL);
     }
     if (duel != NULL)
         pos = vm_net_mock_build_duel_start_response(out, outCap, responder);

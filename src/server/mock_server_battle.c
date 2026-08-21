@@ -8012,6 +8012,49 @@ static u32 vm_mock_service_duel_skill_heal_amount(
 }
 
 /*
+ * 比武指数成长：第 1 回合 1×，第 2 回合 2×，第 3 回合 4× …
+ * resolvedRoundCount = 已完整结算的回合数（当前正在结算的回合尚未计入）。
+ */
+static u32 vm_mock_service_duel_arena_round_scale(const vm_mock_service_duel *duel)
+{
+    u32 n;
+
+    if (duel == NULL || !duel->arenaMode)
+        return 1u;
+    n = duel->resolvedRoundCount;
+    /* Cap 2^12=4096：避免 u32 溢出把伤害/命中撑爆。 */
+    if (n > 12u)
+        n = 12u;
+    return 1u << n;
+}
+
+/* 比武：禁止回血/增益/驱散/封魔等非伤害辅助；防对刷与天机互封拖死。 */
+static bool vm_mock_service_duel_arena_blocks_support_operate(u32 operate)
+{
+    const vm_net_mock_skill_catalog_item *skill =
+        vm_net_mock_battle_operate_skill(operate);
+
+    if (operate <= 2 || skill == NULL)
+        return false;
+    if (vm_net_mock_battle_operate_skill_targets_friendly_group_heal(operate) ||
+        vm_net_mock_battle_operate_skill_targets_friendly_group_modifier(operate) ||
+        vm_net_mock_battle_operate_skill_targets_enemy_status_no_damage(operate) ||
+        vm_net_mock_battle_skill_is_revive(skill) ||
+        vm_net_mock_battle_skill_is_dispel(skill) ||
+        vm_net_mock_battle_skill_is_silence(skill))
+    {
+        return true;
+    }
+    /* 其它对己/友、无伤害的技能行也按辅助拦截。 */
+    if (skill->hpChange >= 0 && skill->targetDirection <= 2 &&
+        vm_net_mock_battle_skill_min_hp_damage(skill) == 0)
+    {
+        return true;
+    }
+    return false;
+}
+
+/*
  * Resolve one committed Operate into a duel hit.
  * Mirrors PvE skill.dsh branches: heal (td=1/2 +hp), self/party buff
  * (td=0/2 timed stats), enemy status-no-damage (td=0 timed no stats),
@@ -8048,6 +8091,16 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
     /* Silenced seats may only normal-attack. */
     if (operateIsSkill && duel->silenceRounds[sourceIndex] != 0)
     {
+        operate = 0;
+        operateIsSkill = false;
+    }
+    /* 比武：辅助技能改普攻，不扣 MP（防对刷增益/回血）。 */
+    if (operateIsSkill && duel->arenaMode &&
+        vm_mock_service_duel_arena_blocks_support_operate(operate))
+    {
+        printf("[info][mock-service] arena_duel_support_blocked serial=%u "
+               "actor=%u operate=%u ->na evidence=arena-no-support-skill\n",
+               duel->serial, sourceIndex, operate);
         operate = 0;
         operateIsSkill = false;
     }
@@ -8140,15 +8193,28 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
         if (operate > 2 && skill != NULL)
             magical = vm_net_mock_battle_skill_is_magical(skill);
         /* 鬼道法术忽略闪躲；物理普攻/物技仍检定。 */
-        if (!magical &&
-            !vm_net_mock_battle_roll_hit(sourceStats.hit, targetStats.dodge))
         {
-            hitOut->targetSelf = false;
-            hitOut->supportNoDamage = false;
-            hitOut->damage = 0;
-            hitOut->childFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE;
-            hitOut->targetHpAfter = duel->hp[targetIndex];
-            return true;
+            u32 attackHit = sourceStats.hit;
+
+            if (duel->arenaMode)
+            {
+                u32 hitScale = vm_mock_service_duel_arena_round_scale(duel);
+                uint64_t scaledHit =
+                    (uint64_t)sourceStats.hit * (uint64_t)hitScale;
+
+                attackHit = scaledHit > 0xffffffffull ? 0xffffffffu
+                                                         : (u32)scaledHit;
+            }
+            if (!magical &&
+                !vm_net_mock_battle_roll_hit(attackHit, targetStats.dodge))
+            {
+                hitOut->targetSelf = false;
+                hitOut->supportNoDamage = false;
+                hitOut->damage = 0;
+                hitOut->childFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE;
+                hitOut->targetHpAfter = duel->hp[targetIndex];
+                return true;
+            }
         }
 
         if (operate > 2 && skill != NULL)
@@ -8242,6 +8308,23 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
                        targetRole ? targetRole->roleId : 0u, beforeDr, rawDamage,
                        vm_net_mock_role_chenghao_incoming_dr_percent(targetRole,
                                                                     true));
+            }
+        }
+        if (duel->arenaMode)
+        {
+            u32 dmgScale = vm_mock_service_duel_arena_round_scale(duel);
+            u32 beforeScale = rawDamage;
+            uint64_t scaled =
+                (uint64_t)rawDamage * (uint64_t)dmgScale;
+
+            rawDamage = scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
+            if (dmgScale > 1u)
+            {
+                printf("[info][mock-service] arena_duel_scale serial=%u "
+                       "actor=%u round=%u scale=%u hit_base=%u dmg=%u->%u "
+                       "evidence=arena-exp-round-damage+hit\n",
+                       duel->serial, sourceIndex, duel->resolvedRoundCount,
+                       dmgScale, sourceStats.hit, beforeScale, rawDamage);
             }
         }
         rawDamage = vm_net_mock_min_u32(rawDamage, duel->hp[targetIndex]);
@@ -8529,28 +8612,40 @@ static bool vm_mock_service_duel_resolve_committed_round(
             u32 hpAfter = duel->hp[sourceIndex];
             u32 mpAfter = duel->mp[sourceIndex];
 
-            memset(&hit, 0, sizeof(hit));
-            if (healHp != 0)
-                hpAfter = vm_net_mock_min_u32(
-                    vm_net_mock_add_capped_u32(duel->hp[sourceIndex], healHp),
-                    duel->hpMax[sourceIndex] ? duel->hpMax[sourceIndex]
-                                             : duel->hp[sourceIndex] + healHp);
-            if (healMp != 0)
-                mpAfter = vm_net_mock_min_u32(
-                    vm_net_mock_add_capped_u32(duel->mp[sourceIndex], healMp),
-                    duel->mpMax[sourceIndex] ? duel->mpMax[sourceIndex]
-                                             : duel->mp[sourceIndex] + healMp);
-            hit.valid = true;
-            hit.sourceIndex = sourceIndex;
-            hit.operate = 0;
-            hit.damage = healHp;
-            hit.sourceMpAfter = mpAfter;
-            hit.targetHpAfter = hpAfter;
-            hit.targetSelf = true;
-            hit.supportNoDamage = true;
-            hit.childFlag = 0;
-            /* Mark item via operate sentinel for action packet type-2. */
-            hit.operate = 0xfffffffeu;
+            /* 比武：战斗物品整段禁用；若误入 commit 则改普攻。 */
+            if (duel->arenaMode)
+            {
+                printf("[info][mock-service] arena_duel_item_nullify serial=%u "
+                       "actor=%u ->na evidence=arena-no-battle-item\n",
+                       duel->serial, sourceIndex);
+                if (!vm_mock_service_duel_apply_operate(duel, sourceIndex, 0, &hit))
+                    continue;
+            }
+            else
+            {
+                memset(&hit, 0, sizeof(hit));
+                if (healHp != 0)
+                    hpAfter = vm_net_mock_min_u32(
+                        vm_net_mock_add_capped_u32(duel->hp[sourceIndex], healHp),
+                        duel->hpMax[sourceIndex] ? duel->hpMax[sourceIndex]
+                                                 : duel->hp[sourceIndex] + healHp);
+                if (healMp != 0)
+                    mpAfter = vm_net_mock_min_u32(
+                        vm_net_mock_add_capped_u32(duel->mp[sourceIndex], healMp),
+                        duel->mpMax[sourceIndex] ? duel->mpMax[sourceIndex]
+                                                 : duel->mp[sourceIndex] + healMp);
+                hit.valid = true;
+                hit.sourceIndex = sourceIndex;
+                hit.operate = 0;
+                hit.damage = healHp;
+                hit.sourceMpAfter = mpAfter;
+                hit.targetHpAfter = hpAfter;
+                hit.targetSelf = true;
+                hit.supportNoDamage = true;
+                hit.childFlag = 0;
+                /* Mark item via operate sentinel for action packet type-2. */
+                hit.operate = 0xfffffffeu;
+            }
         }
         else
         {
@@ -8561,6 +8656,9 @@ static bool vm_mock_service_duel_resolve_committed_round(
                 const vm_net_mock_skill_catalog_item *skill =
                     vm_net_mock_battle_operate_skill(operate);
                 if (skill == NULL || duel->mp[sourceIndex] < skill->mpCost)
+                    operate = 0;
+                else if (duel->arenaMode &&
+                         vm_mock_service_duel_arena_blocks_support_operate(operate))
                     operate = 0;
             }
             if (!vm_mock_service_duel_apply_operate(duel, sourceIndex, operate, &hit))
@@ -8663,6 +8761,15 @@ static bool vm_mock_service_duel_resolve_committed_round(
             --duel->silenceRounds[seat];
     }
     vm_mock_service_duel_clear_round_commits(duel);
+    if (duel->arenaMode)
+    {
+        if (duel->resolvedRoundCount < 0xffffu)
+            ++duel->resolvedRoundCount;
+        printf("[info][mock-service] arena_duel_round_advance serial=%u "
+               "resolved=%u next_scale=%u evidence=arena-exp-round\n",
+               duel->serial, duel->resolvedRoundCount,
+               vm_mock_service_duel_arena_round_scale(duel));
+    }
     if (terminal)
     {
         /*
@@ -9318,6 +9425,14 @@ static u32 vm_net_mock_build_duel_operate_response(
             vm_net_mock_battle_operate_skill(operate);
         if (skill == NULL || duel->mp[sourceIndex] < skill->mpCost)
             operate = 0;
+        else if (duel->arenaMode &&
+                 vm_mock_service_duel_arena_blocks_support_operate(operate))
+        {
+            printf("[info][mock-service] arena_duel_support_commit_na serial=%u "
+                   "source=%08x actor=%d operate=%u evidence=arena-no-support-skill\n",
+                   duel->serial, source->clientId, sourceIndex, operate);
+            operate = 0;
+        }
     }
 
     duel->roundCommitOperate[sourceIndex] = operate;
@@ -9430,48 +9545,58 @@ static u32 vm_net_mock_build_duel_item_use_response(const u8 *request, u32 reque
     role = vm_mock_service_trade_role_for_session(source, NULL);
     if (role == NULL)
         role = vm_net_mock_active_role();
-    if (role != NULL)
-        item = vm_net_mock_role_find_backpack_item(role, 0, parsed.seq);
-    if (item != NULL)
+    /* 比武：禁用战斗用药/壶等物品，不消耗背包，回合改普攻。 */
+    if (duel->arenaMode)
     {
-        effect = vm_net_mock_find_item_effect_catalog_item(item->itemId);
-        if (vm_net_mock_item_effect_is_usable(effect))
+        printf("[info][mock-service] arena_duel_item_blocked serial=%u "
+               "source=%08x actor=%d seq=%u evidence=arena-no-battle-item\n",
+               duel->serial, source->clientId, sourceIndex, parsed.seq);
+    }
+    else if (role != NULL)
+    {
+        item = vm_net_mock_role_find_backpack_item(role, 0, parsed.seq);
+        if (item != NULL)
         {
-            reservoirItem = vm_net_mock_item_effect_is_reservoir(effect);
-            if (reservoirItem)
+            effect = vm_net_mock_find_item_effect_catalog_item(item->itemId);
+            if (vm_net_mock_item_effect_is_usable(effect))
             {
-                u32 missingHp =
-                    duel->hpMax[sourceIndex] > duel->hp[sourceIndex]
-                        ? duel->hpMax[sourceIndex] - duel->hp[sourceIndex]
-                        : 0;
-                u32 missingMp =
-                    duel->mpMax[sourceIndex] > duel->mp[sourceIndex]
-                        ? duel->mpMax[sourceIndex] - duel->mp[sourceIndex]
-                        : 0;
-                reservoirBefore = item->count;
-                (void)vm_net_mock_item_effect_plan_reservoir_restore(
-                    effect, reservoirBefore, missingHp, missingMp,
-                    VM_NET_MOCK_FLASK_BATTLE_PER_USE_CAP, &hpPlanned, &mpPlanned);
-                reservoirConsumed = vm_net_mock_item_effect_battle_flask_charge(
-                    reservoirBefore, hpPlanned, mpPlanned);
-                remaining = reservoirBefore;
-                if (reservoirConsumed != 0)
-                    consumed = vm_net_mock_role_consume_backpack_item(
-                        role, item->itemId, parsed.seq, reservoirConsumed,
-                        &remaining);
-                else
-                    consumed = true;
-                healHp = hpPlanned;
-                healMp = mpPlanned;
-            }
-            else
-            {
-                consumed = vm_net_mock_role_consume_backpack_item(
-                    role, item->itemId, parsed.seq, 1, &remaining);
-                if (consumed)
+                reservoirItem = vm_net_mock_item_effect_is_reservoir(effect);
+                if (reservoirItem)
                 {
-                    healHp = effect->hp;
-                    healMp = effect->mp;
+                    u32 missingHp =
+                        duel->hpMax[sourceIndex] > duel->hp[sourceIndex]
+                            ? duel->hpMax[sourceIndex] - duel->hp[sourceIndex]
+                            : 0;
+                    u32 missingMp =
+                        duel->mpMax[sourceIndex] > duel->mp[sourceIndex]
+                            ? duel->mpMax[sourceIndex] - duel->mp[sourceIndex]
+                            : 0;
+                    reservoirBefore = item->count;
+                    (void)vm_net_mock_item_effect_plan_reservoir_restore(
+                        effect, reservoirBefore, missingHp, missingMp,
+                        VM_NET_MOCK_FLASK_BATTLE_PER_USE_CAP, &hpPlanned,
+                        &mpPlanned);
+                    reservoirConsumed = vm_net_mock_item_effect_battle_flask_charge(
+                        reservoirBefore, hpPlanned, mpPlanned);
+                    remaining = reservoirBefore;
+                    if (reservoirConsumed != 0)
+                        consumed = vm_net_mock_role_consume_backpack_item(
+                            role, item->itemId, parsed.seq, reservoirConsumed,
+                            &remaining);
+                    else
+                        consumed = true;
+                    healHp = hpPlanned;
+                    healMp = mpPlanned;
+                }
+                else
+                {
+                    consumed = vm_net_mock_role_consume_backpack_item(
+                        role, item->itemId, parsed.seq, 1, &remaining);
+                    if (consumed)
+                    {
+                        healHp = effect->hp;
+                        healMp = effect->mp;
+                    }
                 }
             }
         }

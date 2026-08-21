@@ -36,3 +36,8 @@ Agent 复用：`.codex/skills/pixijs-android-apk/SKILL.md`。
 4. 进图即拉起 `HangupKeepAlive` 前台服务（API34+ `specialUse`；`online`/`hangup` 文案），见 [2026-08-10-pixi-android-background-disconnect.md](2026-08-10-pixi-android-background-disconnect.md)、[2026-08-10-pixi-hangup-keepalive-resume.md](2026-08-10-pixi-hangup-keepalive-resume.md)
 
 Manifest：`WAKE_LOCK`、`FOREGROUND_SERVICE`/`_DATA_SYNC`/`_SPECIAL_USE`、`POST_NOTIFICATIONS`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`、`usesCleartextTraffic`
+
+## 2026-08-19 出包
+
+`versionCode` **42** / `1.0.42`，`client_code_version` **22**（`bundledCodeVersion.ts` 同步），服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **22**。  
+`BUILD SUCCESSFUL`；产物 `PixiJS_web/android/app/release/jh_ol.apk`（54.6 MB）。含黑屏 recover 修补。覆盖安装会清 WebView。线上服读到 22 后，旧包登录会「请更新客户端」。
