@@ -79,6 +79,7 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
     u32 *distanceOut, const char **routeOut);
 
 #include "mock_server_equipment_npc.c"
+#include "mock_server_mailbox.c"
 #include "mock_server_scene_task.c"
 #include "mock_server_scene_sync.c"
 #include "mock_server_guild.c"

@@ -57,8 +57,7 @@ category15_insert item=815 seq=258 amount=42 physical=74 occupied=74 empty=0
 ```text
 7/4  result=1                 静默完成并清除操作等待状态
 7/11 { info = chest_seq, chest_remaining }
-7/11 { info = key_seq, key_remaining }
-7/15 result=1,total=1  原生奖励增量与提示
+7/15 result=1,total=1  原生奖励增量与提示；key 只在该原生路径中扣一次
 ```
 
 删除的只是两个违反客户端契约的消费项 `7/7 type=2` 对象。服务端事务、宝箱和钥匙
@@ -68,8 +67,8 @@ category15_insert item=815 seq=258 amount=42 physical=74 occupied=74 empty=0
 
 ## 回归边界
 
-`scripts/chest-open-reward-notice-regression.c` 现在断言成功包只有四个对象，顺序为
-`7/4, 7/11, 7/11, 7/15`，并明确拒绝消费项的 `7/7 type=2`。运行时复测还需确认：
+`scripts/chest-open-reward-notice-regression.c` 现在断言成功包只有三个对象，顺序为
+`7/4, 7/11, 7/15`，并明确拒绝消费项的 `7/7 type=2` 与钥匙 `7/11`。运行时复测还需确认：
 
 - 连续开箱时不再出现 `category15_insert item=524/815`；
 - 奖励物品按原生 `7/15` 正常加入且只加入一次；

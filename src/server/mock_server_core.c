@@ -5336,8 +5336,16 @@ enum
     /* Version 7 changes the persisted EXP curve.  EXP is a cumulative value,
      * so version-6 rows must be migrated before their level is normalized.
      * Version 8 makes +4/+8/+12/+16 attribute rolls durable equipment-instance
-     * data instead of deriving one fixed row from the item catalogue. */
-    VM_NET_MOCK_ROLE_DB_VERSION = 8,
+     * data instead of deriving one fixed row from the item catalogue.
+     * Version 9 replaces the unsustainably steep V1 curve.  V7/V8 rows map
+     * their old-level progress to the V2 interval before normalization.
+     * Version 10 scales the same curve to a 100M cap so low-level percentage
+     * rewards do not collapse to one EXP; V9 rows retain level and interval
+     * progress when they move to the new curve. */
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V1_VERSION = 7,
+    VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION = 8,
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION = 9,
+    VM_NET_MOCK_ROLE_DB_VERSION = 10,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
@@ -5443,7 +5451,10 @@ enum
      * its client requests are the independently decoded 1/30/7, 1/30/8 and
      * 1/30/11 room protocol. */
     VM_NET_MOCK_NPC_KIND_ARENA_MASTER = 8,
-    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_ARENA_MASTER,
+    /* The mailbox stays inside ParseNPCDialogData's proven action=1 contract;
+     * only its server-owned nested values are new. */
+    VM_NET_MOCK_NPC_KIND_MAILBOX = 9,
+    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_MAILBOX,
     /* ParseNPCDialogData stores action rows in ten fixed 64-byte entries.
      * Tasks and direct NPC services share this one client-owned list. */
     VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS = 10,
@@ -5503,12 +5514,29 @@ static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE 0xf2000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE 0xf3000000u
 #define VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE 0xf4000000u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX_BASE 0xf5000000u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_MAIL_BASE    0xf6000000u
+#define VM_NET_MOCK_NPC_SERVICE_CLAIM_MAIL_BASE   0xf7000000u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX      0xf5000001u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
 #define VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR 0xfeu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
 #define VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS 5u
+
+typedef struct
+{
+    bool active;
+    /* The recipient row is account-scoped.  roleId only binds the reward to
+     * the role snapshot being saved so another role cannot reuse this in-memory
+     * transaction context. */
+    u32 roleId;
+    u32 mailId;
+} vm_net_mock_mail_claim_transaction;
+
+static vm_net_mock_mail_claim_transaction g_vm_net_mock_mail_claim_transaction;
+static bool vm_net_mock_mail_claim_commit_in_transaction(u32 scopedRoleId);
 /* Equipment resale is deliberately a low-value copper sink/source.  Both the
  * explicit recovery NPC and the Battle Insight full-bag auto-sale consume this
  * one authoritative percentage. */

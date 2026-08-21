@@ -3,8 +3,9 @@
 ## Audit Result
 
 The equipment catalog and role-stat builder already produce `hit`, `dodge`,
-`crit`, and `resist`, including valid equipment, enhancement and active battle
-modifier contributions.  Before this change no damage entry point read those
+`crit`, and `resist`.  Resistance is deliberately the sum of valid worn
+equipment and its enhancement affixes only; it has no character-level,
+primary-attribute, ActorInfo override or timed-skill source.  Before this change no damage entry point read those
 fields: normal attacks and offensive skills only used attack/defense, while
 enemy attacks only used attack/defense.  The values could therefore appear in
 the attribute UI without affecting any battle result.

@@ -114,17 +114,21 @@ only includes entries whose money or level condition is satisfied by the
 active role:
 
 ```text
-0  一贫如洗    riches_name0.gif  minMoney=0
-1  衣食无忧    riches_name1.gif  minMoney=5000
-2  生财有道    riches_name2.gif  minMoney=20000
-3  理财有方    riches_name3.gif  minMoney=50000
-4  财运亨通    riches_name4.gif  minMoney=100000
-5  腰缠万贯    riches_name5.gif  minMoney=300000
-6  家财万贯    riches_name6.gif  minMoney=500000
-7  富商巨贾    riches_name7.gif  minMoney=1000000
-8  富甲一方    riches_name8.gif  minMoney=3000000
-9  富可敌国    riches_name9.gif  minMoney=10000000
+0  一贫如洗    riches_name0.gif  0 金       (minMoney=0)
+1  衣食无忧    riches_name1.gif  1 金       (minMoney=1,000)
+2  生财有道    riches_name2.gif  10 金      (minMoney=10,000)
+3  理财有方    riches_name3.gif  100 金     (minMoney=100,000)
+4  财运亨通    riches_name4.gif  1,000 金   (minMoney=1,000,000)
+5  腰缠万贯    riches_name5.gif  5,000 金   (minMoney=5,000,000)
+6  家财万贯    riches_name6.gif  10,000 金  (minMoney=10,000,000)
+7  富商巨贾    riches_name7.gif  30,000 金  (minMoney=30,000,000)
+8  富甲一方    riches_name8.gif  60,000 金  (minMoney=60,000,000)
+9  富可敌国    riches_name9.gif  100,000 金 (minMoney=100,000,000)
 ```
+
+2026-08-21 起，金钱称号按当前持有金额判断，换算为 `1 金 = 1,000`
+持久 `money` 单位。以上是当前服务端配置；称号资源、稳定 ID、`23/1` 列表与
+`23/3` 选择回包格式均未改变。
 
 Level titles:
 

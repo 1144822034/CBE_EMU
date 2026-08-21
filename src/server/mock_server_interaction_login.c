@@ -3085,12 +3085,15 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
                                              actorStatusFields.words[3]);
     actorAttrWords[4] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_DEFENSE",
                                              actorStatusFields.words[4]);
-    actorAttrWords[5] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_RESIST",
-                                             actorStatusFields.words[5]);
+    /* Resistance has no ActorInfo override: the baseline is zero and the
+     * client adds resistance solely from the subsequent 1/7/7 worn-equipment
+     * records.  Keeping an override here would manufacture a second source
+     * that combat does not share. */
+    actorAttrWords[5] = actorStatusFields.words[5];
     actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
     actorGap0CC0 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC0", playerStats.attack);
     actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", playerStats.defense);
-    actorGap0CC8 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC8", playerStats.resist);
+    actorGap0CC8 = playerStats.resist;
     shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", vm_net_mock_role_title(role));
 
     /*

@@ -96,7 +96,7 @@ static bool read_tagged_u32(const u8 *blob, u16 blobLen, u32 *offset,
 
 static bool assert_native_chest_packet(const u8 *packet, u32 packetLen)
 {
-    static const u8 expectedSubtype[] = { 4, 11, 11, 15 };
+    static const u8 expectedSubtype[] = { 4, 11, 15 };
     u32 offset = 5;
 
     if (packet == NULL || packetLen < offset || packet[0] != 'W' ||
@@ -126,7 +126,7 @@ static bool assert_native_chest_packet(const u8 *packet, u32 packetLen)
                 result[2] != 1 || fieldOffset != offset + objectLen)
                 return false;
         }
-        if (i == 3)
+        if (i == 2)
         {
             const u8 *result = NULL;
             const u8 *total = NULL;
@@ -203,11 +203,9 @@ int main(void)
     ++objectCount;
     if (!vm_net_mock_append_backpack_item_count11_object(
             packet, sizeof(packet), &packetLen, &objectCount, 238, 524, 0) ||
-        !vm_net_mock_append_backpack_item_count11_object(
-            packet, sizeof(packet), &packetLen, &objectCount, 258, 815, 0) ||
         !vm_net_mock_append_chest_open_reward15_object(
             packet, sizeof(packet), &packetLen, &objectCount, &rewardItem, 3) ||
-        objectCount != 4)
+        objectCount != 3)
     {
         fputs("native chest reward objects were not built\n", stderr);
         return 1;
@@ -219,6 +217,6 @@ int main(void)
         return 1;
     }
 
-    puts("chest-open reward-notice regression passed: 7/4 completion + sequence-only 7/11 consumption + native 7/15 reward/prompt");
+    puts("chest-open reward-notice regression passed: 7/4 completion + chest-only 7/11 sync + native single-key 7/15 reward/prompt");
     return 0;
 }
