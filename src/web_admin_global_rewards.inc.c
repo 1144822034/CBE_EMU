@@ -109,7 +109,6 @@ static void vm_mock_admin_global_reward_render_nav(vm_mock_admin_text *page)
     vm_mock_admin_text_appendf(
         page,
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab\" href=\"/?tab=enhance-restore\">强化恢复</a>"
         "<a class=\"tab on\" href=\"/?tab=global-rewards\">全服奖励管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"

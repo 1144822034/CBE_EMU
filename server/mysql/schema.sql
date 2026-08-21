@@ -456,7 +456,8 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
 
 -- Direct NPC dialog services are a set, not a replacement for task bindings.
 -- service_kind=0 is the explicit “configured but no direct service” marker;
--- 1..9 are the parser-backed action=1 service kinds.  Rows are
+-- 1..10 are parser-backed NPC-dialog service kinds (guard challenge uses
+-- client-native action=13).  Rows are
 -- shared by dynamic NPCs and scene-native NPC overrides, so no foreign key is
 -- used here: native actors do not have a server_dynamic_npcs parent row.
 CREATE TABLE IF NOT EXISTS `server_npc_services` (

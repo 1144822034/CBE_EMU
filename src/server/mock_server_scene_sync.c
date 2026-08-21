@@ -3623,9 +3623,37 @@ static bool vm_net_mock_npc_service_option_default(
     case VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE:
         if (seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
             return false;
-        name = "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xd3\xeb\xcc\xf4\xd5\xbd"; /* 副本传送与挑战 */
-        description = "\xb8\xb1\xb1\xbe\xcf\xf2\xb5\xbc"; /* 副本向导 */
-        value = VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE | seed->actorId;
+        /* A configured destination is a transport service.  Point the first
+         * action=1 selection straight at the parser-backed ENTER_INSTANCE
+         * request so the client receives its 30/1 scene-enter response
+         * immediately, rather than rendering a second operation dialog. */
+        if (seed->instanceScene[0] != 0)
+        {
+            name = "\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe"; /* 进入副本 */
+            description = "\xd6\xb1\xbd\xd3\xb4\xab\xcb\xcd\xb5\xbd\xb8\xb1\xb1\xbe\xb3\xa1\xbe\xb0"; /* 直接传送到副本场景 */
+            value = VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE |
+                    seed->actorId;
+        }
+        else
+        {
+            /* Compatibility projection for old challenge-only kind-6 rows.
+             * New admin saves use INSTANCE_CHALLENGE below. */
+            name = "\xcc\xf4\xd5\xbd\xca\xd8\xb9\xd8\xb9\xd6"; /* 挑战守关怪 */
+            description = "\xd6\xb1\xbd\xd3\xbf\xaa\xca\xbc\xd5\xbd\xb6\xb7"; /* 直接开始战斗 */
+            value = VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE |
+                    seed->actorId;
+        }
+        break;
+    case VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE:
+        if (seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+            return false;
+        name = "\xcc\xf4\xd5\xbd\xca\xd8\xb9\xd8\xb9\xd6"; /* 挑战守关怪 */
+        description = "\xd6\xb1\xbd\xd3\xbf\xaa\xca\xbc\xd5\xbd\xb6\xb7"; /* 直接开始战斗 */
+        /* The dialog serializer replaces this private value with the guarded
+         * action-13 enemy id.  Keep a supported value here so a malformed
+         * caller cannot turn an unknown opcode into a service action. */
+        value = VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE |
+                seed->actorId;
         break;
     case VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER:
         name = "\xb3\xf6\xca\xdb\xd7\xb0\xb1\xb8"; /* 出售装备 */
@@ -3649,6 +3677,19 @@ static bool vm_net_mock_npc_service_option_default(
     *descriptionOut = description;
     *valueOut = value;
     return true;
+}
+
+static bool vm_net_mock_npc_service_is_direct_instance_challenge(
+    const vm_net_mock_scene_npcinfo_seed *seed, u16 serviceKind)
+{
+    if (seed == NULL || seed->challengeEnemyId == 0)
+        return false;
+    /* Kind 6 without a destination is the compatibility representation used
+     * by existing challenge-only NPCs.  Newly saved NPCs use kind 10, which
+     * remains direct even when the same NPC also offers instance transport. */
+    return serviceKind == VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE ||
+           (serviceKind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+            seed->instanceScene[0] == 0);
 }
 
 static void vm_net_mock_npc_service_context_record(
@@ -4201,14 +4242,13 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
      * index in 4/1; advertising action 13 before the SCE kind-3 record has
      * been installed makes the client send index=0 and leaves its loading
      * state waiting for a 4/5 battle that cannot legally be built. */
-    if (matchedSeed != NULL && matchedSeed->challengeEnemyId != 0 &&
-        matchedSeed->instanceScene[0] == 0)
+    if (matchedSeed != NULL && matchedSeed->challengeEnemyId != 0)
     {
         for (u32 serviceIndex = 0;
              serviceIndex < configuredServiceCount; ++serviceIndex)
         {
-            if (configuredServices[serviceIndex].kind ==
-                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+            if (vm_net_mock_npc_service_is_direct_instance_challenge(
+                    matchedSeed, configuredServices[serviceIndex].kind))
             {
                 directChallengeServiceConfigured = true;
                 break;
@@ -4262,9 +4302,9 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         {
             continue;
         }
-        if (configuredServices[serviceIndex].kind ==
-                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
-            directChallengeServiceConfigured && !directChallengeNodeReady)
+        if (directChallengeServiceConfigured && !directChallengeNodeReady &&
+            vm_net_mock_npc_service_is_direct_instance_challenge(
+                matchedSeed, configuredServices[serviceIndex].kind))
         {
             directChallengeUnavailable = true;
             continue;
@@ -4283,7 +4323,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         emittedServiceMask |= vm_net_mock_npc_service_kind_mask(
             configuredServices[serviceIndex].kind);
     }
-    if (directChallengeUnavailable && taskEntryCount == 0)
+    if (directChallengeUnavailable && taskEntryCount == 0 &&
+        emittedServiceCount == 0)
     {
         dialogText =
             "\xcc\xf4\xd5\xbd\xc4\xbf\xb1\xea\xc9\xd0\xce\xb4\xb2\xbf\xca\xf0\xa3\xac"
@@ -4347,17 +4388,13 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             configuredServices[serviceIndex].optionDescription[0] != 0
                 ? configuredServices[serviceIndex].optionDescription
                 : defaultDescription;
-        /* A guide with a challenge target but no destination scene has no
-         * meaningful intermediate choice.  Encode its client-native
-         * action-13 option in this first dialog, so the next step is the
-         * real 4/1 battle request instead of “请选择副本操作”.  If a target
-         * scene also exists, keep the menu: entering and challenging remain
-         * separate user operations. */
+        /* A dedicated guard-challenge service is encoded as the native
+         * action-13 option in this first dialog.  The next client action is
+         * the real 4/1 battle request, never a second NPC dialog or a
+         * 30/9 confirmation window. */
         directChallengeService =
-            configuredServices[serviceIndex].kind ==
-                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
-            matchedSeed != NULL && matchedSeed->challengeEnemyId != 0 &&
-            matchedSeed->instanceScene[0] == 0;
+            vm_net_mock_npc_service_is_direct_instance_challenge(
+                matchedSeed, configuredServices[serviceIndex].kind);
         if (directChallengeService && !directChallengeNodeReady)
             continue;
         if (directChallengeService)
@@ -5165,9 +5202,12 @@ vm_net_mock_instance_guide_seed(u32 actorId)
                 resolved[i].serviceOptionName,
                 resolved[i].serviceOptionDescription, services,
                 VM_NET_MOCK_NPC_SERVICE_OPTION_MAX, &serviceCount, NULL) &&
-            vm_net_mock_npc_service_options_has_kind(
-                services, serviceCount,
-                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE))
+            (vm_net_mock_npc_service_options_has_kind(
+                 services, serviceCount,
+                 VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) ||
+             vm_net_mock_npc_service_options_has_kind(
+                 services, serviceCount,
+                 VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE)))
         {
             return &resolved[i];
         }
