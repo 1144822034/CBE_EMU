@@ -32,15 +32,8 @@ mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.
 [info][network] mock_item_effect_catalog total=230 source=item.dsh
 mock_role_db_mysql_load account=07060707 source=relational roles=1 active=10438
 [info][mock-service] account_state_release account=07060707 reason=admin-management-close
-[info][mock-admin] global_reward_send mail=1 recipient_accounts=430 items=1 action=committed
-mock_role_db_mysql_load account=07060707 source=relational roles=1 active=10438
-[info][mock-service] account_state_release account=07060707 reason=admin-management-close
-[info][mock-admin] request worker=2 sequence=12 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=187
-[info][mock-admin] request worker=3 sequence=15 result=1 queue_wait_ms=0 state_wait_ms=31 process_ms=0
-[info][mock-admin] request worker=4 sequence=18 result=1 queue_wait_ms=0 state_wait_ms=78 process_ms=0
-[info][mock-admin] request worker=3 sequence=19 result=1 queue_wait_ms=0 state_wait_ms=78 process_ms=0
-[info][mock-admin] request worker=2 sequence=20 result=1 queue_wait_ms=0 state_wait_ms=78 process_ms=0
-[info][mock-admin] dynamic_npc_save scene=c04临安府_01.sce actor=20092 enabled=1 kind=7 service_option=- task=0 repeat_policy=0 pos=(264,304) instance=-@(0,0) enemy=0 min_level=1 actor_res=n_man1.actor script=04临安胡斐.xse
+[info][mock-admin] request worker=2 sequence=7 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=110
+[info][mock-admin] dynamic_npc_save scene=测试地图.sce actor=30000 enabled=1 kind=6 service_option=- task=0 repeat_policy=0 pos=(120,120) instance=c04临安府_01.sce@(120,120) enemy=0 min_level=1 actor_res=n_man1.actor script=-
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10438 error=no MySQL error detail
 [info][network] mock_update_version request=18/9 result=0x00 identity=f197ad82 source=delivery-ledger configured=0/0/0/0 content=2/200/1 client_content=2/1 action=update
 net_send connect=0 wt=18/9 len=137 source=builtin-version resp=63
@@ -50,643 +43,214 @@ net_send connect=0 wt=18/8 len=57 source=builtin-content-update-chunk resp=101
 net_send connect=0 wt=18/5 len=70 source=builtin-update-version-catalog resp=23
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10438 error=no MySQL error detail
 net_send connect=0 wt=99/1 len=9 source=builtin-short-63-1-empty-ack resp=5
+[info][mock-admin] monster_db_load rows=92 skipped=0 drops=544 drops_skipped=0
+[info][mock-admin] request worker=4 sequence=357 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=125
+[info][mock-admin] request worker=2 sequence=856 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
+[info][mock-admin] request worker=4 sequence=873 result=0 queue_wait_ms=0 state_wait_ms=16 process_ms=0
+[info][mock-admin] request worker=4 sequence=889 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
+[info][mock-admin] request worker=3 sequence=894 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=16
+[warn][mysql] mysql_transport_retry phase=com-query-incomplete
+[warn][mysql] mysql_transport_retry phase=com-query-incomplete
+[info][mock-admin] content_update_publish id=3 code=133 files=2 payload=31 changed=1 delivery=WT18/9+18/8->18/7
+[info][mock-admin] scene_battle_monster_deploy scene=测试地图.sce base=mysql-captured-base drafts=1 enabled=1 nodes=0->1 raw=524 payload=507 resource_type=2 content_changed=1 publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-kind3+mmBattle:0x66CC
 [info][mock-service] account_cache_acquire account=21642502 entries=1 reason=session-login
-[info][mock-service] session_bind client=1dc03502 account=21642502 displaced=0
-mock_role_exp_curve_migrate version=9->10 account=21642502 roles=4 capped=2 source_curve=percentage-v2 strategy=preserve-level-progress level49_cost=883730 level70_cost=11507132 cap_exp=100001769
-mock_role_db_mysql_save account=21642502 reason=normalize roles=4 active=10599 scope=full storage=relational
-mock_role_db_mysql_load account=21642502 source=relational roles=4 active=10599
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10599 error=no MySQL error detail
+[info][mock-service] session_bind client=8b07c0cb account=21642502 displaced=0
+mock_role_db_mysql_load account=21642502 source=relational roles=4 active=10036
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
 [info][network] login_server_catalog_load rows=1 enabled=1 skipped=0 source=mysql
 [info][network] mock_login_alt12_server_list result=1 servernum=1 issued=0 user=- resp=141
 net_send connect=0 wt=1/12 len=100 source=builtin-login resp=141
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10599 error=no MySQL error detail
-net_send connect=0 wt=1/4 len=46 source=builtin-title-server-select resp=294
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10599 error=no MySQL error detail
-mock_role_db_mysql_save account=21642502 reason=role-select roles=4 active=10036 scope=active storage=relational
-mock_role_db_mysql_save account=21642502 reason=offline-exp-settle roles=4 active=10036 scope=active storage=relational
-[info][network] mock_offline_exp_settle role=10036 elapsed_minutes=185 settled_minutes=0 tokens=0 remaining_minutes=0 exp=0 source=item.dsh:804/812/938
-[info][network] mock_backpack_grid_reseed role=10036 reason=title-role-select next=group-type1-30/21 evidence=JianghuOL.CBE:0x01039952
-mock_title_role_select requested=10036 selected=1 active=10036 name_len=8 actorinfo_len=239 response=1/1/6+1/1/15 evidence=mmTitle:0x39FC/0x1B9C/0x53EC
-net_send connect=0 wt=1/6 len=25 source=builtin-title-role-select resp=457
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-[info][network] mock_team_member_row observer=1dc03502 member=1dc03502/10036 wire=10036 sex_group=1 job_index=2 online=0 hp=1155/1155 mp=1825/1825 wire_order=hp-mp-hpmax-mpmax
-[info][network] mock_team_solo_groupinfo observer=1dc03502 role=10036 groupinfo_len=48 lifecycle=login-self-roster
-[info][network] mock_backpack_grid role=10036 kind=30 subtype=21 gridnum=98 stored_rows=98 iteminfo_len=2646
-mock_backpack_grid role=10036 kind=30 subtype=21 gridnum=98 stored_rows=98 iteminfo_len=2646 evidence=JianghuOL:0x1039952+mmShop:sub_9DE
+net_send connect=0 wt=1/4 len=46 source=builtin-title-server-select resp=294
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_grid_reseed role=10036 reason=title-role-select next=group-type1-30/21 evidence=JianghuOL.CBE:0x01039952
+mock_title_role_select requested=10036 selected=1 active=10036 name_len=8 actorinfo_len=240 response=1/1/6+1/1/15 evidence=mmTitle:0x39FC/0x1B9C/0x53EC
+net_send connect=0 wt=1/6 len=25 source=builtin-title-role-select resp=458
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_team_member_row observer=8b07c0cb member=8b07c0cb/10036 wire=10036 sex_group=1 job_index=2 online=0 hp=1155/1155 mp=1825/1825 wire_order=hp-mp-hpmax-mpmax
+[info][network] mock_team_solo_groupinfo observer=8b07c0cb role=10036 groupinfo_len=48 lifecycle=login-self-roster
+[info][network] mock_backpack_grid role=10036 kind=30 subtype=21 gridnum=34 stored_rows=34 iteminfo_len=918
+mock_backpack_grid role=10036 kind=30 subtype=21 gridnum=34 stored_rows=34 iteminfo_len=918 evidence=JianghuOL:0x1039952+mmShop:sub_9DE
 [info][network] mock_backpack_reservoir_seed role=10036 rows=3 info_len=33 response=7/11 evidence=JianghuOL.CBE:0x1033544
 mock_backpack_reservoir_seed role=10036 rows=3 info_len=33 response=7/11 evidence=JianghuOL.CBE:0x1033544
-net_send connect=0 wt=5/10 len=35 source=builtin-group-type1 resp=2968
+net_send connect=0 wt=5/10 len=35 source=builtin-group-type1 resp=1240
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
 net_send connect=0 wt=7/7 len=19 source=builtin-game-type resp=34
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
 net_send connect=0 wt=7/7 len=19 source=builtin-game-type resp=36
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-[info][network] mock_scene_npc_catalog scene=01桃花岛_02.sce source=service-dynamic delivery=initial actors=1 selected=1 rows=1 dynamic=1 truncated=0 npcinfo_len=78 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
-[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=01桃花岛_02.sce npcNum=1 npcInfoLen=78
-[info][mock-service] task_prompt_refresh_arm client=1dc03502 scene=01桃花岛_02.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
-[info][network] mock_scene_npc_seed phase=startup-scene-followup-immediate scene=01桃花岛_02.sce source=27/11-catalog npcnum=1 npcinfo_len=78 once=1 evidence=JianghuOL.CBE:0x01037998
-[info][mock-service] scene_npc_lifecycle_seed client=1dc03502 scene=01桃花岛_02.sce phase=startup-scene-followup-immediate npcnum=1 objects=1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998
+[info][network] mock_scene_npc_catalog scene=c04临安府_01.sce source=service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=3 truncated=0 npcinfo_len=236 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
+[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=c04临安府_01.sce npcNum=3 npcInfoLen=236
+[info][mock-service] task_prompt_refresh_arm client=8b07c0cb scene=c04临安府_01.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
+[info][network] mock_scene_npc_seed phase=startup-scene-followup-immediate scene=c04临安府_01.sce source=27/11-catalog npcnum=3 npcinfo_len=236 once=1 evidence=JianghuOL.CBE:0x01037998
+[info][mock-service] scene_npc_lifecycle_seed client=8b07c0cb scene=c04临安府_01.sce phase=startup-scene-followup-immediate npcnum=3 objects=1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998
 [info][network] mock_role_service_load account=21642502 role=10036 skills=25 durability_source=role-instance invalid=0
 [info][network] mock_skill_catalog total=74 source=skill.dsh
 mock_role_skills role=10036 role_job=3 raw_job=2 job_name=Guidao level=70 learned=25 ids=201,202,203,204,205,212,213,214,215,221,222,223,224,225,231,232,233,242,243,244,253,254,261,262,263 evidence=JianghuOL.CBE:0x1010594/0x103550E skill.dsh
-[info][network] mock_backpack_items role=10036 capacity=64 rows=98 stored_rows=98 iteminfo_len=1669 layout=bootstrap-compact
-mock_backpack_items role=10036 capacity=64 rows=98 stored_rows=98 iteminfo_len=1669 layout=bootstrap-compact evidence=mmGame:0x418C+mmShop:sub_9DE
+[info][network] mock_backpack_items role=10036 capacity=64 rows=34 stored_rows=34 iteminfo_len=581 layout=bootstrap-compact
+mock_backpack_items role=10036 capacity=64 rows=34 stored_rows=34 iteminfo_len=581 layout=bootstrap-compact evidence=mmGame:0x418C+mmShop:sub_9DE
 [info][network] mock_task_list role=10036 tasknum=2 persisted_active=2 taskinfo_len=170 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
-[info][network] mock_task_candidates role=10036 scene=01桃花岛_02.sce tasknum=1 taskinfo_len=33 persisted=5 npc_rows=1 npc_total=1 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
-[debug][mock-service] movement_rate_reset client=1dc03502 reason=scene-ready
-[info][mock-service] session_online client=1dc03502 account=21642502 role=10036 name=武林盟主 scene=01桃花岛_02.sce pos=(256,350) reason=scene-task-subset-followup
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=1
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=2
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10525 bytes=14 source_bytes=14 truncated=0 depth=3
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10268 bytes=8 source_bytes=8 truncated=0 depth=4
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10507 bytes=4 source_bytes=4 truncated=0 depth=5
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10525 bytes=22 source_bytes=22 truncated=0 depth=6
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10061 bytes=40 source_bytes=40 truncated=0 depth=7
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10061 bytes=40 source_bytes=40 truncated=0 depth=8
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10061 bytes=42 source_bytes=42 truncated=0 depth=9
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=10
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=11
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=12
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=13
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10550 bytes=6 source_bytes=6 truncated=0 depth=14
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=2 source_bytes=2 truncated=0 depth=15
+[info][network] mock_task_candidates role=10036 scene=c04临安府_01.sce tasknum=0 taskinfo_len=0 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[debug][mock-service] movement_rate_reset client=8b07c0cb reason=scene-ready
+[info][mock-service] session_online client=8b07c0cb account=21642502 role=10036 name=武林盟主 scene=c04临安府_01.sce pos=(261,308) reason=scene-task-subset-followup
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=1
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=2
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10525 bytes=14 source_bytes=14 truncated=0 depth=3
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10268 bytes=8 source_bytes=8 truncated=0 depth=4
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10507 bytes=4 source_bytes=4 truncated=0 depth=5
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10525 bytes=22 source_bytes=22 truncated=0 depth=6
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10061 bytes=40 source_bytes=40 truncated=0 depth=7
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10061 bytes=40 source_bytes=40 truncated=0 depth=8
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10061 bytes=42 source_bytes=42 truncated=0 depth=9
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=10
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=11
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=12
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10477 bytes=42 source_bytes=42 truncated=0 depth=13
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10550 bytes=6 source_bytes=6 truncated=0 depth=14
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=2 source_bytes=2 truncated=0 depth=15
 [warn][mock-service] world_chat_history_normalize role=10415 source_bytes=81 bytes=78 max=79 evidence=JianghuOL.CBE:0x010126C6
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10415 bytes=78 source_bytes=78 truncated=0 depth=16
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=17
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10571 bytes=20 source_bytes=20 truncated=0 depth=18
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=19
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=20
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10093 bytes=40 source_bytes=40 truncated=0 depth=21
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=46 source_bytes=46 truncated=0 depth=22
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=46 source_bytes=46 truncated=0 depth=23
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=24
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=25
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=26
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=27
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=46 source_bytes=46 truncated=0 depth=28
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=29
-[info][mock-service] chat_notice_queue target=1dc03502 type=world source=00000000/10036 bytes=2 source_bytes=2 truncated=0 depth=30
-[info][mock-service] world_chat_history_queue target=1dc03502 queued=30 skipped=0 limit=30
-[info][mock-service] chat_notice_queue target=1dc03502 type=system source=00000000/0 bytes=16 source_bytes=16 truncated=0 depth=31
-[info][mock-service] scene_ready client=1dc03502 account=21642502 scene=01桃花岛_02.sce pos=(256,350) reason=scene-task-subset-followup
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10477 bytes=42 age_ticks=0
-[info][mock-service] scene_ready_messages client=1dc03502 scene=01桃花岛_02.sce objects=1 reason=scene-task-subset-followup delivery=same-scene-completion evidence=JianghuOL.CBE:0x01012FB4+0x010126C6
-[debug][mock-service] movement_rate_reset client=1dc03502 reason=scene-pending
-[info][mock-service] scene_pending client=1dc03502 account=21642502 scene=01桃花岛_02.sce pos=(256,350) reason=scene-target-remember
-[info][network] mock_scene_target_remember serial=1 scene=01桃花岛_02.sce pos=(256,350) exit=0
-[debug][mock-service] movement_rate_reset client=1dc03502 reason=scene-ready
-[info][mock-service] scene_ready client=1dc03502 account=21642502 scene=01桃花岛_02.sce pos=(256,350) reason=scene-target-complete
-[info][network] mock_scene_target_direct_completed scene=01桃花岛_02.sce pos=(256,350) exit=0 reason=scene-startup-followup-complete
-[debug][mock-service] role_position_save_skip role=10036 scene=01桃花岛_02.sce pos=(256,350) reason=scene-startup-followup-complete unchanged=1
-[info][network] mock_scene_startup_followup_complete scene=01桃花岛_02.sce pos=(256,350) source=scene-task-subset-followup objects=10 resp=2499 action=no-second-scene-enter
-mock_scene_startup_followup_complete scene=01桃花岛_02.sce pos=(256,350) source=scene-task-subset-followup objects=10 response=no-scene-pos-reenter evidence=JianghuOL.CBE:0x010137CA+0x010396D6
-net_send connect=0 wt=12/1 len=54 source=builtin-scene-task-subset-followup resp=2499
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10415 bytes=78 source_bytes=78 truncated=0 depth=16
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=17
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10571 bytes=20 source_bytes=20 truncated=0 depth=18
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=19
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=20
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10093 bytes=40 source_bytes=40 truncated=0 depth=21
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=46 source_bytes=46 truncated=0 depth=22
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=46 source_bytes=46 truncated=0 depth=23
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=24
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=25
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=26
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=27
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=46 source_bytes=46 truncated=0 depth=28
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=44 source_bytes=44 truncated=0 depth=29
+[info][mock-service] chat_notice_queue target=8b07c0cb type=world source=00000000/10036 bytes=2 source_bytes=2 truncated=0 depth=30
+[info][mock-service] world_chat_history_queue target=8b07c0cb queued=30 skipped=0 limit=30
+[info][mock-service] chat_notice_queue target=8b07c0cb type=system source=00000000/0 bytes=16 source_bytes=16 truncated=0 depth=31
+[info][mock-service] scene_ready client=8b07c0cb account=21642502 scene=c04临安府_01.sce pos=(261,308) reason=scene-task-subset-followup
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10477 bytes=42 age_ticks=0
+[info][mock-service] scene_ready_messages client=8b07c0cb scene=c04临安府_01.sce objects=1 reason=scene-task-subset-followup delivery=same-scene-completion evidence=JianghuOL.CBE:0x01012FB4+0x010126C6
+[debug][mock-service] movement_rate_reset client=8b07c0cb reason=scene-pending
+[info][mock-service] scene_pending client=8b07c0cb account=21642502 scene=c04临安府_01.sce pos=(261,308) reason=scene-target-remember
+[info][network] mock_scene_target_remember serial=1 scene=c04临安府_01.sce pos=(261,308) exit=0
+[debug][mock-service] movement_rate_reset client=8b07c0cb reason=scene-ready
+[info][mock-service] scene_ready client=8b07c0cb account=21642502 scene=c04临安府_01.sce pos=(261,308) reason=scene-target-complete
+[info][network] mock_scene_target_direct_completed scene=c04临安府_01.sce pos=(261,308) exit=0 reason=scene-startup-followup-complete
+[debug][mock-service] role_position_save_skip role=10036 scene=c04临安府_01.sce pos=(261,308) reason=scene-startup-followup-complete unchanged=1
+[info][network] mock_scene_startup_followup_complete scene=c04临安府_01.sce pos=(261,308) source=scene-task-subset-followup objects=10 resp=1536 action=no-second-scene-enter
+mock_scene_startup_followup_complete scene=c04临安府_01.sce pos=(261,308) source=scene-task-subset-followup objects=10 response=no-scene-pos-reenter evidence=JianghuOL.CBE:0x010137CA+0x010396D6
+net_send connect=0 wt=12/1 len=54 source=builtin-scene-task-subset-followup resp=1536
 [info][network] mock_task_list role=10036 tasknum=2 persisted_active=2 taskinfo_len=170 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
-[info][network] mock_task_candidates role=10036 scene=01桃花岛_02.sce tasknum=1 taskinfo_len=33 persisted=5 npc_rows=1 npc_total=1 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
-[info][mock-service] task_prompt_refresh_deliver client=1dc03502 scene=01桃花岛_02.sce objects=2 evidence=JianghuOL.CBE:0x0104726C(cases1,14)->0x01017C6C
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10477 bytes=42 age_ticks=0
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10525 bytes=14 age_ticks=0
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10268 bytes=8 age_ticks=0
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10507 bytes=4 age_ticks=0
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10525 bytes=22 age_ticks=2
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10061 bytes=40 age_ticks=2
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10061 bytes=40 age_ticks=2
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10061 bytes=42 age_ticks=2
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10477 bytes=42 age_ticks=4
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10477 bytes=42 age_ticks=4
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10477 bytes=42 age_ticks=4
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10477 bytes=42 age_ticks=4
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10550 bytes=6 age_ticks=6
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=2 age_ticks=6
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10415 bytes=78 age_ticks=6
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=6
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10571 bytes=20 age_ticks=9
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=9
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=9
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10093 bytes=40 age_ticks=9
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=46 age_ticks=11
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=46 age_ticks=11
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=11
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=11
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=13
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=13
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=46 age_ticks=13
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=44 age_ticks=13
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=world source=00000000/10036 bytes=2 age_ticks=14
-[info][mock-service] chat_notice_deliver observer=1dc03502 type=system source=00000000/0 bytes=16 age_ticks=14
+[info][network] mock_task_candidates role=10036 scene=c04临安府_01.sce tasknum=0 taskinfo_len=0 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][mock-service] task_prompt_refresh_deliver client=8b07c0cb scene=c04临安府_01.sce objects=2 evidence=JianghuOL.CBE:0x0104726C(cases1,14)->0x01017C6C
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10477 bytes=42 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10525 bytes=14 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10268 bytes=8 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10507 bytes=4 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10525 bytes=22 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10061 bytes=40 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10061 bytes=40 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10061 bytes=42 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10477 bytes=42 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10477 bytes=42 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10477 bytes=42 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10477 bytes=42 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10550 bytes=6 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=2 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10415 bytes=78 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10571 bytes=20 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10093 bytes=40 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=46 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=46 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=46 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=44 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=world source=00000000/10036 bytes=2 age_ticks=16
+[info][mock-service] chat_notice_deliver observer=8b07c0cb type=system source=00000000/0 bytes=16 age_ticks=16
+[info][network] mock_npc_dialog actor=20092 index=0 name=胡斐 script=- scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=6 scene_entity_kind=0 native=0 service_configured=1 service_count=3 service_mask=000002c0 direct_challenge=0 task_options=0 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=0 xse_dialogs=0 dialog_len=176 objects=1 resp=209 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
+mock_npc_dialog actor=20092 index=0 catalog_match=1 dialog_len=176 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
+net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=209
+[debug][mock-service] movement_rate_reset client=8b07c0cb reason=scene-pending
+[info][mock-service] scene_pending client=8b07c0cb account=21642502 scene=测试地图.sce pos=(122,122) reason=scene-target-remember
+[info][network] mock_scene_target_remember serial=2 scene=测试地图.sce pos=(122,122) exit=0
+mock_role_db_mysql_save account=21642502 reason=npc-instance-enter roles=4 active=10036 scope=active storage=relational
+[info][network] mock_npc_instance_enter actor=20092 scene=测试地图.sce pos=(122,122) response=30/1 resp=51 evidence=JianghuOL.CBE:0x01039B8A+0x010396D6
+net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=51
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-mock_scene_safe_landing scene=c04临安府_01.sce raw=(201,128) safe=(201,140) rect=(181,88)-(221,108) entry=0 targetEntry=2
-mock_scene_reasonable_spawn scene=c04临安府_01.sce pos=(201,140) source=sce-nearest-entry entry=0
-[info][network] mock_scene_landing_resolve scene=c04临安府_01.sce smap_marker=(112,208) landing=(201,140) source=sce-nearest-entry entry=0
-mock_scene_landing_resolve scene=c04临安府_01.sce smap_marker=(112,208) landing=(201,140) source=sce-nearest-entry entry=0 evidence=SCE2-edge-portal
-[info][network] mock_teleport_stone_map_confirm curid=2 objid=4 smap_row=47 scene_count=10 row_source=wmap-base-await-confirm-exitID scene=c04临安府_01.sce scene_key=smap-exact scene_pos=(201,140) response=16/4-confirm value=1 scene_source=wmap-smap-dsh pos_source=sce-nearest-entry download=0 resp=37
-mock_teleport_stone_map_confirm curid=2 objid=4 smap_row=47 scene_count=10 row_source=wmap-base-await-confirm-exitID scene=c04临安府_01.sce scene_key=smap-exact scene_pos=(201,140) response=16/4-confirm value=1 scene_source=wmap-smap-dsh pos_source=sce-nearest-entry download=0 evidence=JianghuOL:0x010357E0/0x010190A8/0x01018F66/0x0103130A/0x0103581E negative=value0-wrong-cost+direct-30/1-stale-map-controller+extensionless-smap-miss
-net_send connect=0 wt=16/4 len=37 source=builtin-teleport-stone-map-confirm resp=37
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-[info][network] mock_teleport_stone_confirmed_exit_resolve exit=47 provisional_scene=c04临安府_01.sce provisional_row=47 final_scene=c04临安府_01.sce pos=(201,140) pos_source=confirmed-exit-matches-provisional changed=0 evidence=JianghuOL.CBE:0x0103573A(wMap ids)+0x01018F66(exitID)
-[info][item-use] rows phase=before item=800 selected_seq=266 row_seq=266 row_count=1 row_index=10 total_rows=98 request_count=1 request_num=1
-mock_role_db_mysql_save account=21642502 reason=item-use roles=4 active=10036 scope=active storage=relational
-[info][item-use] rows phase=after item=800 selected_seq=266 row_count=0 total_rows=97 request_count=1 request_num=1
-[info][network] mock_item_use item=800 seq=266 count=1 mode=1 reserve=0->0 consumed=1 hp=1/1 mp=0/0 exp=0 cap=100->100 expand=0 applied=1 consumed_ok=1 refresh=7/1+7/7+7/11 resp=125 evidence=JianghuOL.CBE:0x1033544+item.dsh:consumeMode
-mock_item_use item=800 seq=266 count=1 mode=1 reserve=0->0 consumed=1 hp=1/1 mp=0/0 exp=0 cap=100->100 expand=0 applied=1 consumed_ok=1 response=7/1-use-ok+7/7-type2+7/11-info evidence=runtime:wt7/1 JianghuOL.CBE:0x1033544 item.dsh:consumeMode
-[info][network] mock_teleport_stone_confirmed_exit_combo request_objects=3 exit=47 type=3 item_request=42 item_response=125 response_objects=3 deferred_scene=1 scene=c04临安府_01.sce pos=(201,140) target_source=confirmed-exitID armed_tick=944 resp=125
-mock_teleport_stone_confirmed_exit_combo request_objects=3 exit=47 type=3 item=1 response_objects=3 response=item-ack-only deferred_scene=1 evidence=runtime:wt16/2-len130+crash:0x01018136/0x01046189/0x01005AF4
-net_send connect=0 wt=16/2 len=130 source=builtin-teleport-stone-confirmed-exit-combo resp=125
-[debug][mock-service] movement_rate_reset client=1dc03502 reason=scene-pending
-[info][mock-service] scene_pending client=1dc03502 account=21642502 scene=c04临安府_01.sce pos=(201,140) reason=scene-target-remember
-[info][network] mock_scene_target_remember serial=2 scene=c04临安府_01.sce pos=(201,140) exit=47
-mock_role_db_mysql_save account=21642502 reason=teleport-stone-deferred-target roles=4 active=10036 scope=active storage=relational
-[info][network] mock_teleport_stone_deferred_enter scene=c04临安府_01.sce pos=(201,140) armed_tick=944 deliver_tick=945 response=scene-channel-enter-confirm-target resp=55 evidence=separate-network-event
-mock_teleport_stone_deferred_enter scene=c04临安府_01.sce pos=(201,140) armed_tick=944 deliver_tick=945 response=30/1 evidence=JianghuOL:0x01012E4D/0x01039B8A/0x010396D6 crash-boundary:0x01018136/0x01046189/0x01005AF4
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-[info][network] mock_scene_target_inherit_pending scene=c04临安府_01.sce pos=(201,140) exit=0
-[info][network] mock_scene_target_inherit_pending scene=c04临安府_01.sce pos=(201,140) exit=0
-[debug][mock-service] movement_rate_reset client=1dc03502 reason=scene-ready
-[info][mock-service] scene_ready client=1dc03502 account=21642502 scene=c04临安府_01.sce pos=(201,140) reason=scene-target-complete
-[debug][mock-service] role_position_save_skip role=10036 scene=c04临安府_01.sce pos=(201,140) reason=scene-change-current-scene-ack unchanged=1
-[info][network] mock_teleport_stone_current_scene_complete scene=c04临安府_01.sce pos=(201,140) objects=5 resp=219 response=27-family+30/2-no-posinfo action=reset-download-state
-[info][network] mock_scene_npc_seed_defer scene=c04临安府_01.sce phase=current-scene-completion next=WT6/1 reason=direct-map-stone-shell-not-runtime-ready
-mock_teleport_stone_current_scene_complete scene=c04临安府_01.sce pos=(201,140) objects=5 response=30/2-no-posinfo evidence=JianghuOL.CBE:0x01039770+0x0103993C
-net_send connect=0 wt=2/3 len=73 source=builtin-scene-change-current-scene-ack resp=219
-[info][network] mock_scene_npc_catalog scene=c04临安府_01.sce source=service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=3 truncated=0 npcinfo_len=250 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
-[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=c04临安府_01.sce npcNum=3 npcInfoLen=250
-[info][mock-service] task_prompt_refresh_arm client=1dc03502 scene=c04临安府_01.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
-[info][network] mock_scene_npc_seed phase=startup-scene-sync-poll scene=c04临安府_01.sce source=27/11-catalog npcnum=3 npcinfo_len=250 once=1 evidence=JianghuOL.CBE:0x01037998
+[info][network] mock_scene_target_inherit_pending scene=测试地图.sce pos=(122,122) exit=0
+[info][network] mock_scene_target_inherit_pending scene=测试地图.sce pos=(122,122) exit=0
+[debug][mock-service] movement_rate_reset client=8b07c0cb reason=scene-ready
+[info][mock-service] scene_ready client=8b07c0cb account=21642502 scene=测试地图.sce pos=(122,122) reason=scene-target-complete
+[debug][mock-service] role_position_save_skip role=10036 scene=测试地图.sce pos=(122,122) reason=scene-change-current-scene-ack unchanged=1
+[info][network] mock_teleport_stone_current_scene_complete scene=测试地图.sce pos=(122,122) objects=5 resp=211 response=27-family+30/2-no-posinfo action=reset-download-state
+[info][network] mock_scene_npc_seed_defer scene=测试地图.sce phase=current-scene-completion next=WT6/1 reason=direct-map-stone-shell-not-runtime-ready
+mock_teleport_stone_current_scene_complete scene=测试地图.sce pos=(122,122) objects=5 response=30/2-no-posinfo evidence=JianghuOL.CBE:0x01039770+0x0103993C
+net_send connect=0 wt=2/3 len=69 source=builtin-scene-change-current-scene-ack resp=211
+[info][network] mock_scene_npc_catalog scene=测试地图.sce source=sce+service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=1 truncated=0 npcinfo_len=226 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
+[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=测试地图.sce npcNum=3 npcInfoLen=226
+[info][mock-service] task_prompt_refresh_arm client=8b07c0cb scene=测试地图.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
+[info][network] mock_scene_npc_seed phase=startup-scene-sync-poll scene=测试地图.sce source=27/11-catalog npcnum=3 npcinfo_len=226 once=1 evidence=JianghuOL.CBE:0x01037998
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
 net_send connect=0 wt=25/5 len=34 source=builtin-type27-followup resp=114
+[info][network] mock_update_chunk subtype=7 file=n_oldman.actor start=0 chunk=61 total=61 crc=1264 version=1 path=../web/fs/JHOnlineData/n_oldman.actor resp=168
+[info][network] mock_update_chunk_complete client=8b07c0cb file=n_oldman.actor action=client-install-callback protocol=WT18/7 evidence=JianghuOL.CBE:0x01037000+0x01036768
+net_send connect=0 wt=18/7 len=86 source=builtin-update-chunk resp=168
+[info][network] mock_update_chunk subtype=7 file=n_oldman.gif start=0 chunk=375 total=375 crc=22 version=1 path=../web/fs/JHOnlineData/n_oldman.gif resp=480
+[info][network] mock_update_chunk_complete client=8b07c0cb file=n_oldman.gif action=client-install-callback protocol=WT18/7 evidence=JianghuOL.CBE:0x01037000+0x01036768
+net_send connect=0 wt=18/7 len=84 source=builtin-update-chunk resp=480
+[info][network] mock_update_chunk subtype=7 file=娴嬭瘯鍦板浘.sce start=0 chunk=524 total=524 crc=7079 version=1 path=../web/fs/JHOnlineData/娴嬭瘯鍦板浘.sce resp=629
+[info][network] mock_update_chunk_complete client=8b07c0cb file=娴嬭瘯鍦板浘.sce action=client-install-callback protocol=WT18/7 evidence=JianghuOL.CBE:0x01037000+0x01036768
+net_send connect=0 wt=18/7 len=86 source=builtin-update-chunk resp=629
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
 [debug][mock-service] task_state_request_snapshot role=10036 rows=5 ok=1
 [info][network] mock_task_list role=10036 tasknum=2 persisted_active=2 taskinfo_len=170 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
-[debug][mock-service] scene_npc_request_snapshot scene=c04临安府_01.sce selected=3 total=3 dynamic=3
-[info][network] mock_task_candidates role=10036 scene=c04临安府_01.sce tasknum=1 taskinfo_len=39 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
-[info][network] mock_scene_resource_followup_repeat_ack scene=c04临安府_01.sce objects=5 resp=393 age=9 recent=1 shop_return=0 completion=none
-mock_scene_resource_followup_repeat_ack scene=c04临安府_01.sce objects=5 response=resource-followup-no-30/1 age=9 evidence=JianghuOL.CBE:0x01039770+0x0103993C
-net_send connect=0 wt=6/1 len=39 source=builtin-scene-resource-followup resp=393
+[debug][mock-service] scene_npc_request_snapshot scene=测试地图.sce selected=3 total=3 dynamic=1
+[info][network] mock_task_candidates role=10036 scene=测试地图.sce tasknum=1 taskinfo_len=41 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][network] mock_scene_resource_followup_repeat_ack scene=测试地图.sce objects=5 resp=395 age=10 recent=1 shop_return=0 completion=none
+mock_scene_resource_followup_repeat_ack scene=测试地图.sce objects=5 response=resource-followup-no-30/1 age=10 evidence=JianghuOL.CBE:0x01039770+0x0103993C
+net_send connect=0 wt=6/1 len=39 source=builtin-scene-resource-followup resp=395
 [info][network] mock_task_list role=10036 tasknum=2 persisted_active=2 taskinfo_len=170 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
-[info][network] mock_task_candidates role=10036 scene=c04临安府_01.sce tasknum=1 taskinfo_len=39 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
-[info][mock-service] task_prompt_refresh_deliver client=1dc03502 scene=c04临安府_01.sce objects=2 evidence=JianghuOL.CBE:0x0104726C(cases1,14)->0x01017C6C
-[info][network] mock_moveinfo_source pos=(205,172) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+[info][network] mock_task_candidates role=10036 scene=测试地图.sce tasknum=1 taskinfo_len=41 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][mock-service] task_prompt_refresh_deliver client=8b07c0cb scene=测试地图.sce objects=2 evidence=JianghuOL.CBE:0x0104726C(cases1,14)->0x01017C6C
+[info][network] mock_moveinfo_source pos=(162,122) reason=moveinfo-upload-timeline scene=测试地图.sce
 net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
-[info][network] mock_moveinfo_source pos=(205,212) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+[info][network] mock_moveinfo_source pos=(182,122) reason=moveinfo-upload-timeline scene=测试地图.sce
 net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
-[info][network] mock_moveinfo_source pos=(205,252) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+[info][network] mock_moveinfo_source pos=(166,110) reason=moveinfo-upload-timeline scene=测试地图.sce
 net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
-[info][network] mock_moveinfo_source pos=(205,292) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+[info][network] mock_moveinfo_source pos=(126,110) reason=moveinfo-upload-timeline scene=测试地图.sce
 net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
-[info][network] mock_moveinfo_source pos=(225,308) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+[info][network] mock_moveinfo_source pos=(86,110) reason=moveinfo-upload-timeline scene=测试地图.sce
 net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
-[info][network] mock_moveinfo_source pos=(261,308) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+[info][network] mock_moveinfo_source pos=(86,110) reason=moveinfo-upload-timeline scene=测试地图.sce
 net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
-[info][network] mock_npc_dialog actor=20092 index=0 name=胡斐 script=04临安胡斐.xse scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=7 scene_entity_kind=0 native=0 service_configured=1 service_count=2 service_mask=00000280 direct_challenge=0 task_options=1 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=4 xse_dialogs=4 dialog_len=254 objects=1 resp=287 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
-mock_npc_dialog actor=20092 index=0 catalog_match=1 dialog_len=254 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=287
-[info][network] mock_npc_service action=mailbox-list opcode=f5000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=1 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=99 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=99
-[info][network] mock_npc_service action=mailbox-detail opcode=f6000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=2 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=168 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=168
-[info][network] mock_npc_service action=mailbox-list opcode=f5000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=1 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=99 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=99
-[info][network] mock_npc_service action=mailbox-detail opcode=f6000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=2 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=168 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=168
-mock_role_db_mysql_save account=21642502 reason=mail-reward-claim roles=4 active=10036 scope=active storage=relational
-[info][network] mock_npc_service action=mailbox-claim opcode=f7000001 value=1 page=0 role=10036 job=3 level=70 result=1 options=1 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=99 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=99
-[info][network] mock_npc_service action=mailbox-list opcode=f5000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=1 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=95 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=95
+[info][network] mock_moveinfo_source pos=(114,110) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_npc_dialog actor=30000 index=0 name=副本使者 script=- scene=测试地图.sce catalog_match=1 legacy_service_kind=6 scene_entity_kind=0 native=0 service_configured=1 service_count=1 service_mask=00000040 direct_challenge=0 task_options=0 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=0 xse_dialogs=0 dialog_len=74 objects=1 resp=107 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
+mock_npc_dialog actor=30000 index=0 catalog_match=1 dialog_len=74 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
+net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=107
 [error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
 net_send connect=0 wt=25/5 len=9 source=builtin-scene-default-event resp=23
-[info][network] mock_npc_dialog actor=20092 index=0 name=胡斐 script=04临安胡斐.xse scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=7 scene_entity_kind=0 native=0 service_configured=1 service_count=2 service_mask=00000280 direct_challenge=0 task_options=1 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=4 xse_dialogs=4 dialog_len=254 objects=1 resp=287 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
-mock_npc_dialog actor=20092 index=0 catalog_match=1 dialog_len=254 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=287
-[info][network] mock_npc_service action=mailbox-list opcode=f5000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=1 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=95 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=95
-[info][network] mock_npc_service action=mailbox-detail opcode=f6000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=1 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=112 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=112
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-net_send connect=0 wt=25/5 len=9 source=builtin-scene-default-event resp=23
-[info][network] mock_npc_dialog actor=20092 index=0 name=胡斐 script=04临安胡斐.xse scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=7 scene_entity_kind=0 native=0 service_configured=1 service_count=2 service_mask=00000280 direct_challenge=0 task_options=1 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=4 xse_dialogs=4 dialog_len=254 objects=1 resp=287 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
-mock_npc_dialog actor=20092 index=0 catalog_match=1 dialog_len=254 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=287
-[info][network] mock_npc_service action=mailbox-list opcode=f5000001 value=1 page=0 role=10036 job=3 level=70 result=0 options=1 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=95 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=95
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-net_send connect=0 wt=25/5 len=9 source=builtin-scene-default-event resp=23
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-net_send connect=0 wt=2/10 len=19 source=builtin-actor-other-only10 resp=40
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-net_send connect=0 wt=2/10 len=19 source=builtin-actor-other-only10 resp=40
-[info][network] mock_npc_dialog actor=20092 index=0 name=胡斐 script=04临安胡斐.xse scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=7 scene_entity_kind=0 native=0 service_configured=1 service_count=2 service_mask=00000280 direct_challenge=0 task_options=1 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=4 xse_dialogs=4 dialog_len=254 objects=1 resp=287 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
-mock_npc_dialog actor=20092 index=0 catalog_match=1 dialog_len=254 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=287
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000000 value=0 page=0 role=10036 job=3 level=70 result=0 options=6 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=442 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=442
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000114 value=276 page=0 role=10036 job=3 level=70 result=0 options=2 money=1303510 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000114 value=276 page=0 role=10036 job=3 level=70 result=1 options=6 money=1303518 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=466 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=466
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00011f value=287 page=0 role=10036 job=3 level=70 result=0 options=2 money=1303518 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=232 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=232
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00011f value=287 page=0 role=10036 job=3 level=70 result=1 options=6 money=1303525 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=465 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=465
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000001 value=1 page=1 role=10036 job=3 level=70 result=0 options=7 money=1303525 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=471 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=471
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000137 value=311 page=1 role=10036 job=3 level=70 result=0 options=2 money=1303525 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000137 value=311 page=1 role=10036 job=3 level=70 result=1 options=7 money=1303532 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00013b value=315 page=1 role=10036 job=3 level=70 result=0 options=2 money=1303532 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00013b value=315 page=1 role=10036 job=3 level=70 result=1 options=7 money=1303539 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000130 value=304 page=1 role=10036 job=3 level=70 result=0 options=2 money=1303539 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=245 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=245
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000130 value=304 page=1 role=10036 job=3 level=70 result=1 options=7 money=1304331 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=475 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=475
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000142 value=322 page=1 role=10036 job=3 level=70 result=0 options=2 money=1304331 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=205 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=205
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000142 value=322 page=1 role=10036 job=3 level=70 result=1 options=7 money=1304346 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=514 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=514
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000002 value=2 page=2 role=10036 job=3 level=70 result=0 options=7 money=1304346 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=539 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=539
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000003 value=3 page=3 role=10036 job=3 level=70 result=0 options=7 money=1304346 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=464 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=464
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00014b value=331 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304346 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=217 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=217
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00014b value=331 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304358 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=470 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=470
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00014d value=333 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304358 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=221 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=221
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00014d value=333 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304372 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=460 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=460
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00014e value=334 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304372 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=205 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=205
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00014e value=334 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304387 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=458 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=458
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00014f value=335 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304387 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=221 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=221
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00014f value=335 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304404 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=448 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=448
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000150 value=336 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304404 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000150 value=336 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304411 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=447 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=447
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000151 value=337 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304411 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000151 value=337 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304418 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=449 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=449
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000152 value=338 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304418 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000152 value=338 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304425 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=449 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=449
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000154 value=340 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304425 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000154 value=340 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304432 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=449 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=449
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000155 value=341 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304432 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000155 value=341 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304439 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=447 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=447
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000156 value=342 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304439 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000156 value=342 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304446 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=449 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=449
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000157 value=343 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304446 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000157 value=343 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304453 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=451 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=451
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000158 value=344 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304453 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000158 value=344 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304460 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=451 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=451
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00015a value=346 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304460 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00015a value=346 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304467 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=451 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=451
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00015b value=347 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304467 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00015b value=347 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304474 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00015c value=348 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304474 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00015c value=348 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304481 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=474 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=474
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00015d value=349 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304481 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00015d value=349 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304488 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00015f value=351 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304488 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00015f value=351 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304495 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000161 value=353 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304495 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000161 value=353 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304502 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000160 value=352 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304502 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000160 value=352 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304509 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000162 value=354 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304509 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000162 value=354 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304516 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000164 value=356 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304516 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000164 value=356 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304523 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000163 value=355 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304523 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000163 value=355 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304530 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000165 value=357 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304530 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000165 value=357 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304537 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=470 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=470
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000166 value=358 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304537 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000166 value=358 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304544 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=470 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=470
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000167 value=359 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304544 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000167 value=359 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304551 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000168 value=360 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304551 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000168 value=360 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304558 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00016a value=362 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304558 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00016a value=362 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304565 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00016b value=363 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304565 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00016b value=363 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304572 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000169 value=361 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304572 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000169 value=361 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304579 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=472 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=472
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00016d value=365 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304579 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00016d value=365 page=3 role=10036 job=3 level=70 result=1 options=7 money=1304586 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=470 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=470
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00014c value=332 page=3 role=10036 job=3 level=70 result=0 options=2 money=1304586 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=234 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=234
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00014c value=332 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305379 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=458 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=458
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00016c value=364 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305379 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00016c value=364 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305386 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=456 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=456
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00016e value=366 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305386 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00016e value=366 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305393 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=456 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=456
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00016f value=367 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305393 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00016f value=367 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305400 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000171 value=369 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305400 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000171 value=369 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305407 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000170 value=368 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305407 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000170 value=368 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305414 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000172 value=370 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305414 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000172 value=370 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305421 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000173 value=371 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305421 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000173 value=371 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305428 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000174 value=372 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305428 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000174 value=372 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305435 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000175 value=373 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305435 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000175 value=373 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305442 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000176 value=374 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305442 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000176 value=374 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305449 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000177 value=375 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305449 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000177 value=375 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305456 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000178 value=376 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305456 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000178 value=376 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305463 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000179 value=377 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305463 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000179 value=377 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305470 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00017a value=378 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305470 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00017a value=378 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305477 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00017b value=379 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305477 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00017b value=379 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305484 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=454 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=454
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00017d value=381 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305484 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00017d value=381 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305491 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=456 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=456
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00017c value=380 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305491 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00017c value=380 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305498 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=458 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=458
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00017e value=382 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305498 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00017e value=382 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305505 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=460 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=460
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00017f value=383 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305505 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee00017f value=383 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305512 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=458 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=458
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000180 value=384 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305512 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000180 value=384 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305519 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=458 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=458
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000181 value=385 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305519 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000181 value=385 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305526 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=458 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=458
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000182 value=386 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305526 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=202 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=202
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000182 value=386 page=3 role=10036 job=3 level=70 result=1 options=7 money=1305533 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=460 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=460
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000183 value=387 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305533 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000183 value=387 page=3 role=10036 job=3 level=70 result=1 options=6 money=1305540 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=428 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=428
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee00014a value=330 page=3 role=10036 job=3 level=70 result=0 options=2 money=1305540 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=288 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=288
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-net_send connect=0 wt=25/5 len=9 source=builtin-scene-default-event resp=23
-[info][network] mock_npc_dialog actor=20092 index=0 name=胡斐 script=04临安胡斐.xse scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=7 scene_entity_kind=0 native=0 service_configured=1 service_count=2 service_mask=00000280 direct_challenge=0 task_options=1 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=4 xse_dialogs=4 dialog_len=254 objects=1 resp=287 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
-mock_npc_dialog actor=20092 index=0 catalog_match=1 dialog_len=254 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=287
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000000 value=0 page=0 role=10036 job=3 level=70 result=0 options=6 money=1305540 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=464 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=464
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000119 value=281 page=0 role=10036 job=3 level=70 result=0 options=2 money=1305540 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=232 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=232
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000119 value=281 page=0 role=10036 job=3 level=70 result=1 options=6 money=1306366 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=470 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=470
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000001 value=1 page=1 role=10036 job=3 level=70 result=0 options=7 money=1306366 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=535 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=535
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000002 value=2 page=2 role=10036 job=3 level=70 result=0 options=7 money=1306366 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=539 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=539
-[info][network] mock_npc_service action=equipment-sell-list opcode=ed000003 value=3 page=3 role=10036 job=3 level=70 result=0 options=5 money=1306366 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=334 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=334
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000185 value=389 page=3 role=10036 job=3 level=70 result=0 options=2 money=1306366 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000185 value=389 page=3 role=10036 job=3 level=70 result=1 options=4 money=1306373 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=281 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=281
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000186 value=390 page=3 role=10036 job=3 level=70 result=0 options=2 money=1306373 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000186 value=390 page=3 role=10036 job=3 level=70 result=1 options=3 money=1306380 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=227 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=227
-[info][network] mock_npc_service action=equipment-sell-confirm-prompt opcode=ee000184 value=388 page=3 role=10036 job=3 level=70 result=0 options=2 money=1306380 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=204 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=204
-mock_role_db_mysql_save account=21642502 reason=npc-equipment-sell roles=4 active=10036 scope=active storage=relational
-[info][network] mock_backpack_role_list_pending source=npc-equipment-sell shop_pending=0 role_list=1
-[info][network] mock_npc_service action=equipment-sell opcode=ee000184 value=388 page=3 role=10036 job=3 level=70 result=1 options=2 money=1306387 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=173 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-service resp=173
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
-net_send connect=0 wt=25/5 len=9 source=builtin-scene-default-event resp=23
-[info][network] mock_npc_dialog actor=20092 index=0 name=胡斐 script=04临安胡斐.xse scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=7 scene_entity_kind=0 native=0 service_configured=1 service_count=2 service_mask=00000280 direct_challenge=0 task_options=1 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=4 xse_dialogs=4 dialog_len=254 objects=1 resp=287 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
-mock_npc_dialog actor=20092 index=0 catalog_match=1 dialog_len=254 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
-net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=287
+[info][network] mock_moveinfo_source pos=(154,110) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(190,110) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(150,110) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(110,110) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(70,110) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(54,130) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(54,170) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(54,210) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(54,230) reason=moveinfo-upload-timeline scene=测试地图.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11

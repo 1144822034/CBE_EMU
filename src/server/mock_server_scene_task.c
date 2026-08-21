@@ -4897,6 +4897,8 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     const char *publishError = NULL;
     bool transactionStarted = false;
     bool hasInstanceService = false;
+    bool hasInstanceTeleport = false;
+    bool hasInstanceChallenge = false;
 
     if (errorOut)
         *errorOut = "invalid dynamic npc";
@@ -4931,10 +4933,31 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         return false;
     }
     hasInstanceService = replaceServiceOptions
-                             ? vm_net_mock_npc_service_options_has_kind(
-                                   serviceOptions, serviceOptionCount,
-                                   VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
-                             : seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE;
+                             ? (vm_net_mock_npc_service_options_has_kind(
+                                    serviceOptions, serviceOptionCount,
+                                    VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) ||
+                                vm_net_mock_npc_service_options_has_kind(
+                                    serviceOptions, serviceOptionCount,
+                                    VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE))
+                             : vm_net_mock_npc_service_kind_uses_instance_config(
+                                   seed->kind);
+    hasInstanceTeleport = replaceServiceOptions
+                              ? vm_net_mock_npc_service_options_has_kind(
+                                    serviceOptions, serviceOptionCount,
+                                    VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+                              : seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+                                    seed->instanceScene[0] != 0;
+    /* New kind-10 rows always use the source scene's live kind-3 node.  Keep
+     * kind-6-without-a-target as a compatibility representation for existing
+     * challenge-only NPCs until an administrator next saves the split form. */
+    hasInstanceChallenge = hasInstanceService &&
+                           seed->challengeEnemyId != 0 &&
+                           (replaceServiceOptions
+                                ? (vm_net_mock_npc_service_options_has_kind(
+                                       serviceOptions, serviceOptionCount,
+                                       VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE) ||
+                                   seed->instanceScene[0] == 0)
+                                : seed->instanceScene[0] == 0);
     if (!vm_net_mock_scene_name_is_safe(scene) ||
         seed->actorId == 0 || seed->x == 0 || seed->y == 0 ||
         seed->kind > VM_NET_MOCK_NPC_KIND_MAX ||
@@ -4947,14 +4970,15 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
         (hasInstanceService &&
-         ((seed->instanceScene[0] == 0 && seed->challengeEnemyId == 0) ||
-          (seed->instanceScene[0] != 0 &&
+         ((!hasInstanceTeleport && !hasInstanceChallenge) ||
+          (hasInstanceTeleport &&
            (!vm_net_mock_str_ends_with(seed->instanceScene, ".sce") ||
             !vm_net_mock_scene_name_is_safe(seed->instanceScene) ||
             seed->instanceX == 0 || seed->instanceY == 0 ||
             !vm_net_mock_scene_resource_exists(seed->instanceScene))) ||
-          !vm_net_mock_npc_instance_challenge_target_is_configured(
-              scene, seed) ||
+          (hasInstanceChallenge &&
+           !vm_net_mock_scene_battle_monster_configured_target_exists(
+               scene, seed->challengeEnemyId)) ||
           seed->instanceMinLevel == 0 || seed->instanceMinLevel > 0xffu ||
           seed->challengeEnemyId > 0xffffu ||
           seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)) ||

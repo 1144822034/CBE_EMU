@@ -3341,7 +3341,7 @@ typedef struct
     vm_net_mock_monster_drop drops[VM_NET_MOCK_MONSTER_DROP_MAX];
 } vm_net_mock_monster_override;
 
-typedef struct
+typedef struct vm_net_mock_monster_admin_row
 {
     u32 enemyId;
     u32 level;
@@ -3355,6 +3355,7 @@ typedef struct
     vm_net_mock_monster_drop drops[VM_NET_MOCK_MONSTER_DROP_MAX];
     u8 family;
     bool overridden;
+    bool smartDropExcluded;
     char displayName[32];
     char firstScene[64];
 } vm_net_mock_monster_admin_row;
@@ -5107,6 +5108,672 @@ mysql_failed:
     if (errorOut)
         *errorOut = "怪物配置保存失败，请检查服务端 MySQL 日志";
     return false;
+}
+
+/* The ordinary monster list contains far more entries than the small boss
+ * list.  Keep the assignment policy here, beside the authoritative drop
+ * persistence, rather than reproducing it in the admin page: the UI only
+ * supplies the three rates, while this layer owns item eligibility, task-drop
+ * preservation and the all-or-nothing MySQL update. */
+typedef struct
+{
+    const vm_net_mock_equipment_catalog_item *equipment;
+    const vm_net_mock_shop_catalog_item *shop;
+} vm_net_mock_monster_equipment_drop_candidate;
+
+typedef struct
+{
+    u32 equipmentByQuality[3];
+    u32 taskDropsPreserved;
+    u32 strongNameMatches;
+    u32 ordinaryMonsterCount;
+    u32 bossMonsterCount;
+    u32 sceneBattleMonsterCount;
+    u32 equipmentSkippedByQuality[3];
+} vm_net_mock_monster_equipment_drop_assignment;
+
+typedef struct
+{
+    vm_net_mock_monster_admin_row *monsters;
+    u32 monsterCount;
+    u32 excludedCount;
+    bool invalid;
+} vm_net_mock_monster_scene_exclusion_context;
+
+static bool vm_net_mock_monster_scene_exclusion_row(
+    void *value, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_monster_scene_exclusion_context *context =
+        (vm_net_mock_monster_scene_exclusion_context *)value;
+    u32 enemyId = 0;
+
+    if (context == NULL || columnCount != 1 || values == NULL || lengths == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &enemyId) || enemyId == 0)
+    {
+        if (context)
+            context->invalid = true;
+        return true;
+    }
+    for (u32 monster = 0; monster < context->monsterCount; ++monster)
+    {
+        if (context->monsters[monster].enemyId == enemyId &&
+            !context->monsters[monster].smartDropExcluded)
+        {
+            context->monsters[monster].smartDropExcluded = true;
+            ++context->excludedCount;
+            break;
+        }
+    }
+    return true;
+}
+
+static bool vm_net_mock_monster_mark_scene_battle_exclusions(
+    vm_net_mock_monster_admin_row *monsters, u32 monsterCount,
+    u32 *excludedCountOut)
+{
+    vm_net_mock_monster_scene_exclusion_context context;
+
+    if (excludedCountOut)
+        *excludedCountOut = 0;
+    if (monsters == NULL || monsterCount == 0)
+        return false;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_scene_battle_monsters ("
+            "entry_id INT UNSIGNED NOT NULL AUTO_INCREMENT,"
+            "scene VARBINARY(64) NOT NULL,monster_id SMALLINT UNSIGNED NOT NULL,"
+            "pos_x SMALLINT UNSIGNED NOT NULL,pos_y SMALLINT UNSIGNED NOT NULL,"
+            "display_name VARBINARY(30) NOT NULL,actor_resource VARBINARY(64) NOT NULL,"
+            "effect_resource VARBINARY(64) NOT NULL DEFAULT 'e_ghostfireR.actor',"
+            "visual_hint TINYINT UNSIGNED NOT NULL DEFAULT 5,enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(entry_id),KEY idx_scene_battle_monster_scene(scene),"
+            "UNIQUE KEY uq_scene_battle_monster_pos(scene,monster_id,pos_x,pos_y)"
+            ") ENGINE=InnoDB"))
+        return false;
+    memset(&context, 0, sizeof(context));
+    context.monsters = monsters;
+    context.monsterCount = monsterCount;
+    if (!vm_mysql_query(
+            "SELECT DISTINCT monster_id FROM server_scene_battle_monsters",
+            vm_net_mock_monster_scene_exclusion_row, &context) || context.invalid)
+        return false;
+    if (excludedCountOut)
+        *excludedCountOut = context.excludedCount;
+    return true;
+}
+
+/* Item and monster labels are both authoritative GBK strings.  Treat a
+ * contiguous two-character Chinese run as a strong relation (for example
+ * "野猪" in both the monster and an item name).  ASCII ids, brackets and a
+ * single generic Chinese character are deliberately ignored so a coincidental
+ * marker cannot outweigh level proximity and even distribution. */
+static u32 vm_net_mock_monster_gbk_chinese_tokens(const char *value,
+                                                   u16 *tokens, u32 tokenCap)
+{
+    const u8 *bytes = (const u8 *)(value ? value : "");
+    u32 pos = 0;
+    u32 count = 0;
+
+    while (bytes[pos] != 0)
+    {
+        if (bytes[pos] >= 0xb0u && bytes[pos] <= 0xf7u &&
+            bytes[pos + 1u] != 0)
+        {
+            if (count < tokenCap)
+            {
+                tokens[count] = (u16)(((u16)bytes[pos] << 8) |
+                                      (u16)bytes[pos + 1u]);
+                ++count;
+            }
+            pos += 2u;
+            continue;
+        }
+        if (bytes[pos] >= 0x80u && bytes[pos + 1u] != 0)
+        {
+            pos += 2u;
+            continue;
+        }
+        ++pos;
+    }
+    return count;
+}
+
+static u32 vm_net_mock_monster_equipment_name_match(const char *monsterName,
+                                                     const char *itemName)
+{
+    u16 monsterTokens[32];
+    u16 itemTokens[64];
+    u32 monsterCount = 0;
+    u32 itemCount = 0;
+    u32 longest = 0;
+
+    memset(monsterTokens, 0, sizeof(monsterTokens));
+    memset(itemTokens, 0, sizeof(itemTokens));
+    monsterCount = vm_net_mock_monster_gbk_chinese_tokens(
+        monsterName, monsterTokens,
+        (u32)(sizeof(monsterTokens) / sizeof(monsterTokens[0])));
+    itemCount = vm_net_mock_monster_gbk_chinese_tokens(
+        itemName, itemTokens,
+        (u32)(sizeof(itemTokens) / sizeof(itemTokens[0])));
+    for (u32 monster = 0; monster < monsterCount; ++monster)
+    {
+        for (u32 item = 0; item < itemCount; ++item)
+        {
+            u32 run = 0;
+
+            while (monster + run < monsterCount && item + run < itemCount &&
+                   monsterTokens[monster + run] == itemTokens[item + run])
+            {
+                ++run;
+            }
+            if (run > longest)
+                longest = run;
+        }
+    }
+    return longest;
+}
+
+static int vm_net_mock_monster_equipment_drop_candidate_compare(
+    const void *leftValue, const void *rightValue)
+{
+    const vm_net_mock_monster_equipment_drop_candidate *left =
+        (const vm_net_mock_monster_equipment_drop_candidate *)leftValue;
+    const vm_net_mock_monster_equipment_drop_candidate *right =
+        (const vm_net_mock_monster_equipment_drop_candidate *)rightValue;
+
+    if (left->equipment->quality != right->equipment->quality)
+    {
+        return left->equipment->quality < right->equipment->quality ? -1 : 1;
+    }
+    if (left->equipment->levelRequired != right->equipment->levelRequired)
+    {
+        return left->equipment->levelRequired < right->equipment->levelRequired
+                   ? -1
+                   : 1;
+    }
+    if (left->equipment->itemId != right->equipment->itemId)
+        return left->equipment->itemId < right->equipment->itemId ? -1 : 1;
+    return 0;
+}
+
+static bool vm_net_mock_monster_drop_row_has_item(
+    const vm_net_mock_monster_admin_row *row, u32 itemId)
+{
+    if (row == NULL || itemId == 0)
+        return false;
+    for (u8 i = 0; i < row->dropCount; ++i)
+    {
+        if (row->drops[i].itemId == itemId)
+            return true;
+    }
+    return false;
+}
+
+static u32 vm_net_mock_monster_equipment_drop_count(
+    const vm_net_mock_monster_admin_row *row)
+{
+    u32 count = 0;
+
+    if (row == NULL)
+        return 0;
+    for (u8 i = 0; i < row->dropCount; ++i)
+    {
+        if (vm_net_mock_find_equipment_catalog_item(row->drops[i].itemId) != NULL)
+            ++count;
+    }
+    return count;
+}
+
+static bool vm_net_mock_monster_drop_row_has_equipment_slot(
+    const vm_net_mock_monster_admin_row *row, u8 slot)
+{
+    if (row == NULL || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+        return false;
+    for (u8 i = 0; i < row->dropCount; ++i)
+    {
+        const vm_net_mock_equipment_catalog_item *equipment =
+            vm_net_mock_find_equipment_catalog_item(row->drops[i].itemId);
+        if (equipment != NULL && equipment->slot == slot)
+            return true;
+    }
+    return false;
+}
+
+/* Smart drops are allocated by the same ten-level progression stages used by
+ * the monster/equipment balance tables.  A one-sided `monsterLevel >=
+ * levelRequired` check is insufficient: it lets a high-level boss absorb all
+ * remaining low-level items (for example a level-6 staff on a level-42 boss)
+ * once the lower-level monsters have filled their slots. */
+static bool vm_net_mock_monster_equipment_level_eligible(
+    u32 monsterLevel, u32 equipmentLevel)
+{
+    u32 monsterStage = 0;
+    u32 equipmentStage = 0;
+
+    if (monsterLevel == 0 || equipmentLevel == 0 ||
+        monsterLevel > 255u || equipmentLevel > 255u)
+        return false;
+    monsterStage = (monsterLevel - 1u) / 10u;
+    equipmentStage = (equipmentLevel - 1u) / 10u;
+    return monsterStage == equipmentStage;
+}
+
+/* The original one-item entries are task-material contracts, not ordinary
+ * editor choices.  When an old override still contains that identity, retain
+ * its administrator-adjusted rate; otherwise restore the authored rate. */
+static bool vm_net_mock_monster_preserve_authored_task_drop(
+    vm_net_mock_monster_admin_row *row, u32 *preservedOut)
+{
+    vm_net_mock_monster_entry entry;
+    u8 rate = 0;
+
+    if (row == NULL)
+        return false;
+    if (preservedOut)
+        *preservedOut = 0;
+    entry = vm_net_mock_monster_entry_for_enemy(row->enemyId);
+    if (entry.dropItemId == 0 || entry.dropRatePercent == 0)
+    {
+        row->dropCount = 0;
+        return true;
+    }
+    rate = entry.dropRatePercent;
+    for (u8 i = 0; i < row->dropCount; ++i)
+    {
+        if (row->drops[i].itemId == entry.dropItemId &&
+            row->drops[i].ratePercent != 0)
+        {
+            rate = row->drops[i].ratePercent;
+            break;
+        }
+    }
+    row->dropCount = 0;
+    if (vm_net_mock_find_shop_catalog_item(entry.dropItemId) == NULL ||
+        rate == 0 || row->dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX)
+    {
+        return false;
+    }
+    row->drops[row->dropCount].itemId = entry.dropItemId;
+    row->drops[row->dropCount].ratePercent = rate;
+    ++row->dropCount;
+    if (preservedOut)
+        *preservedOut = 1;
+    return true;
+}
+
+/* Build a complete replacement table in memory before the first SQL write.
+ * Quality 0 belongs only to ordinary monsters; qualities 1 and 2 belong only
+ * to bosses.  Within each quality, the least-used eligible monster wins, then
+ * the closest level.  A two-or-more-character name relation is deliberately
+ * considered first, as requested, while equal relations still remain evenly
+ * distributed. */
+static bool vm_net_mock_monster_plan_equipment_drops(
+    vm_net_mock_monster_admin_row *monsters, u32 monsterCount,
+    const u8 qualityRates[3],
+    vm_net_mock_monster_equipment_drop_assignment *assignment,
+    const char **errorOut)
+{
+    vm_net_mock_monster_equipment_drop_candidate *candidates = NULL;
+    u32 assignedPerMonster[VM_NET_MOCK_MONSTER_CATALOG_MAX][3];
+    u32 equipmentTotal = 0;
+    u32 candidateCount = 0;
+    bool ok = false;
+
+    if (errorOut)
+        *errorOut = "智能装备掉落参数无效";
+    if (assignment)
+        memset(assignment, 0, sizeof(*assignment));
+    if (monsters == NULL || monsterCount == 0 ||
+        monsterCount > VM_NET_MOCK_MONSTER_CATALOG_MAX || qualityRates == NULL)
+    {
+        return false;
+    }
+    for (u32 quality = 0; quality < 3; ++quality)
+    {
+        if (qualityRates[quality] == 0 || qualityRates[quality] > 100u)
+            return false;
+    }
+    memset(assignedPerMonster, 0, sizeof(assignedPerMonster));
+
+    for (u32 monster = 0; monster < monsterCount; ++monster)
+    {
+        u32 preserved = 0;
+
+        if (monsters[monster].smartDropExcluded)
+        {
+            if (assignment)
+                ++assignment->sceneBattleMonsterCount;
+            continue;
+        }
+        if (!vm_net_mock_monster_preserve_authored_task_drop(
+                &monsters[monster], &preserved))
+        {
+            if (errorOut)
+                *errorOut = "怪物的原始任务掉落不在物品目录中";
+            goto done;
+        }
+        if (assignment)
+        {
+            assignment->taskDropsPreserved += preserved;
+            if (monsters[monster].family == VM_NET_MOCK_MONSTER_BOSS)
+                ++assignment->bossMonsterCount;
+            else
+                ++assignment->ordinaryMonsterCount;
+        }
+    }
+
+    equipmentTotal = vm_net_mock_load_equipment_catalog();
+    if (equipmentTotal == 0)
+    {
+        if (errorOut)
+            *errorOut = "装备目录为空，未执行覆盖";
+        goto done;
+    }
+    candidates = (vm_net_mock_monster_equipment_drop_candidate *)calloc(
+        equipmentTotal, sizeof(*candidates));
+    if (candidates == NULL)
+    {
+        if (errorOut)
+            *errorOut = "智能装备掉落分配内存不足";
+        goto done;
+    }
+    for (u32 item = 0; item < equipmentTotal; ++item)
+    {
+        const vm_net_mock_equipment_catalog_item *equipment =
+            &g_vm_net_mock_equipment_catalog[item];
+        const vm_net_mock_shop_catalog_item *shop = NULL;
+
+        /* equipment catalog loading already rejects slots outside the eight
+         * actual worn positions (weapon plus seven body positions). */
+        if (equipment->quality > 2u ||
+            equipment->slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+        {
+            continue;
+        }
+        shop = vm_net_mock_find_shop_catalog_item(equipment->itemId);
+        if (shop == NULL || !shop->isEquip)
+        {
+            if (errorOut)
+                *errorOut = "装备目录缺少可显示名称，未执行覆盖";
+            goto done;
+        }
+        if (candidateCount >= equipmentTotal)
+        {
+            if (errorOut)
+                *errorOut = "装备目录条目计数异常";
+            goto done;
+        }
+        candidates[candidateCount].equipment = equipment;
+        candidates[candidateCount].shop = shop;
+        ++candidateCount;
+        if (assignment)
+            ++assignment->equipmentByQuality[equipment->quality];
+    }
+    if (candidateCount == 0)
+    {
+        if (errorOut)
+            *errorOut = "装备目录没有品质 0、1、2 的可穿戴装备";
+        goto done;
+    }
+    qsort(candidates, candidateCount, sizeof(*candidates),
+          vm_net_mock_monster_equipment_drop_candidate_compare);
+
+    for (u32 item = 0; item < candidateCount; ++item)
+    {
+        const vm_net_mock_monster_equipment_drop_candidate *candidate =
+            &candidates[item];
+        u32 quality = candidate->equipment->quality;
+        int best = -1;
+        u32 bestNameMatch = 0;
+        u32 bestAssigned = 0;
+        u32 bestLevelDelta = 0;
+
+        for (u32 monster = 0; monster < monsterCount; ++monster)
+        {
+            bool boss = monsters[monster].family == VM_NET_MOCK_MONSTER_BOSS;
+            u32 nameMatch = 0;
+            u32 assigned = 0;
+            u32 levelDelta = 0;
+
+            if (monsters[monster].smartDropExcluded ||
+                (quality == 0 && boss) || (quality != 0 && !boss) ||
+                !vm_net_mock_monster_equipment_level_eligible(
+                    monsters[monster].level,
+                    candidate->equipment->levelRequired) ||
+                vm_net_mock_monster_equipment_drop_count(&monsters[monster]) >=
+                    VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+                monsters[monster].dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX ||
+                vm_net_mock_monster_drop_row_has_item(
+                    &monsters[monster], candidate->equipment->itemId) ||
+                vm_net_mock_monster_drop_row_has_equipment_slot(
+                    &monsters[monster], candidate->equipment->slot))
+            {
+                continue;
+            }
+            nameMatch = vm_net_mock_monster_equipment_name_match(
+                monsters[monster].displayName, candidate->shop->name);
+            if (nameMatch < 2u)
+                nameMatch = 0;
+            assigned = assignedPerMonster[monster][quality];
+            levelDelta = monsters[monster].level >
+                                 candidate->equipment->levelRequired
+                             ? monsters[monster].level -
+                                   candidate->equipment->levelRequired
+                             : candidate->equipment->levelRequired -
+                                   monsters[monster].level;
+            if (best < 0 || levelDelta < bestLevelDelta ||
+                (levelDelta == bestLevelDelta && assigned < bestAssigned) ||
+                (levelDelta == bestLevelDelta && assigned == bestAssigned &&
+                 nameMatch > bestNameMatch) ||
+                (levelDelta == bestLevelDelta && assigned == bestAssigned &&
+                 nameMatch == bestNameMatch &&
+                 monsters[monster].enemyId < monsters[best].enemyId))
+            {
+                best = (int)monster;
+                bestNameMatch = nameMatch;
+                bestAssigned = assigned;
+                bestLevelDelta = levelDelta;
+            }
+        }
+        if (best < 0)
+        {
+            /* An item that has no legal recipient must not be forced onto a
+             * lower-level monster or a second copy of an occupied slot.  It
+             * remains unassigned and is reported to the administrator. */
+            if (assignment)
+            {
+                ++assignment->equipmentSkippedByQuality[quality];
+                --assignment->equipmentByQuality[quality];
+            }
+            continue;
+        }
+        monsters[best].drops[monsters[best].dropCount].itemId =
+            candidate->equipment->itemId;
+        monsters[best].drops[monsters[best].dropCount].ratePercent =
+            qualityRates[quality];
+        ++monsters[best].dropCount;
+        ++assignedPerMonster[best][quality];
+        if (assignment && bestNameMatch >= 2u)
+            ++assignment->strongNameMatches;
+    }
+    ok = true;
+    if (errorOut)
+        *errorOut = "ok";
+
+done:
+    free(candidates);
+    return ok;
+}
+
+/* Persist the planned table atomically.  Scene battle monsters are outside
+ * this operation entirely, so their authored stats and existing drops are
+ * neither deleted nor rebuilt by an equipment-allocation run. */
+static bool vm_net_mock_monster_admin_assign_equipment_drops(
+    const u8 qualityRates[3],
+    vm_net_mock_monster_equipment_drop_assignment *assignmentOut,
+    const char **errorOut)
+{
+    vm_net_mock_monster_admin_row *monsters = NULL;
+    vm_net_mock_monster_equipment_drop_assignment assignment;
+    char query[1024];
+    char mysqlError[512];
+    u32 total = 0;
+    u32 listed = 0;
+    bool transactionStarted = false;
+    bool ok = false;
+
+    if (errorOut)
+        *errorOut = "智能装备掉落分配失败";
+    if (assignmentOut)
+        memset(assignmentOut, 0, sizeof(*assignmentOut));
+    if (qualityRates == NULL)
+        return false;
+    vm_net_mock_monster_resource_labels_load();
+    if (!g_vm_net_mock_monster_db_valid)
+    {
+        g_vm_net_mock_monster_db_loaded = false;
+        if (!vm_net_mock_monster_db_load())
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
+    total = vm_net_mock_monster_admin_list(NULL, 0);
+    if (total == 0 || total > VM_NET_MOCK_MONSTER_CATALOG_MAX)
+    {
+        if (errorOut)
+            *errorOut = "怪物目录为空或超过可分配上限";
+        return false;
+    }
+    monsters = (vm_net_mock_monster_admin_row *)calloc(total, sizeof(*monsters));
+    if (monsters == NULL)
+    {
+        if (errorOut)
+            *errorOut = "智能装备掉落分配内存不足";
+        return false;
+    }
+    listed = vm_net_mock_monster_admin_list(monsters, total);
+    if (listed != total ||
+        !vm_net_mock_monster_mark_scene_battle_exclusions(monsters, total, NULL) ||
+        !vm_net_mock_monster_plan_equipment_drops(
+            monsters, total, qualityRates, &assignment, errorOut))
+    {
+        if (listed != total && errorOut)
+            *errorOut = "怪物目录在分配期间发生变化";
+        goto done;
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto mysql_failed;
+    transactionStarted = true;
+    for (u32 monster = 0; monster < total; ++monster)
+    {
+        const vm_net_mock_monster_admin_row *row = &monsters[monster];
+
+        if (row->smartDropExcluded)
+            continue;
+
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
+                 "defense_value,reward_exp,reward_money,drop_item_id,drop_rate_percent) "
+                 "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,0,0) ON DUPLICATE KEY UPDATE "
+                 "level=VALUES(level),family=VALUES(family),hp=VALUES(hp),mp=VALUES(mp),"
+                 "attack_value=VALUES(attack_value),defense_value=VALUES(defense_value),"
+                 "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),"
+                 "drop_item_id=0,drop_rate_percent=0",
+                 row->enemyId, row->level, row->family, row->hp, row->mp,
+                 row->attack, row->defense, row->exp, row->gold);
+        if (!vm_mysql_exec(query))
+            goto mysql_failed;
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_monster_drops WHERE monster_id=%u",
+                 row->enemyId);
+        if (!vm_mysql_exec(query))
+            goto mysql_failed;
+        for (u8 drop = 0; drop < row->dropCount; ++drop)
+        {
+            snprintf(query, sizeof(query),
+                     "INSERT INTO server_monster_drops("
+                     "monster_id,drop_slot,item_id,drop_rate_percent) "
+                     "VALUES(%u,%u,%u,%u)",
+                     row->enemyId, (u32)drop + 1u,
+                     row->drops[drop].itemId,
+                     (u32)row->drops[drop].ratePercent);
+            if (!vm_mysql_exec(query))
+                goto mysql_failed;
+        }
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto mysql_failed;
+    transactionStarted = false;
+
+    for (u32 monster = 0; monster < total; ++monster)
+    {
+        const vm_net_mock_monster_admin_row *row = &monsters[monster];
+        int index = vm_net_mock_monster_catalog_index(row->enemyId);
+        vm_net_mock_monster_override *override = NULL;
+
+        if (row->smartDropExcluded)
+            continue;
+        if (index < 0)
+        {
+            if (errorOut)
+                *errorOut = "怪物目录在提交后发生变化";
+            goto done;
+        }
+        override = &g_vm_net_mock_monster_overrides[index];
+        memset(override, 0, sizeof(*override));
+        override->used = true;
+        override->family = row->family;
+        override->stats.enemyId = row->enemyId;
+        override->stats.level = row->level;
+        override->stats.hp = row->hp;
+        override->stats.mp = row->mp;
+        override->stats.attack = row->attack;
+        override->stats.defense = row->defense;
+        override->stats.exp = row->exp;
+        override->stats.gold = row->gold;
+        override->dropCount = row->dropCount;
+        if (row->dropCount != 0)
+        {
+            memcpy(override->drops, row->drops,
+                   sizeof(override->drops[0]) * row->dropCount);
+        }
+    }
+    if (assignmentOut)
+        *assignmentOut = assignment;
+    printf("[info][mock-admin] monster_equipment_drop_assign ordinary=%u bosses=%u "
+           "scene_excluded=%u quality0=%u quality1=%u quality2=%u "
+           "skipped0=%u skipped1=%u skipped2=%u task_drops=%u name_matches=%u "
+           "rates=%u/%u/%u transaction=committed\n",
+           assignment.ordinaryMonsterCount, assignment.bossMonsterCount,
+           assignment.sceneBattleMonsterCount,
+           assignment.equipmentByQuality[0], assignment.equipmentByQuality[1],
+           assignment.equipmentByQuality[2],
+           assignment.equipmentSkippedByQuality[0],
+           assignment.equipmentSkippedByQuality[1],
+           assignment.equipmentSkippedByQuality[2], assignment.taskDropsPreserved,
+           assignment.strongNameMatches, qualityRates[0], qualityRates[1],
+           qualityRates[2]);
+    if (errorOut)
+        *errorOut = "ok";
+    ok = true;
+    goto done;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = "智能装备掉落事务失败，请检查服务端 MySQL 日志";
+    printf("[error][mock-admin] monster_equipment_drop_assign_failed error=%s\n",
+           mysqlError);
+
+done:
+    free(monsters);
+    return ok;
 }
 
 /* Recalculate exactly the four combat attributes selected by the admin UI.

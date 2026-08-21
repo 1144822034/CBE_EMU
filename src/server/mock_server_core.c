@@ -5454,7 +5454,11 @@ enum
     /* The mailbox stays inside ParseNPCDialogData's proven action=1 contract;
      * only its server-owned nested values are new. */
     VM_NET_MOCK_NPC_KIND_MAILBOX = 9,
-    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_MAILBOX,
+    /* Instance transport and guard challenge are separate NPC-dialog
+     * services.  The latter is emitted as client-native action=13 so it can
+     * start the configured live scene battle without an intermediate menu. */
+    VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE = 10,
+    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE,
     /* ParseNPCDialogData stores action rows in ten fixed 64-byte entries.
      * Tasks and direct NPC services share this one client-owned list. */
     VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS = 10,
@@ -5480,6 +5484,12 @@ static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
                    kind <= VM_NET_MOCK_NPC_KIND_MAX
                ? (1u << kind)
                : 0u;
+}
+
+static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
+{
+    return kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE ||
+           kind == VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE;
 }
 
 /* action=1 in task_hall_activate_selected_entry sends 26/1{type=2,id=value}.

@@ -76,7 +76,6 @@ $(CLIENT_OBJDIR)/main.o: src/main.c src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 $(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/web_admin_equipment_restore.inc.c \
 	src/web_admin_global_rewards.inc.c \
 	src/mysql-client.h src/config.h
 
@@ -126,7 +125,6 @@ boundary-check: build
 
 $(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/web_admin_equipment_restore.inc.c \
 	src/web_admin_global_rewards.inc.c \
 	src/mysql-client.h src/config.h
 

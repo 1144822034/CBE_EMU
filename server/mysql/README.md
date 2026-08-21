@@ -331,7 +331,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `server_task_reward_items`：任务的有序多项物品奖励；存在记录时覆盖 `server_tasks` 的首项奖励兼容字段。
 - `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系，以及该 NPC 是否允许角色在完成后重复接取。
 - `server_dynamic_npcs`：服务端动态 NPC 的场景位置、Actor、任务/XSE 与旧单服务兼容字段；新服务集合优先保存于 `server_npc_services`。
-- `server_npc_services`：按场景和 Actor 保存动态 NPC 或原生 NPC 覆盖的有序多服务集合，以及每项可选的对话名称/说明；只允许现有 parser-backed `action=1` 服务种类，任务仍由动态 NPC 任务绑定独立生成 `action=4`。
+- `server_npc_services`：按场景和 Actor 保存动态 NPC 或原生 NPC 覆盖的有序多服务集合，以及每项可选的对话名称/说明；只允许现有 parser-backed 对话服务种类，任务仍由动态 NPC 任务绑定独立生成 `action=4`，守关怪挑战使用客户端原生 `action=13`。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。

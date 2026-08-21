@@ -44,6 +44,15 @@ static void vm_net_mock_arena_on_duel_released(u32 roomId, u32 duelSerial);
  * stats/overrides, while the scene fragment owns the resource scan. */
 static void vm_net_mock_monster_catalog_ensure_loaded(void);
 
+/* The role layer owns the atomic equipment-drop replacement, while scene
+ * discovery owns the authoritative display names and the assembled admin
+ * catalog.  This narrow declaration keeps that operation data-driven without
+ * moving persistence into the web layer. */
+typedef struct vm_net_mock_monster_admin_row vm_net_mock_monster_admin_row;
+static void vm_net_mock_monster_resource_labels_load(void);
+static u32 vm_net_mock_monster_admin_list(
+    vm_net_mock_monster_admin_row *rows, u32 rowCap);
+
 /* Content deployment validates the Actor/GIF dependency set before its SCE2
  * kind-3 record can reach a clean client cache.  The web
  * administration implementation owns the existing resource inspector; this

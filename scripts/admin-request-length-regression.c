@@ -36,7 +36,9 @@ int main(int argc, char **argv)
     size_t totalLength = 0;
     char emptyUtf8[8];
     char serviceForm[2048];
+    char renderedNpcFields[32768];
     size_t serviceFormLen = 0;
+    vm_mock_admin_text renderedPage;
     vm_net_mock_npc_service_option
         serviceOptions[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
     u32 serviceOptionCount = 0;
@@ -78,6 +80,28 @@ int main(int argc, char **argv)
         fprintf(stderr, "NPC service optional dash was not normalized to empty\n");
         return 1;
     }
+    vm_mock_admin_text_init(&renderedPage, renderedNpcFields,
+                            sizeof(renderedNpcFields));
+    vm_mock_admin_render_npc_service_option_fields(
+        &renderedPage, NULL, NULL, true);
+    vm_mock_admin_render_instance_fields(&renderedPage, NULL, 0, NULL);
+    vm_mock_admin_render_npc_inventory_setup_pending(
+        &renderedPage, true, 0);
+    if (renderedPage.truncated ||
+        strstr(renderedNpcFields, "data-npc-service-toggle=\"6\"") == NULL ||
+        strstr(renderedNpcFields, "data-npc-service-toggle=\"10\"") == NULL ||
+        strstr(renderedNpcFields,
+               "data-npc-service-config=\"1\" hidden") == NULL ||
+        strstr(renderedNpcFields,
+               "data-npc-instance-teleport-fields hidden") == NULL ||
+        strstr(renderedNpcFields,
+               "data-npc-instance-challenge-fields hidden") == NULL ||
+        strstr(renderedNpcFields, "武器商店 专属库存") == NULL)
+    {
+        fprintf(stderr,
+                "NPC service toggle/configuration markup is incomplete\n");
+        return 1;
+    }
 
     if (!vm_mock_admin_parse_content_length(requestHeader,
                                             strlen(requestHeader),
@@ -115,6 +139,19 @@ int main(int argc, char **argv)
                 "from the shared admin script\n");
         return 1;
     }
+    if (strstr(g_vm_mock_admin_script, "const setupNpcServices") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-npc-service-toggle") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "data-npc-instance-teleport-fields") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "data-npc-instance-challenge-fields") == NULL ||
+        strstr(g_vm_mock_admin_script, "setupNpcServices();") == NULL ||
+        strstr(g_vm_mock_admin_script, "setupNpcKinds") != NULL)
+    {
+        fprintf(stderr,
+                "NPC service controls do not drive immediate configuration visibility\n");
+        return 1;
+    }
     if (argc == 3 && strcmp(argv[1], "--write-js") == 0)
     {
         FILE *file = fopen(argv[2], "wb");
@@ -131,6 +168,6 @@ int main(int argc, char **argv)
         }
         fclose(file);
     }
-    puts("admin request-length regression passed: empty display + NPC optional text + 24KiB body + monster search + bulk drops");
+    puts("admin request-length regression passed: empty display + NPC service toggle/configuration + 24KiB body + monster search + bulk drops");
     return 0;
 }
