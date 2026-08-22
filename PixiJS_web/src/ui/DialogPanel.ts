@@ -1,6 +1,6 @@
 import { Container, Graphics } from "pixi.js";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, drawCbePanel, makePixelText } from "./constants";
-import { BitmapLabel, wrapUiText } from "./BitmapLabel";
+import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
@@ -93,7 +93,7 @@ export class DialogPanel extends Container {
     this.addChild(title);
     this.labels.push(title);
 
-    const bodyLines = wrapUiText(this.dialog.body, w - 20).slice(0, 4);
+    const bodyLines = wrapChars(this.dialog.body).slice(0, 8);
     bodyLines.forEach((line, i) => {
       const t = makePixelText(line, 11, CBE.inkBody);
       t.position.set(x + 10, y + 32 + i * 16);

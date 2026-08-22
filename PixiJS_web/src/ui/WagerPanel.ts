@@ -592,7 +592,7 @@ export class WagerPanel extends Container {
         .fill({ color: CBE.bgPanelDark })
         .stroke({ width: 1, color: CBE.border });
       this.addLabel(`#${openId}  押${formatStakeJin(stake)}`, lx + 6, y + 6, CBE.ink);
-      this.addLabel(hosts.slice(0, 22), lx + 6, y + 22, CBE.inkLabel);
+      this.addLabel(hosts, lx + 6, y + 22, CBE.inkLabel);
       this.addLabel(
         scene ? `场景 ${scene} · 等待挑战` : "等待挑战中",
         lx + 6,

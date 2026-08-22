@@ -33,6 +33,9 @@ export const UC3_DISPLAY_SCALE = UC3_CELL / UC3_NATIVE_CELL;
 /** Floor for opt-in smooth Pixi.Text resolution. */
 export const UI_TEXT_RESOLUTION = 2;
 
+/** LCD UI: wrap single-line copy at this many characters (CJK / ASCII each count as 1). */
+export const UI_WRAP_CHARS = 14;
+
 /**
  * CSS scale of #phone-wrap (wrapCssPx / LCD_WIDTH). Crisp bake supersamples
  * at this integer factor so glyphs match softkey pixel density.
@@ -462,9 +465,10 @@ export class BitmapLabel extends Container {
   private rerenderSystemCrisp(): void {
     const wrap =
       this._wordWrap ?? (this._maxWidth != null && this._maxWidth > 0);
+    const shown = wrap ? this.displayText() : this._text;
     const ss = crispSupersample();
     const key = crispCacheKey(
-      this._text,
+      shown,
       this._color,
       this._outline,
       this._outlineColor,
@@ -477,7 +481,7 @@ export class BitmapLabel extends Container {
     let tex = crispTexCache.get(key);
     if (!tex) {
       tex = bakeCrispSystem(
-        this._text,
+        shown,
         this._fontSize,
         this._color,
         this._outline,
@@ -498,6 +502,7 @@ export class BitmapLabel extends Container {
   private rerenderSystem(): void {
     const wrap =
       this._wordWrap ?? (this._maxWidth != null && this._maxWidth > 0);
+    const shown = wrap ? this.displayText() : this._text;
     const style: Record<string, unknown> = {
       fontFamily: uiFontFamily(),
       fontSize: this._fontSize,
@@ -516,7 +521,7 @@ export class BitmapLabel extends Container {
 
     if (!this.pixiText) {
       this.pixiText = new Text({
-        text: this._text,
+        text: shown,
         style,
         resolution: textRes,
         roundPixels: true,
@@ -529,14 +534,20 @@ export class BitmapLabel extends Container {
       this.pixiText.resolution = textRes;
       this.pixiText.roundPixels = true;
       this.pixiText.style = style;
-      this.pixiText.text = this._text;
+      this.pixiText.text = shown;
       this.pixiText.anchor.set(this._ax, this._ay);
     }
   }
 
+  private displayText(): string {
+    if (this._wordWrap === false || !this._text) return this._text;
+    return formatUiMultiline(this._text);
+  }
+
   private async rerenderUc3(): Promise<void> {
+    const shown = this.displayText();
     const key = uc3CacheKey(
-      this._text,
+      shown,
       this._color,
       this._outline,
       this._outlineColor,
@@ -554,7 +565,7 @@ export class BitmapLabel extends Container {
         this._maxWidth != null
           ? Math.ceil(this._maxWidth / UC3_DISPLAY_SCALE)
           : undefined;
-      const { width, height, rgba } = renderUc3ToRgba(font, this._text, {
+      const { width, height, rgba } = renderUc3ToRgba(font, shown, {
         color: this._color,
         outline: this._outline,
         outlineColor: this._outlineColor,
@@ -657,6 +668,37 @@ export function measureUiTextWidth(text: string, cell = UC3_CELL): number {
     w += (ch.codePointAt(0) ?? 0) > 0xff ? cell : ascii;
   }
   return w;
+}
+
+/**
+ * Character-count wrap (each code unit = 1). Honors existing `\n` paragraphs.
+ */
+export function wrapChars(
+  text: string,
+  maxCols = UI_WRAP_CHARS,
+): string[] {
+  const cols = Math.max(1, maxCols | 0);
+  const lines: string[] = [];
+  for (const para of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
+    let cur = "";
+    for (const ch of para) {
+      if (cur.length >= cols) {
+        lines.push(cur);
+        cur = "";
+      }
+      cur += ch;
+    }
+    lines.push(cur || " ");
+  }
+  return lines.length ? lines : [""];
+}
+
+/** Join {@link wrapChars} with `\n` for multiline UC3 labels. */
+export function formatUiMultiline(
+  text: string,
+  maxCols = UI_WRAP_CHARS,
+): string {
+  return wrapChars(text, maxCols).join("\n");
 }
 
 /**

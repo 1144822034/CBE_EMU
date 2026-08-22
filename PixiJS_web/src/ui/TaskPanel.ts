@@ -8,7 +8,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
 } from "./constants";
-import { BitmapLabel } from "./BitmapLabel";
+import { BitmapLabel, UI_WRAP_CHARS, wrapChars } from "./BitmapLabel";
 import type { TaskCandidateRow, TaskListRow } from "../net/protocolExtras";
 import {
   clearPanelTip,
@@ -99,7 +99,9 @@ export class TaskPanel extends Container {
 
   showDetail(text: string): void {
     const body = (text || "(无详情)").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    this.detailLines = wrapLines(body, 18);
+    this.detailLines = body
+      .split("\n")
+      .flatMap((p) => wrapChars(p, UI_WRAP_CHARS));
     this.detailPage = 0;
     this.mode = "detail";
     this.redraw();
@@ -332,7 +334,7 @@ export class TaskPanel extends Container {
       if (this.mode === "actions") {
         let ly = tabY + 18;
         const row = this.currentRows()[this.listCursor];
-        this.addLabel((row?.name || "").slice(0, 14), x + 10, ly, CBE.ink);
+        this.addLabel(row?.name || "", x + 10, ly, CBE.ink);
         ly += 18;
         this.actionLabels.forEach((lab, i) => {
           const sel = i === this.actionCursor;
@@ -420,20 +422,4 @@ export class TaskPanel extends Container {
       drawPanelTipOverlay(this, this.toast);
     }
   }
-}
-
-function wrapLines(text: string, width: number): string[] {
-  const out: string[] = [];
-  for (const para of text.split("\n")) {
-    let cur = "";
-    for (const ch of para) {
-      if (cur.length >= width) {
-        out.push(cur);
-        cur = "";
-      }
-      cur += ch;
-    }
-    out.push(cur || " ");
-  }
-  return out.length ? out : ["(无详情)"];
 }

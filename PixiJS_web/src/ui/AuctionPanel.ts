@@ -8,7 +8,7 @@ import {
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
-import { BitmapLabel, wrapUiText } from "./BitmapLabel";
+import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
 import {
   bagVisibleStackCount,
@@ -19,6 +19,7 @@ import {
 import { lookupItemSync, qualityColor } from "../resources/itemCatalog";
 import {
   AUCTION_DURATION_LABELS,
+  auctionBidStep,
   auctionPriceUnit,
   currencyLabel,
   formatAuctionClaimRow,
@@ -49,6 +50,7 @@ import { attachPageNavButtons } from "./pageNav";
 export type AuctionPanelAction =
   | "bid"
   | "buyout"
+  | "buyout_challenge"
   | "cancel"
   | "claim"
   | "refresh"
@@ -140,12 +142,28 @@ export class AuctionPanel extends Container {
   private detailListing: AuctionListing | null = null;
   private detailActionCursor = 0;
   private detailPage = 0;
+  /** 一口价验证码界面 */
+  private buyoutCaptchaOpen = false;
+  private buyoutCaptchaCode = "";
+  private buyoutCaptchaDraft = "";
+  private buyoutCaptchaListingId = 0;
   private ime = new ChatIme({
     maxLength: 10,
     inputMode: "numeric",
     enterkeyhint: "done",
     ariaLabel: "竞拍金额",
     sanitize: (raw) => raw.replace(/\D/g, "").replace(/^0+(?=\d)/, ""),
+  });
+  private captchaIme = new ChatIme({
+    maxLength: 4,
+    inputMode: "text",
+    enterkeyhint: "done",
+    ariaLabel: "一口价验证码",
+    sanitize: (raw) =>
+      raw
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 4),
   });
 
   onAction: ((action: AuctionPanelAction, listingId?: number) => void) | null =
@@ -160,7 +178,10 @@ export class AuctionPanel extends Container {
     this.addChild(this.box);
     this.inputHit.eventMode = "static";
     this.inputHit.cursor = "text";
-    this.inputHit.on("pointertap", () => this.focusPriceInput());
+    this.inputHit.on("pointertap", () => {
+      if (this.isBuyoutCaptchaMode()) this.focusCaptchaInput();
+      else this.focusPriceInput();
+    });
     this.addChild(this.inputHit);
     this.ime.onChange = (v) => {
       const next = v || "0";
@@ -169,6 +190,11 @@ export class AuctionPanel extends Container {
       if (this.visible && this.listMode === "price") this.redraw();
     };
     this.ime.onSubmit = () => this.commitPrice();
+    this.captchaIme.onChange = (v) => {
+      this.buyoutCaptchaDraft = v;
+      if (this.visible && this.buyoutCaptchaOpen) this.redraw();
+    };
+    this.captchaIme.onSubmit = () => this.confirmBuyoutCaptcha();
   }
 
   get tab(): Tab {
@@ -204,6 +230,7 @@ export class AuctionPanel extends Container {
     claims?: AuctionClaimRow[],
     myRoleId?: number,
   ): void {
+    this.clearBuyoutCaptcha();
     this.releaseIme();
     this.rows = rows;
     this.mine = mine;
@@ -279,12 +306,16 @@ export class AuctionPanel extends Container {
         this.rows.find((x) => x.listingId === id) ||
         this.mine.find((x) => x.listingId === id) ||
         null;
+      if (!this.detailListing && this.buyoutCaptchaOpen) {
+        this.clearBuyoutCaptcha();
+      }
     }
     if (this.visible) this.redraw();
   }
 
   /** 从背包「拍卖」动作进入时预选物品并切到上架页。 */
   preselectBagItem(item: BagItem): void {
+    this.clearBuyoutCaptcha();
     this.activeTab = 2;
     this.listMode = "menu";
     this.detailListing = null;
@@ -300,6 +331,7 @@ export class AuctionPanel extends Container {
   }
 
   close(): void {
+    this.clearBuyoutCaptcha();
     this.releaseIme();
     clearPanelTip(this.toast);
     clearPointerHits(this.rowHits);
@@ -316,6 +348,9 @@ export class AuctionPanel extends Container {
   }
 
   softkeys(): { left: string; mid: string; right: string } {
+    if (this.buyoutCaptchaOpen) {
+      return { left: "确认", mid: "确认", right: "返回" };
+    }
     if (this.detailListing) {
       return { left: "确认", mid: "确认", right: "返回" };
     }
@@ -358,6 +393,7 @@ export class AuctionPanel extends Container {
 
   move(dir: -1 | 1): void {
     if (!this.visible) return;
+    if (this.buyoutCaptchaOpen) return;
     if (this.detailListing) {
       const acts = this.detailActions();
       if (!acts.length) return;
@@ -392,6 +428,7 @@ export class AuctionPanel extends Container {
    */
   horizontal(dir: -1 | 1): boolean {
     if (!this.visible) return false;
+    if (this.buyoutCaptchaOpen) return false;
     if (this.detailListing) {
       this.detailPage = Math.max(0, this.detailPage + dir);
       this.redraw();
@@ -423,6 +460,10 @@ export class AuctionPanel extends Container {
 
   confirm(): void {
     if (!this.visible) return;
+    if (this.buyoutCaptchaOpen) {
+      this.confirmBuyoutCaptcha();
+      return;
+    }
     if (this.detailListing) {
       this.confirmDetail();
       return;
@@ -452,6 +493,13 @@ export class AuctionPanel extends Container {
   cancelOrBack(): boolean {
     if (!this.visible) return false;
     if (tryDismissPanelTipOnSoftRight(this.toast)) return true;
+    if (this.buyoutCaptchaOpen) {
+      this.clearBuyoutCaptcha();
+      this.tip = "";
+      this.redraw();
+      this.onSoftkeys?.();
+      return true;
+    }
     if (this.detailListing) {
       this.detailListing = null;
       this.detailActionCursor = 0;
@@ -474,7 +522,65 @@ export class AuctionPanel extends Container {
     return this.visible && this.tab === "list" && this.listMode === "price";
   }
 
+  isBuyoutCaptchaMode(): boolean {
+    return this.visible && this.buyoutCaptchaOpen;
+  }
+
+  /** After 42/11 challenge: show captcha entry for listing. */
+  showBuyoutCaptcha(listingId: number, captcha: string): void {
+    if (!this.detailListing || this.detailListing.listingId !== listingId) {
+      this.tip = "拍品已变化";
+      this.redraw();
+      return;
+    }
+    this.buyoutCaptchaOpen = true;
+    this.buyoutCaptchaListingId = listingId;
+    this.buyoutCaptchaCode = (captcha || "").toUpperCase().slice(0, 4);
+    this.buyoutCaptchaDraft = "";
+    this.tip = "输入验证码后确认一口价";
+    this.redraw();
+    this.onSoftkeys?.();
+    this.focusCaptchaInput();
+  }
+
+  getBuyoutCaptchaAnswer(): string {
+    return this.buyoutCaptchaDraft.trim().toUpperCase();
+  }
+
+  getBuyoutCaptchaListingId(): number {
+    return this.buyoutCaptchaListingId;
+  }
+
+  refreshBuyoutCaptchaCode(captcha: string): void {
+    this.buyoutCaptchaCode = (captcha || "").toUpperCase().slice(0, 4);
+    this.buyoutCaptchaDraft = "";
+    this.captchaIme.setValue("");
+    if (this.visible && this.buyoutCaptchaOpen) {
+      this.redraw();
+      this.focusCaptchaInput();
+    }
+  }
+
   typePriceKey(key: string): boolean {
+    if (this.isBuyoutCaptchaMode()) {
+      if (this.captchaIme.isFocused()) return false;
+      if (/^[a-zA-Z0-9]$/.test(key) && this.buyoutCaptchaDraft.length < 4) {
+        this.buyoutCaptchaDraft = (this.buyoutCaptchaDraft + key.toUpperCase()).slice(
+          0,
+          4,
+        );
+        this.captchaIme.setValue(this.buyoutCaptchaDraft);
+        this.redraw();
+        return true;
+      }
+      if (key === "backspace") {
+        this.buyoutCaptchaDraft = this.buyoutCaptchaDraft.slice(0, -1);
+        this.captchaIme.setValue(this.buyoutCaptchaDraft);
+        this.redraw();
+        return true;
+      }
+      return false;
+    }
     if (!this.isPriceMode() || this.ime.isFocused()) return false;
     const cur =
       this.priceTarget === "buyout" ? this.buyoutDraft : this.priceDraft;
@@ -535,12 +641,23 @@ export class AuctionPanel extends Container {
   }
 
   destroy(options?: boolean | { children?: boolean; texture?: boolean }): void {
+    this.clearBuyoutCaptcha();
     this.releaseIme();
     this.ime.destroy();
+    this.captchaIme.destroy();
     super.destroy(options);
   }
 
+  private clearBuyoutCaptcha(): void {
+    this.buyoutCaptchaOpen = false;
+    this.buyoutCaptchaCode = "";
+    this.buyoutCaptchaDraft = "";
+    this.buyoutCaptchaListingId = 0;
+    this.captchaIme.hide();
+  }
+
   private openDetail(listing: AuctionListing): void {
+    this.clearBuyoutCaptcha();
     this.detailListing = listing;
     this.detailActionCursor = 0;
     this.detailPage = 0;
@@ -575,7 +692,12 @@ export class AuctionPanel extends Container {
       ];
     }
     const acts: { id: AuctionPanelAction | "back"; label: string }[] = [
-      { id: "bid", label: "出价" },
+      {
+        id: "bid",
+        label: r.highBidderRoleId
+          ? `出价(+${formatAuctionPrice(auctionBidStep(r.startPrice), r.currency)})`
+          : `出价 ${formatAuctionPrice(r.currentPrice, r.currency)}`,
+      },
     ];
     if (r.buyoutPrice > 0 && r.currentPrice <= r.buyoutPrice) {
       acts.push({
@@ -602,7 +724,39 @@ export class AuctionPanel extends Container {
       this.redraw();
       return;
     }
+    if (act.id === "buyout") {
+      this.tip = "获取验证码…";
+      this.redraw();
+      this.onAction?.("buyout_challenge", r.listingId);
+      return;
+    }
     this.onAction?.(act.id, r.listingId);
+  }
+
+  private confirmBuyoutCaptcha(): void {
+    const id = this.buyoutCaptchaListingId;
+    const ans = this.getBuyoutCaptchaAnswer();
+    if (!id || !this.buyoutCaptchaCode) {
+      this.tip = "验证码无效，请返回重试";
+      this.redraw();
+      return;
+    }
+    if (ans.length < 4) {
+      this.tip = "请输入4位验证码";
+      this.redraw();
+      this.focusCaptchaInput();
+      return;
+    }
+    if (ans !== this.buyoutCaptchaCode) {
+      this.tip = "验证码错误";
+      this.buyoutCaptchaDraft = "";
+      this.captchaIme.setValue("");
+      this.redraw();
+      this.onAction?.("buyout_challenge", id);
+      return;
+    }
+    this.releaseIme();
+    this.onAction?.("buyout", id);
   }
 
   private confirmList(): void {
@@ -656,7 +810,9 @@ export class AuctionPanel extends Container {
       this.priceTarget = "buyout";
       this.listMode = "price";
       this.tip =
-        this.currency === 0 ? "一口价金(0=无)须≥起拍" : "一口价酷宝(0=无)须≥起拍";
+        this.currency === 0
+          ? "一口价金(0=无)须≥起拍且≤10倍"
+          : "一口价酷宝(0=无)须≥起拍且≤10倍";
       this.redraw();
       this.focusPriceInput();
       return;
@@ -688,6 +844,11 @@ export class AuctionPanel extends Container {
       const buyout = Number(this.buyoutDraft) || 0;
       if (buyout > 0 && buyout < price) {
         this.tip = "一口价须≥起拍价";
+        this.redraw();
+        return;
+      }
+      if (buyout > 0 && buyout > price * 10) {
+        this.tip = "一口价不能超过起拍价10倍";
         this.redraw();
         return;
       }
@@ -927,8 +1088,24 @@ export class AuctionPanel extends Container {
       this.priceTarget === "buyout"
         ? Math.max(0, Number(raw || this.ime.value) || 0)
         : Math.max(1, Number(raw || this.ime.value) || 0);
-    if (this.priceTarget === "buyout") this.buyoutDraft = String(n);
-    else this.priceDraft = String(n);
+    if (this.priceTarget === "buyout") {
+      const start = Math.max(1, Number(this.priceDraft) || 0);
+      if (n > 0 && n < start) {
+        this.tip = "一口价须≥起拍价";
+        this.buyoutDraft = String(n);
+        this.redraw();
+        return;
+      }
+      if (n > 0 && n > start * 10) {
+        this.tip = "一口价不能超过起拍价10倍";
+        this.buyoutDraft = String(n);
+        this.redraw();
+        return;
+      }
+      this.buyoutDraft = String(n);
+    } else {
+      this.priceDraft = String(n);
+    }
     this.releaseIme();
     this.listMode = "menu";
     this.menuCursor = this.priceTarget === "buyout" ? 3 : 6;
@@ -950,11 +1127,36 @@ export class AuctionPanel extends Container {
       this.focusTimer = null;
     }
     this.ime.hide();
+    this.captchaIme.hide();
     this.inputHit.clear();
+  }
+
+  private focusCaptchaInput(): void {
+    if (!this.isBuyoutCaptchaMode()) return;
+    const rect = this.captchaInputRect();
+    this.captchaIme.show(rect);
+    this.inputHit.clear();
+    this.inputHit.rect(rect.x, rect.y, rect.w, rect.h).fill({
+      color: 0x000000,
+      alpha: 0.01,
+    });
+    this.addChild(this.inputHit);
+    if (this.focusTimer) clearTimeout(this.focusTimer);
+    const gen = ++this.openGen;
+    this.focusTimer = setTimeout(() => {
+      this.focusTimer = null;
+      if (!this.visible || this.openGen !== gen || !this.isBuyoutCaptchaMode())
+        return;
+      this.captchaIme.focus(this.buyoutCaptchaDraft);
+    }, 50);
   }
 
   private priceInputRect(): { x: number; y: number; w: number; h: number } {
     return { x: 20, y: 118, w: LCD_WIDTH - 40, h: 22 };
+  }
+
+  private captchaInputRect(): { x: number; y: number; w: number; h: number } {
+    return { x: 20, y: 128, w: LCD_WIDTH - 40, h: 24 };
   }
 
   private clearLabels(): void {
@@ -985,12 +1187,13 @@ export class AuctionPanel extends Container {
     this.labels.push(l);
   }
 
-  private paintEquipLine(line: EquipPaintLine, x: number, y: number): void {
+  private paintEquipLine(line: EquipPaintLine, x: number, y: number): number {
     if (line.kind === "text") {
-      this.addLabel(line.text.slice(0, 26), x, y, line.color);
-      return;
+      this.addLabel(line.text, x, y, line.color);
+      return wrapChars(line.text).length;
     }
-    this.addLabel(`${line.key}${line.value}`.slice(0, 26), x, y, line.keyColor);
+    this.addLabel(`${line.key}${line.value}`, x, y, line.keyColor);
+    return wrapChars(`${line.key}${line.value}`).length;
   }
 
   private drawTabs(x: number, y: number, w: number, h: number): void {
@@ -1037,16 +1240,71 @@ export class AuctionPanel extends Container {
     this.drawTabs(x + 6, tabY, w - 12, tabH);
 
     const bodyTop = tabY + tabH + 6;
-    if (this.detailListing) this.drawDetail(x, bodyTop, w, h - (bodyTop - y));
+    if (this.buyoutCaptchaOpen && this.detailListing)
+      this.drawBuyoutCaptcha(x, bodyTop, w, h - (bodyTop - y));
+    else if (this.detailListing) this.drawDetail(x, bodyTop, w, h - (bodyTop - y));
     else if (this.tab === "list") this.drawListTab(x, bodyTop, w, h - (bodyTop - y));
     else this.drawBrowseLike(x, bodyTop, w, h - (bodyTop - y));
 
     drawPanelTipOverlay(this, this.toast);
-    if (this.isPriceMode()) {
+    if (this.isBuyoutCaptchaMode()) {
+      this.addChild(this.inputHit);
+      this.captchaIme.show(this.captchaInputRect());
+    } else if (this.isPriceMode()) {
       // Keep IME hit above labels/tips added this frame.
       this.addChild(this.inputHit);
       this.ime.show(this.priceInputRect());
     }
+  }
+
+  private drawBuyoutCaptcha(
+    x: number,
+    bodyTop: number,
+    w: number,
+    bodyH: number,
+  ): void {
+    const r = this.detailListing;
+    if (!r) return;
+    const tipY = bodyTop + bodyH - 16;
+    const item = listingAsBagItem(r);
+    const qColor = qualityColor(item.quality);
+    const titleH = 20;
+    this.box.rect(x + 6, bodyTop, w - 12, titleH).fill({ color: CBE.bgPanelDark });
+    const en = r.enhanceLevel > 0 ? `+${r.enhanceLevel}` : "";
+    this.addLabelCentered(
+      `${item.name}${en}`,
+      LCD_WIDTH / 2,
+      bodyTop + titleH / 2,
+      qColor,
+    );
+    this.addLabel(
+      `一口价 ${formatAuctionPrice(r.buyoutPrice, r.currency)}`,
+      x + 10,
+      bodyTop + titleH + 8,
+      CBE.inkMint,
+    );
+    this.addLabel("防秒拍验证码", x + 10, bodyTop + titleH + 28, EQUIP_DETAIL_YELLOW);
+    this.addLabel(
+      `请输入: ${this.buyoutCaptchaCode || "----"}`,
+      x + 10,
+      bodyTop + titleH + 46,
+      CBE.ink,
+    );
+    const rect = this.captchaInputRect();
+    this.box.rect(rect.x, rect.y, rect.w, rect.h).fill({ color: BAG_SELECT });
+    const draft = this.buyoutCaptchaDraft || "_";
+    this.addLabel(`输入 ${draft}`, rect.x + 6, rect.y + 4, EQUIP_DETAIL_YELLOW);
+    this.rowHits.push(
+      attachRowPointerHit(this, rect.x, rect.y, rect.w, rect.h, () => {
+        this.focusCaptchaInput();
+      }),
+    );
+    this.addLabel(
+      this.tip || "输入上方验证码后确认",
+      x + 10,
+      tipY,
+      CBE.inkMint,
+    );
   }
 
   private drawDetail(
@@ -1069,7 +1327,7 @@ export class AuctionPanel extends Container {
     this.box.rect(x + 6, bodyTop, w - 12, titleH).fill({ color: CBE.bgPanelDark });
     const en = r.enhanceLevel > 0 ? `+${r.enhanceLevel}` : "";
     this.addLabelCentered(
-      `${item.name}${en}`.slice(0, 18),
+      `${item.name}${en}`,
       LCD_WIDTH / 2,
       bodyTop + titleH / 2,
       qColor,
@@ -1090,7 +1348,7 @@ export class AuctionPanel extends Container {
         ? `一口价${formatAuctionPrice(r.buyoutPrice, r.currency)}`
         : "无一口价";
     this.addLabel(
-      `${buy} 剩${formatRemain(r.remainSec)}`.slice(0, 26),
+      `${buy} 剩${formatRemain(r.remainSec)}`,
       x + 10,
       metaY + 14,
       CBE.inkMint,
@@ -1110,7 +1368,7 @@ export class AuctionPanel extends Container {
           : isDurableMallPassItemId(item.itemId)
             ? `耐久 ${item.count}`
             : `数量 ${item.count}`);
-      for (const line of wrapUiText(desc, w - 28, 12)) {
+      for (const line of wrapChars(desc)) {
         lines.push({ kind: "text", text: line, color: CBE.ink });
       }
       lines.push({
@@ -1130,8 +1388,8 @@ export class AuctionPanel extends Container {
     const pageLines = lines.slice(start, start + fitRows);
     let ly = bodyY;
     for (const line of pageLines) {
-      this.paintEquipLine(line, x + 10, ly);
-      ly += rowH;
+      const rows = this.paintEquipLine(line, x + 10, ly);
+      ly += rowH * Math.max(1, rows);
     }
     if (pageCount > 1) {
       this.addLabel(
@@ -1148,7 +1406,7 @@ export class AuctionPanel extends Container {
       const by = actionTop + 4 + i * (btnH + 2);
       if (hi) this.box.rect(x + 8, by, w - 16, btnH).fill({ color: BAG_SELECT });
       this.addLabel(
-        act.label.slice(0, 24),
+        act.label,
         x + 14,
         by + 2,
         hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
@@ -1195,19 +1453,17 @@ export class AuctionPanel extends Container {
     this.addLabel(hint, x + 10, bodyTop, CBE.inkLabel);
 
     const listTop = bodyTop + 16;
-    const rowH = 16;
-    const maxShow = Math.max(1, Math.floor((tipY - listTop - 4) / rowH));
+    const baseRowH = 16;
+    const maxShow = Math.max(1, Math.floor((tipY - listTop - 4) / baseRowH));
     let start = 0;
     if (this.listCursor >= maxShow) start = this.listCursor - maxShow + 1;
     if (!rows.length) {
       this.addLabel("(空)", x + 12, listTop + 4, CBE.inkMint);
     }
-    for (let i = 0; i < maxShow && start + i < rows.length; i++) {
-      const idx = start + i;
+    let listY = listTop;
+    for (let idx = start; idx < rows.length && listY < tipY - 4; idx++) {
       const row = rows[idx]!;
-      const ry = listTop + i * rowH;
       const hi = idx === this.listCursor;
-      if (hi) this.box.rect(x + 6, ry, w - 12, rowH - 1).fill({ color: BAG_SELECT });
       let label = "";
       if (row.kind === "action") label = row.label;
       else if (row.kind === "claim") label = formatAuctionClaimRow(row.claim);
@@ -1233,15 +1489,19 @@ export class AuctionPanel extends Container {
         label =
           `${r.itemName}${en}${qtyTag} ${formatAuctionPrice(r.currentPrice, r.currency)} ${buy} ${tag}`.trim();
       }
-      this.addLabel(label.slice(0, 26), x + 10, ry + 1, hi ? CBE.menuHi : CBE.ink);
+      const lineCount = wrapChars(label).length;
+      const effRowH = Math.max(baseRowH, lineCount * 14 + 2);
+      if (hi) this.box.rect(x + 6, listY, w - 12, effRowH - 1).fill({ color: BAG_SELECT });
+      this.addLabel(label, x + 10, listY + 1, hi ? CBE.menuHi : CBE.ink);
       const hitIdx = idx;
       this.rowHits.push(
-        attachRowPointerHit(this, x + 6, ry, w - 12, rowH - 1, () => {
+        attachRowPointerHit(this, x + 6, listY, w - 12, effRowH - 1, () => {
           this.listCursor = hitIdx;
           this.redraw();
           this.confirm();
         }),
       );
+      listY += effRowH;
     }
     this.addLabel(this.tip || hint, x + 10, tipY, CBE.inkMint);
   }
@@ -1277,7 +1537,7 @@ export class AuctionPanel extends Container {
               ? `耐${it.count}`
               : `×${it.count}`;
           this.addLabel(
-            `${it.name}${en} ${qty}`.slice(0, 22),
+            `${it.name}${en} ${qty}`,
             x + 10,
             ry + 1,
             hi ? CBE.ink : qualityColor(it.quality),
@@ -1340,7 +1600,7 @@ export class AuctionPanel extends Container {
       const sel = this.selected
         ? `${this.selected.name}${this.selected.enhance ? `+${this.selected.enhance}` : ""}`
         : "(未选物品)";
-      this.addLabel(sel.slice(0, 22), x + 10, bodyTop + 18, CBE.inkMint);
+      this.addLabel(sel, x + 10, bodyTop + 18, CBE.inkMint);
       this.addLabel(
         `货币 ${currencyLabel(this.currency)} 起拍${this.priceDraft || "0"}${unit}`,
         x + 10,
@@ -1379,19 +1639,22 @@ export class AuctionPanel extends Container {
     this.addLabel("←→标签/调数量·货币·时长", x + 10, bodyTop, CBE.inkLabel);
     const menu = this.listMenu();
     const listTop = bodyTop + 18;
+    let menuY = listTop;
     menu.forEach((row, i) => {
-      const ry = listTop + i * 16;
       const hi = i === this.menuCursor;
-      if (hi) this.box.rect(x + 6, ry, w - 12, 15).fill({ color: BAG_SELECT });
-      this.addLabel(row.label.slice(0, 26), x + 10, ry + 1, hi ? CBE.menuHi : CBE.ink);
+      const lineCount = wrapChars(row.label).length;
+      const effRowH = Math.max(16, lineCount * 14 + 2);
+      if (hi) this.box.rect(x + 6, menuY, w - 12, effRowH - 1).fill({ color: BAG_SELECT });
+      this.addLabel(row.label, x + 10, menuY + 1, hi ? CBE.menuHi : CBE.ink);
       const idx = i;
       this.rowHits.push(
-        attachRowPointerHit(this, x + 6, ry, w - 12, 15, () => {
+        attachRowPointerHit(this, x + 6, menuY, w - 12, effRowH - 1, () => {
           this.menuCursor = idx;
           this.redraw();
           this.confirm();
         }),
       );
+      menuY += effRowH;
     });
     this.addLabel(
       this.tip || "←→切标签；数量/货币/时长行可调",

@@ -10,7 +10,7 @@ import {
   drawCbePanel,
   drawCbeTitlePill,
 } from "./constants";
-import { BitmapLabel } from "./BitmapLabel";
+import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import type {
   GuildApplicantRow,
   GuildDetail,
@@ -371,9 +371,11 @@ export class GuildPanel extends Container {
 
     try {
       if (this.mode === "text") {
-        this.textLines.slice(0, 12).forEach((line, i) => {
-          this.addLabel(line.slice(0, 28), x + 10, y + 36 + i * 15, CBE.inkMint);
-        });
+        let ly = y + 36;
+        for (const line of this.textLines.flatMap((l) => wrapChars(l)).slice(0, 24)) {
+          this.addLabel(line, x + 10, ly, CBE.inkMint);
+          ly += 15;
+        }
         this.addLabel(
           this.actionLabels.includes("申请入帮") ? "确定=操作" : "确定=返回",
           x + 10,

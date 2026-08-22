@@ -206,17 +206,40 @@ export function renderUc3ToRgba(
   const og = (outlineColor >> 8) & 0xff;
   const ob = outlineColor & 0xff;
   const pad = outline ? 1 : 0;
-  let advance = 0;
-  const chars: { cp: number; x: number; bits: Uint8Array | null; drawW: number }[] = [];
-  for (const ch of text) {
-    const cp = ch.codePointAt(0)!;
-    const drawW = fontCellWidth(font, cp);
-    if (opts.maxWidth != null && advance + drawW > opts.maxWidth) break;
-    chars.push({ cp, x: advance, bits: font.glyphs.get(cp) ?? null, drawW });
-    advance += drawW;
+  const lineGap = 2;
+  const lineTexts = text.split("\n");
+  type Glyph = {
+    cp: number;
+    x: number;
+    y: number;
+    bits: Uint8Array | null;
+    drawW: number;
+  };
+  const glyphs: Glyph[] = [];
+  let maxLineW = 0;
+  for (let li = 0; li < lineTexts.length; li++) {
+    const lineText = lineTexts[li] ?? "";
+    const lineY = li * (font.height + lineGap);
+    let advance = 0;
+    for (const ch of lineText) {
+      const cp = ch.codePointAt(0)!;
+      const drawW = fontCellWidth(font, cp);
+      if (opts.maxWidth != null && advance + drawW > opts.maxWidth) break;
+      glyphs.push({
+        cp,
+        x: advance,
+        y: lineY,
+        bits: font.glyphs.get(cp) ?? null,
+        drawW,
+      });
+      advance += drawW;
+    }
+    maxLineW = Math.max(maxLineW, advance);
   }
-  const logicalW = Math.max(1, advance + pad * 2);
-  const logicalH = font.height + pad * 2;
+  const nLines = Math.max(1, lineTexts.length);
+  const logicalW = Math.max(1, maxLineW + pad * 2);
+  const logicalH =
+    nLines * font.height + Math.max(0, nLines - 1) * lineGap + pad * 2;
   const width = logicalW * ss;
   const height = logicalH * ss;
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -259,10 +282,10 @@ export function renderUc3ToRgba(
         [1, 1],
       ];
 
-  for (const c of chars) {
+  for (const c of glyphs) {
     if (!c.bits) continue;
     const ox = c.x + pad;
-    const oy = pad;
+    const oy = c.y + pad;
     for (let j = 0; j < font.height; j++) {
       for (let i = 0; i < c.drawW; i++) {
         const byteIndex = j * pitch + (i >> 3);

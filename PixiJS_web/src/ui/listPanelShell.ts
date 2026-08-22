@@ -13,6 +13,7 @@ import {
 } from "./constants";
 import { attachRowPointerHit } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
+import { UI_WRAP_CHARS, wrapChars } from "./BitmapLabel";
 
 export const LIST_SHELL_DEFAULT_PAGE_SIZE = 8;
 export const LIST_SHELL_TAB_BG = 0x375946;
@@ -196,14 +197,8 @@ export function paintListShellBody(
   const paging = opts.paging ?? "local";
   const pageSize = Math.max(1, opts.pageSize | 0);
   const rowH = opts.rowH ?? (dualLine ? 28 : 20);
-  const nameMax = Math.max(
-    1,
-    opts.nameMax ?? (dualLine ? 16 : 14),
-  );
-  const subtitleMax = Math.max(
-    1,
-    opts.subtitleMax ?? (dualLine ? 18 : 16),
-  );
+  const nameMax = Math.max(1, opts.nameMax ?? UI_WRAP_CHARS);
+  const subtitleMax = Math.max(1, opts.subtitleMax ?? UI_WRAP_CHARS);
 
   let page = 1;
   let pages = 1;
@@ -236,38 +231,44 @@ export function paintListShellBody(
         : cursor < 0
           ? -1
           : Math.min(Math.max(0, cursor), shown.length - 1);
+    let listY = listTop;
     shown.forEach((row, i) => {
       const abs = pageStart + i;
       const hi = i === localCursor;
-      const ry = listTop + i * rowH;
-      if (ry + rowH > listBottom + 4) return;
+      const nameLines = wrapChars(row.name, nameMax).length;
+      const subLines = row.subtitle ? wrapChars(row.subtitle, subtitleMax).length : 0;
+      const effRowH = dualLine
+        ? rowH
+        : Math.max(rowH, nameLines * 14 + 6);
+      if (listY + effRowH > listBottom + 4) return;
       if (hi) {
-        ctx.box.rect(x + 6, ry, w - 12, rowH - 2).fill({ color: CBE.select });
+        ctx.box.rect(x + 6, listY, w - 12, effRowH - 2).fill({ color: CBE.select });
       }
       const nameCol = hi ? CBE.ink : (row.nameColor ?? CBE.inkMint);
-      ctx.addLabel(row.name.slice(0, nameMax), x + 10, ry + 2, nameCol);
+      ctx.addLabel(row.name, x + 10, listY + 2, nameCol);
       if (row.subtitle) {
         if (dualLine) {
           ctx.addLabel(
-            row.subtitle.slice(0, subtitleMax),
+            row.subtitle,
             x + 12,
-            ry + 14,
+            listY + 14,
             row.subtitleColor ?? CBE.inkLabel,
           );
-        } else {
+        } else if (subLines > 0) {
           ctx.addLabel(
-            row.subtitle.slice(0, subtitleMax),
+            row.subtitle,
             x + 100,
-            ry + 2,
+            listY + 2,
             row.subtitleColor ?? CBE.inkLabel,
           );
         }
       }
       ctx.hits.push(
-        attachRowPointerHit(ctx.host, x + 6, ry, w - 12, rowH - 2, () =>
+        attachRowPointerHit(ctx.host, x + 6, listY, w - 12, effRowH - 2, () =>
           onRow(abs),
         ),
       );
+      listY += effRowH;
     });
   }
 

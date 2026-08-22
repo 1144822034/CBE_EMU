@@ -7,7 +7,7 @@ import {
   drawCbePanel,
   drawCbeTitlePill,
 } from "./constants";
-import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
+import { BitmapLabel, measureUiTextWidth, wrapChars } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
 import {
   EQUIP_ICON_SIZE,
@@ -1874,8 +1874,8 @@ export class SystemPanel extends Container {
 
     let ly = bodyTop;
     for (const line of pageLines) {
-      this.paintEquipLine(line, x + 14, ly);
-      ly += rowH;
+      const rows = this.paintEquipLine(line, x + 14, ly);
+      ly += rowH * Math.max(1, rows);
     }
 
     if (pageCount > 1) {
@@ -1944,15 +1944,16 @@ export class SystemPanel extends Container {
     }
   }
 
-  private paintEquipLine(line: EquipPaintLine, x: number, y: number): void {
+  private paintEquipLine(line: EquipPaintLine, x: number, y: number): number {
     if (line.kind === "text") {
       this.addAttrText(line.text, x, y, line.color);
-      return;
+      return wrapChars(line.text).length;
     }
     // Same-color key+value → one Label (merge); two-tone keeps two Labels.
     if (line.keyColor === line.valueColor) {
-      this.addAttrText(`${line.key}${line.value}`, x, y, line.keyColor);
-      return;
+      const merged = `${line.key}${line.value}`;
+      this.addAttrText(merged, x, y, line.keyColor);
+      return wrapChars(merged).length;
     }
     this.addAttrText(line.key, x, y, line.keyColor);
     // UC3 16×16 — old 12/7 system-font estimate put yellow values on top of keys.
@@ -1962,15 +1963,18 @@ export class SystemPanel extends Container {
       y,
       line.valueColor,
     );
+    return Math.max(wrapChars(line.key).length, wrapChars(line.value).length);
   }
 
   private drawBagInnerDetail(x: number, _y: number, w: number, top: number, bottom: number): void {
-    const lines = this.detailText();
-    const shown = lines.slice(0, Math.floor((bottom - top) / 16));
-    shown.forEach((line, i) => {
-      this.addAttrText(line.slice(0, 26), x + 14, top + i * 16, CBE.inkMint);
-    });
-    this.addAttrText("左软=操作  右软=返回", x + 14, top + shown.length * 16 + 8, CBE.inkLabel);
+    const flat = this.detailText().flatMap((line) => wrapChars(line));
+    const maxLines = Math.floor((bottom - top) / 16);
+    let ly = top;
+    for (const line of flat.slice(0, maxLines)) {
+      this.addAttrText(line, x + 14, ly, CBE.inkMint);
+      ly += 16;
+    }
+    this.addAttrText("左软=操作  右软=返回", x + 14, ly + 8, CBE.inkLabel);
   }
 
   private drawBagInnerActions(
@@ -2167,26 +2171,30 @@ export class SystemPanel extends Container {
       ? this.cursorIndex - pageStart
       : this.cursorIndex;
 
+    let listY = listTop;
     for (let i = 0; i < pageLines.length; i++) {
       const hi = i === localCursor;
-      if (hi) this.box.rect(x + 4, listTop + i * 16, w - 8, 15).fill({ color: CBE.select });
       const row = pageLines[i]!;
       const ink = hi ? CBE.ink : row.color;
-      const ty = listTop + 1 + i * 16;
+      const lineCount = row.right ? 1 : wrapChars(row.text).length;
+      const effH = Math.max(16, lineCount * 14 + 1);
+      if (hi) this.box.rect(x + 4, listY, w - 8, effH - 1).fill({ color: CBE.select });
+      const ty = listY + 1;
       if (row.right) {
-        this.addAttrText(row.text.slice(0, 14), x + 8, ty, ink);
+        this.addAttrText(row.text, x + 8, ty, ink);
         this.addAttrTextRight(row.right, x + w - 8, ty, ink, 80);
       } else {
-        this.addLabel(row.text.slice(0, 26), x + 8, ty, ink);
+        this.addLabel(row.text, x + 8, ty, ink);
       }
       const absIdx = pageStart + i;
       this.rowHits.push(
-        attachRowPointerHit(this, x + 4, listTop + i * 16, w - 8, 15, () => {
+        attachRowPointerHit(this, x + 4, listY, w - 8, effH - 1, () => {
           this.cursorIndex = absIdx;
           this.redraw();
           this.confirm();
         }),
       );
+      listY += effH;
     }
 
     const footY = y + LCD_HEIGHT - SOFTKEY_H - 64 - 18;
@@ -2284,15 +2292,16 @@ export class SystemPanel extends Container {
   }
 
   private drawDetail(x: number, y: number, w: number): void {
-    const lines = this.detailText();
-    const shown = lines.slice(0, 12);
-    shown.forEach((line, i) => {
-      this.addLabel(line.slice(0, 28), x + 8, y + 46 + i * 15, CBE.inkMint);
-    });
+    const lines = this.detailText().flatMap((line) => wrapChars(line));
+    let ly = y + 46;
+    for (const line of lines.slice(0, 24)) {
+      this.addLabel(line, x + 8, ly, CBE.inkMint);
+      ly += 15;
+    }
     this.addLabel(
       "左软=操作  右软=返回",
       x + 8,
-      y + 46 + shown.length * 15 + 8,
+      ly + 8,
       CBE.inkLabel,
     );
   }
@@ -2304,7 +2313,7 @@ export class SystemPanel extends Container {
         it.name,
         `数量 ${it.count}  seq ${it.seq}`,
         it.kind === "equip" ? `强化 +${it.enhance}  品质 ${it.quality}` : `品质 ${it.quality}`,
-        it.desc ? it.desc.slice(0, 40) : "",
+        it.desc ? it.desc : "",
         `id ${it.itemId}`,
       ].filter(Boolean);
     }
@@ -2407,26 +2416,9 @@ function formatBagName(it: BagItem): string {
   return `${it.name}${plus}`;
 }
 
-/** Wrap by system-font advances for dark description wells (fontSize≈12). */
-function wrapUc3Lines(text: string, maxWidth: number): string[] {
-  const cjk = 12;
-  const ascii = 12 * 0.55;
-  const lines: string[] = [];
-  let cur = "";
-  let w = 0;
-  for (const ch of text) {
-    const cw = (ch.codePointAt(0) ?? 0) > 0xff ? cjk : ascii;
-    if (w + cw > maxWidth && cur) {
-      lines.push(cur);
-      cur = ch;
-      w = cw;
-    } else {
-      cur += ch;
-      w += cw;
-    }
-  }
-  if (cur) lines.push(cur);
-  return lines.length ? lines : [""];
+/** Wrap description wells at {@link UI_WRAP_CHARS} per line. */
+function wrapUc3Lines(text: string, _maxWidth: number): string[] {
+  return text.split("\n").flatMap((p) => wrapChars(p));
 }
 
 /** CBE / admin：1金=10000铜，1银=100铜. */

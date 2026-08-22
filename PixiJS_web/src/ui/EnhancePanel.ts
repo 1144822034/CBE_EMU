@@ -626,7 +626,7 @@ export class EnhancePanel extends Container {
     if (this.mode === "transferConfirm" && this.destPick) {
       this.addAttr("确认强化转移", x + 14, bodyTop, EQUIP_DETAIL_YELLOW);
       this.addAttr(
-        `目标: ${this.destPick.name}`.slice(0, 20),
+        `目标: ${this.destPick.name}`,
         x + 14,
         bodyTop + 18,
         CBE.ink,
@@ -711,7 +711,7 @@ export class EnhancePanel extends Container {
         if (hi) this.box.rect(x + 10, sy, w - 20, 15).fill({ color: SELECT_BG });
         const en = row.enhance > 0 ? `(+${row.enhance})` : "";
         this.addAttr(
-          `${row.name}${en}`.slice(0, 18),
+          `${row.name}${en}`,
           x + 14,
           sy + 1,
           hi ? CBE.ink : CBE.inkMint,

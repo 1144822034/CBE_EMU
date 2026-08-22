@@ -8,7 +8,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
 } from "./constants";
-import { BitmapLabel } from "./BitmapLabel";
+import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
 import type { PeerActor } from "../net/protocol";
 import type {
@@ -299,7 +299,7 @@ export class SocialPanel extends Container {
     this.rows = rows.map((r) => ({
       id: r.id,
       name: `${r.equipped ? "★" : ""}${r.name}`,
-      subtitle: r.desc.slice(0, 16),
+      subtitle: r.desc,
     }));
     this.enterList();
     const focusId =
@@ -362,7 +362,7 @@ export class SocialPanel extends Container {
       { id: -1, name: "发送世界消息…", subtitle: "" },
       ...lines.slice(-20).map((line, i) => ({
         id: i + 1,
-        name: line.slice(0, 22),
+        name: line,
         subtitle: "",
       })),
     ];
@@ -664,9 +664,11 @@ export class SocialPanel extends Container {
         const pages = Math.max(1, Math.ceil(this.textLines.length / ps));
         const start = this.textPage * ps;
         const shown = this.textLines.slice(start, start + ps);
-        shown.forEach((line, i) => {
-          this.addLabel(line.slice(0, 28), x + 10, y + 36 + i * 15, CBE.inkMint);
-        });
+        let ly = y + 36;
+        for (const line of shown.flatMap((l) => wrapChars(l))) {
+          this.addLabel(line, x + 10, ly, CBE.inkMint);
+          ly += 15;
+        }
         const hint =
           pages > 1
             ? `确定=${this.textPage + 1 < pages ? "下页" : "关闭"}`

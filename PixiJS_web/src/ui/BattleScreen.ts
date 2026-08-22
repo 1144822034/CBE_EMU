@@ -6,7 +6,7 @@ import {
   LCD_WIDTH,
   drawCbePanel,
 } from "./constants";
-import { BitmapLabel } from "./BitmapLabel";
+import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import type { BattleState, BattleSide } from "../net/protocol";
 import {
   battleDisplayToWire,
@@ -64,7 +64,6 @@ const UNIT_FEET_Y = STAGE_TOP + Math.floor((STAGE_BOTTOM - STAGE_TOP) * 0.64);
 const FORMATION_FORWARD = 12;
 /** Vertical gap between formation rows. */
 const FORMATION_ROW = 30;
-const TURN_SECONDS = 16;
 
 /**
  * Screenshot chevron: top/bottom stay back; middle slot steps toward center.
@@ -96,6 +95,11 @@ const SKILL_PAGE_SIZE = 6;
 const ITEM_PAGE_SIZE = 6;
 type MenuItem = (typeof MENU_ITEMS)[number];
 
+/** PvE / 普通切磋默认回合秒数。 */
+const TURN_SECONDS = 16;
+/** 比武：与服端 CBE_DUEL_ROUND_COMMIT_TIMEOUT_MS 默认 20s 对齐。 */
+const TURN_SECONDS_ARENA = 20;
+
 export type BattleBagRow = {
   seq: number;
   itemId: number;
@@ -108,6 +112,12 @@ const MENU_ITEMS_SPAR: readonly MenuItem[] = [
   "仙术",
   "物品",
   "自动",
+  "查看",
+];
+/** 比武：禁逃跑、禁自动、禁物品（防对刷 / 挂机）。 */
+const MENU_ITEMS_ARENA: readonly MenuItem[] = [
+  "攻击",
+  "仙术",
   "查看",
 ];
 
@@ -191,6 +201,8 @@ export class BattleScreen extends Container {
    * (team merge or spar duel_round_defer). No menu / ops until applyUpdate.
    */
   private awaitingRound = false;
+  /** Timed 比武 duel: no [自动], 20s NA timeout. */
+  private arenaDuel = false;
   private tickAcc = 0;
   private idleTickAcc = 0;
   private timerSec = TURN_SECONDS;
@@ -322,6 +334,7 @@ export class BattleScreen extends Container {
     }
     this.menuMode = "root";
     this.menuOpen = true;
+    this.paintLocalActingTitle();
     this.redrawMenu();
   }
 
@@ -350,6 +363,7 @@ export class BattleScreen extends Container {
     }
     this.menuMode = "root";
     this.menuOpen = true;
+    this.paintLocalActingTitle();
     this.redrawMenu();
   }
 
@@ -456,6 +470,7 @@ export class BattleScreen extends Container {
     ) {
       this.menuMode = "root";
       this.menuOpen = true;
+      this.paintLocalActingTitle();
       this.redrawMenu();
     }
   }
@@ -468,6 +483,19 @@ export class BattleScreen extends Container {
     if (!this.state || this.state.subtype !== 10) return false;
     const g = this.state.left[0]?.visual0 ?? 0;
     return g >= 1 && g <= 2;
+  }
+
+  /** Pixi 比武擂台 duel — set by main when entering battle from arena scene. */
+  setArenaDuel(on: boolean): void {
+    this.arenaDuel = on;
+  }
+
+  isArenaDuel(): boolean {
+    return this.arenaDuel && this.isSparBattle();
+  }
+
+  private turnSeconds(): number {
+    return this.isArenaDuel() ? TURN_SECONDS_ARENA : TURN_SECONDS;
   }
 
   /** Right softkey label while battle menu is interactive. */
@@ -493,6 +521,7 @@ export class BattleScreen extends Container {
   }
 
   private rootMenuItems(): readonly MenuItem[] {
+    if (this.isArenaDuel()) return MENU_ITEMS_ARENA;
     return this.isSparBattle() ? MENU_ITEMS_SPAR : MENU_ITEMS;
   }
 
@@ -533,7 +562,7 @@ export class BattleScreen extends Container {
     this.menuCursor = 0;
     this.menuOpen = this.operateMenuAllowed();
     this.resetTargetPick();
-    this.timerSec = TURN_SECONDS;
+    this.timerSec = this.turnSeconds();
     this.timerAcc = 0;
     this.clearFloats();
     this.fxHost.removeChildren().forEach((c) => c.destroy({ children: true }));
@@ -544,12 +573,7 @@ export class BattleScreen extends Container {
     this.refreshBottomHud();
     this.paintTimer();
     this.refreshAutoBannerVisibility();
-    const pname = this.visuals.playerName || state.right[0]?.name || "侠客";
-    void this.topTitle.setText(`${pname}行动`, CBE.ink, {
-      uc3: true,
-      smooth: false,
-      outline: false,
-    });
+    this.paintLocalActingTitle();
     void this.log.setText(
       this.hangupActive
         ? "挂机战斗中…"
@@ -569,7 +593,7 @@ export class BattleScreen extends Container {
     this.menuOpen = false;
     this.resetTargetPick();
     this.redrawMenu();
-    void this.log.setText(up.log.slice(0, 28), CBE.inkBody, {
+    void this.log.setText(up.log, CBE.inkBody, {
       maxWidth: LCD_WIDTH - 16,
     });
 
@@ -649,9 +673,10 @@ export class BattleScreen extends Container {
       this.menuMode = "root";
       // Keep scroll hidden while [自动] / hangup; banner or stop-hangup restores.
       this.menuOpen = this.operateMenuAllowed();
-      this.timerSec = TURN_SECONDS;
+      this.timerSec = this.turnSeconds();
       this.timerAcc = 0;
       this.paintTimer();
+      this.paintLocalActingTitle();
       this.redrawMenu();
       this.refreshAutoBannerVisibility();
       // Next seat is ready — main arms [自动] client 4/2 if enabled.
@@ -664,6 +689,7 @@ export class BattleScreen extends Container {
     if (this.state) this.notifyVitalsChanged();
     this.visible = false;
     this.state = null;
+    this.arenaDuel = false;
     this.hangupActive = false;
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
@@ -968,6 +994,10 @@ export class BattleScreen extends Container {
     }
     if (this.awaitingExit) {
       this.confirmSettlement();
+      return;
+    }
+    if (this.isArenaDuel()) {
+      void this.log.setText("比武中不可用物品", CBE.inkTip);
       return;
     }
     if (this.playbackBusy || this.awaitingRound) return;
@@ -1420,7 +1450,7 @@ export class BattleScreen extends Container {
     }
     this.timerDigits = await DigitStrip.timeNum();
     if (this.timerDigits) {
-      this.timerDigits.setText(String(TURN_SECONDS), 24, 12);
+      this.timerDigits.setText(String(this.turnSeconds()), 24, 12);
       this.topHost.addChild(this.timerDigits.root);
     }
     this.paintTimer();
@@ -1472,11 +1502,7 @@ export class BattleScreen extends Container {
       const scene = await loadSceneMap(sce);
       if (gen !== this.mapLoadGen) return;
       this.paintMap(scene);
-      void this.topTitle.setText(
-        `${this.visuals.playerName || "侠客"}行动`,
-        CBE.ink,
-        { uc3: true, smooth: false, outline: false },
-      );
+      this.paintLocalActingTitle();
       console.info("[battle] map", sce, `${scene.width}x${scene.height}`);
     } catch (e) {
       console.warn("[battle] load map failed", sce, e);
@@ -1671,6 +1697,29 @@ export class BattleScreen extends Container {
     return (
       (selfId ? rows.find((r) => r.id === selfId) : undefined) || rows[0] || null
     );
+  }
+
+  /** CBE `%s行动` — unit display name from battleinfo, keyed by action actor wire. */
+  private paintActingTitle(name: string): void {
+    const label = (name || "").trim() || "侠客";
+    void this.topTitle.setText(`${label}行动`, CBE.ink, {
+      uc3: true,
+      smooth: false,
+      outline: false,
+    });
+  }
+
+  private paintLocalActingTitle(): void {
+    const side = this.localPlayerSide();
+    this.paintActingTitle(
+      side?.name || this.visuals.playerName || "侠客",
+    );
+  }
+
+  private paintActingTitleForWire(wire: number): void {
+    if (!this.state) return;
+    const unit = battleUnitForWire(this.state, wire);
+    this.paintActingTitle(unit?.name || `目标#${wire}`);
   }
 
   private isLocalPlayerDead(): boolean {
@@ -2005,6 +2054,10 @@ export class BattleScreen extends Container {
       return;
     }
     if (item === "物品") {
+      if (this.isArenaDuel()) {
+        void this.log.setText("比武中不可用物品", CBE.inkTip);
+        return;
+      }
       this.item();
       return;
     }
@@ -2013,6 +2066,10 @@ export class BattleScreen extends Container {
       return;
     }
     if (item === "自动") {
+      if (this.isArenaDuel()) {
+        void this.log.setText("比武中不可自动", CBE.inkTip);
+        return;
+      }
       const on = this.onAutoToggle?.() ?? false;
       this.setAutoBattleActive(on);
       void this.log.setText(on ? "自动战斗开启" : "自动战斗关闭", CBE.inkTip);
@@ -2327,6 +2384,8 @@ export class BattleScreen extends Container {
     }
 
     for (const rec of actions) {
+      // CBE DrawBattleSceneBg `%s行动`: advance with each actioninfo actor.
+      this.paintActingTitleForWire(rec.actorWire);
       if (rec.type === 3 || rec.type === 4) {
         const dead = this.unitForWire(rec.actorWire);
         if (dead) await this.playDeathMotion(dead);
@@ -2714,7 +2773,7 @@ export class BattleScreen extends Container {
     const rows: SettleRow[] = [];
     if (arenaFdata) {
       /* Keep 积分 + n胜/n负/n平 on one settle line. */
-      rows.push({ kind: "text", text: s.fdata.slice(0, 48), color: CBE.inkBody });
+      rows.push({ kind: "text", text: s.fdata, color: CBE.inkBody });
     } else {
       rows.push({ kind: "stat", label: "exp", value: formatSettleDelta(s.expGain) });
       rows.push({ kind: "stat", label: "gold", value: formatSettleDelta(s.goldGain) });
@@ -2737,7 +2796,7 @@ export class BattleScreen extends Container {
       if (parsed.extra) {
         rows.push({
           kind: "text",
-          text: parsed.extra.slice(0, 20),
+          text: parsed.extra,
           color: CBE.inkWarn,
         });
       }
@@ -2750,9 +2809,13 @@ export class BattleScreen extends Container {
     const titleH = 22;
     const closeH = 22;
     const pad = 10;
+    const visualRows = rows.reduce((n, row) => {
+      if (row.kind === "text") return n + wrapChars(row.text).length;
+      return n + 1;
+    }, 0);
     const panelH = Math.min(
       260,
-      pad + titleH + rows.length * rowH + closeH + pad + 4,
+      pad + titleH + visualRows * rowH + closeH + pad + 4,
     );
 
     const box = new Graphics();
@@ -2785,6 +2848,7 @@ export class BattleScreen extends Container {
           maxWidth: panelW - 24,
         });
         this.settleHost.addChild(lab);
+        y += rowH * wrapChars(row.text).length;
       } else {
         const fallback: Record<SettleLabelKey, string> = {
           exp: "获得经验",
@@ -2835,8 +2899,8 @@ export class BattleScreen extends Container {
           maxWidth: panelW - (valueX - panelX) - 12,
         });
         this.settleHost.addChild(val);
+        y += rowH;
       }
-      y += rowH;
     }
 
     const btn = new Container();

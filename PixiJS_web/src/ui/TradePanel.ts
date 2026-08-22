@@ -544,7 +544,7 @@ export class TradePanel extends Container {
     const title = `交易·${this.peerName}`;
     const pillW = Math.min(w - 16, title.length * 12 + 20);
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 18);
-    this.addLabel(title.slice(0, 16), LCD_WIDTH / 2 - pillW / 2 + 6, y + 8, CBE.ink);
+    this.addLabel(title, LCD_WIDTH / 2 - pillW / 2 + 6, y + 8, CBE.ink);
 
     const leftX = x + 8;
     const rightX = x + w / 2 + 2;
@@ -649,12 +649,9 @@ export class TradePanel extends Container {
           const en = it.enhance ? `+${it.enhance}` : "";
           const stackable = it.kind !== "equip" && it.count > 1;
           if (hi && stackable) {
-            text = `${it.name}${en} <${this.pickQtyForItem(it)}/${it.count}>`.slice(
-              0,
-              22,
-            );
+            text = `${it.name}${en} <${this.pickQtyForItem(it)}/${it.count}>`;
           } else {
-            text = `${it.name}${en} ×${it.count}`.slice(0, 22);
+            text = `${it.name}${en} ×${it.count}`;
           }
           color = hi ? CBE.ink : qualityColor(it.quality);
         } else {
@@ -784,7 +781,7 @@ export class TradePanel extends Container {
       .stroke({ width: 1, color: CBE.borderDim });
     const shown = this.moneyDraft.length ? this.moneyDraft : "点击输入金币…";
     this.addLabel(
-      shown.slice(0, 18),
+      shown,
       x + 14,
       barY + 8,
       this.moneyDraft ? CBE.ink : CBE.inkLabel,

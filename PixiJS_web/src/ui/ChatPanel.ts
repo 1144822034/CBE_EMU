@@ -525,7 +525,7 @@ export class ChatPanel extends Container {
       placeholder = this.draft || "点击输入…";
     }
     this.addLabel(
-      placeholder.slice(0, 16),
+      placeholder,
       x + 44,
       barY + 8,
       this.draft ? CBE.ink : CBE.inkLabel,
