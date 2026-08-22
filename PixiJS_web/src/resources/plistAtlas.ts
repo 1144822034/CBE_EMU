@@ -121,7 +121,6 @@ function scheduleGpuUnload(pngUrl: string): void {
       try {
         const src = base.source;
         if (src && !src.destroyed) src.unload();
-        console.info("[plist] source.unload (idle)", pngUrl.replace(/^.*\//, ""));
       } catch (e) {
         console.warn("[plist] source.unload", e);
       }

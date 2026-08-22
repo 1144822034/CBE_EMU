@@ -5941,9 +5941,12 @@ dialog.hide();
       payload,
     };
     forensicRing.push(ev);
+    const verboseForensic =
+      typeof localStorage !== "undefined" &&
+      localStorage.getItem("pix_gl_forensic") === "1";
     const line = `[gl] forensic ${cls} why=${why} blank=${blank} lost=${glLost}`;
     if (isAlertForensicClass(cls)) console.warn(line, payload);
-    else console.info(line);
+    else if (verboseForensic) console.info(line);
     if (
       isAlertForensicClass(cls) &&
       performance.now() - lastForensicClipboardAt > 4000
@@ -5951,8 +5954,10 @@ dialog.hide();
       lastForensicClipboardAt = performance.now();
       const text = forensicRing.dumpJson();
       void copyForensicText(text).then((ok) => {
-        if (ok) console.info("[gl] forensic clipboard ok", cls);
-        else console.warn("[gl] forensic clipboard failed", cls);
+        if (verboseForensic) {
+          if (ok) console.info("[gl] forensic clipboard ok", cls);
+          else console.warn("[gl] forensic clipboard failed", cls);
+        }
       });
     }
     return cls;
@@ -6393,7 +6398,8 @@ dialog.hide();
     }
   }, 2000);
 
-  // Observe-only heartbeat: classify black-screen class without changing recover.
+  // Quiet ring heartbeat (no console). Opt-in verbose: localStorage pix_gl_forensic=1
+  // Dump still via __pixiDumpForensic / long-press status.
   window.setInterval(() => {
     if (!rendererReady) return;
     if (document.visibilityState === "hidden") return;
@@ -6411,6 +6417,16 @@ dialog.hide();
         scanBroken: true,
         extra: { msSinceOkRender: Math.round(msSinceOk) },
       });
+    }
+    const verboseForensic =
+      typeof localStorage !== "undefined" &&
+      localStorage.getItem("pix_gl_forensic") === "1";
+    if (!verboseForensic && msSinceOk < RENDER_STALL_MS && !isGlContextLost() && glLostAt === 0) {
+      /* Still sample into ring without blank-canvas probe every 10s. */
+      void recordForensic(`heartbeat:${forensicHeartbeatN}`, {
+        blank: null,
+      });
+      return;
     }
     const probe =
       forensicHeartbeatN % 3 === 0 ||

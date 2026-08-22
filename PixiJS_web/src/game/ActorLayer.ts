@@ -527,17 +527,11 @@ export class ActorLayer {
     if (!pending) return;
     const m = this.markers.get(id);
     if (!m || m.kind !== "peer") {
-      console.info(
-        `[actors] cosmetics pending peer=${id} ch=${pending.eqChenghao} wing=${pending.eqWing} mount=${pending.eqMount} (no marker yet)`,
-      );
       return;
     }
     m.eqChenghao = pending.eqChenghao;
     m.eqWing = pending.eqWing;
     m.eqMount = pending.eqMount;
-    console.info(
-      `[actors] cosmetics paint peer=${id} name=${m.nameLabel} ch=${m.eqChenghao} wing=${m.eqWing} mount=${m.eqMount}`,
-    );
     this.applyPeerCosmeticsVisual(m);
   }
 
@@ -1196,9 +1190,6 @@ export class ActorLayer {
       this.syncPeerWingDepth(m);
       return;
     }
-    console.info(
-      `[actors] refreshPeerWing peer=${m.id} name=${m.nameLabel} wing=${id} visible=${m.wing.root.visible}`,
-    );
     await m.wing.setWingId(id);
     if (this.markers.get(m.id) !== m) return;
     const bodyH = m.sprite ? Math.round(m.sprite.height) : 24;

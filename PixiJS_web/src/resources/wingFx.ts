@@ -147,11 +147,9 @@ export class WingOverlay {
     const gen = ++this.loadGen;
     this.wingId = id;
     this.loadInFlight = true;
-    console.info("[wing] load start", id);
     try {
       const atlas = await loadPlistAtlas(wingAtlasPath(id));
       if (gen !== this.loadGen) {
-        console.info("[wing] load stale", id, "gen", gen, "now", this.loadGen);
         return;
       }
       this.atlas = bindPlistAtlasIfCurrent(
@@ -172,7 +170,6 @@ export class WingOverlay {
       if (gen !== this.loadGen) return;
       this.root.visible = true;
       this.layout();
-      console.info("[wing] ready", id, "frames", this.atlas.textures.length);
     } catch (e) {
       if (gen !== this.loadGen) return;
       console.warn("[wing] load failed", id, e);

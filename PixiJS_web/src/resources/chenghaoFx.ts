@@ -222,7 +222,6 @@ export class ChenghaoOverlay {
       if (gen !== this.loadGen) return;
       this.root.visible = true;
       this.layout();
-      console.info("[chenghao] ready", id);
     } catch (e) {
       if (gen !== this.loadGen) return;
       console.warn("[chenghao] load failed", id, e);
