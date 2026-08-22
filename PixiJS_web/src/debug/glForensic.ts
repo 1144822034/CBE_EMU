@@ -238,7 +238,7 @@ export function scanBrokenTextures(
     if (hits.length >= maxHits || depth > 48) return;
     const kind = node.constructor?.name || "?";
     const label = String(node.label || "");
-    const tex = node.texture;
+    const tex = kind.includes("Graphics") ? undefined : node.texture;
     if (tex) {
       let sourceNull = false;
       let sourceDestroyed = false;

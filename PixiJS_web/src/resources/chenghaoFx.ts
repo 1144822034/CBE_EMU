@@ -4,6 +4,7 @@
  */
 import { Container, Sprite } from "pixi.js";
 import {
+  bindPlistAtlasIfCurrent,
   loadPlistAtlas,
   rebindPlistAtlas,
   type LoadedPlistAtlas,
@@ -150,6 +151,7 @@ export class ChenghaoOverlay {
   private phase = 0;
   private animAcc = 0;
   private loadGen = 0;
+  private loadInFlight = false;
 
   constructor() {
     this.root.visible = false;
@@ -163,6 +165,7 @@ export class ChenghaoOverlay {
 
   clear(): void {
     this.loadGen++;
+    this.loadInFlight = false;
     this.titleId = 0;
     this.atlas = rebindPlistAtlas(this.atlas, null);
     this.phase = 0;
@@ -184,35 +187,48 @@ export class ChenghaoOverlay {
     if (!isChenghaoId(id)) {
       console.warn("[chenghao] unlisted id, trying atlas", id);
     }
-    if (id === this.titleId && this.atlas) {
-      this.root.visible = true;
-      this.layout();
-      return;
+    if (id === this.titleId) {
+      if (this.atlas) {
+        this.root.visible = true;
+        this.layout();
+        return;
+      }
+      if (this.loadInFlight) return;
     }
     const gen = ++this.loadGen;
     this.titleId = id;
+    this.loadInFlight = true;
     try {
       // stableFace: drop Y-spin / near-empty cells (e.g. 86043 tumble loop).
       const atlas = await loadPlistAtlas(chenghaoAtlasPath(id), {
         stableFace: true,
       });
       if (gen !== this.loadGen) return;
-      this.atlas = rebindPlistAtlas(this.atlas, atlas);
+      this.atlas = bindPlistAtlasIfCurrent(
+        this.atlas,
+        atlas,
+        () => gen === this.loadGen,
+      );
+      if (!this.atlas || gen !== this.loadGen) return;
       this.phase = 0;
       this.animAcc = 0;
       if (!this.sprite) {
-        this.sprite = new Sprite(atlas.textures[0]!);
+        this.sprite = new Sprite(this.atlas.textures[0]!);
         this.sprite.anchor.set(0.5, 1);
         this.root.addChild(this.sprite);
       } else {
-        this.sprite.texture = atlas.textures[0]!;
+        this.sprite.texture = this.atlas.textures[0]!;
       }
+      if (gen !== this.loadGen) return;
       this.root.visible = true;
       this.layout();
+      console.info("[chenghao] ready", id);
     } catch (e) {
       if (gen !== this.loadGen) return;
       console.warn("[chenghao] load failed", id, e);
       this.clear();
+    } finally {
+      if (gen === this.loadGen) this.loadInFlight = false;
     }
   }
 

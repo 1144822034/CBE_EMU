@@ -4,6 +4,7 @@
  */
 import { Container, Sprite } from "pixi.js";
 import {
+  bindPlistAtlasIfCurrent,
   loadPlistAtlas,
   rebindPlistAtlas,
   type LoadedPlistAtlas,
@@ -87,6 +88,8 @@ export class WingOverlay {
   private phase = 0;
   private animAcc = 0;
   private loadGen = 0;
+  /** True while setWingId await is in flight for current wingId. */
+  private loadInFlight = false;
   /** Body height in display px (after ACTOR_DISPLAY_SCALE). */
   private bodyDisplayH = 24;
   /** CBE dir 1=up 2=right 3=down 4=left. */
@@ -106,6 +109,7 @@ export class WingOverlay {
 
   clear(): void {
     this.loadGen++;
+    this.loadInFlight = false;
     this.wingId = 0;
     this.atlas = rebindPlistAtlas(this.atlas, null);
     this.phase = 0;
@@ -130,32 +134,51 @@ export class WingOverlay {
       /* Still try JHOnlineData atlas — catalog may lag behind server unlocks. */
       console.warn("[wing] unlisted id, trying atlas", id);
     }
-    if (id === this.wingId && this.atlas) {
-      this.root.visible = true;
-      this.layout();
-      return;
+    // Same id + ready → show. Same id + in flight → wait.
+    // Same id + failed/cancelled (no atlas, not in flight) → retry below.
+    if (id === this.wingId) {
+      if (this.atlas) {
+        this.root.visible = true;
+        this.layout();
+        return;
+      }
+      if (this.loadInFlight) return;
     }
     const gen = ++this.loadGen;
     this.wingId = id;
+    this.loadInFlight = true;
+    console.info("[wing] load start", id);
     try {
       const atlas = await loadPlistAtlas(wingAtlasPath(id));
-      if (gen !== this.loadGen) return;
-      this.atlas = rebindPlistAtlas(this.atlas, atlas);
+      if (gen !== this.loadGen) {
+        console.info("[wing] load stale", id, "gen", gen, "now", this.loadGen);
+        return;
+      }
+      this.atlas = bindPlistAtlasIfCurrent(
+        this.atlas,
+        atlas,
+        () => gen === this.loadGen,
+      );
+      if (!this.atlas || gen !== this.loadGen) return;
       this.phase = 0;
       this.animAcc = 0;
       if (!this.sprite) {
-        this.sprite = new Sprite(atlas.textures[0]!);
+        this.sprite = new Sprite(this.atlas.textures[0]!);
         this.sprite.anchor.set(0.5, 0.5);
         this.root.addChild(this.sprite);
       } else {
-        this.sprite.texture = atlas.textures[0]!;
+        this.sprite.texture = this.atlas.textures[0]!;
       }
+      if (gen !== this.loadGen) return;
       this.root.visible = true;
       this.layout();
+      console.info("[wing] ready", id, "frames", this.atlas.textures.length);
     } catch (e) {
       if (gen !== this.loadGen) return;
       console.warn("[wing] load failed", id, e);
       this.clear();
+    } finally {
+      if (gen === this.loadGen) this.loadInFlight = false;
     }
   }
 

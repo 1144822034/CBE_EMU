@@ -5111,6 +5111,7 @@ static int vm_net_mock_append_scene_sync_chat_objects_limited(
     u8 maxObjects)
 {
     int appended = 0;
+    u8 chatBudget = 0;
 
     if (out == NULL || pos == NULL || observer == NULL)
         return -1;
@@ -5120,9 +5121,29 @@ static int vm_net_mock_append_scene_sync_chat_objects_limited(
     {
         vm_net_mock_chest_announce_flush_pending(observer);
     }
+    /*
+     * Peer 31/5 before chat: busy maps fill MAIN_BUSINESS_OBJECT_MAX with
+     * nearby moveinfo; chat used to consume leftover slots and starve wings.
+     */
+    {
+        int statePush = vm_net_mock_append_pending_cosmetics31_2(
+            out, outCap, pos, observer);
+        if (statePush < 0)
+            return -1;
+        appended += statePush;
+        {
+            int cos = vm_net_mock_append_pending_cosmetics31_5(
+                out, outCap, pos, observer,
+                (u8)(maxObjects > appended ? maxObjects - appended : 0));
+            if (cos < 0)
+                return -1;
+            appended += cos;
+        }
+    }
+    chatBudget = (u8)(maxObjects > appended ? maxObjects - appended : 0);
     while (observer->chatNoticeCount > 0 &&
            appended < VM_MOCK_SERVICE_CHAT_POLL_MAX &&
-           appended < maxObjects)
+           chatBudget > 0)
     {
         vm_mock_service_chat_notice *notice =
             &observer->chatNotices[observer->chatNoticeHead];
@@ -5175,19 +5196,7 @@ static int vm_net_mock_append_scene_sync_chat_objects_limited(
             (u8)((observer->chatNoticeHead + 1) % VM_MOCK_SERVICE_CHAT_NOTICE_MAX);
         --observer->chatNoticeCount;
         ++appended;
-    }
-    {
-        int statePush = vm_net_mock_append_pending_cosmetics31_2(
-            out, outCap, pos, observer);
-        if (statePush < 0)
-            return -1;
-        appended += statePush;
-        int cos = vm_net_mock_append_pending_cosmetics31_5(
-            out, outCap, pos, observer,
-            (u8)(maxObjects > appended ? maxObjects - appended : 0));
-        if (cos < 0)
-            return -1;
-        appended += cos;
+        --chatBudget;
     }
     return appended;
 }
@@ -5210,12 +5219,26 @@ static int vm_net_mock_append_scene_sync_chat_objects_budgeted(
     u8 objectCount)
 {
     u8 capacity = 0;
+    /* Soft MAIN max is for nearby/chat; allow up to 8 extra WT objects for 31/5. */
+    const u8 cosmeticsOverflowMax = 8;
 
     if (objectCount < VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX)
     {
         capacity = (u8)(VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX - objectCount);
         if (capacity > VM_MOCK_SERVICE_CHAT_POLL_MAX)
             capacity = VM_MOCK_SERVICE_CHAT_POLL_MAX;
+    }
+    if (capacity == 0 &&
+        vm_mock_service_session_has_pending_cosmetics(observer))
+    {
+        capacity = cosmeticsOverflowMax;
+    }
+    else if (capacity > 0 &&
+             capacity < cosmeticsOverflowMax &&
+             vm_mock_service_session_has_pending_cosmetics(observer))
+    {
+        /* Prefer draining peer cosmetics when soft room is tiny. */
+        capacity = cosmeticsOverflowMax;
     }
     if (capacity == 0)
         return 0;
@@ -7444,7 +7467,8 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         observer->chatNoticeCount == 0 &&
         observer->chestAnnounceCount == 0 &&
         !observer->systemWelcomeQueued &&
-        !observer->worldChatHistoryQueued)
+        !observer->worldChatHistoryQueued &&
+        !vm_mock_service_session_has_pending_cosmetics(observer))
     {
         bool hasSocial = false;
         bool hasPeerVisible = false;

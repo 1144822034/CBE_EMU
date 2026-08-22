@@ -554,6 +554,12 @@ export class ActorLayer {
 
   private applyPeerCosmeticsVisual(m: Marker): void {
     if (!isPeerCosmeticsVisible()) {
+      if (!(ActorLayer as unknown as { _prefWarn?: boolean })._prefWarn) {
+        (ActorLayer as unknown as { _prefWarn?: boolean })._prefWarn = true;
+        console.warn(
+          "[actors] peer cosmetics hidden (localStorage pix_peer_cosmetics=0); menu「附近翅/骑/称号」",
+        );
+      }
       m.wing?.clear();
       m.mount?.clear();
       if (m.sprite) m.sprite.y = 0;
@@ -1184,6 +1190,15 @@ export class ActorLayer {
       m.wing = new WingOverlay();
       m.root.addChild(m.wing.root);
     }
+    // Already showing this wing — skip (heavy refresh every 500ms).
+    if (m.wing.currentWingId === id && m.wing.root.visible) {
+      m.wing.setFacing(m.dir);
+      this.syncPeerWingDepth(m);
+      return;
+    }
+    console.info(
+      `[actors] refreshPeerWing peer=${m.id} name=${m.nameLabel} wing=${id} visible=${m.wing.root.visible}`,
+    );
     await m.wing.setWingId(id);
     if (this.markers.get(m.id) !== m) return;
     const bodyH = m.sprite ? Math.round(m.sprite.height) : 24;
@@ -1203,6 +1218,14 @@ export class ActorLayer {
     if (!m.mount) {
       m.mount = new MountOverlay();
       m.root.addChild(m.mount.root);
+    }
+    if (m.mount.currentMountId === id && m.mount.root.visible) {
+      m.mount.setFacing(m.dir, false);
+      m.mount.setMoving(m.moving);
+      if (m.sprite) m.sprite.y = -MOUNT_BODY_LIFT;
+      this.layoutNameplate(m);
+      this.syncPeerWingDepth(m);
+      return;
     }
     await m.mount.setMountId(id);
     if (this.markers.get(m.id) !== m) return;
@@ -1242,10 +1265,9 @@ export class ActorLayer {
     const key = chenghaoId
       ? `chenghao:${chenghaoId}`
       : gif || (textTitle ? `text:${textTitle}` : "");
-    if (
-      key === m.titleGifKey &&
-      (key ? m.titleBadge.visible : !m.titleBadge.visible)
-    ) {
+    // Same key: do not tear down / restart. Peer paints re-enter often while
+    // chenghao atlas is still loading (badge not visible yet).
+    if (key === m.titleGifKey) {
       this.layoutNameplate(m);
       return;
     }

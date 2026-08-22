@@ -9,6 +9,7 @@
  */
 import { Container, Sprite } from "pixi.js";
 import {
+  bindPlistAtlasIfCurrent,
   loadPlistAtlas,
   rebindPlistAtlas,
   type LoadedPlistAtlas,
@@ -138,6 +139,8 @@ export class MountOverlay {
   private sideDir = 2;
   private moving = false;
   private sheetKey = "";
+  /** In-flight reloadSheet target; coalesce before ++loadGen. */
+  private loadingKey = "";
 
   constructor() {
     this.root.sortableChildren = false;
@@ -160,6 +163,7 @@ export class MountOverlay {
     this.sideDir = 2;
     this.moving = false;
     this.sheetKey = "";
+    this.loadingKey = "";
     this.root.visible = false;
     this.root.zIndex = 0.5;
     if (this.sprite) {
@@ -178,10 +182,15 @@ export class MountOverlay {
     if (!isMountId(id)) {
       console.warn("[mount] unlisted id, trying atlas", id);
     }
-    if (id === this.mountId && this.atlas) {
-      this.root.visible = true;
-      this.layout();
-      return;
+    // Same id + ready → show. Same id + in flight → wait.
+    // Same id + stuck (no atlas) → fall through and retry.
+    if (id === this.mountId) {
+      if (this.atlas) {
+        this.root.visible = true;
+        this.layout();
+        return;
+      }
+      if (this.loadingKey) return;
     }
     this.mountId = id;
     this.phase = 0;
@@ -218,8 +227,12 @@ export class MountOverlay {
       this.sideDir = d;
       changed = true;
     }
-    if (!changed && this.atlas) return;
-
+    // Facing unchanged: never reloadSheet. While atlas is still null, the old
+    // `!changed && this.atlas` guard fell through and ++loadGen every peer step.
+    if (!changed) {
+      if (this.atlas) this.layout();
+      return;
+    }
     if (spec?.kind === "dir") {
       void this.reloadSheet();
       return;
@@ -271,31 +284,40 @@ export class MountOverlay {
     const spec = getMountSpec(id);
     if (!spec) return;
 
+    let key: string;
+    if (spec.kind === "sfx") {
+      key = mountAtlasPath(id);
+    } else {
+      const act = this.pickAct(spec);
+      const face = cbeDirToMountFace(this.faceDir);
+      key = `${spec.id}:${act}:${face}`;
+    }
+    // Coalesce before ++loadGen — peer moves must not cancel an in-flight load.
+    if (key === this.sheetKey && this.atlas) {
+      this.root.visible = true;
+      this.layout();
+      return;
+    }
+    if (key === this.loadingKey) return;
+
     const gen = ++this.loadGen;
+    this.loadingKey = key;
     try {
       let atlas: LoadedPlistAtlas;
-      let key: string;
       if (spec.kind === "sfx") {
-        key = mountAtlasPath(id);
-        if (key === this.sheetKey && this.atlas) {
-          this.root.visible = true;
-          this.layout();
-          return;
-        }
         atlas = await loadPlistAtlas(key);
       } else {
         const act = this.pickAct(spec);
         const face = cbeDirToMountFace(this.faceDir);
-        key = `${spec.id}:${act}:${face}`;
-        if (key === this.sheetKey && this.atlas) {
-          this.root.visible = true;
-          this.layout();
-          return;
-        }
         atlas = await loadDirFacingAtlas(spec, act, face);
       }
       if (gen !== this.loadGen) return;
-      this.atlas = rebindPlistAtlas(this.atlas, atlas);
+      this.atlas = bindPlistAtlasIfCurrent(
+        this.atlas,
+        atlas,
+        () => gen === this.loadGen,
+      );
+      if (!this.atlas || gen !== this.loadGen) return;
       this.sheetKey = key;
       this.phase = 0;
       this.animAcc = 0;
@@ -306,12 +328,15 @@ export class MountOverlay {
       } else {
         this.sprite.texture = atlas.textures[0]!;
       }
+      if (gen !== this.loadGen) return;
       this.root.visible = true;
       this.layout();
     } catch (e) {
       if (gen !== this.loadGen) return;
       console.warn("[mount] load failed", id, e);
       if (!this.atlas) this.clear();
+    } finally {
+      if (gen === this.loadGen && this.loadingKey === key) this.loadingKey = "";
     }
   }
 

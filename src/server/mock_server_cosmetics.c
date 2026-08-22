@@ -508,24 +508,81 @@ static int vm_net_mock_append_pending_cosmetics31_2(u8 *out, u32 outCap, u32 *po
     return 1;
 }
 
+static void vm_mock_service_session_sync_online_cosmetics(
+    vm_mock_service_client_session *session,
+    const vm_net_mock_role_state *role);
+
+static bool vm_mock_service_session_has_pending_cosmetics(
+    const vm_mock_service_client_session *observer)
+{
+    u8 i;
+
+    if (observer == NULL)
+        return false;
+    if (observer->cosmeticsStatePushPending)
+        return true;
+    for (i = 0; i < VM_NET_MOCK_COSMETIC_NOTICE_MAX; ++i)
+    {
+        if (observer->cosmeticNotices[i].valid)
+            return true;
+    }
+    return false;
+}
+
 static void vm_mock_service_session_enqueue_peer_cosmetics(
     vm_mock_service_client_session *observer,
     const vm_mock_service_client_session *source,
     u32 mapActorId)
 {
     u32 actorId = mapActorId;
+    u32 eqChenghao;
+    u32 eqWing;
+    u32 eqMount;
+
     if (observer == NULL || source == NULL)
         return;
     if (actorId == 0)
         actorId = source->onlineRoleId;
     if (actorId == 0)
         return;
+    eqChenghao = source->onlineEqChenghaoId;
+    eqWing = source->onlineEqWingId;
+    eqMount = source->onlineEqMountId;
+    /*
+     * Presence cache can lag first visibility (baseline/moveinfo enqueue before
+     * the next capture_online_presence).  Empty 31/5 is ignored once by Pixi and
+     * never retried until equip change — resolve equipped ids from role DB.
+     */
+    if (!(eqChenghao || eqWing || eqMount) &&
+        source->onlineRoleId != 0 &&
+        g_vm_net_mock_role_db_valid)
+    {
+        u32 i;
+
+        for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+
+            if (role->roleId != source->onlineRoleId)
+                continue;
+            eqChenghao = role->equippedChenghaoId;
+            eqWing = role->equippedWingId;
+            eqMount = role->equippedMountId;
+            {
+                vm_mock_service_client_session *mutableSource =
+                    vm_mock_service_find_client_session(source->clientId);
+                if (mutableSource != NULL)
+                    vm_mock_service_session_sync_online_cosmetics(mutableSource,
+                                                                 role);
+            }
+            break;
+        }
+    }
+    /* Do not enqueue all-zero: Pixi ignores the first empty notice forever. */
+    if (!(eqChenghao || eqWing || eqMount))
+        return;
     (void)vm_mock_service_session_enqueue_cosmetic_notice(
-        observer,
-        actorId,
-        source->onlineEqChenghaoId,
-        source->onlineEqWingId,
-        source->onlineEqMountId);
+        observer, actorId, eqChenghao, eqWing, eqMount);
 }
 
 static void vm_mock_service_session_sync_online_cosmetics(

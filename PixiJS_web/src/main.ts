@@ -118,7 +118,7 @@ import {
   toggleSoundEnabled,
   unlockAndResumeBgm,
 } from "./audio/GameBgm";
-import { togglePeerCosmeticsVisible } from "./resources/peerCosmeticsPref";
+import { isPeerCosmeticsVisible, togglePeerCosmeticsVisible } from "./resources/peerCosmeticsPref";
 import {
   playKillStreakTitle,
   preloadKillStreakSfx,
@@ -5973,23 +5973,44 @@ dialog.hide();
     });
   };
 
-  // Observe-only: wrap render so we see TEX_NULL crashes even when blank probe is false.
+  // Observe-only wrap + narrow兜底: alphaMode/TEX_NULL must not freeze the ticker.
+  // Pixi ticker calls renderer.render, not always app.render — stall timer must follow both.
   {
-    const rawRender = app.render.bind(app);
-    app.render = (() => {
-      try {
-        rawRender();
-        lastOkRenderAt = performance.now();
-      } catch (e) {
-        noteRenderCrash(
-          e,
-          isTextureSourceNullError(e)
-            ? "render-crash:alphaMode"
-            : "render-crash:other",
-        );
-        throw e;
-      }
-    }) as typeof app.render;
+    const noteOk = (): void => {
+      lastOkRenderAt = performance.now();
+    };
+    const wrapRender = <T extends (...args: never[]) => unknown>(
+      raw: T,
+      label: string,
+    ): T =>
+      ((...args: never[]) => {
+        try {
+          const out = raw(...args);
+          noteOk();
+          return out;
+        } catch (e) {
+          noteRenderCrash(
+            e,
+            isTextureSourceNullError(e)
+              ? `render-crash:alphaMode:${label}`
+              : `render-crash:other:${label}`,
+          );
+          if (isTextureSourceNullError(e)) {
+            console.warn(`[gl] swallow render alphaMode (${label}, frame skipped)`);
+            return undefined;
+          }
+          throw e;
+        }
+      }) as T;
+
+    app.render = wrapRender(app.render.bind(app), "app");
+    const renderer = app.renderer as unknown as {
+      render: (...args: never[]) => unknown;
+    };
+    renderer.render = wrapRender(
+      renderer.render.bind(renderer) as typeof renderer.render,
+      "renderer",
+    );
   }
 
   window.addEventListener("error", (ev) => {
@@ -6011,6 +6032,24 @@ dialog.hide();
   (
     window as unknown as { __pixiDumpForensic?: () => string }
   ).__pixiDumpForensic = dumpForensic;
+  (
+    window as unknown as {
+      __pixiDebugPeerCosmetics?: () => Record<string, unknown>;
+    }
+  ).__pixiDebugPeerCosmetics = () => {
+    const dump = {
+      peerCosmeticsPref: isPeerCosmeticsVisible(),
+      native: !!(
+        globalThis as unknown as {
+          Capacitor?: { isNativePlatform?: () => boolean };
+        }
+      ).Capacitor?.isNativePlatform?.(),
+      ...view.actors.debugPeerCosmetics(),
+      plist: plistAtlasGpuStats(),
+    };
+    console.info("[gl] peer cosmetics debug", dump);
+    return dump;
+  };
   touch.onStatusLongPress = () => {
     dumpForensic();
   };

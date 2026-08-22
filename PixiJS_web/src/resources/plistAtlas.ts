@@ -46,6 +46,9 @@ const unloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
 /** Delay so brief face/act churn does not thrash GPU re-upload. */
 const UNLOAD_DELAY_MS = isNativePlatform() ? 30_000 : 2500;
 
+/** atlas cache key → pngUrl (for sync eviction on idle unload). */
+const cacheKeysByPng = new Map<string, Set<string>>();
+
 function isNativePlatform(): boolean {
   try {
     const cap = (
@@ -59,6 +62,32 @@ function isNativePlatform(): boolean {
   }
 }
 
+function rememberCacheKey(pngUrl: string, key: string): void {
+  let set = cacheKeysByPng.get(pngUrl);
+  if (!set) {
+    set = new Set();
+    cacheKeysByPng.set(pngUrl, set);
+  }
+  set.add(key);
+}
+
+/** Drop in-memory atlas promises for this PNG so the next load rebuilds live textures. */
+function evictAtlasCacheForPng(pngUrl: string): void {
+  const keys = cacheKeysByPng.get(pngUrl);
+  if (keys) {
+    for (const key of keys) cache.delete(key);
+    cacheKeysByPng.delete(pngUrl);
+  }
+  // Also sweep any orphan keys (prefix packs sharing png before remember ran).
+  for (const [key, prom] of [...cache.entries()]) {
+    void prom.then((atlas) => {
+      if (atlas.pngUrl === pngUrl && cache.get(key) === prom) cache.delete(key);
+    }).catch(() => {
+      if (cache.get(key) === prom) cache.delete(key);
+    });
+  }
+}
+
 function cancelScheduledUnload(pngUrl: string): void {
   const t = unloadTimers.get(pngUrl);
   if (t != null) {
@@ -68,26 +97,55 @@ function cancelScheduledUnload(pngUrl: string): void {
 }
 
 /**
- * Pixi official: `texture.source.unload()` frees GPU, keeps JS / Assets cache.
+ * Pixi official: `texture.source.unload()` frees GPU, keeps JS Texture objects.
  * Never `Assets.unload` here — shared multi-face sheets went blank last time.
+ *
+ * Browser: skip idle unload — 2.5s unload + cache reuse caused RENDER_CRASH and
+ * peer cosmetics never staying visible. Native keeps delayed unload + cache evict.
  */
 function scheduleGpuUnload(pngUrl: string): void {
   cancelScheduledUnload(pngUrl);
+  if (!isNativePlatform()) {
+    /* Browser: only allow TextureGC via autoGarbageCollect after release. */
+    return;
+  }
   unloadTimers.set(
     pngUrl,
     setTimeout(() => {
       unloadTimers.delete(pngUrl);
       if ((pngRetain.get(pngUrl) ?? 0) > 0) return;
       const base = pngBase.get(pngUrl);
+      pngBase.delete(pngUrl);
+      evictAtlasCacheForPng(pngUrl);
       if (!base || base.destroyed) return;
       try {
-        base.source.unload();
+        const src = base.source;
+        if (src && !src.destroyed) src.unload();
         console.info("[plist] source.unload (idle)", pngUrl.replace(/^.*\//, ""));
       } catch (e) {
         console.warn("[plist] source.unload", e);
       }
     }, UNLOAD_DELAY_MS),
   );
+}
+
+/** Re-touch GPU after idle unload / context restore while overlays still retain. */
+function ensurePlistSourceAlive(atlas: LoadedPlistAtlas): void {
+  try {
+    const src = atlas.base?.source;
+    if (!src || src.destroyed) {
+      console.warn(
+        "[plist] base source dead on retain",
+        atlas.pngUrl.replace(/^.*\//, ""),
+      );
+      evictAtlasCacheForPng(atlas.pngUrl);
+      return;
+    }
+    src.autoGarbageCollect = false;
+    src.update?.();
+  } catch (e) {
+    console.warn("[plist] ensure source", e);
+  }
 }
 
 /** Retain shared PNG while an overlay displays frames from this atlas. */
@@ -97,11 +155,7 @@ export function retainPlistAtlas(atlas: LoadedPlistAtlas | null | undefined): vo
   cancelScheduledUnload(url);
   pngBase.set(url, atlas.base);
   pngRetain.set(url, (pngRetain.get(url) ?? 0) + 1);
-  try {
-    atlas.base.source.autoGarbageCollect = false;
-  } catch {
-    /* ignore */
-  }
+  ensurePlistSourceAlive(atlas);
 }
 
 /** Drop one display hold; GPU unload only when nobody retains the PNG. */
@@ -131,6 +185,23 @@ export function rebindPlistAtlas(
   if (next) retainPlistAtlas(next);
   if (prev) releasePlistAtlas(prev);
   return next ?? null;
+}
+
+/**
+ * After `await loadPlistAtlas`: rebind only if still current.
+ * If a concurrent `clear()` bumped loadGen mid-flight, release the just-bound
+ * atlas so we never leave a Sprite on-stage with retain=0 (idle unload →
+ * RENDER_CRASH / alphaMode).
+ */
+export function bindPlistAtlasIfCurrent(
+  prev: LoadedPlistAtlas | null | undefined,
+  next: LoadedPlistAtlas,
+  stillCurrent: () => boolean,
+): LoadedPlistAtlas | null {
+  if (!stillCurrent()) return prev ?? null;
+  const bound = rebindPlistAtlas(prev, next);
+  if (!stillCurrent()) return rebindPlistAtlas(bound, null);
+  return bound;
 }
 
 /** After webglcontextrestored: re-touch GPU for atlases still in Promise cache. */
@@ -462,12 +533,10 @@ export function loadPlistAtlas(
       );
     }
 
-    // Native: skip full-sheet getImageData for wing/mount (CPU/RAM spike).
-    // Chenghao stableFace still samples (sheets are small).
-    const skipPixelSample = isNativePlatform() && !stableFace;
-    if (skipPixelSample) {
-      console.info("[plist] skip pixel sample (native)", sheetKey);
-    }
+    // Pixel sample is expensive (full PNG getImageData). Skip for wing/mount on
+    // all platforms — browser used to sample every peer sheet and stalled so
+    // only self cosmetics appeared. Chenghao stableFace still samples.
+    const skipPixelSample = !stableFace;
     const pixels = skipPixelSample ? null : await loadAtlasPixels(pngUrl);
     let cents: OpaqueMetrics[] = pixels
       ? frames.map((fr) => opaqueCentroid(pixels, fr))
@@ -574,6 +643,7 @@ export function loadPlistAtlas(
       );
     });
 
+    rememberCacheKey(pngUrl, key);
     return {
       key: prefix ? `${sheetKey}#${prefix}` : sheetKey,
       textureFileName: parsed.textureFileName,
