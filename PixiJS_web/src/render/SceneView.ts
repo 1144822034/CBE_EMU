@@ -1320,6 +1320,34 @@ export class SceneView {
     this.nearNpcId = 0;
   }
 
+  /** Observe-only: map / visibility fields for black-screen class tags. */
+  forensicMapState(): {
+    mapIdentity: string;
+    mapW: number;
+    mapH: number;
+    hasMapSprite: boolean;
+    rootVisible: boolean;
+    worldVisible: boolean;
+    mapSourceValid: boolean;
+  } {
+    let mapSourceValid = false;
+    try {
+      const src = this.mapSprite?.texture?.source;
+      mapSourceValid = !!(src && (src as { width?: number }).width);
+    } catch {
+      mapSourceValid = false;
+    }
+    return {
+      mapIdentity: this.mapIdentity,
+      mapW: this.mapWidth,
+      mapH: this.mapHeight,
+      hasMapSprite: !!this.mapSprite,
+      rootVisible: this.root.visible,
+      worldVisible: this.world.visible,
+      mapSourceValid,
+    };
+  }
+
   /**
    * Android WebView often drops the WebGL context after long screen-off.
    * Pixi clears GPU texture slots on restore; nudge CPU sources / rebuild actors.

@@ -26,6 +26,14 @@ import { SceneView } from "./render/SceneView";
 import { countPlus16Worn } from "./render/Plus16Sparkles";
 import { poseTextureCacheStats } from "./render/poseTextureCache";
 import { plistAtlasGpuStats } from "./resources/plistAtlas";
+import {
+  classifyForensic,
+  copyForensicText,
+  GlForensicRing,
+  isAlertForensicClass,
+  isGameDisplayPhase,
+  type ForensicClass,
+} from "./debug/glForensic";
 import { GameSession } from "./game/GameSession";
 import { PhoneShell } from "./ui/PhoneShell";
 import { TitleScreen } from "./ui/TitleScreen";
@@ -2105,8 +2113,26 @@ async function main(): Promise<void> {
           /* bag optional for battle entry */
         }
         battle.setBattleItems(session.bagItems);
-        battle.setHangupActive(session.hangupActive);
-        battle.setAutoBattleActive(session.autoBattleActive);
+        const arenaDuel = session.isArenaScene();
+        battle.setArenaDuel(arenaDuel);
+        if (arenaDuel) {
+          /* Fair duel: no [自动]/hangup synth; force manual + 20s NA. */
+          if (session.autoBattleActive) {
+            void session.setBattleAutoPrefer(false);
+          }
+          if (session.hangupActive || session.hangupDesired) {
+            void session.stopHangup();
+          }
+          battle.setHangupActive(false);
+          battle.setAutoBattleActive(false);
+          if (autoArmTimer != null) {
+            window.clearTimeout(autoArmTimer);
+            autoArmTimer = null;
+          }
+        } else {
+          battle.setHangupActive(session.hangupActive);
+          battle.setAutoBattleActive(session.autoBattleActive);
+        }
         battle.show(state);
         touch.releaseAll();
         view.clearHeldKeys();
@@ -2118,14 +2144,16 @@ async function main(): Promise<void> {
           session.mpMax = Math.max(selfSlot.maxMp, selfSlot.mp, 1);
         }
         showPhase("battle");
-        if (session.hangupActive || session.autoBattleActive) {
+        if (arenaDuel) {
+          shell.setSoftkeys({ left: "确定", right: "" });
+        } else if (session.hangupActive || session.autoBattleActive) {
           shell.setSoftkeys({ left: "", right: "" });
         }
-        if (session.autoBattleActive) {
+        if (!arenaDuel && session.autoBattleActive) {
           // Re-arm gateway prefer for this fight (poll synth; hangup=0).
           void session.setBattleAutoPrefer(true);
         }
-        if (session.shouldClientDriveInBattleAuto()) {
+        if (!arenaDuel && session.shouldClientDriveInBattleAuto()) {
           armInBattleAuto("挂机出手…");
         }
       })();
@@ -2168,8 +2196,8 @@ async function main(): Promise<void> {
         const hideKeys =
           battle.isAwaitingRound() ||
           battle.isPlaybackBusy() ||
-          session.hangupActive ||
-          session.autoBattleActive;
+          (!battle.isArenaDuel() &&
+            (session.hangupActive || session.autoBattleActive));
         shell.setSoftkeys(
           hideKeys
             ? { left: "", right: "" }
@@ -2788,6 +2816,7 @@ async function main(): Promise<void> {
     // Prefer battle UI phase over session.inBattle — mid-fight scene packets
     // can clear the flag while mmBattle is still showing.
     if (
+      battle.isArenaDuel() ||
       !session.shouldClientDriveInBattleAuto() ||
       phase !== "battle" ||
       !battle.visible
@@ -2923,6 +2952,7 @@ async function main(): Promise<void> {
     const tick = () => {
       autoArmTimer = null;
       if (
+        battle.isArenaDuel() ||
         !session.shouldClientDriveInBattleAuto() ||
         phase !== "battle" ||
         !battle.visible
@@ -4751,6 +4781,10 @@ dialog.hide();
     });
   };
   battle.onAutoToggle = () => {
+    if (battle.isArenaDuel() || session.isArenaScene()) {
+      showGameTip("比武中不可自动");
+      return false;
+    }
     const on = !session.autoBattleActive;
     void session.setBattleAutoPrefer(on);
     hud.pushChat(on ? "[战]自动开启" : "[战]自动关闭");
@@ -4812,6 +4846,7 @@ dialog.hide();
     hud.setVitals(session.hp, session.hpMax, session.mp, session.mpMax);
   };
   battle.onAutoReady = () => {
+    if (battle.isArenaDuel()) return;
     if (!session.shouldClientDriveInBattleAuto()) return;
     window.setTimeout(() => {
       armInBattleAuto("挂机出手…");
@@ -5775,10 +5810,12 @@ dialog.hide();
   const softReloadGl = (why: string): void => {
     if (glSoftReloadCount >= GL_RELOAD_CAP) {
       console.error("[gl] reload cap reached", why, glPressureSnapshot());
+      void recordForensic(`reload-cap:${why}`, { forceBlankProbe: true });
       return;
     }
     glSoftReloadCount += 1;
     console.error("[gl] soft reload", why, glSoftReloadCount, "/", GL_RELOAD_CAP);
+    void recordForensic(`soft-reload:${why}`, { forceBlankProbe: true });
     window.location.reload();
   };
 
@@ -5788,6 +5825,7 @@ dialog.hide();
       glWatchdogTimer = 0;
       if (!glLostAt) return;
       console.error("[gl] restore watchdog", glPressureSnapshot());
+      void recordForensic("restore-watchdog", { forceBlankProbe: true });
       softReloadGl("watchdog");
     }, GL_RESTORE_WATCHDOG_MS);
   };
@@ -5800,6 +5838,7 @@ dialog.hide();
       const peersWithCos = probe.peers.filter(
         (p) => p.eqWing || p.eqMount || p.eqChenghao,
       ).length;
+      const map = view.forensicMapState();
       return {
         phase,
         self: {
@@ -5812,10 +5851,101 @@ dialog.hide();
         pendingCos: probe.pending.length,
         pose: poseTextureCacheStats(),
         plist: plistAtlasGpuStats(),
+        viewRootVisible: view.root.visible,
+        battleVisible: battle.visible,
+        mapIdentity: map.mapIdentity,
+        mapW: map.mapW,
+        mapH: map.mapH,
+        hasMapSprite: map.hasMapSprite,
+        mapSourceValid: map.mapSourceValid,
+        worldVisible: map.worldVisible,
+        hidden: document.visibilityState === "hidden",
+        glLostAt,
+        recoverInFlight,
       };
     } catch (e) {
       return { err: e instanceof Error ? e.message : String(e) };
     }
+  };
+
+  const forensicRing = new GlForensicRing();
+  let forensicHeartbeatN = 0;
+  let lastForensicClipboardAt = 0;
+
+  const recordForensic = async (
+    why: string,
+    opts?: { blank?: boolean | null; forceBlankProbe?: boolean },
+  ): Promise<ForensicClass> => {
+    const glLost = isGlContextLost();
+    let blank: boolean | null =
+      opts?.blank === undefined ? null : opts.blank;
+    if (opts?.forceBlankProbe || blank === null) {
+      if (
+        opts?.forceBlankProbe ||
+        glLost ||
+        why.includes("blank") ||
+        why.includes("context") ||
+        why.startsWith("recover")
+      ) {
+        blank = canvasLooksBlank();
+      }
+    }
+    const map = view.forensicMapState();
+    const cls = classifyForensic({
+      why,
+      phase,
+      glLost,
+      blank,
+      viewRootVisible: view.root.visible,
+      battleVisible: battle.visible,
+      mapW: map.mapW,
+      mapH: map.mapH,
+      hasMapSprite: map.hasMapSprite,
+    });
+    const payload = glPressureSnapshot();
+    const ev = {
+      t: performance.now(),
+      iso: new Date().toISOString(),
+      why,
+      class: cls,
+      blank,
+      glLost,
+      payload,
+    };
+    forensicRing.push(ev);
+    const line = `[gl] forensic ${cls} why=${why} blank=${blank} lost=${glLost}`;
+    if (isAlertForensicClass(cls)) console.warn(line, payload);
+    else console.info(line);
+    if (
+      isAlertForensicClass(cls) &&
+      performance.now() - lastForensicClipboardAt > 4000
+    ) {
+      lastForensicClipboardAt = performance.now();
+      const text = forensicRing.dumpJson();
+      void copyForensicText(text).then((ok) => {
+        if (ok) console.info("[gl] forensic clipboard ok", cls);
+        else console.warn("[gl] forensic clipboard failed", cls);
+      });
+    }
+    return cls;
+  };
+
+  const dumpForensic = (): string => {
+    const text = forensicRing.dumpJson();
+    console.info("[gl] forensic dump", text.length, "bytes");
+    void copyForensicText(text).then((ok) => {
+      setChromeStatus(
+        ok ? "取证已复制" : "取证已打印(剪贴板失败)",
+        !ok,
+      );
+    });
+    return text;
+  };
+  (
+    window as unknown as { __pixiDumpForensic?: () => string }
+  ).__pixiDumpForensic = dumpForensic;
+  touch.onStatusLongPress = () => {
+    dumpForensic();
   };
 
   const regionLooksBlank = (frame: Rectangle): boolean => {
@@ -5960,6 +6090,7 @@ dialog.hide();
       if (!recoverInFlight) return;
       console.error("[gl] recover hung", why, glPressureSnapshot());
       recoverInFlight = false;
+      void recordForensic(`recover-hung:${why}`, { forceBlankProbe: true });
       softReloadGl("recover-hung");
     }, GL_RECOVER_HANG_MS);
     try {
@@ -5971,6 +6102,10 @@ dialog.hide();
         stillLostBefore,
         glPressureSnapshot(),
       );
+      void recordForensic(`recover:${why}`, {
+        blank: null,
+        forceBlankProbe: stillLostBefore || glLostAt > 0,
+      });
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
       fitPhoneWrap();
@@ -6028,6 +6163,10 @@ dialog.hide();
           isGlContextLost(),
           glPressureSnapshot(),
         );
+        void recordForensic(`recover-still-blank:${why}`, {
+          blank: true,
+          forceBlankProbe: false,
+        });
         if (consecutiveLostRecovers >= GL_SOFT_RELOAD_AFTER) {
           softReloadGl("failed-recover");
         }
@@ -6035,6 +6174,7 @@ dialog.hide();
         consecutiveLostRecovers = 0;
         glLostAt = 0;
         cancelGlRestoreWatchdog();
+        void recordForensic(`recover-ok:${why}`, { blank: false });
       }
     } finally {
       if (recoverHangTimer) {
@@ -6055,6 +6195,7 @@ dialog.hide();
       touch.releaseAll();
       view.clearHeldKeys();
       console.warn("[gl] webglcontextlost", glPressureSnapshot());
+      void recordForensic("webglcontextlost", { blank: true });
       // Pixi only restoreContext() for *forced* loss. Natural OOM on WebView
       // often never fires contextrestored unless we request it.
       window.setTimeout(() => tryRestoreGlContext(), 0);
@@ -6066,6 +6207,7 @@ dialog.hide();
     "webglcontextrestored",
     () => {
       console.warn("[gl] webglcontextrestored");
+      void recordForensic("webglcontextrestored", { forceBlankProbe: true });
       setTextureGcEnabled(true);
       void recoverDisplayAfterForeground("contextrestored");
     },
@@ -6082,15 +6224,18 @@ dialog.hide();
       void session.backgroundKeepAliveTick();
       touch.releaseAll();
       view.clearHeldKeys();
+      void recordForensic("visibility-hidden", { blank: null });
       return;
     }
     setTextureGcEnabled(true);
+    void recordForensic("visibility-visible", { forceBlankProbe: true });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("visibility");
     void resumeBgmAfterForeground();
   });
   window.addEventListener("focus", () => {
     setTextureGcEnabled(true);
+    void recordForensic("window-focus", { forceBlankProbe: true });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("focus");
     void unlockAndResumeBgm();
@@ -6141,6 +6286,22 @@ dialog.hide();
       void recoverDisplayAfterForeground("interval-blank");
     }
   }, 2000);
+
+  // Observe-only heartbeat: classify black-screen class without changing recover.
+  window.setInterval(() => {
+    if (!rendererReady) return;
+    if (document.visibilityState === "hidden") return;
+    if (!isGameDisplayPhase(phase)) return;
+    forensicHeartbeatN += 1;
+    const probe =
+      forensicHeartbeatN % 3 === 0 ||
+      isGlContextLost() ||
+      glLostAt > 0;
+    void recordForensic(`heartbeat:${forensicHeartbeatN}`, {
+      forceBlankProbe: probe,
+      blank: probe ? undefined : null,
+    });
+  }, 10_000);
 }
 
 main().catch((err) => {

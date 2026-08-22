@@ -22,12 +22,15 @@ export class TouchControls {
   onDir: ((dir: TouchDir, down: boolean) => void) | null = null;
   /** Center softkey row toggled — parent should re-fit chrome height. */
   onLayout: (() => void) | null = null;
+  /** Long-press `#touch-status` — forensic dump (observe-only). */
+  onStatusLongPress: (() => void) | null = null;
 
   constructor() {
     this.left = el("sk-left");
     this.right = el("sk-right");
     this.center = el("sk-center");
     this.status = document.getElementById("touch-status") ?? document.body;
+    wireStatusLongPress(this.status, () => this.onStatusLongPress?.());
 
     wireSoft(this.left, () => this.onSoftkey?.("left"), this.captured);
     wireSoft(this.right, () => this.onSoftkey?.("right"), this.captured);
@@ -130,6 +133,28 @@ function setBtn(btn: HTMLButtonElement, label: string | undefined): void {
   else if (btn.id === "sk-right") btn.textContent = "右软";
   else if (btn.classList.contains("ok")) btn.textContent = "OK";
   else btn.textContent = "中软";
+}
+
+function wireStatusLongPress(status: HTMLElement, fn: () => void): void {
+  let timer = 0;
+  const clear = () => {
+    if (timer) {
+      window.clearTimeout(timer);
+      timer = 0;
+    }
+  };
+  status.addEventListener("pointerdown", (ev) => {
+    if (ev.button != null && ev.button !== 0) return;
+    clear();
+    timer = window.setTimeout(() => {
+      timer = 0;
+      fn();
+    }, 650);
+  });
+  status.addEventListener("pointerup", clear);
+  status.addEventListener("pointercancel", clear);
+  status.addEventListener("pointerleave", clear);
+  status.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
 function wireSoft(
