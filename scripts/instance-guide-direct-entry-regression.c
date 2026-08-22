@@ -12,7 +12,7 @@
 #include <string.h>
 
 #define main cbe_server_program_main
-#include "../src/main.c"
+#include "../src/server_main.c"
 #undef main
 
 int main(void)
@@ -31,6 +31,7 @@ int main(void)
              "b_29\xC3\xCE\xBE\xB3\xBF\xD5\xBC\xE4.sce"); /* 梦境空间 */
     seed.instanceX = 50;
     seed.instanceY = 50;
+    seed.instanceSpawnEnemyId = 205;
     seed.challengeEnemyId = 105;
     if (!vm_net_mock_npc_service_option_default(
             &seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE, &name, &description,
@@ -43,6 +44,23 @@ int main(void)
         return 1;
     }
     memset(response, 0, sizeof(response));
+    /* Runtime entry must reject an advertised kind-3 target until the exact
+     * target scene resource contains the deployed row. */
+    responseLen = vm_net_mock_build_instance_enter_response(
+        &seed, response, sizeof(response));
+    if (responseLen != 0)
+    {
+        fputs("undeployed instance spawn target unexpectedly entered scene\n",
+              stderr);
+        return 1;
+    }
+    seed.instanceSpawnEnemyId = 0;
+    /* A direct NPC instance entry is not a map-stone route.  Seed stale
+     * map-stone provenance to ensure the builder clears it before the first
+     * destination WT2/3 is dispatched. */
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = true;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = true;
+    g_vm_net_mock_teleport_stone_map_enter_pending = true;
     responseLen = vm_net_mock_build_instance_enter_response(
         &seed, response, sizeof(response));
     /* Response objects use the client event-packet layout: the count is at
@@ -52,6 +70,14 @@ int main(void)
         response[7] != 1)
     {
         fputs("direct instance entry did not produce one 30/1 scene response\n",
+              stderr);
+        return 1;
+    }
+    if (g_vm_net_mock_teleport_stone_subtype3_ack_sent ||
+        g_vm_net_mock_teleport_stone_direct_enter_pending ||
+        g_vm_net_mock_teleport_stone_map_enter_pending)
+    {
+        fputs("direct instance entry leaked map-stone completion provenance\n",
               stderr);
         return 1;
     }

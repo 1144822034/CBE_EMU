@@ -62,7 +62,7 @@ static bool create_seed_table(void)
         "mp INT UNSIGNED NOT NULL,attack_value INT UNSIGNED NOT NULL,"
         "defense_value INT UNSIGNED NOT NULL,reward_exp INT UNSIGNED NOT NULL,"
         "reward_money INT UNSIGNED NOT NULL,drop_item_id INT UNSIGNED NOT NULL DEFAULT 0,"
-        "drop_rate_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "drop_rate_percent DECIMAL(5,2) UNSIGNED NOT NULL DEFAULT 0,"
         "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
         "PRIMARY KEY(monster_id)) ENGINE=InnoDB");

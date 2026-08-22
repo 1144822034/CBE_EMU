@@ -520,6 +520,9 @@ static u32 g_screenRootExitPendingTick = 0;
 static volatile u32 g_hostQuitRequested = 0;
 static volatile u32 g_hostQuitCleanupStarted = 0;
 static volatile u32 g_vmThreadFinished = 0;
+#ifdef CBE_PLATFORM_ANDROID
+static volatile int g_cbeLastRunStatus = UC_ERR_OK;
+#endif
 static u32 g_appMainEntry = 0;
 static u32 g_appExitEntry = 0;
 static u8 g_wpayMockFlowActive = 0;
@@ -572,6 +575,8 @@ typedef struct
 {
     u8 active;
     u8 fired;
+    u8 downloadSnapshotValid;
+    u8 downloadSnapshotState;
     u16 delayTicks;
     u32 eventType;
     u32 r0;
@@ -579,6 +584,7 @@ typedef struct
     u32 r2;
     u32 callback;
     u32 context;
+    u8 downloadSnapshot[0x60];
     vm_net_remote_observation remoteObservation;
 } vm_net_task;
 
@@ -696,7 +702,7 @@ static u8 g_mockServiceOnly = 0;
 #endif
 static u8 g_mockServiceWarnedUnavailable = 0;
 #ifdef CBE_PLATFORM_ANDROID
-static char g_mockServiceHost[64] = "23.141.172.143";
+static char g_mockServiceHost[64] = "58.220.46.173:13317";
 #else
 static char g_mockServiceHost[64] = "127.0.0.1";
 #endif
@@ -2891,8 +2897,26 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
             g_netTasks[i].r2 = r2;
             g_netTasks[i].callback = callback;
             g_netTasks[i].context = context;
+            g_netTasks[i].downloadSnapshotValid = 0;
+            g_netTasks[i].downloadSnapshotState = 0;
+            memset(g_netTasks[i].downloadSnapshot, 0, sizeof(g_netTasks[i].downloadSnapshot));
             memset(&g_netTasks[i].remoteObservation, 0,
                    sizeof(g_netTasks[i].remoteObservation));
+            if (eventType == 7 && Global_R9)
+            {
+                u32 downloadBase = Global_R9 + 0x9584;
+                if (uc_mem_read(MTK, downloadBase, g_netTasks[i].downloadSnapshot, sizeof(g_netTasks[i].downloadSnapshot)) == UC_ERR_OK)
+                {
+                    u32 bufferPtr = 0;
+                    u32 received = 0;
+                    u32 capacity = 0;
+                    g_netTasks[i].downloadSnapshotValid = 1;
+                    g_netTasks[i].downloadSnapshotState = g_netTasks[i].downloadSnapshot[0];
+                    memcpy(&bufferPtr, g_netTasks[i].downloadSnapshot + 0x14, sizeof(bufferPtr));
+                    memcpy(&received, g_netTasks[i].downloadSnapshot + 0x18, sizeof(received));
+                    memcpy(&capacity, g_netTasks[i].downloadSnapshot + 0x28, sizeof(capacity));
+                }
+            }
             DEBUG_PRINT("[probe_net] queue event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u last=%x\n", eventType, r0, r1, r2, callback, context, g_schedulerTick, lastAddress);
             if (s_netQueueObserveCount < 100)
             {
@@ -4128,25 +4152,6 @@ static void vm_hangup_battle_render_trace_note_pc(u32 pc)
     if (!vm_is_pool_entry(pc) || pc < g_hangupBattleRenderTrace.codeBase)
         return;
     localPc = pc - g_hangupBattleRenderTrace.codeBase;
-    if (localPc == 0x5E16u && g_vmHangupAutoConfirm.enabled &&
-        g_vmHangupAutoConfirm.hangupAutoActive &&
-        g_vmHangupAutoConfirm.settlementPending)
-    {
-        u32 moduleR9 = 0;
-        u32 gameState = 0;
-
-        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
-        if (moduleR9 != 0 &&
-            uc_mem_read(MTK, moduleR9 + 8272u, &gameState,
-                        sizeof(gameState)) == UC_ERR_OK &&
-            gameState != 0)
-        {
-            /* DrawBattleMain owns these offsets.  Cache only the active
-             * module base so the confirmation helper can later read the
-             * rendered phase without confusing it with main CBE's R9. */
-            g_vmHangupAutoConfirm.battleModuleR9 = moduleR9;
-        }
-    }
     if (!g_hangupBattleRenderTrace.firstPoolPcSeen)
     {
         g_hangupBattleRenderTrace.firstPoolPcSeen = 1;
@@ -4864,12 +4869,13 @@ static uc_err scheduler_dispatch_net_tasks(void)
                        i, taskEvent, taskR0, taskR1, taskR2,
                        taskCallback, taskContext, g_netTaskDispatchDepth);
             }
-            if (taskEvent == 5 || taskEvent == 7 || taskEvent == 8 ||
-                taskEvent == 9)
+            if (taskEvent == 7)
             {
-                vm_shop_return_forensics_log("net-before-callback", taskEvent,
-                                              taskR0, taskCallback,
-                                              taskContext);
+                if (task->downloadSnapshotValid && task->downloadSnapshotState == 2)
+                {
+                    u32 downloadBase = Global_R9 + 0x9584;
+                    uc_mem_write(MTK, downloadBase, task->downloadSnapshot, sizeof(task->downloadSnapshot));
+                }
             }
             remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
                 &taskRemoteObservation);
@@ -4889,13 +4895,6 @@ static uc_err scheduler_dispatch_net_tasks(void)
                                                     taskCallback);
             vm_autotest_trace_update_guest_callback("callback-end", taskR0,
                                                      taskR1);
-            if (taskEvent == 5 || taskEvent == 7 || taskEvent == 8 ||
-                taskEvent == 9)
-            {
-                vm_shop_return_forensics_log("net-after-callback", taskEvent,
-                                              taskR0, taskCallback,
-                                              taskContext);
-            }
             vm_hangup_protocol_parser_trace_end(&taskRemoteObservation);
             if (g_netDebugReadWindow)
             {
@@ -8611,40 +8610,106 @@ static int vm_autotest_parse_u32(const char *text, u32 *value)
     return 1;
 }
 
-static int vm_mock_service_parse_host_port(const char *text, char *host, size_t hostCap, u16 *port)
+static int vm_mock_service_copy_host_slice(const char *text, size_t textLen,
+                                           char *host, size_t hostCap)
 {
+    if (text == NULL || textLen == 0 || host == NULL || hostCap == 0 ||
+        textLen >= hostCap)
+    {
+        return 0;
+    }
+    memcpy(host, text, textLen);
+    host[textLen] = 0;
+    return 1;
+}
+
+/* Accept the endpoint forms used by both environment configuration and the
+ * compiled-in g_mockServiceHost default:
+ *
+ *   host:port       conventional IPv4/DNS endpoint
+ *   [ipv6]:port     explicit IPv6 endpoint
+ *   host / ipv6     host only; preserve the caller's existing port
+ *   port            legacy localhost shorthand
+ */
+static int vm_mock_service_parse_host_port(const char *text, char *host,
+                                           size_t hostCap, u16 *port)
+{
+    const char *firstColon = NULL;
     const char *colon = NULL;
+    const char *closeBracket = NULL;
     u32 parsedPort = 0;
     size_t hostLen = 0;
 
     if (text == NULL || *text == 0 || host == NULL || hostCap == 0 || port == NULL)
         return 0;
 
-    colon = strrchr(text, ':');
-    if (colon != NULL)
+    if (text[0] == '[')
     {
-        if (!vm_autotest_parse_u32(colon + 1, &parsedPort) || parsedPort == 0 || parsedPort > 65535u)
+        closeBracket = strchr(text + 1, ']');
+        if (closeBracket == NULL || closeBracket == text + 1)
             return 0;
-        hostLen = (size_t)(colon - text);
-        if (hostLen == 0)
+        hostLen = (size_t)(closeBracket - (text + 1));
+        if (closeBracket[1] == 0)
+            return vm_mock_service_copy_host_slice(text + 1, hostLen, host, hostCap);
+        if (closeBracket[1] != ':' ||
+            !vm_autotest_parse_u32(closeBracket + 2, &parsedPort) ||
+            parsedPort == 0 || parsedPort > 65535u ||
+            !vm_mock_service_copy_host_slice(text + 1, hostLen, host, hostCap))
         {
-            snprintf(host, hostCap, "127.0.0.1");
-        }
-        else
-        {
-            if (hostLen >= hostCap)
-                hostLen = hostCap - 1;
-            memcpy(host, text, hostLen);
-            host[hostLen] = 0;
+            return 0;
         }
         *port = (u16)parsedPort;
         return 1;
     }
 
-    if (!vm_autotest_parse_u32(text, &parsedPort) || parsedPort == 0 || parsedPort > 65535u)
+    firstColon = strchr(text, ':');
+    colon = strrchr(text, ':');
+    if (colon != NULL && colon == firstColon)
+    {
+        if (!vm_autotest_parse_u32(colon + 1, &parsedPort) ||
+            parsedPort == 0 || parsedPort > 65535u)
+        {
+            return 0;
+        }
+        hostLen = (size_t)(colon - text);
+        if (hostLen == 0)
+            snprintf(host, hostCap, "127.0.0.1");
+        else if (!vm_mock_service_copy_host_slice(text, hostLen, host, hostCap))
+            return 0;
+        *port = (u16)parsedPort;
+        return 1;
+    }
+
+    if (colon != NULL)
+    {
+        /* Multiple colons are an unbracketed IPv6 host without a port. */
+        return vm_mock_service_copy_host_slice(text, strlen(text), host, hostCap);
+    }
+
+    if (vm_autotest_parse_u32(text, &parsedPort))
+    {
+        if (parsedPort == 0 || parsedPort > 65535u)
+            return 0;
+        snprintf(host, hostCap, "127.0.0.1");
+        *port = (u16)parsedPort;
+        return 1;
+    }
+
+    return vm_mock_service_copy_host_slice(text, strlen(text), host, hostCap);
+}
+
+static int vm_mock_service_apply_configured_host_port(void)
+{
+    char parsedHost[sizeof(g_mockServiceHost)];
+    u16 parsedPort = g_mockServicePort;
+
+    if (!vm_mock_service_parse_host_port(g_mockServiceHost, parsedHost,
+                                         sizeof(parsedHost), &parsedPort))
+    {
         return 0;
-    snprintf(host, hostCap, "127.0.0.1");
-    *port = (u16)parsedPort;
+    }
+    snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+    g_mockServicePort = parsedPort;
     return 1;
 }
 
@@ -8935,10 +9000,15 @@ static void vm_autotest_note(const char *fmt, ...)
 
 static void vm_mock_service_init_config(int argc, char *args[])
 {
+    if (!vm_mock_service_apply_configured_host_port())
+    {
+        printf("[warn][mock-service] invalid compiled default host=%s\n",
+               g_mockServiceHost);
+    }
 #ifdef CBE_CLIENT_ONLY
     const char *envEndpoint = getenv("CBE_SERVER_ENDPOINT");
     char parsedHost[64];
-    u16 parsedPort = 0;
+    u16 parsedPort = g_mockServicePort;
     (void)argc;
     (void)args;
 
@@ -8975,7 +9045,7 @@ static void vm_mock_service_init_config(int argc, char *args[])
     const char *envAdminBind = getenv("CBE_MOCK_ADMIN_BIND");
     const char *envAdminPort = getenv("CBE_MOCK_ADMIN_PORT");
     char parsedHost[64];
-    u16 parsedPort = 0;
+    u16 parsedPort = g_mockServicePort;
 
     if (envOnly && strcmp(envOnly, "0") != 0)
         g_mockServiceOnly = 1;
@@ -13076,6 +13146,9 @@ void RunArmProgram(void *param)
         }
         if (p != UC_ERR_OK)
             printf("native app loop异常:%s\n", uc_strerror(p));
+#ifdef CBE_PLATFORM_ANDROID
+        g_cbeLastRunStatus = (int)p;
+#endif
         g_vmThreadFinished = 1;
         return;
     }
@@ -13599,6 +13672,9 @@ void RunArmProgram(void *param)
         printf("程序已正常退出\n");
 
     dumpCpuInfo();
+#ifdef CBE_PLATFORM_ANDROID
+    g_cbeLastRunStatus = (int)p;
+#endif
     g_vmThreadFinished = 1;
     if (p != UC_ERR_OK)
         assert(0);
@@ -13954,9 +14030,10 @@ int cbeRun(void)
     if (!g_cbeInitialized || g_cbeRunning)
         return -1;
     g_cbeRunning = 1;
+    g_cbeLastRunStatus = UC_ERR_OK;
     RunArmProgram((void *)(uintptr_t)Program_ROM_Address);
     g_cbeRunning = 0;
-    return 0;
+    return g_cbeLastRunStatus;
 }
 
 void cbeTaskListRun(void)
@@ -18297,6 +18374,10 @@ static bool hook_vm_manager_screen_func(u32 address)
             if (vm_net_mock_consume_update_completed_scene_reenter(activeTarget))
             {
                 acceptChange = true;
+                /* The resource callback may restore a recently completed
+                 * target when WT18/7 arrived after the first WT30/2. Refresh
+                 * the pointer before arming the duplicate-entry guard. */
+                activeTarget = vm_active_scene_reenter_target();
                 /* The update callback can call EnterSceneByMapName more than
                  * once before returning.  Refresh the serial-bound guard for
                  * the one accepted resource-completion re-entry so any later

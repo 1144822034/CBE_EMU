@@ -25,7 +25,7 @@ u8 my_mem_compare(u8 *src, u8 *dest, u32 len)
 }
 
 #ifdef CBE_PLATFORM_ANDROID
-#include "android_gbk_table.inc"
+#include "android/android_gbk_table.inc"
 
 static int lookup_gbk_by_unicode(u16 unicode, u16 *gbk)
 {

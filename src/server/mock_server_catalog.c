@@ -3599,8 +3599,11 @@ static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 
 
 static u32 vm_net_mock_shop_page_item_limit(u8 subtype)
 {
+    /* 秘宝道具和神兵利器页均由 mmShop 的 14/<subtype>(index) 原生
+     * 分页路径读取。秘宝不能再被截成单页，否则 totalnum 永远不超过
+     * 第一页，客户端不会请求后续 index。 */
     if (subtype == 5)
-        return VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS;
+        return VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS;
     if (subtype >= 6 && subtype <= 13)
         return VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS;
     return VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS;
@@ -7666,6 +7669,27 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
         !vm_net_mock_str_ends_with(scene, ".sce") ||
         vm_net_mock_scene_name_has_path_separator(scene))
     return false;
+
+    /* A published scene belongs to the active database overlay.  Never let
+     * another database's generated file win merely because it shares the
+     * immutable resource directory. */
+    {
+        if (vm_net_mock_build_overlay_resource_path(scene, candidate,
+                                                    sizeof(candidate)))
+        {
+            FILE *fp = vm_net_mock_fopen_game_path(candidate, "rb");
+            if (fp != NULL)
+            {
+                if (pathOut && pathOutCap != 0)
+                    snprintf(pathOut, pathOutCap, "%s", candidate);
+                if (fpOut)
+                    *fpOut = fp;
+                else
+                    fclose(fp);
+                return true;
+            }
+        }
+    }
 
     if (g_vm_net_mock_resource_dir[0] != 0)
     {

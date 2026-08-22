@@ -182,6 +182,17 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_monst
 脚本只新增怪物属性覆盖表。没有覆盖记录的怪物继续使用服务端目录中的
 等级、类型和统一属性公式；服务启动时也会自动创建该表。
 
+已有数据库启用后台账号操作日志时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_admin_operation_logs.sql
+```
+
+脚本只新增 `server_admin_operation_logs`。后台设置角色等级、增加普通钱币或 W 币、
+发放物品/装备、改名、改密和重置位置等成功操作，以及游戏内商城购买和付费副本门票
+的 W 币成功扣款，都会追加记录；角色后续迁移或删除不会改写既有审计记录。服务首次
+写入或查看该页面时也会自动创建同一张表。
+
 已有怪物管理升级为多物品掉落时，停止 mock-service 后执行：
 
 ```powershell
@@ -192,6 +203,15 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_monst
 `server_monster_drops` 的第 1 槽，不会覆盖已经存在的多掉落配置。之后应在
 后台“怪物管理”中保存一次该怪物；新保存会以多掉落表为唯一来源，并清空旧列，
 避免已删除的旧掉落在重启后被重新导入。
+
+已有数据库需要在怪物掉落概率中使用小数（例如 `0.25%`）时，建议在停服窗口执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_monster_drop_rate_decimal.sql
+```
+
+脚本把掉落概率列升级为两位小数，原有整数概率保持数值不变（例如 `5` 变为
+`5.00`）。服务启动时也会检测并完成同一列类型升级。
 
 已有数据库升级到装备强化功能时，停止 mock-service 后执行：
 
@@ -310,6 +330,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 
 - `accounts`：账号与登录密码。
 - `server_admin_config`：后台管理密码、连续失败次数和数据库锁定状态。
+- `server_admin_operation_logs`：后台对账号和角色执行成功操作、以及游戏内成功 W 币消费的追加式审计记录，包含操作时间、目标账号/角色、金额或物品信息及说明。
 - `server_payment_config`：支付接口地址、通讯密钥、公开回调地址和 W 币兑换比例。
 - `wcoin_recharge_orders`：充值订单、支付确认及幂等入账状态。
 - `server_data_migrations`：记录一次性数据语义迁移，防止重复换算。

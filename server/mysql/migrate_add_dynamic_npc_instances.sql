@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
   `target_x` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `target_y` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `challenge_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `spawn_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `minimum_level` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -16,3 +17,19 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
     REFERENCES `server_dynamic_npcs` (`scene`, `actor_id`)
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+SET @spawn_enemy_column_exists := (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'server_dynamic_npc_instances'
+    AND COLUMN_NAME = 'spawn_enemy_id'
+);
+SET @spawn_enemy_column_sql := IF(
+  @spawn_enemy_column_exists = 0,
+  'ALTER TABLE `server_dynamic_npc_instances` ADD COLUMN `spawn_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER `challenge_enemy_id`',
+  'SELECT 1'
+);
+PREPARE spawn_enemy_column_stmt FROM @spawn_enemy_column_sql;
+EXECUTE spawn_enemy_column_stmt;
+DEALLOCATE PREPARE spawn_enemy_column_stmt;

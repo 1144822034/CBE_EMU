@@ -59,6 +59,11 @@ static u32 vm_net_mock_monster_admin_list(
  * declaration keeps scene-content assembly in the scene module. */
 static bool vm_net_mock_ensure_actor_resource_available(
     const char *actorResource, const char **errorOut);
+/* Runtime Actor motion descriptors are not serialized in the editor .actor
+ * manifest.  Keep the capacity hook narrow until a runtime allocation trace
+ * proves a stable file-to-child-node mapping. */
+static bool vm_net_mock_actor_scene_node_reserve(
+    const char *actorResource, u32 *reserveOut, const char **errorOut);
 
 /* A fresh mmGame bootstrap can discard client-side NPC nodes without being a
  * scene enter.  The catalog arms this narrow session marker so the next
@@ -74,18 +79,29 @@ static bool vm_mock_world_chat_publish_chest_reward(
     const char *openerName, u32 chestItemId, const char *chestNameGbk,
     u32 rewardItemId, const char *rewardNameGbk, u32 rewardCount);
 
+/* The web-admin module owns the shared append-only operation-log table, but
+ * successful in-game W-coin debits must be auditable in that same history.
+ * Keep the declaration narrow at the aggregation boundary; callers invoke it
+ * only after their own authoritative debit transaction has committed. */
+static bool vm_mock_admin_operation_log_record(
+    const char *actionCode, const char *accountId, u32 roleId, u32 itemId,
+    u32 itemCount, u32 changeAmount, const char *detail);
+
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
 #include "mock_server_ranking.c"
 
 /* Death recovery owns the role mutation in mock_server_equipment_npc.c, while
- * the destination is derived from the sMap/wMap topology and SCE resources in
- * mock_server_scene_task.c.  Keep this narrow declaration here so both pieces
- * remain in their proper business module despite the single aggregation unit. */
-static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
+ * the nearest safe town centre is derived from sMap/wMap topology and SCE
+ * resources in mock_server_scene_task.c.  Keep this narrow declaration here
+ * so both pieces remain in their proper business module despite the single
+ * aggregation unit. */
+static bool vm_net_mock_resolve_nearest_town_center_respawn(
     const char *fromScene, char *sceneOut, size_t sceneOutCap,
     u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
     u32 *distanceOut, const char **routeOut);
+static bool vm_net_mock_adjust_recovery_landing_to_map_safe(
+    const char *scene, u16 *x, u16 *y);
 
 #include "mock_server_equipment_npc.c"
 #include "mock_server_mailbox.c"

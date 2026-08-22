@@ -31,7 +31,8 @@ enum
     VM_CLIENT_SOCKET_TIMEOUT_MS = 5000,
     VM_CLIENT_REQUEST_MAX = 512,
     VM_CLIENT_QUEUE_MAX = 64,
-    VM_CLIENT_FOLLOWUP_MAX = 65536
+    VM_CLIENT_FOLLOWUP_MAX = 65536,
+    VM_CLIENT_COMPLETED_SCENE_REUSE_TICKS = 120
 };
 
 typedef struct
@@ -50,6 +51,13 @@ typedef struct
 static vm_net_mock_scene_change_target g_vm_net_mock_last_scene_change_target;
 static bool g_vm_net_mock_last_scene_change_target_valid = false;
 static u32 g_vm_net_mock_last_scene_change_target_serial = 0;
+static vm_net_mock_scene_change_target
+    g_vm_client_last_completed_scene_change_target;
+static bool g_vm_client_last_completed_scene_change_target_valid = false;
+static u32 g_vm_client_last_completed_scene_change_tick = 0;
+static u32 g_vm_client_completed_scene_target_serial = 0;
+static bool g_vm_client_update_completed_reenter_pending = false;
+static char g_vm_client_update_completed_name[64];
 
 static bool vm_net_mock_scene_names_equal_exact(const char *a, const char *b)
 {
@@ -57,23 +65,10 @@ static bool vm_net_mock_scene_names_equal_exact(const char *a, const char *b)
 }
 
 static bool vm_net_mock_consume_update_completed_scene_reenter(
-    const vm_net_mock_scene_change_target *target)
-{
-    (void)target;
-    return false;
-}
-
+    const vm_net_mock_scene_change_target *target);
 static u32 vm_net_mock_apply_remote_observation(
-    const vm_net_remote_observation *observation)
-{
-    (void)observation;
-    return 0;
-}
-
-static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial)
-{
-    (void)sceneTargetSerial;
-}
+    const vm_net_remote_observation *observation);
+static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial);
 
 static bool vm_net_mock_should_rearm_send_ready(void)
 {
@@ -166,6 +161,321 @@ static bool vm_client_next_wt_object(const u8 *packet, u32 packetLen,
     }
     *offset = start + objectLen;
     return true;
+}
+
+static bool vm_client_wt_object_field(const vm_client_wt_object *object,
+                                      const char *field,
+                                      const u8 **encoded,
+                                      u16 *encodedLen)
+{
+    u32 pos = 0;
+    u32 fieldLen = field ? (u32)strlen(field) : 0;
+
+    if (encoded != NULL)
+        *encoded = NULL;
+    if (encodedLen != NULL)
+        *encodedLen = 0;
+    if (object == NULL || object->payload == NULL || fieldLen == 0 ||
+        fieldLen > 0xff)
+    {
+        return false;
+    }
+    while (pos < object->payloadLen)
+    {
+        u32 nameLen = object->payload[pos++];
+        u16 valueLen = 0;
+
+        if (nameLen > object->payloadLen - pos ||
+            object->payloadLen - pos - nameLen < 2)
+        {
+            return false;
+        }
+        if (nameLen == fieldLen &&
+            memcmp(object->payload + pos, field, fieldLen) == 0)
+        {
+            pos += nameLen;
+            valueLen = (u16)(((u16)object->payload[pos] << 8) |
+                             object->payload[pos + 1]);
+            pos += 2;
+            if (valueLen > object->payloadLen - pos)
+                return false;
+            if (encoded != NULL)
+                *encoded = object->payload + pos;
+            if (encodedLen != NULL)
+                *encodedLen = valueLen;
+            return true;
+        }
+        pos += nameLen;
+        valueLen = (u16)(((u16)object->payload[pos] << 8) |
+                         object->payload[pos + 1]);
+        pos += 2;
+        if (valueLen > object->payloadLen - pos)
+            return false;
+        pos += valueLen;
+    }
+    return false;
+}
+
+static bool vm_client_wt_object_u32(const vm_client_wt_object *object,
+                                    const char *field, u32 *value)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+    const u8 *bytes = NULL;
+
+    if (!vm_client_wt_object_field(object, field, &encoded, &encodedLen))
+        return false;
+    if (encodedLen == 7 && encoded[0] == 6 && encoded[1] == 0 &&
+        encoded[2] == 4)
+    {
+        bytes = encoded + 3;
+    }
+    else if (encodedLen == 5 && encoded[0] == 4)
+    {
+        bytes = encoded + 1;
+    }
+    else
+    {
+        return false;
+    }
+    if (value != NULL)
+    {
+        *value = ((u32)bytes[0] << 24) | ((u32)bytes[1] << 16) |
+                 ((u32)bytes[2] << 8) | bytes[3];
+    }
+    return true;
+}
+
+static bool vm_client_wt_object_wrapped_bytes(
+    const vm_client_wt_object *object, const char *field,
+    const u8 **value, u16 *valueLen)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+    u16 innerLen = 0;
+
+    if (value != NULL)
+        *value = NULL;
+    if (valueLen != NULL)
+        *valueLen = 0;
+    if (!vm_client_wt_object_field(object, field, &encoded, &encodedLen) ||
+        encodedLen < 2)
+    {
+        return false;
+    }
+    innerLen = (u16)(((u16)encoded[0] << 8) | encoded[1]);
+    if ((u32)innerLen + 2u != encodedLen)
+        return false;
+    if (value != NULL)
+        *value = encoded + 2;
+    if (valueLen != NULL)
+        *valueLen = innerLen;
+    return true;
+}
+
+static bool vm_client_wt_object_string(const vm_client_wt_object *object,
+                                       const char *field, char *value,
+                                       size_t valueCap)
+{
+    const u8 *text = NULL;
+    u16 textLen = 0;
+    size_t copyLen = 0;
+
+    if (value == NULL || valueCap == 0)
+        return false;
+    value[0] = 0;
+    if (!vm_client_wt_object_wrapped_bytes(object, field, &text, &textLen))
+        return false;
+    copyLen = SDL_min((size_t)textLen, valueCap - 1);
+    while (copyLen > 0 && text[copyLen - 1] == 0)
+        --copyLen;
+    memcpy(value, text, copyLen);
+    value[copyLen] = 0;
+    return value[0] != 0;
+}
+
+static bool vm_client_wt_object_posinfo(const vm_client_wt_object *object,
+                                        u16 *x, u16 *y)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+
+    if (!vm_client_wt_object_field(object, "posinfo", &encoded,
+                                   &encodedLen) ||
+        encodedLen != 8 || encoded[0] != 0 || encoded[1] != 2 ||
+        encoded[4] != 0 || encoded[5] != 2)
+    {
+        return false;
+    }
+    if (x != NULL)
+        *x = (u16)(((u16)encoded[2] << 8) | encoded[3]);
+    if (y != NULL)
+        *y = (u16)(((u16)encoded[6] << 8) | encoded[7]);
+    return true;
+}
+
+static void vm_client_snapshot_completed_scene_target(u32 serial)
+{
+    if (!g_vm_net_mock_last_scene_change_target_valid || serial == 0 ||
+        serial != g_vm_net_mock_last_scene_change_target_serial)
+    {
+        return;
+    }
+    g_vm_client_last_completed_scene_change_target =
+        g_vm_net_mock_last_scene_change_target;
+    g_vm_client_last_completed_scene_change_target.needsSceneDownload = false;
+    g_vm_client_last_completed_scene_change_target_valid = true;
+    g_vm_client_last_completed_scene_change_tick = g_schedulerTick;
+    g_vm_client_completed_scene_target_serial = serial;
+}
+
+static bool vm_net_mock_consume_update_completed_scene_reenter(
+    const vm_net_mock_scene_change_target *target)
+{
+    bool matches = false;
+
+    if (!g_vm_client_update_completed_reenter_pending)
+        return false;
+    matches = target != NULL && target->scene[0] != 0 &&
+              g_vm_client_update_completed_name[0] != 0 &&
+              vm_net_mock_scene_names_equal_exact(
+                  target->scene, g_vm_client_update_completed_name);
+    g_vm_client_update_completed_reenter_pending = false;
+    if (!matches)
+    {
+        printf("[warn][screen] remote_update_reenter_rejected file=%s "
+               "scene=%s reason=resource-target-mismatch\n",
+               g_vm_client_update_completed_name,
+               target ? target->scene : "");
+        return false;
+    }
+    printf("[info][screen] screen_mgr allow-update-reenter scene=%s "
+           "pos=(%u,%u) exit=%u file=%s source=remote-WT18/7\n",
+           target->scene, target->x, target->y, target->exitId,
+           g_vm_client_update_completed_name);
+    vm_autotest_note("screen_mgr allow-update-reenter scene=%s pos=(%u,%u) "
+                     "exit=%u file=%s source=remote-WT18/7\n",
+                     target->scene, target->x, target->y, target->exitId,
+                     g_vm_client_update_completed_name);
+    return true;
+}
+
+static u32 vm_net_mock_apply_remote_observation(
+    const vm_net_remote_observation *observation)
+{
+    u32 clearAfterCallbackSerial = 0;
+    bool restoredCompletedTarget = false;
+
+    if (observation == NULL)
+        return 0;
+    if (observation->hasSceneTarget && observation->scene[0] != 0)
+    {
+        vm_net_mock_scene_change_target target;
+
+        memset(&target, 0, sizeof(target));
+        snprintf(target.scene, sizeof(target.scene), "%s",
+                 observation->scene);
+        target.x = observation->sceneX;
+        target.y = observation->sceneY;
+        target.mapType = 2;
+        target.hasSceEntry = true;
+        g_vm_client_update_completed_reenter_pending = false;
+        g_vm_client_update_completed_name[0] = 0;
+        g_vm_client_last_completed_scene_change_target_valid = false;
+        g_vm_client_completed_scene_target_serial = 0;
+        g_vm_net_mock_last_scene_change_target = target;
+        g_vm_net_mock_last_scene_change_target_valid = true;
+        ++g_vm_net_mock_last_scene_change_target_serial;
+        if (g_vm_net_mock_last_scene_change_target_serial == 0)
+            g_vm_net_mock_last_scene_change_target_serial = 1;
+        printf("[info][screen] remote_scene_target_apply serial=%u subtype=%u "
+               "scene=%s pos=(%u,%u) evidence=WT30/%u-before-callback\n",
+               g_vm_net_mock_last_scene_change_target_serial,
+               observation->sceneSubtype, target.scene, target.x, target.y,
+               observation->sceneSubtype);
+    }
+    if (observation->sceneCompleteAfterCallback &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        (observation->scene[0] == 0 ||
+         vm_net_mock_scene_names_equal_exact(
+             observation->scene,
+             g_vm_net_mock_last_scene_change_target.scene)))
+    {
+        clearAfterCallbackSerial =
+            g_vm_net_mock_last_scene_change_target_serial;
+        vm_client_snapshot_completed_scene_target(clearAfterCallbackSerial);
+        printf("[info][screen] remote_scene_target_complete_pending serial=%u "
+               "scene=%s action=clear-after-own-callback evidence=WT30/2\n",
+               clearAfterCallbackSerial,
+               g_vm_net_mock_last_scene_change_target.scene);
+    }
+    if (observation->updateComplete && observation->updateName[0] != 0)
+    {
+        if (!g_vm_net_mock_last_scene_change_target_valid &&
+            g_vm_client_last_completed_scene_change_target_valid &&
+            g_vm_client_completed_scene_target_serial != 0 &&
+            g_schedulerTick - g_vm_client_last_completed_scene_change_tick <
+                VM_CLIENT_COMPLETED_SCENE_REUSE_TICKS &&
+            vm_net_mock_scene_names_equal_exact(
+                g_vm_client_last_completed_scene_change_target.scene,
+                observation->updateName))
+        {
+            g_vm_net_mock_last_scene_change_target =
+                g_vm_client_last_completed_scene_change_target;
+            g_vm_net_mock_last_scene_change_target_valid = true;
+            g_vm_net_mock_last_scene_change_target_serial =
+                g_vm_client_completed_scene_target_serial;
+            g_vm_client_last_completed_scene_change_tick = g_schedulerTick;
+            restoredCompletedTarget = true;
+            printf("[info][screen] remote_scene_target_restore serial=%u "
+                   "scene=%s file=%s reason=resource-completion-callback\n",
+                   g_vm_net_mock_last_scene_change_target_serial,
+                   g_vm_net_mock_last_scene_change_target.scene,
+                   observation->updateName);
+        }
+        if (g_vm_net_mock_last_scene_change_target_valid &&
+            vm_net_mock_scene_names_equal_exact(
+                g_vm_net_mock_last_scene_change_target.scene,
+                observation->updateName))
+        {
+            snprintf(g_vm_client_update_completed_name,
+                     sizeof(g_vm_client_update_completed_name), "%s",
+                     observation->updateName);
+            g_vm_client_update_completed_reenter_pending = true;
+            if (restoredCompletedTarget)
+            {
+                clearAfterCallbackSerial =
+                    g_vm_net_mock_last_scene_change_target_serial;
+            }
+            printf("[info][screen] remote_update_complete_apply file=%s "
+                   "serial=%u action=arm-one-scene-reenter "
+                   "before-callback\n",
+                   observation->updateName,
+                   g_vm_net_mock_last_scene_change_target_serial);
+        }
+        else
+        {
+            printf("[warn][screen] remote_update_complete_unbound file=%s "
+                   "action=no-scene-reenter reason=no-matching-recent-target\n",
+                   observation->updateName);
+        }
+    }
+    return clearAfterCallbackSerial;
+}
+
+static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial)
+{
+    if (sceneTargetSerial == 0 ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        sceneTargetSerial != g_vm_net_mock_last_scene_change_target_serial)
+    {
+        return;
+    }
+    printf("[info][screen] remote_scene_target_complete serial=%u scene=%s "
+           "action=cleared-after-own-callback\n",
+           sceneTargetSerial,
+           g_vm_net_mock_last_scene_change_target.scene);
+    g_vm_net_mock_last_scene_change_target_valid = false;
 }
 
 static void vm_client_finish_wt_packet(u8 *packet, u32 len, u8 objectCount)
@@ -595,6 +905,9 @@ typedef struct vm_client_completion
     vm_client_job_kind kind;
     bool success;
     bool closeAfterData;
+    bool requestIsUpdateChunk;
+    u32 updateChunkStart;
+    char updateChunkName[64];
     u8 *response;
     u8 *followup;
 } vm_client_completion;
@@ -627,6 +940,51 @@ static void vm_client_free_completion(vm_client_completion *completion)
     free(completion->response);
     free(completion->followup);
     free(completion);
+}
+
+static bool vm_client_capture_update_chunk_request(
+    const u8 *request, u32 requestLen, u32 *startOut,
+    char *nameOut, size_t nameOutCap)
+{
+    u32 packetLen = 0;
+    u32 offset = 4;
+
+    if (startOut != NULL)
+        *startOut = 0;
+    if (nameOut != NULL && nameOutCap != 0)
+        nameOut[0] = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' ||
+        request[1] != 'T')
+    {
+        return false;
+    }
+    packetLen = ((u32)request[2] << 8) | request[3];
+    if (packetLen < 9 || packetLen > requestLen)
+        return false;
+    while (offset + 5 <= packetLen)
+    {
+        u16 objectLen = (u16)(((u16)request[offset + 3] << 8) |
+                              request[offset + 4]);
+        vm_client_wt_object object;
+
+        if (objectLen < 5 || offset + objectLen > packetLen)
+            return false;
+        memset(&object, 0, sizeof(object));
+        object.major = request[offset];
+        object.kind = request[offset + 1];
+        object.subtype = request[offset + 2];
+        object.payload = request + offset + 5;
+        object.payloadLen = (u16)(objectLen - 5);
+        if (object.major == 1 && object.kind == 18 && object.subtype == 7)
+        {
+            (void)vm_client_wt_object_u32(&object, "start", startOut);
+            (void)vm_client_wt_object_string(&object, "name", nameOut,
+                                             nameOutCap);
+            return true;
+        }
+        offset += objectLen;
+    }
+    return false;
 }
 
 static void *vm_client_worker_main(void *unused)
@@ -681,6 +1039,15 @@ static void *vm_client_worker_main(void *unused)
         completion->connectId = job->connectId;
         completion->kind = job->kind;
         completion->eventType = 7;
+        if (job->kind == VM_CLIENT_JOB_DATA &&
+            vm_client_capture_update_chunk_request(
+                job->request, job->requestLen,
+                &completion->updateChunkStart,
+                completion->updateChunkName,
+                sizeof(completion->updateChunkName)))
+        {
+            completion->requestIsUpdateChunk = true;
+        }
 
         if (job->kind == VM_CLIENT_JOB_SCENE_POLL)
         {
@@ -801,6 +1168,104 @@ static bool vm_client_enqueue(vm_client_job_kind kind, u32 connectId,
     return true;
 }
 
+/* Capture scene lifecycle facts from the exact downlink packet.  The state is
+ * attached to that scheduler event and applied only immediately before its
+ * guest callback, preserving response order when multiple TCP jobs finish in
+ * one emulator frame. */
+static void vm_client_capture_remote_scene_observation(
+    const vm_client_completion *completion,
+    vm_net_remote_observation *observation)
+{
+    const u8 *packet = NULL;
+    u32 packetLen = 0;
+    u32 offset = 5;
+    u8 parsedCount = 0;
+
+    if (completion == NULL || observation == NULL ||
+        completion->eventType != 7 || completion->response == NULL ||
+        completion->responseLen < 5)
+    {
+        return;
+    }
+    packet = completion->response;
+    packetLen = ((u32)packet[2] << 8) | packet[3];
+    if (packet[0] != 'W' || packet[1] != 'T' || packetLen < 5 ||
+        packetLen > completion->responseLen)
+    {
+        return;
+    }
+    while (parsedCount < packet[4])
+    {
+        vm_client_wt_object object;
+
+        if (!vm_client_next_wt_object(packet, packetLen, &offset, &object))
+            return;
+        if (object.major == 1 && object.kind == 30 &&
+            (object.subtype == 1 || object.subtype == 2))
+        {
+            char scene[64];
+            u16 x = 0;
+            u16 y = 0;
+            bool haveScene = vm_client_wt_object_string(
+                &object, "scene", scene, sizeof(scene));
+            bool havePos = vm_client_wt_object_posinfo(&object, &x, &y);
+
+            if (haveScene && havePos)
+            {
+                observation->hasSceneTarget = 1;
+                observation->sceneSubtype = object.subtype;
+                observation->sceneX = x;
+                observation->sceneY = y;
+                snprintf(observation->scene, sizeof(observation->scene),
+                         "%s", scene);
+            }
+            if (object.subtype == 2)
+            {
+                observation->sceneCompleteAfterCallback = 1;
+                if (haveScene)
+                {
+                    snprintf(observation->scene,
+                             sizeof(observation->scene), "%s", scene);
+                }
+            }
+        }
+        if (completion->requestIsUpdateChunk && object.major == 1 &&
+            object.kind == 18 && object.subtype == 7)
+        {
+            const u8 *chunk = NULL;
+            u16 chunkLen = 0;
+            u32 totalSize = 0;
+            char payloadName[64];
+
+            payloadName[0] = 0;
+            if (vm_client_wt_object_u32(&object, "totalsize", &totalSize) &&
+                vm_client_wt_object_wrapped_bytes(
+                    &object, "data", &chunk, &chunkLen) &&
+                totalSize != 0 && chunkLen != 0 &&
+                completion->updateChunkStart <= totalSize &&
+                chunkLen <= totalSize - completion->updateChunkStart &&
+                completion->updateChunkStart + chunkLen >= totalSize)
+            {
+                if (!vm_client_wt_object_string(
+                        &object, "name", payloadName,
+                        sizeof(payloadName)))
+                {
+                    snprintf(payloadName, sizeof(payloadName), "%s",
+                             completion->updateChunkName);
+                }
+                if (payloadName[0] != 0)
+                {
+                    observation->updateComplete = 1;
+                    snprintf(observation->updateName,
+                             sizeof(observation->updateName), "%s",
+                             payloadName);
+                }
+            }
+        }
+        ++parsedCount;
+    }
+}
+
 /*
  * The post-shop hangup investigation needs the guest callback boundary, not
  * merely the TCP completion.  Recognise only the battle-start object prefix
@@ -832,7 +1297,6 @@ static void vm_client_capture_hangup_battle_start_response(
 
     if (observation == NULL)
         return;
-    memset(observation, 0, sizeof(*observation));
     if (completion == NULL || completion->eventType != 7 ||
         completion->response == NULL || completion->responseLen < 5)
     {
@@ -925,6 +1389,7 @@ static void vm_net_mock_async_drain_completions(void)
         u32 responsePtr;
         u32 nowMs;
 
+        memset(&remoteObservation, 0, sizeof(remoteObservation));
         pthread_mutex_lock(&g_vmClientAsync.mutex);
         completion = g_vmClientAsync.completionHead;
         if (completion != NULL)
@@ -981,6 +1446,8 @@ static void vm_net_mock_async_drain_completions(void)
             g_netMockResponseLen = completion->responseLen;
             g_netMockResponseOffset = 0;
         }
+        vm_client_capture_remote_scene_observation(completion,
+                                                   &remoteObservation);
         vm_client_capture_hangup_battle_start_response(completion,
                                                        &remoteObservation);
         vm_hangup_vital_forensics_capture_response(
@@ -1003,11 +1470,17 @@ static void vm_net_mock_async_drain_completions(void)
         scheduler_queue_net_event(completion->eventType, responsePtr,
                                   completion->responseLen, completion->responseLen,
                                   channel->callback, channel->context);
-        if (remoteObservation.hasHangupBattleStart)
+        if (remoteObservation.hasSceneTarget ||
+            remoteObservation.sceneCompleteAfterCallback ||
+            remoteObservation.updateComplete ||
+            remoteObservation.hasHangupBattleStart)
         {
             (void)scheduler_attach_net_remote_observation(
                 completion->eventType, responsePtr, channel->callback,
                 channel->context, &remoteObservation);
+        }
+        if (remoteObservation.hasHangupBattleStart)
+        {
             printf("[info][network] mock_hangup_response_queue seq=%u "
                    "event=%u response=%u objects=%u parsed=%u connect=%u "
                    "delivery=normal source=remote-hangup-start\n",

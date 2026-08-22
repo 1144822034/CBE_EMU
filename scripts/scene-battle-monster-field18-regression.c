@@ -14,7 +14,7 @@
 #include <string.h>
 
 #define main cbe_server_program_main
-#include "../src/main.c"
+#include "../src/server_main.c"
 #undef main
 
 int main(void)
@@ -26,10 +26,16 @@ int main(void)
     u8 encoded[512];
     u8 raw[516];
     u8 roundTrip[256];
+    u8 nativeStream[512];
+    u8 sharedMapScene[64];
+    u8 recoveredPrefix[14];
+    const char sharedMapName[] =
+        "01\xCC\xD2\xBB\xA8\xB5\xBA_01.map"; /* GBK: 01桃花岛_01.map */
     const u8 terminalFixture[] = {
         0xaa, 0xbb, 0xcc,
         8, 0, 0x46, 0, 0x26, 0, 1, 0, 1, 0, 0x26, 0, 0, 0
     };
+    const u8 zeroTerminalFixture[] = { 0xaa, 0xbb, 0x00, 0x00 };
     u32 pos = 0;
     u32 end = 0;
     u32 truncatedLen = 0;
@@ -38,6 +44,8 @@ int main(void)
     u32 roundTripLen = 0;
     u32 insertOffset = 0;
     u32 terminalLen = 0;
+    u32 nativeStreamLen = 0;
+    u32 sharedMapSceneLen = 0;
 
     memset(&row, 0, sizeof(row));
     memset(&spawn, 0, sizeof(spawn));
@@ -62,12 +70,76 @@ int main(void)
         return 1;
     }
 
+    /* 桃花岛's first 毒泥怪 is preceded by this exact native boundary:
+     * kind-8 (70,38), scalar field 1/value 38, zero word, then kind-3. */
+    {
+        const u8 taohuaPrefix[] = {
+            8, 0, 70, 0, 38, 0, 1, 0, 1, 0, 38, 0, 0, 0
+        };
+
+        memcpy(nativeStream, taohuaPrefix, sizeof(taohuaPrefix));
+        nativeStreamLen = sizeof(taohuaPrefix);
+        if (!vm_net_mock_scene_battle_monster_append_record(
+                nativeStream, sizeof(nativeStream), &nativeStreamLen, &row) ||
+            !vm_net_mock_scene_battle_monster_has_spawn_prefix(
+                nativeStream, nativeStreamLen, nativeStreamLen))
+        {
+            fputs("native short-marker/zero/kind-3 stream was not recognized\n",
+                  stderr);
+            return 1;
+        }
+        if (vm_net_mock_scene_battle_monster_has_spawn_prefix(
+                record, pos, pos))
+        {
+            fputs("bare kind-3 record was mistaken for a native spawn stream\n",
+                  stderr);
+            return 1;
+        }
+    }
+
+    /* A custom scene may reuse 桃花岛's MAP while omitting the marker.  The
+     * compiler must recover the authored marker from a shipped same-MAP SCE
+     * instead of deriving it from the requested monster coordinates. */
+    memset(sharedMapScene, 0, sizeof(sharedMapScene));
+    memcpy(sharedMapScene, "SCE2", 4);
+    sharedMapScene[4] = 0x40;
+    sharedMapScene[5] = 0x01;
+    sharedMapScene[6] = 0xd0;
+    sharedMapScene[7] = 0x01;
+    sharedMapScene[8] = 1;
+    sharedMapScene[10] = (u8)strlen(sharedMapName);
+    memcpy(sharedMapScene + 11, sharedMapName, strlen(sharedMapName));
+    sharedMapSceneLen = 11u + (u32)strlen(sharedMapName) + 4u;
+    if (!vm_net_mock_set_resource_dir("web/fs/JHOnlineData") ||
+        !vm_net_mock_scene_battle_monster_find_native_spawn_prefix(
+            sharedMapScene, sharedMapSceneLen, recoveredPrefix,
+            sizeof(recoveredPrefix)) ||
+        vm_net_mock_read_le16_at(recoveredPrefix, 0) != 8u ||
+        vm_net_mock_read_le16_at(recoveredPrefix, 2) != 70u ||
+        vm_net_mock_read_le16_at(recoveredPrefix, 4) != 38u ||
+        vm_net_mock_read_le16_at(recoveredPrefix, 10) != 38u ||
+        vm_net_mock_read_le16_at(recoveredPrefix, 12) != 0u)
+    {
+        fputs("same-MAP native spawn prefix recovery failed\n", stderr);
+        return 1;
+    }
+
     if (!vm_net_mock_scene_battle_monster_find_insert_offset(
             terminalFixture, sizeof(terminalFixture), &insertOffset,
             &terminalLen) ||
         insertOffset != 3u || terminalLen != 14u)
     {
         fputs("native SCE2 final kind-8 insertion boundary was not recovered\n",
+              stderr);
+        return 1;
+    }
+
+    if (!vm_net_mock_scene_battle_monster_find_insert_offset(
+            zeroTerminalFixture, sizeof(zeroTerminalFixture), &insertOffset,
+            &terminalLen) ||
+        insertOffset != 2u || terminalLen != 2u)
+    {
+        fputs("native SCE2 zero-word insertion boundary was not recovered\n",
               stderr);
         return 1;
     }

@@ -3304,6 +3304,8 @@ typedef enum
  * the complete non-zero u8 range rather than silently omitting the tail after
  * the former 64-row editor boundary. */
 #define VM_NET_MOCK_MONSTER_DROP_MAX 255u
+#define VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT 100u
+#define VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX 10000u
 
 typedef struct
 {
@@ -3317,8 +3319,74 @@ typedef struct
 typedef struct
 {
     u32 itemId;
-    u8 ratePercent;
+    /* Hundredths of one percent: 25 means 0.25%, 10000 means 100%. */
+    u16 rateBasisPoints;
 } vm_net_mock_monster_drop;
+
+static bool vm_net_mock_parse_drop_rate_basis_points(const char *text,
+                                                      size_t textLen,
+                                                      u16 *valueOut)
+{
+    u32 whole = 0;
+    u32 fraction = 0;
+    u32 fractionDigits = 0;
+    size_t pos = 0;
+
+    if (text == NULL || textLen == 0 || valueOut == NULL)
+        return false;
+    while (pos < textLen && text[pos] >= '0' && text[pos] <= '9')
+    {
+        u32 digit = (u32)(text[pos] - '0');
+
+        if (whole > (100u - digit) / 10u)
+            return false;
+        whole = whole * 10u + digit;
+        ++pos;
+    }
+    if (pos == 0)
+        return false;
+    if (pos < textLen && text[pos] == '.')
+    {
+        ++pos;
+        while (pos < textLen && text[pos] >= '0' && text[pos] <= '9')
+        {
+            if (fractionDigits == 2)
+                return false;
+            fraction = fraction * 10u + (u32)(text[pos] - '0');
+            ++fractionDigits;
+            ++pos;
+        }
+        if (fractionDigits == 0)
+            return false;
+    }
+    if (pos != textLen)
+        return false;
+    if (fractionDigits == 1)
+        fraction *= 10u;
+    if (whole > 100u ||
+        (whole == 100u && fraction != 0))
+    {
+        return false;
+    }
+    *valueOut = (u16)(whole * VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT +
+                      fraction);
+    return true;
+}
+
+static void vm_net_mock_format_drop_rate_basis_points(u16 rateBasisPoints,
+                                                      char *output,
+                                                      size_t outputCap)
+{
+    u32 whole = rateBasisPoints / VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT;
+    u32 fraction = rateBasisPoints % VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT;
+
+    if (output == NULL || outputCap == 0)
+        return;
+    if (fraction == 0)
+        snprintf(output, outputCap, "%u", whole);
+    else
+        snprintf(output, outputCap, "%u.%02u", whole, fraction);
+}
 
 typedef struct
 {
@@ -4791,14 +4859,15 @@ static bool vm_net_mock_monster_db_drop_row(void *contextValue,
 {
     vm_net_mock_monster_db_load_context *context =
         (vm_net_mock_monster_db_load_context *)contextValue;
-    u32 number[4];
+    u32 number[3];
+    u16 rateBasisPoints = 0;
     int index = -1;
     vm_net_mock_monster_override *override = NULL;
 
     memset(number, 0, sizeof(number));
     if (context == NULL || columnCount != 4)
         return false;
-    for (u32 i = 0; i < 4; ++i)
+    for (u32 i = 0; i < 3; ++i)
     {
         if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
         {
@@ -4806,10 +4875,16 @@ static bool vm_net_mock_monster_db_drop_row(void *contextValue,
             return true;
         }
     }
+    if (!vm_net_mock_parse_drop_rate_basis_points(values[3], lengths[3],
+                                                   &rateBasisPoints))
+    {
+        ++context->dropsSkipped;
+        return true;
+    }
     index = vm_net_mock_monster_catalog_index(number[0]);
     if (index < 0 || number[1] == 0 ||
         number[1] > VM_NET_MOCK_MONSTER_DROP_MAX || number[2] == 0 ||
-        number[3] == 0 || number[3] > 100u ||
+        rateBasisPoints == 0 ||
         vm_net_mock_find_shop_catalog_item(number[2]) == NULL)
     {
         ++context->dropsSkipped;
@@ -4823,9 +4898,85 @@ static bool vm_net_mock_monster_db_drop_row(void *contextValue,
         return true;
     }
     override->drops[override->dropCount].itemId = number[2];
-    override->drops[override->dropCount].ratePercent = (u8)number[3];
+    override->drops[override->dropCount].rateBasisPoints = rateBasisPoints;
     ++override->dropCount;
     ++context->dropsLoaded;
+    return true;
+}
+
+typedef struct
+{
+    u8 seenMask;
+    u8 decimalMask;
+    bool invalid;
+} vm_net_mock_monster_drop_rate_schema_context;
+
+static bool vm_net_mock_monster_drop_rate_schema_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_monster_drop_rate_schema_context *context =
+        (vm_net_mock_monster_drop_rate_schema_context *)contextValue;
+    u8 bit = 0;
+
+    if (context == NULL || columnCount != 3 || values == NULL ||
+        lengths == NULL || values[0] == NULL || values[1] == NULL ||
+        values[2] == NULL)
+    {
+        return false;
+    }
+    if (lengths[0] == strlen("server_monsters") &&
+        memcmp(values[0], "server_monsters", lengths[0]) == 0)
+    {
+        bit = 1u;
+    }
+    else if (lengths[0] == strlen("server_monster_drops") &&
+             memcmp(values[0], "server_monster_drops", lengths[0]) == 0)
+    {
+        bit = 2u;
+    }
+    else
+    {
+        context->invalid = true;
+        return true;
+    }
+    context->seenMask |= bit;
+    if (lengths[1] == strlen("decimal") &&
+        memcmp(values[1], "decimal", lengths[1]) == 0 &&
+        lengths[2] == 1 && values[2][0] == '2')
+    {
+        context->decimalMask |= bit;
+    }
+    return true;
+}
+
+static bool vm_net_mock_monster_drop_rate_schema_prepare(void)
+{
+    vm_net_mock_monster_drop_rate_schema_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT TABLE_NAME,DATA_TYPE,NUMERIC_SCALE "
+            "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+            "AND COLUMN_NAME='drop_rate_percent' AND TABLE_NAME IN "
+            "('server_monsters','server_monster_drops')",
+            vm_net_mock_monster_drop_rate_schema_row, &context) ||
+        context.invalid || context.seenMask != 3u)
+    {
+        return false;
+    }
+    if (context.decimalMask == 3u)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_monsters MODIFY COLUMN drop_rate_percent "
+            "DECIMAL(5,2) UNSIGNED NOT NULL DEFAULT 0") ||
+        !vm_mysql_exec(
+            "ALTER TABLE server_monster_drops MODIFY COLUMN drop_rate_percent "
+            "DECIMAL(5,2) UNSIGNED NOT NULL"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] monster_drop_rate_schema migration=decimal-2 action=applied\n");
     return true;
 }
 
@@ -4848,7 +4999,7 @@ static bool vm_net_mock_monster_db_load(void)
             "mp INT UNSIGNED NOT NULL,attack_value INT UNSIGNED NOT NULL,"
             "defense_value INT UNSIGNED NOT NULL,reward_exp INT UNSIGNED NOT NULL,"
             "reward_money INT UNSIGNED NOT NULL,drop_item_id INT UNSIGNED NOT NULL DEFAULT 0,"
-            "drop_rate_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "drop_rate_percent DECIMAL(5,2) UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(monster_id)) ENGINE=InnoDB") ||
@@ -4857,7 +5008,7 @@ static bool vm_net_mock_monster_db_load(void)
             "monster_id SMALLINT UNSIGNED NOT NULL,"
             "drop_slot TINYINT UNSIGNED NOT NULL,"
             "item_id INT UNSIGNED NOT NULL,"
-            "drop_rate_percent TINYINT UNSIGNED NOT NULL,"
+            "drop_rate_percent DECIMAL(5,2) UNSIGNED NOT NULL,"
             "PRIMARY KEY(monster_id,drop_slot),"
             "CONSTRAINT fk_server_monster_drops_monster "
             "FOREIGN KEY(monster_id) REFERENCES server_monsters(monster_id) "
@@ -4868,6 +5019,7 @@ static bool vm_net_mock_monster_db_load(void)
             "COLLATE ascii_bin NOT NULL,"
             "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "PRIMARY KEY(migration_name)) ENGINE=InnoDB") ||
+        !vm_net_mock_monster_drop_rate_schema_prepare() ||
         /* Old single-drop rows are a one-way compatibility source.  New
          * saves clear those legacy columns, so a later zero-drop edit cannot
          * be silently recreated on the next service restart. */
@@ -4969,7 +5121,9 @@ static u8 vm_net_mock_monster_drops_for_enemy(
         if (drops != NULL && dropCap != 0)
         {
             drops[0].itemId = entry.dropItemId;
-            drops[0].ratePercent = entry.dropRatePercent;
+            drops[0].rateBasisPoints =
+                (u16)(entry.dropRatePercent *
+                      VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT);
         }
     }
     return total;
@@ -5008,8 +5162,9 @@ static bool vm_net_mock_monster_admin_save(
     }
     for (u8 i = 0; i < row->dropCount; ++i)
     {
-        if (row->drops[i].itemId == 0 || row->drops[i].ratePercent == 0 ||
-            row->drops[i].ratePercent > 100u ||
+        if (row->drops[i].itemId == 0 || row->drops[i].rateBasisPoints == 0 ||
+            row->drops[i].rateBasisPoints >
+                VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX ||
             vm_net_mock_find_shop_catalog_item(row->drops[i].itemId) == NULL)
         {
             if (errorOut)
@@ -5060,12 +5215,17 @@ static bool vm_net_mock_monster_admin_save(
         goto mysql_failed;
     for (u8 i = 0; i < row->dropCount; ++i)
     {
+        char rateText[16];
+
+        memset(rateText, 0, sizeof(rateText));
+        vm_net_mock_format_drop_rate_basis_points(
+            row->drops[i].rateBasisPoints, rateText, sizeof(rateText));
         snprintf(query, sizeof(query),
                  "INSERT INTO server_monster_drops("
                  "monster_id,drop_slot,item_id,drop_rate_percent) "
-                 "VALUES(%u,%u,%u,%u)",
+                 "VALUES(%u,%u,%u,%s)",
                  row->enemyId, (u32)i + 1u, row->drops[i].itemId,
-                 row->drops[i].ratePercent);
+                 rateText);
         if (!vm_mysql_exec(query))
             goto mysql_failed;
     }
@@ -5282,9 +5442,28 @@ static int vm_net_mock_monster_equipment_drop_candidate_compare(
         (const vm_net_mock_monster_equipment_drop_candidate *)leftValue;
     const vm_net_mock_monster_equipment_drop_candidate *right =
         (const vm_net_mock_monster_equipment_drop_candidate *)rightValue;
+    u32 leftStage = (left->equipment->levelRequired - 1u) / 10u;
+    u32 rightStage = (right->equipment->levelRequired - 1u) / 10u;
 
+    /* Work one progression stage and worn slot at a time.  A boss may retain
+     * quality 1 and 2 for one slot, but its finite drop budget can still be
+     * saturated by one quality.  Alternate the initial boss-quality priority
+     * so both qualities remain represented across the worn positions. */
+    if (leftStage != rightStage)
+        return leftStage < rightStage ? -1 : 1;
+    if (left->equipment->slot != right->equipment->slot)
+    {
+        return left->equipment->slot < right->equipment->slot ? -1 : 1;
+    }
     if (left->equipment->quality != right->equipment->quality)
     {
+        if (left->equipment->quality != 0 && right->equipment->quality != 0)
+        {
+            u32 firstBossQuality =
+                ((leftStage + left->equipment->slot) & 1u) != 0 ? 1u : 2u;
+
+            return left->equipment->quality == firstBossQuality ? -1 : 1;
+        }
         return left->equipment->quality < right->equipment->quality ? -1 : 1;
     }
     if (left->equipment->levelRequired != right->equipment->levelRequired)
@@ -5326,8 +5505,8 @@ static u32 vm_net_mock_monster_equipment_drop_count(
     return count;
 }
 
-static bool vm_net_mock_monster_drop_row_has_equipment_slot(
-    const vm_net_mock_monster_admin_row *row, u8 slot)
+static bool vm_net_mock_monster_drop_row_has_equipment_slot_quality(
+    const vm_net_mock_monster_admin_row *row, u8 slot, u8 quality)
 {
     if (row == NULL || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
         return false;
@@ -5335,10 +5514,19 @@ static bool vm_net_mock_monster_drop_row_has_equipment_slot(
     {
         const vm_net_mock_equipment_catalog_item *equipment =
             vm_net_mock_find_equipment_catalog_item(row->drops[i].itemId);
-        if (equipment != NULL && equipment->slot == slot)
+        if (equipment != NULL && equipment->slot == slot &&
+            equipment->quality == quality)
             return true;
     }
     return false;
+}
+
+static u32 vm_net_mock_monster_equipment_drop_limit(
+    const vm_net_mock_monster_admin_row *row)
+{
+    if (row != NULL && row->family == VM_NET_MOCK_MONSTER_BOSS)
+        return VM_NET_MOCK_EQUIP_SLOT_COUNT * 2u;
+    return VM_NET_MOCK_EQUIP_SLOT_COUNT;
 }
 
 /* Smart drops are allocated by the same ten-level progression stages used by
@@ -5367,7 +5555,7 @@ static bool vm_net_mock_monster_preserve_authored_task_drop(
     vm_net_mock_monster_admin_row *row, u32 *preservedOut)
 {
     vm_net_mock_monster_entry entry;
-    u8 rate = 0;
+    u16 rate = 0;
 
     if (row == NULL)
         return false;
@@ -5379,13 +5567,14 @@ static bool vm_net_mock_monster_preserve_authored_task_drop(
         row->dropCount = 0;
         return true;
     }
-    rate = entry.dropRatePercent;
+    rate = (u16)(entry.dropRatePercent *
+                 VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT);
     for (u8 i = 0; i < row->dropCount; ++i)
     {
         if (row->drops[i].itemId == entry.dropItemId &&
-            row->drops[i].ratePercent != 0)
+            row->drops[i].rateBasisPoints != 0)
         {
-            rate = row->drops[i].ratePercent;
+            rate = row->drops[i].rateBasisPoints;
             break;
         }
     }
@@ -5396,7 +5585,7 @@ static bool vm_net_mock_monster_preserve_authored_task_drop(
         return false;
     }
     row->drops[row->dropCount].itemId = entry.dropItemId;
-    row->drops[row->dropCount].ratePercent = rate;
+    row->drops[row->dropCount].rateBasisPoints = rate;
     ++row->dropCount;
     if (preservedOut)
         *preservedOut = 1;
@@ -5411,7 +5600,7 @@ static bool vm_net_mock_monster_preserve_authored_task_drop(
  * distributed. */
 static bool vm_net_mock_monster_plan_equipment_drops(
     vm_net_mock_monster_admin_row *monsters, u32 monsterCount,
-    const u8 qualityRates[3],
+    const u16 qualityRates[3],
     vm_net_mock_monster_equipment_drop_assignment *assignment,
     const char **errorOut)
 {
@@ -5432,7 +5621,8 @@ static bool vm_net_mock_monster_plan_equipment_drops(
     }
     for (u32 quality = 0; quality < 3; ++quality)
     {
-        if (qualityRates[quality] == 0 || qualityRates[quality] > 100u)
+        if (qualityRates[quality] == 0 || qualityRates[quality] >
+                                               VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX)
             return false;
     }
     memset(assignedPerMonster, 0, sizeof(assignedPerMonster));
@@ -5543,12 +5733,13 @@ static bool vm_net_mock_monster_plan_equipment_drops(
                     monsters[monster].level,
                     candidate->equipment->levelRequired) ||
                 vm_net_mock_monster_equipment_drop_count(&monsters[monster]) >=
-                    VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+                    vm_net_mock_monster_equipment_drop_limit(&monsters[monster]) ||
                 monsters[monster].dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX ||
                 vm_net_mock_monster_drop_row_has_item(
                     &monsters[monster], candidate->equipment->itemId) ||
-                vm_net_mock_monster_drop_row_has_equipment_slot(
-                    &monsters[monster], candidate->equipment->slot))
+                vm_net_mock_monster_drop_row_has_equipment_slot_quality(
+                    &monsters[monster], candidate->equipment->slot,
+                    candidate->equipment->quality))
             {
                 continue;
             }
@@ -5591,7 +5782,7 @@ static bool vm_net_mock_monster_plan_equipment_drops(
         }
         monsters[best].drops[monsters[best].dropCount].itemId =
             candidate->equipment->itemId;
-        monsters[best].drops[monsters[best].dropCount].ratePercent =
+        monsters[best].drops[monsters[best].dropCount].rateBasisPoints =
             qualityRates[quality];
         ++monsters[best].dropCount;
         ++assignedPerMonster[best][quality];
@@ -5611,7 +5802,7 @@ done:
  * this operation entirely, so their authored stats and existing drops are
  * neither deleted nor rebuilt by an equipment-allocation run. */
 static bool vm_net_mock_monster_admin_assign_equipment_drops(
-    const u8 qualityRates[3],
+    const u16 qualityRates[3],
     vm_net_mock_monster_equipment_drop_assignment *assignmentOut,
     const char **errorOut)
 {
@@ -5694,13 +5885,18 @@ static bool vm_net_mock_monster_admin_assign_equipment_drops(
             goto mysql_failed;
         for (u8 drop = 0; drop < row->dropCount; ++drop)
         {
+            char rateText[16];
+
+            memset(rateText, 0, sizeof(rateText));
+            vm_net_mock_format_drop_rate_basis_points(
+                row->drops[drop].rateBasisPoints, rateText, sizeof(rateText));
             snprintf(query, sizeof(query),
                      "INSERT INTO server_monster_drops("
                      "monster_id,drop_slot,item_id,drop_rate_percent) "
-                     "VALUES(%u,%u,%u,%u)",
+                     "VALUES(%u,%u,%u,%s)",
                      row->enemyId, (u32)drop + 1u,
                      row->drops[drop].itemId,
-                     (u32)row->drops[drop].ratePercent);
+                     rateText);
             if (!vm_mysql_exec(query))
                 goto mysql_failed;
         }
@@ -5747,7 +5943,7 @@ static bool vm_net_mock_monster_admin_assign_equipment_drops(
     printf("[info][mock-admin] monster_equipment_drop_assign ordinary=%u bosses=%u "
            "scene_excluded=%u quality0=%u quality1=%u quality2=%u "
            "skipped0=%u skipped1=%u skipped2=%u task_drops=%u name_matches=%u "
-           "rates=%u/%u/%u transaction=committed\n",
+           "rates_bp=%u/%u/%u transaction=committed\n",
            assignment.ordinaryMonsterCount, assignment.bossMonsterCount,
            assignment.sceneBattleMonsterCount,
            assignment.equipmentByQuality[0], assignment.equipmentByQuality[1],

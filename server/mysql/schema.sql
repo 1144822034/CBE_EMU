@@ -211,6 +211,24 @@ CREATE TABLE IF NOT EXISTS `account_role_count_write_audit` (
   KEY `idx_role_count_write_audit_account` (`account_id`, `created_at`)
 ) ENGINE=InnoDB;
 
+-- 后台对账号和角色执行的人工管理操作，以及游戏内已提交的 W 币消费。
+-- 该表没有角色外键，保证角色删除、迁移或账号状态变化后仍可保留操作当时的
+-- 目标身份与审计证据。
+CREATE TABLE IF NOT EXISTS `server_admin_operation_logs` (
+  `log_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `action_code` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `target_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `target_role_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `item_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `item_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `change_amount` INT UNSIGNED NOT NULL DEFAULT 0,
+  `detail` VARBINARY(255) NOT NULL,
+  `created_at` TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`log_id`),
+  KEY `idx_admin_operation_logs_account` (`target_account_id`, `log_id`),
+  KEY `idx_admin_operation_logs_created` (`created_at`, `log_id`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `account_role_transfer_codes` (
   `verification_code` CHAR(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `source_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -444,6 +462,7 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
   `target_x` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `target_y` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `challenge_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `spawn_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `minimum_level` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -484,7 +503,7 @@ CREATE TABLE IF NOT EXISTS `server_monsters` (
   `reward_exp` INT UNSIGNED NOT NULL,
   `reward_money` INT UNSIGNED NOT NULL,
   `drop_item_id` INT UNSIGNED NOT NULL DEFAULT 0,
-  `drop_rate_percent` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `drop_rate_percent` DECIMAL(5,2) UNSIGNED NOT NULL DEFAULT 0,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`monster_id`)
@@ -497,7 +516,7 @@ CREATE TABLE IF NOT EXISTS `server_monster_drops` (
   `monster_id` SMALLINT UNSIGNED NOT NULL,
   `drop_slot` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
-  `drop_rate_percent` TINYINT UNSIGNED NOT NULL,
+  `drop_rate_percent` DECIMAL(5,2) UNSIGNED NOT NULL,
   PRIMARY KEY (`monster_id`, `drop_slot`),
   CONSTRAINT `fk_server_monster_drops_monster`
     FOREIGN KEY (`monster_id`) REFERENCES `server_monsters` (`monster_id`)

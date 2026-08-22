@@ -1395,26 +1395,40 @@ static void vm_net_mock_battle_reset_enemy_hp_from_stats(u32 enemyId)
     vm_net_mock_battle_sync_enemy_hp_totals();
 }
 
-static bool vm_net_mock_battle_roll_percent(u32 percent)
+static bool vm_net_mock_battle_roll_drop_rate_basis_points(u32 rateBasisPoints)
 {
-    if (percent == 0)
+    if (rateBasisPoints == 0)
         return false;
-    if (percent >= 100)
+    if (rateBasisPoints >= VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX)
         return true;
-    return (vm_net_mock_battle_reward_rand() % 100u) < percent;
+    return (vm_net_mock_battle_reward_rand() %
+            VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX) < rateBasisPoints;
 }
 
-/* A configured drop percentage belongs to the battle, not to each enemy row.
+/* Escape and other non-drop paths still express their chance as an integer
+ * percent.  Keep that contract separate from decimal equipment-drop rates. */
+static bool vm_net_mock_battle_roll_percent(u32 percent)
+{
+    if (percent >= 100u)
+        return vm_net_mock_battle_roll_drop_rate_basis_points(
+            VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX);
+    return vm_net_mock_battle_roll_drop_rate_basis_points(
+        percent * VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT);
+}
+
+/* A configured drop rate belongs to the battle, not to each enemy row.
  * Enemy count scales only the awarded quantity after that one roll succeeds.
  * Keeping this rule in one helper makes it impossible for a 5% drop to become
  * three independent 5% chances merely because the encounter spawned three
  * copies of the same monster. */
-static u32 vm_net_mock_battle_drop_count_for_battle(u32 percent,
+static u32 vm_net_mock_battle_drop_count_for_battle(u32 rateBasisPoints,
                                                     u32 enemyCount)
 {
     if (enemyCount == 0)
         return 0;
-    return vm_net_mock_battle_roll_percent(percent) ? enemyCount : 0;
+    return vm_net_mock_battle_roll_drop_rate_basis_points(rateBasisPoints)
+               ? enemyCount
+               : 0;
 }
 
 static u32 vm_net_mock_battle_reward_exp_for_enemy(u32 enemyId)
@@ -1551,16 +1565,36 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         {
             overrideDrop.itemId = vm_net_mock_env_u32_if_set(
                 "CBE_BATTLE_CHANGMING_SAN_ITEM_ID", overrideDrop.itemId);
-            overrideDrop.ratePercent = (u8)vm_net_mock_env_u32_if_set(
-                "CBE_BATTLE_CHANGMING_SAN_DROP_RATE", overrideDrop.ratePercent);
+            if (getenv("CBE_BATTLE_CHANGMING_SAN_DROP_RATE") != NULL)
+            {
+                u32 ratePercent = vm_net_mock_env_u32_if_set(
+                    "CBE_BATTLE_CHANGMING_SAN_DROP_RATE", 0);
+
+                if (ratePercent <= 100u)
+                {
+                    overrideDrop.rateBasisPoints = (u16)(
+                        ratePercent *
+                        VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT);
+                }
+            }
         }
         overrideDrop.itemId = vm_net_mock_env_u32_if_set(
             "CBE_BATTLE_DROP_ITEM_ID", overrideDrop.itemId);
-        overrideDrop.ratePercent = (u8)vm_net_mock_env_u32_if_set(
-            "CBE_BATTLE_DROP_RATE", overrideDrop.ratePercent);
+        if (getenv("CBE_BATTLE_DROP_RATE") != NULL)
+        {
+            u32 ratePercent = vm_net_mock_env_u32_if_set(
+                "CBE_BATTLE_DROP_RATE", 0);
+
+            if (ratePercent <= 100u)
+            {
+                overrideDrop.rateBasisPoints = (u16)(
+                    ratePercent *
+                    VM_NET_MOCK_DROP_RATE_BASIS_POINTS_PER_PERCENT);
+            }
+        }
         configuredDrops[0] = overrideDrop;
         configuredDropCount = overrideDrop.itemId != 0 &&
-                              overrideDrop.ratePercent != 0 ? 1 : 0;
+                              overrideDrop.rateBasisPoints != 0 ? 1 : 0;
     }
 
     for (u8 dropIndex = 0;
@@ -1579,8 +1613,9 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         bool dropEligible = false;
         bool dropRollHit = false;
 
-        if (configured->itemId != 0 && configured->ratePercent != 0 &&
-            configured->ratePercent <= 100u && role != NULL)
+        if (configured->itemId != 0 && configured->rateBasisPoints != 0 &&
+            configured->rateBasisPoints <=
+                VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX && role != NULL)
         {
             dropPolicyOk = vm_net_mock_task_material_drop_policy(
                 role->roleId, configured->itemId, &dropIsTaskMaterial,
@@ -1591,17 +1626,18 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         if (dropEligible)
         {
             rolledDropCount = vm_net_mock_battle_drop_count_for_battle(
-                configured->ratePercent, enemyCount);
+                configured->rateBasisPoints, enemyCount);
             dropRollHit = rolledDropCount != 0;
             grantedCount = rolledDropCount;
             if (dropIsTaskMaterial && grantedCount > taskMaterialRemaining)
                 grantedCount = taskMaterialRemaining;
         }
-        printf("[info][network] mock_battle_drop_gate enemy=%u role=%u slot=%u item=%u rate=%u "
+        printf("[info][network] mock_battle_drop_gate enemy=%u role=%u slot=%u item=%u rate_bp=%u "
                "task_material=%u remaining=%u policy=%s eligible=%u rolls=%u "
                "roll_hit=%u quantity_multiplier=%u rolled=%u grant=%u\n",
                g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
-               (u32)dropIndex + 1u, configured->itemId, configured->ratePercent,
+               (u32)dropIndex + 1u, configured->itemId,
+               configured->rateBasisPoints,
                dropIsTaskMaterial ? 1u : 0u, taskMaterialRemaining,
                dropPolicyOk ? "ok" : "unavailable", dropEligible ? 1u : 0u,
                dropEligible ? 1u : 0u, dropRollHit ? 1u : 0u, enemyCount,
@@ -1931,7 +1967,7 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     char sourceScene[64];
-    char nearestStoneScene[64];
+    char nearestTownScene[64];
     const char *respawnScene = NULL;
     const char *respawnRoute = "unresolved";
     u16 respawnX = VM_NET_MOCK_ROLE_INITIAL_X;
@@ -1966,20 +2002,19 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
         return 0;
 
     memset(sourceScene, 0, sizeof(sourceScene));
-    memset(nearestStoneScene, 0, sizeof(nearestStoneScene));
+    memset(nearestTownScene, 0, sizeof(nearestTownScene));
     if (vm_net_mock_scene_name_is_safe(role->scene))
         snprintf(sourceScene, sizeof(sourceScene), "%s", role->scene);
 
-    /* The ordinary death choice must return the player to an authored
-     * teleport-stone scene.  Keep an unresolved source explicit and retain the
-     * current valid scene rather than silently turning a data failure into a
-     * bootstrap-map respawn. */
-    if (sourceScene[0] != 0 && vm_net_mock_resolve_nearest_teleport_stone_respawn(
-            sourceScene, nearestStoneScene, sizeof(nearestStoneScene),
+    /* Ordinary death returns to the nearest authored town centre.  Keep an
+     * unresolved source explicit and retain the current valid scene rather
+     * than silently turning a data failure into a bootstrap-map respawn. */
+    if (sourceScene[0] != 0 && vm_net_mock_resolve_nearest_town_center_respawn(
+            sourceScene, nearestTownScene, sizeof(nearestTownScene),
             &respawnX, &respawnY, &sourceSmapRow, &targetSmapRow,
             &respawnDistance, &respawnRoute))
     {
-        respawnScene = nearestStoneScene;
+        respawnScene = nearestTownScene;
     }
     else if (vm_net_mock_scene_name_is_safe(sourceScene))
     {
@@ -1990,7 +2025,9 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
                                                               &respawnY,
                                                               NULL);
         vm_net_mock_adjust_safe_player_pos_for_scene(respawnScene, &respawnX, &respawnY);
-        printf("[error][network] mock_death_respawn_nearest_telestone_unresolved source_scene=%s action=keep-current-scene reason=sMap-wMap-or-SCE-data\n",
+        (void)vm_net_mock_adjust_recovery_landing_to_map_safe(respawnScene,
+                                                               &respawnX, &respawnY);
+        printf("[error][network] mock_death_respawn_nearest_town_unresolved source_scene=%s action=keep-current-scene reason=sMap-wMap-or-SCE-data\n",
                sourceScene);
     }
     else
@@ -2002,7 +2039,9 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
                                                               &respawnY,
                                                               NULL);
         vm_net_mock_adjust_safe_player_pos_for_scene(respawnScene, &respawnX, &respawnY);
-        printf("[error][network] mock_death_respawn_nearest_telestone_unresolved source_scene=- action=initial-scene reason=invalid-role-scene\n");
+        (void)vm_net_mock_adjust_recovery_landing_to_map_safe(respawnScene,
+                                                               &respawnX, &respawnY);
+        printf("[error][network] mock_death_respawn_nearest_town_unresolved source_scene=- action=initial-scene reason=invalid-role-scene\n");
     }
 
     vm_net_mock_role_sync_derived_vitals(role);
@@ -2060,7 +2099,7 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
            expBefore, role->exp, levelExpRequired, expPenalty, moneyPenalty, role->scene,
            sourceSmapRow, targetSmapRow, respawnRoute ? respawnRoute : "-",
            respawnDistance, role->x, role->y);
-    vm_autotest_note("mock_death_penalty reason=%s level=%u->%u exp=%u->%u level_exp_required=%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u) evidence=sMap.dsh/wMap.dsh/SCE:n_telestone\n",
+    vm_autotest_note("mock_death_penalty reason=%s level=%u->%u exp=%u->%u level_exp_required=%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u) evidence=sMap.dsh/wMap.dsh(monster-level=none)/SCE\n",
                      reason ? reason : "battle-death", levelBefore, role->level,
                      expBefore, role->exp, levelExpRequired, expPenalty, moneyPenalty, role->scene,
                      sourceSmapRow, targetSmapRow, respawnRoute ? respawnRoute : "-",
@@ -2272,6 +2311,14 @@ typedef struct
      * must never emit another scene+posinfo result for the same target.
      */
     bool sceneEnterPosinfoSent;
+    /* A 30/1 or position-bearing 30/2 starts the destination shell.  The
+     * separate no-posinfo 30/2 closes that shell only after every invalidated
+     * scene resource required by it has completed WT18/7. */
+    bool sceneCompletionSent;
+    /* Content-manifest scenes get one lightweight 25/5 acknowledgement before
+     * completion. Cached scenes then continue immediately with WT6/1, while
+     * missing scenes use the same open loader to request WT18/7. */
+    bool sceneResourceProbeAcknowledged;
 } vm_net_mock_scene_change_target;
 
 typedef struct
@@ -6762,6 +6809,10 @@ typedef struct
     u16 orientation;
     u16 instanceX;
     u16 instanceY;
+    /* Optional kind-3 scene battle monster to be shown after entering the
+     * configured instance scene.  This is deliberately independent from
+     * challengeEnemyId, which belongs to the source-scene guard challenge. */
+    u32 instanceSpawnEnemyId;
     u16 instanceMinLevel;
     char actorResource[64];
     char displayName[32];
