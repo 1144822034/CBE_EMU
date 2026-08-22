@@ -32,6 +32,8 @@ import {
   GlForensicRing,
   isAlertForensicClass,
   isGameDisplayPhase,
+  isTextureSourceNullError,
+  scanBrokenTextures,
   type ForensicClass,
 } from "./debug/glForensic";
 import { GameSession } from "./game/GameSession";
@@ -5871,10 +5873,20 @@ dialog.hide();
   const forensicRing = new GlForensicRing();
   let forensicHeartbeatN = 0;
   let lastForensicClipboardAt = 0;
+  let lastOkRenderAt = performance.now();
+  let lastRenderCrashForensicAt = 0;
+  let lastRenderStallForensicAt = 0;
+  const RENDER_STALL_MS = 2500;
 
   const recordForensic = async (
     why: string,
-    opts?: { blank?: boolean | null; forceBlankProbe?: boolean },
+    opts?: {
+      blank?: boolean | null;
+      forceBlankProbe?: boolean;
+      classOverride?: ForensicClass;
+      extra?: Record<string, unknown>;
+      scanBroken?: boolean;
+    },
   ): Promise<ForensicClass> => {
     const glLost = isGlContextLost();
     let blank: boolean | null =
@@ -5885,7 +5897,9 @@ dialog.hide();
         glLost ||
         why.includes("blank") ||
         why.includes("context") ||
-        why.startsWith("recover")
+        why.startsWith("recover") ||
+        why.includes("stall") ||
+        why.includes("crash")
       ) {
         blank = canvasLooksBlank();
       }
@@ -5901,8 +5915,22 @@ dialog.hide();
       mapW: map.mapW,
       mapH: map.mapH,
       hasMapSprite: map.hasMapSprite,
+      classOverride: opts?.classOverride,
     });
-    const payload = glPressureSnapshot();
+    const payload: Record<string, unknown> = {
+      ...glPressureSnapshot(),
+      msSinceOkRender: Math.round(performance.now() - lastOkRenderAt),
+      ...(opts?.extra ?? {}),
+    };
+    if (opts?.scanBroken) {
+      try {
+        payload.brokenTex = scanBrokenTextures(
+          app.stage as unknown as Parameters<typeof scanBrokenTextures>[0],
+        );
+      } catch (e) {
+        payload.brokenTexErr = e instanceof Error ? e.message : String(e);
+      }
+    }
     const ev = {
       t: performance.now(),
       iso: new Date().toISOString(),
@@ -5929,6 +5957,45 @@ dialog.hide();
     }
     return cls;
   };
+
+  const noteRenderCrash = (err: unknown, why: string): void => {
+    const now = performance.now();
+    if (now - lastRenderCrashForensicAt < 2000) return;
+    lastRenderCrashForensicAt = now;
+    void recordForensic(why, {
+      classOverride: "RENDER_CRASH",
+      forceBlankProbe: true,
+      scanBroken: true,
+      extra: {
+        err: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.slice(0, 600) : undefined,
+      },
+    });
+  };
+
+  // Observe-only: wrap render so we see TEX_NULL crashes even when blank probe is false.
+  {
+    const rawRender = app.render.bind(app);
+    app.render = (() => {
+      try {
+        rawRender();
+        lastOkRenderAt = performance.now();
+      } catch (e) {
+        noteRenderCrash(
+          e,
+          isTextureSourceNullError(e)
+            ? "render-crash:alphaMode"
+            : "render-crash:other",
+        );
+        throw e;
+      }
+    }) as typeof app.render;
+  }
+
+  window.addEventListener("error", (ev) => {
+    if (!isTextureSourceNullError(ev.error ?? ev.message)) return;
+    noteRenderCrash(ev.error ?? ev.message, "render-crash:window-error");
+  });
 
   const dumpForensic = (): string => {
     const text = forensicRing.dumpJson();
@@ -6293,10 +6360,24 @@ dialog.hide();
     if (document.visibilityState === "hidden") return;
     if (!isGameDisplayPhase(phase)) return;
     forensicHeartbeatN += 1;
+    const msSinceOk = performance.now() - lastOkRenderAt;
+    if (
+      msSinceOk >= RENDER_STALL_MS &&
+      performance.now() - lastRenderStallForensicAt > 8000
+    ) {
+      lastRenderStallForensicAt = performance.now();
+      void recordForensic(`render-stall:${Math.round(msSinceOk)}ms`, {
+        classOverride: "RENDER_STALL",
+        forceBlankProbe: true,
+        scanBroken: true,
+        extra: { msSinceOkRender: Math.round(msSinceOk) },
+      });
+    }
     const probe =
       forensicHeartbeatN % 3 === 0 ||
       isGlContextLost() ||
-      glLostAt > 0;
+      glLostAt > 0 ||
+      msSinceOk >= RENDER_STALL_MS;
     void recordForensic(`heartbeat:${forensicHeartbeatN}`, {
       forceBlankProbe: probe,
       blank: probe ? undefined : null,

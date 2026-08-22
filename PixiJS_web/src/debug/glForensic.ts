@@ -9,6 +9,8 @@ export type ForensicClass =
   | "EMPTY_SCENE"
   | "PHASE_HIDE"
   | "BATTLE_BLACK"
+  | "RENDER_CRASH"
+  | "RENDER_STALL"
   | "UNKNOWN"
   | "OK";
 
@@ -22,6 +24,8 @@ export interface ForensicClassifyInput {
   mapW: number;
   mapH: number;
   hasMapSprite: boolean;
+  /** When set, wins over heuristic (crash/stall injectors). */
+  classOverride?: ForensicClass;
 }
 
 export interface ForensicEvent {
@@ -32,6 +36,18 @@ export interface ForensicEvent {
   blank: boolean | null;
   glLost: boolean;
   payload: Record<string, unknown>;
+}
+
+export interface BrokenTexHit {
+  path: string;
+  kind: string;
+  label: string;
+  visible: boolean;
+  texUid?: number;
+  texLabel?: string;
+  sourceNull: boolean;
+  sourceDestroyed: boolean;
+  urlHint: string;
 }
 
 const RING_CAP = 80;
@@ -57,7 +73,19 @@ export function isGameDisplayPhase(phase: string): boolean {
 }
 
 export function classifyForensic(input: ForensicClassifyInput): ForensicClass {
+  if (input.classOverride) return input.classOverride;
+
   const why = input.why.toLowerCase();
+  if (
+    why.includes("render-crash") ||
+    why.includes("alphamode") ||
+    why.includes("texturesource")
+  ) {
+    return "RENDER_CRASH";
+  }
+  if (why.includes("render-stall") || why.startsWith("stall:")) {
+    return "RENDER_STALL";
+  }
   if (
     input.glLost ||
     why.includes("contextlost") ||
@@ -104,6 +132,7 @@ function okPayloadKey(payload: Record<string, unknown>): string {
     payload.peers,
     payload.peersWithCos,
     payload.plist,
+    payload.msSinceOkRender,
   ].join("|");
 }
 
@@ -135,7 +164,7 @@ export class GlForensicRing {
   dumpJson(): string {
     return JSON.stringify(
       {
-        v: 1,
+        v: 2,
         n: this.events.length,
         events: this.events,
       },
@@ -156,4 +185,104 @@ export async function copyForensicText(text: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function urlHintFromTex(tex: {
+  label?: string;
+  source?: {
+    label?: string;
+    resource?: unknown;
+    _source?: unknown;
+  } | null;
+}): string {
+  const src = tex.source;
+  const bits = [
+    tex.label,
+    src?.label,
+    typeof (src as { resource?: { src?: string } } | null)?.resource?.src ===
+    "string"
+      ? (src as { resource: { src: string } }).resource.src
+      : "",
+  ].filter(Boolean);
+  const s = bits.join("|");
+  if (!s) return "";
+  const leaf = s.replace(/^.*[/\\]/, "");
+  return leaf.slice(0, 96);
+}
+
+type WalkNode = {
+  label?: string;
+  visible?: boolean;
+  children?: WalkNode[];
+  texture?: {
+    uid?: number;
+    label?: string;
+    destroyed?: boolean;
+    source?: { destroyed?: boolean; label?: string; resource?: unknown } | null;
+  };
+  constructor?: { name?: string };
+};
+
+/**
+ * Find sprites/meshes still in the tree whose texture.source is null/destroyed
+ * (typical cause of Batcher alphaMode TypeError → frozen LCD).
+ */
+export function scanBrokenTextures(
+  root: WalkNode | null | undefined,
+  maxHits = 24,
+): BrokenTexHit[] {
+  const hits: BrokenTexHit[] = [];
+  if (!root) return hits;
+
+  const walk = (node: WalkNode, path: string, depth: number): void => {
+    if (hits.length >= maxHits || depth > 48) return;
+    const kind = node.constructor?.name || "?";
+    const label = String(node.label || "");
+    const tex = node.texture;
+    if (tex) {
+      let sourceNull = false;
+      let sourceDestroyed = false;
+      try {
+        const src = tex.source;
+        sourceNull = src == null;
+        sourceDestroyed = !!(tex.destroyed || src?.destroyed);
+      } catch {
+        sourceNull = true;
+      }
+      if (sourceNull || sourceDestroyed) {
+        hits.push({
+          path,
+          kind,
+          label,
+          visible: node.visible !== false,
+          texUid: tex.uid,
+          texLabel: tex.label,
+          sourceNull,
+          sourceDestroyed,
+          urlHint: urlHintFromTex(tex),
+        });
+      }
+    }
+    const kids = node.children;
+    if (!kids?.length) return;
+    for (let i = 0; i < kids.length; i++) {
+      const ch = kids[i];
+      if (!ch) continue;
+      const cn = ch.constructor?.name || "?";
+      const cl = ch.label ? `(${ch.label})` : "";
+      walk(ch, `${path}/${i}:${cn}${cl}`, depth + 1);
+    }
+  };
+
+  walk(root, "stage", 0);
+  return hits;
+}
+
+export function isTextureSourceNullError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return (
+    /alphaMode/i.test(msg) ||
+    /textureSource/i.test(msg) ||
+    /Cannot read properties of null/i.test(msg)
+  );
 }
