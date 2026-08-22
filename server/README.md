@@ -39,6 +39,14 @@ CBE_RESOURCE_ROOT=/mnt/vdb/JHOnline/bin/JHOnlineData ./bin/jh-online-server
 ./bin/jh-online-server --resource-root=/mnt/vdb/JHOnline
 ```
 
+Treat this directory as the immutable base resource tree. Generated scene
+battle-monster publications are written under
+`JHOnlineData/.cbe-overlays/<CBE_MYSQL_DATABASE>/` and the active database's
+overlay is preferred for WT 18/7 downloads. Different databases may share the
+same base tree, but they must not copy generated SCE files back into the base
+directory. Deployments created by older builds must be explicitly republished
+once so their files are created in the database-scoped overlay.
+
 ### Windows
 
 ```powershell

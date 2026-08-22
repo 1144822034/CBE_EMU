@@ -978,6 +978,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             vm_mock_service_account_capture(accountState);
         }
         vm_mock_service_session_mark_offline(clientSession, "explicit-disconnect");
+        vm_net_mock_content_client_forget(requestMeta.clientId);
         g_vm_mock_service_active_account = NULL;
         g_vm_mock_service_active_account_id = NULL;
         g_vm_mock_service_active_client_id = 0;
@@ -1603,12 +1604,17 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     u32 acceptedGameLogCount = 0;
     u32 acceptedAdminLogCount = 0;
     bool legacyAccountMigration = false;
+    const char *activeDatabase = getenv("CBE_MYSQL_DATABASE");
 
     if (!vm_net_mock_service_ensure_resource_root())
     {
         printf("[error][mock-service] resource root unresolved required=task.dsh+item.dsh+equip.dsh\n");
         return -1;
     }
+    if (activeDatabase == NULL || activeDatabase[0] == 0)
+        activeDatabase = "jh_online";
+    printf("[info][mock-service] resource_overlay database=%s root=%s/.cbe-overlays/%s base=immutable\n",
+           activeDatabase, vm_net_mock_resource_dir(), activeDatabase);
 
     if (!vm_mock_service_socket_init())
     {

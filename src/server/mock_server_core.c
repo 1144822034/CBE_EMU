@@ -23,6 +23,9 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <time.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 #include "../mysql-client.h"
 #include "../md5.h"
 
@@ -1457,6 +1460,7 @@ static u32 vm_net_mock_copy_response(const u8 *response, u32 responseLen, u8 *ou
 static char g_vm_net_mock_resource_dir[1024];
 static long vm_net_mock_file_size(const char *path);
 static long vm_net_mock_update_file_size(const char *name);
+static FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode);
 static u32 g_vm_mock_service_active_client_id;
 /* The headless service assigns this before dispatching every game packet.  The
  * startup updater uses it to associate the pre-login 18/9 request with the
@@ -1500,11 +1504,106 @@ static bool vm_net_mock_build_configured_resource_path(const char *name,
                     name) < (int)outCap;
 }
 
+/* Scene deployments are mutable server state.  Keep them outside the base
+ * JHOnlineData tree and scope the overlay by the active MySQL database so two
+ * service instances cannot publish different bytes under one resource key. */
+static bool vm_net_mock_overlay_database_is_safe(const char *name)
+{
+    if (name == NULL || name[0] == 0 || strstr(name, "..") != NULL)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; ++p)
+    {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-'))
+            return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_overlay_resource_name_is_safe(const char *name)
+{
+    if (name == NULL || name[0] == 0 || strstr(name, "..") != NULL)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; ++p)
+    {
+        if (*p == '/' || *p == '\\' || *p == ':' || *p < 0x20)
+            return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_overlay_ensure_directory(const char *path)
+{
+    if (path == NULL || path[0] == 0)
+        return false;
+#ifdef _WIN32
+    if (CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS)
+        return true;
+#else
+    if (mkdir(path, 0755) == 0 || errno == EEXIST)
+        return true;
+#endif
+    return false;
+}
+
+static bool vm_net_mock_build_overlay_resource_path(const char *name,
+                                                    char *out,
+                                                    size_t outCap)
+{
+    const char *database = getenv("CBE_MYSQL_DATABASE");
+    char overlayRoot[1200];
+    char databaseRoot[1400];
+    size_t dirLen = strlen(g_vm_net_mock_resource_dir);
+
+    if (database == NULL || database[0] == 0)
+        database = "jh_online";
+    if (out == NULL || outCap == 0 || name == NULL || name[0] == 0 ||
+        dirLen == 0 || !vm_net_mock_overlay_resource_name_is_safe(name) ||
+        !vm_net_mock_overlay_database_is_safe(database))
+        return false;
+    if (snprintf(overlayRoot, sizeof(overlayRoot), "%s/.cbe-overlays",
+                 g_vm_net_mock_resource_dir) >= (int)sizeof(overlayRoot) ||
+        snprintf(databaseRoot, sizeof(databaseRoot), "%s/%s", overlayRoot,
+                 database) >= (int)sizeof(databaseRoot))
+        return false;
+    if (!vm_net_mock_overlay_ensure_directory(overlayRoot) ||
+        !vm_net_mock_overlay_ensure_directory(databaseRoot))
+        return false;
+    return snprintf(out, outCap, "%s/%s", databaseRoot, name) < (int)outCap;
+}
+
+static bool vm_net_mock_open_server_base_resource(const char *name,
+                                                  FILE **fpOut,
+                                                  char *pathOut,
+                                                  size_t pathOutCap)
+{
+    char path[1200];
+    FILE *fp = NULL;
+
+    if (fpOut)
+        *fpOut = NULL;
+    if (pathOut && pathOutCap)
+        pathOut[0] = 0;
+    if (!vm_net_mock_build_configured_resource_path(name, path, sizeof(path)))
+        return false;
+    fp = vm_net_mock_fopen_game_path(path, "rb");
+    if (fp == NULL)
+        return false;
+    if (pathOut && pathOutCap)
+        snprintf(pathOut, pathOutCap, "%s", path);
+    if (fpOut)
+        *fpOut = fp;
+    else
+        fclose(fp);
+    return true;
+}
+
 enum
 {
     VM_NET_MOCK_UPDATE_SLOT_COUNT = 4,
     VM_NET_MOCK_UPDATE_DELIVERY_MAX = 256,
     VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX = 64,
+    VM_NET_MOCK_CONTENT_CLIENT_STATE_MAX = 64,
     VM_NET_MOCK_UPDATE_PAYLOAD_MAX = 1024 * 1024,
     /* WT 18/8 is a startup cache-invalidation manifest.  Each entry is a
      * u8 filename length followed by the resource name.  The resource root
@@ -1552,6 +1651,15 @@ typedef struct
     u32 nameCount;
 } vm_net_mock_content_update_config;
 
+typedef struct
+{
+    u32 clientId;
+    u32 releaseId;
+    u32 releaseCode;
+    bool negotiated;
+    u8 pending[(VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX + 7) / 8];
+} vm_net_mock_content_client_state;
+
 static const char *g_vm_net_mock_update_slot_files[VM_NET_MOCK_UPDATE_SLOT_COUNT] = {
     "mmTitleMstarWqvga.cbm",
     "mmGameMstarWqvga.cbm",
@@ -1575,11 +1683,126 @@ static bool g_vm_net_mock_update_catalog_loaded = false;
 static bool g_vm_net_mock_update_delivery_loaded = false;
 static vm_net_mock_content_update_config g_vm_net_mock_content_update;
 static bool g_vm_net_mock_content_update_loaded = false;
+static vm_net_mock_content_client_state
+    g_vm_net_mock_content_client_states[VM_NET_MOCK_CONTENT_CLIENT_STATE_MAX];
 
 static u32 vm_net_mock_signed_byte_sum(const u8 *data, u32 len);
 static long vm_net_mock_update_file_size(const char *name);
 static bool vm_net_mock_content_update_resource_checksum(const char *name,
                                                          u32 *checksumOut);
+
+static vm_net_mock_content_client_state *
+vm_net_mock_content_client_state_find(u32 clientId, bool create)
+{
+    vm_net_mock_content_client_state *empty = NULL;
+
+    if (clientId == 0)
+        return NULL;
+    for (u32 i = 0; i < VM_NET_MOCK_CONTENT_CLIENT_STATE_MAX; ++i)
+    {
+        vm_net_mock_content_client_state *state =
+            &g_vm_net_mock_content_client_states[i];
+
+        if (state->clientId == clientId)
+            return state;
+        if (empty == NULL && state->clientId == 0)
+            empty = state;
+    }
+    if (!create)
+        return NULL;
+    if (empty == NULL)
+    {
+        /* Client ids are connection-scoped. Keep the tracker bounded without
+         * ever turning one client's cache state into global authority. */
+        empty = &g_vm_net_mock_content_client_states[
+            clientId % VM_NET_MOCK_CONTENT_CLIENT_STATE_MAX];
+    }
+    memset(empty, 0, sizeof(*empty));
+    empty->clientId = clientId;
+    return empty;
+}
+
+static void vm_net_mock_content_client_note_version(
+    u32 clientId, bool haveContentUpdate, bool clientContentCurrent)
+{
+    vm_net_mock_content_client_state *state =
+        vm_net_mock_content_client_state_find(clientId, true);
+
+    if (state == NULL)
+        return;
+    memset(state->pending, 0, sizeof(state->pending));
+    state->releaseId = haveContentUpdate ? g_vm_net_mock_content_update.id : 0;
+    state->releaseCode = haveContentUpdate ? g_vm_net_mock_content_update.code : 0;
+    state->negotiated = true;
+    if (haveContentUpdate && !clientContentCurrent)
+    {
+        for (u32 i = 0; i < g_vm_net_mock_content_update.nameCount; ++i)
+            state->pending[i >> 3] |= (u8)(1u << (i & 7));
+    }
+    printf("[info][network] mock_content_client_state client=%08x "
+           "release=%u/%u pending=%u source=WT18/9\n",
+           clientId, state->releaseId, state->releaseCode,
+           haveContentUpdate && !clientContentCurrent
+               ? g_vm_net_mock_content_update.nameCount : 0);
+}
+
+static int vm_net_mock_content_update_name_index(const char *name)
+{
+    if (name == NULL || name[0] == 0)
+        return -1;
+    for (u32 i = 0; i < g_vm_net_mock_content_update.nameCount; ++i)
+    {
+        if (strcmp(g_vm_net_mock_content_update.names[i], name) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+static bool vm_net_mock_content_client_resource_pending(u32 clientId,
+                                                        const char *name)
+{
+    vm_net_mock_content_client_state *state =
+        vm_net_mock_content_client_state_find(clientId, false);
+    int index = vm_net_mock_content_update_name_index(name);
+
+    if (state == NULL || !state->negotiated || index < 0 ||
+        state->releaseId != g_vm_net_mock_content_update.id ||
+        state->releaseCode != g_vm_net_mock_content_update.code)
+    {
+        return false;
+    }
+    return (state->pending[(u32)index >> 3] &
+            (u8)(1u << ((u32)index & 7))) != 0;
+}
+
+static void vm_net_mock_content_client_mark_resource_installed(
+    u32 clientId, const char *name)
+{
+    vm_net_mock_content_client_state *state =
+        vm_net_mock_content_client_state_find(clientId, false);
+    int index = vm_net_mock_content_update_name_index(name);
+
+    if (state == NULL || !state->negotiated || index < 0 ||
+        state->releaseId != g_vm_net_mock_content_update.id ||
+        state->releaseCode != g_vm_net_mock_content_update.code)
+    {
+        return;
+    }
+    state->pending[(u32)index >> 3] &=
+        (u8)~(1u << ((u32)index & 7));
+    printf("[info][network] mock_content_client_resource_ready client=%08x "
+           "release=%u file_index=%d file=%s source=final-WT18/7\n",
+           clientId, state->releaseId, index, name);
+}
+
+static void vm_net_mock_content_client_forget(u32 clientId)
+{
+    vm_net_mock_content_client_state *state =
+        vm_net_mock_content_client_state_find(clientId, false);
+
+    if (state != NULL)
+        memset(state, 0, sizeof(*state));
+}
 
 static bool vm_net_mock_update_name_is_safe(const char *name)
 {
@@ -1605,6 +1828,21 @@ static bool vm_net_mock_update_resource_path(const char *leaf,
     };
     if (!vm_net_mock_update_name_is_safe(leaf))
         return false;
+    {
+        char overlayPath[1400];
+        FILE *overlay = NULL;
+        if (vm_net_mock_build_overlay_resource_path(leaf, overlayPath,
+                                                    sizeof(overlayPath)))
+        {
+            overlay = vm_net_mock_fopen_game_path(overlayPath, "rb");
+            if (overlay != NULL)
+            {
+                fclose(overlay);
+                return snprintf(out, outCap, "%s", overlayPath) <
+                       (int)outCap;
+            }
+        }
+    }
     if (vm_net_mock_build_configured_resource_path(leaf, out, outCap))
         return true;
     for (u32 i = 0; i < sizeof(fallbackRoots) / sizeof(fallbackRoots[0]); ++i)
@@ -3516,6 +3754,8 @@ static void vm_net_mock_note_update_chunk_complete(const char *payloadName)
 
     if (payloadName == NULL || payloadName[0] == 0)
         return;
+    vm_net_mock_content_client_mark_resource_installed(
+        g_vm_mock_service_active_client_id, payloadName);
     snprintf(g_vm_net_mock_update_completed_name,
              sizeof(g_vm_net_mock_update_completed_name),
              "%s",
@@ -3541,8 +3781,9 @@ static u32 vm_net_mock_load_requested_resource_payload(const char *payloadName,
     static const char *pathFormats[] = {
         /*
          * WT 18/7 chunks represent server-side resource downloads. Use the
-         * clean source tree, not the client's writable cache: a failed run can
-         * leave JHOnlineData/<name> polluted with the wrong payload.
+         * active database overlay or immutable source tree, not the client's
+         * writable cache: a failed run can leave JHOnlineData/<name> polluted
+         * with the wrong payload.
          * The emulator is normally started from bin/, so include the parent
          * workspace path before the project-root relative form.
          */
@@ -4929,6 +5170,12 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    if (result == 0 && requestKind == 0x12 && requestSubtype == 9)
+    {
+        vm_net_mock_content_client_note_version(
+            g_vm_mock_service_active_client_id, haveContentUpdate,
+            clientContentCurrent);
+    }
     printf("[info][network] mock_update_version request=%u/%u result=0x%02x identity=%08x source=%s configured=%u/%u/%u/%u content=%u/%u/%u client_content=%u/%u action=%s\n",
            requestKind, requestSubtype, result, identityHash,
            usedClientVersions ? "client-cbm-versions" : "delivery-ledger",
@@ -5309,7 +5556,6 @@ enum
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
     VM_NET_MOCK_SHOP_PAGE_SIZE = 10,
-    VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 8,
     VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS = 80,
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
@@ -5322,7 +5568,6 @@ enum
     VM_NET_MOCK_AUTO_MONSTER_CATALOG_MAX_ITEMS = 128,
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
     VM_NET_MOCK_SKILL_NAME_BYTES = 24,
-    VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
     VM_NET_MOCK_TELEPORT_STONE_COST = 1,
     VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
     VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,

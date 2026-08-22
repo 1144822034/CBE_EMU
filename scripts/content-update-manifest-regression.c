@@ -11,7 +11,7 @@
 #include <string.h>
 
 #define main cbe_server_program_main
-#include "../src/main.c"
+#include "../src/server_main.c"
 #undef main
 
 static u32 make_request(u8 *out, u32 outCap, u8 subtype,
@@ -61,9 +61,14 @@ static u32 make_request(u8 *out, u32 outCap, u8 subtype,
 
 int main(void)
 {
+    const u32 clientId = 0x55667788u;
     static const char scene[] = "00fixture.sce";
     static const char actor[] = "fixture.actor";
+    static const char effect[] = "fixture-effect.actor";
     static const char module[] = "mmGameMstarWqvga.cbm";
+    vm_net_mock_scene_battle_monster_admin_row rows[3];
+    const char *publishNames[8];
+    u32 publishNameCount = 0;
     u8 request[512];
     u8 response[2048];
     u8 expected[64];
@@ -82,6 +87,25 @@ int main(void)
     u32 responseLen = 0;
     u32 expectedLen = 0;
     u32 expectedCode = 0;
+
+    memset(rows, 0, sizeof(rows));
+    rows[0].enabled = true;
+    snprintf(rows[0].actorResource, sizeof(rows[0].actorResource), "%s", actor);
+    snprintf(rows[0].effectResource, sizeof(rows[0].effectResource), "%s", effect);
+    rows[1].enabled = true;
+    snprintf(rows[1].actorResource, sizeof(rows[1].actorResource), "%s", actor);
+    snprintf(rows[1].effectResource, sizeof(rows[1].effectResource), "%s", effect);
+    rows[2].enabled = false;
+    publishNameCount = vm_net_mock_scene_battle_monster_collect_publish_names(
+        scene, rows, 3, publishNames,
+        sizeof(publishNames) / sizeof(publishNames[0]));
+    if (publishNameCount != 3 || strcmp(publishNames[0], scene) != 0 ||
+        strcmp(publishNames[1], actor) != 0 ||
+        strcmp(publishNames[2], effect) != 0)
+    {
+        fputs("scene battle monster dependency manifest dedupe failed\n", stderr);
+        return 1;
+    }
 
     memset(g_vm_net_mock_update_slots, 0, sizeof(g_vm_net_mock_update_slots));
     g_vm_net_mock_update_catalog_loaded = true;
@@ -115,6 +139,7 @@ int main(void)
         return 1;
     }
     g_vm_net_mock_content_update.code = expectedCode;
+    g_vm_mock_service_active_client_id = clientId;
 
     requestLen = make_request(request, sizeof(request), 9, 0, 0);
     responseLen = vm_net_mock_build_version_response(request, requestLen,
@@ -127,7 +152,9 @@ int main(void)
         !vm_net_mock_get_object_u32_field(response, responseLen, "id", &id) ||
         !vm_net_mock_get_object_u32_field(response, responseLen, "code", &code) ||
         type != 1 || id != g_vm_net_mock_content_update.id ||
-        code != expectedCode)
+        code != expectedCode ||
+        !vm_net_mock_content_client_resource_pending(clientId, scene) ||
+        !vm_net_mock_content_client_resource_pending(clientId, actor))
     {
         fputs("WT 18/9 content target contract failed\n", stderr);
         return 1;
@@ -144,7 +171,9 @@ int main(void)
         !vm_net_mock_get_object_u8_field(response, responseLen, "type", &type) ||
         !vm_net_mock_get_object_u32_field(response, responseLen, "id", &id) ||
         !vm_net_mock_get_object_u32_field(response, responseLen, "code", &code) ||
-        type != 0 || id != 0 || code != 0)
+        type != 0 || id != 0 || code != 0 ||
+        vm_net_mock_content_client_resource_pending(clientId, scene) ||
+        vm_net_mock_content_client_resource_pending(clientId, actor))
     {
         fputs("WT 18/9 current-content acknowledgement failed\n", stderr);
         return 1;
@@ -192,5 +221,6 @@ int main(void)
     }
     printf("content update manifest regression passed: id=%u bytes=%u code=%u\n",
            id, expectedLen, expectedCode);
+    g_vm_mock_service_active_client_id = 0;
     return 0;
 }

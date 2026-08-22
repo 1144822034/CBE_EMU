@@ -705,6 +705,98 @@ static u32 vm_net_mock_monster_catalog_collect_scene_files(
     return count;
 }
 
+static bool vm_net_mock_sce_read_map_name(const u8 *data, u32 len,
+                                          char *mapName, size_t mapNameCap)
+{
+    u32 base = 0;
+    u8 mapNameLen = 0;
+
+    if (mapName && mapNameCap)
+        mapName[0] = 0;
+    if (data == NULL || mapName == NULL || mapNameCap == 0 || len < 15u)
+        return false;
+    for (base = 0; base + 15u <= len && base < 32u; ++base)
+    {
+        if (memcmp(data + base, "SCE2", 4) == 0)
+            break;
+    }
+    if (base >= 32u || base + 11u > len)
+        return false;
+    mapNameLen = data[base + 10u];
+    if (mapNameLen == 0 || mapNameLen >= mapNameCap ||
+        base + 11u + mapNameLen > len)
+    {
+        return false;
+    }
+    memcpy(mapName, data + base + 11u, mapNameLen);
+    mapName[mapNameLen] = 0;
+    return vm_net_mock_str_ends_with(mapName, ".map");
+}
+
+static bool vm_net_mock_scene_battle_monster_decode_raw_sce(
+    const u8 *raw, u32 rawLen, u8 *decoded, u32 decodedCap,
+    u32 *decodedLenOut);
+static bool vm_net_mock_scene_battle_monster_read_base_raw(
+    const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut);
+
+/* The short kind-8 values are authored per-map scene data, not fields from a
+ * configured monster row.  Recover them from another shipped SCE that
+ * references the same .map.  This lets custom/instance scenes based on
+ * 01桃花岛_01.map reuse the exact native 70,38,field1=38 marker instead of
+ * inventing values from the requested spawn coordinates. */
+static bool vm_net_mock_scene_battle_monster_find_native_spawn_prefix(
+    const u8 *targetPayload, u32 targetPayloadLen,
+    u8 *prefixOut, u32 prefixCap)
+{
+    vm_net_mock_monster_catalog_scene_file
+        scenes[VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX];
+    char targetMap[96];
+    u32 sceneCount = 0;
+
+    if (prefixOut == NULL || prefixCap < 14u ||
+        !vm_net_mock_sce_read_map_name(targetPayload, targetPayloadLen,
+                                       targetMap, sizeof(targetMap)))
+    {
+        return false;
+    }
+    sceneCount = vm_net_mock_monster_catalog_collect_scene_files(
+        scenes, VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX);
+    for (u32 sceneIndex = 0; sceneIndex < sceneCount; ++sceneIndex)
+    {
+        u8 raw[16384];
+        u8 data[16384];
+        char candidateMap[96];
+        u32 rawLen = 0;
+        u32 len = 0;
+
+        if (!vm_net_mock_scene_battle_monster_read_base_raw(
+                scenes[sceneIndex].name, raw, sizeof(raw), &rawLen) ||
+            !vm_net_mock_scene_battle_monster_decode_raw_sce(
+                raw, rawLen, data, sizeof(data), &len) ||
+            !vm_net_mock_sce_read_map_name(
+                            data, len, candidateMap, sizeof(candidateMap)) ||
+            strcmp(candidateMap, targetMap) != 0)
+        {
+            continue;
+        }
+        for (u32 off = 0; off + 16u <= len; ++off)
+        {
+            if (vm_net_mock_read_le16_at(data, off) != 8u ||
+                vm_net_mock_read_le16_at(data, off + 6u) != 1u ||
+                vm_net_mock_read_le16_at(data, off + 8u) != 1u ||
+                vm_net_mock_read_le16_at(data, off + 10u) != 38u ||
+                vm_net_mock_read_le16_at(data, off + 12u) != 0u ||
+                vm_net_mock_read_le16_at(data, off + 14u) != 3u)
+            {
+                continue;
+            }
+            memcpy(prefixOut, data + off, 14u);
+            return true;
+        }
+    }
+    return false;
+}
+
 static void vm_net_mock_monster_catalog_sort(void)
 {
     /* The base table is already ID ordered.  SCE-only records are appended
@@ -1219,13 +1311,19 @@ static bool vm_net_mock_monster_admin_reset_scene_levels_batch(
                 goto mysql_failed;
             for (u8 drop = 0; drop < row->dropCount; ++drop)
             {
+                char rateText[16];
+
+                memset(rateText, 0, sizeof(rateText));
+                vm_net_mock_format_drop_rate_basis_points(
+                    row->drops[drop].rateBasisPoints, rateText,
+                    sizeof(rateText));
                 snprintf(query, sizeof(query),
                          "INSERT INTO server_monster_drops("
                          "monster_id,drop_slot,item_id,drop_rate_percent) "
-                         "VALUES(%u,%u,%u,%u)",
+                         "VALUES(%u,%u,%u,%s)",
                          row->stats.enemyId, (u32)drop + 1u,
                          row->drops[drop].itemId,
-                         (u32)row->drops[drop].ratePercent);
+                         rateText);
                 if (!vm_mysql_exec(query))
                     goto mysql_failed;
             }
@@ -1829,6 +1927,7 @@ typedef struct
 typedef struct
 {
     u32 fingerprint;
+    u32 configuredCount;
     bool found;
     bool invalid;
 } vm_net_mock_scene_battle_monster_deployment_context;
@@ -2143,6 +2242,18 @@ static u32 vm_net_mock_scene_battle_monster_admin_list(
     return context.count;
 }
 
+static bool vm_net_mock_scene_battle_monster_deployed_source_matches(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCount);
+static bool vm_net_mock_scene_battle_monster_admin_is_deployed(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCount, bool *deployedOut);
+static bool vm_net_mock_scene_battle_monster_read_base_raw(
+    const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut);
+static bool vm_net_mock_scene_battle_monster_live_capacity_safe(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCount);
+
 /* A direct NPC challenge targets a native SCE kind-3 node in the NPC's
  * current scene.  That identity is deliberately distinct from the general
  * monster catalog: a freshly configured scene battle monster is a valid
@@ -2176,6 +2287,38 @@ static bool vm_net_mock_scene_battle_monster_configured_target_exists(
             return true;
     }
     return false;
+}
+
+/* A teleport target must reference the exact scene resource that the client
+ * will load.  Check both the durable enabled draft and the deployed SCE
+ * payload so a stale/unpublished row cannot be advertised as a live monster. */
+static bool vm_net_mock_scene_battle_monster_target_ready(
+    const char *scene, u32 monsterId)
+{
+    vm_net_mock_scene_battle_monster_admin_row rows[
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX];
+    u32 rowCount = 0;
+    bool found = false;
+    bool deployed = false;
+
+    if (scene == NULL || monsterId == 0 || monsterId > 0xffffu ||
+        !vm_net_mock_scene_name_is_safe(scene))
+        return false;
+    memset(rows, 0, sizeof(rows));
+    rowCount = vm_net_mock_scene_battle_monster_admin_list(
+        scene, rows, VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX);
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].enabled && rows[i].monsterId == monsterId)
+        {
+            found = true;
+            break;
+        }
+    }
+    return found && vm_net_mock_scene_battle_monster_admin_is_deployed(
+                        scene, rows, rowCount, &deployed) && deployed &&
+           vm_net_mock_scene_battle_monster_live_capacity_safe(
+               scene, rows, rowCount);
 }
 
 static bool vm_net_mock_npc_instance_challenge_target_is_configured(
@@ -2393,9 +2536,12 @@ static bool vm_net_mock_scene_battle_monster_deployment_row(
     vm_net_mock_scene_battle_monster_deployment_context *context =
         (vm_net_mock_scene_battle_monster_deployment_context *)contextValue;
 
-    if (context == NULL || columnCount != 1 || context->found ||
+    if (context == NULL || columnCount != 2 || context->found ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0],
-                                 &context->fingerprint))
+                                 &context->fingerprint) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1],
+                                 &context->configuredCount) ||
+        context->configuredCount > VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX)
     {
         if (context != NULL)
             context->invalid = true;
@@ -2414,6 +2560,7 @@ static bool vm_net_mock_scene_battle_monster_admin_is_deployed(
     char query[384];
     u32 fingerprint = vm_net_mock_scene_battle_monster_fingerprint(rows,
                                                                      rowCount);
+    u32 enabledCount = 0;
 
     if (deployedOut)
         *deployedOut = false;
@@ -2424,8 +2571,14 @@ static bool vm_net_mock_scene_battle_monster_admin_is_deployed(
         return false;
     }
     memset(&context, 0, sizeof(context));
+    for (u32 i = 0; rows != NULL && i < rowCount; ++i)
+    {
+        if (rows[i].enabled)
+            ++enabledCount;
+    }
     snprintf(query, sizeof(query),
-             "SELECT config_fingerprint FROM server_scene_battle_monster_deployments "
+             "SELECT config_fingerprint,configured_count "
+             "FROM server_scene_battle_monster_deployments "
              "WHERE scene=X'%s'", sceneHex);
     if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_deployment_row,
                         &context) || context.invalid)
@@ -2435,7 +2588,8 @@ static bool vm_net_mock_scene_battle_monster_admin_is_deployed(
     if (deployedOut)
     {
         bool fingerprintMatches = context.found &&
-                                  context.fingerprint == fingerprint;
+                                  context.fingerprint == fingerprint &&
+                                  context.configuredCount == enabledCount;
         bool sourceMatches = fingerprintMatches &&
                              vm_net_mock_scene_battle_monster_deployed_source_matches(
                                  scene, rows, rowCount);
@@ -2602,8 +2756,8 @@ static bool vm_net_mock_scene_battle_monster_load_base_raw(
             *sourceOut = "mysql-captured-base";
         return true;
     }
-    if (!vm_net_mock_scene_battle_monster_read_source_raw(scene, raw, rawCap,
-                                                           &currentLen, NULL, 0) ||
+    if (!vm_net_mock_scene_battle_monster_read_base_raw(scene, raw, rawCap,
+                                                         &currentLen) ||
         currentLen == 0 || currentLen > rawCap)
     {
         return false;
@@ -2868,7 +3022,84 @@ static bool vm_net_mock_scene_battle_monster_find_insert_offset(
         }
     }
 
+    /* Native SCE2 streams also use a bare zero word as the entity-stream
+     * terminator when no trailing kind-8 control record is present.  Treat it
+     * as part of the terminal bytes so a later deployment inserts records
+     * before it instead of appending after the client parser's end marker. */
+    if (payloadLen >= 2u &&
+        vm_net_mock_read_le16_at(payload, payloadLen - 2u) == 0u)
+    {
+        *insertOffsetOut = payloadLen - 2u;
+        if (terminalLenOut != NULL)
+            *terminalLenOut = 2u;
+        return true;
+    }
+
     *insertOffsetOut = payloadLen;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_has_spawn_prefix(
+    const u8 *payload, u32 payloadLen, u32 scanEnd)
+{
+    if (payload == NULL || scanEnd > payloadLen)
+        return false;
+    for (u32 off = 0; off + 16u <= scanEnd; ++off)
+    {
+        if (vm_net_mock_read_le16_at(payload, off) == 8u &&
+            vm_net_mock_read_le16_at(payload, off + 6u) == 1u &&
+            vm_net_mock_read_le16_at(payload, off + 8u) == 1u &&
+            vm_net_mock_read_le16_at(payload, off + 10u) == 38u &&
+            vm_net_mock_read_le16_at(payload, off + 12u) == 0u &&
+            vm_net_mock_read_le16_at(payload, off + 14u) == 3u)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_net_mock_scene_battle_monster_read_base_raw(
+    const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut)
+{
+    char path[1200];
+    u32 rawLen = 0;
+
+    if (rawLenOut)
+        *rawLenOut = 0;
+    if (scene == NULL || raw == NULL || rawCap == 0 ||
+        !vm_net_mock_open_server_base_resource(scene, NULL, path,
+                                               sizeof(path)))
+        return false;
+    rawLen = vm_net_mock_load_response_file(path, raw, rawCap);
+    if (rawLen == 0)
+        return false;
+    if (rawLenOut)
+        *rawLenOut = rawLen;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_read_overlay_raw(
+    const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut,
+    char *pathOut, size_t pathOutCap)
+{
+    char path[1400];
+    u32 rawLen = 0;
+
+    if (rawLenOut)
+        *rawLenOut = 0;
+    if (pathOut && pathOutCap)
+        pathOut[0] = 0;
+    if (scene == NULL || raw == NULL || rawCap == 0 ||
+        !vm_net_mock_build_overlay_resource_path(scene, path, sizeof(path)))
+        return false;
+    rawLen = vm_net_mock_load_response_file(path, raw, rawCap);
+    if (rawLen == 0)
+        return false;
+    if (pathOut && pathOutCap)
+        snprintf(pathOut, pathOutCap, "%s", path);
+    if (rawLenOut)
+        *rawLenOut = rawLen;
     return true;
 }
 
@@ -2977,26 +3208,48 @@ static bool vm_net_mock_scene_battle_monster_deployed_source_matches(
     u8 payload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
     u32 rawLen = 0;
     u32 payloadLen = 0;
+    u32 baseNodeCount = 0;
+    u32 publishedNodeCount = 0;
+    u32 enabledCount = 0;
 
     if (scene == NULL || rows == NULL ||
         !vm_net_mock_scene_name_is_safe(scene) ||
-        !vm_net_mock_scene_battle_monster_read_source_raw(
+        !vm_net_mock_scene_battle_monster_load_base_raw(
+            scene, raw, sizeof(raw), &rawLen, NULL) ||
+        !vm_net_mock_scene_battle_monster_decode_raw_sce(
+            raw, rawLen, payload, sizeof(payload), &payloadLen) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            payload, payloadLen, &baseNodeCount) ||
+        !vm_net_mock_scene_battle_monster_read_overlay_raw(
             scene, raw, sizeof(raw), &rawLen, NULL, 0) ||
         !vm_net_mock_scene_battle_monster_decode_raw_sce(
-            raw, rawLen, payload, sizeof(payload), &payloadLen))
+            raw, rawLen, payload, sizeof(payload), &payloadLen) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            payload, payloadLen, &publishedNodeCount))
     {
         return false;
     }
     for (u32 i = 0; i < rowCount; ++i)
     {
-        if (rows[i].enabled &&
-            !vm_net_mock_scene_battle_monster_payload_has_row(
+        if (!rows[i].enabled)
+            continue;
+        ++enabledCount;
+        if (!vm_net_mock_scene_battle_monster_payload_has_row(
                 payload, payloadLen, &rows[i]))
         {
             return false;
         }
     }
-    return true;
+    if (enabledCount != 0 &&
+        !vm_net_mock_scene_battle_monster_has_spawn_prefix(
+            payload, payloadLen, payloadLen))
+    {
+        return false;
+    }
+    return baseNodeCount <= VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX &&
+           enabledCount <= VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX -
+                               baseNodeCount &&
+           publishedNodeCount == baseNodeCount + enabledCount;
 }
 
 static bool vm_net_mock_scene_battle_monster_deployment_save(
@@ -3040,6 +3293,72 @@ static u32 vm_net_mock_scene_battle_monster_npc_node_reserve(
         scene, seeds, VM_NET_MOCK_SCENE_NPCINFO_MAX, NULL, NULL);
 }
 
+/* The on-disk .actor resource is the editor's compressed image/animation
+ * manifest.  The motion descriptor parsed at 0x0100D6E2 is a runtime object
+ * produced after that manifest is loaded, so it cannot be decoded from the
+ * file bytes with the scene-node parser's u16/string grammar.  Keep this
+ * reserve conservative until a runtime allocation trace establishes a stable
+ * file-to-node mapping; rejecting every valid actor here would be a false
+ * configuration error. */
+static bool vm_net_mock_actor_scene_node_reserve(
+    const char *actorResource, u32 *reserveOut, const char **errorOut)
+{
+    if (reserveOut)
+        *reserveOut = 0;
+    if (errorOut)
+        *errorOut = NULL;
+    if (actorResource == NULL || reserveOut == NULL ||
+        vm_net_mock_scene_name_has_path_separator(actorResource) ||
+        !vm_net_mock_str_ends_with(actorResource, ".actor"))
+    {
+        if (errorOut)
+            *errorOut = "Actor 资源名格式无效";
+        return false;
+    }
+    return true;
+}
+
+static u32 vm_net_mock_scene_battle_monster_collect_publish_names(
+    const char *scene,
+    const vm_net_mock_scene_battle_monster_admin_row *rows, u32 rowCount,
+    const char **names, u32 nameCap)
+{
+    u32 nameCount = 0;
+
+    if (scene == NULL || rows == NULL || names == NULL || nameCap == 0)
+        return 0;
+    names[nameCount++] = scene;
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        const char *dependencies[2];
+
+        if (!rows[i].enabled)
+            continue;
+        dependencies[0] = rows[i].actorResource;
+        dependencies[1] = rows[i].effectResource;
+        for (u32 dependencyIndex = 0; dependencyIndex < 2; ++dependencyIndex)
+        {
+            bool duplicate = false;
+
+            for (u32 existing = 0; existing < nameCount; ++existing)
+            {
+                if (strcmp(names[existing], dependencies[dependencyIndex]) == 0)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                if (nameCount >= nameCap)
+                    return 0;
+                names[nameCount++] = dependencies[dependencyIndex];
+            }
+        }
+    }
+    return nameCount;
+}
+
 /* Rebuild one exact source SCE from its durable base plus the currently
  * enabled rows.  The runtime does not read the table to synthesize nodes; it
  * reads the resulting SCE through the normal scene-resource path. */
@@ -3057,6 +3376,7 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     u8 terminalRecord[14];
     const char *baseSource = "unresolved";
     const char *publishError = NULL;
+    const char *spawnPrefixSource = "none";
     char resourcePath[1200];
     u32 rowCount = 0;
     u32 storedRowCount = 0;
@@ -3070,10 +3390,19 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     u32 originalNodeCount = 0;
     u32 finalNodeCount = 0;
     u32 npcNodeReserve = 0;
+    u32 actorChildReserve = 0;
     u32 insertOffset = 0;
     u32 terminalLen = 0;
+    bool terminalWasKind8 = false;
+    bool hasSpawnPrefix = false;
     u32 fingerprint = 0;
-    const char *names[1];
+    /* A generated SCE kind-3 record is not self-contained: the client must
+     * have both Actor descriptors referenced by the record before it can
+     * create the scene entity.  Publish those dependencies in the same
+     * native content-update release as the SCE, otherwise a re-entering
+     * client may install the scene bytes but silently skip the monster. */
+    const char *names[1 + VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX * 2u];
+    u32 nameCount = 0;
     bool contentChanged = false;
 
     if (errorOut)
@@ -3111,6 +3440,7 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
         }
         if (rows[i].enabled)
         {
+            u32 rowChildReserve = 0;
             if (!vm_net_mock_ensure_actor_resource_available(
                     rows[i].actorResource, &publishError))
             {
@@ -3126,6 +3456,20 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
                                              "战斗怪特效 Actor 资源校验失败";
                 return false;
             }
+            if (!vm_net_mock_actor_scene_node_reserve(
+                    rows[i].actorResource, &rowChildReserve, &publishError) ||
+                rowChildReserve >
+                    VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX -
+                        actorChildReserve)
+            {
+                printf("[error][mock-admin] scene_battle_monster_deploy stage=actor-capacity-input scene=%s actor=%u resource=%s\n",
+                       scene, rows[i].monsterId, rows[i].actorResource);
+                if (errorOut)
+                    *errorOut = publishError ? publishError :
+                                             "战斗怪 Actor 容量参数校验失败";
+                return false;
+            }
+            actorChildReserve += rowChildReserve;
             ++enabledCount;
         }
     }
@@ -3170,34 +3514,86 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
         return false;
     }
     npcNodeReserve = vm_net_mock_scene_battle_monster_npc_node_reserve(scene);
-    if (originalNodeCount + npcNodeReserve + enabledCount >
+    if (originalNodeCount + npcNodeReserve + enabledCount + actorChildReserve >
         VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX)
     {
         printf("[error][mock-admin] scene_battle_monster_deploy stage=node-limit "
-               "scene=%s base=%s static=%u npc_reserve=%u enabled=%u limit=%u\n", scene,
+               "scene=%s base=%s static=%u npc_reserve=%u enabled=%u actor_child_reserve=%u limit=%u\n", scene,
                baseSource, originalNodeCount, npcNodeReserve, enabledCount,
+               actorChildReserve,
                VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX);
         if (errorOut)
-            *errorOut = "场景静态节点、最多 4 个已下发 NPC 与启用战斗怪超过客户端 24 个非本地节点上限";
+            *errorOut = "场景静态节点、已下发 NPC、战斗怪及其 Actor 子节点超过客户端 24 个非本地节点上限";
         return false;
     }
     if (terminalLen != 0)
     {
         memcpy(terminalRecord, payload + insertOffset, terminalLen);
+        terminalWasKind8 = terminalLen == 14u &&
+                           vm_net_mock_read_le16_at(terminalRecord, 0) == 8u &&
+                           vm_net_mock_read_le16_at(terminalRecord, 6u) == 1u &&
+                           vm_net_mock_read_le16_at(terminalRecord, 8u) == 1u &&
+                           vm_net_mock_read_le16_at(terminalRecord, 10u) == 38u &&
+                           vm_net_mock_read_le16_at(terminalRecord, 12u) == 0u;
         payloadLen = insertOffset;
+    }
+    hasSpawnPrefix = vm_net_mock_scene_battle_monster_has_spawn_prefix(
+        payload, payloadLen, payloadLen);
+    if (hasSpawnPrefix)
+        spawnPrefixSource = "base-native";
+    if (enabledCount != 0 && !hasSpawnPrefix)
+    {
+        /* A trailing native kind-8 marker is the same prefix used by the
+         * shipped 桃花岛 stream. Move it in front of the newly authored
+         * combat records instead of restoring it after them. */
+        if (terminalWasKind8)
+        {
+            if (payloadLen > sizeof(payload) - 14u)
+            {
+                if (errorOut)
+                    *errorOut = "场景资源容量不足，无法保留战斗区 marker";
+                return false;
+            }
+            memcpy(payload + payloadLen, terminalRecord, 14u);
+            payloadLen += 14u;
+            spawnPrefixSource = "moved-trailing-kind8";
+        }
+        else
+        {
+            u8 nativePrefix[14];
+
+            if (!vm_net_mock_scene_battle_monster_find_native_spawn_prefix(
+                    payload, payloadLen, nativePrefix,
+                    sizeof(nativePrefix)) ||
+                payloadLen > sizeof(payload) - sizeof(nativePrefix))
+            {
+                if (errorOut)
+                    *errorOut = "找不到引用同一 MAP 的原生战斗区 marker，无法安全生成战斗怪";
+                return false;
+            }
+            memcpy(payload + payloadLen, nativePrefix, sizeof(nativePrefix));
+            payloadLen += sizeof(nativePrefix);
+            spawnPrefixSource = "same-map-native";
+        }
     }
     for (u32 i = 0; i < rowCount; ++i)
     {
         if (rows[i].enabled &&
             !vm_net_mock_scene_battle_monster_append_record(
-                payload, sizeof(payload) - terminalLen, &payloadLen, &rows[i]))
+                payload, sizeof(payload), &payloadLen, &rows[i]))
         {
             if (errorOut)
                 *errorOut = "场景资源容量不足，无法写入全部战斗怪";
-            return false;
+                return false;
         }
     }
-    if (terminalLen != 0)
+    /* In 桃花岛 the zero word belongs between the short marker and the first
+     * kind-3 record; the final effect Actor ends at EOF.  When combat rows are
+     * emitted, the original terminal has therefore been consumed into the
+     * native prefix and must not be appended after the monsters.  A distinct
+     * final kind-8 control record whose field-1 value is not 38 is preserved. */
+    if (terminalLen != 0 &&
+        (enabledCount == 0 || (terminalLen == 14u && !terminalWasKind8)))
     {
         if (payloadLen > sizeof(payload) - terminalLen)
         {
@@ -3208,7 +3604,10 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
         memcpy(payload + payloadLen, terminalRecord, terminalLen);
         payloadLen += terminalLen;
     }
-    if (!vm_net_mock_scene_battle_monster_payload_collect_node_count(
+    if ((enabledCount != 0 &&
+         !vm_net_mock_scene_battle_monster_has_spawn_prefix(
+             payload, payloadLen, payloadLen)) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
             payload, payloadLen, &finalNodeCount) ||
         finalNodeCount != originalNodeCount + enabledCount)
     {
@@ -3259,13 +3658,18 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
             *errorOut = "生成的场景资源未能按客户端 SCE2 格式解码";
         return false;
     }
-    if (!vm_net_mock_scene_battle_monster_read_source_raw(
-            scene, previousRaw, sizeof(previousRaw), &previousRawLen,
-            resourcePath, sizeof(resourcePath)))
+    if (!vm_net_mock_build_overlay_resource_path(scene, resourcePath,
+                                                 sizeof(resourcePath)))
     {
         if (errorOut)
-            *errorOut = "当前服务端场景资源不可读";
+            *errorOut = "无法建立当前数据库的场景发布目录";
         return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_read_overlay_raw(
+            scene, previousRaw, sizeof(previousRaw), &previousRawLen,
+            NULL, 0))
+    {
+        previousRawLen = 0;
     }
     if (!vm_net_mock_scene_battle_monster_write_resource(resourcePath,
                                                           outputRaw,
@@ -3274,13 +3678,28 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     {
         return false;
     }
-    names[0] = scene;
-    if (!vm_net_mock_content_update_publish_files(names, 1, &publishError,
+    nameCount = vm_net_mock_scene_battle_monster_collect_publish_names(
+        scene, rows, rowCount, names,
+        sizeof(names) / sizeof(names[0]));
+    if (nameCount == 0)
+    {
+        if (errorOut)
+            *errorOut = "场景战斗怪依赖资源清单生成失败";
+        return false;
+    }
+    if (!vm_net_mock_content_update_publish_files(names, nameCount, &publishError,
                                                   &contentChanged))
     {
         const char *restoreError = NULL;
-        (void)vm_net_mock_scene_battle_monster_write_resource(
-            resourcePath, previousRaw, previousRawLen, &restoreError);
+        if (previousRawLen != 0)
+        {
+            (void)vm_net_mock_scene_battle_monster_write_resource(
+                resourcePath, previousRaw, previousRawLen, &restoreError);
+        }
+        else
+        {
+            (void)remove(resourcePath);
+        }
         if (errorOut)
             *errorOut = publishError ? publishError : "内容更新发布失败";
         return false;
@@ -3301,11 +3720,11 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     vm_net_mock_monster_catalog_invalidate();
     printf("[info][mock-admin] scene_battle_monster_deploy scene=%s base=%s "
             "drafts=%u enabled=%u nodes=%u->%u raw=%u payload=%u "
-            "resource_type=%u content_changed=%u publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-kind3+"
+            "spawn_prefix=%s manifest_files=%u resource_type=%u content_changed=%u publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-native-spawn-prefix+kind3+"
             "mmBattle:0x66CC\n",
             scene, baseSource, rowCount, enabledCount, originalNodeCount,
-            finalNodeCount, outputRawLen, payloadLen, outputRaw[4],
-            contentChanged ? 1u : 0u);
+            finalNodeCount, outputRawLen, payloadLen, spawnPrefixSource,
+            nameCount, outputRaw[4], contentChanged ? 1u : 0u);
     if (errorOut)
         *errorOut = "ok";
     return true;
@@ -4211,6 +4630,85 @@ static bool vm_net_mock_dynamic_npc_ensure_service_option_columns(void)
     return true;
 }
 
+static bool vm_net_mock_scene_battle_monster_live_capacity_safe(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCount)
+{
+    u8 raw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 payload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u32 rawLen = 0;
+    u32 payloadLen = 0;
+    u32 staticCount = 0;
+    u32 npcReserve = 0;
+    u32 enabledCount = 0;
+    u32 childReserve = 0;
+
+    if (scene == NULL || rows == NULL ||
+        !vm_net_mock_scene_battle_monster_read_overlay_raw(
+            scene, raw, sizeof(raw), &rawLen, NULL, 0) ||
+        !vm_net_mock_scene_battle_monster_decode_raw_sce(
+            raw, rawLen, payload, sizeof(payload), &payloadLen) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            payload, payloadLen, &staticCount))
+    {
+        return false;
+    }
+    npcReserve = vm_net_mock_scene_battle_monster_npc_node_reserve(scene);
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        u32 rowReserve = 0;
+        if (!rows[i].enabled)
+            continue;
+        if (!vm_net_mock_actor_scene_node_reserve(
+                rows[i].actorResource, &rowReserve, NULL))
+        {
+            return false;
+        }
+        ++enabledCount;
+        if (childReserve > VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX -
+                               rowReserve)
+            return false;
+        childReserve += rowReserve;
+    }
+    if (staticCount > VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX ||
+        npcReserve > VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX ||
+        enabledCount > VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX ||
+        staticCount + npcReserve + enabledCount + childReserve >
+            VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX)
+    {
+        printf("[error][network] mock_scene_battle_monster_capacity_unsafe scene=%s static=%u npc_reserve=%u enabled=%u actor_child_reserve=%u limit=%u action=reject-enter\n",
+               scene, staticCount, npcReserve, enabledCount, childReserve,
+               VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX);
+        return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_instances_ensure_spawn_enemy_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_instances' "
+            "AND COLUMN_NAME='spawn_enemy_id'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count == 0 && !vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_instances "
+            "ADD COLUMN spawn_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER challenge_enemy_id"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_instance_schema migration=spawn-enemy-id action=ready\n");
+    return true;
+}
+
 /* Every dynamic-NPC scene key is a client resource key.  Both a placement
  * scene and an instance target must name the exact downloadable SCE file;
  * accepting a bare name here makes a distinct SQL key which later collides
@@ -4344,8 +4842,8 @@ static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
             goto failed;
         snprintf(query, sizeof(query),
                  "INSERT IGNORE INTO server_dynamic_npc_instances("
-                 "scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level) "
-                 "SELECT X'%s',actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level "
+                "scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,minimum_level) "
+                 "SELECT X'%s',actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,minimum_level "
                  "FROM server_dynamic_npc_instances WHERE scene=X'%s' AND actor_id=%u",
                  canonicalHex, legacyHex, migration->actorId);
         if (!vm_mysql_exec(query))
@@ -4478,12 +4976,12 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[13];
+    u32 number[14];
     bool hasInstanceConfiguration = false;
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 20 ||
+    if (context == NULL || columnCount != 21 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -4515,8 +5013,9 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[8]) || number[8] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[9]) || number[9] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[10]) || number[10] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffu ||
-        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[12]) || number[12] > 1u)
+        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[12]) || number[12] > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[13]) || number[13] > 1u)
     {
         if (context != NULL)
             ++context->skipped;
@@ -4536,7 +5035,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.instanceX = (u16)number[8];
     row.seed.instanceY = (u16)number[9];
     row.seed.challengeEnemyId = number[10];
-    row.seed.instanceMinLevel = (u16)number[11];
+    row.seed.instanceSpawnEnemyId = number[11];
+    row.seed.instanceMinLevel = (u16)number[12];
     /* The parent `npc_kind` is now only a compatibility projection.  Instance
      * settings belong to the independent child row and may be used by a
      * multi-service NPC whose first selected service is not the instance
@@ -4544,6 +5044,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     hasInstanceConfiguration = row.seed.instanceScene[0] != 0 ||
                                row.seed.instanceX != 0 ||
                                row.seed.instanceY != 0 ||
+                               row.seed.instanceSpawnEnemyId != 0 ||
                                row.seed.challengeEnemyId != 0;
     if (context->scanningParentSceneMigrations)
     {
@@ -4609,7 +5110,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
      * kind-3 challenges.  Destination-scene guides retain the already local
      * generic catalog predicate. */
     if (hasInstanceConfiguration && row.seed.challengeEnemyId != 0 &&
-        ((row.seed.instanceScene[0] == 0 && number[12] == 0) ||
+        ((row.seed.instanceScene[0] == 0 && number[13] == 0) ||
          (row.seed.instanceScene[0] != 0 &&
           !vm_net_mock_monster_enemy_id_known(row.seed.challengeEnemyId))))
     {
@@ -4621,7 +5122,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                "direct_scene_target_exists=%u source=parent-load-query\n",
                row.scene, row.seed.actorId,
                row.seed.instanceScene[0] ? row.seed.instanceScene : "-",
-               row.seed.challengeEnemyId, number[12]);
+               row.seed.challengeEnemyId, number[13]);
         return true;
     }
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
@@ -4675,6 +5176,7 @@ static bool vm_net_mock_dynamic_npc_db_query_rows(
         "COALESCE(server_dynamic_npc_instances.target_x,0),"
         "COALESCE(server_dynamic_npc_instances.target_y,0),"
         "COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0),"
+        "COALESCE(server_dynamic_npc_instances.spawn_enemy_id,0),"
         "COALESCE(server_dynamic_npc_instances.minimum_level,1),"
         "EXISTS(SELECT 1 FROM server_scene_battle_monsters AS sbm "
         "WHERE sbm.scene=server_dynamic_npcs.scene "
@@ -4734,12 +5236,14 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "target_x SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "target_y SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "challenge_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "spawn_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "minimum_level TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id),"
             "CONSTRAINT fk_server_dynamic_npc_instances_npc FOREIGN KEY(scene,actor_id) "
-            "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB"))
+            "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
+        !vm_net_mock_dynamic_npc_instances_ensure_spawn_enemy_column())
     {
         printf("[error][mock-admin] dynamic_npc_db_load failed error=%s\n",
                vm_mysql_last_error());
@@ -4770,6 +5274,29 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         printf("[error][mock-admin] dynamic_npc_db_load failed phase=final-load error=%s\n",
                vm_mysql_last_error());
         return false;
+    }
+    /* The MySQL row callback must not issue nested queries.  Validate the
+     * optional destination-scene kind-3 target only after the complete result
+     * set has been materialized, then quarantine invalid rows before runtime
+     * lookup can expose them. */
+    for (u32 i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
+    {
+        vm_net_mock_dynamic_npc_override *row =
+            &g_vm_net_mock_dynamic_npc_overrides[i];
+
+        if (row->seed.instanceSpawnEnemyId == 0)
+            continue;
+        if (row->seed.instanceScene[0] == 0 ||
+            !vm_net_mock_scene_battle_monster_target_ready(
+                row->seed.instanceScene, row->seed.instanceSpawnEnemyId))
+        {
+            row->enabled = false;
+            ++context.skipped;
+            printf("[error][mock-admin] dynamic_npc_instance_spawn_unresolved scene=%s actor=%u target_scene=%s spawn_enemy=%u action=runtime-disable reason=target-kind3-not-enabled-or-deployed\n",
+                   row->scene, row->seed.actorId,
+                   row->seed.instanceScene[0] ? row->seed.instanceScene : "-",
+                   row->seed.instanceSpawnEnemyId);
+        }
     }
     if (!vm_net_mock_dynamic_npc_instance_scene_apply_migrations(&context))
     {
@@ -4979,6 +5506,10 @@ static bool vm_net_mock_dynamic_npc_admin_save(
           (hasInstanceChallenge &&
            !vm_net_mock_scene_battle_monster_configured_target_exists(
                scene, seed->challengeEnemyId)) ||
+          (seed->instanceSpawnEnemyId != 0 &&
+           (!hasInstanceTeleport ||
+            !vm_net_mock_scene_battle_monster_target_ready(
+                seed->instanceScene, seed->instanceSpawnEnemyId))) ||
           seed->instanceMinLevel == 0 || seed->instanceMinLevel > 0xffu ||
           seed->challengeEnemyId > 0xffffu ||
           seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)) ||
@@ -5070,13 +5601,13 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     if (hasInstanceService)
     {
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level) "
-                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,minimum_level) "
+                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
                  "target_scene=VALUES(target_scene),target_x=VALUES(target_x),target_y=VALUES(target_y),"
-                 "challenge_enemy_id=VALUES(challenge_enemy_id),minimum_level=VALUES(minimum_level)",
+                 "challenge_enemy_id=VALUES(challenge_enemy_id),spawn_enemy_id=VALUES(spawn_enemy_id),minimum_level=VALUES(minimum_level)",
                  sceneHex, seed->actorId, instanceSceneHex, seed->instanceX,
                  seed->instanceY, seed->challengeEnemyId,
-                 seed->instanceMinLevel);
+                 seed->instanceSpawnEnemyId, seed->instanceMinLevel);
     }
     else
     {
@@ -5123,12 +5654,13 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) challenge_enemy=%u spawn_enemy=%u spawn_source=SCE2-kind3 min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
            seed->serviceOptionName[0] ? seed->serviceOptionName : "-",
            seed->taskId, (u32)seed->taskRepeatPolicy, seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
+           seed->instanceSpawnEnemyId,
            seed->instanceMinLevel, seed->actorResource,
            seed->scriptName[0] ? seed->scriptName : "-");
     return true;
@@ -5661,6 +6193,69 @@ static u32 vm_net_mock_native_npc_admin_list(
     return count;
 }
 
+static bool vm_net_mock_get_scene_center_spawn_from_sce(const char *scene,
+                                                         u16 *xOut,
+                                                         u16 *yOut);
+
+static bool vm_net_mock_scene_client_content_ready(
+    const char *scene, char *missingOut, size_t missingOutCap)
+{
+    u8 data[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u32 len = 0;
+    u32 start = 0;
+
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    if (vm_net_mock_content_client_resource_pending(
+            g_vm_mock_service_active_client_id, scene))
+    {
+        if (missingOut != NULL && missingOutCap != 0)
+            snprintf(missingOut, missingOutCap, "%s", scene);
+        return false;
+    }
+
+    /* Scene-battle deployment publishes the SCE, the motion Actor and its
+     * exit-effect Actor in one invalidation release.  Parse the authoritative
+     * SCE2 grammar and wait for those exact dependencies; server-side file
+     * existence says nothing about this client's deleted cache. */
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    start = vm_net_mock_scene_payload_start(data, len);
+    if (len == 0 || start == 0)
+        return true;
+    for (u32 off = start; off + 14 <= len; ++off)
+    {
+        vm_net_mock_sce_combat_spawn spawn;
+        u32 end = 0;
+        const char *pendingName = NULL;
+
+        if (!vm_net_mock_parse_sce_combat_spawn_at(data, len, off,
+                                                    &spawn, &end))
+        {
+            continue;
+        }
+        if (vm_net_mock_content_client_resource_pending(
+                g_vm_mock_service_active_client_id, spawn.actorResource))
+        {
+            pendingName = spawn.actorResource;
+        }
+        else if (vm_net_mock_content_client_resource_pending(
+                     g_vm_mock_service_active_client_id,
+                     spawn.effectResource))
+        {
+            pendingName = spawn.effectResource;
+        }
+        if (pendingName != NULL)
+        {
+            if (missingOut != NULL && missingOutCap != 0)
+                snprintf(missingOut, missingOutCap, "%s", pendingName);
+            return false;
+        }
+        if (end > off)
+            off = end - 1;
+    }
+    return true;
+}
+
 static bool vm_net_mock_prepare_scene_enter_resources(vm_net_mock_scene_change_target *target,
                                                       char *missingOut,
                                                       size_t missingOutCap)
@@ -5669,8 +6264,36 @@ static bool vm_net_mock_prepare_scene_enter_resources(vm_net_mock_scene_change_t
         missingOut[0] = 0;
     if (target == NULL || target->scene[0] == 0)
         return false;
+    if (target->needsSceneDownload &&
+        vm_net_mock_scene_resource_exists(target->scene))
+    {
+        target->needsSceneDownload = false;
+        if (target->x == 0 && target->y == 0)
+        {
+            u16 cx = 0;
+            u16 cy = 0;
+
+            if (vm_net_mock_get_scene_reasonable_spawn_from_sce(
+                    target->scene, &cx, &cy, NULL))
+            {
+                target->x = cx;
+                target->y = cy;
+                target->hasSceEntry = true;
+            }
+        }
+    }
     if (target->needsSceneDownload)
+    {
+        if (missingOut != NULL && missingOutCap != 0)
+            snprintf(missingOut, missingOutCap, "%s", target->scene);
         return false;
+    }
+    if (!vm_net_mock_scene_client_content_ready(target->scene, missingOut,
+                                                 missingOutCap))
+    {
+        target->needsSceneDownload = true;
+        return false;
+    }
     /*
      * A real server does not inspect the client's writable resource cache.
      * It sends the scene-enter contract and, if the client lacks resources,
@@ -5679,10 +6302,6 @@ static bool vm_net_mock_prepare_scene_enter_resources(vm_net_mock_scene_change_t
      */
     return true;
 }
-
-static bool vm_net_mock_get_scene_center_spawn_from_sce(const char *scene,
-                                                         u16 *xOut,
-                                                         u16 *yOut);
 
 static void vm_net_mock_defer_scene_enter_completion(const vm_net_mock_scene_change_target *target,
                                                       const char *phase,
@@ -5693,27 +6312,6 @@ static void vm_net_mock_defer_scene_enter_completion(const vm_net_mock_scene_cha
     if (target == NULL || target->scene[0] == 0)
         return;
     g_vm_net_mock_last_scene_change_target = *target;
-    /*
-     * Same fix as remember_target: if the scene exists locally the download
-     * flag is stale and will cause the 25/5 follow-up to defer again.
-     */
-    if (g_vm_net_mock_last_scene_change_target.needsSceneDownload &&
-        vm_net_mock_scene_resource_exists(g_vm_net_mock_last_scene_change_target.scene))
-    {
-        g_vm_net_mock_last_scene_change_target.needsSceneDownload = false;
-        if (g_vm_net_mock_last_scene_change_target.x == 0 &&
-            g_vm_net_mock_last_scene_change_target.y == 0)
-        {
-            u16 cx = 0, cy = 0;
-            if (vm_net_mock_get_scene_reasonable_spawn_from_sce(
-                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy, NULL))
-            {
-                g_vm_net_mock_last_scene_change_target.x = cx;
-                g_vm_net_mock_last_scene_change_target.y = cy;
-                g_vm_net_mock_last_scene_change_target.hasSceEntry = true;
-            }
-        }
-    }
     g_vm_net_mock_last_scene_change_target_valid = true;
     vm_mock_service_mark_active_session_scene_pending(target, phase ? phase : "scene-enter-defer");
     vm_net_mock_gbk_label_to_utf8((missingResource != NULL && missingResource[0] != 0) ?
@@ -6189,6 +6787,287 @@ static bool vm_net_mock_adjust_safe_player_pos_from_sce(const char *scene, u16 *
     return oldX != *x || oldY != *y;
 }
 
+/*
+ * The SCE portal spawn is authoritative for an ordinary map transition, but
+ * an explicit recovery (death respawn or the settings "unstuck" action) must
+ * additionally leave the player somewhere they can take a movement step.
+ *
+ * The CBE movement path checks the high nibble of the surrounding MAP cells
+ * (CheckMoveCollision -> CheckMapMoveCollision / CheckMapMoveCollisionY2).
+ * A portal-gap adjustment alone can push a player sideways into an all-edge
+ * cell: 11终南山_02's lower-right entry is the concrete case.  Keep this
+ * narrowly scoped to recovery landings; normal portal entry continues to use
+ * its exact SCE spawn contract.
+ */
+enum
+{
+    VM_NET_MOCK_SCENE_RECOVERY_MAP_DATA_MAX = 16384,
+    VM_NET_MOCK_SCENE_RECOVERY_MAP_RAW_MAX = 16384,
+    VM_NET_MOCK_SCENE_RECOVERY_MAX_EDGE_PORTALS = 32,
+    VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES = 1
+};
+
+typedef struct
+{
+    u8 data[VM_NET_MOCK_SCENE_RECOVERY_MAP_DATA_MAX];
+    u32 dataLen;
+    u32 cellsOffset;
+    u32 columns;
+    u32 rows;
+    u32 tileWidth;
+    u32 tileHeight;
+    vm_net_mock_sce_edge_portal portals[VM_NET_MOCK_SCENE_RECOVERY_MAX_EDGE_PORTALS];
+    u32 portalCount;
+} vm_net_mock_scene_recovery_map;
+
+static bool vm_net_mock_scene_recovery_load_map(const char *scene,
+                                                vm_net_mock_scene_recovery_map *map)
+{
+    u8 sceData[8192];
+    u8 raw[VM_NET_MOCK_SCENE_RECOVERY_MAP_RAW_MAX];
+    char mapName[64];
+    char mapPath[256];
+    u32 sceLen = 0;
+    u32 sceBase = 0;
+    u32 scePayloadStart = 0;
+    u32 scePos = 0;
+    u32 rawLen = 0;
+    u32 declaredLen = 0;
+    u32 decodedLen = 0;
+    u32 nameCount = 0;
+    u32 mapPos = 0;
+    u32 mapWidth = 0;
+    u32 mapHeight = 0;
+    u32 cellCount = 0;
+    u32 expectedCells = 0;
+
+    if (map == NULL || scene == NULL || scene[0] == 0)
+        return false;
+    memset(map, 0, sizeof(*map));
+    memset(mapName, 0, sizeof(mapName));
+
+    sceLen = vm_net_mock_load_scene_resource(scene, sceData, sizeof(sceData));
+    scePayloadStart = vm_net_mock_scene_payload_start(sceData, sceLen);
+    if (scePayloadStart == 0)
+    {
+        return false;
+    }
+    for (sceBase = 0; sceBase + 11 <= sceLen && sceBase < 32; ++sceBase)
+    {
+        if (memcmp(sceData + sceBase, "SCE2", 4) == 0)
+            break;
+    }
+    if (sceBase + 11 > sceLen || sceBase >= 32)
+        return false;
+    scePos = sceBase + 10;
+    if (!vm_net_mock_read_sce_len_string(sceData, sceLen, &scePos,
+                                         mapName, sizeof(mapName)) ||
+        !vm_net_mock_str_ends_with(mapName, ".map") ||
+        !vm_net_mock_open_server_data_resource(mapName, ".map", NULL,
+                                               mapPath, sizeof(mapPath)))
+    {
+        return false;
+    }
+
+    /* Skip the SCE's reserved dword, then retain the real edge triggers so
+     * the recovery candidate cannot immediately re-enter a portal. */
+    if (scePos + 4 > sceLen || scePos + 4 != scePayloadStart)
+        return false;
+    scePos += 4;
+    for (u32 off = scePos; off + 18 <= sceLen; ++off)
+    {
+        vm_net_mock_sce_edge_portal portal;
+        u32 end = 0;
+
+        if (!vm_net_mock_parse_sce_edge_portal_at(sceData, sceLen, off,
+                                                  &portal, &end))
+        {
+            continue;
+        }
+        if (map->portalCount < VM_NET_MOCK_SCENE_RECOVERY_MAX_EDGE_PORTALS)
+            map->portals[map->portalCount++] = portal;
+    }
+
+    rawLen = vm_net_mock_load_response_file(mapPath, raw, sizeof(raw));
+    if (rawLen < 5)
+        return false;
+    declaredLen = vm_net_mock_read_le16_at(raw, 0) |
+                  ((u32)vm_net_mock_read_le16_at(raw, 2) << 16);
+    if (declaredLen == 0 || declaredLen > rawLen - 4)
+        return false;
+    if (raw[4] == 2)
+    {
+        decodedLen = vm_net_mock_decode_lzss_resource_stream(raw + 4,
+                                                              declaredLen,
+                                                              map->data,
+                                                              sizeof(map->data));
+    }
+    else if (raw[4] == 1)
+    {
+        decodedLen = declaredLen - 1u;
+        if (decodedLen > sizeof(map->data))
+            return false;
+        memcpy(map->data, raw + 5, decodedLen);
+    }
+    else
+    {
+        return false;
+    }
+    if (decodedLen < 20)
+        return false;
+    map->dataLen = decodedLen;
+
+    nameCount = vm_net_mock_read_le32_at(map->data, 0);
+    if (nameCount > 128)
+        return false;
+    mapPos = 4;
+    for (u32 i = 0; i < nameCount; ++i)
+    {
+        u32 nameLen = 0;
+        if (mapPos >= map->dataLen)
+            return false;
+        nameLen = map->data[mapPos++];
+        if (nameLen == 0 || mapPos + nameLen > map->dataLen)
+            return false;
+        mapPos += nameLen;
+    }
+    if (mapPos + 16 > map->dataLen)
+        return false;
+    mapWidth = vm_net_mock_read_le32_at(map->data, mapPos);
+    mapHeight = vm_net_mock_read_le32_at(map->data, mapPos + 4);
+    map->tileWidth = vm_net_mock_read_le32_at(map->data, mapPos + 8);
+    map->tileHeight = vm_net_mock_read_le32_at(map->data, mapPos + 12);
+    mapPos += 16;
+    if (mapWidth == 0 || mapHeight == 0 || map->tileWidth == 0 ||
+        map->tileHeight == 0 || map->tileWidth > mapWidth ||
+        map->tileHeight > mapHeight)
+    {
+        return false;
+    }
+    map->columns = (mapWidth + map->tileWidth - 1u) / map->tileWidth;
+    map->rows = (mapHeight + map->tileHeight - 1u) / map->tileHeight;
+    if (map->columns == 0 || map->rows == 0 || map->columns > 4096 || map->rows > 4096 ||
+        map->columns > UINT32_MAX / map->rows)
+    {
+        return false;
+    }
+    expectedCells = map->columns * map->rows;
+    cellCount = (map->dataLen - mapPos) / 4u;
+    if (cellCount < expectedCells || mapPos + expectedCells * 4u > map->dataLen)
+        return false;
+    map->cellsOffset = mapPos;
+    return true;
+}
+
+static bool vm_net_mock_scene_recovery_candidate_is_clear(
+    const vm_net_mock_scene_recovery_map *map, u16 x, u16 y)
+{
+    u32 tileX = 0;
+    u32 tileY = 0;
+
+    if (map == NULL || map->tileWidth == 0 || map->tileHeight == 0)
+        return false;
+    tileX = (u32)x / map->tileWidth;
+    tileY = (u32)y / map->tileHeight;
+    if (tileX < VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES ||
+        tileY < VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES ||
+        tileX + VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES >= map->columns ||
+        tileY + VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES >= map->rows)
+    {
+        return false;
+    }
+
+    for (int dy = -(int)VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES;
+         dy <= (int)VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES; ++dy)
+    {
+        for (int dx = -(int)VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES;
+             dx <= (int)VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES; ++dx)
+        {
+            u32 cx = (u32)((int)tileX + dx);
+            u32 cy = (u32)((int)tileY + dy);
+            u32 cellOffset = map->cellsOffset + (cx * map->rows + cy) * 4u;
+
+            if ((vm_net_mock_read_le32_at(map->data, cellOffset) >> 28) != 0)
+                return false;
+        }
+    }
+
+    for (u32 i = 0; i < map->portalCount; ++i)
+    {
+        const vm_net_mock_sce_edge_portal *portal = &map->portals[i];
+        u32 left = portal->left > VM_NET_MOCK_SCENE_LANDING_SAFE_GAP ?
+                       portal->left - VM_NET_MOCK_SCENE_LANDING_SAFE_GAP : 0;
+        u32 top = portal->top > VM_NET_MOCK_SCENE_LANDING_SAFE_GAP ?
+                      portal->top - VM_NET_MOCK_SCENE_LANDING_SAFE_GAP : 0;
+        u32 right = (u32)portal->right + VM_NET_MOCK_SCENE_LANDING_SAFE_GAP;
+        u32 bottom = (u32)portal->bottom + VM_NET_MOCK_SCENE_LANDING_SAFE_GAP;
+
+        if ((u32)x >= left && (u32)x <= right &&
+            (u32)y >= top && (u32)y <= bottom)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool vm_net_mock_adjust_recovery_landing_to_map_safe(const char *scene,
+                                                             u16 *x, u16 *y)
+{
+    vm_net_mock_scene_recovery_map map;
+    u16 rawX = 0;
+    u16 rawY = 0;
+    u16 bestX = 0;
+    u16 bestY = 0;
+    unsigned long long bestDistance = 0;
+    bool found = false;
+
+    if (scene == NULL || x == NULL || y == NULL ||
+        !vm_net_mock_scene_recovery_load_map(scene, &map))
+    {
+        return false;
+    }
+    rawX = *x;
+    rawY = *y;
+    for (u32 tileX = VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES;
+         tileX + VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES < map.columns; ++tileX)
+    {
+        for (u32 tileY = VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES;
+             tileY + VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES < map.rows; ++tileY)
+        {
+            u32 candidateX = tileX * map.tileWidth + map.tileWidth / 2u;
+            u32 candidateY = tileY * map.tileHeight + map.tileHeight / 2u;
+            unsigned long long dx = candidateX > rawX ? candidateX - rawX : rawX - candidateX;
+            unsigned long long dy = candidateY > rawY ? candidateY - rawY : rawY - candidateY;
+            unsigned long long distance = dx * dx + dy * dy;
+
+            if (candidateX > UINT16_MAX || candidateY > UINT16_MAX ||
+                !vm_net_mock_scene_recovery_candidate_is_clear(
+                    &map, (u16)candidateX, (u16)candidateY) ||
+                (found && distance >= bestDistance))
+            {
+                continue;
+            }
+            found = true;
+            bestDistance = distance;
+            bestX = (u16)candidateX;
+            bestY = (u16)candidateY;
+        }
+    }
+    if (!found || (bestX == rawX && bestY == rawY))
+        return false;
+
+    *x = bestX;
+    *y = bestY;
+    printf("[info][network] mock_scene_recovery_map_safe_landing scene=%s raw=(%u,%u) safe=(%u,%u) clearance_tiles=%u evidence=MAP-high-nibble+CheckMoveCollision\n",
+           scene, rawX, rawY, bestX, bestY,
+           VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES);
+    vm_autotest_note("mock_scene_recovery_map_safe_landing scene=%s raw=(%u,%u) safe=(%u,%u) clearance_tiles=%u evidence=MAP-high-nibble+CheckMoveCollision\n",
+                     scene, rawX, rawY, bestX, bestY,
+                     VM_NET_MOCK_SCENE_RECOVERY_CLEARANCE_TILES);
+    return true;
+}
+
 static bool vm_net_mock_get_scene_entry_spawn_from_sce(const char *scene, u32 entryId,
                                                        u16 *xOut, u16 *yOut)
 {
@@ -6524,33 +7403,6 @@ static void vm_net_mock_remember_scene_change_target(const vm_net_mock_scene_cha
     if (target == NULL || target->scene[0] == 0)
         return;
     g_vm_net_mock_last_scene_change_target = *target;
-    /*
-     * Clear needsSceneDownload when the scene file already exists locally.
-     * Stale download flags from earlier resolution paths (e.g. edge-portal
-     * target-entry mismatch) cause prepare_scene_enter_resources to return
-     * false, which defers completion and triggers a re-entry loop.
-     */
-    if (g_vm_net_mock_last_scene_change_target.needsSceneDownload &&
-        vm_net_mock_scene_resource_exists(g_vm_net_mock_last_scene_change_target.scene))
-    {
-        g_vm_net_mock_last_scene_change_target.needsSceneDownload = false;
-        if (g_vm_net_mock_last_scene_change_target.x == 0 &&
-            g_vm_net_mock_last_scene_change_target.y == 0)
-        {
-            u16 cx = 0, cy = 0;
-            if (vm_net_mock_get_scene_reasonable_spawn_from_sce(
-                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy, NULL))
-            {
-                g_vm_net_mock_last_scene_change_target.x = cx;
-                g_vm_net_mock_last_scene_change_target.y = cy;
-                g_vm_net_mock_last_scene_change_target.hasSceEntry = true;
-            }
-        }
-        printf("[info][network] remember_target cleared needsDownload scene=%s pos=(%u,%u)\n",
-               g_vm_net_mock_last_scene_change_target.scene,
-               g_vm_net_mock_last_scene_change_target.x,
-               g_vm_net_mock_last_scene_change_target.y);
-    }
     g_vm_net_mock_last_scene_change_target_valid = true;
     vm_mock_service_mark_active_session_scene_pending(target, "scene-target-remember");
     ++g_vm_net_mock_last_scene_change_target_serial;
@@ -6625,11 +7477,47 @@ static bool vm_net_mock_scene_change_targets_same_arrival(const vm_net_mock_scen
 
 static bool vm_net_mock_consume_update_completed_scene_reenter(const vm_net_mock_scene_change_target *target)
 {
+    const vm_net_mock_scene_change_target *effectiveTarget = target;
+    bool restoredFromCompleted = false;
     char updateNameUtf8[128];
 
     if (!g_vm_net_mock_update_completed_reenter_pending)
         return false;
-    if (target == NULL || target->scene[0] == 0)
+    /*
+     * The instance-enter path can legitimately complete its initial WT30/2
+     * before the client discovers that the target SCE is stale and requests
+     * WT18/7.  In that case the normal active target has already been cleared,
+     * but the completed target is still the only authoritative arrival point.
+     * Restore it for this one matching resource callback so the client can
+     * re-enter through its native scene loader.  Never bind an unrelated
+     * resource update to an old scene target.
+     */
+    if ((effectiveTarget == NULL || effectiveTarget->scene[0] == 0) &&
+        g_vm_net_mock_last_completed_scene_change_target_valid &&
+        (g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick) <
+            VM_NET_MOCK_COMPLETED_SCENE_REUSE_TICKS &&
+        g_vm_net_mock_update_completed_name[0] != 0 &&
+        vm_net_mock_scene_names_equal_exact(
+            g_vm_net_mock_last_completed_scene_change_target.scene,
+            g_vm_net_mock_update_completed_name))
+    {
+        g_vm_net_mock_last_scene_change_target =
+            g_vm_net_mock_last_completed_scene_change_target;
+        g_vm_net_mock_last_scene_change_target_valid = true;
+        effectiveTarget = &g_vm_net_mock_last_scene_change_target;
+        restoredFromCompleted = true;
+        printf("[info][screen] scene_target_restore_for_update_reenter scene=%s pos=(%u,%u) file=%s reason=completed-target-resource-match\n",
+               effectiveTarget->scene, effectiveTarget->x, effectiveTarget->y,
+               g_vm_net_mock_update_completed_name);
+        vm_autotest_note("scene_target_restore_for_update_reenter scene=%s pos=(%u,%u) file=%s reason=completed-target-resource-match evidence=WT18/7->scene-loader\n",
+                         effectiveTarget->scene, effectiveTarget->x,
+                         effectiveTarget->y, g_vm_net_mock_update_completed_name);
+    }
+    if (effectiveTarget == NULL || effectiveTarget->scene[0] == 0 ||
+        (restoredFromCompleted &&
+         (g_vm_net_mock_update_completed_name[0] == 0 ||
+          !vm_net_mock_scene_names_equal_exact(
+              effectiveTarget->scene, g_vm_net_mock_update_completed_name))))
     {
         g_vm_net_mock_update_completed_reenter_pending = false;
         return false;
@@ -6639,16 +7527,16 @@ static bool vm_net_mock_consume_update_completed_scene_reenter(const vm_net_mock
                                   updateNameUtf8,
                                   sizeof(updateNameUtf8));
     printf("[info][screen] screen_mgr allow-update-reenter scene=%s pos=(%u,%u) exit=%u file=%s\n",
-           target->scene,
-           target->x,
-           target->y,
-           target->exitId,
+           effectiveTarget->scene,
+           effectiveTarget->x,
+           effectiveTarget->y,
+           effectiveTarget->exitId,
            updateNameUtf8);
     vm_autotest_note("screen_mgr allow-update-reenter scene=%s pos=(%u,%u) exit=%u file=%s\n",
-                     target->scene,
-                     target->x,
-                     target->y,
-                     target->exitId,
+                     effectiveTarget->scene,
+                     effectiveTarget->x,
+                     effectiveTarget->y,
+                     effectiveTarget->exitId,
                      updateNameUtf8);
     return true;
 }
@@ -6688,6 +7576,27 @@ static void vm_net_mock_mark_direct_scene_enter_completed(const vm_net_mock_scen
            target->y,
            target->exitId,
            reason ? reason : "direct-enter");
+}
+
+/* Settings "unstuck" enters the current scene through an mmGame 16/2 or
+ * 16/3 result, so it does not pass the normal 30/1 builder that re-arms the
+ * one-shot 27/11 directory.  The client has nevertheless discarded the old
+ * scene shell.  Re-arm only this settings recovery path and let the first
+ * later WT6/1 consume the catalog after scene_runtime_init_and_sync() has
+ * rebuilt the runtime tables.  Do not fold this into
+ * mark_direct_scene_enter_completed(): that shared helper also closes
+ * startup and named-portal paths whose catalog may already have been sent. */
+static void vm_net_mock_mark_settings_unstuck_npc_reseed_pending(
+    const vm_net_mock_scene_change_target *target, const char *responseKind)
+{
+    if (target == NULL || target->scene[0] == 0)
+        return;
+
+    vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target->scene);
+    printf("[info][network] mock_scene_npc_rearm scene=%s trigger=settings-unstuck response=%s immediate=0 next=WT6/1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
+           target->scene, responseKind ? responseKind : "direct-enter");
+    vm_autotest_note("mock_scene_npc_rearm scene=%s trigger=settings-unstuck response=%s immediate=0 next=WT6/1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
+                     target->scene, responseKind ? responseKind : "direct-enter");
 }
 
 static void vm_net_mock_complete_startup_scene_followup(const char *currentScene,
@@ -7164,34 +8073,51 @@ static bool vm_net_mock_is_teleport_stone_transfer_request(const u8 *request, u3
     return true;
 }
 
-static void vm_net_mock_get_teleport_stone_target(const u8 *request, u32 requestLen,
-                                                  vm_net_mock_scene_change_target *target)
+static bool vm_net_mock_get_teleport_stone_catalog_target(
+    u32 exitId, vm_net_mock_scene_change_target *target);
+
+static bool vm_net_mock_get_teleport_stone_target(const u8 *request, u32 requestLen,
+                                                   vm_net_mock_scene_change_target *target)
 {
-    u32 exitId = VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID;
+    u32 exitId = 0;
     const char *sceneOverride = vm_net_mock_env_str("CBE_TELEPORT_STONE_SCENE", "");
-    const char *targetScene = vm_net_mock_default_scene_name();
 
+    if (target == NULL)
+        return false;
     memset(target, 0, sizeof(*target));
-    if (sceneOverride != NULL && sceneOverride[0] != 0 && vm_net_mock_scene_name_is_safe(sceneOverride))
-        targetScene = sceneOverride;
-
-    (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitID", &exitId);
-    (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitid", &exitId);
-
-    snprintf(target->scene, sizeof(target->scene), "%s", vm_net_mock_normalize_scene_name_for_enter(targetScene));
-    target->x = VM_NET_MOCK_ROLE_INITIAL_X;
-    target->y = VM_NET_MOCK_ROLE_INITIAL_Y;
-    (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(target->scene,
-                                                          &target->x,
-                                                          &target->y,
-                                                          NULL);
+    if (!(vm_net_mock_get_object_u32_field(request, requestLen, "exitID", &exitId) ||
+          vm_net_mock_get_object_u32_field(request, requestLen, "exitid", &exitId)) ||
+        exitId == 0 ||
+        !vm_net_mock_get_teleport_stone_catalog_target(exitId, target))
+    {
+        printf("[error][network] mock_teleport_stone_target_unresolved exit=%u "
+               "reason=not-an-authored-telestone-scene\n", exitId);
+        return false;
+    }
+    /*
+     * This remains a deliberate test-only override, but the normal target is
+     * always selected by the actual exitinfo catalog.  Do not let a default
+     * scene stand in for an unknown catalog id.
+     */
+    if (sceneOverride != NULL && sceneOverride[0] != 0 &&
+        vm_net_mock_scene_name_is_safe(sceneOverride))
+    {
+        snprintf(target->scene, sizeof(target->scene), "%s",
+                 vm_net_mock_normalize_scene_name_for_enter(sceneOverride));
+        target->x = VM_NET_MOCK_ROLE_INITIAL_X;
+        target->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(
+            target->scene, &target->x, &target->y, NULL);
+        vm_net_mock_adjust_safe_player_pos_for_scene(
+            target->scene, &target->x, &target->y);
+    }
     if (getenv("CBE_TELEPORT_STONE_X") != NULL)
         target->x = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_X", target->x);
     if (getenv("CBE_TELEPORT_STONE_Y") != NULL)
         target->y = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_Y", target->y);
-    target->exitId = exitId;
-    target->mapType = 2;
-    vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+    vm_net_mock_adjust_safe_player_pos_for_scene(
+        target->scene, &target->x, &target->y);
+    return true;
 }
 
 static bool vm_net_mock_is_teleport_stone_map_transfer_request(const u8 *request, u32 requestLen)
@@ -7403,11 +8329,11 @@ static bool vm_net_mock_find_teleport_stone_smap_scene_dsh(const char *path,
     return false;
 }
 
-/* Ordinary death recovery needs a real return point, not the character's
- * bootstrap map.  `n_telestone` is the authored scene actor used by the
- * client resources; sMap supplies local-scene topology and wMap joins the
- * otherwise separate local-map groups.  The sMap X/Y values are world-map UI
- * markers, so they are deliberately never used as actor coordinates here. */
+/* Ordinary death recovery uses the nearest town, not the nearest scene
+ * teleport stone.  sMap supplies scene/world topology and child-map UI
+ * positions identify a town's centre; wMap supplies world adjacency and
+ * marks safe town maps with its authored monster-level value \"无\".  The
+ * selected SCE supplies the actual player landing point. */
 enum
 {
     VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX = 192,
@@ -7418,6 +8344,8 @@ typedef struct
 {
     u32 rowId;
     u32 parentWorldId;
+    u32 mapMarkerX;
+    u32 mapMarkerY;
     u32 neighbors[4];
     char scene[64];
 } vm_net_mock_death_respawn_smap_node;
@@ -7426,20 +8354,8 @@ typedef struct
 {
     u32 worldId;
     u32 neighbors[4];
+    bool isTown;
 } vm_net_mock_death_respawn_wmap_node;
-
-static int vm_net_mock_death_respawn_find_smap_node(
-    const vm_net_mock_death_respawn_smap_node *nodes, u32 count, u32 rowId)
-{
-    if (nodes == NULL || rowId == 0)
-        return -1;
-    for (u32 i = 0; i < count; ++i)
-    {
-        if (nodes[i].rowId == rowId)
-            return (int)i;
-    }
-    return -1;
-}
 
 static int vm_net_mock_death_respawn_find_wmap_node(
     const vm_net_mock_death_respawn_wmap_node *nodes, u32 count, u32 worldId)
@@ -7469,6 +8385,217 @@ static bool vm_net_mock_death_respawn_scene_has_teleport_stone(const char *scene
     {
         if (memcmp(data + offset, marker, sizeof(marker) - 1) == 0)
             return true;
+    }
+    return false;
+}
+
+/*
+ * The client asks the scene teleport stone for an exitinfo list, not a world
+ * map page.  Its item-use callback repeats the selected exit id in 16/2 and
+ * 16/3, so every list row must carry a stable server-resolvable identity.
+ *
+ * sMap row IDs are the natural identity for authored world-map scenes.  A few
+ * shipped SCEs with n_telestone are intentionally absent from sMap; retain
+ * those real scene resources as well with a deterministic high-range id,
+ * rather than silently hiding them or redirecting them to Penglai.
+ */
+enum
+{
+    VM_NET_MOCK_TELEPORT_STONE_DESTINATION_MAX = 64,
+    VM_NET_MOCK_TELEPORT_STONE_SYNTHETIC_EXIT_BASE = 0x80000000u
+};
+
+typedef struct
+{
+    u32 exitId;
+    bool hasSmapRow;
+    char scene[64];
+    char label[64];
+} vm_net_mock_teleport_stone_destination;
+
+static bool vm_net_mock_find_teleport_stone_smap_destination(
+    const char *scene, u32 *rowIdOut, char *labelOut, size_t labelOutCap)
+{
+    char path[256];
+    u8 data[16384];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 headerBytes = 0;
+    u32 pos = 0;
+
+    if (rowIdOut)
+        *rowIdOut = 0;
+    if (labelOut && labelOutCap)
+        labelOut[0] = 0;
+    if (!vm_net_mock_scene_name_is_download_key(scene) ||
+        !vm_net_mock_open_server_data_resource("sMap.dsh", ".dsh", NULL,
+                                               path, sizeof(path)))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (columnCount < 3 || columnCount > 64 || rowCount > 10000 ||
+        16u + headerBytes > len)
+    {
+        return false;
+    }
+    pos = 16u + headerBytes;
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        u32 rowId = 0;
+        char rowScene[64];
+        char rowLabel[64];
+        bool valid = true;
+
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            return false;
+        memset(rowScene, 0, sizeof(rowScene));
+        memset(rowLabel, 0, sizeof(rowLabel));
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+            {
+                valid = false;
+                break;
+            }
+            if (col == 0)
+                rowId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 1)
+                valid = vm_net_mock_copy_dsh_string_field(
+                            rowScene, sizeof(rowScene), value, valueLen) &&
+                        valid;
+            else if (col == 2)
+                (void)vm_net_mock_copy_dsh_string_field(
+                    rowLabel, sizeof(rowLabel), value, valueLen);
+            rowPos += valueLen;
+        }
+        if (valid && rowId != 0 &&
+            vm_net_mock_scene_names_equal_exact(scene, rowScene))
+        {
+            if (rowIdOut)
+                *rowIdOut = rowId;
+            if (labelOut && labelOutCap)
+            {
+                snprintf(labelOut, labelOutCap, "%s",
+                         rowLabel[0] ? rowLabel : rowScene);
+            }
+            return true;
+        }
+        pos = rowEnd;
+    }
+    return false;
+}
+
+static void vm_net_mock_teleport_stone_scene_key_label(
+    const char *scene, char *labelOut, size_t labelOutCap)
+{
+    char *suffix = NULL;
+
+    if (labelOut == NULL || labelOutCap == 0)
+        return;
+    labelOut[0] = 0;
+    if (scene == NULL || scene[0] == 0)
+        return;
+    snprintf(labelOut, labelOutCap, "%s", scene);
+    suffix = strstr(labelOut, ".sce");
+    if (suffix != NULL && suffix[4] == 0)
+        *suffix = 0;
+}
+
+static u32 vm_net_mock_collect_teleport_stone_destinations(
+    vm_net_mock_teleport_stone_destination *destinations, u32 destinationCap)
+{
+    vm_net_mock_monster_catalog_scene_file files[
+        VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX];
+    u32 fileCount = 0;
+    u32 destinationCount = 0;
+
+    if (destinations == NULL || destinationCap == 0)
+        return 0;
+    memset(destinations, 0, sizeof(*destinations) * destinationCap);
+    fileCount = vm_net_mock_monster_catalog_collect_scene_files(
+        files, sizeof(files) / sizeof(files[0]));
+    for (u32 fileIndex = 0;
+         fileIndex < fileCount && destinationCount < destinationCap;
+         ++fileIndex)
+    {
+        vm_net_mock_teleport_stone_destination *destination =
+            &destinations[destinationCount];
+        u32 smapRowId = 0;
+
+        if (!vm_net_mock_scene_name_is_download_key(files[fileIndex].name) ||
+            !vm_net_mock_death_respawn_scene_has_teleport_stone(
+                files[fileIndex].name))
+        {
+            continue;
+        }
+        snprintf(destination->scene, sizeof(destination->scene), "%s",
+                 files[fileIndex].name);
+        if (vm_net_mock_find_teleport_stone_smap_destination(
+                destination->scene, &smapRowId, destination->label,
+                sizeof(destination->label)))
+        {
+            destination->exitId = smapRowId;
+            destination->hasSmapRow = true;
+        }
+        else
+        {
+            destination->exitId =
+                VM_NET_MOCK_TELEPORT_STONE_SYNTHETIC_EXIT_BASE + fileIndex;
+            destination->hasSmapRow = false;
+            vm_net_mock_teleport_stone_scene_key_label(
+                destination->scene, destination->label,
+                sizeof(destination->label));
+        }
+        if (destination->exitId == 0 || destination->label[0] == 0)
+            continue;
+        ++destinationCount;
+    }
+    return destinationCount;
+}
+
+static bool vm_net_mock_get_teleport_stone_catalog_target(
+    u32 exitId, vm_net_mock_scene_change_target *target)
+{
+    vm_net_mock_teleport_stone_destination destinations[
+        VM_NET_MOCK_TELEPORT_STONE_DESTINATION_MAX];
+    u32 destinationCount = 0;
+
+    if (target == NULL || exitId == 0)
+        return false;
+    destinationCount = vm_net_mock_collect_teleport_stone_destinations(
+        destinations, sizeof(destinations) / sizeof(destinations[0]));
+    for (u32 i = 0; i < destinationCount; ++i)
+    {
+        const vm_net_mock_teleport_stone_destination *destination =
+            &destinations[i];
+
+        if (destination->exitId != exitId)
+            continue;
+        memset(target, 0, sizeof(*target));
+        snprintf(target->scene, sizeof(target->scene), "%s",
+                 destination->scene);
+        target->x = VM_NET_MOCK_ROLE_INITIAL_X;
+        target->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(
+            target->scene, &target->x, &target->y, NULL);
+        vm_net_mock_adjust_safe_player_pos_for_scene(
+            target->scene, &target->x, &target->y);
+        target->exitId = destination->exitId;
+        target->mapType = 2;
+        return true;
     }
     return false;
 }
@@ -7532,6 +8659,12 @@ static bool vm_net_mock_death_respawn_load_smap_topology(
                 valid = vm_net_mock_copy_dsh_string_field(node.scene,
                                                            sizeof(node.scene),
                                                            value, valueLen) && valid;
+            else if (col == 3)
+                node.mapMarkerX =
+                    vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 4)
+                node.mapMarkerY =
+                    vm_net_mock_parse_dsh_u32(value, valueLen, 0);
             else if (col >= 7 && col <= 10)
                 node.neighbors[col - 7] = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
             else if (col == 11)
@@ -7607,6 +8740,13 @@ static bool vm_net_mock_death_respawn_load_wmap_topology(
                 node.worldId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
             else if (col >= 8 && col <= 11)
                 node.neighbors[col - 8] = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 16)
+            {
+                /* GBK "无": the authored wMap monster-level value for the
+                 * safe city maps (蓬莱、临安府、雁门关、蜀山、大理). */
+                node.isTown = valueLen == 2 &&
+                              value[0] == 0xce && value[1] == 0xde;
+            }
             rowPos += valueLen;
         }
         if (valid && node.worldId != 0)
@@ -7618,27 +8758,86 @@ static bool vm_net_mock_death_respawn_load_wmap_topology(
     return nodeCount != 0;
 }
 
-static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
+static bool vm_net_mock_find_town_center_smap_node(
+    const vm_net_mock_death_respawn_smap_node *smap, u32 smapCount,
+    u32 townWorldId, u32 *targetIndexOut)
+{
+    unsigned long long totalX = 0;
+    unsigned long long totalY = 0;
+    u32 memberCount = 0;
+    u32 centerX = 0;
+    u32 centerY = 0;
+    u32 bestIndex = 0;
+    unsigned long long bestDistance = 0;
+    bool found = false;
+
+    if (targetIndexOut)
+        *targetIndexOut = 0;
+    if (smap == NULL || smapCount == 0 || townWorldId == 0)
+        return false;
+    for (u32 i = 0; i < smapCount; ++i)
+    {
+        if (smap[i].parentWorldId != townWorldId ||
+            !vm_net_mock_scene_name_is_download_key(smap[i].scene))
+        {
+            continue;
+        }
+        totalX += smap[i].mapMarkerX;
+        totalY += smap[i].mapMarkerY;
+        ++memberCount;
+    }
+    if (memberCount == 0)
+        return false;
+    centerX = (u32)(totalX / memberCount);
+    centerY = (u32)(totalY / memberCount);
+    for (u32 i = 0; i < smapCount; ++i)
+    {
+        unsigned long long dx = 0;
+        unsigned long long dy = 0;
+        unsigned long long distance = 0;
+
+        if (smap[i].parentWorldId != townWorldId ||
+            !vm_net_mock_scene_name_is_download_key(smap[i].scene))
+        {
+            continue;
+        }
+        dx = smap[i].mapMarkerX > centerX
+                 ? smap[i].mapMarkerX - centerX : centerX - smap[i].mapMarkerX;
+        dy = smap[i].mapMarkerY > centerY
+                 ? smap[i].mapMarkerY - centerY : centerY - smap[i].mapMarkerY;
+        distance = dx * dx + dy * dy;
+        if (!found || distance < bestDistance ||
+            (distance == bestDistance && smap[i].rowId < smap[bestIndex].rowId))
+        {
+            found = true;
+            bestIndex = i;
+            bestDistance = distance;
+        }
+    }
+    if (!found)
+        return false;
+    if (targetIndexOut)
+        *targetIndexOut = bestIndex;
+    return true;
+}
+
+static bool vm_net_mock_resolve_nearest_town_center_respawn(
     const char *fromScene, char *sceneOut, size_t sceneOutCap,
     u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
     u32 *distanceOut, const char **routeOut)
 {
     vm_net_mock_death_respawn_smap_node smap[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
     vm_net_mock_death_respawn_wmap_node wmap[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
-    bool smapVisited[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
-    u32 smapQueue[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
-    u32 smapDistance[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
     u32 wmapQueue[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
     u32 wmapDistance[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
     u32 smapCount = 0;
     u32 wmapCount = 0;
     u32 sourceIndex = 0;
     u32 targetIndex = 0;
-    u32 sourceWorldId = 0;
+    u32 targetWorldId = 0;
     u32 bestDistance = 0xffffffffu;
     u32 queueHead = 0;
     u32 queueTail = 0;
-    const char *route = "-";
     u16 landingX = 0;
     u16 landingY = 0;
 
@@ -7656,71 +8855,34 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
         *distanceOut = 0;
     if (routeOut)
         *routeOut = "unresolved";
-    if (!vm_net_mock_scene_name_is_safe(fromScene) || sceneOut == NULL || sceneOutCap == 0 ||
-        !vm_net_mock_death_respawn_load_smap_topology(smap, sizeof(smap) / sizeof(smap[0]),
-                                                       &smapCount))
+    if (!vm_net_mock_scene_name_is_safe(fromScene) || sceneOut == NULL ||
+        sceneOutCap == 0 ||
+        !vm_net_mock_death_respawn_load_smap_topology(
+            smap, sizeof(smap) / sizeof(smap[0]), &smapCount) ||
+        !vm_net_mock_death_respawn_load_wmap_topology(
+            wmap, sizeof(wmap) / sizeof(wmap[0]), &wmapCount))
     {
         return false;
     }
     for (; sourceIndex < smapCount; ++sourceIndex)
     {
-        if (vm_net_mock_scene_names_equal_exact(fromScene, smap[sourceIndex].scene))
+        if (vm_net_mock_scene_names_equal_exact(fromScene,
+                                                smap[sourceIndex].scene))
+        {
             break;
+        }
     }
     if (sourceIndex == smapCount)
         return false;
-    sourceWorldId = smap[sourceIndex].parentWorldId;
     if (sourceSmapRowOut)
         *sourceSmapRowOut = smap[sourceIndex].rowId;
-
-    /* Prefer an actually connected local scene.  This preserves the shortest
-     * scene-edge route and avoids treating world-map UI coordinates as space. */
-    memset(smapVisited, 0, sizeof(smapVisited));
-    smapQueue[queueTail++] = sourceIndex;
-    smapVisited[sourceIndex] = true;
-    smapDistance[sourceIndex] = 0;
-    while (queueHead < queueTail)
-    {
-        u32 index = smapQueue[queueHead++];
-
-        if (vm_net_mock_death_respawn_scene_has_teleport_stone(smap[index].scene))
-        {
-            targetIndex = index;
-            bestDistance = smapDistance[index];
-            route = "smap-neighbor";
-            goto resolved_target;
-        }
-        for (u32 edge = 0; edge < 4; ++edge)
-        {
-            int neighbor = vm_net_mock_death_respawn_find_smap_node(
-                smap, smapCount, smap[index].neighbors[edge]);
-            if (neighbor >= 0 && !smapVisited[neighbor] && queueTail < smapCount)
-            {
-                smapVisited[neighbor] = true;
-                smapDistance[neighbor] = smapDistance[index] + 1;
-                smapQueue[queueTail++] = (u32)neighbor;
-            }
-        }
-    }
-
-    /* Local sMap components do not cross world-map groups.  If none of their
-     * scenes contains an authored stone, select the nearest world-map group
-     * whose child scene does, using only wMap adjacency. */
-    if (sourceWorldId == 0 ||
-        !vm_net_mock_death_respawn_load_wmap_topology(wmap, sizeof(wmap) / sizeof(wmap[0]),
-                                                       &wmapCount))
-    {
-        return false;
-    }
     {
         int sourceWorldIndex = vm_net_mock_death_respawn_find_wmap_node(
-            wmap, wmapCount, sourceWorldId);
+            wmap, wmapCount, smap[sourceIndex].parentWorldId);
         if (sourceWorldIndex < 0)
             return false;
         for (u32 i = 0; i < wmapCount; ++i)
             wmapDistance[i] = 0xffffffffu;
-        queueHead = 0;
-        queueTail = 0;
         wmapQueue[queueTail++] = (u32)sourceWorldIndex;
         wmapDistance[sourceWorldIndex] = 0;
         while (queueHead < queueTail)
@@ -7739,35 +8901,30 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
             }
         }
     }
-    for (u32 i = 0; i < smapCount; ++i)
+    for (u32 i = 0; i < wmapCount; ++i)
     {
-        int worldIndex = vm_net_mock_death_respawn_find_wmap_node(
-            wmap, wmapCount, smap[i].parentWorldId);
-        u32 worldDistance = worldIndex >= 0 ? wmapDistance[worldIndex] : 0xffffffffu;
-
-        if (worldDistance == 0xffffffffu ||
-            !vm_net_mock_death_respawn_scene_has_teleport_stone(smap[i].scene))
-        {
+        if (!wmap[i].isTown || wmapDistance[i] == 0xffffffffu)
             continue;
-        }
-        if (worldDistance < bestDistance ||
-            (worldDistance == bestDistance && smap[i].rowId < smap[targetIndex].rowId))
+        if (wmapDistance[i] < bestDistance ||
+            (wmapDistance[i] == bestDistance &&
+             (targetWorldId == 0 || wmap[i].worldId < targetWorldId)))
         {
-            targetIndex = i;
-            bestDistance = worldDistance;
+            targetWorldId = wmap[i].worldId;
+            bestDistance = wmapDistance[i];
         }
     }
-    if (bestDistance == 0xffffffffu)
-        return false;
-    route = "wmap-neighbor";
-
-resolved_target:
-    if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(smap[targetIndex].scene,
-                                                          &landingX, &landingY, NULL))
+    if (targetWorldId == 0 ||
+        !vm_net_mock_find_town_center_smap_node(
+            smap, smapCount, targetWorldId, &targetIndex) ||
+        !vm_net_mock_get_scene_reasonable_spawn_from_sce(
+            smap[targetIndex].scene, &landingX, &landingY, NULL))
     {
         return false;
     }
-    vm_net_mock_adjust_safe_player_pos_for_scene(smap[targetIndex].scene, &landingX, &landingY);
+    vm_net_mock_adjust_safe_player_pos_for_scene(
+        smap[targetIndex].scene, &landingX, &landingY);
+    (void)vm_net_mock_adjust_recovery_landing_to_map_safe(
+        smap[targetIndex].scene, &landingX, &landingY);
     snprintf(sceneOut, sceneOutCap, "%s", smap[targetIndex].scene);
     if (xOut)
         *xOut = landingX;
@@ -7778,13 +8935,20 @@ resolved_target:
     if (distanceOut)
         *distanceOut = bestDistance;
     if (routeOut)
-        *routeOut = route;
-    printf("[info][network] mock_death_respawn_nearest_telestone source_scene=%s source_smap=%u target_scene=%s target_smap=%u route=%s hops=%u landing=(%u,%u) evidence=sMap.dsh+wMap.dsh+SCE:n_telestone\n",
-           fromScene, smap[sourceIndex].rowId, smap[targetIndex].scene,
-           smap[targetIndex].rowId, route, bestDistance, landingX, landingY);
-    vm_autotest_note("mock_death_respawn_nearest_telestone source_scene=%s source_smap=%u target_scene=%s target_smap=%u route=%s hops=%u landing=(%u,%u) evidence=sMap.dsh/wMap.dsh/SCE:n_telestone\n",
-                     fromScene, smap[sourceIndex].rowId, smap[targetIndex].scene,
-                     smap[targetIndex].rowId, route, bestDistance, landingX, landingY);
+        *routeOut = "wmap-nearest-town-center";
+    printf("[info][network] mock_death_respawn_nearest_town source_scene=%s "
+           "source_smap=%u town_world=%u target_scene=%s target_smap=%u "
+           "hops=%u landing=(%u,%u) evidence=sMap.dsh+wMap.dsh(monster-level=none)+SCE\n",
+           fromScene, smap[sourceIndex].rowId, targetWorldId,
+           smap[targetIndex].scene, smap[targetIndex].rowId, bestDistance,
+           landingX, landingY);
+    vm_autotest_note("mock_death_respawn_nearest_town source_scene=%s "
+                     "source_smap=%u town_world=%u target_scene=%s "
+                     "target_smap=%u hops=%u landing=(%u,%u) "
+                     "evidence=sMap.dsh/wMap.dsh(monster-level=none)/SCE\n",
+                     fromScene, smap[sourceIndex].rowId, targetWorldId,
+                     smap[targetIndex].scene, smap[targetIndex].rowId,
+                     bestDistance, landingX, landingY);
     return true;
 }
 
@@ -8121,40 +9285,44 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
     return true;
 }
 
-static const char *vm_net_mock_teleport_stone_display_label(void)
+static bool vm_net_mock_build_teleport_stone_exitinfo_blob(
+    u8 *out, u32 outCap, u32 *blobLenOut, u32 *entryCountOut)
 {
-    /* GBK: 蓬莱-铜雀台.  This is the display name of c00蓬莱仙岛_01.sce,
-     * which is also the default target selected by the existing builder. */
-    static const char defaultLabel[] =
-        "\xc5\xee\xc0\xb3-\xcd\xad\xc8\xb8\xcc\xa8";
-    return vm_net_mock_env_str("CBE_TELEPORT_STONE_LABEL", defaultLabel);
-}
-
-static bool vm_net_mock_build_teleport_stone_exitinfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
-{
+    vm_net_mock_teleport_stone_destination destinations[
+        VM_NET_MOCK_TELEPORT_STONE_DESTINATION_MAX];
+    u32 destinationCount = 0;
     u32 pos = 0;
-    const char *label = vm_net_mock_teleport_stone_display_label();
-    u32 exitId = vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID", VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID);
 
     if (out == NULL || blobLenOut == NULL)
         return false;
-    if (exitId > 0xffff)
-        exitId = VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID;
+    if (entryCountOut)
+        *entryCountOut = 0;
+    destinationCount = vm_net_mock_collect_teleport_stone_destinations(
+        destinations, sizeof(destinations) / sizeof(destinations[0]));
+    if (destinationCount == 0 || destinationCount > UINT8_MAX)
+        return false;
 
     /*
      * mmGameMstarWqvga.cbm:sub_11CE parses 16/1 exitinfo as:
      *   u8 count, repeated u32 exitId, len16 string label, u32 reserved.
      */
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, (u8)destinationCount))
         return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, exitId))
-        return false;
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, label))
-        return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 0))
-        return false;
+    for (u32 i = 0; i < destinationCount; ++i)
+    {
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
+                                     destinations[i].exitId) ||
+            !vm_net_mock_seq_put_string(out, outCap, &pos,
+                                        destinations[i].label) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, 0))
+        {
+            return false;
+        }
+    }
 
     *blobLenOut = pos;
+    if (entryCountOut)
+        *entryCountOut = destinationCount;
     return true;
 }
 
@@ -8162,8 +9330,9 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
     u32 objectStart = 0;
-    u8 exitInfo[128];
+    u8 exitInfo[4096];
     u32 exitInfoLen = 0;
+    u32 destinationCount = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_net_mock_backpack_item_state *teleportStone =
         role ? vm_net_mock_role_find_backpack_item(
@@ -8175,7 +9344,8 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
     if (outCap < pos)
         return 0;
     memset(exitInfo, 0, sizeof(exitInfo));
-    if (!vm_net_mock_build_teleport_stone_exitinfo_blob(exitInfo, sizeof(exitInfo), &exitInfoLen))
+    if (!vm_net_mock_build_teleport_stone_exitinfo_blob(
+            exitInfo, sizeof(exitInfo), &exitInfoLen, &destinationCount))
         return 0;
     if (exitInfoLen == 0 || exitInfoLen > 0xffff)
         return 0;
@@ -8188,16 +9358,15 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_packet(out, pos, 1);
     g_vm_net_mock_last_teleport_stone_list_tick = g_schedulerTick;
 
-    printf("[info][network] mock_teleport_stone_list entries=1 exit=%u label=%s role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
-           vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID",
-                               VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID),
-           vm_net_mock_teleport_stone_display_label(),
+    printf("[info][network] mock_teleport_stone_list entries=%u source=SCE:n_telestone+sMap.dsh "
+           "role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
+           destinationCount,
            role ? role->roleId : 0,
            teleportStoneCount,
            wcoin,
            exitInfoLen);
-    vm_autotest_note("mock_teleport_stone_list entries=1 role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
-                     role ? role->roleId : 0,
+    vm_autotest_note("mock_teleport_stone_list entries=%u source=SCE:n_telestone+sMap.dsh role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
+                     destinationCount, role ? role->roleId : 0,
                      teleportStoneCount,
                      wcoin,
                      exitInfoLen);
@@ -8452,6 +9621,11 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
         target->y = fromY;
         vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
     }
+    if (vm_net_mock_adjust_recovery_landing_to_map_safe(target->scene,
+                                                         &target->x, &target->y))
+    {
+        targetSource = "map-collision-safe";
+    }
     target->exitId = 0;
     target->mapType = 2;
     target->hasSceEntry = strcmp(targetSource, "current-pos") != 0;
@@ -8491,6 +9665,7 @@ static u32 vm_net_mock_build_settings_unstuck_response(const u8 *request, u32 re
     vm_net_mock_finish_wt_packet(out, pos, 2);
 
     vm_net_mock_mark_direct_scene_enter_completed(&target, "settings-unstuck-target");
+    vm_net_mock_mark_settings_unstuck_npc_reseed_pending(&target, "12/3+16/3");
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "settings-unstuck-target");
@@ -8548,6 +9723,7 @@ static u32 vm_net_mock_build_settings_unstuck_16_2_response(const u8 *request, u
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
     vm_net_mock_mark_direct_scene_enter_completed(&target, "settings-unstuck-16-2-target");
+    vm_net_mock_mark_settings_unstuck_npc_reseed_pending(&target, "16/2");
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
@@ -8794,6 +9970,27 @@ static u32 vm_net_mock_build_named_portal_access_response(const u8 *request,
                    wcoinBefore);
             return vm_net_mock_build_paid_instance_failure_response(4, configurationHint,
                                                                      out, outCap);
+        }
+        /* The account-wallet debit is committed before scene construction.
+         * Keep the operation log append-only and non-blocking: its failure is
+         * visible to the service operator but must not falsely reject a paid
+         * entry whose authoritative W-coin transaction already succeeded. */
+        if (g_vm_mock_service_active_account_id != NULL &&
+            g_vm_mock_service_active_account_id[0] != 0)
+        {
+            char operationDetail[256];
+
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "游戏内付费副本消费 W币 %u，入口 %u，余额 %u→%u",
+                     wcoinCost, targetEntryId, wcoinBefore, wcoinAfter);
+            if (!vm_mock_admin_operation_log_record(
+                    "spend-wcoin-instance", g_vm_mock_service_active_account_id,
+                    role->roleId, 0, 0, wcoinCost, operationDetail))
+            {
+                printf("[error][mock-service] operation_log_game_wcoin_failed source=paid-instance account=%s role=%u entry=%u cost=%u error=%s\n",
+                       g_vm_mock_service_active_account_id, role->roleId,
+                       targetEntryId, wcoinCost, vm_mysql_last_error());
+            }
         }
     }
     else
@@ -9151,7 +10348,11 @@ static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request,
         }
         else
         {
-            vm_net_mock_get_teleport_stone_target(request, requestLen, &target);
+            if (!vm_net_mock_get_teleport_stone_target(
+                    request, requestLen, &target))
+            {
+                return 0;
+            }
         }
         if (targetFromConfirm)
         {
@@ -9226,7 +10427,11 @@ static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request,
     }
     else
     {
-        vm_net_mock_get_teleport_stone_target(request, requestLen, &target);
+        if (!vm_net_mock_get_teleport_stone_target(request, requestLen,
+                                                    &target))
+        {
+            return 0;
+        }
     }
 
     if (targetAlreadyPending)

@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include "config.h"
 #ifdef CBE_PLATFORM_NO_WINDOW
-#include "android_compat.h"
+#include "android/android_compat.h"
 #endif
 #if defined(CBE_PLATFORM_ANDROID)
 #include <unicorn/unicorn.h>

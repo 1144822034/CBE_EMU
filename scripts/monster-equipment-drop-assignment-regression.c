@@ -36,6 +36,19 @@ static void seed_equipment(u32 index, u32 itemId, u32 level, u32 quality)
     item->quality = (u8)quality;
 }
 
+static void seed_equipment_in_slot(u32 index, u32 itemId, u32 level,
+                                   u32 quality, u32 slot)
+{
+    vm_net_mock_equipment_catalog_item *item =
+        &g_vm_net_mock_equipment_catalog[index];
+
+    memset(item, 0, sizeof(*item));
+    item->itemId = itemId;
+    item->slot = (u8)slot;
+    item->levelRequired = (u8)level;
+    item->quality = (u8)quality;
+}
+
 static bool row_has_item(const vm_net_mock_monster_admin_row *row, u32 itemId)
 {
     return vm_net_mock_monster_drop_row_has_item(row, itemId);
@@ -51,6 +64,19 @@ static u32 row_equipment_count(const vm_net_mock_monster_admin_row *row)
             ++count;
     }
     return count;
+}
+
+static u16 row_drop_rate_basis_points(const vm_net_mock_monster_admin_row *row,
+                                      u32 itemId)
+{
+    if (row == NULL)
+        return 0;
+    for (u8 drop = 0; drop < row->dropCount; ++drop)
+    {
+        if (row->drops[drop].itemId == itemId)
+            return row->drops[drop].rateBasisPoints;
+    }
+    return 0;
 }
 
 int main(void)
@@ -71,8 +97,35 @@ int main(void)
     vm_net_mock_monster_admin_row monsters[5];
     vm_net_mock_monster_equipment_drop_assignment assignment;
     const char *error = NULL;
-    const u8 rates[3] = {5, 2, 1};
+    const u16 rates[3] = {125, 50, 25};
     const u32 equipmentIds[] = {1001, 1002, 1003, 2001, 2002, 3001, 3002};
+    u16 rateBasisPoints = 0;
+    char rateText[16];
+
+    memset(rateText, 0, sizeof(rateText));
+    if (!vm_net_mock_parse_drop_rate_basis_points("0.25", 4,
+                                                   &rateBasisPoints) ||
+        rateBasisPoints != 25 ||
+        !vm_mock_admin_form_drop_rate_basis_points(
+            "drop_rate_0=0.25", "drop_rate_0", &rateBasisPoints) ||
+        rateBasisPoints != 25 ||
+        vm_net_mock_parse_drop_rate_basis_points("0.001", 5,
+                                                  &rateBasisPoints) ||
+        vm_net_mock_parse_drop_rate_basis_points("100.01", 6,
+                                                  &rateBasisPoints))
+    {
+        fputs("decimal drop-rate parsing failed\n", stderr);
+        return 1;
+    }
+    vm_net_mock_format_drop_rate_basis_points(25, rateText, sizeof(rateText));
+    if (strcmp(rateText, "0.25") != 0 ||
+        vm_net_mock_battle_drop_count_for_battle(0, 1) != 0 ||
+        vm_net_mock_battle_drop_count_for_battle(10000, 1) != 1)
+    {
+        fputs("decimal drop-rate formatting or battle boundaries failed\n",
+              stderr);
+        return 1;
+    }
 
     memset(monsters, 0, sizeof(monsters));
     memset(&assignment, 0, sizeof(assignment));
@@ -106,7 +159,7 @@ int main(void)
     monsters[0].family = VM_NET_MOCK_MONSTER_BEAST;
     snprintf(monsters[0].displayName, sizeof(monsters[0].displayName), "%s", kBoar);
     monsters[0].dropCount = 1;
-    monsters[0].drops[0] = (vm_net_mock_monster_drop){27, 77};
+    monsters[0].drops[0] = (vm_net_mock_monster_drop){27, 7700};
     monsters[1].enemyId = 4; monsters[1].level = 20;
     monsters[1].family = VM_NET_MOCK_MONSTER_BEAST;
     snprintf(monsters[1].displayName, sizeof(monsters[1].displayName), "%s", kBandit);
@@ -152,7 +205,8 @@ int main(void)
         assignment.equipmentSkippedByQuality[1] != 1 ||
         assignment.taskDropsPreserved != 1 ||
         assignment.strongNameMatches != 7 ||
-        !row_has_item(&monsters[0], 27) || monsters[0].drops[0].ratePercent != 77 ||
+        !row_has_item(&monsters[0], 27) ||
+        monsters[0].drops[0].rateBasisPoints != 7700 ||
         !row_has_item(&monsters[0], 1001) ||
         !row_has_item(&monsters[1], 1002) ||
         !row_has_item(&monsters[2], 1003) ||
@@ -160,6 +214,9 @@ int main(void)
         !row_has_item(&monsters[3], 3001) ||
         !row_has_item(&monsters[4], 2002) ||
         !row_has_item(&monsters[4], 3002) ||
+        row_drop_rate_basis_points(&monsters[0], 1001) != 125 ||
+        row_drop_rate_basis_points(&monsters[3], 2001) != 50 ||
+        row_drop_rate_basis_points(&monsters[3], 3001) != 25 ||
         row_has_item(&monsters[3], 4001) ||
         row_has_item(&monsters[4], 4001))
     {
@@ -191,6 +248,64 @@ int main(void)
         fputs("assignment is not evenly distributed within the eligible monsters\n", stderr);
         return 1;
     }
-    puts("monster equipment-drop assignment regression passed: task preserve + quality eligibility + level/name distribution");
+
+    /* A boss can carry one quality-1 and one quality-2 candidate for every
+     * worn slot.  A second candidate of the same quality and slot must still
+     * be skipped, so the full eight-slot fixture verifies both constraints. */
+    {
+        vm_net_mock_monster_admin_row bossQualityMonsters[1];
+        vm_net_mock_monster_equipment_drop_assignment bossQualityAssignment;
+        const char *bossQualityError = NULL;
+
+        memset(bossQualityMonsters, 0, sizeof(bossQualityMonsters));
+        memset(&bossQualityAssignment, 0, sizeof(bossQualityAssignment));
+        memset(g_vm_net_mock_equipment_catalog, 0,
+               sizeof(g_vm_net_mock_equipment_catalog));
+        memset(g_vm_net_mock_shop_catalog, 0,
+               sizeof(g_vm_net_mock_shop_catalog));
+        g_vm_net_mock_equipment_catalog_count = 17;
+        g_vm_net_mock_shop_catalog_count = 17;
+        bossQualityMonsters[0].enemyId = 501;
+        bossQualityMonsters[0].level = 25;
+        bossQualityMonsters[0].family = VM_NET_MOCK_MONSTER_BOSS;
+        for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+        {
+            u32 qualityOneItem = 5100u + slot;
+            u32 qualityTwoItem = 5200u + slot;
+
+            seed_shop_item(slot * 2u, qualityOneItem, "quality-one", true);
+            seed_shop_item(slot * 2u + 1u, qualityTwoItem, "quality-two", true);
+            seed_equipment_in_slot(slot * 2u, qualityOneItem, 25, 1, slot);
+            seed_equipment_in_slot(slot * 2u + 1u, qualityTwoItem, 25, 2,
+                                   slot);
+        }
+        seed_shop_item(16, 5300, "quality-one-duplicate", true);
+        seed_equipment_in_slot(16, 5300, 25, 1, 0);
+        if (!vm_net_mock_monster_plan_equipment_drops(
+                bossQualityMonsters, 1, rates, &bossQualityAssignment,
+                &bossQualityError) ||
+            bossQualityAssignment.equipmentByQuality[1] != 8 ||
+            bossQualityAssignment.equipmentByQuality[2] != 8 ||
+            bossQualityAssignment.equipmentSkippedByQuality[1] != 1 ||
+            bossQualityAssignment.equipmentSkippedByQuality[2] != 0 ||
+            row_equipment_count(&bossQualityMonsters[0]) != 16)
+        {
+            fprintf(stderr, "boss quality slot coexistence failed: %s\n",
+                    bossQualityError ? bossQualityError : "-");
+            return 1;
+        }
+        for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+        {
+            if (!row_has_item(&bossQualityMonsters[0], 5100u + slot) ||
+                !row_has_item(&bossQualityMonsters[0], 5200u + slot) ||
+                row_has_item(&bossQualityMonsters[0], 5300))
+            {
+                fputs("boss quality slot coexistence or duplicate rejection failed\n",
+                      stderr);
+                return 1;
+            }
+        }
+    }
+    puts("monster equipment-drop assignment regression passed: decimal rates + task preserve + quality eligibility + level/name distribution + boss quality slot coexistence");
     return 0;
 }

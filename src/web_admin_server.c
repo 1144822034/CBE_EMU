@@ -642,7 +642,8 @@ enum
      * intervals are inserted), but the trail still grows without bound.  Keep
      * one render at a fixed row budget and page the audit_id DESC order with
      * an explicit offset so every historical record stays reachable. */
-    VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE = 50
+    VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE = 50,
+    VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE = 50
 };
 
 typedef struct
@@ -747,7 +748,7 @@ static const char g_vm_mock_admin_script[] =
     "const applyPicker=()=>{const wanted=category.value,supports=pickerSupportsEquipment(),keyword=search.value.trim().toLowerCase(),used=usedIds();qualityField.hidden=!supports;levelField.hidden=!supports;if(!supports){quality.value='all';level.value='all';}const wantedQuality=quality.value,wantedLevel=level.value,hasEquipmentFilter=supports&&(wantedQuality!=='all'||wantedLevel!=='all');let shown=0;for(const choice of state.choices){const isEquipment=choice.dataset.category.startsWith('e'),equipmentMatches=!hasEquipmentFilter||(isEquipment&&(wantedQuality==='all'||choice.dataset.quality===wantedQuality)&&(wantedLevel==='all'||choice.dataset.level===wantedLevel)),visible=!used.has(choice.dataset.itemId)&&(wanted==='all'||choice.dataset.category===wanted)&&equipmentMatches&&(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;const check=choice.querySelector('input');check.checked=state.selected.has(choice.dataset.itemId);choice.classList.toggle('selected',check.checked);if(visible)shown++;}count.textContent=`找到 ${shown} 件可添加物品`;selectedCount.textContent=`已选择 ${state.selected.size} 件，剩余 ${freeRows().length} 个槽位`;empty.hidden=shown!==0;};"
     "const hide=()=>{modal.hidden=true;document.body.classList.remove('modal-open');manager.querySelector('[data-monster-drop-open]')?.focus();};const show=()=>{modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';applyPicker();search.focus();};const hideCurrent=()=>{currentModal.hidden=true;document.body.classList.remove('modal-open');currentOpen.focus();},showCurrent=()=>{applyCurrent();currentModal.hidden=false;document.body.classList.add('modal-open');};"
     "const clearRow=row=>{const input=inputOf(row),rate=rateOf(row),check=checkOf(row);if(input)input.value='0';if(rate)rate.value='0';if(check)check.checked=false;setRowMetadata(row,null);row.hidden=true;syncLabel(row);};"
-    "const addSelected=()=>{const free=freeRows(),selected=[...state.selected];if(!selected.length)return;if(selected.length>free.length){error.textContent=`当前只剩 ${free.length} 个空掉落槽位，请减少选择或先移除已有掉落`;show();return;}const rate=Math.max(1,Math.min(100,Number(manager.querySelector('[data-monster-drop-default-rate]')?.value)||100));selected.forEach((itemId,index)=>{const row=free[index],option=optionById.get(itemId),input=inputOf(row),rateInput=rateOf(row),check=checkOf(row);if(!row||!option||!input)return;input.value=itemId;if(rateInput)rateInput.value=String(rate);if(check)check.checked=false;setRowMetadata(row,option);row.hidden=false;syncLabel(row);});state.selected.clear();syncAdd();applyCurrent();applyPicker();hide();};"
+    "const addSelected=()=>{const free=freeRows(),selected=[...state.selected];if(!selected.length)return;if(selected.length>free.length){error.textContent=`当前只剩 ${free.length} 个空掉落槽位，请减少选择或先移除已有掉落`;show();return;}const rate=Math.max(.01,Math.min(100,Number(manager.querySelector('[data-monster-drop-default-rate]')?.value)||100));selected.forEach((itemId,index)=>{const row=free[index],option=optionById.get(itemId),input=inputOf(row),rateInput=rateOf(row),check=checkOf(row);if(!row||!option||!input)return;input.value=itemId;if(rateInput)rateInput.value=String(rate);if(check)check.checked=false;setRowMetadata(row,option);row.hidden=false;syncLabel(row);});state.selected.clear();syncAdd();applyCurrent();applyPicker();hide();};"
     "for(const row of rows){const input=inputOf(row),remove=row.querySelector('[data-drop-remove]'),check=checkOf(row);if(input)input.addEventListener('change',()=>{const option=optionById.get(input.value);if(option){setRowMetadata(row,option);row.hidden=false;}else setRowMetadata(row,null);applyCurrent();applyPicker();syncAdd();});if(check)check.addEventListener('change',syncCurrent);if(remove)remove.addEventListener('click',()=>{clearRow(row);applyCurrent();applyPicker();syncAdd();});}"
     "manager.querySelector('[data-monster-drop-open]')?.addEventListener('click',show);manager.querySelector('[data-monster-drop-add]')?.addEventListener('click',addSelected);currentOpen.addEventListener('click',showCurrent);currentClose.addEventListener('click',hideCurrent);currentModal.addEventListener('click',event=>{if(event.target===currentModal)hideCurrent();});manager.querySelector('[data-monster-drop-current-category]')?.addEventListener('change',applyCurrent);manager.querySelector('[data-monster-drop-current-quality]')?.addEventListener('change',applyCurrent);manager.querySelector('[data-monster-drop-select-current]')?.addEventListener('click',()=>{for(const row of activeRows())if(!row.hidden){const check=checkOf(row);if(check)check.checked=true;}syncCurrent();});manager.querySelector('[data-monster-drop-remove-current]')?.addEventListener('click',()=>{const selected=activeRows().filter(row=>checkOf(row)?.checked);if(!selected.length)return;if(!window.confirm(`确定移除已选的 ${selected.length} 项掉落吗？`))return;selected.forEach(clearRow);applyCurrent();applyPicker();syncAdd();});"
     "clear.addEventListener('click',()=>{state.selected.clear();syncAdd();applyPicker();});selectFiltered.addEventListener('click',()=>{for(const choice of state.choices)if(!choice.hidden)state.selected.add(choice.dataset.itemId);syncAdd();applyPicker();});unselectFiltered.addEventListener('click',()=>{for(const choice of state.choices)if(!choice.hidden)state.selected.delete(choice.dataset.itemId);syncAdd();applyPicker();});confirm.addEventListener('click',hide);close.addEventListener('click',hide);modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!currentModal.hidden)hideCurrent();});category.addEventListener('change',()=>{rebuildLevels();applyPicker();});quality.addEventListener('change',applyPicker);level.addEventListener('change',applyPicker);search.addEventListener('input',applyPicker);syncAdd();applyCurrent();rebuildLevels();applyPicker();};"
@@ -771,9 +772,22 @@ static const char g_vm_mock_admin_script[] =
     "if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const trigger=event.target.closest('[data-actor-picker-open]');if(!trigger)return;const field=trigger.closest('.actor-picker-field'),select=field&&field.querySelector('select.actor-resource-select');if(!select||select.disabled)return;event.preventDefault();state.show(select);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.modal&&!state.modal.hidden)state.hide();});document.addEventListener('submit',event=>{const form=event.target;if(!form||!form.closest('.npc'))return;const missing=[...form.querySelectorAll('select.actor-resource-select')].find(select=>!select.value);if(!missing)return;event.preventDefault();if(state.error)state.error.textContent='请先选择一个可用的 Actor 资源';state.show(missing);});}"
     "if(modal.dataset.actorPickerBound!=='1'){modal.dataset.actorPickerBound='1';close.addEventListener('click',()=>state.hide());modal.addEventListener('click',event=>{if(event.target===modal)state.hide();});search.addEventListener('input',()=>state.apply());}"
     "};"
-    "const setupNpcServices=()=>{for(const form of document.querySelectorAll('.npc form')){"
+    "const setupScenePicker=()=>{"
+    "const state=window.__cbeScenePickerState||(window.__cbeScenePickerState={bound:false});"
+    "const modal=document.querySelector('#scene-picker-modal'),close=document.querySelector('#scene-picker-close'),search=document.querySelector('#scene-picker-search'),list=document.querySelector('#scene-picker-list'),count=document.querySelector('#scene-picker-result-count'),empty=document.querySelector('#scene-picker-empty'),selects=[...document.querySelectorAll('select.scene-resource-select')];"
+    "if(!modal||!close||!search||!list||!count||!empty||!selects.length)return;"
+    "state.modal=modal;state.close=close;state.search=search;state.list=list;state.count=count;state.empty=empty;state.selects=selects;state.update=select=>{if(!select)return;const field=select.closest('.scene-picker-field'),trigger=field&&field.querySelector('[data-scene-picker-open]'),label=trigger&&trigger.querySelector('[data-scene-picker-label]'),selected=select.options[select.selectedIndex];if(label)label.textContent=selected&&selected.textContent?selected.textContent:(select.dataset.scenePickerEmpty||'请选择目标场景');};"
+    "for(const select of selects){if(select.dataset.scenePickerBound!=='1'){select.dataset.scenePickerBound='1';select.addEventListener('change',()=>state.update(select));}state.update(select);}"
+    "state.render=()=>{if(!state.active)return;state.list.replaceChildren();state.choices=[];for(const option of state.active.options){if(!option.value||option.disabled)continue;const button=document.createElement('button'),title=document.createElement('strong'),meta=document.createElement('span');button.type='button';button.className='item-choice';button.dataset.search=option.textContent.toLowerCase();button.classList.toggle('selected',option.value===state.active.value);title.textContent=option.textContent;meta.textContent=option.value===state.active.value?'当前选择':'SCE 场景';button.append(title,meta);button.addEventListener('click',()=>{if(!state.active)return;state.active.value=option.value;state.active.dispatchEvent(new Event('change',{bubbles:true}));state.hide();});state.choices.push(button);state.list.append(button);}};"
+    "state.apply=()=>{state.render();const keyword=state.search.value.trim().toLowerCase();let shown=0;for(const choice of state.choices){const visible=!keyword||choice.dataset.search.includes(keyword);choice.hidden=!visible;if(visible)shown++;}state.count.textContent=`找到 ${shown} 个场景`;state.empty.hidden=shown!==0;};"
+    "state.show=select=>{if(!select||!select.isConnected||select.disabled)return;state.active=select;state.search.value='';state.modal.hidden=false;document.body.classList.add('modal-open');state.apply();state.search.focus();};"
+    "state.hide=()=>{if(!state.modal)return;state.modal.hidden=true;document.body.classList.remove('modal-open');const field=state.active&&state.active.closest('.scene-picker-field'),trigger=field&&field.querySelector('[data-scene-picker-open]');if(trigger)trigger.focus();};"
+    "if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const trigger=event.target.closest('[data-scene-picker-open]');if(!trigger)return;const field=trigger.closest('.scene-picker-field'),select=field&&field.querySelector('select.scene-resource-select');if(!select||select.disabled)return;event.preventDefault();state.show(select);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.modal&&!state.modal.hidden)state.hide();});}"
+    "if(modal.dataset.scenePickerBound!=='1'){modal.dataset.scenePickerBound='1';close.addEventListener('click',()=>state.hide());modal.addEventListener('click',event=>{if(event.target===modal)state.hide();});search.addEventListener('input',()=>state.apply());}"
+    "};"
+    "const setupNpcServices=()=>{setupScenePicker();for(const form of document.querySelectorAll('.npc form')){"
     "const toggles=[...form.querySelectorAll('input[data-npc-service-toggle]')];if(!toggles.length)continue;const card=form.closest('.npc')||form;"
-    "const apply=()=>{for(const toggle of toggles){const kind=toggle.dataset.npcServiceToggle,show=toggle.checked;for(const fields of card.querySelectorAll(`[data-npc-service-config=\"${kind}\"]`))fields.hidden=!show;}const teleportToggle=form.querySelector('input[data-npc-service-toggle=\"6\"]'),challengeToggle=form.querySelector('input[data-npc-service-toggle=\"10\"]'),setFields=(selector,show)=>{for(const fields of card.querySelectorAll(selector)){fields.hidden=!show;for(const control of fields.querySelectorAll('input,select'))control.disabled=!show;}};setFields('[data-npc-instance-teleport-fields]',!!(teleportToggle&&teleportToggle.checked));setFields('[data-npc-instance-challenge-fields]',!!(challengeToggle&&challengeToggle.checked));setFields('[data-npc-instance-level-fields]',!!((teleportToggle&&teleportToggle.checked)||(challengeToggle&&challengeToggle.checked)));};"
+    "const apply=()=>{for(const toggle of toggles){const kind=toggle.dataset.npcServiceToggle,show=toggle.checked;for(const fields of card.querySelectorAll(`[data-npc-service-config=\"${kind}\"]`))fields.hidden=!show;}const teleportToggle=form.querySelector('input[data-npc-service-toggle=\"6\"]'),challengeToggle=form.querySelector('input[data-npc-service-toggle=\"10\"]'),setFields=(selector,show)=>{for(const fields of card.querySelectorAll(selector)){fields.hidden=!show;for(const control of fields.querySelectorAll('input,select,button'))control.disabled=!show;}};setFields('[data-npc-instance-teleport-fields]',!!(teleportToggle&&teleportToggle.checked));setFields('[data-npc-instance-spawn-fields]',!!(teleportToggle&&teleportToggle.checked));setFields('[data-npc-instance-challenge-fields]',!!(challengeToggle&&challengeToggle.checked));setFields('[data-npc-instance-level-fields]',!!((teleportToggle&&teleportToggle.checked)||(challengeToggle&&challengeToggle.checked)));};"
     "for(const toggle of toggles)toggle.addEventListener('change',apply);apply();}};"
     "const setupAccountList=()=>{"
     "const list=document.querySelector('[data-account-list]'),form=document.querySelector('[data-account-search-form]'),input=document.querySelector('[data-account-search]'),status=document.querySelector('[data-account-list-status]');"
@@ -787,12 +801,15 @@ static const char g_vm_mock_admin_script[] =
     "form.addEventListener('submit',event=>{event.preventDefault();clearTimeout(timer);reset();});input.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(reset,220);});list.addEventListener('scroll',()=>{if(list.scrollTop+list.clientHeight>=list.scrollHeight-72)load(false);},{passive:true});"
     "if(!count())load(true);else updateStatus(`已显示 ${count()} 个账号${more?'，向下滚动加载更多':''}`);};"
     "const setupContentUpdatePicker=()=>{const search=document.querySelector('[data-content-update-search]'),select=document.querySelector('[data-content-update-select]'),selectFiltered=document.querySelector('[data-content-update-select-filtered]'),clear=document.querySelector('[data-content-update-clear-selection]');if(!search||!select||search.dataset.bound==='1')return;search.dataset.bound='1';const apply=()=>{const q=search.value.trim().toLowerCase();for(const option of select.options)option.hidden=!!q&&!option.textContent.toLowerCase().includes(q);};search.addEventListener('input',apply);selectFiltered?.addEventListener('click',()=>{for(const option of select.options)if(!option.hidden)option.selected=true;});clear?.addEventListener('click',()=>{for(const option of select.options)option.selected=false;});apply();};"
+    "const setupContentResourceSearch=()=>{for(const input of document.querySelectorAll('[data-content-resource-search]')){if(input.dataset.contentResourceSearchBound==='1')continue;const list=document.querySelector(input.getAttribute('data-content-resource-search')||'[data-content-resource-list]'),count=input.parentElement?.querySelector('[data-content-resource-search-count]');if(!list)continue;input.dataset.contentResourceSearchBound='1';const apply=()=>{const q=input.value.trim().toLowerCase();let shown=0,total=0;for(const item of list.querySelectorAll('[data-content-resource-item]')){const name=item.querySelector('span')?.textContent.toLowerCase()||'';const visible=!q||name.includes(q);item.hidden=!visible;total++;if(visible)shown++;}if(count)count.textContent=`显示 ${shown} / ${total} 项`;};input.addEventListener('input',apply);apply();}};"
+    "const setupContentNavigation=()=>{const nav=document.querySelector('#admin-spa-tabs');if(!nav)return;nav.querySelector('[data-admin-tab=actors]')?.remove();if(new URL(window.location.href).searchParams.get('tab')!=='actors')return;for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab==='content';link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
+    "const setupAdminToasts=()=>{const state=window.__cbeAdminToastState||(window.__cbeAdminToastState={queue:[],showing:false,observer:null});const host=()=>{let node=document.querySelector('#admin-toast-host');if(node)return node;const style=document.createElement('style');style.id='admin-toast-style';style.textContent='#admin-toast-host{position:fixed;z-index:10050;top:18px;right:18px;display:grid;justify-items:end;pointer-events:none} .admin-toast{width:min(380px,calc(100vw - 36px));display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:10px;align-items:start;padding:13px 12px 13px 15px;border:1px solid #b9d8ff;border-radius:10px;background:#fff;color:#18436f;box-shadow:0 14px 32px #10182833;opacity:0;transform:translateX(calc(100%% + 24px));transition:opacity .22s ease,transform .22s ease;pointer-events:auto} .admin-toast.show{opacity:1;transform:translateX(0)} .admin-toast.error{border-color:#f5b7b1;background:#fff7f6;color:#8f1d1d} .admin-toast.success{border-color:#9be3ba;background:#f3fff7;color:#05603a} .admin-toast-close{width:28px;height:28px;margin:-3px -3px 0 0;padding:0;border:0;border-radius:6px;background:transparent;color:currentColor;font:22px/1 sans-serif;cursor:pointer}@media(max-width:560px){#admin-toast-host{top:10px;right:10px}.admin-toast{width:min(380px,calc(100vw - 20px))}}';document.head.append(style);node=document.createElement('div');node.id='admin-toast-host';node.setAttribute('aria-live','polite');node.setAttribute('aria-atomic','true');document.body.append(node);return node;};const next=()=>{if(state.showing||!state.queue.length)return;state.showing=true;const entry=state.queue.shift(),node=document.createElement('section'),close=document.createElement('button'),dismiss=()=>{if(node.dataset.closing==='1')return;node.dataset.closing='1';node.classList.remove('show');setTimeout(()=>{node.remove();state.showing=false;next();},240);};node.className='admin-toast '+(entry.error?'error':'success');node.setAttribute('role',entry.error?'alert':'status');node.textContent=entry.text;close.type='button';close.className='admin-toast-close';close.setAttribute('aria-label','关闭提示');close.textContent='×';close.addEventListener('click',dismiss);node.append(close);host().append(node);requestAnimationFrame(()=>node.classList.add('show'));setTimeout(dismiss,5000);};const queue=node=>{if(!(node instanceof Element)||node.dataset.adminToastQueued==='1'||!node.matches('.notice.ok,.notice.error'))return;const text=node.textContent.trim();node.dataset.adminToastQueued='1';if(!text)return;state.queue.push({text,error:node.classList.contains('error')});node.remove();next();};const scan=root=>{if(root instanceof Element)queue(root);if(root.querySelectorAll)for(const node of root.querySelectorAll('.notice.ok,.notice.error'))queue(node);};scan(document);if(state.observer)return;state.observer=new MutationObserver(records=>{for(const record of records)for(const node of record.addedNodes)scan(node);});state.observer.observe(document.body,{childList:true,subtree:true});};"
     "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupNpcStock();setupMonsterDrops();setupTaskRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
-    "const setupGlobalRewardsTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const accounts=nav.querySelector('[data-admin-tab=accounts],a[href*=\\\"tab=accounts\\\"]');if(accounts&&!nav.querySelector('[data-admin-tab=global-rewards],a[href*=\\\"tab=global-rewards\\\"]')){const link=document.createElement('a');link.className='tab admin-spa-tab';link.dataset.adminTab='global-rewards';link.href='?tab=global-rewards';link.textContent='全服奖励管理';accounts.after(link);}const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
-    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupTaskRewards();setupChestRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();};"
-    "const setupAdminLayout=()=>{if(document.querySelector('#admin-spa-layout-style'))return;const style=document.createElement('style');style.id='admin-spa-layout-style';style.textContent='#admin-spa-content{display:contents!important}#admin-spa-content[aria-busy=true]>*{opacity:.62;pointer-events:none;transition:opacity .12s ease}';document.head.append(style);};"
+    "const setupGlobalRewardsTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const accounts=nav.querySelector('[data-admin-tab=accounts],a[href*=\\\"tab=accounts\\\"]'),add=(key,label)=>{if(!accounts||[...nav.querySelectorAll('[data-admin-tab],a[href]')].some(link=>link.dataset.adminTab===key||link.getAttribute('href')?.includes('tab='+key)))return;const link=document.createElement('a');link.className='tab admin-spa-tab';link.dataset.adminTab=key;link.href='?tab='+key;link.textContent=label;accounts.after(link);};add('operations','操作日志');add('global-rewards','全服奖励管理');const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
+    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupTaskRewards();setupChestRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
+    "const setupAdminLayout=()=>{if(document.querySelector('#admin-spa-layout-style'))return;const style=document.createElement('style');style.id='admin-spa-layout-style';style.textContent='#admin-spa-shell{width:min(1680px,calc(100vw - 48px))!important;max-width:none!important;height:100vh!important;min-height:0!important;overflow:hidden!important;margin:0 auto!important}#admin-spa-content{display:flex!important;align-self:stretch!important;height:100%!important;flex-direction:column!important;min-height:0!important;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable;padding-bottom:2px}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:1 1 auto;min-height:0}#admin-spa-content [data-admin-list]{flex:1 1 auto;min-height:0;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}#admin-spa-content[aria-busy=true]>*{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{width:100%!important;height:auto!important;min-height:100vh!important;overflow:visible!important}#admin-spa-content{align-self:auto!important;height:auto!important;overflow:visible!important;scrollbar-gutter:auto;padding-bottom:0}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:none}#admin-spa-content [data-admin-list]{flex:none;scrollbar-gutter:auto}}';document.head.append(style);};"
     "const setupAdminHeader=()=>{const main=document.querySelector('#admin-spa-shell'),header=main&&[...main.children].find(node=>node.matches&&node.matches('header'));if(!header||header.dataset.adminSpaHeader==='1')return;header.dataset.adminSpaHeader='1';const logout=header.querySelector('form[action$=\"/logout\"]'),intro=document.createElement('div'),style=document.createElement('style');intro.innerHTML='<h1>江湖 OL 后台管理</h1><p class=\"sub\">账号、游戏内容与运营配置统一管理</p>';header.replaceChildren(intro);if(logout)header.append(logout);style.id='admin-spa-header-style';style.textContent='#admin-spa-shell>header[data-admin-spa-header]{display:flex!important;align-items:center;justify-content:space-between;gap:16px;margin:0 0 12px;padding:4px 2px}#admin-spa-shell>header[data-admin-spa-header] h1{margin:0;color:#183d6e;font-size:22px}#admin-spa-shell>header[data-admin-spa-header] .sub{margin:5px 0 0;color:#63738a}';document.head.append(style);};"
-    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险角色管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{min-height:100vh}#admin-spa-tabs{display:flex!important;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 16px;padding:10px 12px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:center;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{min-width:0}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value);if(missingActor)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
+    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险角色管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{display:grid!important;grid-template-columns:216px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);column-gap:16px;align-items:start;min-height:100vh}#admin-spa-shell>header{grid-column:1/-1;grid-row:1}#admin-spa-tabs{display:flex!important;grid-column:1;grid-row:2;position:sticky;top:16px;align-self:start;flex-direction:column;align-items:stretch;gap:6px;flex-wrap:nowrap;margin:0;padding:10px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:flex-start;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding-right:2px}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{display:block!important;min-height:100vh}#admin-spa-tabs{position:static;flex-direction:row;align-items:center;flex-wrap:wrap;margin:0 0 16px}#admin-spa-tabs .admin-spa-tab{justify-content:center}#admin-spa-content{overflow:visible;padding-right:0}}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value);if(missingActor)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
     "document.addEventListener('DOMContentLoaded',()=>{setupMonsterActions();setupTaskActions();setupPartialNavigation();setupAdminSpa();setupAdminLayout();setupAdminHeader();setupAdminContent();});"
     "})();";
 
@@ -2104,7 +2121,8 @@ static void vm_mock_admin_render_instance_scene_select(
     if (page == NULL)
         return;
     vm_mock_admin_text_appendf(
-        page, "<select name=\"instance_scene\"><option value=\"\">请选择副本目标场景</option>");
+        page,
+        "<div class=\"scene-picker-field\"><select class=\"scene-resource-select\" name=\"instance_scene\" hidden><option value=\"\">请选择副本目标场景</option>");
     for (u32 i = 0; i < sceneCount; ++i)
     {
         char runtimeScene[64];
@@ -2129,7 +2147,21 @@ static void vm_mock_admin_render_instance_scene_select(
         vm_mock_admin_text_append_html(page, sceneUtf8);
         vm_mock_admin_text_appendf(page, "</option>");
     }
-    vm_mock_admin_text_appendf(page, "</select>");
+    vm_mock_admin_text_appendf(
+        page,
+        "</select><button class=\"item-picker-trigger scene-picker-trigger\" type=\"button\" data-scene-picker-open aria-haspopup=\"dialog\" aria-controls=\"scene-picker-modal\"><span data-scene-picker-label>请选择副本目标场景</span><small>搜索场景</small></button></div>");
+}
+
+/* A single dialog is shared by every actual SCE <select> on the content
+ * page.  Each trigger keeps its authoritative select in the form, so server
+ * validation and pending form submissions retain their existing contract. */
+static void vm_mock_admin_render_scene_picker_modal(vm_mock_admin_text *page)
+{
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"item-modal scene-picker-modal\" id=\"scene-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"scene-picker-title\" hidden><section class=\"item-picker-panel\"><div class=\"item-picker-head\"><div><h3 id=\"scene-picker-title\">选择 SCE 场景</h3><p>按场景文件名搜索；选择后会更新当前表单的目标场景。</p></div><button class=\"item-picker-close\" id=\"scene-picker-close\" type=\"button\" aria-label=\"关闭场景选择\">×</button></div><div class=\"item-picker-tools\"><label><span>搜索场景</span><input id=\"scene-picker-search\" type=\"search\" placeholder=\"输入场景名称或文件名\" autocomplete=\"off\"></label></div><div class=\"item-result-bar\"><span id=\"scene-picker-result-count\"></span></div><div class=\"item-picker-list\" id=\"scene-picker-list\"></div><p class=\"item-picker-empty\" id=\"scene-picker-empty\" hidden>没有符合条件的 SCE 场景。</p></section></div>");
 }
 
 /* Role recovery accepts only an exact server-owned SCE key.  A datalist keeps
@@ -2174,6 +2206,7 @@ static void vm_mock_admin_render_instance_fields(
     u32 x = seed ? seed->instanceX : 0;
     u32 y = seed ? seed->instanceY : 0;
     u32 enemyId = seed ? seed->challengeEnemyId : 0;
+    u32 spawnEnemyId = seed ? seed->instanceSpawnEnemyId : 0;
     u32 minimumLevel = seed && seed->instanceMinLevel != 0
                            ? seed->instanceMinLevel
                            : 1;
@@ -2190,11 +2223,12 @@ static void vm_mock_admin_render_instance_fields(
         "</label><label class=\"field\"><span>落点 X</span><input type=\"number\" name=\"instance_x\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<label class=\"field\"><span>落点 Y</span><input type=\"number\" name=\"instance_y\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<p class=\"instance-help\">落点 X/Y 都填 0 会自动解析目标 SCE 的安全入口。</p></div>"
+        "<div class=\"instance-fields\" data-npc-instance-spawn-fields hidden><label class=\"field\"><span>进入后刷新怪物 ID</span><input type=\"number\" name=\"instance_spawn_enemy_id\" min=\"0\" max=\"65535\" value=\"%u\"></label><p class=\"instance-help\">必须是目标场景已启用并已部署到 SCE2 kind-3 的场景战斗怪；填 0 表示不额外刷新。</p></div>"
         "<div class=\"instance-fields\" data-npc-service-config=\"10\" data-npc-instance-challenge-fields hidden><label class=\"field\"><span>守关怪 ID</span><input type=\"number\" name=\"challenge_enemy_id\" min=\"1\" max=\"65535\" value=\"%u\"></label>"
         "<p class=\"instance-help\">挑战对象必须是当前场景中已启用的场景战斗怪；选择后客户端会直接发起战斗，不显示二次确认。</p></div>"
         "<div class=\"instance-fields\" data-npc-instance-level-fields hidden><label class=\"field\"><span>副本功能最低等级</span><input type=\"number\" name=\"instance_min_level\" min=\"1\" max=\"255\" value=\"%u\"></label>"
         "<p class=\"instance-help\">该等级限制同时用于已启用的副本传送和守关怪挑战。</p></div>",
-        x, y, enemyId, minimumLevel);
+        x, y, spawnEnemyId, enemyId, minimumLevel);
 }
 
 static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
@@ -4990,8 +5024,8 @@ static void vm_mock_admin_render_content_resource_page(
         "<title>江湖OL 游戏内容管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100%%;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1280px;height:100vh;margin:auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.head h1{font-size:24px;margin:0}.sub{margin:4px 0 16px;color:#667085}.tabs,.format-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}.tab,.format{padding:8px 13px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none}.tab.on,.format.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:#fff;color:#475467}.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.catalog{display:flex;flex-direction:column;min-height:0}.list{display:grid;gap:4px;overflow:auto;min-height:0}.file{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.file:hover,.file.on{background:#eef4ff;color:#175cd3}.size,.hint{font-size:12px;color:#667085}.detail{overflow:auto;min-width:0}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.preview{display:grid;grid-template-columns:minmax(180px,420px) 1fr;gap:18px;align-items:start}.preview img{display:block;max-width:100%%;max-height:520px;image-rendering:pixelated;background:#101828;border:1px solid #d0d5dd}.meta{display:grid;gap:8px}.meta div{padding:9px 10px;border-radius:7px;background:#f8fafc}.upload{margin-top:18px;padding:14px;border:1px solid #bfd4f4;border-radius:9px;background:#f7faff}.upload h3{margin:0 0 5px}.upload form{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.upload label{display:grid;gap:4px;min-width:260px}.upload input{padding:8px;border:1px solid #d0d5dd;border-radius:6px;background:#fff}.upload button{border:0;border-radius:6px;padding:9px 13px;background:#175cd3;color:#fff;cursor:pointer}.empty{color:#667085;padding:16px 0}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px}.grid,.preview{grid-template-columns:1fr}.catalog{min-height:260px}.detail{overflow:visible}}</style>"
         "</head><body><main class=\"wrap\"><header class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">游戏内容管理 · 按资源文件格式分类</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
-        "<div class=\"grid\"><aside class=\"card catalog\"><h2>文件格式</h2><nav class=\"format-tabs\"><a class=\"format\" data-admin-select href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a class=\"format%s\" data-admin-select href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a class=\"format%s\" data-admin-select href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a></nav><h2>%s（%u）</h2><div class=\"list\" data-admin-list>",
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<div class=\"grid\"><aside class=\"card catalog\"><h2>文件格式</h2><nav class=\"format-tabs\"><a class=\"format\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a class=\"format%s\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a class=\"format%s\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=actor\">Actor 资源</a></nav><h2>%s（%u）</h2><label style=\"display:grid;gap:4px;margin:0 0 10px\"><span class=\"hint\">按名称搜索</span><input type=\"search\" data-content-resource-search placeholder=\"输入资源名称\" autocomplete=\"off\"><small class=\"hint\" data-content-resource-search-count></small></label><div class=\"list\" data-admin-list data-content-resource-list>",
         gifMode ? " on" : "", gifMode ? "" : " on", kindLabel, count);
     for (u32 i = 0; i < count; ++i)
     {
@@ -5001,7 +5035,7 @@ static void vm_mock_admin_render_content_resource_page(
         vm_net_mock_gbk_label_to_utf8(files[i].name, utf8, sizeof(utf8));
         vm_mock_admin_url_encode(utf8, encoded, sizeof(encoded));
         vm_mock_admin_text_appendf(&page,
-            "<a class=\"file%s\" data-admin-select href=\"/?tab=content&amp;content_kind=%s&amp;resource=%s\"><span>",
+            "<a class=\"file%s\" data-admin-select data-content-resource-item href=\"/?tab=content&amp;content_kind=%s&amp;resource=%s\"><span>",
             strcmp(files[i].name, selectedGame) == 0 ? " on" : "",
             gifMode ? "gif" : "dsh", encoded);
         vm_mock_admin_text_append_html(&page, utf8);
@@ -5104,7 +5138,7 @@ static void vm_mock_admin_render_sce_portal_editor(
             vm_mock_admin_text_appendf(page, "入口 %u → %u", portal->entryId,
                                        portal->targetEntryId);
         vm_mock_admin_text_appendf(
-            page, " · 区域 (%u,%u)-(%u,%u)</span></div><label class=\"field\"><span>目标 SCE</span><select name=\"target_scene\" required>",
+            page, " · 区域 (%u,%u)-(%u,%u)</span></div><label class=\"field\"><span>目标 SCE</span><div class=\"scene-picker-field\"><select class=\"scene-resource-select\" name=\"target_scene\" required hidden>",
             portal->left, portal->top, portal->right, portal->bottom);
         for (u32 j = 0; j < sceneCount; ++j)
         {
@@ -5124,7 +5158,7 @@ static void vm_mock_admin_render_sce_portal_editor(
         }
         vm_mock_admin_text_appendf(
             page,
-            "</select></label><div class=\"actions\"><button type=\"submit\">保存目标场景</button></div></form>");
+            "</select><button class=\"item-picker-trigger scene-picker-trigger\" type=\"button\" data-scene-picker-open aria-haspopup=\"dialog\" aria-controls=\"scene-picker-modal\"><span data-scene-picker-label>选择目标 SCE</span><small>搜索场景</small></button></div></label><div class=\"actions\"><button type=\"submit\">保存目标场景</button></div></form>");
     }
     if (portalCount == 0)
         vm_mock_admin_text_appendf(page,
@@ -5276,13 +5310,12 @@ static void vm_mock_admin_render_content_page(char *response,
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a>"
-        "<a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
         "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
-        "<div class=\"grid\"><aside class=\"card\"><h2>文件格式</h2><nav class=\"format-tabs\"><a class=\"format on\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a></nav><h2>SCE 场景（%u）</h2><div class=\"scene-list\" data-admin-list>",
+        "<div class=\"grid\"><aside class=\"card\"><h2>文件格式</h2><nav class=\"format-tabs\"><a class=\"format on\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=actor\">Actor 资源</a></nav><h2>SCE 场景（%u）</h2><label style=\"display:grid;gap:4px;margin:0 0 10px\"><span class=\"foot\">按名称搜索</span><input type=\"search\" data-content-resource-search placeholder=\"输入场景名称\" autocomplete=\"off\"><small class=\"foot\" data-content-resource-search-count></small></label><div class=\"scene-list\" data-admin-list data-content-resource-list>",
         sceneCount);
     for (u32 i = 0; i < sceneCount; ++i)
     {
@@ -5294,13 +5327,13 @@ static void vm_mock_admin_render_content_page(char *response,
         if (strcmp(sceneFiles[i].name, selectedSceneFile) == 0)
         {
             vm_mock_admin_text_appendf(&page,
-                "<a id=\"selected-scene\" class=\"scene on\" data-admin-select aria-current=\"page\" href=\"/?tab=content&amp;content_kind=sce&amp;content_section=%s&amp;scene=%s#selected-scene\"><span>",
+                "<a id=\"selected-scene\" class=\"scene on\" data-admin-select data-content-resource-item aria-current=\"page\" href=\"/?tab=content&amp;content_kind=sce&amp;content_section=%s&amp;scene=%s#selected-scene\"><span>",
                 portalSection ? "portals" : "npcs", encoded);
         }
         else
         {
             vm_mock_admin_text_appendf(&page,
-                "<a class=\"scene\" data-admin-select href=\"/?tab=content&amp;content_kind=sce&amp;content_section=%s&amp;scene=%s#selected-scene\"><span>",
+                "<a class=\"scene\" data-admin-select data-content-resource-item href=\"/?tab=content&amp;content_kind=sce&amp;content_section=%s&amp;scene=%s#selected-scene\"><span>",
                 portalSection ? "portals" : "npcs", encoded);
         }
         vm_mock_admin_text_append_html(&page, sceneUtf8);
@@ -5720,6 +5753,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<p class=\"foot\">对话服务功能决定客户端可操作入口；自定义名称和说明只改变该入口的显示文字。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。装备回收商人仅列出背包中的装备，并按装备基础价值的 50% 回收为铜钱；已装备在角色身上的物品不会出现在回收列表。副本传送和守关怪挑战可独立勾选：前者直接进入目标场景，后者直接开始当前场景的守关战斗，均按最低等级拦截。比武擂台会打开客户端原生擂台大厅，可开设、查看和加入在线擂台房间；房间随房主离线即时关闭。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div>");
     vm_mock_admin_render_actor_picker_modal(&page, actorFiles, actorCount);
+    vm_mock_admin_render_scene_picker_modal(&page);
     vm_mock_admin_render_item_picker_modal(&page, false);
     vm_mock_admin_render_npc_stock_picker_modal(&page);
     }
@@ -7646,6 +7680,503 @@ static void vm_mock_admin_render_risk_page(char *response,
     }
 }
 
+/* Account and role writes are committed by their owning service functions.
+ * This append-only audit trail is deliberately independent of those parent
+ * rows, so a later role migration or deletion cannot erase the history of a
+ * completed administrator action. */
+typedef struct
+{
+    uint64_t logId;
+    char actionCode[33];
+    char accountId[64];
+    u32 roleId;
+    u32 itemId;
+    u32 itemCount;
+    u32 changeAmount;
+    char detail[256];
+    char createdAt[40];
+} vm_mock_admin_operation_log_row;
+
+typedef struct
+{
+    vm_mock_admin_operation_log_row rows[VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE];
+    u32 count;
+    bool invalid;
+} vm_mock_admin_operation_log_page;
+
+typedef struct
+{
+    const char *actionCode;
+    const char *label;
+} vm_mock_admin_operation_log_action;
+
+static const vm_mock_admin_operation_log_action
+    g_vm_mock_admin_operation_log_actions[] = {
+    {"create-account", "创建账号"},
+    {"set-password", "修改密码"},
+    {"set-role-name", "修改角色名称"},
+    {"add-money", "增加普通钱币"},
+    {"add-wcoin", "增加 W 币"},
+    {"set-role-level", "设置角色等级"},
+    {"grant-item", "发放物品/装备"},
+    {"reset-role-selected-scene", "重置角色位置"},
+    {"ban-risk-account", "封禁风险账号"},
+    {"spend-wcoin-shop", "游戏内商城消费 W 币"},
+    {"spend-wcoin-instance", "付费副本消费 W 币"}
+};
+
+enum
+{
+    VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT =
+        sizeof(g_vm_mock_admin_operation_log_actions) /
+        sizeof(g_vm_mock_admin_operation_log_actions[0])
+};
+
+static bool g_vm_mock_admin_operation_log_schema_prepared = false;
+
+static bool vm_mock_admin_operation_log_schema_ensure(void)
+{
+    if (g_vm_mock_admin_operation_log_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_admin_operation_logs ("
+            "log_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+            "action_code VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "target_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "target_role_id INT UNSIGNED NOT NULL DEFAULT 0,"
+            "item_id INT UNSIGNED NOT NULL DEFAULT 0,"
+            "item_count INT UNSIGNED NOT NULL DEFAULT 0,"
+            "change_amount INT UNSIGNED NOT NULL DEFAULT 0,"
+            "detail VARBINARY(255) NOT NULL,"
+            "created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),"
+            "PRIMARY KEY(log_id),"
+            "KEY idx_admin_operation_logs_account(target_account_id,log_id),"
+            "KEY idx_admin_operation_logs_created(created_at,log_id)"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-admin] operation_log_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_mock_admin_operation_log_schema_prepared = true;
+    return true;
+}
+
+static bool vm_mock_admin_operation_log_record(
+    const char *actionCode, const char *accountId, u32 roleId, u32 itemId,
+    u32 itemCount, u32 changeAmount, const char *detail)
+{
+    char actionHex[65];
+    char accountHex[127];
+    char detailHex[511];
+    char sql[1280];
+    size_t actionLen = actionCode ? strlen(actionCode) : 0;
+    size_t accountLen = accountId ? strlen(accountId) : 0;
+    size_t detailLen = detail ? strlen(detail) : 0;
+
+    if (actionLen == 0 || actionLen > 32 || accountLen == 0 ||
+        accountLen > 63 || detailLen == 0 || detailLen > 255 ||
+        !vm_mock_admin_operation_log_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)actionCode, actionLen, actionHex,
+                            sizeof(actionHex)) == 0 ||
+        vm_mysql_hex_encode((const u8 *)accountId, accountLen, accountHex,
+                            sizeof(accountHex)) == 0 ||
+        vm_mysql_hex_encode((const u8 *)detail, detailLen, detailHex,
+                            sizeof(detailHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO server_admin_operation_logs"
+             "(action_code,target_account_id,target_role_id,item_id,item_count,change_amount,detail) "
+             "VALUES(CAST(X'%s' AS CHAR),CAST(X'%s' AS CHAR),%u,%u,%u,%u,X'%s')",
+             actionHex, accountHex, roleId, itemId, itemCount, changeAmount,
+             detailHex);
+    if (!vm_mysql_exec(sql))
+    {
+        printf("[error][mock-admin] operation_log_insert_failed action=%s account=%s role=%u error=%s\n",
+               actionCode, accountId, roleId, vm_mysql_last_error());
+        return false;
+    }
+    return true;
+}
+
+static bool vm_mock_admin_operation_log_row_callback(
+    void *contextValue, unsigned int columnCount,
+    const char *const *values, const size_t *lengths)
+{
+    vm_mock_admin_operation_log_page *page =
+        (vm_mock_admin_operation_log_page *)contextValue;
+    vm_mock_admin_operation_log_row *row = NULL;
+
+    if (page == NULL || page->count >= VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE ||
+        columnCount != 9 || values == NULL || lengths == NULL)
+    {
+        if (page != NULL)
+            page->invalid = true;
+        return true;
+    }
+    row = &page->rows[page->count];
+    if (!vm_mock_mysql_parse_u64(values[0], lengths[0], &row->logId) ||
+        !vm_mock_mysql_copy_text(row->actionCode, sizeof(row->actionCode),
+                                 values[1], lengths[1]) ||
+        !vm_mock_mysql_copy_text(row->accountId, sizeof(row->accountId),
+                                 values[2], lengths[2]) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &row->roleId) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &row->itemId) ||
+        !vm_mock_mysql_parse_u32(values[5], lengths[5], &row->itemCount) ||
+        !vm_mock_mysql_parse_u32(values[6], lengths[6], &row->changeAmount) ||
+        !vm_mock_admin_risk_decode_hex(row->detail, sizeof(row->detail),
+                                       values[7], lengths[7]) ||
+        !vm_mock_mysql_copy_text(row->createdAt, sizeof(row->createdAt),
+                                 values[8], lengths[8]))
+    {
+        page->invalid = true;
+        return true;
+    }
+    ++page->count;
+    return true;
+}
+
+static u32 vm_mock_admin_operation_log_action_filter_from_query(
+    const char *query)
+{
+    char selected[VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT][33];
+    u32 selectedCount = 0;
+    u32 filter = 0;
+
+    memset(selected, 0, sizeof(selected));
+    if (!vm_mock_admin_form_values(query, "type", (char *)selected,
+                                   sizeof(selected[0]),
+                                   VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT,
+                                   &selectedCount))
+    {
+        return 0;
+    }
+    for (u32 i = 0; i < selectedCount; ++i)
+    {
+        for (u32 j = 0; j < VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT; ++j)
+        {
+            if (strcmp(selected[i],
+                       g_vm_mock_admin_operation_log_actions[j].actionCode) == 0)
+            {
+                filter |= 1u << j;
+                break;
+            }
+        }
+    }
+    return filter;
+}
+
+static bool vm_mock_admin_operation_log_build_filter(const char *accountId,
+                                                      u32 actionFilter,
+                                                      char *filter,
+                                                      size_t filterCap)
+{
+    char accountHex[127];
+    size_t used = 0;
+    bool haveCondition = false;
+    bool haveAction = false;
+
+    if (filter == NULL || filterCap == 0)
+        return false;
+    filter[0] = 0;
+    if (accountId != NULL && accountId[0] != 0)
+    {
+        int written = 0;
+
+        if (strlen(accountId) > 63 ||
+            vm_mysql_hex_encode((const u8 *)accountId, strlen(accountId),
+                                accountHex, sizeof(accountHex)) == 0)
+        {
+            return false;
+        }
+        written = snprintf(filter, filterCap,
+                           "WHERE target_account_id=CAST(X'%s' AS CHAR)",
+                           accountHex);
+        if (written < 0 || (size_t)written >= filterCap)
+            return false;
+        used = (size_t)written;
+        haveCondition = true;
+    }
+    if (actionFilter != 0)
+    {
+        int written = snprintf(filter + used, filterCap - used, "%s(",
+                               haveCondition ? " AND " : "WHERE ");
+
+        if (written < 0 || (size_t)written >= filterCap - used)
+            return false;
+        used += (size_t)written;
+        for (u32 i = 0; i < VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT; ++i)
+        {
+            if ((actionFilter & (1u << i)) == 0)
+                continue;
+            written = snprintf(filter + used, filterCap - used, "%saction_code='%s'",
+                               haveAction ? " OR " : "",
+                               g_vm_mock_admin_operation_log_actions[i].actionCode);
+            if (written < 0 || (size_t)written >= filterCap - used)
+                return false;
+            used += (size_t)written;
+            haveAction = true;
+        }
+        if (!haveAction || used + 1 >= filterCap)
+            return false;
+        filter[used++] = ')';
+        filter[used] = 0;
+    }
+    return true;
+}
+
+static void vm_mock_admin_operation_log_append_action_filter_query(
+    u32 actionFilter, char *out, size_t outCap)
+{
+    size_t used = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    for (u32 i = 0; i < VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT; ++i)
+    {
+        int written = 0;
+
+        if ((actionFilter & (1u << i)) == 0)
+            continue;
+        written = snprintf(out + used, outCap - used, "&amp;type=%s",
+                           g_vm_mock_admin_operation_log_actions[i].actionCode);
+        if (written < 0 || (size_t)written >= outCap - used)
+        {
+            out[used] = 0;
+            return;
+        }
+        used += (size_t)written;
+    }
+}
+
+static bool vm_mock_admin_operation_log_query(
+    const char *accountId, u32 actionFilter, u32 offset, u32 limit,
+    vm_mock_admin_operation_log_page *page)
+{
+    char filter[768];
+    char sql[1024];
+
+    if (page == NULL || limit == 0 ||
+        !vm_mock_admin_operation_log_schema_ensure() ||
+        !vm_mock_admin_operation_log_build_filter(accountId, actionFilter,
+                                                  filter, sizeof(filter)))
+    {
+        return false;
+    }
+    memset(page, 0, sizeof(*page));
+    snprintf(sql, sizeof(sql),
+             "SELECT log_id,action_code,target_account_id,target_role_id,item_id,"
+             "item_count,change_amount,HEX(detail),"
+             "DATE_FORMAT(created_at,'%%Y-%%m-%%d %%H:%%i:%%s.%%f') "
+             "FROM server_admin_operation_logs %s ORDER BY log_id DESC "
+             "LIMIT %u,%u",
+             filter, offset, limit);
+    return vm_mysql_query(sql, vm_mock_admin_operation_log_row_callback, page) &&
+           !page->invalid;
+}
+
+static bool vm_mock_admin_operation_log_query_count(const char *accountId,
+                                                    u32 actionFilter,
+                                                    u32 *countOut)
+{
+    char filter[768];
+    char sql[896];
+    vm_mock_admin_count count;
+
+    if (countOut != NULL)
+        *countOut = 0;
+    if (!vm_mock_admin_operation_log_schema_ensure() ||
+        !vm_mock_admin_operation_log_build_filter(accountId, actionFilter,
+                                                  filter, sizeof(filter)))
+        return false;
+    memset(&count, 0, sizeof(count));
+    snprintf(sql, sizeof(sql),
+             "SELECT COUNT(*) FROM server_admin_operation_logs %s", filter);
+    if (!vm_mysql_query(sql, vm_mock_admin_count_row, &count) ||
+        count.invalid || !count.found)
+    {
+        return false;
+    }
+    if (countOut != NULL)
+        *countOut = count.value;
+    return true;
+}
+
+static const char *vm_mock_admin_operation_log_action_label(
+    const char *actionCode)
+{
+    if (actionCode == NULL)
+        return "未知操作";
+    for (u32 i = 0; i < VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT; ++i)
+    {
+        if (strcmp(actionCode,
+                   g_vm_mock_admin_operation_log_actions[i].actionCode) == 0)
+        {
+            return g_vm_mock_admin_operation_log_actions[i].label;
+        }
+    }
+    return actionCode;
+}
+
+static void vm_mock_admin_render_operation_log_page(char *response,
+                                                    size_t responseCap,
+                                                    const char *query)
+{
+    vm_mock_admin_text page;
+    vm_mock_admin_operation_log_page logPage;
+    char accountFilter[64];
+    char encodedAccount[128];
+    char encodedActionFilter[512];
+    char pageText[16];
+    u32 totalCount = 0;
+    u32 pageNumber = 1;
+    u32 pageCount = 1;
+    u32 offset = 0;
+    u32 actionFilter = 0;
+    bool queryOk = false;
+
+    memset(&logPage, 0, sizeof(logPage));
+    memset(accountFilter, 0, sizeof(accountFilter));
+    memset(encodedAccount, 0, sizeof(encodedAccount));
+    memset(encodedActionFilter, 0, sizeof(encodedActionFilter));
+    memset(pageText, 0, sizeof(pageText));
+    (void)vm_mock_admin_form_value(query, "account", accountFilter,
+                                   sizeof(accountFilter));
+    actionFilter = vm_mock_admin_operation_log_action_filter_from_query(query);
+    (void)vm_mock_admin_form_value(query, "page", pageText, sizeof(pageText));
+    if (pageText[0] != 0 &&
+        (!vm_net_mock_parse_u32_strict(pageText, &pageNumber) || pageNumber == 0))
+    {
+        pageNumber = 1;
+    }
+    queryOk = vm_mock_admin_operation_log_query_count(accountFilter,
+                                                       actionFilter, &totalCount);
+    if (queryOk)
+    {
+        if (totalCount != 0)
+            pageCount = (totalCount + VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE - 1) /
+                        VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE;
+        if (pageNumber > pageCount)
+            pageNumber = pageCount;
+        offset = (pageNumber - 1) * VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE;
+        queryOk = vm_mock_admin_operation_log_query(
+            accountFilter, actionFilter, offset,
+            VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE, &logPage);
+    }
+    vm_mock_admin_url_encode(accountFilter, encodedAccount,
+                             sizeof(encodedAccount));
+    vm_mock_admin_operation_log_append_action_filter_query(
+        actionFilter, encodedActionFilter, sizeof(encodedActionFilter));
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(
+        &page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 后台操作日志</title><style>"
+        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 10px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap}.filter>label{display:grid;gap:4px;color:#475467;font-size:12px}.filter input[type=text]{min-width:250px;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;font:inherit}.type-filter{display:grid;gap:6px;flex:1 1 100%%;margin:0;padding:8px 10px;border:1px solid #d0d5dd;border-radius:7px}.type-filter legend{padding:0 4px;color:#475467;font-size:12px}.type-options{display:flex;flex-wrap:wrap;gap:6px 12px}.type-options label{display:inline-flex;align-items:center;gap:5px;color:#344054;font-size:13px;white-space:nowrap}.type-options input{margin:0}.filter button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;font:inherit;cursor:pointer}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%%;min-width:960px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.tag{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px;font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}.filter input[type=text]{min-width:0;width:100%%}}</style>"
+        "<script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">操作日志 · 记录后台账号管理和游戏内 W 币消费</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=global-rewards\">全服奖励管理</a><a class=\"tab on\" href=\"/?tab=operations\">操作日志</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<section class=\"card\"><h2>查询操作日志</h2><form class=\"filter\" method=\"get\"><input type=\"hidden\" name=\"tab\" value=\"operations\"><label><span>目标账号（留空显示全部）</span><input type=\"text\" name=\"account\" maxlength=\"63\" value=\"");
+    vm_mock_admin_text_append_html(&page, accountFilter);
+    vm_mock_admin_text_appendf(
+        &page,
+        "\" placeholder=\"输入精确账号名\"></label><fieldset class=\"type-filter\"><legend>日志类型（可多选）</legend><div class=\"type-options\">");
+    for (u32 i = 0; i < VM_MOCK_ADMIN_OPERATION_LOG_ACTION_COUNT; ++i)
+    {
+        vm_mock_admin_text_appendf(
+            &page, "<label><input type=\"checkbox\" name=\"type\" value=\"%s\"%s>",
+            g_vm_mock_admin_operation_log_actions[i].actionCode,
+            (actionFilter & (1u << i)) != 0 ? " checked" : "");
+        vm_mock_admin_text_append_html(
+            &page, g_vm_mock_admin_operation_log_actions[i].label);
+        vm_mock_admin_text_appendf(&page, "</label>");
+    }
+    vm_mock_admin_text_appendf(
+        &page,
+        "</div></fieldset><button type=\"submit\">查询</button></form><p class=\"sub\">可同时勾选多个类型；日志记录后台成功操作及游戏内已提交的 W 币消费，不记录密码内容。</p></section><section class=\"card\"><h2>操作记录</h2>");
+    if (!queryOk)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<p class=\"muted\">无法读取操作日志：%s</p></section></main></body></html>",
+            vm_mysql_last_error());
+    }
+    else if (logPage.count == 0)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<p class=\"muted\">暂无符合条件的操作记录。</p></section></main></body></html>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<div class=\"table-wrap\"><table><thead><tr><th>时间</th><th>操作</th><th>账号</th><th>角色</th><th>变动</th><th>说明</th></tr></thead><tbody>");
+        for (u32 i = 0; i < logPage.count; ++i)
+        {
+            const vm_mock_admin_operation_log_row *row = &logPage.rows[i];
+            const char *label =
+                vm_mock_admin_operation_log_action_label(row->actionCode);
+
+            vm_mock_admin_text_appendf(&page,
+                "<tr><td class=\"mono\">%s</td><td><span class=\"tag\">",
+                row->createdAt);
+            vm_mock_admin_text_append_html(&page, label);
+            vm_mock_admin_text_appendf(&page, "</span></td><td class=\"mono\">");
+            vm_mock_admin_text_append_html(&page, row->accountId);
+            vm_mock_admin_text_appendf(&page, "</td><td class=\"mono\">");
+            if (row->roleId != 0)
+                vm_mock_admin_text_appendf(&page, "ID %u", row->roleId);
+            else
+                vm_mock_admin_text_appendf(&page, "账号级");
+            vm_mock_admin_text_appendf(&page, "</td><td class=\"mono\">");
+            if (row->itemId != 0 && row->changeAmount != 0)
+                vm_mock_admin_text_appendf(&page, "物品 %u × %u；W币 -%u",
+                                           row->itemId, row->itemCount,
+                                           row->changeAmount);
+            else if (row->itemId != 0)
+                vm_mock_admin_text_appendf(&page, "物品 %u × %u", row->itemId,
+                                           row->itemCount);
+            else if (row->changeAmount != 0)
+                vm_mock_admin_text_appendf(
+                    &page, "%s%u",
+                    strncmp(row->actionCode, "spend-wcoin-", 12) == 0 ?
+                        "W币 -" : "",
+                    row->changeAmount);
+            else
+                vm_mock_admin_text_appendf(&page, "—");
+            vm_mock_admin_text_appendf(&page, "</td><td>");
+            vm_mock_admin_text_append_html(&page, row->detail);
+            vm_mock_admin_text_appendf(&page, "</td></tr>");
+        }
+        vm_mock_admin_text_appendf(
+            &page,
+            "</tbody></table></div><div class=\"pages\"><span>第 %u / %u 页 · 共 %u 条</span><div class=\"page-links\">",
+            pageNumber, pageCount, totalCount);
+        if (pageNumber > 1)
+            vm_mock_admin_text_appendf(
+                &page,
+                "<a href=\"/?tab=operations&amp;account=%s%s&amp;page=%u\">上一页</a>",
+                encodedAccount, encodedActionFilter, pageNumber - 1);
+        if (pageNumber < pageCount)
+            vm_mock_admin_text_appendf(
+                &page,
+                "<a href=\"/?tab=operations&amp;account=%s%s&amp;page=%u\">下一页</a>",
+                encodedAccount, encodedActionFilter, pageNumber + 1);
+        vm_mock_admin_text_appendf(
+            &page, "</div></div></section></main></body></html>");
+    }
+    if (page.truncated)
+    {
+        snprintf(response, responseCap,
+                 "<!doctype html><meta charset=\"utf-8\"><p>操作日志页面超过大小限制。</p>");
+    }
+}
+
 /* Account listing is an administrative directory view, not a reason to keep
  * every credential in the game-session cache.  The cursor is a database
  * offset over the same ORDER BY contract on each request.  Fetching one extra
@@ -8270,10 +8801,10 @@ static void vm_mock_admin_render_actor_resource_page(char *response,
     vm_mock_admin_text_appendf(&page,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<title>Actor 资源管理 · 江湖OL 后台</title><style>"
+        "<title>江湖OL 游戏内容管理 · Actor 资源</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1440px;margin:0 auto;padding:28px 18px 46px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0}h3{font-size:15px;margin:0}.sub,.muted{color:#667085;margin:4px 0 20px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{border:1px solid #d0d5dd;background:#fff;color:#475467}.layout{display:grid;grid-template-columns:285px minmax(0,1fr);gap:16px;align-items:start}.card{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;box-shadow:0 1px 2px #1018280d}.actor-list{display:grid;gap:5px;max-height:calc(100vh - 225px);overflow:auto;padding-right:3px}.actor-link{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:7px;color:#344054;text-decoration:none}.actor-link:hover,.actor-link.on{background:#eef4ff;color:#175cd3}.actor-link small{color:#98a2b3}.new-link{display:block;margin:12px 0;padding:9px 10px;border-radius:7px;background:#175cd3;color:#fff;text-align:center;text-decoration:none;font-weight:650}.new-link:hover{background:#1849a9}.notice{padding:10px 12px;border-radius:8px;margin:0 0 14px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}.actor-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:14px}.preview{width:156px;min-width:156px;height:156px;display:grid;place-items:center;border:1px solid #e4e7ec;border-radius:10px;background:linear-gradient(135deg,#f8fafc,#eef4ff);overflow:hidden}.preview img{max-width:148px;max-height:148px;image-rendering:pixelated}.editor{display:grid;gap:13px}.top-fields{display:grid;grid-template-columns:minmax(230px,1fr) auto;gap:10px;align-items:end}.top-fields label,.editor>label{display:grid;gap:5px;color:#344054;font-weight:600}.top-fields label>span,.editor>label>span{font-size:12px;color:#667085;font-weight:500}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:7px;padding:9px 10px;background:#fff;color:#1f2937;font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}textarea{resize:vertical;min-height:76px}button{border:0;border-radius:7px;padding:9px 13px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}button:hover{background:#1849a9}.template{display:flex;gap:8px;align-items:end;padding:12px;border:1px solid #e4e7ec;border-radius:9px;background:#f8fafc}.template label{display:grid;gap:4px;flex:1;color:#475467}.template label span{font-size:12px}.contract{margin:0;padding:10px 12px;border-left:3px solid #175cd3;border-radius:4px;background:#eef4ff;color:#344054}.stats{display:flex;gap:8px;flex-wrap:wrap}.badge{border-radius:999px;background:#eef4ff;color:#175cd3;padding:3px 8px;font-size:12px}.empty{padding:28px;border:1px dashed #d0d5dd;border-radius:9px;color:#667085;text-align:center}@media(max-width:900px){.layout{grid-template-columns:1fr}.actor-list{max-height:250px}.preview{width:116px;min-width:116px;height:116px}.preview img{max-width:108px;max-height:108px}}@media(max-width:580px){.wrap{padding:18px 10px}.top-fields{grid-template-columns:1fr}.actor-head{align-items:flex-start}.preview{display:none}}"
-        "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>Actor 资源管理</h1><p class=\"sub\">编辑服务端权威 .actor 结构；保存后会用原生内容更新让客户端重新下载。</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab on\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><div class=\"layout\"><aside class=\"card\"><h2>已有 Actor（%u）</h2><div class=\"actor-list\" data-admin-list><a class=\"new-link%s\" data-admin-select%s href=\"/?tab=actors&amp;new=1\">新建 Actor 资源</a>",
+        "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">游戏内容管理 · 编辑服务端权威 .actor 结构；保存后会用原生内容更新让客户端重新下载。</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><div class=\"layout\"><aside class=\"card\"><h2>文件格式</h2><nav style=\"display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 16px\"><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a><a style=\"padding:7px 9px;border:1px solid #175cd3;border-radius:7px;color:#fff;background:#175cd3;text-decoration:none\" href=\"/?tab=content&amp;content_kind=actor\">Actor 资源</a></nav><h2>已有 Actor（%u）</h2><div class=\"actor-list\" data-admin-list><a class=\"new-link%s\" data-admin-select%s href=\"/?tab=content&amp;content_kind=actor&amp;new=1\">新建 Actor 资源</a>",
         fileCount, newMode ? " on" : "",
         newMode ? " aria-current=\"page\"" : "");
     for (u32 i = 0; i < fileCount; ++i)
@@ -8282,7 +8813,7 @@ static void vm_mock_admin_render_actor_resource_page(char *response,
         vm_mock_admin_url_encode(files[i].name, encoded, sizeof(encoded));
         int selectedActor = !newMode && strcmp(files[i].name, selected) == 0;
         vm_mock_admin_text_appendf(&page,
-            "<a class=\"actor-link%s\" data-admin-select%s href=\"/?tab=actors&amp;actor=%s\"><span>",
+            "<a class=\"actor-link%s\" data-admin-select%s href=\"/?tab=content&amp;content_kind=actor&amp;actor=%s\"><span>",
             selectedActor ? " on" : "",
             selectedActor ? " aria-current=\"page\"" : "", encoded);
         vm_mock_admin_text_append_html(&page, files[i].name);
@@ -8325,7 +8856,7 @@ static void vm_mock_admin_render_actor_resource_page(char *response,
         if (newMode)
         {
             vm_mock_admin_text_appendf(&page,
-                "<form class=\"template\" method=\"get\" action=\"/\"><input type=\"hidden\" name=\"tab\" value=\"actors\"><input type=\"hidden\" name=\"new\" value=\"1\"><label><span>新建模板</span><select name=\"template\">");
+                "<form class=\"template\" method=\"get\" action=\"/\"><input type=\"hidden\" name=\"tab\" value=\"content\"><input type=\"hidden\" name=\"content_kind\" value=\"actor\"><input type=\"hidden\" name=\"new\" value=\"1\"><label><span>新建模板</span><select name=\"template\">");
             for (u32 i = 0; i < fileCount; ++i)
             {
                 vm_mock_admin_text_appendf(&page, "<option value=\"");
@@ -8364,6 +8895,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
 {
     vm_mock_admin_text page;
     char tab[16];
+    char contentKind[16];
     char selectedAccount[64];
     char accountSearch[64];
     char status[16];
@@ -8380,6 +8912,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
 
     vm_mock_admin_text_init(&page, response, responseCap);
     memset(tab, 0, sizeof(tab));
+    memset(contentKind, 0, sizeof(contentKind));
     memset(selectedAccount, 0, sizeof(selectedAccount));
     memset(accountSearch, 0, sizeof(accountSearch));
     memset(status, 0, sizeof(status));
@@ -8388,13 +8921,26 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     memset(managedRoleIds, 0, sizeof(managedRoleIds));
     memset(managedRoleNames, 0, sizeof(managedRoleNames));
     (void)vm_mock_admin_form_value(query, "tab", tab, sizeof(tab));
+    (void)vm_mock_admin_form_value(query, "content_kind", contentKind,
+                                   sizeof(contentKind));
     if (strcmp(tab, "global-rewards") == 0)
     {
         vm_mock_admin_render_global_rewards_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "operations") == 0)
+    {
+        vm_mock_admin_render_operation_log_page(response, responseCap, query);
+        return;
+    }
     if (strcmp(tab, "content") == 0)
     {
+        if (strcmp(contentKind, "actor") == 0)
+        {
+            vm_mock_admin_render_actor_resource_page(response, responseCap,
+                                                     query);
+            return;
+        }
         vm_mock_admin_render_content_page(response, responseCap, query);
         return;
     }
@@ -9277,7 +9823,7 @@ static void vm_mock_admin_redirect_actors(vm_mock_service_socket client,
                              sizeof(messageEncoded));
     snprintf(location, sizeof(location),
              VM_MOCK_ADMIN_ROOT_PATH
-             "?tab=actors&actor=%s&status=%s&message=%s",
+             "?tab=content&content_kind=actor&actor=%s&status=%s&message=%s",
              actorEncoded, statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
@@ -9297,6 +9843,18 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
     if (valueOut)
         *valueOut = parsed;
     return true;
+}
+
+static bool vm_mock_admin_form_drop_rate_basis_points(const char *body,
+                                                       const char *field,
+                                                       u16 *valueOut)
+{
+    char textValue[32];
+
+    memset(textValue, 0, sizeof(textValue));
+    return vm_mock_admin_form_value(body, field, textValue, sizeof(textValue)) &&
+           vm_net_mock_parse_drop_rate_basis_points(
+               textValue, strlen(textValue), valueOut);
 }
 
 /* Empty is meaningful for merchant prices: it asks the service to resolve the
@@ -9651,27 +10209,25 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
     if (strcmp(action, "assign-monster-equipment-drops") == 0)
     {
         vm_net_mock_monster_equipment_drop_assignment assignment;
-        u32 rates[3] = {0, 0, 0};
-        u8 qualityRates[3] = {0, 0, 0};
+        u16 qualityRates[3] = {0, 0, 0};
         char message[384];
 
         memset(&assignment, 0, sizeof(assignment));
         memset(message, 0, sizeof(message));
-        if (!vm_mock_admin_form_u32(body, "quality0_drop_rate", 100u,
-                                    &rates[0]) ||
-            !vm_mock_admin_form_u32(body, "quality1_drop_rate", 100u,
-                                    &rates[1]) ||
-            !vm_mock_admin_form_u32(body, "quality2_drop_rate", 100u,
-                                    &rates[2]) ||
-            rates[0] == 0 || rates[1] == 0 || rates[2] == 0)
+        if (!vm_mock_admin_form_drop_rate_basis_points(
+                body, "quality0_drop_rate", &qualityRates[0]) ||
+            !vm_mock_admin_form_drop_rate_basis_points(
+                body, "quality1_drop_rate", &qualityRates[1]) ||
+            !vm_mock_admin_form_drop_rate_basis_points(
+                body, "quality2_drop_rate", &qualityRates[2]) ||
+            qualityRates[0] == 0 || qualityRates[1] == 0 ||
+            qualityRates[2] == 0)
         {
             vm_mock_admin_redirect_monster(
                 client, row.enemyId, "error",
-                "品质 0、1、2 的装备掉落概率都必须为 1 到 100");
+                "品质 0、1、2 的装备掉落概率都必须为 0.01 到 100，且最多两位小数");
             return;
         }
-        for (u32 quality = 0; quality < 3; ++quality)
-            qualityRates[quality] = (u8)rates[quality];
         if (!vm_net_mock_monster_admin_assign_equipment_drops(
                 qualityRates, &assignment, &error))
         {
@@ -9814,20 +10370,21 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
         char itemField[48];
         char rateField[48];
         u32 itemId = 0;
-        u32 rate = 0;
+        u16 rateBasisPoints = 0;
 
         snprintf(itemField, sizeof(itemField), "drop_item_id_%u", (u32)slot);
         snprintf(rateField, sizeof(rateField), "drop_rate_%u", (u32)slot);
         if (!vm_mock_admin_form_u32(body, itemField, 0xffffffffu, &itemId) ||
-            !vm_mock_admin_form_u32(body, rateField, 100u, &rate))
+            !vm_mock_admin_form_drop_rate_basis_points(
+                body, rateField, &rateBasisPoints))
         {
             vm_mock_admin_redirect_monster(client, row.enemyId, "error",
                                            "掉落表单字段不完整或数值越界");
             return;
         }
-        if (itemId == 0 && rate == 0)
+        if (itemId == 0 && rateBasisPoints == 0)
             continue;
-        if (itemId == 0 || rate == 0 ||
+        if (itemId == 0 || rateBasisPoints == 0 ||
             row.dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX)
         {
             vm_mock_admin_redirect_monster(client, row.enemyId, "error",
@@ -9835,7 +10392,7 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
             return;
         }
         row.drops[row.dropCount].itemId = itemId;
-        row.drops[row.dropCount].ratePercent = (u8)rate;
+        row.drops[row.dropCount].rateBasisPoints = rateBasisPoints;
         ++row.dropCount;
     }
     if (!vm_net_mock_monster_admin_save(&row, &error))
@@ -10037,6 +10594,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 instanceX = 0;
     u32 instanceY = 0;
     u32 challengeEnemyId = 0;
+    u32 instanceSpawnEnemyId = 0;
     u32 instanceMinLevel = 1;
     u32 serviceOptionCount = 0;
     bool hasInstanceTeleport = false;
@@ -10546,6 +11104,18 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
                 "守关怪必须是当前场景中已启用的场景战斗怪");
             return;
         }
+        if (hasInstanceTeleport &&
+            (!vm_mock_admin_form_u32(body, "instance_spawn_enemy_id",
+                                     0xffffu, &instanceSpawnEnemyId) ||
+             (instanceSpawnEnemyId != 0 &&
+              !vm_net_mock_scene_battle_monster_target_ready(
+                  instanceRuntimeScene, instanceSpawnEnemyId))))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error",
+                "目标场景刷新怪物必须是已启用且已部署的场景战斗怪；填 0 表示不刷新");
+            return;
+        }
     }
     for (const unsigned char *p = (const unsigned char *)actorResource; *p; ++p)
     {
@@ -10618,6 +11188,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.instanceX = (u16)instanceX;
     seed.instanceY = (u16)instanceY;
     seed.challengeEnemyId = challengeEnemyId;
+    seed.instanceSpawnEnemyId = instanceSpawnEnemyId;
     seed.instanceMinLevel = (u16)instanceMinLevel;
     snprintf(seed.instanceScene, sizeof(seed.instanceScene), "%s",
              instanceRuntimeScene);
@@ -11484,10 +12055,12 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     char roleNameGbk[32];
     char resetSceneUtf8[192];
     char resetRuntimeScene[64];
+    char operationDetail[256];
     const char *error = NULL;
     u32 itemId = 0;
     u32 amount = 0;
     u32 level = 0;
+    u32 roleId = 0;
     u16 itemSeq = 0;
     bool ok = false;
 
@@ -11502,6 +12075,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     memset(roleNameGbk, 0, sizeof(roleNameGbk));
     memset(resetSceneUtf8, 0, sizeof(resetSceneUtf8));
     memset(resetRuntimeScene, 0, sizeof(resetRuntimeScene));
+    memset(operationDetail, 0, sizeof(operationDetail));
     if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
     {
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
@@ -11625,6 +12199,18 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         {
             char message[192];
 
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "封禁风险账号，断开 %u 个游戏会话、注销 %u 个用户中心会话",
+                     disconnected, userSessions);
+            if (!vm_mock_admin_operation_log_record(
+                    "ban-risk-account", account, 0, 0, 0, 0,
+                    operationDetail))
+            {
+                vm_mock_admin_redirect_risk(
+                    client, pageNumber, "error",
+                    "账号已封禁，但操作日志写入失败，请检查数据库");
+                return;
+            }
             snprintf(message, sizeof(message),
                      "账号已封禁：已立即断开 %u 个游戏会话、注销 %u 个用户中心会话；后续登录将被拒绝",
                      disconnected, userSessions);
@@ -11649,6 +12235,13 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
             error = "密码不能为空";
         else
             ok = vm_mock_service_account_create_record(account, password, &error);
+        if (ok && !vm_mock_admin_operation_log_record(
+                      "create-account", account, 0, 0, 0, 0, "创建账号"))
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "账号创建成功，但操作日志写入失败，请检查数据库");
+            return;
+        }
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "账号创建成功" : (error ? error : "账号创建失败"));
         return;
@@ -11659,6 +12252,14 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
             error = "密码不能为空";
         else
             ok = vm_mock_service_account_set_password(account, password, &error);
+        if (ok && !vm_mock_admin_operation_log_record(
+                      "set-password", account, 0, 0, 0, 0,
+                      "修改账号密码（不记录密码内容）"))
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "密码修改成功，但操作日志写入失败，请检查数据库");
+            return;
+        }
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "密码修改成功" : (error ? error : "密码修改失败"));
         return;
@@ -11677,6 +12278,20 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         }
         ok = vm_mock_service_account_set_role_name(account, role, roleNameGbk,
                                                    &error);
+        if (ok && (error == NULL || strcmp(error, "角色名称没有变化") != 0))
+        {
+            (void)vm_net_mock_parse_u32_strict(role, &roleId);
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "角色名称修改为 %s", roleNameUtf8);
+            if (!vm_mock_admin_operation_log_record(
+                    "set-role-name", account, roleId, 0, 0, 0,
+                    operationDetail))
+            {
+                vm_mock_admin_redirect(client, account, "error",
+                                       "角色名称已更新，但操作日志写入失败，请检查数据库");
+                return;
+            }
+        }
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? (error ? error : "角色名称已更新")
                                   : (error ? error : "角色名称修改失败"));
@@ -11701,6 +12316,28 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         }
         else
             ok = vm_mock_service_account_add_wcoin(account, amount, &error);
+        if (ok)
+        {
+            roleId = 0;
+            if (strcmp(action, "add-money") == 0)
+            {
+                (void)vm_net_mock_parse_u32_strict(role, &roleId);
+                snprintf(operationDetail, sizeof(operationDetail),
+                         "增加普通钱币 %u 铜", amount);
+            }
+            else
+            {
+                snprintf(operationDetail, sizeof(operationDetail),
+                         "增加 W 币 %u", amount);
+            }
+            if (!vm_mock_admin_operation_log_record(
+                    action, account, roleId, 0, 0, amount, operationDetail))
+            {
+                vm_mock_admin_redirect(client, account, "error",
+                                       "余额已增加，但操作日志写入失败，请检查数据库");
+                return;
+            }
+        }
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? (strcmp(action, "add-money") == 0 ? "普通钱币增加成功" : "W 币增加成功")
                                   : (error ? error : "余额修改失败"));
@@ -11721,6 +12358,20 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         }
         ok = vm_mock_service_account_reset_role_to_scene_spawn(
             account, role, resetRuntimeScene, &error);
+        if (ok)
+        {
+            (void)vm_net_mock_parse_u32_strict(role, &roleId);
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "重置到场景 %s 的安全落点", resetSceneUtf8);
+            if (!vm_mock_admin_operation_log_record(
+                    "reset-role-selected-scene", account, roleId, 0, 0, 0,
+                    operationDetail))
+            {
+                vm_mock_admin_redirect(client, account, "error",
+                                       "角色位置已重置，但操作日志写入失败，请检查数据库");
+                return;
+            }
+        }
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? (error ? error : "已重置到指定场景的安全落点，重新进入游戏后生效")
                                   : (error ? error : "角色位置重置失败"));
@@ -11740,6 +12391,20 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         }
         ok = vm_mock_service_account_set_role_level(account, role, level,
                                                     &error);
+        if (ok)
+        {
+            (void)vm_net_mock_parse_u32_strict(role, &roleId);
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "角色等级设为 %u", level);
+            if (!vm_mock_admin_operation_log_record(
+                    "set-role-level", account, roleId, 0, 0, level,
+                    operationDetail))
+            {
+                vm_mock_admin_redirect(client, account, "error",
+                                       "角色等级已更新，但操作日志写入失败，请检查数据库");
+                return;
+            }
+        }
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "角色等级已更新，经验已重置为该等级起点"
                                   : (error ? error : "角色等级设置失败"));
@@ -11762,6 +12427,31 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         }
         ok = vm_mock_service_account_grant_role_item(
             account, role, itemId, amount, &itemSeq, &error);
+        if (ok)
+        {
+            const vm_net_mock_shop_catalog_item *catalogItem =
+                vm_net_mock_find_shop_catalog_item(itemId);
+            char itemNameUtf8[128];
+
+            memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+            if (catalogItem != NULL)
+                vm_net_mock_gbk_label_to_utf8(catalogItem->name, itemNameUtf8,
+                                              sizeof(itemNameUtf8));
+            (void)vm_net_mock_parse_u32_strict(role, &roleId);
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "发放%s %s（ID %u）×%u，背包序号 %u",
+                     catalogItem != NULL && catalogItem->isEquip ? "装备" : "物品",
+                     itemNameUtf8[0] ? itemNameUtf8 : "未命名物品", itemId,
+                     amount, itemSeq);
+            if (!vm_mock_admin_operation_log_record(
+                    "grant-item", account, roleId, itemId, amount, 0,
+                    operationDetail))
+            {
+                vm_mock_admin_redirect(client, account, "error",
+                                       "物品已给予，但操作日志写入失败，请检查数据库");
+                return;
+            }
+        }
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "物品给予成功" :
                                     (error ? error : "物品给予失败"));

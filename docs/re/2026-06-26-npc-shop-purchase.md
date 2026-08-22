@@ -4,6 +4,34 @@ Date: 2026-06-26
 
 Status: implemented for shop open, DSH-backed catalog paging, shop-friendly catalog ordering, host DSH lookup compatibility, and buy-result packets; needs end-to-end NPC click validation
 
+## 2026-08-22 秘宝目录分页
+
+### 根因与修复
+
+- `vm_net_mock_shop_page_item_limit(5)` 曾把 `14/5` 的过滤总量截为 8。
+  因此客户端在 `mmShop:0x7BC` 读到的 `totalnum` 从不超过第一页容量，原生
+  `mmShop:0x618` 不会继续请求 `index=1`。
+- 移除该 8 条总量上限。`14/5(index)` 现在和其它商城目录一样保留每页 10 条的
+  响应边界，并在每页返回完整的过滤总数；后续页继续由客户端发出的 `index` 决定。
+
+### 回归
+
+- `scripts/shop-secret-pagination-regression.c` 在隔离进程内构造客户端原生
+  `WT 1/14/5(index)` 请求，注入 12 条秘宝，并验证 `index=0` 返回 `10` 条、
+  `index=1` 返回 `2` 条，两个响应的 `totalnum` 都为 `12`。
+
+### 合并翻页请求
+
+- 运行时在秘宝第 1、2 页已完成后记录到未处理包：
+  `unhandled wt=14/5 len=36 ... 1/14/5:11,1/14/5:11`。这是一个 WT 包中连续
+  带两个页面请求；旧 detector 要求请求只能含一个对象，因此返回 0 字节，客户端
+  的数据获取等待无法结束。
+- `vm_net_mock_build_shop_page14_response()` 现在仅接受由一或两个合法
+  `1/14/5..13(index)` 对象组成的请求，并以同一顺序返回一或两个页面对象。任何
+  混合对象、缺少 `index` 或超过该已取证批量大小的包仍不会被本处理器接管。
+- 分页回归同时验证双 `1/14/5(index=0,index=1)` 合并请求返回两个对象：第一页
+  `10` 条、第二页 `2` 条，且两页的 `totalnum` 都为 `12`。
+
 ## 2026-07-19 Windows 服务资源根修复
 
 ### 现象与根因
@@ -30,8 +58,10 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - 启动日志：`resource_root=../web/fs/JHOnlineData source=service-auto`；装备属性目录
   加载 `1485` 行，不再出现 fallback。
 - 商城目录：`total=1715 items=230 equips=1485 first=1001`。
-- `14/5` 返回 8 条秘宝；`14/6..13` 各分类第一页均返回 10 条，响应长度分别为
-  `532/532/530/530/533/532/532/530` 字节。
+- 当时的秘宝目录只有 8 条，`14/5(index=0)` 返回全部 8 条；`14/6..13`
+  各分类第一页均返回 10 条，响应长度分别为
+  `532/532/530/530/533/532/532/530` 字节。秘宝目录随后改为与其它分类
+  一样按 `index` 原生分页，目录总量不再固定为 8 条。
 - 商城返回场景的 NPC one-shot 回归同时通过；服务 stderr 为空。
 
 ## 1. Current Block
@@ -127,8 +157,10 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
 - Supported fields:
   - `index` as u8 or u32
 - Response:
-  - subtype `5`: `秘宝道具`, filtered from `item.dsh` category `14` and capped
-    to one visible page for now.
+  - subtype `5`: `秘宝道具`, filtered from `item.dsh` category `14` and paged
+    with the requested `index`. Each response contains at most 10 rows, while
+    `totalnum` remains the full filtered total (up to the 2048-row catalog
+    capacity).
   - subtype `6`: `神兵利器/武器`, filtered from `equip.dsh` weapon categories
     `7/8/9`.
   - subtype `7`: `衣服`, `equip.dsh` category `1`.
@@ -289,7 +321,7 @@ ActorInfo 的响应契约，不再授权重建 `mmGame` 或清空背包网格种
     two i16 fields plus `attr_count=0`.
 - Added `vm_net_mock_is_shop_page14_request()` and
   `vm_net_mock_build_shop_page14_response()`:
-  - responds to `1/14/5(index)` with the bounded `秘宝道具` page;
+  - responds to `1/14/5(index)` with the normal paged `秘宝道具` result;
   - responds to `1/14/6..13(index)` with bounded `神兵利器` subcategory pages
     based on `equip.dsh` category/slot metadata;
   - dispatch source: `builtin-shop-page14`;

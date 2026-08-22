@@ -5223,8 +5223,15 @@ static u32 vm_net_mock_build_instance_enter_response(
 
     if (seed == NULL || seed->instanceScene[0] == 0 ||
         !vm_net_mock_str_ends_with(seed->instanceScene, ".sce") ||
-        seed->instanceX == 0 || seed->instanceY == 0)
+        seed->instanceX == 0 || seed->instanceY == 0 ||
+        (seed->instanceSpawnEnemyId != 0 &&
+         !vm_net_mock_scene_battle_monster_target_ready(
+             seed->instanceScene, seed->instanceSpawnEnemyId)))
     {
+        if (seed != NULL && seed->instanceSpawnEnemyId != 0)
+            printf("[error][network] mock_npc_instance_enter_spawn_unresolved actor=%u scene=%s spawn_enemy=%u source=SCE2-kind3 action=no-fallback\n",
+                   seed->actorId, seed->instanceScene,
+                   seed->instanceSpawnEnemyId);
         return 0;
     }
     memset(&target, 0, sizeof(target));
@@ -5238,16 +5245,32 @@ static u32 vm_net_mock_build_instance_enter_response(
     if (pos == 0)
         return 0;
 
+    /* The response above is the position-bearing 30/1 that creates the
+     * destination scene shell.  Preserve that fact on the pending target so
+     * its WT6/1 resource callback cannot fall through to the generic first
+     * scene path and emit a second 30/1. */
+    target.sceneEnterPosinfoSent = true;
     vm_net_mock_remember_scene_change_target(&target);
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
-    g_vm_net_mock_teleport_stone_subtype3_ack_sent = true;
-    g_vm_net_mock_teleport_stone_direct_enter_pending = true;
+    /*
+     * NPC instance entry is a direct 30/1 scene enter, but it did not pass
+     * through a map-stone 16/1/16/2/16/3 confirmation.  Marking it as a
+     * map-stone direct entry makes an unrelated map-stone completion handler
+     * own the target.  The observed instance path instead sends a composite
+     * WT2/1 type-27 request and then WT6/1 after this 30/1.
+     *
+     * Keep the target pending: WT2/1 answers only its requested families, and
+     * WT6/1 owns resources, NPC data and the one no-posinfo 30/2 completion.
+     */
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
                                       "npc-instance-enter");
-    printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) response=30/1 resp=%u evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
-           seed->actorId, target.scene, target.x, target.y, pos);
+    printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) spawn_enemy=%u source=SCE2-kind3 response=30/1 resp=%u evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+           seed->actorId, target.scene, target.x, target.y,
+           seed->instanceSpawnEnemyId, pos);
     return pos;
 }
 

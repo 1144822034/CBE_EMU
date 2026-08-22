@@ -1069,6 +1069,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         if (!vm_net_mock_append_scene_pos_result_object_for_scene(out, outCap, &pos,
                                                                   target.scene, target.x, target.y))
             return 0;
+        target.sceneCompletionSent = true;
         objectCount += 1;
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
         /*
@@ -1115,6 +1116,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
             return 0;
         }
         vm_net_mock_finish_wt_object(out, objectStart, pos);
+        target.sceneCompletionSent = true;
         objectCount += 1;
     }
     if (needFb11)
@@ -1851,6 +1853,7 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     const char *currentScene = NULL;
     char missingResource[64];
     bool resourcesReady = false;
+    bool needsContentLoadBoundary = false;
     u8 targetNpcCount = 0;
 
     if (outCap < pos || !vm_net_mock_is_mmgame_scene_transfer_followup_request(request, requestLen))
@@ -1876,31 +1879,24 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
                                                                missingResource,
                                                                sizeof(missingResource));
-    /*
-     * Re-evaluate resource readiness against the actual on-disk scene file
-     * rather than trusting the possibly-stale needsSceneDownload flag carried
-     * from the remembered target.  A scene that exists locally is ready
-     * regardless of whether the original request thought it needed downloading.
-     */
-    if (!resourcesReady && vm_net_mock_scene_resource_exists(target.scene))
+    needsContentLoadBoundary =
+        !target.sceneCompletionSent &&
+        !target.sceneResourceProbeAcknowledged &&
+        vm_net_mock_content_update_name_index(target.scene) >= 0;
+    if (needsContentLoadBoundary)
     {
-        target.needsSceneDownload = false;
-        if (target.x == 0 && target.y == 0)
+        target.sceneResourceProbeAcknowledged = true;
+        if (resourcesReady)
         {
-            u16 cx = 0, cy = 0;
-            if (vm_net_mock_get_scene_reasonable_spawn_from_sce(target.scene,
-                                                                &cx,
-                                                                &cy,
-                                                                NULL))
-            {
-                target.x = cx;
-                target.y = cy;
-                target.hasSceEntry = true;
-            }
+            /* A current content version proves that the invalidation manifest
+             * ran, not that this lazily loaded file is present. Keep the
+             * destination shell open for its real WT6/1 boundary even when no
+             * WT18/7 is needed because the cache is already warm. */
+            resourcesReady = false;
+            target.needsSceneDownload = true;
+            snprintf(missingResource, sizeof(missingResource), "%s",
+                     target.scene);
         }
-        resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
-                                                                   missingResource,
-                                                                   sizeof(missingResource));
     }
     g_vm_net_mock_last_scene_change_target = target;
     currentScene = vm_net_mock_current_scene_name();
@@ -1959,13 +1955,35 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
                           target.y);
     }
 
-    /*
-     * This completion also follows a client-created destination scene shell and
-     * intentionally ends with 30/2(no-posinfo), not 30/1.  Treat it as the same
-     * NPC lifecycle boundary as a normal scene enter: every fresh shell needs a
-     * fresh 27/11 catalog even when the player is returning to a scene that was
-     * seeded earlier in this service session.
-     */
+    if (!resourcesReady)
+    {
+        u32 ackLen = 0;
+
+        pos = 5;
+        objectCount = 0;
+        if (!vm_net_mock_append_info_banner_result5_object(
+                out, outCap, &pos))
+            return 0;
+        objectCount = 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        ackLen = pos;
+        vm_net_mock_defer_scene_enter_completion(
+            &target, "mmgame-scene-transfer-followup", missingResource);
+        printf("[info][network] mock_mmgame_scene_transfer_deferred "
+               "scene=%s pos=(%u,%u) missing=%s response=25/5-only "
+               "complete=0 evidence=WT18/9-client-cache+WT18/7\n",
+               target.scene, target.x, target.y,
+               missingResource[0] ? missingResource : "-");
+        vm_autotest_note("mock_mmgame_scene_transfer_deferred scene=%s "
+                         "pos=(%u,%u) missing=%s response=25/5-only "
+                         "completion=WT6/1-after-final-dependency\n",
+                         target.scene, target.x, target.y,
+                         missingResource[0] ? missingResource : "-");
+        return ackLen;
+    }
+
+    /* This completion follows a client-created destination scene shell and
+     * intentionally ends with 30/2(no-posinfo), not 30/1. */
     vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
     targetNpcCount = vm_net_mock_scene_room_npc_seed_count(target.scene);
     if (resourcesReady && targetNpcCount > 0)
@@ -1994,18 +2012,9 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
+    target.sceneCompletionSent = true;
     objectCount += 1;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-
-    if (!resourcesReady)
-    {
-        vm_net_mock_defer_scene_enter_completion(&target,
-                                                 "mmgame-scene-transfer-followup",
-                                                 missingResource);
-        printf("[info][network] mock_mmgame_scene_transfer_followup scene=%s pos=(%u,%u) objects=%u resp=%u complete=0\n",
-               target.scene, target.x, target.y, objectCount, pos);
-        return pos;
-    }
 
     vm_net_mock_mark_completed_scene_change_target(&target);
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "mmgame-scene-transfer-followup");

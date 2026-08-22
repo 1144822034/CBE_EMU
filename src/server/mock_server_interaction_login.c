@@ -811,10 +811,12 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u16 shopReturnX = 0;
     u16 shopReturnY = 0;
     bool deferredTeleportNpcSeedAfterCurrentCompletion = false;
+    bool positionedPortalEnterPending = false;
     bool completeTeleportResourceEnter = false;
     bool completePositionedPortalEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
     vm_net_mock_scene_change_target positionedPortalTarget;
+    char positionedPortalMissingResource[64];
     bool useDownloadedTarget = false;
     u32 timingStartMs = 0;
     u32 timingLifecycleMs = 0;
@@ -848,11 +850,12 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent)
     {
         positionedPortalTarget = g_vm_net_mock_last_scene_change_target;
+        positionedPortalEnterPending = true;
         completePositionedPortalEnter =
             vm_net_mock_prepare_scene_enter_resources(&positionedPortalTarget,
-                                                      NULL, 0);
-        if (completePositionedPortalEnter)
-            g_vm_net_mock_last_scene_change_target = positionedPortalTarget;
+                                                      positionedPortalMissingResource,
+                                                      sizeof(positionedPortalMissingResource));
+        g_vm_net_mock_last_scene_change_target = positionedPortalTarget;
     }
 
     if (completeTeleportResourceEnter)
@@ -898,6 +901,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         objectCount += 1;
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
+        target.sceneCompletionSent = true;
         vm_net_mock_mark_completed_scene_change_target(&target);
         vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
                                           "teleport-resource-followup");
@@ -912,6 +916,35 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                target.scene, target.x, target.y, objectCount, pos);
         vm_autotest_note("mock_teleport_resource_followup_complete scene=%s pos=(%u,%u) objects=%u response=resources+30/2-no-posinfo evidence=WT6/1-after-final-WT18/7\n",
                          target.scene, target.x, target.y, objectCount);
+        return pos;
+    }
+    if (positionedPortalEnterPending && !completePositionedPortalEnter)
+    {
+        /* A 30/1 (direct instance entry) or position-bearing 30/2 has already
+         * created this target's shell.  While an invalidated SCE/Actor is still
+         * pending, acknowledge only the families requested by WT6/1.  Neither
+         * another 30/1 nor the closing 30/2 is valid before the final WT18/7. */
+        if (!vm_net_mock_append_scene_resource_followup_objects_ex(
+                out, outCap, &pos, &objectCount,
+                positionedPortalTarget.scene, includeSkillBooks,
+                true, true, true, false, false, false, false))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        vm_net_mock_defer_scene_enter_completion(
+            &positionedPortalTarget, "scene-resource-positioned-enter",
+            positionedPortalMissingResource);
+        printf("[info][network] mock_scene_resource_positioned_enter_deferred scene=%s missing=%s objects=%u resp=%u completion=none evidence=30/1-or-30/2-shell+WT18/7-pending\n",
+               positionedPortalTarget.scene,
+               positionedPortalMissingResource[0] ?
+                   positionedPortalMissingResource : "-",
+               objectCount, pos);
+        vm_autotest_note("mock_scene_resource_positioned_enter_deferred scene=%s missing=%s objects=%u response=resources-no-30/1-no-30/2 evidence=WT6/1-before-final-WT18/7\n",
+                         positionedPortalTarget.scene,
+                         positionedPortalMissingResource[0] ?
+                             positionedPortalMissingResource : "-",
+                         objectCount);
         return pos;
     }
     if (completePositionedPortalEnter)
@@ -946,6 +979,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         objectCount += 1;
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
+        positionedPortalTarget.sceneCompletionSent = true;
         vm_net_mock_mark_completed_scene_change_target(&positionedPortalTarget);
         vm_net_mock_save_player_pos_state(positionedPortalTarget.scene,
                                           positionedPortalTarget.x,
@@ -1389,6 +1423,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     u32 pos = 5;
     u8 objectCount = 0;
     bool completeDeferredScene = g_vm_net_mock_last_scene_change_target_valid;
+    bool appendDeferredSceneCompletion = false;
     bool startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending;
     const char *currentScene = NULL;
     const char *nearbyScene = NULL;
@@ -1436,14 +1471,48 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                                                        missingResource,
                                                        sizeof(missingResource)))
         {
+            u8 deferredObjectCount = 0;
+
             vm_net_mock_defer_scene_enter_completion(&target,
                                                      "scene-task-subset-followup",
                                                      missingResource);
-            completeDeferredScene = false;
+            /* This callback belongs to the destination loader, but its SCE or
+             * Actor dependency is still being installed. Acknowledge the
+             * requested families against the destination without seeding
+             * scene nodes and without closing the loader through WT30/2. */
+            if (!vm_net_mock_append_scene_resource_followup_objects_ex(
+                    out, outCap, &pos, &deferredObjectCount, target.scene,
+                    includeSkillBooks, true, true, true, false, false,
+                    false, false))
+            {
+                return 0;
+            }
+            if (primaryTaskSubsetNeedsFb11Ack)
+            {
+                if (!vm_net_mock_append_fb_target_empty11_object(
+                        out, outCap, &pos))
+                {
+                    return 0;
+                }
+                deferredObjectCount += 1;
+            }
+            vm_net_mock_finish_wt_packet(out, pos, deferredObjectCount);
+            printf("[info][network] mock_scene_task_subset_deferred "
+                   "scene=%s missing=%s objects=%u resp=%u completion=none "
+                   "evidence=WT18/7-dependency-pending\n",
+                   target.scene, missingResource[0] ? missingResource : "-",
+                   deferredObjectCount, pos);
+            vm_autotest_note("mock_scene_task_subset_deferred scene=%s "
+                             "missing=%s objects=%u completion=none\n",
+                             target.scene,
+                             missingResource[0] ? missingResource : "-",
+                             deferredObjectCount);
+            return pos;
         }
         else
         {
             g_vm_net_mock_last_scene_change_target = target;
+            appendDeferredSceneCompletion = !target.sceneCompletionSent;
         }
     }
     if (completeDeferredScene &&
@@ -1558,14 +1627,31 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                                                         vm_net_mock_fb_target_info_text()))
             return 0;
         objectCount += 1;
-        /*
-         * Do not append another scene-channel object here.  The first WT2/3
-         * already carried the sole 30/2+posinfo entry (which also runs
-         * ResetDownloadState), while this composite callback can already fill
-         * all ten main-business object slots with its requested 6/*, 2/10 and
-         * 27/* results.  Adding a cosmetic no-posinfo 30/2 would exceed the
-         * client's verified ten-object dispatch limit.
-         */
+        if (appendDeferredSceneCompletion)
+        {
+            u32 sceneObjectStart = 0;
+
+            if (objectCount >= VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX)
+            {
+                printf("[error][network] mock_scene_task_subset_completion "
+                       "scene=%s objects=%u action=reject-over-dispatch-limit\n",
+                       target->scene, objectCount);
+                return 0;
+            }
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                             &sceneObjectStart) ||
+                !vm_net_mock_put_scene_ack_without_posinfo(
+                    out, outCap, &pos, 2, target->scene))
+            {
+                return 0;
+            }
+            vm_net_mock_finish_wt_object(out, sceneObjectStart, pos);
+            objectCount += 1;
+            g_vm_net_mock_last_scene_change_target.sceneCompletionSent = true;
+            printf("[info][network] mock_scene_task_subset_completion "
+                   "scene=%s response=30/2-no-posinfo reason=all-WT18/7-dependencies-ready\n",
+                   target->scene);
+        }
         vm_net_mock_mark_completed_scene_change_target(target);
         g_vm_net_mock_last_scene_change_target_valid = false;
         g_vm_net_mock_teleport_stone_map_enter_pending = false;
@@ -2260,37 +2346,60 @@ static u32 vm_net_mock_build_shop_info14_response(const u8 *request, u32 request
     return pos;
 }
 
-static bool vm_net_mock_is_shop_page14_request(const u8 *request, u32 requestLen,
-                                               u8 *subtypeOut, u32 *indexOut)
+enum
+{
+    /* Runtime capture: mmShop can batch two consecutive 14/<subtype>(index)
+     * requests into one WT packet while the user turns catalog pages. */
+    VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS = 2
+};
+
+static bool vm_net_mock_collect_shop_page14_request(
+    const u8 *request, u32 requestLen,
+    u8 subtypes[VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS],
+    u32 indexes[VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS],
+    u8 *objectCountOut)
 {
     u32 offset = 4;
-    u32 index = 0;
-    u8 index8 = 0;
+    u8 objectCount = 0;
     vm_net_mock_request_object object;
 
-    if (subtypeOut)
-        *subtypeOut = 0;
-    if (indexOut)
-        *indexOut = 0;
-    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
-        return false;
-    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
-        return false;
-    if (offset != requestLen)
-        return false;
-    if (object.major != 1 || object.kind != 14 || object.subtype < 5 || object.subtype > 13)
-        return false;
-    if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "index", &index))
+    if (objectCountOut)
+        *objectCountOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' ||
+        request[1] != 'T' || subtypes == NULL || indexes == NULL ||
+        objectCountOut == NULL)
+    return false;
+
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
     {
-        if (!vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "index", &index8))
+        u32 index = 0;
+        u8 index8 = 0;
+
+        if (objectCount >= VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS ||
+            object.major != 1 || object.kind != 14 || object.subtype < 5 ||
+            object.subtype > 13)
+        {
             return false;
-        index = index8;
+        }
+        if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                              "index", &index))
+        {
+            if (!vm_net_mock_get_object_u8_field(object.payload,
+                                                  object.payloadLen, "index",
+                                                  &index8))
+            {
+                return false;
+            }
+            index = index8;
+        }
+        subtypes[objectCount] = object.subtype;
+        indexes[objectCount] = index;
+        objectCount += 1;
     }
 
-    if (subtypeOut)
-        *subtypeOut = object.subtype;
-    if (indexOut)
-        *indexOut = index;
+    if (offset != requestLen || objectCount == 0)
+        return false;
+    *objectCountOut = objectCount;
     return true;
 }
 
@@ -2298,39 +2407,56 @@ static u32 vm_net_mock_build_shop_page14_response(const u8 *request, u32 request
                                                   u8 *out, u32 outCap)
 {
     u32 pos = 5;
-    u32 pageIndex = 0;
-    u32 totalItems = 0;
-    u32 pageRows = 0;
-    u32 itemInfoLen = 0;
-    u8 subtype = 0;
-    char ids[160];
+    u8 subtypes[VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS];
+    u32 pageIndexes[VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS];
+    u32 totalItems[VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS];
+    u32 pageRows[VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS];
+    u32 itemInfoLens[VM_NET_MOCK_SHOP_PAGE14_BATCH_MAX_OBJECTS];
+    u8 objectCount = 0;
 
     if (out == NULL || outCap < pos)
         return 0;
-    if (!vm_net_mock_is_shop_page14_request(request, requestLen, &subtype, &pageIndex))
+    memset(subtypes, 0, sizeof(subtypes));
+    memset(pageIndexes, 0, sizeof(pageIndexes));
+    memset(totalItems, 0, sizeof(totalItems));
+    memset(pageRows, 0, sizeof(pageRows));
+    memset(itemInfoLens, 0, sizeof(itemInfoLens));
+    if (!vm_net_mock_collect_shop_page14_request(request, requestLen, subtypes,
+                                                  pageIndexes, &objectCount))
         return 0;
 
-    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, subtype, pageIndex,
-                                                    &totalItems, &pageRows, &itemInfoLen))
-        return 0;
+    for (u8 i = 0; i < objectCount; ++i)
+    {
+        if (!vm_net_mock_append_shop_catalog_page_object(
+                out, outCap, &pos, subtypes[i], pageIndexes[i],
+                &totalItems[i], &pageRows[i], &itemInfoLens[i]))
+        {
+            return 0;
+        }
+    }
 
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
     g_netMockShop17ListPending = 1;
-    ids[0] = 0;
-    vm_net_mock_format_shop_page_ids(subtype, pageIndex, 8, ids, sizeof(ids));
-    printf("[info][network] mock_shop_page14 subtype=%u category=%s index=%u total=%u rows=%u iteminfo_len=%u first=%u ids=%s\n",
-           subtype,
-           vm_net_mock_shop_page_subtype_name(subtype),
-           pageIndex,
-           totalItems,
-           pageRows,
-           itemInfoLen,
-           g_vm_net_mock_shop_catalog_count > 0 ? g_vm_net_mock_shop_catalog[0].itemId : 0,
-           ids);
-    vm_autotest_note("mock_shop_page14 subtype=%u category=%s index=%u items_total=%u page_rows=%u iteminfo_len=%u evidence=mmShop:0x618/0x7BC\n",
-                     subtype,
-                     vm_net_mock_shop_page_subtype_name(subtype),
-                     pageIndex, totalItems, pageRows, itemInfoLen);
+    for (u8 i = 0; i < objectCount; ++i)
+    {
+        char ids[160];
+
+        ids[0] = 0;
+        vm_net_mock_format_shop_page_ids(subtypes[i], pageIndexes[i], 8, ids,
+                                         sizeof(ids));
+        printf("[info][network] mock_shop_page14 subtype=%u category=%s index=%u total=%u rows=%u iteminfo_len=%u first=%u ids=%s request_objects=%u object_index=%u\n",
+               subtypes[i],
+               vm_net_mock_shop_page_subtype_name(subtypes[i]),
+               pageIndexes[i], totalItems[i], pageRows[i], itemInfoLens[i],
+               g_vm_net_mock_shop_catalog_count > 0 ?
+                   g_vm_net_mock_shop_catalog[0].itemId : 0,
+               ids, objectCount, i);
+        vm_autotest_note("mock_shop_page14 subtype=%u category=%s index=%u items_total=%u page_rows=%u iteminfo_len=%u request_objects=%u object_index=%u evidence=mmShop:0x618/0x7BC\n",
+                         subtypes[i],
+                         vm_net_mock_shop_page_subtype_name(subtypes[i]),
+                         pageIndexes[i], totalItems[i], pageRows[i],
+                         itemInfoLens[i], objectCount, i);
+    }
     return pos;
 }
 
@@ -2712,6 +2838,29 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
      * merely because the purchase response was delivered. */
     revivalStoneConfirmPending = result == 1 && itemId == 801 &&
         role != NULL && role->hp == 0;
+
+    /* The wallet debit has already committed through the same relational
+     * purchase transaction that persisted the item/capacity/direct effect.
+     * Audit only that durable success; a log-write failure must never turn a
+     * completed player purchase into a failed client response. */
+    if (result == 1 && cost != 0 && role != NULL &&
+        g_vm_mock_service_active_account_id != NULL &&
+        g_vm_mock_service_active_account_id[0] != 0)
+    {
+        char operationDetail[256];
+
+        snprintf(operationDetail, sizeof(operationDetail),
+                 "游戏内商城消费 W币 %u，购买商品 ID %u × %u，余额 %u→%u",
+                 cost, itemId, count, wcoinBefore, wcoinAfter);
+        if (!vm_mock_admin_operation_log_record(
+                "spend-wcoin-shop", g_vm_mock_service_active_account_id,
+                role->roleId, itemId, count, cost, operationDetail))
+        {
+            printf("[error][mock-service] operation_log_game_wcoin_failed source=shop account=%s role=%u item=%u count=%u cost=%u error=%s\n",
+                   g_vm_mock_service_active_account_id, role->roleId, itemId,
+                   count, cost, vm_mysql_last_error());
+        }
+    }
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 3, &objectStart))
         return 0;
