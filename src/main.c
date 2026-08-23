@@ -13,6 +13,7 @@
 
 #include "main.h"
 #include "lcd.h"
+#include "screen_lifecycle.h"
 #ifdef CBE_CLIENT_ONLY
 #include "automation_png.h"
 #endif
@@ -702,7 +703,7 @@ static u8 g_mockServiceOnly = 0;
 #endif
 static u8 g_mockServiceWarnedUnavailable = 0;
 #ifdef CBE_PLATFORM_ANDROID
-static char g_mockServiceHost[64] = "58.220.46.173:13317";
+static char g_mockServiceHost[64] = "8.210.207.26";
 #else
 static char g_mockServiceHost[64] = "127.0.0.1";
 #endif
@@ -8623,6 +8624,92 @@ static int vm_mock_service_copy_host_slice(const char *text, size_t textLen,
     return 1;
 }
 
+/*
+ * Read-only ordering trace for same-screen AddScreen re-entry.  The actor
+ * table pointer distinguishes a completed scene teardown from a callback that
+ * merely selected DESTROY but has not executed it yet.
+ */
+static void vm_trace_screen_lifecycle_order(const char *phase, u32 screen,
+                                            u32 screenThis, u32 callback,
+                                            u32 replacesActive)
+{
+    static u32 traceCount = 0;
+    const char *enabled = getenv("CBE_TRACE_SCREEN_LIFECYCLE_ORDER");
+    u32 actorArray = 0;
+    u8 actorCount = 0;
+    FILE *trace = NULL;
+
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0 ||
+        traceCount >= 256u)
+    {
+        return;
+    }
+    if (MTK != NULL && Global_R9 != 0)
+    {
+        (void)uc_mem_read(MTK, Global_R9 + 0x5CB4u, &actorArray,
+                          sizeof(actorArray));
+        (void)uc_mem_read(MTK, Global_R9 + 0x5C73u, &actorCount,
+                          sizeof(actorCount));
+    }
+    trace = fopen("logs/screen-lifecycle-order.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "screen_lifecycle_order seq=%u phase=%s caller=%08x screen=%08x "
+            "screen_this=%08x callback=%08x active=%08x active_this=%08x "
+            "change=%u exit_mode=%u replaces_active=%u stack_depth=%u "
+            "actor_array=%08x actor_count=%u net_depth=%d net_slot=%d\n",
+            traceCount, phase ? phase : "-", lastAddress, screen, screenThis,
+            callback, vmAddedScreen, g_currentScreenThis, screenStructChange,
+            g_screenExitMode, replacesActive, g_screenStackCount, actorArray,
+            (unsigned)actorCount, g_netTaskDispatchDepth,
+            g_netTaskDispatchSlot);
+    fclose(trace);
+}
+
+static void vm_trace_screen_manager_decision(
+    u32 idx, u32 guestLr, u32 requestedScreen, u32 oldActiveScreen,
+    u32 param, u32 flags, bool sameActiveRequest,
+    bool updateReenterConsumed, bool duplicateGuardMatched,
+    bool acceptChange, const vm_net_mock_scene_change_target *target)
+{
+    static u32 traceCount = 0;
+    const char *enabled = getenv("CBE_TRACE_SCREEN_LIFECYCLE_ORDER");
+    FILE *trace = NULL;
+
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0 ||
+        traceCount >= 256u)
+    {
+        return;
+    }
+    trace = fopen("logs/screen-lifecycle-order.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "screen_manager_decision seq=%u idx=%u caller=%08x guest_lr=%08x "
+            "requested=%08x active=%08x param=%08x flags=%u same_active=%u "
+            "update_reenter_consumed=%u duplicate_guard=%u accept=%u "
+            "result_exit_mode=%u target_valid=%u target_serial=%u "
+            "target_scene=%s target_pos=(%u,%u) target_exit=%u "
+            "net_depth=%d net_slot=%d\n",
+            traceCount, idx, lastAddress, guestLr, requestedScreen,
+            oldActiveScreen, param, flags, sameActiveRequest ? 1u : 0u,
+            updateReenterConsumed ? 1u : 0u,
+            duplicateGuardMatched ? 1u : 0u, acceptChange ? 1u : 0u,
+            acceptChange && requestedScreen != 0 ? VM_SCREEN_EXIT_DESTROY
+                                                  : g_screenExitMode,
+            g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u,
+            g_vm_net_mock_last_scene_change_target_serial,
+            target ? target->scene : "", target ? target->x : 0,
+            target ? target->y : 0, target ? target->exitId : 0,
+            g_netTaskDispatchDepth, g_netTaskDispatchSlot);
+    fclose(trace);
+}
+
 /* Accept the endpoint forms used by both environment configuration and the
  * compiled-in g_mockServiceHost default:
  *
@@ -12497,14 +12584,16 @@ static void vm_note_sce_load_entry_pc(u32 pc)
  * does not alter guest registers, memory, PC, or callback timing; it only
  * records normal call arguments.
  *
- * It is opt-in because every scene load would otherwise add diagnostic noise.
- * Launch the client with CBE_TRACE_SCE_ENTITY_CALLBACK=1 and inspect
- * logs/sce-entity-callback.log.  The trace is kept separate from production
- * network logs so it can be removed after the callback grammar is recovered.
+ * CBE_TRACE_SCE_ENTITY_CALLBACK records the callback boundary and one selected
+ * node ID. CBE_TRACE_SCE_ENTITY_LOADER separately enables the high-volume
+ * layer/loader entries. Inspect logs/sce-entity-callback.log; the trace is kept
+ * separate from production network logs so it can be removed after the
+ * callback grammar is recovered.
  */
 static void vm_trace_sce_entity_callback_pc(u32 pc)
 {
     const char *enabled = NULL;
+    const char *loaderEnabled = NULL;
     u32 stream = 0;
     u32 offsetPtr = 0;
     u32 callback = 0;
@@ -12532,6 +12621,14 @@ static void vm_trace_sce_entity_callback_pc(u32 pc)
     (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
     if (pc == 0x010067F0)
     {
+        loaderEnabled = getenv("CBE_TRACE_SCE_ENTITY_LOADER");
+        if (loaderEnabled == NULL || loaderEnabled[0] == 0 ||
+            strcmp(loaderEnabled, "0") == 0 ||
+            strcmp(loaderEnabled, "off") == 0 ||
+            strcmp(loaderEnabled, "false") == 0)
+        {
+            return;
+        }
         memset(stackArgs, 0, sizeof(stackArgs));
         (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
         if (sp != 0)
@@ -12542,29 +12639,37 @@ static void vm_trace_sce_entity_callback_pc(u32 pc)
             fprintf(trace,
                     "sce_layer_init entry pc=%08x controller=%08x arg1=%08x "
                     "arg2=%08x arg3=%08x stream_resource=%08x callback=%08x "
-                    "lr=%08x\\n",
+                    "lr=%08x\n",
                     pc, stream, offsetPtr, callback, lr,
                     stackArgs[0], stackArgs[3], lr);
             fclose(trace);
         }
         printf("[info][scene] sce_layer_init entry pc=%08x controller=%08x "
-               "stream_resource=%08x callback=%08x lr=%08x\\n",
+               "stream_resource=%08x callback=%08x lr=%08x\n",
                pc, stream, stackArgs[0], stackArgs[3], lr);
         return;
     }
     if (pc == 0x01006204)
     {
+        loaderEnabled = getenv("CBE_TRACE_SCE_ENTITY_LOADER");
+        if (loaderEnabled == NULL || loaderEnabled[0] == 0 ||
+            strcmp(loaderEnabled, "0") == 0 ||
+            strcmp(loaderEnabled, "off") == 0 ||
+            strcmp(loaderEnabled, "false") == 0)
+        {
+            return;
+        }
         trace = fopen("logs/sce-entity-callback.log", "ab");
         if (trace != NULL)
         {
             fprintf(trace,
                     "sce_entity_loader entry pc=%08x controller=%08x resource=%08x "
-                    "callback=%08x lr=%08x\\n",
+                    "callback=%08x lr=%08x\n",
                     pc, stream, offsetPtr, callback, lr);
             fclose(trace);
         }
         printf("[info][scene] sce_entity_loader entry pc=%08x controller=%08x "
-               "resource=%08x callback=%08x lr=%08x\\n",
+               "resource=%08x callback=%08x lr=%08x\n",
                pc, stream, offsetPtr, callback, lr);
         return;
     }
@@ -12674,11 +12779,11 @@ static void vm_trace_scene_challenge_node_table_pc(u32 pc)
     if (trace != NULL)
     {
         fprintf(trace,
-                "scene_challenge_nodes pc=%08x requested=%u r9=%08x base=%08x active=[%s]\\n",
+                "scene_challenge_nodes pc=%08x requested=%u r9=%08x base=%08x active=[%s]\n",
                 pc, requestedId, Global_R9, nodeBase, rows[0] ? rows : "-");
         fclose(trace);
     }
-    printf("[info][scene] scene_challenge_nodes requested=%u active=[%s]\\n",
+    printf("[info][scene] scene_challenge_nodes requested=%u active=[%s]\n",
            requestedId, rows[0] ? rows : "-");
 }
 
@@ -12765,15 +12870,1661 @@ static void vm_trace_scene_node_create_pc(u32 pc)
         fprintf(trace,
                 "scene_node_create entry pc=%08x actor=%u pos=%u,%u group=%u "
                 "variant=%u label=%s/%u short=%s/%u target=%u,%u flags=%u,%u "
-                "long=%s/%u lr=%08x sp=%08x\\n",
+                "long=%s/%u lr=%08x sp=%08x\n",
                 pc, actorId, x, y, visualGroup, stackArgs[0], label, stackArgs[2],
                 shortLabel, stackArgs[4], stackArgs[5], stackArgs[6], stackArgs[7],
                 stackArgs[8], longLabel, stackArgs[10], lr, sp);
         fclose(trace);
     }
     printf("[info][scene] scene_node_create actor=%u pos=%u,%u group=%u variant=%u "
-           "lr=%08x\\n",
+           "lr=%08x\n",
            actorId, x, y, visualGroup, stackArgs[0], lr);
+}
+
+/*
+ * Read-only boundary trace for the client-native challenge route.  The
+ * scene's +108 vtable slot is TriggerAutoBattle, while the legacy task-hall
+ * action-13 path enters SendNPCInteractReq through task_hall_activate_selected
+ * entry.  Recording both boundaries, including the selected task slot, lets
+ * a native-vs-test comparison prove whether the test node ever becomes an
+ * action entry.  This probe never changes guest state or input timing.
+ */
+static void vm_trace_action13_boundary_pc(u32 pc)
+{
+    const char *enabled = NULL;
+    FILE *trace = NULL;
+    u32 lr = 0;
+    u32 r0 = 0;
+    u32 slotIndex = 0;
+    u32 slot = 0;
+    u8 action = 0;
+    u32 value = 0;
+    u32 nodeBase = 0;
+    u32 matchedIndex = UINT32_MAX;
+
+    if (MTK == NULL ||
+        (pc != 0x010492B0u && pc != 0x01037ED4u))
+        return;
+    enabled = getenv("CBE_TRACE_SCE_ENTITY_CALLBACK");
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
+        return;
+
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    if (Global_R9 != 0)
+    {
+        (void)uc_mem_read(MTK, Global_R9 + 40070u, &slotIndex,
+                          sizeof(slotIndex));
+        slotIndex = (slotIndex >> 24) & 0xffu;
+        if (slotIndex < 32u)
+        {
+            slot = Global_R9 + 38444u + slotIndex * 64u;
+            (void)uc_mem_read(MTK, slot + 44u, &action, sizeof(action));
+            (void)uc_mem_read(MTK, slot + 48u, &value, sizeof(value));
+        }
+        (void)uc_mem_read(MTK, Global_R9 + 23728u, &nodeBase,
+                          sizeof(nodeBase));
+    }
+    if (pc == 0x01037ED4u && nodeBase != 0)
+    {
+        for (u32 index = 0; index < 25u; ++index)
+        {
+            u8 active = 0;
+            u32 actor = 0;
+            u32 node = nodeBase + index * 340u;
+            (void)uc_mem_read(MTK, node + 319u, &active, sizeof(active));
+            (void)uc_mem_read(MTK, node + 100u, &actor, sizeof(actor));
+            if (active != 0 && actor == r0)
+            {
+                matchedIndex = index;
+                break;
+            }
+        }
+    }
+    trace = fopen("logs/sce-entity-callback.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "action13_boundary pc=%08x lr=%08x actor_arg=%u slot_index=%u "
+            "slot=%08x action=%u value=%u node_base=%08x matched_index=%u "
+            "scene=%s\n",
+            pc, lr, r0, slotIndex, slot, (unsigned)action, value, nodeBase,
+            matchedIndex, g_lastSceLoadName[0] ? g_lastSceLoadName : "-");
+    fclose(trace);
+}
+
+/*
+ * Read-only probe for the native scene-monster collision function.
+ * Runtime evidence ties TriggerAutoBattle to the real scene WT 4/1 sender.
+ * Trace one actor's scan/callback state and the owning scene-control dispatch.
+ * No guest state, registers, callbacks, or timing are changed.
+ */
+static void vm_trace_scene_battle_collision_pc(u32 pc)
+{
+    static u32 triggerEntrySequence = 0;
+    static u32 tracedLogicEntry = 0;
+    static u32 tracedModuleR9 = 0;
+    static u32 logicTargets[7];
+    static u32 logicTargetCalls[7];
+    static u32 sceneModuleCodeBase = 0;
+    static u32 sceneControlObject = 0;
+    static u32 sceneControlCallback = 0;
+    static u32 sceneControlCallbackCalls = 0;
+    static u32 actionDispatchTraceCount = 0;
+    static u32 actionRouteTraceCount = 0;
+    static u32 actionCallbackTraceCount = 0;
+    static u32 inputRegistryTarget = 0;
+    static u32 inputDispatchCallback = 0;
+    static u32 inputRegistryTraceCount = 0;
+    static bool logicPositionSeen = false;
+    static int16_t lastLogicPlayerX = 0;
+    static int16_t lastLogicPlayerY = 0;
+    static bool collisionPending = false;
+    static u32 collisionSequence = 0;
+    static u32 collisionTraceCount = 0;
+    static u32 collisionPendingActor = 0;
+    static u32 collisionPendingIndex = UINT32_MAX;
+    static u32 collisionPendingLr = 0;
+    static u32 collisionPendingNode = 0;
+    static int16_t collisionPendingPlayerX = 0;
+    static int16_t collisionPendingPlayerY = 0;
+    static int16_t collisionPendingNodeX = 0;
+    static int16_t collisionPendingNodeY = 0;
+    static u32 lastNodeBase = 0;
+    static int16_t lastEntryX = 0;
+    static int16_t lastEntryY = 0;
+    static u32 lastEntryGates = UINT32_MAX;
+    static bool entrySeen = false;
+    static int16_t lastBeforeX[25];
+    static int16_t lastBeforeY[25];
+    static bool beforeSeen[25];
+    static int16_t lastAfterX[25];
+    static int16_t lastAfterY[25];
+    static u8 lastAfterResult[25];
+    static bool afterSeen[25];
+    static bool apiSlotLogged = false;
+    static u32 candidateActiveLogic = 0;
+    static u32 candidateActiveLogicLocal = UINT32_MAX;
+    static int candidateActiveLogicAppIndex = -1;
+    const char *enabled = NULL;
+    const char *targetText = NULL;
+    u32 targetActorId = 1000u;
+    u32 nodeBase = 0;
+    u32 playerNode = 0;
+    u32 engine = 0;
+    FILE *trace = NULL;
+    u32 activeLogic = 0;
+    u32 activeLogicLocal = UINT32_MAX;
+    int activeLogicAppIndex = -1;
+    static u32 activeLogicScreen = 0;
+    static int traceEnabled = -1;
+    static u32 configuredTargetActorId = 1000u;
+
+    if (MTK == NULL)
+        return;
+    if (traceEnabled < 0)
+    {
+        enabled = getenv("CBE_TRACE_SCENE_BATTLE_COLLISION");
+        traceEnabled = enabled != NULL && enabled[0] != 0 &&
+                       strcmp(enabled, "0") != 0 &&
+                       strcmp(enabled, "off") != 0 &&
+                       strcmp(enabled, "false") != 0;
+        targetText = getenv("CBE_TRACE_SCE_NODE_ACTOR_ID");
+        if (targetText != NULL && targetText[0] != 0)
+        {
+            char *end = NULL;
+            unsigned long parsed = strtoul(targetText, &end, 0);
+            if (end != targetText && end != NULL && *end == 0 &&
+                parsed <= UINT32_MAX)
+                configuredTargetActorId = (u32)parsed;
+        }
+    }
+    if (!traceEnabled)
+        return;
+    targetActorId = configuredTargetActorId;
+    /* Resolving the current screen's module address is expensive.  It only
+     * needs to happen when the active screen changes; the normal instruction
+     * hook must stay constant-time between those transitions. */
+    if (vmAddedScreen != activeLogicScreen)
+    {
+        u32 startupMainApi = 0;
+        u32 startupInputRegistryTarget = 0;
+
+        activeLogicScreen = vmAddedScreen;
+        tracedLogicEntry = 0;
+        tracedModuleR9 = 0;
+        sceneControlCallback = 0;
+        sceneModuleCodeBase = 0;
+        actionDispatchTraceCount = 0;
+        actionRouteTraceCount = 0;
+        actionCallbackTraceCount = 0;
+        inputRegistryTarget = 0;
+        inputDispatchCallback = 0;
+        inputRegistryTraceCount = 0;
+        /* sub_1444 can register its input callback during the first screen
+         * lifecycle before scene logic has reached sub_604.  The main CBE API
+         * table is already stable at Global_R9+0x2054, so seed the setter
+         * address at the screen boundary without reading or changing module
+         * state. */
+        if (Global_R9 != 0)
+        {
+            (void)uc_mem_read(MTK, Global_R9 + 0x2054u, &startupMainApi,
+                              sizeof(startupMainApi));
+            if (startupMainApi != 0)
+            {
+                (void)uc_mem_read(MTK, startupMainApi + 52u,
+                                  &startupInputRegistryTarget,
+                                  sizeof(startupInputRegistryTarget));
+            }
+        }
+        inputRegistryTarget = startupInputRegistryTarget;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_input_registry phase=screen-change "
+                    "screen=%08x main_api=%08x setter=%08x scene=%s\n",
+                    vmAddedScreen, startupMainApi, inputRegistryTarget,
+                    g_lastSceLoadName[0] ? g_lastSceLoadName : "-");
+            fclose(trace);
+        }
+        candidateActiveLogic = vmAddedScreen != 0
+                                   ? vm_get_var(vmAddedScreen + 8u) & ~1u
+                                   : 0;
+        candidateActiveLogicAppIndex =
+            vm_dl_find_loaded_index_by_pc(candidateActiveLogic);
+        candidateActiveLogicLocal = UINT32_MAX;
+        if (candidateActiveLogicAppIndex >= 0)
+        {
+            candidateActiveLogicLocal =
+                candidateActiveLogic -
+                g_vmDlLoadedApps[candidateActiveLogicAppIndex].buffer;
+        }
+    }
+    if (tracedLogicEntry == 0)
+    {
+        activeLogic = candidateActiveLogic;
+        activeLogicAppIndex = candidateActiveLogicAppIndex;
+        activeLogicLocal = candidateActiveLogicLocal;
+    }
+    else
+    {
+        activeLogic = tracedLogicEntry;
+    }
+
+    if (pc == 0x010183A0u)
+    {
+        static const u8 logicFingerprint[8] = {
+            0x10u, 0xB5u, 0x84u, 0x4Cu, 0x01u, 0x21u, 0x4Cu, 0x44u};
+        static const u8 actionFingerprint[8] = {
+            0xFEu, 0xB5u, 0x02u, 0x1Cu, 0xEBu, 0x48u, 0x0Cu, 0x1Cu};
+        u32 lr = 0;
+        u32 caller = 0;
+        u32 inferredBase = 0;
+        u8 observedLogic[sizeof(logicFingerprint)] = {0};
+        u8 observedAction[sizeof(actionFingerprint)] = {0};
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        caller = lr & ~1u;
+        if (caller >= 0xAC8u)
+        {
+            inferredBase = caller - 0xAC8u;
+            if (uc_mem_read(MTK, inferredBase + 0x604u, observedLogic,
+                            sizeof(observedLogic)) == UC_ERR_OK &&
+                uc_mem_read(MTK, inferredBase + 0x8A8u, observedAction,
+                            sizeof(observedAction)) == UC_ERR_OK &&
+                memcmp(observedLogic, logicFingerprint,
+                       sizeof(logicFingerprint)) == 0 &&
+                memcmp(observedAction, actionFingerprint,
+                       sizeof(actionFingerprint)) == 0 &&
+                sceneModuleCodeBase != inferredBase)
+            {
+                sceneModuleCodeBase = inferredBase;
+                actionDispatchTraceCount = 0;
+                actionRouteTraceCount = 0;
+                actionCallbackTraceCount = 0;
+                trace = fopen("logs/scene-battle-collision.log", "ab");
+                if (trace != NULL)
+                {
+                    fprintf(trace,
+                            "scene_battle_scheduler phase=module-base-inferred "
+                            "source=trigger-lr lr=%08x module_base=%08x "
+                            "fingerprint=sub_604+sub_8A8 scene=%s\n",
+                            lr, sceneModuleCodeBase, g_lastSceLoadName);
+                    fclose(trace);
+                }
+            }
+        }
+    }
+
+    if (pc != 0x0100F5B4u && pc != 0x010183A0u &&
+        pc != 0x010184D2u && pc != 0x010184D4u &&
+        pc != 0x01004CE8u && pc != 0x01004DC8u &&
+        pc != activeLogic && pc != (sceneControlCallback & ~1u) &&
+        pc != (inputRegistryTarget & ~1u) &&
+        pc != (inputDispatchCallback & ~1u) &&
+        pc != sceneModuleCodeBase + 0x8A8u &&
+        pc != sceneModuleCodeBase + 0xAC4u &&
+        pc != sceneModuleCodeBase + 0x68Eu)
+    {
+        bool dynamicTarget = false;
+
+        for (u32 targetIndex = 0; targetIndex < mySizeOf(logicTargets);
+             ++targetIndex)
+        {
+            if (logicTargets[targetIndex] != 0 &&
+                pc == (logicTargets[targetIndex] & ~1u))
+            {
+                dynamicTarget = true;
+                break;
+            }
+        }
+        if (!dynamicTarget)
+            return;
+    }
+
+    if (inputRegistryTarget != 0 &&
+        pc == (inputRegistryTarget & ~1u) &&
+        inputRegistryTraceCount < 12u)
+    {
+        u32 lr = 0;
+        u32 callback = 0;
+        u32 moduleR9 = 0;
+        u32 priorCallback = 0;
+        u32 callbackBase = 0;
+        u32 callbackLocal = UINT32_MAX;
+        u16 callbackAppId = 0;
+        int callbackAppIndex = -1;
+        const char *callbackOwner = "unmapped";
+        static const u8 logicFingerprint[8] = {
+            0x10u, 0xB5u, 0x84u, 0x4Cu, 0x01u, 0x21u, 0x4Cu, 0x44u};
+        static const u8 actionFingerprint[8] = {
+            0xFEu, 0xB5u, 0x02u, 0x1Cu, 0xEBu, 0x48u, 0x0Cu, 0x1Cu};
+        u8 observedLogic[sizeof(logicFingerprint)] = {0};
+        u8 observedAction[sizeof(actionFingerprint)] = {0};
+        u32 registeredModuleBase = 0;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &callback);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0)
+        {
+            (void)uc_mem_read(MTK, moduleR9 + 0x5D28u, &priorCallback,
+                              sizeof(priorCallback));
+        }
+        callbackAppIndex = vm_dl_find_loaded_index_by_pc(callback);
+        if (callbackAppIndex >= 0)
+        {
+            callbackOwner = "loaded-cbm";
+            callbackBase = g_vmDlLoadedApps[callbackAppIndex].buffer;
+            callbackAppId = g_vmDlLoadedApps[callbackAppIndex].appId;
+            if (callbackBase != 0 && (callback & ~1u) >= callbackBase)
+                callbackLocal = (callback & ~1u) - callbackBase;
+        }
+        /* sub_1444 registers sub_8A8 before the first scene logic tick. The
+         * same sub_604/sub_8A8 fingerprints used for the proven trigger-LR
+         * path turn that callback into a module base without writing it back
+         * to the client or assuming a particular pool allocation. */
+        if (callback >= 0x8A8u)
+        {
+            registeredModuleBase = (callback & ~1u) - 0x8A8u;
+            if (uc_mem_read(MTK, registeredModuleBase + 0x604u,
+                            observedLogic, sizeof(observedLogic)) == UC_ERR_OK &&
+                uc_mem_read(MTK, registeredModuleBase + 0x8A8u,
+                            observedAction, sizeof(observedAction)) == UC_ERR_OK &&
+                memcmp(observedLogic, logicFingerprint,
+                       sizeof(logicFingerprint)) == 0 &&
+                memcmp(observedAction, actionFingerprint,
+                       sizeof(actionFingerprint)) == 0)
+            {
+                sceneModuleCodeBase = registeredModuleBase;
+                inputDispatchCallback = callback;
+                actionDispatchTraceCount = 0;
+                actionRouteTraceCount = 0;
+                actionCallbackTraceCount = 0;
+            }
+            else
+            {
+                registeredModuleBase = 0;
+            }
+        }
+        ++inputRegistryTraceCount;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_input_registry phase=api+52-call call=%u "
+                    "pc=%08x lr=%08x callback=%08x prior_callback=%08x "
+                    "callback_owner=%s callback_app=%u callback_base=%08x "
+                    "registered_module_base=%08x active_logic=%08x "
+                    "module_r9=%08x known_scene_module_base=%08x "
+                    "callback_local=%08x scene=%s\n",
+                    inputRegistryTraceCount, pc, lr, callback, priorCallback,
+                    callbackOwner, (unsigned)callbackAppId, callbackBase,
+                    registeredModuleBase, activeLogic, moduleR9,
+                    sceneModuleCodeBase, callbackLocal,
+                    g_lastSceLoadName);
+            fclose(trace);
+        }
+        return;
+    }
+
+    if (sceneModuleCodeBase != 0 &&
+        (pc == sceneModuleCodeBase + 0x8A8u ||
+         pc == sceneModuleCodeBase + 0xAC4u ||
+         pc == sceneModuleCodeBase + 0x68Eu))
+    {
+        const char *phase = NULL;
+        u32 *phaseCount = NULL;
+        u32 phaseLimit = 0;
+        u32 lr = 0;
+        u32 regs[5] = {0, 0, 0, 0, 0};
+        u32 moduleR9 = 0;
+        u32 mainApi = 0;
+        u32 mainCallback = 0;
+        u32 privateObject = 0;
+        u32 privateCallback = 0;
+
+        if (pc == sceneModuleCodeBase + 0x8A8u)
+        {
+            phase = "input-dispatch";
+            phaseCount = &actionDispatchTraceCount;
+            phaseLimit = 24u;
+        }
+        else if (pc == sceneModuleCodeBase + 0xAC4u)
+        {
+            phase = "touch-route-before-call";
+            phaseCount = &actionRouteTraceCount;
+            phaseLimit = 8u;
+        }
+        else
+        {
+            phase = "touch-callback-entry";
+            phaseCount = &actionCallbackTraceCount;
+            phaseLimit = 8u;
+        }
+        if (*phaseCount >= phaseLimit)
+            return;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R4, &regs[4]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0)
+        {
+            (void)uc_mem_read(MTK, moduleR9 + 0x2054u, &mainApi,
+                              sizeof(mainApi));
+            (void)uc_mem_read(MTK, moduleR9 + 0x2850u, &privateObject,
+                              sizeof(privateObject));
+        }
+        if (mainApi != 0)
+        {
+            (void)uc_mem_read(MTK, mainApi + 68u, &mainCallback,
+                              sizeof(mainCallback));
+        }
+        if (privateObject != 0)
+        {
+            (void)uc_mem_read(MTK, privateObject + 20u, &privateCallback,
+                              sizeof(privateCallback));
+        }
+
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            ++*phaseCount;
+            fprintf(trace,
+                    "scene_battle_action phase=%s call=%u pc=%08x lr=%08x "
+                    "regs=%08x,%08x,%08x,%08x,%08x logic=%08x "
+                    "module_base=%08x module_r9=%08x main_api=%08x "
+                    "main_callback=%08x private_object=%08x "
+                    "private_callback=%08x private_context=%08x scene=%s\n",
+                    phase, *phaseCount, pc, lr, regs[0], regs[1], regs[2],
+                    regs[3], regs[4], activeLogic, sceneModuleCodeBase,
+                    moduleR9, mainApi, mainCallback, privateObject,
+                    privateCallback,
+                    moduleR9 != 0 ? moduleR9 + 0x2D44u : 0,
+                    g_lastSceLoadName);
+            fclose(trace);
+        }
+        return;
+    }
+
+    if (tracedLogicEntry != 0)
+    {
+        static const char *const targetNames[7] = {
+            "main-api+1080", "main-api+324", "private+80",
+            "main-api+2480", "main-api+244", "main-api+1108",
+            "control-object+48"};
+
+        for (u32 targetIndex = 0; targetIndex < mySizeOf(logicTargets);
+             ++targetIndex)
+        {
+            u32 target = logicTargets[targetIndex] & ~1u;
+            if (target == 0 || pc != target ||
+                logicTargetCalls[targetIndex] >= 4u)
+            {
+                continue;
+            }
+
+            u32 lr = 0;
+            u32 args[4] = {0, 0, 0, 0};
+            (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+            (void)uc_reg_read(MTK, UC_ARM_REG_R0, &args[0]);
+            (void)uc_reg_read(MTK, UC_ARM_REG_R1, &args[1]);
+            (void)uc_reg_read(MTK, UC_ARM_REG_R2, &args[2]);
+            (void)uc_reg_read(MTK, UC_ARM_REG_R3, &args[3]);
+            ++logicTargetCalls[targetIndex];
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_scheduler phase=logic-target-call "
+                        "slot=%s call=%u pc=%08x lr=%08x args="
+                        "%08x,%08x,%08x,%08x logic=%08x logic_local=%08x "
+                        "module_r9=%08x caller_local=%08x scene=%s\n",
+                        targetNames[targetIndex],
+                        logicTargetCalls[targetIndex], pc, lr, args[0],
+                        args[1], args[2], args[3], activeLogic,
+                        activeLogicLocal, tracedModuleR9,
+                        sceneModuleCodeBase != 0 && (lr & ~1u) >= sceneModuleCodeBase
+                            ? (lr & ~1u) - sceneModuleCodeBase
+                            : UINT32_MAX,
+                        g_lastSceLoadName);
+                fclose(trace);
+            }
+            break;
+        }
+    }
+
+    if (sceneControlCallback != 0 &&
+        pc == (sceneControlCallback & ~1u) &&
+        sceneControlCallbackCalls < 4u)
+    {
+        u32 lr = 0;
+        u32 args[4] = {0, 0, 0, 0};
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &args[0]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &args[1]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R2, &args[2]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R3, &args[3]);
+        ++sceneControlCallbackCalls;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_scheduler phase=control-callback call=%u "
+                    "pc=%08x lr=%08x caller_local=%08x object=%08x args="
+                    "%08x,%08x,%08x,%08x scene=%s\n",
+                    sceneControlCallbackCalls, pc, lr,
+                    sceneModuleCodeBase != 0 && (lr & ~1u) >= sceneModuleCodeBase
+                        ? (lr & ~1u) - sceneModuleCodeBase
+                        : UINT32_MAX,
+                    sceneControlObject, args[0], args[1], args[2], args[3],
+                    g_lastSceLoadName);
+            fclose(trace);
+        }
+    }
+
+    if (pc == activeLogic && activeLogic != 0)
+    {
+        u32 moduleR9 = 0;
+        u32 mainApi = 0;
+        u32 privateObject = 0;
+        u32 controlCallback = 0;
+        u32 triggerSlot = 0;
+        u32 nextInputRegistryTarget = 0;
+        u32 nextTargets[7] = {0, 0, 0, 0, 0, 0, 0};
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0)
+        {
+            (void)uc_mem_read(MTK, moduleR9 + 0x2054u, &mainApi,
+                              sizeof(mainApi));
+            (void)uc_mem_read(MTK, moduleR9 + 0x285Cu, &privateObject,
+                              sizeof(privateObject));
+        }
+        if (mainApi != 0)
+        {
+            (void)uc_mem_read(MTK, mainApi + 108u, &triggerSlot,
+                              sizeof(triggerSlot));
+            (void)uc_mem_read(MTK, mainApi + 52u,
+                              &nextInputRegistryTarget,
+                              sizeof(nextInputRegistryTarget));
+        }
+        if ((triggerSlot & ~1u) != 0x010183A0u)
+            return;
+        if (mainApi != 0)
+        {
+            (void)uc_mem_read(MTK, mainApi + 1080u, &nextTargets[0],
+                              sizeof(nextTargets[0]));
+            (void)uc_mem_read(MTK, mainApi + 324u, &nextTargets[1],
+                              sizeof(nextTargets[1]));
+            (void)uc_mem_read(MTK, mainApi + 2480u, &nextTargets[3],
+                              sizeof(nextTargets[3]));
+            (void)uc_mem_read(MTK, mainApi + 244u, &nextTargets[4],
+                              sizeof(nextTargets[4]));
+            (void)uc_mem_read(MTK, mainApi + 1108u, &nextTargets[5],
+                              sizeof(nextTargets[5]));
+        }
+        if (privateObject != 0)
+        {
+            (void)uc_mem_read(MTK, privateObject + 80u, &nextTargets[2],
+                              sizeof(nextTargets[2]));
+        }
+        if (privateObject == 0)
+            return;
+        (void)uc_mem_read(MTK, moduleR9 + 0x2DA8u + 72u,
+                          &controlCallback, sizeof(controlCallback));
+        (void)uc_mem_read(MTK, moduleR9 + 0x2DA8u + 48u,
+                          &nextTargets[6], sizeof(nextTargets[6]));
+        if (activeLogic != tracedLogicEntry || moduleR9 != tracedModuleR9 ||
+            memcmp(logicTargets, nextTargets, sizeof(logicTargets)) != 0 ||
+            sceneControlCallback != controlCallback)
+        {
+            tracedLogicEntry = activeLogic;
+            tracedModuleR9 = moduleR9;
+            u32 nextSceneModuleCodeBase = activeLogic >= 0x604u
+                                              ? activeLogic - 0x604u
+                                              : 0;
+            if (sceneModuleCodeBase != nextSceneModuleCodeBase)
+            {
+                actionDispatchTraceCount = 0;
+                actionRouteTraceCount = 0;
+                actionCallbackTraceCount = 0;
+            }
+            sceneModuleCodeBase = nextSceneModuleCodeBase;
+            if (inputRegistryTarget != nextInputRegistryTarget)
+            {
+                inputRegistryTarget = nextInputRegistryTarget;
+                inputRegistryTraceCount = 0;
+            }
+            sceneControlObject = moduleR9 + 0x2DA8u;
+            sceneControlCallback = controlCallback;
+            sceneControlCallbackCalls = 0;
+            memcpy(logicTargets, nextTargets, sizeof(logicTargets));
+            memset(logicTargetCalls, 0, sizeof(logicTargetCalls));
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_scheduler phase=logic-api-map "
+                        "logic=%08x logic_local=%08x app=%u module_r9=%08x "
+                        "module_code_base=%08x main_api=%08x trigger_slot=%08x "
+                        "input_registry_target=%08x "
+                        "private_object=%08x control_object=%08x "
+                        "control_callback=%08x targets="
+                        "%08x,%08x,%08x,%08x,%08x,%08x,%08x scene=%s\n",
+                        activeLogic, activeLogicLocal,
+                        activeLogicAppIndex >= 0
+                            ? (unsigned)g_vmDlLoadedApps[activeLogicAppIndex].appId
+                            : 0u,
+                        moduleR9, sceneModuleCodeBase, mainApi, triggerSlot,
+                        inputRegistryTarget,
+                        privateObject, sceneControlObject,
+                        sceneControlCallback,
+                        logicTargets[0], logicTargets[1], logicTargets[2],
+                        logicTargets[3], logicTargets[4], logicTargets[5],
+                        logicTargets[6],
+                        g_lastSceLoadName);
+                fclose(trace);
+            }
+        }
+
+        {
+            u32 liveNodeBase = 0;
+            u32 livePlayerNode = 0;
+            u32 nearestActor = 0;
+            u32 nearestIndex = UINT32_MAX;
+            u32 nearestDistance = UINT32_MAX;
+            int16_t playerX = 0;
+            int16_t playerY = 0;
+            int16_t nearestX = 0;
+            int16_t nearestY = 0;
+
+            (void)uc_mem_read(MTK, Global_R9 + 0x5CB0u, &liveNodeBase,
+                              sizeof(liveNodeBase));
+            (void)uc_mem_read(MTK, Global_R9 + 0x5CA4u, &livePlayerNode,
+                              sizeof(livePlayerNode));
+            if (liveNodeBase != 0 && livePlayerNode != 0)
+            {
+                (void)uc_mem_read(MTK, livePlayerNode + 24u, &playerX,
+                                  sizeof(playerX));
+                (void)uc_mem_read(MTK, livePlayerNode + 26u, &playerY,
+                                  sizeof(playerY));
+                for (u32 index = 0; index < 25u; ++index)
+                {
+                    u32 node = liveNodeBase + index * 340u;
+                    u32 actorId = 0;
+                    int16_t x = 0;
+                    int16_t y = 0;
+                    u8 kind = 0;
+                    u8 occupied = 0;
+                    int32_t dx = 0;
+                    int32_t dy = 0;
+                    u32 distance = 0;
+
+                    (void)uc_mem_read(MTK, node + 100u, &actorId,
+                                      sizeof(actorId));
+                    (void)uc_mem_read(MTK, node + 315u, &kind,
+                                      sizeof(kind));
+                    (void)uc_mem_read(MTK, node + 319u, &occupied,
+                                      sizeof(occupied));
+                    if (actorId != targetActorId || kind != 2 || occupied == 0)
+                        continue;
+                    (void)uc_mem_read(MTK, node + 24u, &x, sizeof(x));
+                    (void)uc_mem_read(MTK, node + 26u, &y, sizeof(y));
+                    dx = (int32_t)x - playerX;
+                    dy = (int32_t)y - playerY;
+                    distance = (u32)(dx * dx + dy * dy);
+                    if (nearestIndex == UINT32_MAX || distance < nearestDistance)
+                    {
+                        nearestActor = actorId;
+                        nearestIndex = index;
+                        nearestDistance = distance;
+                        nearestX = x;
+                        nearestY = y;
+                    }
+                }
+                if (nearestIndex != UINT32_MAX &&
+                    (!logicPositionSeen || playerX != lastLogicPlayerX ||
+                     playerY != lastLogicPlayerY))
+                {
+                    u32 unknownOffset23852 = 0;
+                    u32 sceneBattleGate = 0;
+                    (void)uc_mem_read(MTK, Global_R9 + 23852u,
+                                      &unknownOffset23852,
+                                      sizeof(unknownOffset23852));
+                    (void)uc_mem_read(MTK, Global_R9 + 23768u,
+                                      &sceneBattleGate,
+                                      sizeof(sceneBattleGate));
+                    logicPositionSeen = true;
+                    lastLogicPlayerX = playerX;
+                    lastLogicPlayerY = playerY;
+                    trace = fopen("logs/scene-battle-collision.log", "ab");
+                    if (trace != NULL)
+                    {
+                        fprintf(trace,
+                                "scene_battle_scheduler phase=logic-position "
+                                "logic=%08x player_node=%08x player=%d,%d "
+                                "nearest_actor=%u nearest_index=%u nearest=%d,%d "
+                                "distance2=%u offset23852=%08x battle_gate=%08x "
+                                "scene=%s\n",
+                                activeLogic, livePlayerNode, (int)playerX,
+                                (int)playerY, nearestActor, nearestIndex,
+                                (int)nearestX, (int)nearestY, nearestDistance,
+                                unknownOffset23852, sceneBattleGate,
+                                g_lastSceLoadName);
+                        fclose(trace);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if (Global_R9 == 0 ||
+        (pc != 0x0100F5B4 && pc != 0x010183A0 &&
+         pc != 0x010184D2 && pc != 0x010184D4 &&
+         pc != 0x01004CE8 && pc != 0x01004DC8))
+    {
+        return;
+    }
+    (void)uc_mem_read(MTK, Global_R9 + 0x5CB0u, &nodeBase, sizeof(nodeBase));
+    (void)uc_mem_read(MTK, Global_R9 + 0x5CA4u, &playerNode, sizeof(playerNode));
+    (void)uc_mem_read(MTK, Global_R9 + 0x54ACu, &engine, sizeof(engine));
+    if (nodeBase != lastNodeBase)
+    {
+        lastNodeBase = nodeBase;
+        triggerEntrySequence = 0;
+        logicPositionSeen = false;
+        entrySeen = false;
+        memset(beforeSeen, 0, sizeof(beforeSeen));
+        memset(afterSeen, 0, sizeof(afterSeen));
+        apiSlotLogged = false;
+    }
+
+    if (pc == 0x010183A0 && triggerEntrySequence < 2u)
+    {
+        u32 lr = 0;
+        u32 args[4] = {0, 0, 0, 0};
+        u32 caller = 0;
+        u32 callerBase = 0;
+        u32 callerLocal = UINT32_MAX;
+        u16 callerAppId = 0;
+        const char *callerModule = "unknown";
+        int callerAppIndex = -1;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &args[0]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &args[1]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R2, &args[2]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R3, &args[3]);
+        caller = lr & ~1u;
+        if (caller >= Program_ROM_Address &&
+            caller < Program_ROM_Address + Program_ROM_Mapped_Size)
+        {
+            callerModule = "JianghuOL.CBE";
+            callerBase = Program_ROM_Address;
+            callerLocal = caller - callerBase;
+        }
+        else
+        {
+            callerAppIndex = vm_dl_find_loaded_index_by_pc(caller);
+            if (callerAppIndex >= 0)
+            {
+                callerModule = "loaded-cbm";
+                callerBase = g_vmDlLoadedApps[callerAppIndex].buffer;
+                callerLocal = caller - callerBase;
+                callerAppId = g_vmDlLoadedApps[callerAppIndex].appId;
+            }
+        }
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            ++triggerEntrySequence;
+            fprintf(trace,
+                    "scene_battle_trigger phase=entry sequence=%u pc=%08x "
+                    "lr=%08x caller=%08x caller_module=%s caller_app=%u "
+                    "caller_base=%08x caller_local=%08x args="
+                    "%08x,%08x,%08x,%08x scene=%s screen=%08x "
+                    "screen_this=%08x screen_module=%08x active_logic=%08x "
+                    "logic_base=%08x caller_logic_local=%08x node_base=%08x "
+                    "player_node=%08x\n",
+                    triggerEntrySequence, pc, lr, caller, callerModule,
+                    (unsigned)callerAppId, callerBase, callerLocal,
+                    args[0], args[1], args[2], args[3], g_lastSceLoadName,
+                    vmAddedScreen, g_currentScreenThis,
+                    g_currentScreenModuleBase, activeLogic,
+                    sceneModuleCodeBase,
+                    sceneModuleCodeBase != 0 && caller >= sceneModuleCodeBase
+                        ? caller - sceneModuleCodeBase
+                        : UINT32_MAX,
+                    nodeBase, playerNode);
+            fclose(trace);
+        }
+    }
+
+    if (pc == 0x0100F5B4)
+    {
+        u32 sp = 0;
+        u32 node = 0;
+        u32 actorId = 0;
+        u32 collisionFn = 0;
+        u32 actorResourcePtr = 0;
+        u32 worldX = 0;
+        u32 worldY = 0;
+        int16_t x = 0;
+        int16_t y = 0;
+        u8 tail[14];
+        char actorResource[96];
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if (sp == 0 ||
+            uc_mem_read(MTK, sp + 0x2Cu, &node, sizeof(node)) != UC_ERR_OK ||
+            node == 0 ||
+            uc_mem_read(MTK, node + 100u, &actorId, sizeof(actorId)) != UC_ERR_OK ||
+            actorId != targetActorId)
+        {
+            return;
+        }
+        memset(tail, 0, sizeof(tail));
+        (void)uc_mem_read(MTK, node + 24u, &x, sizeof(x));
+        (void)uc_mem_read(MTK, node + 26u, &y, sizeof(y));
+        (void)uc_mem_read(MTK, node + 64u, &collisionFn, sizeof(collisionFn));
+        (void)uc_mem_read(MTK, node + 240u, &worldX, sizeof(worldX));
+        (void)uc_mem_read(MTK, node + 244u, &worldY, sizeof(worldY));
+        (void)uc_mem_read(MTK, node + 248u, &actorResourcePtr,
+                          sizeof(actorResourcePtr));
+        (void)uc_mem_read(MTK, node + 314u, tail, sizeof(tail));
+        vm_trace_read_guest_string(actorResourcePtr, actorResource,
+                                   sizeof(actorResource));
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_node phase=parse-complete pc=%08x actor=%u "
+                    "node=%08x pos=%d,%d world=%d,%d collision=%08x "
+                    "resource_ptr=%08x resource=%s tail314="
+                    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                    pc, actorId, node, (int)x, (int)y, (int)(int32_t)worldX,
+                    (int)(int32_t)worldY, collisionFn, actorResourcePtr,
+                    actorResource,
+                    tail[0], tail[1], tail[2], tail[3], tail[4], tail[5],
+                    tail[6], tail[7], tail[8], tail[9], tail[10], tail[11],
+                    tail[12], tail[13]);
+            fclose(trace);
+        }
+        if (!apiSlotLogged)
+        {
+            u32 apiTable = 0;
+            u32 triggerSlot = UINT32_MAX;
+
+            (void)uc_mem_read(MTK, Global_R9 + 8276u, &apiTable,
+                              sizeof(apiTable));
+            if (apiTable != 0)
+            {
+                for (u32 offset = 0; offset < 4096u; offset += 4u)
+                {
+                    u32 candidate = 0;
+                    if (uc_mem_read(MTK, apiTable + offset, &candidate,
+                                    sizeof(candidate)) != UC_ERR_OK)
+                    {
+                        break;
+                    }
+                    if ((candidate & ~1u) == 0x010183A0u)
+                    {
+                        triggerSlot = offset;
+                        break;
+                    }
+                }
+            }
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_scheduler phase=api-slot actor=%u "
+                        "api=%08x trigger_slot=%u trigger_found=%u\n",
+                        actorId, apiTable,
+                        triggerSlot == UINT32_MAX ? 0u : triggerSlot,
+                        triggerSlot == UINT32_MAX ? 0u : 1u);
+                fclose(trace);
+            }
+            apiSlotLogged = true;
+        }
+        printf("[info][scene] scene_battle_node actor=%u node=%08x pos=%d,%d "
+               "kind=%u occupied=%u collision=%08x resource=%s\n",
+               actorId, node, (int)x, (int)y, tail[1], tail[5], collisionFn,
+               actorResource);
+        return;
+    }
+
+    if (nodeBase == 0 || playerNode == 0)
+        return;
+    if (pc == 0x01004CE8)
+    {
+        u32 args[4] = {0, 0, 0, 0};
+        u32 lr = 0;
+        u32 matchedNode = 0;
+        u32 matchedActor = 0;
+        u32 matchedIndex = UINT32_MAX;
+        int16_t playerX = 0;
+        int16_t playerY = 0;
+        int16_t nodeX = 0;
+        int16_t nodeY = 0;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &args[0]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &args[1]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R2, &args[2]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R3, &args[3]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        for (u32 index = 0; index < 25u; ++index)
+        {
+            u32 node = nodeBase + index * 340u;
+            u8 kind = 0;
+            u8 occupied = 0;
+
+            if (args[0] != node && args[1] != node)
+                continue;
+            (void)uc_mem_read(MTK, node + 315u, &kind, sizeof(kind));
+            (void)uc_mem_read(MTK, node + 319u, &occupied, sizeof(occupied));
+            if (kind != 2 || occupied == 0)
+                continue;
+            matchedNode = node;
+            matchedIndex = index;
+            (void)uc_mem_read(MTK, node + 100u, &matchedActor,
+                              sizeof(matchedActor));
+            break;
+        }
+        if (matchedNode == 0)
+            return;
+        (void)uc_mem_read(MTK, playerNode + 24u, &playerX, sizeof(playerX));
+        (void)uc_mem_read(MTK, playerNode + 26u, &playerY, sizeof(playerY));
+        (void)uc_mem_read(MTK, matchedNode + 24u, &nodeX, sizeof(nodeX));
+        (void)uc_mem_read(MTK, matchedNode + 26u, &nodeY, sizeof(nodeY));
+        collisionPending = true;
+        collisionPendingActor = matchedActor;
+        collisionPendingIndex = matchedIndex;
+        collisionPendingLr = lr;
+        collisionPendingNode = matchedNode;
+        collisionPendingPlayerX = playerX;
+        collisionPendingPlayerY = playerY;
+        collisionPendingNodeX = nodeX;
+        collisionPendingNodeY = nodeY;
+        ++collisionSequence;
+        if (collisionTraceCount < 128u)
+        {
+            ++collisionTraceCount;
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_collision phase=map-collision-entry "
+                        "sequence=%u pc=%08x lr=%08x caller_local=%08x "
+                        "actor=%u index=%u node=%08x player=%d,%d node_pos=%d,%d "
+                        "args=%08x,%08x,%08x,%08x scene=%s\n",
+                        collisionSequence, pc, lr,
+                        sceneModuleCodeBase != 0 && (lr & ~1u) >= sceneModuleCodeBase
+                            ? (lr & ~1u) - sceneModuleCodeBase
+                            : UINT32_MAX,
+                        matchedActor, matchedIndex, matchedNode, (int)playerX,
+                        (int)playerY, (int)nodeX, (int)nodeY, args[0], args[1],
+                        args[2], args[3], g_lastSceLoadName);
+                fclose(trace);
+            }
+        }
+        return;
+    }
+    if (pc == 0x01004DC8)
+    {
+        u32 result = 0;
+
+        if (!collisionPending)
+            return;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &result);
+        if (collisionTraceCount < 128u)
+        {
+            ++collisionTraceCount;
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_collision phase=map-collision-return "
+                        "sequence=%u pc=%08x lr=%08x actor=%u index=%u "
+                        "node=%08x player=%d,%d node_pos=%d,%d result=%u scene=%s\n",
+                        collisionSequence, pc, collisionPendingLr,
+                        collisionPendingActor, collisionPendingIndex,
+                        collisionPendingNode, (int)collisionPendingPlayerX,
+                        (int)collisionPendingPlayerY, (int)collisionPendingNodeX,
+                        (int)collisionPendingNodeY, result != 0 ? 1u : 0u,
+                        g_lastSceLoadName);
+                fclose(trace);
+            }
+        }
+        collisionPending = false;
+        return;
+    }
+    if (pc == 0x010183A0)
+    {
+        u32 nearestNode = 0;
+        u32 nearestIndex = UINT32_MAX;
+        u32 nearestDistance = UINT32_MAX;
+        u32 callback = 0;
+        u32 cooldown = 0;
+        u32 pending = 0;
+        u32 uiState = 0;
+        int16_t playerX = 0;
+        int16_t playerY = 0;
+        u8 busy = 0;
+        u8 modalA = 0;
+        u8 modalB = 0;
+        u8 engine978 = 0;
+        u8 engine921 = 0;
+        u8 engine988Positive = 0;
+        u32 gateFingerprint = 0;
+
+        (void)uc_mem_read(MTK, playerNode + 24u, &playerX, sizeof(playerX));
+        (void)uc_mem_read(MTK, playerNode + 26u, &playerY, sizeof(playerY));
+        for (u32 index = 0; index < 25u; ++index)
+        {
+            u32 node = nodeBase + index * 340u;
+            u32 actorId = 0;
+            int16_t x = 0;
+            int16_t y = 0;
+            u8 kind = 0;
+            u8 occupied = 0;
+            int32_t dx = 0;
+            int32_t dy = 0;
+            u32 distance = 0;
+
+            (void)uc_mem_read(MTK, node + 100u, &actorId, sizeof(actorId));
+            (void)uc_mem_read(MTK, node + 315u, &kind, sizeof(kind));
+            (void)uc_mem_read(MTK, node + 319u, &occupied, sizeof(occupied));
+            if (actorId != targetActorId || kind != 2 || occupied == 0)
+                continue;
+            (void)uc_mem_read(MTK, node + 24u, &x, sizeof(x));
+            (void)uc_mem_read(MTK, node + 26u, &y, sizeof(y));
+            dx = (int32_t)x - playerX;
+            dy = (int32_t)y - playerY;
+            distance = (u32)(dx * dx + dy * dy);
+            if (nearestNode == 0 || distance < nearestDistance)
+            {
+                nearestNode = node;
+                nearestIndex = index;
+                nearestDistance = distance;
+            }
+        }
+        if (nearestNode == 0)
+            return;
+        (void)uc_mem_read(MTK, Global_R9 + 23768u, &callback, sizeof(callback));
+        (void)uc_mem_read(MTK, Global_R9 + 23944u, &cooldown, sizeof(cooldown));
+        (void)uc_mem_read(MTK, Global_R9 + 23936u, &pending, sizeof(pending));
+        (void)uc_mem_read(MTK, Global_R9 + 23876u, &uiState, sizeof(uiState));
+        (void)uc_mem_read(MTK, Global_R9 + 24836u, &busy, sizeof(busy));
+        (void)uc_mem_read(MTK, Global_R9 + 38013u, &modalA, sizeof(modalA));
+        (void)uc_mem_read(MTK, Global_R9 + 38014u, &modalB, sizeof(modalB));
+        if (engine != 0)
+        {
+            int32_t engine988 = 0;
+            (void)uc_mem_read(MTK, engine + 978u, &engine978, sizeof(engine978));
+            (void)uc_mem_read(MTK, engine + 921u, &engine921, sizeof(engine921));
+            (void)uc_mem_read(MTK, engine + 988u, &engine988, sizeof(engine988));
+            engine988Positive = engine988 > 0 ? 1u : 0u;
+        }
+        gateFingerprint = (callback != 0 ? 1u : 0u) |
+                          (cooldown != 0 ? 2u : 0u) |
+                          (pending != 0 ? 4u : 0u) |
+                          (uiState == 1 ? 8u : 0u) |
+                          ((u32)busy << 4) | ((u32)modalA << 5) |
+                          ((u32)modalB << 6) | ((u32)engine978 << 7) |
+                          ((u32)engine921 << 8) |
+                          ((u32)engine988Positive << 9);
+        if (entrySeen && playerX == lastEntryX && playerY == lastEntryY &&
+            gateFingerprint == lastEntryGates)
+        {
+            return;
+        }
+        entrySeen = true;
+        lastEntryX = playerX;
+        lastEntryY = playerY;
+        lastEntryGates = gateFingerprint;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_collision phase=scan-entry pc=%08x actor=%u "
+                    "player=%d,%d nearest_index=%u nearest_node=%08x "
+                    "distance2=%u callback=%08x gates=%08x cooldown=%u "
+                    "pending=%u ui=%u busy=%u modal=%u,%u engine=%u,%u,%u\n",
+                    pc, targetActorId, (int)playerX, (int)playerY,
+                    nearestIndex, nearestNode, nearestDistance, callback,
+                    gateFingerprint, cooldown, pending, uiState, busy, modalA,
+                    modalB, engine978, engine921, engine988Positive);
+            fclose(trace);
+        }
+        return;
+    }
+
+    {
+        u32 index = 0;
+        u32 node = 0;
+        u32 actorId = 0;
+        u32 collisionFn = 0;
+        u32 result = 0;
+        int16_t playerX = 0;
+        int16_t playerY = 0;
+        int16_t nodeX = 0;
+        int16_t nodeY = 0;
+        bool shouldLog = false;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_R4, &index);
+        if (index >= 25u)
+            return;
+        node = nodeBase + index * 340u;
+        (void)uc_mem_read(MTK, node + 100u, &actorId, sizeof(actorId));
+        if (actorId != targetActorId)
+            return;
+        (void)uc_mem_read(MTK, playerNode + 24u, &playerX, sizeof(playerX));
+        (void)uc_mem_read(MTK, playerNode + 26u, &playerY, sizeof(playerY));
+        (void)uc_mem_read(MTK, node + 24u, &nodeX, sizeof(nodeX));
+        (void)uc_mem_read(MTK, node + 26u, &nodeY, sizeof(nodeY));
+        if (pc == 0x010184D2)
+        {
+            (void)uc_reg_read(MTK, UC_ARM_REG_R7, &collisionFn);
+            shouldLog = !beforeSeen[index] || lastBeforeX[index] != playerX ||
+                        lastBeforeY[index] != playerY;
+            beforeSeen[index] = true;
+            lastBeforeX[index] = playerX;
+            lastBeforeY[index] = playerY;
+        }
+        else
+        {
+            (void)uc_reg_read(MTK, UC_ARM_REG_R0, &result);
+            shouldLog = !afterSeen[index] || lastAfterX[index] != playerX ||
+                        lastAfterY[index] != playerY ||
+                        lastAfterResult[index] != (u8)(result != 0);
+            afterSeen[index] = true;
+            lastAfterX[index] = playerX;
+            lastAfterY[index] = playerY;
+            lastAfterResult[index] = (u8)(result != 0);
+            (void)uc_mem_read(MTK, node + 64u, &collisionFn,
+                              sizeof(collisionFn));
+        }
+        if (!shouldLog)
+            return;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_collision phase=%s pc=%08x actor=%u index=%u "
+                    "player=%d,%d node=%d,%d collision=%08x result=%u\n",
+                    pc == 0x010184D2 ? "before-callback" : "after-callback",
+                    pc, actorId, index, (int)playerX, (int)playerY,
+                    (int)nodeX, (int)nodeY, collisionFn,
+                    pc == 0x010184D4 ? (result != 0 ? 1u : 0u) : UINT32_MAX);
+            fclose(trace);
+        }
+    }
+}
+
+static void vm_trace_scene_battle_uplink(u32 dataPtr, u32 dataLen, u32 lr,
+                                         u32 sp, u32 r4, u32 r5, u32 r6,
+                                         u32 r7)
+{
+    static u32 sequence = 0;
+    const char *enabled = NULL;
+    u8 packet[512];
+    u8 kind = 0;
+    u8 subtype = 0;
+    u32 packetLen = 0;
+    u32 stackWords[24];
+    char callers[768];
+    size_t used = 0;
+    FILE *trace = NULL;
+
+    enabled = getenv("CBE_TRACE_SCENE_BATTLE_COLLISION");
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0 ||
+        MTK == NULL || dataPtr == 0 || dataLen == 0)
+    {
+        return;
+    }
+    packetLen = dataLen < sizeof(packet) ? dataLen : sizeof(packet);
+    if (uc_mem_read(MTK, dataPtr, packet, packetLen) != UC_ERR_OK ||
+        packetLen < 8 || packet[0] != 'W' || packet[1] != 'T')
+    {
+        return;
+    }
+    kind = packet[5];
+    subtype = packet[6];
+    if (kind != 4 || subtype != 1)
+    {
+        return;
+    }
+
+    memset(stackWords, 0, sizeof(stackWords));
+    if (sp != 0)
+        (void)uc_mem_read(MTK, sp, stackWords, sizeof(stackWords));
+    callers[0] = 0;
+    for (u32 index = 0; index < mySizeOf(stackWords); ++index)
+    {
+        u32 candidate = stackWords[index] & ~1u;
+        u32 base = 0;
+        u32 local = UINT32_MAX;
+        u16 appId = 0;
+        const char *module = NULL;
+        int appIndex = -1;
+        int written = 0;
+
+        if (candidate >= Program_ROM_Address &&
+            candidate < Program_ROM_Address + Program_ROM_Mapped_Size)
+        {
+            module = "JianghuOL.CBE";
+            base = Program_ROM_Address;
+            local = candidate - base;
+        }
+        else
+        {
+            appIndex = vm_dl_find_loaded_index_by_pc(candidate);
+            if (appIndex >= 0)
+            {
+                module = "loaded-cbm";
+                base = g_vmDlLoadedApps[appIndex].buffer;
+                local = candidate - base;
+                appId = g_vmDlLoadedApps[appIndex].appId;
+            }
+        }
+        if (module == NULL || used >= sizeof(callers))
+            continue;
+        written = snprintf(callers + used, sizeof(callers) - used,
+                           "%s%u:%08x:%s:%u:%08x",
+                           used == 0 ? "" : ";", index, candidate, module,
+                           (unsigned)appId, local);
+        if (written < 0 || (size_t)written >= sizeof(callers) - used)
+        {
+            used = sizeof(callers) - 1u;
+            callers[used] = 0;
+            break;
+        }
+        used += (size_t)written;
+    }
+
+    trace = fopen("logs/scene-battle-collision.log", "ab");
+    if (trace == NULL)
+        return;
+    ++sequence;
+    fprintf(trace,
+            "scene_battle_uplink phase=wt-4-1 sequence=%u len=%u data=%08x "
+            "network_lr=%08x network_sp=%08x regs=%08x,%08x,%08x,%08x "
+            "scene=%s screen=%08x screen_this=%08x screen_module=%08x "
+            "stack_callers=[%s]\n",
+            sequence, dataLen, dataPtr, lr, sp, r4, r5, r6, r7,
+            g_lastSceLoadName, vmAddedScreen, g_currentScreenThis,
+            g_currentScreenModuleBase, callers[0] ? callers : "-");
+    fclose(trace);
+}
+
+static void vm_trace_actor_scene_capacity_table(FILE *trace, const char *name,
+                                                u32 tablePtrAddress,
+                                                u32 rowCount)
+{
+    u32 base = 0;
+    u32 blocked = 0;
+
+    if (trace == NULL || name == NULL || MTK == NULL || tablePtrAddress == 0 ||
+        uc_mem_read(MTK, tablePtrAddress, &base, sizeof(base)) != UC_ERR_OK ||
+        base == 0)
+    {
+        if (trace != NULL)
+            fprintf(trace, " table=%s ptr_addr=%08x base=%08x unreadable\n",
+                    name ? name : "-", tablePtrAddress, base);
+        return;
+    }
+
+    if (rowCount > 25u)
+        rowCount = 25u;
+    fprintf(trace, " table=%s ptr_addr=%08x base=%08x capacity=%u rows=[",
+            name, tablePtrAddress, base, rowCount);
+    for (u32 index = 0; index < rowCount; ++index)
+    {
+        u32 node = base + index * 340u;
+        u32 actorId = 0;
+        int16_t x = 0;
+        int16_t y = 0;
+        u8 kind = 0;
+        u8 occupied = 0;
+
+        (void)uc_mem_read(MTK, node + 100u, &actorId, sizeof(actorId));
+        (void)uc_mem_read(MTK, node + 24u, &x, sizeof(x));
+        (void)uc_mem_read(MTK, node + 26u, &y, sizeof(y));
+        (void)uc_mem_read(MTK, node + 315u, &kind, sizeof(kind));
+        (void)uc_mem_read(MTK, node + 319u, &occupied, sizeof(occupied));
+        if (occupied != 0 || kind == 2)
+            ++blocked;
+        fprintf(trace, "%s%u:o%u:k%u:id%d@%d,%d",
+                index == 0 ? "" : ";", index, occupied, kind,
+                (int)(int32_t)actorId, (int)x, (int)y);
+    }
+    fprintf(trace, "] blocked=%u free=%u\n", blocked, rowCount - blocked);
+}
+
+/*
+ * Read-only probe for the Actor motion-descriptor allocation failure at
+ * JianghuOL.CBE:0x0100DA4E.  The parser stores a stream-provided count at
+ * descriptor +0x10, then allocates one scene node per entry.  The ordinary
+ * path uses a fixed 25-slot scene table.  Resources whose names begin with
+ * `b` use the separately allocated battle/background actor array, whose
+ * capacity comes from the first descriptor that allocated it.
+ *
+ * Enable with CBE_TRACE_ACTOR_SCENE_CAPACITY=1.  The default cap is 128
+ * records and can be lowered with CBE_TRACE_ACTOR_SCENE_CAPACITY_MAX.  This
+ * probe only reads registers, stack arguments, descriptors and node tables;
+ * it never changes guest state or allocation results.
+ */
+static void vm_trace_actor_scene_capacity_pc(u32 pc)
+{
+    static u32 traceCount = 0;
+    static u32 battleArrayCapacity = 0;
+    const char *enabled = NULL;
+    const char *maxText = NULL;
+    const char *phase = NULL;
+    u32 maxRecords = 128u;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 r4 = 0;
+    u32 r5 = 0;
+    u32 r7 = 0;
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 descriptor = 0;
+    u32 resourcePtr = 0;
+    u32 childData = 0;
+    u32 loopIndex = UINT32_MAX;
+    int16_t descriptorCount = 0;
+    int16_t pendingCount = 0;
+    char resource[128];
+    char assetName[128];
+    FILE *trace = NULL;
+
+    if (MTK == NULL ||
+        (pc != 0x0100D6E2 && pc != 0x0100D872 && pc != 0x0100D942 &&
+         pc != 0x0100D97E && pc != 0x0100DA14 && pc != 0x0100DA42 &&
+         pc != 0x0100DA4E && pc != 0x01012FE6 && pc != 0x01017E14 &&
+         pc != 0x01017E34 && pc != 0x01017E3C && pc != 0x01017E54))
+    {
+        return;
+    }
+    enabled = getenv("CBE_TRACE_ACTOR_SCENE_CAPACITY");
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
+    {
+        return;
+    }
+    maxText = getenv("CBE_TRACE_ACTOR_SCENE_CAPACITY_MAX");
+    if (maxText != NULL && maxText[0] != 0)
+    {
+        char *end = NULL;
+        unsigned long parsed = strtoul(maxText, &end, 0);
+        if (end != maxText && end != NULL && *end == 0 && parsed > 0 &&
+            parsed <= 1024u)
+        {
+            maxRecords = (u32)parsed;
+        }
+    }
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    if (pc == 0x01012FE6 || pc == 0x01017E14 || pc == 0x01017E34 ||
+        pc == 0x01017E3C || pc == 0x01017E54)
+    {
+        u32 arrayPtr = 0;
+        u8 guestCount = 0;
+
+        (void)uc_mem_read(MTK, Global_R9 + 0x5CB4u, &arrayPtr,
+                          sizeof(arrayPtr));
+        (void)uc_mem_read(MTK, Global_R9 + 0x5C73u, &guestCount,
+                          sizeof(guestCount));
+        if (pc == 0x01017E34)
+            battleArrayCapacity = r4 / 340u;
+        if (pc == 0x01012FE6)
+            phase = "scene-init-reset-count";
+        else if (pc == 0x01017E14)
+            phase = "battle-array-alloc-entry";
+        else if (pc == 0x01017E34)
+            phase = "battle-array-alloc-before-store";
+        else if (pc == 0x01017E3C)
+            phase = "battle-array-free-entry";
+        else
+            phase = "battle-array-free-before-null";
+        if (traceCount >= maxRecords)
+        {
+            if (pc == 0x01017E54)
+                battleArrayCapacity = 0;
+            return;
+        }
+        trace = fopen("logs/actor-scene-node-capacity.log", "ab");
+        if (trace == NULL)
+            return;
+        ++traceCount;
+        fprintf(trace,
+                "actor_scene_capacity seq=%u phase=%s pc=%08x lr=%08x "
+                "array_ptr=%08x guest_count=%u observed_capacity=%u "
+                "request_or_result=%08x bytes=%u\n",
+                traceCount, phase, pc, lr, arrayPtr, (unsigned)guestCount,
+                battleArrayCapacity, r0, r4);
+        fclose(trace);
+        if (pc == 0x01017E54)
+            battleArrayCapacity = 0;
+        return;
+    }
+    /* Login and the source scene may consume the ordinary trace budget.
+     * Never lose the one null result which immediately precedes the crash. */
+    if (traceCount >= maxRecords && !(pc == 0x0100DA4E && r1 == 0))
+        return;
+    descriptor = pc == 0x0100D6E2 ? r0 : r5;
+    if (sp != 0)
+    {
+        u32 resourceArgAddress = pc == 0x0100D6E2 ? sp : sp + 0x70u;
+        (void)uc_mem_read(MTK, resourceArgAddress, &resourcePtr,
+                          sizeof(resourcePtr));
+        if (pc >= 0x0100D97E)
+            (void)uc_mem_read(MTK, sp + 0x38u, &loopIndex, sizeof(loopIndex));
+    }
+    if (descriptor != 0)
+        (void)uc_mem_read(MTK, descriptor + 0x10u, &descriptorCount,
+                          sizeof(descriptorCount));
+    if (pc == 0x0100D872)
+        pendingCount = (int16_t)(r0 & 0xffffu);
+    if ((pc == 0x0100DA14 || pc == 0x0100DA42 || pc == 0x0100DA4E) &&
+        r7 != 0)
+    {
+        (void)uc_mem_read(MTK, r7 + 0x2cu, &childData, sizeof(childData));
+    }
+    vm_trace_read_guest_string(resourcePtr, resource, sizeof(resource));
+    if (pc == 0x0100D942)
+        vm_trace_read_guest_string(r7, assetName, sizeof(assetName));
+    else
+        snprintf(assetName, sizeof(assetName), "-");
+
+    if (pc == 0x0100D6E2)
+        phase = "descriptor-entry";
+    else if (pc == 0x0100D872)
+        phase = "descriptor-count-before-store";
+    else if (pc == 0x0100D942)
+        phase = "asset-name";
+    else if (pc == 0x0100D97E)
+        phase = "child-loop-entry";
+    else if (pc == 0x0100DA14)
+        phase = "alloc-table-b-before-call";
+    else if (pc == 0x0100DA42)
+        phase = "alloc-table-a-before-call";
+    else
+        phase = "allocation-result-before-deref";
+
+    trace = fopen("logs/actor-scene-node-capacity.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "actor_scene_capacity seq=%u phase=%s pc=%08x lr=%08x map=%s "
+            "resource_ptr=%08x resource=%s descriptor=%08x count=%d "
+            "pending_count=%d index=%u child_record=%08x child_data=%08x "
+            "r0=%08x r1=%08x r2=%08x r3=%08x r5=%08x r7=%08x sp=%08x "
+            "asset=%s\n",
+            traceCount, phase, pc, lr, g_lastSceLoadName[0] ? g_lastSceLoadName : "-",
+            resourcePtr, resource, descriptor, (int)descriptorCount,
+            (int)pendingCount, loopIndex, r7, childData,
+            r0, r1, r2, r3, r5, r7, sp, assetName);
+    if (pc == 0x0100DA14 || pc == 0x0100DA42 || pc == 0x0100DA4E)
+    {
+        vm_trace_actor_scene_capacity_table(trace, "scene", Global_R9 + 0x5CB0u,
+                                            25u);
+        vm_trace_actor_scene_capacity_table(trace, "battle-background",
+                                            Global_R9 + 0x5CB4u,
+                                            battleArrayCapacity);
+    }
+    fclose(trace);
+
+    if (pc == 0x0100D6E2 || (pc == 0x0100DA4E && r1 == 0))
+    {
+        printf("[info][scene] actor_scene_capacity phase=%s resource=%s "
+               "descriptor=%08x count=%d index=%u result=%08x lr=%08x\n",
+               phase, resource, descriptor, (int)descriptorCount, loopIndex,
+               r1, lr);
+    }
+}
+
+/*
+ * Read-only lifecycle evidence for the asset-name pointer table owned by the
+ * scene vtable. FindOrAddAssetName assumes R9+0x5AE4 is live after its grow
+ * helper returns; this records setup/free/find callers and host context.
+ */
+static void vm_trace_scene_asset_lifecycle_pc(u32 pc)
+{
+    static u32 traceCount = 0;
+    const char *enabled = NULL;
+    const char *maxText = NULL;
+    const char *phase = NULL;
+    u32 maxRecords = 256u;
+    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r5 = 0;
+    u32 lr = 0, callerLr = 0, sp = 0;
+    u32 stack[10];
+    u32 count = 0, capacity = 0, table = 0, nextSlot = 0;
+    u32 assetPtr = 0;
+    char assetName[128];
+    bool forceNullRecord = false;
+    FILE *trace = NULL;
+
+    if (MTK == NULL ||
+        (pc != 0x0100D1D0u && pc != 0x0100D22Cu &&
+         pc != 0x0100D262u && pc != 0x0100D2A4u &&
+         pc != 0x0100DEB4u && pc != 0x0100DEF8u))
+        return;
+    enabled = getenv("CBE_TRACE_SCENE_ASSET_LIFECYCLE");
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
+        return;
+    maxText = getenv("CBE_TRACE_SCENE_ASSET_LIFECYCLE_MAX");
+    if (maxText != NULL && maxText[0] != 0)
+    {
+        char *end = NULL;
+        unsigned long parsed = strtoul(maxText, &end, 0);
+        if (end != maxText && end != NULL && *end == 0 && parsed > 0 &&
+            parsed <= 2048u)
+            maxRecords = (u32)parsed;
+    }
+
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    memset(stack, 0, sizeof(stack));
+    if (sp != 0)
+        (void)uc_mem_read(MTK, sp, stack, sizeof(stack));
+    callerLr = lr;
+    if (pc == 0x0100D2A4u)
+        callerLr = stack[5];
+    else if (pc == 0x0100DEF8u)
+        callerLr = stack[9];
+
+    if (Global_R9 != 0)
+    {
+        (void)uc_mem_read(MTK, Global_R9 + 0x5AD8u, &count, sizeof(count));
+        (void)uc_mem_read(MTK, Global_R9 + 0x5ADCu, &capacity,
+                          sizeof(capacity));
+        (void)uc_mem_read(MTK, Global_R9 + 0x5AE4u, &table, sizeof(table));
+    }
+    if (table != 0 && count < capacity && count < 2048u)
+        (void)uc_mem_read(MTK, table + count * sizeof(u32), &nextSlot,
+                          sizeof(nextSlot));
+
+    if (pc == 0x0100D262u)
+        assetPtr = r0;
+    else if (pc == 0x0100D2A4u)
+        assetPtr = r5;
+    vm_trace_read_guest_string(assetPtr, assetName, sizeof(assetName));
+
+    if (pc == 0x0100D1D0u)
+        phase = "free-entry";
+    else if (pc == 0x0100D22Cu)
+        phase = "clear-entry";
+    else if (pc == 0x0100D262u)
+        phase = "find-entry";
+    else if (pc == 0x0100D2A4u)
+        phase = "find-after-grow";
+    else if (pc == 0x0100DEB4u)
+        phase = "setup-entry";
+    else
+        phase = "setup-after-table-alloc";
+
+    forceNullRecord = table == 0 &&
+                      (pc == 0x0100D262u || pc == 0x0100D2A4u);
+    if (traceCount >= maxRecords && !forceNullRecord)
+        return;
+    trace = fopen("logs/scene-asset-lifecycle.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_asset_lifecycle seq=%u phase=%s pc=%08x lr=%08x "
+            "caller_lr=%08x r0=%08x r1=%08x r2=%08x r3=%08x r5=%08x "
+            "sp=%08x stack=%08x,%08x,%08x,%08x,%08x,%08x "
+            "count=%u capacity=%u table=%08x next=%08x asset_ptr=%08x "
+            "asset=%s net_depth=%d net_slot=%d screen=%08x screen_this=%08x "
+            "removed_this=%08x host_dp=%08x guest_dp=%08x stack_depth=%u\n",
+            traceCount, phase, pc, lr, callerLr, r0, r1, r2, r3, r5, sp,
+            stack[0], stack[1], stack[2], stack[3], stack[4], stack[5],
+            count, capacity, table, nextSlot, assetPtr, assetName,
+            g_netTaskDispatchDepth, g_netTaskDispatchSlot, vmAddedScreen,
+            g_currentScreenThis, g_activeScreenRemovedThis,
+            g_currentScreenDataPackage, vm_current_data_package(),
+            g_screenStackCount);
+    fclose(trace);
+
+    if (forceNullRecord)
+    {
+        printf("[info][scene] scene_asset_lifecycle phase=%s table=00000000 "
+               "count=%u capacity=%u asset=%s caller=%08x net_depth=%d "
+               "net_slot=%d host_dp=%08x guest_dp=%08x\n",
+               phase, count, capacity, assetName, callerLr,
+               g_netTaskDispatchDepth, g_netTaskDispatchSlot,
+               g_currentScreenDataPackage, vm_current_data_package());
+    }
 }
 
 static void vm_note_castlevania_wpay_pc(u32 pc)
@@ -13332,6 +15083,9 @@ void RunArmProgram(void *param)
                 printf("[SCR_FUNC](init:%x,destory:%x,logic:%x,render:%x,pause:%x,remuse:%x,resLoad:%x)\n", screenInitEntry, screenDestoryEntry, screenLogicEntry, screenRenderEntry, screenPauseEntry, screenRemuseEntry, screenResouceLoadEntry);
                 screenStructChange = 0;
                 g_activeScreenRemovedThisFrame = 0;
+                vm_trace_screen_lifecycle_order("before-init", screenFuncPtr,
+                                                screenThisPtr, screenInitEntry,
+                                                0);
             }
 
             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
@@ -13358,6 +15112,9 @@ void RunArmProgram(void *param)
                     p = vm_emu_start(screenInitEntry, exitAddr);
                 else
                     p = UC_ERR_OK;
+                vm_trace_screen_lifecycle_order("after-init", screenFuncPtr,
+                                                screenThisPtr, screenInitEntry,
+                                                0);
                 vm_automation_note_screen_init(screenFuncPtr, screenInitEntry,
                                                screenLogicEntry, screenRenderEntry);
                 vm_autotest_note("screen_run kind=init caller=%08x this=%08x init=%08x logic=%08x render=%08x\n",
@@ -13623,6 +15380,9 @@ void RunArmProgram(void *param)
                 }
                 else if (g_screenExitMode == VM_SCREEN_EXIT_PAUSE)
                 {
+                    vm_trace_screen_lifecycle_order("before-pause", screenFuncPtr,
+                                                    screenThisPtr,
+                                                    screenPauseEntry, 0);
                     if (screenPauseEntry)
                     {
                         p = vm_emu_start(screenPauseEntry, exitAddr);
@@ -13635,6 +15395,9 @@ void RunArmProgram(void *param)
                 }
                 else
                 {
+                    vm_trace_screen_lifecycle_order("before-destroy", screenFuncPtr,
+                                                    screenThisPtr,
+                                                    screenDestoryEntry, 0);
                     if (screenDestoryEntry)
                     {
                         p = vm_emu_start(screenDestoryEntry, exitAddr);
@@ -13647,6 +15410,9 @@ void RunArmProgram(void *param)
                     else
                     {
                     }
+                    vm_trace_screen_lifecycle_order("after-destroy", screenFuncPtr,
+                                                    screenThisPtr,
+                                                    screenDestoryEntry, 0);
                 }
                 g_screenExitMode = VM_SCREEN_EXIT_DESTROY;
             }
@@ -17491,6 +19257,8 @@ static bool hook_vm_manager_network_func(u32 address)
     {
         if (netR4)
             g_netCurrentObject = netR4;
+        vm_trace_scene_battle_uplink(tmp3, tmp2, netLr, netSp, netR4,
+                                     netR5, netR6, netR7);
         vm_net_mock_on_send(tmp1, tmp3, tmp2);
         vm_set_call_result(tmp2);
     }
@@ -18357,12 +20125,18 @@ static bool hook_vm_manager_screen_func(u32 address)
     else if (idx == 2 || idx == 3)
     {
         bool acceptChange = true;
+        bool sameActiveRequest = false;
+        bool updateReenterConsumed = false;
+        bool duplicateGuardMatched = false;
         u32 moduleBase = 0;
+        u32 guestLr = 0;
+        u32 oldActiveScreen = vmAddedScreen;
         const vm_net_mock_scene_change_target *activeTarget = NULL;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &guestLr);
         if (idx == 2)
         {
             tmp2 = 0;
@@ -18370,8 +20144,11 @@ static bool hook_vm_manager_screen_func(u32 address)
         }
         if (tmp1 != 0 && tmp1 == vmAddedScreen && lastAddress == 0x01018150)
         {
+            sameActiveRequest = true;
             activeTarget = vm_active_scene_reenter_target();
-            if (vm_net_mock_consume_update_completed_scene_reenter(activeTarget))
+            updateReenterConsumed =
+                vm_net_mock_consume_update_completed_scene_reenter(activeTarget);
+            if (updateReenterConsumed)
             {
                 acceptChange = true;
                 /* The resource callback may restore a recently completed
@@ -18386,6 +20163,7 @@ static bool hook_vm_manager_screen_func(u32 address)
             }
             else if (vm_scene_same_reenter_matches_target(activeTarget))
             {
+                duplicateGuardMatched = true;
                 acceptChange = false;
                 printf("[info][screen] screen_mgr same-suppressed caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
                        lastAddress,
@@ -18427,11 +20205,16 @@ static bool hook_vm_manager_screen_func(u32 address)
             g_screenRemovedWithoutNext = 0;
             g_screenEnterExistingNoCallback = 0;
         }
+        vm_trace_screen_manager_decision(
+            idx, guestLr, tmp1, oldActiveScreen, tmp2, tmp3,
+            sameActiveRequest, updateReenterConsumed, duplicateGuardMatched,
+            acceptChange, activeTarget);
         vm_set_call_result(0);
     }
     else if (idx == 4 || idx == 5)
     {
         u32 moduleBase = 0;
+        bool replacesActiveScreen = false;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
@@ -18441,6 +20224,13 @@ static bool hook_vm_manager_screen_func(u32 address)
         {
             tmp2 = 0;
             tmp3 = 1;
+        }
+        if (tmp1 != 0 && oldActiveScreen != 0)
+        {
+            int requestedIndex = vm_screen_stack_find_related(tmp1);
+            int activeIndex = vm_screen_stack_find_related(oldActiveScreen);
+            replacesActiveScreen = vm_screen_add_replaces_active(
+                requestedIndex, activeIndex);
         }
         moduleBase = vm_read_current_pool_r9();
         if (!moduleBase)
@@ -18464,19 +20254,27 @@ static bool hook_vm_manager_screen_func(u32 address)
             tmp4 = 0;
             vm_set_var(VM_SCREEN_isInQuit_ADDRESS, tmp4);
             screenStructChange = 1;
-            g_screenExitMode = g_screenStackCount > 1 ? VM_SCREEN_EXIT_PAUSE : VM_SCREEN_EXIT_DESTROY;
+            g_screenExitMode = vm_screen_add_exit_mode(
+                replacesActiveScreen, g_screenStackCount,
+                VM_SCREEN_EXIT_DESTROY, VM_SCREEN_EXIT_PAUSE);
             g_screenEnterExistingNoCallback = 0;
         }
         if (tmp1 != 0)
             g_screenRemovedWithoutNext = 0;
-        vm_autotest_note("screen_mgr idx=%u type=add caller=%08x screen=%08x param=%08x flags=%u old=%08x this=%08x depth=%u\n",
-                         idx, lastAddress, tmp1, tmp2, tmp3, oldActiveScreen, g_currentScreenThis, g_screenStackCount);
+        vm_autotest_note("screen_mgr idx=%u type=add caller=%08x screen=%08x param=%08x flags=%u old=%08x this=%08x depth=%u replaces_active=%u exit_mode=%u\n",
+                         idx, lastAddress, tmp1, tmp2, tmp3, oldActiveScreen,
+                         g_currentScreenThis, g_screenStackCount,
+                         replacesActiveScreen ? 1u : 0u, g_screenExitMode);
+        vm_trace_screen_lifecycle_order("manager-add", tmp1, tmp2, 0,
+                                        replacesActiveScreen ? 1u : 0u);
         vm_set_call_result(0);
     }
     else if (idx == 6)
     {
+        u32 guestLr = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &guestLr);
         int removeIndex = vm_screen_stack_find_related(tmp1);
         bool removingCurrent = removeIndex >= 0 && g_screenStack[(u32)removeIndex] == vmAddedScreen;
         u32 removedThis = removingCurrent ? g_currentScreenThis : 0;
@@ -18487,8 +20285,12 @@ static bool hook_vm_manager_screen_func(u32 address)
         tmp5 = 0;
         u32 newTopDataPackage = 0;
         tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp2, &tmp5, &newTopDataPackage) ? 1 : 0;
-        printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x dp=%08x\n",
-               tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3, tmp5, newTopDataPackage);
+        printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x dp=%08x guest_lr=%08x caller=%08x net_depth=%d net_slot=%d host_dp=%08x guest_dp=%08x stack_depth=%u\n",
+               tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3,
+               tmp5, newTopDataPackage, guestLr, lastAddress,
+               g_netTaskDispatchDepth, g_netTaskDispatchSlot,
+               g_currentScreenDataPackage, vm_current_data_package(),
+               g_screenStackCount);
         if (tmp4 && removingCurrent && tmp3)
         {
             bool requestAppClose = g_screenRootExitArmed &&
@@ -20720,7 +22522,11 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_note_sce_load_entry_pc((u32)address & ~1u);
     vm_trace_sce_entity_callback_pc((u32)address & ~1u);
     vm_trace_scene_challenge_node_table_pc((u32)address & ~1u);
+    vm_trace_action13_boundary_pc((u32)address & ~1u);
     vm_trace_scene_node_create_pc((u32)address & ~1u);
+    vm_trace_scene_battle_collision_pc((u32)address & ~1u);
+    vm_trace_actor_scene_capacity_pc((u32)address & ~1u);
+    vm_trace_scene_asset_lifecycle_pc((u32)address & ~1u);
     vm_note_castlevania_wpay_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))

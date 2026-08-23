@@ -5240,6 +5240,15 @@ static u32 vm_net_mock_build_instance_enter_response(
     target.y = seed->instanceY;
     target.mapType = 2;
     target.hasSceEntry = true;
+    /* The target can be absent from the client cache. If its actual SCE
+     * finishes WT18/7, the next WT6/1 must use one native 30/1 re-entry
+     * before the existing 30/2(no-posinfo) completion. The follow-up handler
+     * also matches the completed filename, so this flag alone cannot trigger
+     * a re-entry for a cached target or an unrelated resource. */
+    target.reenterAfterSceInstall = true;
+    target.sceInstallGenerationAtEnter =
+        vm_net_mock_content_client_resource_install_generation(
+            g_vm_mock_service_active_client_id, target.scene);
     pos = vm_net_mock_build_scene_channel_enter_combo_for_target(
         &target, out, outCap);
     if (pos == 0)
@@ -5652,6 +5661,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     bool transactionCancel = false;
     vm_net_mock_mailbox_dialog mailboxView;
     bool mailboxHandled = false;
+    bool mailboxClaimRefresh = false;
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
 
@@ -5772,6 +5782,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         action = mailboxView.action;
         result = mailboxView.result;
         restoredListPage = mailboxView.page;
+        mailboxClaimRefresh = result == 1 &&
+                              strcmp(action, "mailbox-claim") == 0 &&
+                              mailboxView.claimedItemCount != 0;
     }
     else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE ||
@@ -6372,9 +6385,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 }
                 else
                 {
+                    const u32 soldItemId = backpackItem->itemId;
+                    const u16 soldItemSeq = backpackItem->seq;
+                    const u16 soldEnhanceLevel = backpackItem->enhanceLevel;
+                    const u32 moneyBefore = role->money;
+
                     before = *role;
                     if (!vm_net_mock_role_consume_backpack_item(
-                            role, backpackItem->itemId, backpackItem->seq,
+                            role, soldItemId, soldItemSeq,
                             1, NULL))
                     {
                         dialogText =
@@ -6397,7 +6415,38 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         }
                         else
                         {
+                            const char *auditAccountId =
+                                session != NULL && session->accountId[0] != 0
+                                    ? session->accountId
+                                    : g_vm_mock_service_active_account_id;
+
                             result = 1;
+                            if (auditAccountId != NULL &&
+                                auditAccountId[0] != 0)
+                            {
+                                char operationDetail[256];
+
+                                snprintf(operationDetail,
+                                         sizeof(operationDetail),
+                                         "装备回收 ID %u（背包序号 %u，强化 +%u），"
+                                         "获得铜钱 %u，余额 %u→%u",
+                                         soldItemId, (u32)soldItemSeq,
+                                         (u32)soldEnhanceLevel, price,
+                                         moneyBefore, role->money);
+                                if (!vm_mock_admin_operation_log_record(
+                                        "recycle-equipment", auditAccountId,
+                                        role->roleId, soldItemId, 1, price,
+                                        operationDetail))
+                                {
+                                    printf("[error][mock-service] "
+                                           "operation_log_equipment_recycle_failed "
+                                           "account=%s role=%u item=%u seq=%u "
+                                           "price=%u error=%s\n",
+                                           auditAccountId, role->roleId,
+                                           soldItemId, (u32)soldItemSeq,
+                                           price, vm_mysql_last_error());
+                                }
+                            }
                             vm_net_mock_backpack_queue_authoritative_role_list(
                                 "npc-equipment-sell");
                             snprintf(dialogTextStorage,
@@ -7005,6 +7054,33 @@ npc_service_serialize:
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
+    if (mailboxClaimRefresh)
+    {
+        vm_net_mock_reward15_item_row rewardRows[VM_NET_MOCK_REWARD15_MAX_ROWS];
+
+        if (mailboxView.claimedItemCount > VM_NET_MOCK_REWARD15_MAX_ROWS)
+            return 0;
+        memset(rewardRows, 0, sizeof(rewardRows));
+        for (u8 i = 0; i < mailboxView.claimedItemCount; ++i)
+        {
+            vm_net_mock_mail_claimed_item *claimed =
+                &mailboxView.claimedItems[i];
+            vm_net_mock_backpack_item_state *item =
+                vm_net_mock_role_find_backpack_item(role, claimed->itemId,
+                                                    claimed->seq);
+
+            if (item == NULL || claimed->count == 0)
+                return 0;
+            rewardRows[i].item = item;
+            rewardRows[i].acquiredCount = claimed->count;
+        }
+        if (!vm_net_mock_append_backpack_reward15_object(
+                out, outCap, &pos, &objectCount, rewardRows,
+                mailboxView.claimedItemCount))
+        {
+            return 0;
+        }
+    }
     if (appendSkills)
     {
         if (!vm_net_mock_append_role_skills_object(out, outCap, &pos))
@@ -7064,6 +7140,8 @@ npc_service_serialize:
            result == 1 && (strcmp(action, "shop-buy") == 0 ||
                            strcmp(action, "weapon-buy") == 0)
                ? "dialog+wallet:26/1+10/26;backpack-on-native-query"
+               : mailboxClaimRefresh
+                     ? "dialog+reward:26/1+7/15;native-item-manager-delta"
                : "not-applicable");
     return pos;
 }

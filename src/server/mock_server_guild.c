@@ -2533,6 +2533,32 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
     }
     for (u32 side = 0; side < 2; ++side)
         *liveRoles[side] = roles[side];
+    /* The paired role/backpack transaction is authoritative.  Write one
+     * append-only account record per participant only after that COMMIT; an
+     * audit failure must not recast an already-completed exchange as failed. */
+    for (u32 side = 0; side < 2; ++side)
+    {
+        const u32 peer = 1u - side;
+        char operationDetail[256];
+
+        snprintf(operationDetail, sizeof(operationDetail),
+                 "交易对象=%s/%u；付出:钱%u,物品%u；收到:钱%u,物品%u；余额=%u",
+                 sessions[peer]->accountId, roles[peer].roleId,
+                 trade->offers[side].money, trade->offers[side].itemCount,
+                 trade->offers[peer].money, trade->receipts[side].itemCount,
+                 roles[side].money);
+        if (!vm_mock_admin_operation_log_record(
+                "player-trade", sessions[side]->accountId, roles[side].roleId,
+                0, trade->offers[side].itemCount, trade->offers[side].money,
+                operationDetail))
+        {
+            printf("[error][mock-service] operation_log_player_trade_failed "
+                   "account=%s role=%u peer=%s/%u error=%s\n",
+                   sessions[side]->accountId, roles[side].roleId,
+                   sessions[peer]->accountId, roles[peer].roleId,
+                   vm_mysql_last_error());
+        }
+    }
     printf("[info][mock-service] trade_commit first=%08x/%u money=%u items=%u second=%08x/%u money=%u items=%u\n",
            sessions[0]->clientId, roles[0].roleId, roles[0].money,
            trade->receipts[0].itemCount,

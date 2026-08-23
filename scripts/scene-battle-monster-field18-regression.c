@@ -1,14 +1,5 @@
-/*
- * Regression for the complete native SCE2 kind-3 battle-monster record.
- *
- * The deployment compiler must emit the native effect-actor tail after field
- * 17: `u16 kind=3, u16 kind=3, u8 length, bytes`.  The production parser
- * must reject both a truncated record and the historical short-tail server
- * envelope,
- * because LoadSceneDataFromStream does not create a live type-2 scene node
- * for that invented grammar.  This test is pure: it opens no listener, uses
- * no MySQL and writes no resources.
- */
+/* Regression for the native counted SCE2 entity-list and kind-3 envelope.
+ * Pure test: no listener, MySQL connection, or resource write. */
 
 #include <stdio.h>
 #include <string.h>
@@ -17,187 +8,386 @@
 #include "../src/server_main.c"
 #undef main
 
+static bool load_scene_payload(const char *scene, u8 *payload, u32 payloadCap,
+                               u32 *payloadLenOut)
+{
+    u8 raw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u32 rawLen = 0;
+
+    return vm_net_mock_scene_battle_monster_read_base_raw(
+               scene, raw, sizeof(raw), &rawLen) &&
+           vm_net_mock_scene_battle_monster_decode_raw_sce(
+               raw, rawLen, payload, payloadCap, payloadLenOut);
+}
+
+static bool same_spawn(const vm_net_mock_sce_combat_spawn *left,
+                       const vm_net_mock_sce_combat_spawn *right)
+{
+    return left->actorId == right->actorId && left->x == right->x &&
+           left->y == right->y &&
+           strcmp(left->displayName, right->displayName) == 0 &&
+           strcmp(left->actorResource, right->actorResource) == 0 &&
+           strcmp(left->effectResource, right->effectResource) == 0;
+}
+
+static bool verify_all_scene_entity_lists(void)
+{
+    static const char legacyHuashanScene[] =
+        "09\xBB\xAA\xC9\xBD_02.sce";
+    vm_net_mock_monster_catalog_scene_file
+        scenes[VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX];
+    u8 payload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u32 sceneCount = vm_net_mock_monster_catalog_collect_scene_files(
+        scenes, VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX);
+    u32 failedCount = 0;
+    u32 excludedLegacyCount = 0;
+
+    if (sceneCount == 0)
+        return false;
+    for (u32 i = 0; i < sceneCount; ++i)
+    {
+        vm_net_mock_sce_entity_list list;
+        u32 payloadLen = 0;
+
+        /* b_*.sce files are battle backdrops loaded by mmBattle, not
+         * traversable scene resources using ParseActorFullInfoBlob. */
+        if (scenes[i].name[0] == 'b' && scenes[i].name[1] == '_')
+            continue;
+        /* This shipped legacy resource has a zero client actor count followed
+         * by an extra script-placement envelope that is not described by
+         * LoadSceneDataFromStream(0x01006204). Production deliberately
+         * rejects it instead of byte-scanning for a plausible later count. */
+        if (strcmp(scenes[i].name, legacyHuashanScene) == 0)
+        {
+            ++excludedLegacyCount;
+            continue;
+        }
+        if (!load_scene_payload(scenes[i].name, payload, sizeof(payload),
+                                &payloadLen) ||
+            !vm_net_mock_scene_battle_monster_parse_entity_list(
+                payload, payloadLen, &list) ||
+            (list.recordCount == 0u && list.recordsEnd != payloadLen))
+        {
+            fprintf(stderr, "counted entity-list parse failed for %s\n",
+                    scenes[i].name);
+            ++failedCount;
+        }
+    }
+    if (failedCount != 0u || excludedLegacyCount != 1u)
+    {
+        fprintf(stderr, "counted entity-list parse failures: %u/%u\n",
+                failedCount, sceneCount);
+        return false;
+    }
+    printf("shipped SCE2 entity lists parsed: scenes=%u legacy_excluded=%u\n",
+           sceneCount, excludedLegacyCount);
+    return true;
+}
+
+static bool verify_scene_insert(const char *scene, u32 expectedCountOffset,
+                                u32 expectedRecordCount,
+                                u32 expectedRecordsEnd,
+                                u32 expectedCombatCount,
+                                const vm_net_mock_scene_battle_monster_admin_row *row)
+{
+    static u8 original[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    static u8 first[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    static u8 second[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    vm_net_mock_sce_entity_list before;
+    vm_net_mock_sce_entity_list after;
+    vm_net_mock_sce_combat_spawn oldSpawns[32];
+    vm_net_mock_sce_combat_spawn current;
+    u8 record[512];
+    u32 originalLen = 0;
+    u32 firstLen = 0;
+    u32 secondLen = 0;
+    u32 recordLen = 0;
+    u32 nodeCountBefore = 0;
+    u32 nodeCountAfter = 0;
+    u32 tailLen = 0;
+
+    memset(oldSpawns, 0, sizeof(oldSpawns));
+    if (!load_scene_payload(scene, original, sizeof(original), &originalLen) ||
+        !vm_net_mock_scene_battle_monster_parse_entity_list(
+            original, originalLen, &before) ||
+        before.countOffset != expectedCountOffset ||
+        before.recordCount != expectedRecordCount ||
+        before.recordsEnd != expectedRecordsEnd ||
+        before.combatRecordCount != expectedCombatCount ||
+        expectedCombatCount > sizeof(oldSpawns) / sizeof(oldSpawns[0]) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            original, originalLen, &nodeCountBefore))
+    {
+        fprintf(stderr, "native entity-list boundary failed for %s\n", scene);
+        return false;
+    }
+    for (u32 i = 0; i < expectedCombatCount; ++i)
+    {
+        if (!vm_net_mock_scene_battle_monster_counted_spawn_at(
+                original, originalLen, i, &oldSpawns[i], NULL))
+        {
+            fprintf(stderr, "native counted spawn %u failed for %s\n", i, scene);
+            return false;
+        }
+    }
+
+    firstLen = originalLen;
+    secondLen = originalLen;
+    memcpy(first, original, originalLen);
+    memcpy(second, original, originalLen);
+    if (!vm_net_mock_scene_battle_monster_append_record(
+            record, sizeof(record), &recordLen, row))
+        return false;
+    tailLen = originalLen - before.recordsEnd;
+    if (!vm_net_mock_scene_battle_monster_insert_counted_record(
+            first, sizeof(first), &firstLen, row) ||
+        !vm_net_mock_scene_battle_monster_parse_entity_list(
+            first, firstLen, &after) ||
+        after.recordCount != before.recordCount + 1u ||
+        after.combatRecordCount != before.combatRecordCount + 1u ||
+        after.recordsEnd != before.recordsEnd + recordLen ||
+        firstLen != originalLen + recordLen ||
+        memcmp(first + after.recordsEnd, original + before.recordsEnd,
+               tailLen) != 0 ||
+        !vm_net_mock_scene_battle_monster_payload_has_row(first, firstLen, row) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            first, firstLen, &nodeCountAfter) ||
+        nodeCountAfter != nodeCountBefore + 1u)
+    {
+        fprintf(stderr, "counted insertion failed for %s\n", scene);
+        return false;
+    }
+    for (u32 i = 0; i < expectedCombatCount; ++i)
+    {
+        if (!vm_net_mock_scene_battle_monster_counted_spawn_at(
+                first, firstLen, i, &current, NULL) ||
+            !same_spawn(&oldSpawns[i], &current))
+        {
+            fprintf(stderr, "native spawn order changed for %s\n", scene);
+            return false;
+        }
+    }
+    if (!vm_net_mock_scene_battle_monster_counted_spawn_at(
+            first, firstLen, expectedCombatCount, &current, NULL) ||
+        current.actorId != row->monsterId || current.x != row->x ||
+        current.y != row->y)
+    {
+        fprintf(stderr, "generated spawn is not final counted row for %s\n", scene);
+        return false;
+    }
+
+    /* A redeploy rebuilds from the immutable base. The same base and config
+     * must therefore produce byte-identical output without duplicating rows. */
+    if (!vm_net_mock_scene_battle_monster_insert_counted_record(
+            second, sizeof(second), &secondLen, row) ||
+        secondLen != firstLen || memcmp(second, first, firstLen) != 0)
+    {
+        fprintf(stderr, "counted redeploy is not deterministic for %s\n", scene);
+        return false;
+    }
+
+    printf("scene=%s count=%u->%u combat=%u->%u end=%u->%u tail=%u\n",
+           scene, before.recordCount, after.recordCount,
+           before.combatRecordCount, after.combatRecordCount,
+           before.recordsEnd, after.recordsEnd, tailLen);
+    return true;
+}
+
 int main(void)
 {
+    static const char testScene[] =
+        "\xB2\xE2\xCA\xD4\xB5\xD8\xCD\xBC.sce";
+    static const char penglaiScene[] =
+        "00\xC5\xEE\xC0\xB3\xCF\xC9\xB5\xBA_02.sce";
+    static const char taohuaScene[] =
+        "01\xCC\xD2\xBB\xA8\xB5\xBA_01.sce";
+    static const char huanglingScene[] =
+        "05\xC9\xCF\xB9\xC5\xBB\xCA\xC1\xEA_02.sce";
+    static const char multiMapPenglaiScene[] =
+        "c00\xC5\xEE\xC0\xB3\xCF\xC9\xB5\xBA_03.sce";
     vm_net_mock_scene_battle_monster_admin_row row;
     vm_net_mock_sce_combat_spawn spawn;
-    u8 record[256];
-    u8 malformed[256];
-    u8 encoded[512];
-    u8 raw[516];
-    u8 roundTrip[256];
-    u8 nativeStream[512];
-    u8 sharedMapScene[64];
-    u8 recoveredPrefix[14];
-    const char sharedMapName[] =
-        "01\xCC\xD2\xBB\xA8\xB5\xBA_01.map"; /* GBK: 01桃花岛_01.map */
-    const u8 terminalFixture[] = {
-        0xaa, 0xbb, 0xcc,
-        8, 0, 0x46, 0, 0x26, 0, 1, 0, 1, 0, 0x26, 0, 0, 0
-    };
-    const u8 zeroTerminalFixture[] = { 0xaa, 0xbb, 0x00, 0x00 };
+    vm_net_mock_sce_entity_list list;
+    u8 payload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 record[512];
+    u8 malformed[512];
+    u8 quantityPayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 encoded[1024];
+    u8 raw[1028];
+    u8 roundTrip[512];
+    u32 payloadLen = 0;
     u32 pos = 0;
     u32 end = 0;
-    u32 truncatedLen = 0;
-    u32 malformedLen = 0;
     u32 encodedLen = 0;
     u32 roundTripLen = 0;
-    u32 insertOffset = 0;
-    u32 terminalLen = 0;
-    u32 nativeStreamLen = 0;
-    u32 sharedMapSceneLen = 0;
 
     memset(&row, 0, sizeof(row));
-    memset(&spawn, 0, sizeof(spawn));
     row.monsterId = 1000;
     row.x = 120;
     row.y = 120;
+    row.quantity = 1;
     row.visualHint = 5;
     snprintf(row.displayName, sizeof(row.displayName), "monkey");
     snprintf(row.actorResource, sizeof(row.actorResource), "e_monkey.actor");
     snprintf(row.effectResource, sizeof(row.effectResource),
              "e_ghostfireR.actor");
 
-    if (!vm_net_mock_scene_battle_monster_append_record(
-            record, sizeof(record), &pos, &row) || pos == 0 ||
+    if (!vm_net_mock_set_resource_dir("web/fs/JHOnlineData") ||
+        !vm_net_mock_scene_battle_monster_body_resource_is_supported(
+            row.actorResource) ||
+        vm_net_mock_scene_battle_monster_body_resource_is_supported(
+            row.effectResource) ||
+        !vm_net_mock_scene_battle_monster_append_record(
+            record, sizeof(record), &pos, &row) ||
         !vm_net_mock_parse_sce_combat_spawn_at(record, pos, 0, &spawn, &end) ||
-        end != pos || spawn.actorId != row.monsterId || spawn.x != row.x ||
-        spawn.y != row.y || strcmp(spawn.displayName, row.displayName) != 0 ||
-        strcmp(spawn.actorResource, row.actorResource) != 0 ||
+        end != pos || spawn.actorId != row.monsterId ||
         strcmp(spawn.effectResource, row.effectResource) != 0)
     {
-        fputs("complete SCE2 kind-3 field18 contract failed\n", stderr);
+        fputs("complete SCE2 kind-3 envelope failed\n", stderr);
         return 1;
     }
 
-    /* 桃花岛's first 毒泥怪 is preceded by this exact native boundary:
-     * kind-8 (70,38), scalar field 1/value 38, zero word, then kind-3. */
     {
-        const u8 taohuaPrefix[] = {
-            8, 0, 70, 0, 38, 0, 1, 0, 1, 0, 38, 0, 0, 0
-        };
+        static const u16 expectedX[5] = {120, 104, 136, 120, 120};
+        static const u16 expectedY[5] = {120, 120, 120, 104, 136};
+        vm_net_mock_scene_battle_monster_admin_row quantityRow = row;
+        vm_net_mock_scene_battle_monster_admin_row expanded;
+        vm_net_mock_sce_entity_list before;
+        vm_net_mock_sce_entity_list after;
+        u32 quantityPayloadLen = 0;
+        u32 secondPayloadLen = 0;
+        u32 beforeNodeCount = 0;
+        u32 afterNodeCount = 0;
 
-        memcpy(nativeStream, taohuaPrefix, sizeof(taohuaPrefix));
-        nativeStreamLen = sizeof(taohuaPrefix);
-        if (!vm_net_mock_scene_battle_monster_append_record(
-                nativeStream, sizeof(nativeStream), &nativeStreamLen, &row) ||
-            !vm_net_mock_scene_battle_monster_has_spawn_prefix(
-                nativeStream, nativeStreamLen, nativeStreamLen))
+        quantityRow.quantity = 5;
+        if (!load_scene_payload(testScene, payload, sizeof(payload),
+                                &quantityPayloadLen) ||
+            !vm_net_mock_scene_battle_monster_parse_entity_list(
+                payload, quantityPayloadLen, &before) ||
+            !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+                payload, quantityPayloadLen, &beforeNodeCount))
         {
-            fputs("native short-marker/zero/kind-3 stream was not recognized\n",
-                  stderr);
+            fputs("quantity fixture base parse failed\n", stderr);
             return 1;
         }
-        if (vm_net_mock_scene_battle_monster_has_spawn_prefix(
-                record, pos, pos))
+        for (u32 ordinal = 0; ordinal < quantityRow.quantity; ++ordinal)
         {
-            fputs("bare kind-3 record was mistaken for a native spawn stream\n",
-                  stderr);
+            if (!vm_net_mock_scene_battle_monster_expanded_row(
+                    &quantityRow, ordinal, &expanded) ||
+                expanded.x != expectedX[ordinal] ||
+                expanded.y != expectedY[ordinal] ||
+                !vm_net_mock_scene_battle_monster_insert_counted_record(
+                    payload, sizeof(payload), &quantityPayloadLen, &expanded))
+            {
+                fputs("quantity expansion failed\n", stderr);
+                return 1;
+            }
+        }
+        if (!vm_net_mock_scene_battle_monster_parse_entity_list(
+                payload, quantityPayloadLen, &after) ||
+            !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+                payload, quantityPayloadLen, &afterNodeCount) ||
+            after.recordCount != before.recordCount + 5u ||
+            after.combatRecordCount != before.combatRecordCount + 5u ||
+            afterNodeCount != beforeNodeCount + 5u ||
+            !vm_net_mock_scene_battle_monster_payload_has_expanded_row(
+                payload, quantityPayloadLen, &quantityRow))
+        {
+            fputs("quantity expanded entity-list contract failed\n", stderr);
             return 1;
         }
-    }
-
-    /* A custom scene may reuse 桃花岛's MAP while omitting the marker.  The
-     * compiler must recover the authored marker from a shipped same-MAP SCE
-     * instead of deriving it from the requested monster coordinates. */
-    memset(sharedMapScene, 0, sizeof(sharedMapScene));
-    memcpy(sharedMapScene, "SCE2", 4);
-    sharedMapScene[4] = 0x40;
-    sharedMapScene[5] = 0x01;
-    sharedMapScene[6] = 0xd0;
-    sharedMapScene[7] = 0x01;
-    sharedMapScene[8] = 1;
-    sharedMapScene[10] = (u8)strlen(sharedMapName);
-    memcpy(sharedMapScene + 11, sharedMapName, strlen(sharedMapName));
-    sharedMapSceneLen = 11u + (u32)strlen(sharedMapName) + 4u;
-    if (!vm_net_mock_set_resource_dir("web/fs/JHOnlineData") ||
-        !vm_net_mock_scene_battle_monster_find_native_spawn_prefix(
-            sharedMapScene, sharedMapSceneLen, recoveredPrefix,
-            sizeof(recoveredPrefix)) ||
-        vm_net_mock_read_le16_at(recoveredPrefix, 0) != 8u ||
-        vm_net_mock_read_le16_at(recoveredPrefix, 2) != 70u ||
-        vm_net_mock_read_le16_at(recoveredPrefix, 4) != 38u ||
-        vm_net_mock_read_le16_at(recoveredPrefix, 10) != 38u ||
-        vm_net_mock_read_le16_at(recoveredPrefix, 12) != 0u)
-    {
-        fputs("same-MAP native spawn prefix recovery failed\n", stderr);
-        return 1;
-    }
-
-    if (!vm_net_mock_scene_battle_monster_find_insert_offset(
-            terminalFixture, sizeof(terminalFixture), &insertOffset,
-            &terminalLen) ||
-        insertOffset != 3u || terminalLen != 14u)
-    {
-        fputs("native SCE2 final kind-8 insertion boundary was not recovered\n",
-              stderr);
-        return 1;
-    }
-
-    if (!vm_net_mock_scene_battle_monster_find_insert_offset(
-            zeroTerminalFixture, sizeof(zeroTerminalFixture), &insertOffset,
-            &terminalLen) ||
-        insertOffset != 2u || terminalLen != 2u)
-    {
-        fputs("native SCE2 zero-word insertion boundary was not recovered\n",
-              stderr);
-        return 1;
-    }
-
-    /* Verify the output against the field-18 bytes in shipped kind-3
-     * records.  This assertion is intentionally independent from the
-     * production parser: emitting `3,18` would otherwise round-trip through
-     * a matching-but-wrong emitter/parser pair. */
-    {
-        const u8 nativeEffectEnvelope[] = { 3, 0, 3, 0 };
-        u32 envelopeOffset = pos - (u32)(sizeof(nativeEffectEnvelope) + 1u +
-                                         strlen(row.effectResource));
-        if (memcmp(record + envelopeOffset, nativeEffectEnvelope,
-                   sizeof(nativeEffectEnvelope)) != 0)
+        memcpy(quantityPayload, payload, quantityPayloadLen);
+        if (!load_scene_payload(testScene, payload, sizeof(payload),
+                                &secondPayloadLen))
         {
-            fputs("native SCE2 field18 envelope was not emitted\n", stderr);
+            fputs("quantity deterministic rebuild base failed\n", stderr);
+            return 1;
+        }
+        for (u32 ordinal = 0; ordinal < quantityRow.quantity; ++ordinal)
+        {
+            if (!vm_net_mock_scene_battle_monster_expanded_row(
+                    &quantityRow, ordinal, &expanded) ||
+                !vm_net_mock_scene_battle_monster_insert_counted_record(
+                    payload, sizeof(payload), &secondPayloadLen, &expanded))
+            {
+                fputs("quantity deterministic rebuild failed\n", stderr);
+                return 1;
+            }
+        }
+        if (secondPayloadLen != quantityPayloadLen ||
+            memcmp(payload, quantityPayload, quantityPayloadLen) != 0)
+        {
+            fputs("quantity redeploy was not byte-identical\n", stderr);
             return 1;
         }
     }
 
-    /* Remove exactly the final native string field.  A permissive parser
-     * would accept this historical bad output and make deployment appear to
-     * succeed even though the real client cannot instantiate the node. */
-    truncatedLen = pos - (u32)(5u + strlen(row.effectResource));
-    if (vm_net_mock_parse_sce_combat_spawn_at(record, truncatedLen, 0,
-                                               &spawn, &end))
+    if (vm_net_mock_parse_sce_combat_spawn_at(
+            record, pos - (u32)(5u + strlen(row.effectResource)), 0,
+            &spawn, &end))
     {
-        fputs("truncated SCE2 kind-3 record was accepted\n", stderr);
+        fputs("truncated kind-3 effect tail was accepted\n", stderr);
         return 1;
     }
-
-    /* Reproduce the malformed short tail: remove the required second
-     * `u16 3` before the native one-byte effect length. */
-    malformedLen = pos - 2u;
     memcpy(malformed, record, pos);
     {
-        u32 envelopeOffset = pos - (u32)(5u + strlen(row.effectResource));
-        memmove(malformed + envelopeOffset + 2u,
-                malformed + envelopeOffset + 4u,
+        u32 effectOffset = pos - (u32)(5u + strlen(row.effectResource));
+        memmove(malformed + effectOffset + 2u, malformed + effectOffset + 4u,
                 1u + strlen(row.effectResource));
     }
-    if (vm_net_mock_parse_sce_combat_spawn_at(malformed, malformedLen, 0,
-                                               &spawn, &end))
+    if (vm_net_mock_parse_sce_combat_spawn_at(
+            malformed, pos - 2u, 0, &spawn, &end))
     {
-        fputs("historical short-tail SCE2 field18 envelope was accepted\n",
-              stderr);
+        fputs("short kind-3 effect tail was accepted\n", stderr);
         return 1;
     }
 
-    /* The outer resource is part of the client contract too.  Type 1 is a
-     * literal payload, whereas the literal-run encoder above emits type-2
-     * LZSS tokens.  A type-1 wrapper would make the CBE feed the compression
-     * header to LoadSceneDataFromStream instead of the SCE2 bytes. */
+    if (!verify_all_scene_entity_lists() ||
+        !verify_scene_insert(testScene, 38u, 6u, 428u, 0u, &row) ||
+        !verify_scene_insert(penglaiScene, 100u, 4u, 395u, 1u, &row) ||
+        !verify_scene_insert(taohuaScene, 102u, 8u, 619u, 4u, &row) ||
+        !verify_scene_insert(huanglingScene, 40u, 7u, 578u, 4u, &row) ||
+        !verify_scene_insert(multiMapPenglaiScene, 111u, 4u, 365u, 0u,
+                             &row))
+    {
+        return 1;
+    }
+
+    /* The historical test-map row begins exactly where the client's six-row
+     * loop ends. It must not be reported as visible before insertion. */
+    if (!load_scene_payload(testScene, payload, sizeof(payload), &payloadLen) ||
+        !vm_net_mock_scene_battle_monster_parse_entity_list(
+            payload, payloadLen, &list) ||
+        vm_net_mock_scene_battle_monster_payload_has_row(
+            payload, payloadLen, &row) ||
+        !vm_net_mock_parse_sce_combat_spawn_at(
+            payload, payloadLen, list.recordsEnd, &spawn, &end) ||
+        spawn.actorId != 1001u || end != payloadLen)
+    {
+        fputs("test-map out-of-count historical row boundary failed\n", stderr);
+        return 1;
+    }
+
+    /* Penglai's native monkey is the final counted entity. The later kind-3,
+     * kind-8 and zero word are trailing bytes and must remain untouched. */
+    if (!load_scene_payload(penglaiScene, payload, sizeof(payload), &payloadLen) ||
+        !vm_net_mock_scene_battle_monster_parse_entity_list(
+            payload, payloadLen, &list) ||
+        !vm_net_mock_scene_battle_monster_counted_spawn_at(
+            payload, payloadLen, 0, &spawn, NULL) ||
+        spawn.actorId != 1000u || spawn.x != 120u || spawn.y != 120u ||
+        vm_net_mock_read_le16_at(payload, 469u) != 8u ||
+        vm_net_mock_read_le16_at(payload, payloadLen - 2u) != 0u)
+    {
+        fputs("Penglai native monkey counted-row contract failed\n", stderr);
+        return 1;
+    }
+
     if (!vm_net_mock_scene_battle_monster_lzss_literal_encode(
             record, pos, encoded, sizeof(encoded), &encodedLen) ||
-        encodedLen < 10 || encoded[0] != 2 || encodedLen > sizeof(raw) - 4)
+        encodedLen > sizeof(raw) - 4u || encoded[0] != 2u)
     {
-        fputs("SCE2 type-2 resource wrapper was not emitted\n", stderr);
+        fputs("SCE2 type-2 wrapper emission failed\n", stderr);
         return 1;
     }
     raw[0] = (u8)encodedLen;
@@ -205,20 +395,15 @@ int main(void)
     raw[2] = (u8)(encodedLen >> 16);
     raw[3] = (u8)(encodedLen >> 24);
     memcpy(raw + 4, encoded, encodedLen);
-    /* This fixture contains one record rather than a full SCE2 payload, so
-     * exercise the resource container decoder directly.  Deployment itself
-     * additionally uses vm_net_mock_scene_battle_monster_decode_raw_sce() to
-     * assert the complete result begins with SCE2. */
     roundTripLen = vm_net_mock_decode_lzss_resource_stream(
         raw + 4, encodedLen, roundTrip, sizeof(roundTrip));
-    if (roundTripLen != pos ||
-        memcmp(roundTrip, record, pos) != 0)
+    if (roundTripLen != pos || memcmp(roundTrip, record, pos) != 0)
     {
-        fputs("SCE2 resource wrapper did not round-trip to the record\n", stderr);
+        fputs("SCE2 type-2 wrapper round trip failed\n", stderr);
         return 1;
     }
 
-    printf("scene battle monster field18 regression passed: bytes=%u actor=%s effect=%s\n",
-           pos, row.actorResource, row.effectResource);
+    printf("scene battle monster counted-entity regression passed: record=%u\n",
+           pos);
     return 0;
 }

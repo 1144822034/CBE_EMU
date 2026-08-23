@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS server_scene_battle_monsters (
     monster_id SMALLINT UNSIGNED NOT NULL,
     pos_x SMALLINT UNSIGNED NOT NULL,
     pos_y SMALLINT UNSIGNED NOT NULL,
+    quantity TINYINT UNSIGNED NOT NULL DEFAULT 1,
     display_name VARBINARY(30) NOT NULL,
     actor_resource VARBINARY(64) NOT NULL,
     -- Native SCE2 kind-3 field 18.  The client does not create a live
@@ -24,8 +25,8 @@ CREATE TABLE IF NOT EXISTS server_scene_battle_monsters (
 ) ENGINE=InnoDB;
 
 -- Existing installations are migrated automatically by the server before it
--- selects this field.  The default is an explicitly observed native scene
--- effect Actor, not a synthetic placeholder.
+-- selects effect_resource or quantity. Quantity defaults to one so an old
+-- draft keeps its previous node count until an administrator changes it.
 
 -- 保存首次部署前读取到的服务端 SCE 原始字节。后续部署始终由这份基础
 -- 资源重建，避免在已部署输出上重复追加战斗节点。

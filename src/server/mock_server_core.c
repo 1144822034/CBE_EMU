@@ -1658,6 +1658,11 @@ typedef struct
     u32 releaseCode;
     bool negotiated;
     u8 pending[(VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX + 7) / 8];
+    /* Incremented only by a final WT18/7 that clears a pending manifest
+     * entry. Runtime cache hits intentionally do not advance this value: a
+     * scene target uses it to distinguish an actual post-enter SCE install
+     * from an actor that was already available in the client cache. */
+    u32 installGeneration[VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX];
 } vm_net_mock_content_client_state;
 
 static const char *g_vm_net_mock_update_slot_files[VM_NET_MOCK_UPDATE_SLOT_COUNT] = {
@@ -1731,6 +1736,7 @@ static void vm_net_mock_content_client_note_version(
     if (state == NULL)
         return;
     memset(state->pending, 0, sizeof(state->pending));
+    memset(state->installGeneration, 0, sizeof(state->installGeneration));
     state->releaseId = haveContentUpdate ? g_vm_net_mock_content_update.id : 0;
     state->releaseCode = haveContentUpdate ? g_vm_net_mock_content_update.code : 0;
     state->negotiated = true;
@@ -1775,6 +1781,22 @@ static bool vm_net_mock_content_client_resource_pending(u32 clientId,
             (u8)(1u << ((u32)index & 7))) != 0;
 }
 
+static u32 vm_net_mock_content_client_resource_install_generation(
+    u32 clientId, const char *name)
+{
+    vm_net_mock_content_client_state *state =
+        vm_net_mock_content_client_state_find(clientId, false);
+    int index = vm_net_mock_content_update_name_index(name);
+
+    if (state == NULL || !state->negotiated || index < 0 ||
+        state->releaseId != g_vm_net_mock_content_update.id ||
+        state->releaseCode != g_vm_net_mock_content_update.code)
+    {
+        return 0;
+    }
+    return state->installGeneration[(u32)index];
+}
+
 static void vm_net_mock_content_client_mark_resource_installed(
     u32 clientId, const char *name)
 {
@@ -1788,11 +1810,50 @@ static void vm_net_mock_content_client_mark_resource_installed(
     {
         return;
     }
+    if ((state->pending[(u32)index >> 3] &
+         (u8)(1u << ((u32)index & 7))) != 0)
+    {
+        ++state->installGeneration[(u32)index];
+        if (state->installGeneration[(u32)index] == 0)
+            state->installGeneration[(u32)index] = 1;
+    }
     state->pending[(u32)index >> 3] &=
         (u8)~(1u << ((u32)index & 7));
     printf("[info][network] mock_content_client_resource_ready client=%08x "
-           "release=%u file_index=%d file=%s source=final-WT18/7\n",
-           clientId, state->releaseId, index, name);
+           "release=%u file_index=%d file=%s install_generation=%u "
+           "source=final-WT18/7\n",
+           clientId, state->releaseId, index, name,
+           state->installGeneration[(u32)index]);
+}
+
+/* A manifest entry is an invalidation candidate, not proof that the client
+ * had to download the file.  Once the destination scene reaches its real
+ * WT6/1 runtime-sync boundary, any still-pending resource used by that scene
+ * was resolved from the client's cache. */
+static bool vm_net_mock_content_client_mark_resource_runtime_ready(
+    u32 clientId, const char *name, const char *scene)
+{
+    vm_net_mock_content_client_state *state =
+        vm_net_mock_content_client_state_find(clientId, false);
+    int index = vm_net_mock_content_update_name_index(name);
+    u8 mask = 0;
+
+    if (state == NULL || !state->negotiated || index < 0 ||
+        state->releaseId != g_vm_net_mock_content_update.id ||
+        state->releaseCode != g_vm_net_mock_content_update.code)
+    {
+        return false;
+    }
+    mask = (u8)(1u << ((u32)index & 7));
+    if ((state->pending[(u32)index >> 3] & mask) == 0)
+        return false;
+    state->pending[(u32)index >> 3] &= (u8)~mask;
+    printf("[info][network] mock_content_client_resource_ready client=%08x "
+           "release=%u file_index=%d file=%s source=WT6/1-scene-runtime-cache-hit "
+           "scene=%s\n",
+           clientId, state->releaseId, index, name,
+           (scene != NULL && scene[0] != 0) ? scene : "-");
+    return true;
 }
 
 static void vm_net_mock_content_client_forget(u32 clientId)

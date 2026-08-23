@@ -28,6 +28,15 @@ typedef struct
     u32 count;
 } vm_net_mock_mail_reward_item;
 
+/* Keep the durable attachment delta, rather than its post-claim stack total,
+ * for the native incremental item-manager response. */
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u32 count;
+} vm_net_mock_mail_claimed_item;
+
 typedef struct
 {
     u32 mailId;
@@ -51,6 +60,8 @@ typedef struct
     const char *action;
     u32 result;
     u32 page;
+    vm_net_mock_mail_claimed_item claimedItems[VM_NET_MOCK_MAIL_REWARD_MAX];
+    u8 claimedItemCount;
 } vm_net_mock_mailbox_dialog;
 
 typedef struct
@@ -386,12 +397,20 @@ static void vm_net_mock_mailbox_append_attachments(
 }
 
 static bool vm_net_mock_mailbox_claim(vm_net_mock_role_state *role,
-                                      const vm_net_mock_mail_detail *detail)
+                                      const vm_net_mock_mail_detail *detail,
+                                      vm_net_mock_mail_claimed_item *claimedItems,
+                                      u8 *claimedItemCountOut)
 {
     vm_net_mock_role_state before;
     vm_net_mock_role_state projected;
+    vm_net_mock_mail_claimed_item claimed[VM_NET_MOCK_MAIL_REWARD_MAX];
     bool saved = false;
 
+    if (claimedItemCountOut)
+        *claimedItemCountOut = 0;
+    if (claimedItems)
+        memset(claimedItems, 0,
+               sizeof(*claimedItems) * VM_NET_MOCK_MAIL_REWARD_MAX);
     if (role == NULL || detail == NULL || detail->status != 1 ||
         detail->claimState != 0 || detail->itemCount == 0 ||
         g_vm_net_mock_mail_claim_transaction.active)
@@ -400,11 +419,49 @@ static bool vm_net_mock_mailbox_claim(vm_net_mock_role_state *role,
     }
     before = *role;
     projected = before;
+    memset(claimed, 0, sizeof(claimed));
     for (u8 i = 0; i < detail->itemCount; ++i)
     {
         if (!vm_net_mock_role_add_backpack_item_to_role_in_memory(
                 &projected, detail->items[i].itemId,
-                detail->items[i].count, NULL))
+                detail->items[i].count, &claimed[i].seq) ||
+            claimed[i].seq == 0)
+        {
+            return false;
+        }
+        claimed[i].itemId = detail->items[i].itemId;
+        claimed[i].count = detail->items[i].count;
+    }
+    /* The claim is irreversible after its durable save.  Preflight the exact
+     * native reward object against the projected role first, so a malformed
+     * attachment can never consume its mail without a client-visible item
+     * manager update. */
+    {
+        vm_net_mock_reward15_item_row rewardRows[VM_NET_MOCK_REWARD15_MAX_ROWS];
+        u8 rewardWire[VM_NET_MOCK_REWARD15_ITEMINFO_MAX_BYTES + 128];
+        u32 rewardPos = 5;
+        u8 rewardObjectCount = 0;
+
+        if (detail->itemCount > VM_NET_MOCK_REWARD15_MAX_ROWS)
+            return false;
+        memset(rewardRows, 0, sizeof(rewardRows));
+        memset(rewardWire, 0, sizeof(rewardWire));
+        for (u8 i = 0; i < detail->itemCount; ++i)
+        {
+            vm_net_mock_backpack_item_state *item =
+                vm_net_mock_role_find_backpack_item(&projected,
+                                                    claimed[i].itemId,
+                                                    claimed[i].seq);
+
+            if (item == NULL)
+                return false;
+            rewardRows[i].item = item;
+            rewardRows[i].acquiredCount = claimed[i].count;
+        }
+        if (!vm_net_mock_append_backpack_reward15_object(
+                rewardWire, sizeof(rewardWire), &rewardPos,
+                &rewardObjectCount, rewardRows, detail->itemCount) ||
+            rewardObjectCount != 1)
         {
             return false;
         }
@@ -417,8 +474,15 @@ static bool vm_net_mock_mailbox_claim(vm_net_mock_role_state *role,
     memset(&g_vm_net_mock_mail_claim_transaction, 0,
            sizeof(g_vm_net_mock_mail_claim_transaction));
     if (!saved)
+    {
         *role = before;
-    return saved;
+        return false;
+    }
+    if (claimedItems)
+        memcpy(claimedItems, claimed, sizeof(claimed));
+    if (claimedItemCountOut)
+        *claimedItemCountOut = detail->itemCount;
+    return true;
 }
 
 static bool vm_net_mock_mailbox_build_dialog(
@@ -428,6 +492,8 @@ static bool vm_net_mock_mailbox_build_dialog(
 {
     vm_net_mock_mailbox_list list;
     vm_net_mock_mail_detail detail;
+    vm_net_mock_mail_claimed_item claimedItems[VM_NET_MOCK_MAIL_REWARD_MAX];
+    u8 claimedItemCount = 0;
 
     if (view == NULL ||
         (operation != VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX_BASE &&
@@ -511,12 +577,15 @@ static bool vm_net_mock_mailbox_build_dialog(
         return true;
     if (operation == VM_NET_MOCK_NPC_SERVICE_CLAIM_MAIL_BASE)
     {
-        if (vm_net_mock_mailbox_claim(role, &detail))
+        if (vm_net_mock_mailbox_claim(role, &detail, claimedItems,
+                                      &claimedItemCount))
         {
             view->result = 1;
             snprintf(view->dialog, sizeof(view->dialog), "%s",
                      "\xbd\xb1\xc0\xf8\xd2\xd1\xc1\xec\xc8\xa1\xa3\xac\xc7\xeb\xd4\xda\xb1\xb3\xb0\xfc\xd6\xd0\xb2\xe9\xbf\xb4\xa1\xa3"); /* 奖励已领取，请在背包中查看。 */
             detail.claimState = 1;
+            memcpy(view->claimedItems, claimedItems, sizeof(claimedItems));
+            view->claimedItemCount = claimedItemCount;
         }
         else
         {

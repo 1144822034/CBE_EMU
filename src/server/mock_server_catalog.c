@@ -6453,6 +6453,85 @@ static bool vm_net_mock_append_chest_open_reward15_object(
     return true;
 }
 
+/* `7/15` is the native incremental-reward channel.  Unlike `7/11`, it can
+ * create a newly received row in the CBE item manager; unlike `7/7`, it does
+ * not reinterpret an existing stack as a second physical category-15 slot.
+ * A mailbox can contain multiple attachments, so retain the wire's `total`
+ * list rather than emitting one modal reward object per attachment. */
+enum
+{
+    VM_NET_MOCK_REWARD15_MAX_ROWS = 12,
+    VM_NET_MOCK_REWARD15_ITEMINFO_MAX_BYTES = 4096
+};
+
+typedef struct
+{
+    const vm_net_mock_backpack_item_state *item;
+    u32 acquiredCount;
+} vm_net_mock_reward15_item_row;
+
+static bool vm_net_mock_append_backpack_reward15_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
+    const vm_net_mock_reward15_item_row *rows, u8 rowCount)
+{
+    u8 itemInfo[VM_NET_MOCK_REWARD15_ITEMINFO_MAX_BYTES];
+    u32 itemInfoLen = 0;
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || rows == NULL ||
+        *objectCount == 0xff || rowCount == 0 ||
+        rowCount > VM_NET_MOCK_REWARD15_MAX_ROWS)
+    {
+        return false;
+    }
+    memset(itemInfo, 0, sizeof(itemInfo));
+    for (u8 i = 0; i < rowCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *item = rows[i].item;
+        u8 enhanceLevel = 0;
+        const vm_net_mock_equipment_enhance_affix_state *affixes = NULL;
+
+        if (item == NULL || item->itemId == 0 || item->seq == 0 ||
+            rows[i].acquiredCount == 0)
+        {
+            return false;
+        }
+        if (vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL)
+        {
+            enhanceLevel = (u8)SDL_min(
+                item->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+            affixes = &item->enhanceAffixes;
+        }
+        if (!vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                     item->itemId) ||
+            !vm_net_mock_seq_put_i16(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                     item->seq) ||
+            !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                     rows[i].acquiredCount) ||
+            !vm_net_mock_seq_put_item_common_extra(
+                itemInfo, sizeof(itemInfo), &itemInfoLen, item->itemId,
+                enhanceLevel,
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                affixes) ||
+            itemInfoLen == 0 || itemInfoLen > 0xffffu)
+        {
+            return false;
+        }
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 15,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "total", rowCount) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    ++*objectCount;
+    return true;
+}
+
 /*
  * Client contract:
  * - JianghuOL.CBE:0x01033544 treats 1/7/1 result=1 as the pending item-use
@@ -6994,9 +7073,11 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
     vm_net_mock_backpack_item_state *item = NULL;
     u32 itemId = 0;
     u16 seq = 0;
+    u16 equipmentEnhanceLevel = 0;
     u32 discardCount = 0;
     u32 remaining = 0;
     bool consumed = false;
+    bool discardedEquipment = false;
     u8 result = 2;
     u8 countInfo[32];
     u32 countInfoLen = 0;
@@ -7019,8 +7100,13 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
             item = vm_net_mock_role_find_backpack_item(role, parsed.itemId, 0);
         if (item != NULL)
         {
+            vm_net_mock_role_state before;
+
             itemId = item->itemId;
             seq = item->seq;
+            equipmentEnhanceLevel = item->enhanceLevel;
+            discardedEquipment =
+                vm_net_mock_find_equipment_catalog_item(itemId) != NULL;
             /*
              * The normal backpack discard action identifies one selected
              * entry but has no count field.  It means "discard one", not
@@ -7029,12 +7115,50 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
              * consume validation and returns result=2.
              */
             discardCount = parsed.haveCount ? parsed.count : 1;
-            consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq,
-                                                              discardCount, &remaining);
+            before = *role;
+            consumed = vm_net_mock_role_consume_backpack_item(
+                role, itemId, seq, discardCount, &remaining);
             if (consumed)
             {
-                result = 1;
-                vm_net_mock_role_db_save("item-discard");
+                if (!vm_net_mock_role_db_save("item-discard"))
+                {
+                    /* The client must not receive a successful 7/4 response
+                     * or an audit row for an in-memory removal that failed to
+                     * commit. */
+                    *role = before;
+                    consumed = false;
+                    remaining = 0;
+                }
+                else
+                {
+                    result = 1;
+                    if (discardedEquipment &&
+                        g_vm_mock_service_active_account_id != NULL &&
+                        g_vm_mock_service_active_account_id[0] != 0)
+                    {
+                        char operationDetail[256];
+
+                        snprintf(operationDetail, sizeof(operationDetail),
+                                 "丢弃装备 ID %u（背包序号 %u，强化 +%u）×%u，剩余 %u",
+                                 itemId, (u32)seq,
+                                 (u32)equipmentEnhanceLevel, discardCount,
+                                 remaining);
+                        if (!vm_mock_admin_operation_log_record(
+                                "discard-equipment",
+                                g_vm_mock_service_active_account_id,
+                                role->roleId, itemId, discardCount, 0,
+                                operationDetail))
+                        {
+                            printf("[error][mock-service] "
+                                   "operation_log_equipment_discard_failed "
+                                   "account=%s role=%u item=%u seq=%u "
+                                   "count=%u error=%s\n",
+                                   g_vm_mock_service_active_account_id,
+                                   role->roleId, itemId, (u32)seq,
+                                   discardCount, vm_mysql_last_error());
+                        }
+                    }
+                }
             }
         }
         else

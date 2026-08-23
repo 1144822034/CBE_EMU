@@ -2006,10 +2006,10 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     if (vm_net_mock_scene_name_is_safe(role->scene))
         snprintf(sourceScene, sizeof(sourceScene), "%s", role->scene);
 
-    /* Ordinary death returns to the nearest authored town centre.  Keep an
-     * unresolved source explicit and retain the current valid scene rather
-     * than silently turning a data failure into a bootstrap-map respawn. */
-    if (sourceScene[0] != 0 && vm_net_mock_resolve_nearest_town_center_respawn(
+    /* Ordinary death returns to the nearest authored local safe scene, then
+     * to a town centre only when its local component has none. Keep an
+     * unresolved source explicit rather than silently using the bootstrap map. */
+    if (sourceScene[0] != 0 && vm_net_mock_resolve_nearest_safe_respawn(
             sourceScene, nearestTownScene, sizeof(nearestTownScene),
             &respawnX, &respawnY, &sourceSmapRow, &targetSmapRow,
             &respawnDistance, &respawnRoute))
@@ -2319,6 +2319,16 @@ typedef struct
      * completion. Cached scenes then continue immediately with WT6/1, while
      * missing scenes use the same open loader to request WT18/7. */
     bool sceneResourceProbeAcknowledged;
+    /* A direct NPC-instance 30/1 can install its target SCE after the first
+     * scene shell exists. The first post-install WT6/1 must re-enter that
+     * shell once so mmGame restores its input/action registration before the
+     * ordinary no-posinfo completion closes the transition. */
+    bool reenterAfterSceInstall;
+    bool reenterAfterSceInstallSent;
+    /* Per-client final-WT18/7 generation at the time the direct instance
+     * target was armed. A later actor/effect callback must not be mistaken
+     * for a target-SCE installation. */
+    u32 sceInstallGenerationAtEnter;
 } vm_net_mock_scene_change_target;
 
 typedef struct
