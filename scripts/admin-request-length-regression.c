@@ -14,8 +14,9 @@
  *       Lib/unicorn-2.1.4/unicorn-import.lib -LLib/sdl2-2.0.10/lib
  *       -lSDL2main -lSDL2
  *
- * This only invokes pure request-length and embedded-script checks; it does
- * not open a listener, connect to MySQL, or modify application state.
+ * This invokes request-length and embedded-script checks plus one loopback
+ * socket-pair test for proxy-rewritten Host/Origin headers. It does not
+ * connect to MySQL or modify application state.
  */
 
 #include <stdio.h>
@@ -25,6 +26,60 @@
 #include "../src/main.c"
 #undef main
 
+static bool vm_mock_admin_open_loopback_pair(
+    vm_mock_service_socket *serverOut, vm_mock_service_socket *clientOut)
+{
+    vm_mock_service_socket listener = VM_MOCK_SERVICE_INVALID_SOCKET;
+    vm_mock_service_socket client = VM_MOCK_SERVICE_INVALID_SOCKET;
+    vm_mock_service_socket server = VM_MOCK_SERVICE_INVALID_SOCKET;
+    struct sockaddr_in address;
+#ifdef _WIN32
+    int addressLen = sizeof(address);
+#else
+    socklen_t addressLen = sizeof(address);
+#endif
+
+    if (serverOut == NULL || clientOut == NULL ||
+        !vm_mock_service_socket_init())
+    {
+        return false;
+    }
+    *serverOut = VM_MOCK_SERVICE_INVALID_SOCKET;
+    *clientOut = VM_MOCK_SERVICE_INVALID_SOCKET;
+    listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == VM_MOCK_SERVICE_INVALID_SOCKET)
+        goto fail;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(0);
+    if (bind(listener, (struct sockaddr *)&address, sizeof(address)) != 0 ||
+        getsockname(listener, (struct sockaddr *)&address, &addressLen) != 0 ||
+        listen(listener, 1) != 0)
+    {
+        goto fail;
+    }
+    client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (client == VM_MOCK_SERVICE_INVALID_SOCKET ||
+        connect(client, (struct sockaddr *)&address, sizeof(address)) != 0)
+    {
+        goto fail;
+    }
+    server = accept(listener, NULL, NULL);
+    if (server == VM_MOCK_SERVICE_INVALID_SOCKET)
+        goto fail;
+    vm_mock_service_socket_close(listener);
+    *serverOut = server;
+    *clientOut = client;
+    return true;
+
+fail:
+    vm_mock_service_socket_close(listener);
+    vm_mock_service_socket_close(server);
+    vm_mock_service_socket_close(client);
+    return false;
+}
+
 int main(int argc, char **argv)
 {
     const char requestHeader[] =
@@ -32,6 +87,14 @@ int main(int argc, char **argv)
         "Host: 127.0.0.1\r\n"
         "Content-Type: application/x-www-form-urlencoded\r\n"
         "Content-Length: 24576\r\n\r\n";
+    char proxyRequest[] =
+        "GET /healthz HTTP/1.1\r\n"
+        "Host: 127.0.0.1:19091\r\n"
+        "Origin: https://admin.example.test\r\n\r\n";
+    char proxyResponse[1024];
+    vm_mock_service_socket proxyServer = VM_MOCK_SERVICE_INVALID_SOCKET;
+    vm_mock_service_socket proxyClient = VM_MOCK_SERVICE_INVALID_SOCKET;
+    int proxyResponseLen = 0;
     u32 contentLength = 0;
     size_t totalLength = 0;
     char emptyUtf8[8];
@@ -59,6 +122,31 @@ int main(int argc, char **argv)
     const char *dropBatchError = NULL;
     u32 dropBatchItemId = 0;
     u32 serviceOptionCount = 0;
+
+    if (!vm_mock_admin_open_loopback_pair(&proxyServer, &proxyClient) ||
+        !vm_mock_admin_dispatch_request(proxyServer, proxyRequest,
+                                        sizeof(proxyRequest) - 1u, 0))
+    {
+        fprintf(stderr, "proxy Host/Origin request was rejected\n");
+        vm_mock_service_socket_close(proxyServer);
+        vm_mock_service_socket_close(proxyClient);
+        return 1;
+    }
+    proxyResponseLen = recv(proxyClient, proxyResponse,
+                            (int)sizeof(proxyResponse) - 1, 0);
+    vm_mock_service_socket_close(proxyServer);
+    vm_mock_service_socket_close(proxyClient);
+    if (proxyResponseLen <= 0)
+    {
+        fprintf(stderr, "proxy Host/Origin request returned no response\n");
+        return 1;
+    }
+    proxyResponse[proxyResponseLen] = 0;
+    if (strstr(proxyResponse, "HTTP/1.1 200 OK\r\n") == NULL)
+    {
+        fprintf(stderr, "proxy Host/Origin request did not reach healthz\n");
+        return 1;
+    }
 
     endpointPort = 19090;
     if (!vm_mock_service_parse_host_port("58.220.46.173:13317", endpointHost,
