@@ -895,3 +895,26 @@ lr=0501806f
 `TriggerAutoBattle`。下一次正常触碰可以把剩余分叉精确定位为：输入 action 未到达 callback，
 action 值不属于 `2/3/4`，或 callback 到达而其下游未执行。业务修复在取得这一首个差异前保持
 未决，不能以重发 `30/1` 或伪造 `WT4/1` 掩盖问题。
+
+### 9.20 追踪基址修正（2026-08-23 21:55）
+
+9.19 的 registration 记录已用 `sub_604` 和 `sub_8A8` 双指令指纹确认 callback 所在模块基址为
+`0x05016bd0`。但后续场景 logic 的运行时入口 `0x05017136 - 0x604` 被另一个仅用于 logic
+映射的推断值覆盖为 `0x05016b32`。两者相差 `0x9e`，所以旧追踪虽然允许了已注册 callback 的
+入口，却用错误基址比较 `sub_8A8`、`sub_8A8+0xAC4` 和 `sub_68E`，导致 action 记录全部漏失。
+
+宿主侧只读探针现将两个概念分离：
+
+- `sceneModuleCodeBase` 仍保留给 TriggerAutoBattle/scene logic 的既有调用链映射。
+- `inputDispatchModuleBase` 仅在 API `+52` 收到 callback 且双指令指纹通过时赋值，并独立用于
+  三个 input/action 地址的过滤、比较和日志。
+
+该修正不写客户内存、寄存器、PC/LR、输入队列或协议数据。`make -j2` 已通过；
+`scene-battle-monster-field18-regression.exe` 通过，仍覆盖 196 个发布 SCE 的实体集合和测试图
+五个 kind-3 战斗节点展开。当前没有运行中的客户端或服务端，因而还没有将旧日志误认作此修正
+后的 action 结果。下一次同一测试图触碰必须检查 `scene_battle_action` 是否出现，以及 action
+是否为 `2/3/4`、是否继续到 `touch-route-before-call` 和 `touch-callback-entry`。
+
+为区分 setter 之后被覆盖与 callback 未获调度，探针还会在场景 logic 中只在值改变时记录
+`Global_R9+0x5d28` 的实时输入 callback，以及 `sub_68E` 将调用的主 API `+68` 目标。两个值都
+是客户端已有状态的只读快照；它们没有被回写或用于影响事件分发。

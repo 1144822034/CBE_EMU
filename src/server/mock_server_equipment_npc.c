@@ -1649,26 +1649,44 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         if (!vm_net_mock_role_add_backpack_item(configured->itemId, grantedCount,
                                                 &grantedSeq))
         {
-            u32 soldItemId = 0;
-            u16 soldItemSeq = 0;
-            u32 salePrice = 0;
+            vm_net_mock_role_state beforeSale;
+            u32 unitSalePrice = 0;
+            u32 saleTotal = 0;
 
-            /* An Insight auto-sale is deliberately a retry of the normal
-             * backpack grant, not a synthetic reward response.  It runs only
-             * after the first insertion proved the current physical bag has
-             * no compatible row/slot, and only sells an eligible equipment
-             * instance. */
+            /* A full bag converts only this unreceived reward to copper.  It
+             * never frees a row by selling an existing item, and a failed DB
+             * write is not treated as a full-bag condition. */
             if (battleInsightBonusPercent == 0 ||
-                !vm_net_mock_battle_insight_auto_sell_one_equipment(
-                    role, &soldItemId, &soldItemSeq, &salePrice) ||
-                !vm_net_mock_role_add_backpack_item(configured->itemId,
-                                                    grantedCount, &grantedSeq))
+                !vm_net_mock_battle_insight_overflow_drop_requires_sale(
+                    role, configured->itemId, grantedCount))
             {
                 continue;
             }
-            printf("[info][network] mock_battle_insight_auto_sell role=%u sold_item=%u sold_seq=%u sale=%u reward_item=%u reward_count=%u action=retry-grant\n",
-                   role ? role->roleId : 0, soldItemId, soldItemSeq, salePrice,
-                   configured->itemId, grantedCount);
+            beforeSale = *role;
+            if (!vm_net_mock_battle_insight_apply_overflow_drop_sale(
+                    role, configured->itemId, grantedCount, &unitSalePrice,
+                    &saleTotal))
+            {
+                *role = beforeSale;
+                printf("[warn][network] mock_battle_insight_overflow_drop_sale role=%u drop_item=%u drop_count=%u action=not-sold-unpriced-or-invalid\n",
+                       role->roleId, configured->itemId, grantedCount);
+                continue;
+            }
+            if (!vm_net_mock_role_db_save("battle-insight-overflow-drop-sale"))
+            {
+                *role = beforeSale;
+                printf("[error][network] mock_battle_insight_overflow_drop_sale role=%u drop_item=%u drop_count=%u sale=%u action=rollback-persist-failed error=%s\n",
+                       role->roleId, configured->itemId, grantedCount, saleTotal,
+                       vm_mysql_last_error());
+                continue;
+            }
+            printf("[info][network] mock_battle_insight_overflow_drop_sale role=%u drop_item=%u drop_count=%u unit_sale=%u sale=%u action=drop-sold-backpack-unchanged\n",
+                   role->roleId, configured->itemId, grantedCount,
+                   unitSalePrice, saleTotal);
+            vm_autotest_note("mock_battle_insight_overflow_drop_sale role=%u drop_item=%u drop_count=%u unit_sale=%u sale=%u action=drop-sold-backpack-unchanged\n",
+                             role->roleId, configured->itemId, grantedCount,
+                             unitSalePrice, saleTotal);
+            continue;
         }
         results[resultCount].itemId = configured->itemId;
         results[resultCount].seq = grantedSeq;

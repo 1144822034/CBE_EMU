@@ -12968,6 +12968,11 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
     static u32 logicTargets[7];
     static u32 logicTargetCalls[7];
     static u32 sceneModuleCodeBase = 0;
+    /* The input callback base is independently proven by the sub_604 and
+     * sub_8A8 instruction fingerprints.  Keep it separate from the scene
+     * logic entry's tentative -0x604 derivation: the two callbacks can live
+     * at different module-local offsets. */
+    static u32 inputDispatchModuleBase = 0;
     static u32 sceneControlObject = 0;
     static u32 sceneControlCallback = 0;
     static u32 sceneControlCallbackCalls = 0;
@@ -12977,6 +12982,9 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
     static u32 inputRegistryTarget = 0;
     static u32 inputDispatchCallback = 0;
     static u32 inputRegistryTraceCount = 0;
+    static u32 lastLiveInputDispatchCallback = UINT32_MAX;
+    static u32 lastMainActionCallback = UINT32_MAX;
+    static bool inputDispatchSlotSeen = false;
     static bool logicPositionSeen = false;
     static int16_t lastLogicPlayerX = 0;
     static int16_t lastLogicPlayerY = 0;
@@ -13056,12 +13064,16 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         tracedModuleR9 = 0;
         sceneControlCallback = 0;
         sceneModuleCodeBase = 0;
+        inputDispatchModuleBase = 0;
         actionDispatchTraceCount = 0;
         actionRouteTraceCount = 0;
         actionCallbackTraceCount = 0;
         inputRegistryTarget = 0;
         inputDispatchCallback = 0;
         inputRegistryTraceCount = 0;
+        lastLiveInputDispatchCallback = UINT32_MAX;
+        lastMainActionCallback = UINT32_MAX;
+        inputDispatchSlotSeen = false;
         /* sub_1444 can register its input callback during the first screen
          * lifecycle before scene logic has reached sub_604.  The main CBE API
          * table is already stable at Global_R9+0x2054, so seed the setter
@@ -13164,9 +13176,9 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         pc != activeLogic && pc != (sceneControlCallback & ~1u) &&
         pc != (inputRegistryTarget & ~1u) &&
         pc != (inputDispatchCallback & ~1u) &&
-        pc != sceneModuleCodeBase + 0x8A8u &&
-        pc != sceneModuleCodeBase + 0xAC4u &&
-        pc != sceneModuleCodeBase + 0x68Eu)
+        pc != inputDispatchModuleBase + 0x8A8u &&
+        pc != inputDispatchModuleBase + 0xAC4u &&
+        pc != inputDispatchModuleBase + 0x68Eu)
     {
         bool dynamicTarget = false;
 
@@ -13238,7 +13250,7 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                 memcmp(observedAction, actionFingerprint,
                        sizeof(actionFingerprint)) == 0)
             {
-                sceneModuleCodeBase = registeredModuleBase;
+                inputDispatchModuleBase = registeredModuleBase;
                 inputDispatchCallback = callback;
                 actionDispatchTraceCount = 0;
                 actionRouteTraceCount = 0;
@@ -13263,17 +13275,17 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                     inputRegistryTraceCount, pc, lr, callback, priorCallback,
                     callbackOwner, (unsigned)callbackAppId, callbackBase,
                     registeredModuleBase, activeLogic, moduleR9,
-                    sceneModuleCodeBase, callbackLocal,
+                    inputDispatchModuleBase, callbackLocal,
                     g_lastSceLoadName);
             fclose(trace);
         }
         return;
     }
 
-    if (sceneModuleCodeBase != 0 &&
-        (pc == sceneModuleCodeBase + 0x8A8u ||
-         pc == sceneModuleCodeBase + 0xAC4u ||
-         pc == sceneModuleCodeBase + 0x68Eu))
+    if (inputDispatchModuleBase != 0 &&
+        (pc == inputDispatchModuleBase + 0x8A8u ||
+         pc == inputDispatchModuleBase + 0xAC4u ||
+         pc == inputDispatchModuleBase + 0x68Eu))
     {
         const char *phase = NULL;
         u32 *phaseCount = NULL;
@@ -13286,13 +13298,13 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         u32 privateObject = 0;
         u32 privateCallback = 0;
 
-        if (pc == sceneModuleCodeBase + 0x8A8u)
+        if (pc == inputDispatchModuleBase + 0x8A8u)
         {
             phase = "input-dispatch";
             phaseCount = &actionDispatchTraceCount;
             phaseLimit = 24u;
         }
-        else if (pc == sceneModuleCodeBase + 0xAC4u)
+        else if (pc == inputDispatchModuleBase + 0xAC4u)
         {
             phase = "touch-route-before-call";
             phaseCount = &actionRouteTraceCount;
@@ -13343,7 +13355,7 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                     "main_callback=%08x private_object=%08x "
                     "private_callback=%08x private_context=%08x scene=%s\n",
                     phase, *phaseCount, pc, lr, regs[0], regs[1], regs[2],
-                    regs[3], regs[4], activeLogic, sceneModuleCodeBase,
+                    regs[3], regs[4], activeLogic, inputDispatchModuleBase,
                     moduleR9, mainApi, mainCallback, privateObject,
                     privateCallback,
                     moduleR9 != 0 ? moduleR9 + 0x2D44u : 0,
@@ -13434,6 +13446,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
     {
         u32 moduleR9 = 0;
         u32 mainApi = 0;
+        u32 liveInputDispatchCallback = 0;
+        u32 mainActionCallback = 0;
         u32 privateObject = 0;
         u32 controlCallback = 0;
         u32 triggerSlot = 0;
@@ -13447,17 +13461,45 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                               sizeof(mainApi));
             (void)uc_mem_read(MTK, moduleR9 + 0x285Cu, &privateObject,
                               sizeof(privateObject));
+            (void)uc_mem_read(MTK, moduleR9 + 0x5D28u,
+                              &liveInputDispatchCallback,
+                              sizeof(liveInputDispatchCallback));
         }
         if (mainApi != 0)
         {
             (void)uc_mem_read(MTK, mainApi + 108u, &triggerSlot,
                               sizeof(triggerSlot));
+            (void)uc_mem_read(MTK, mainApi + 68u, &mainActionCallback,
+                              sizeof(mainActionCallback));
             (void)uc_mem_read(MTK, mainApi + 52u,
                               &nextInputRegistryTarget,
                               sizeof(nextInputRegistryTarget));
         }
         if ((triggerSlot & ~1u) != 0x010183A0u)
             return;
+        if (!inputDispatchSlotSeen ||
+            liveInputDispatchCallback != lastLiveInputDispatchCallback ||
+            mainActionCallback != lastMainActionCallback)
+        {
+            inputDispatchSlotSeen = true;
+            lastLiveInputDispatchCallback = liveInputDispatchCallback;
+            lastMainActionCallback = mainActionCallback;
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_input_registry phase=live-slot "
+                        "logic=%08x module_r9=%08x main_api=%08x "
+                        "live_callback=%08x registered_callback=%08x "
+                        "input_module_base=%08x main_action_callback=%08x "
+                        "scene=%s\n",
+                        activeLogic, moduleR9, mainApi,
+                        liveInputDispatchCallback, inputDispatchCallback,
+                        inputDispatchModuleBase, mainActionCallback,
+                        g_lastSceLoadName);
+                fclose(trace);
+            }
+        }
         if (mainApi != 0)
         {
             (void)uc_mem_read(MTK, mainApi + 1080u, &nextTargets[0],

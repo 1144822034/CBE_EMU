@@ -5854,8 +5854,8 @@ typedef struct
 static vm_net_mock_mail_claim_transaction g_vm_net_mock_mail_claim_transaction;
 static bool vm_net_mock_mail_claim_commit_in_transaction(u32 scopedRoleId);
 /* Equipment resale is deliberately a low-value copper sink/source.  Both the
- * explicit recovery NPC and the Battle Insight full-bag auto-sale consume this
- * one authoritative percentage. */
+ * explicit recovery NPC and Battle Insight's full-bag conversion of the
+ * unreceived drop consume this one authoritative percentage. */
 #define VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT 10u
 /* item.dsh row 828 explicitly grants this ceiling to the timed Battle
  * Insight effect only.  It is shared by the special-item acknowledgement and
