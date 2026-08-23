@@ -31,3 +31,10 @@ mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.
 [info][mock-service] listening=127.0.0.1:19090
 [info][mock-admin] listening=http://0.0.0.0:19091/
 [info][mock-service] concurrency workers=4 queue=128 state_model=serialized-legacy-context
+[info][mock-admin] request worker=3 sequence=2 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
+[info][mock-admin] request worker=1 sequence=5 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
+[info][admin] login_success failed_attempts_reset=1
+[info][mock-service] equipment_instance_schema_prepare storage=relational
+[info][network] mock_item_effect_catalog total=230 source=item.dsh
+mock_role_db_mysql_load account=07060707 source=relational roles=1 active=10438
+[info][mock-service] account_state_release account=07060707 reason=admin-management-close

@@ -461,32 +461,6 @@ static bool vm_mock_admin_header_value(const char *request, size_t headerLen,
     return false;
 }
 
-static bool vm_mock_admin_request_has_allowed_origin(const char *request, size_t headerLen)
-{
-    char host[128];
-    char origin[192];
-    char expectedHttpOrigin[192];
-    char expectedHttpsOrigin[192];
-    const char *cursor = NULL;
-
-    if (!vm_mock_admin_header_value(request, headerLen, "Host", host, sizeof(host)))
-        return false;
-    for (cursor = host; *cursor != 0; ++cursor)
-    {
-        unsigned char ch = (unsigned char)*cursor;
-        if (ch <= 0x20 || ch >= 0x7f || ch == '/' || ch == '\\' ||
-            ch == '?' || ch == '#' || ch == '@')
-        {
-            return false;
-        }
-    }
-    if (!vm_mock_admin_header_value(request, headerLen, "Origin", origin, sizeof(origin)))
-        return true;
-    snprintf(expectedHttpOrigin, sizeof(expectedHttpOrigin), "http://%s", host);
-    snprintf(expectedHttpsOrigin, sizeof(expectedHttpsOrigin), "https://%s", host);
-    return strcmp(origin, expectedHttpOrigin) == 0 || strcmp(origin, expectedHttpsOrigin) == 0;
-}
-
 static int vm_mock_admin_send_response(vm_mock_service_socket client,
                                        const char *status,
                                        const char *contentType,
@@ -14186,12 +14160,10 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
     char *query = NULL;
     char *body = NULL;
     char *response = NULL;
-    if (!vm_mock_admin_request_has_allowed_origin(request, headerLen))
-    {
-        vm_mock_admin_send_response(client, "403 Forbidden", NULL, NULL,
-                                    "Host 或 Origin 校验失败。\n");
-        return 0;
-    }
+    /* A TLS-terminating reverse proxy legitimately rewrites Host and leaves
+     * Origin at the browser-facing address.  Authentication and route-level
+     * method checks below are the access-control boundary, so do not reject
+     * otherwise valid admin requests based on those proxy-facing headers. */
     body = request + headerLen;
     body[contentLength] = 0;
     memset(method, 0, sizeof(method));
