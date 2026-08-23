@@ -783,6 +783,79 @@ static int vm_net_mock_append_scene_ready_chat_objects(u8 *out,
     return appended;
 }
 
+/* `scene_runtime_init_and_sync` can expose its first post-enter boundary as
+ * either standalone WT6/1 or the composite WT25/5+6/* subset. A direct NPC
+ * instance may need one native 30/1 only when its exact target SCE completed
+ * a final WT18/7 after that target was armed. The per-file installation
+ * generation deliberately survives later Actor/effect chunks, unlike the
+ * old single "last completed file" marker. */
+static bool vm_net_mock_try_build_instance_sce_install_reenter(
+    const vm_net_mock_scene_change_target *source,
+    u8 *out, u32 outCap, u32 *responseLenOut)
+{
+    vm_net_mock_scene_change_target target;
+    u32 installGeneration = 0;
+    u32 responseLen = 0;
+
+    if (responseLenOut != NULL)
+        *responseLenOut = 0;
+    if (source == NULL || !source->sceneEnterPosinfoSent ||
+        !source->reenterAfterSceInstall ||
+        source->reenterAfterSceInstallSent)
+    {
+        return false;
+    }
+    installGeneration = vm_net_mock_content_client_resource_install_generation(
+        g_vm_mock_service_active_client_id, source->scene);
+    if (installGeneration == 0 ||
+        installGeneration == source->sceInstallGenerationAtEnter)
+    {
+        return false;
+    }
+
+    target = *source;
+    responseLen = vm_net_mock_build_scene_channel_enter_combo_for_target(
+        &target, out, outCap);
+    if (responseLen == 0)
+        return true;
+    target.reenterAfterSceInstallSent = true;
+    vm_net_mock_remember_scene_change_target(&target);
+    printf("[info][network] mock_instance_sce_install_reenter scene=%s pos=(%u,%u) install_generation=%u->%u response=30/1 next=runtime-sync completion=30/2-no-posinfo evidence=WT18/7+JianghuOL.CBE:0x010396D6\n",
+           target.scene, target.x, target.y,
+           target.sceInstallGenerationAtEnter, installGeneration);
+    vm_autotest_note("mock_instance_sce_install_reenter scene=%s pos=(%u,%u) install_generation=%u->%u response=30/1-once next=runtime-sync evidence=WT18/7->0x010396D6\n",
+                     target.scene, target.x, target.y,
+                     target.sceInstallGenerationAtEnter, installGeneration);
+    if (responseLenOut != NULL)
+        *responseLenOut = responseLen;
+    return true;
+}
+
+/* Role-select has already created its first scene shell from actorinfo. Once
+ * that exact SCE has completed WT18/7, its manifest Actor/effect entries can
+ * be recorded as cache hits for the runtime request. This only reconciles
+ * content state; it must not construct another scene+posinfo object. */
+static void vm_net_mock_note_startup_sce_runtime_ready(const char *scene)
+{
+    vm_net_mock_role_state *role = NULL;
+
+    if (!g_vm_net_mock_title_role_scene_followup_pending ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        vm_net_mock_content_client_resource_install_generation(
+            g_vm_mock_service_active_client_id, scene) == 0)
+    {
+        return;
+    }
+    role = vm_net_mock_active_role();
+    if (role == NULL ||
+        !vm_net_mock_scene_names_equal_exact(role->scene, scene) ||
+        role->x == 0 || role->y == 0)
+    {
+        return;
+    }
+    (void)vm_net_mock_scene_client_note_runtime_ready(scene);
+}
+
 static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request, u32 requestLen,
                                                               u8 *out, u32 outCap)
 {
@@ -824,12 +897,26 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 timingTailMs = 0;
     u32 timingReadyMs = 0;
     u32 readyNearbyRoleCount = 0;
+    u32 instanceSceInstallReenterLen = 0;
     if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
         return 0;
 
     currentScene = vm_net_mock_current_scene_name();
+    vm_net_mock_note_startup_sce_runtime_ready(currentScene);
     includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
                         vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
+    if (g_vm_net_mock_last_scene_change_target_valid &&
+        g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent)
+    {
+        (void)vm_net_mock_scene_client_note_runtime_ready(
+            g_vm_net_mock_last_scene_change_target.scene);
+        if (vm_net_mock_try_build_instance_sce_install_reenter(
+                &g_vm_net_mock_last_scene_change_target, out, outCap,
+                &instanceSceInstallReenterLen))
+        {
+            return instanceSceInstallReenterLen;
+        }
+    }
     completeTeleportResourceEnter =
         g_vm_net_mock_teleport_stone_direct_enter_pending &&
         g_vm_net_mock_last_scene_change_target_valid &&
@@ -1442,6 +1529,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     u32 nearbyRoleCount = 0;
     u32 nearbyOtherInfoLen = 0;
     u8 nearbyMoveinfoCount = 0;
+    u32 instanceSceInstallReenterLen = 0;
     char missingResource[64];
     if (outCap < pos || !vm_net_mock_is_scene_task_subset_followup_request(request, requestLen))
         return 0;
@@ -1462,11 +1550,29 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
      * callback at +0x148 unset and crash at scene_draw_actor_pass(0x01014594).
      */
     currentScene = vm_net_mock_current_scene_name();
+    vm_net_mock_note_startup_sce_runtime_ready(currentScene);
     includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
                         vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
     if (completeDeferredScene)
     {
         vm_net_mock_scene_change_target target = g_vm_net_mock_last_scene_change_target;
+
+        /* This composite request is emitted from the same runtime-init phase
+         * as standalone WT6/1. Once the target SCE itself is no longer
+         * pending, any remaining counted Actor/effect entries that the client
+         * did not request are cache hits, not a reason to hold the target
+         * forever. Do not make that inference while the SCE is still pending:
+         * that would falsely treat a missing scene as already installed. */
+        if (!vm_net_mock_content_client_resource_pending(
+                g_vm_mock_service_active_client_id, target.scene))
+        {
+            (void)vm_net_mock_scene_client_note_runtime_ready(target.scene);
+        }
+        if (vm_net_mock_try_build_instance_sce_install_reenter(
+                &target, out, outCap, &instanceSceInstallReenterLen))
+        {
+            return instanceSceInstallReenterLen;
+        }
         if (!vm_net_mock_prepare_scene_enter_resources(&target,
                                                        missingResource,
                                                        sizeof(missingResource)))

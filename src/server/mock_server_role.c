@@ -5343,6 +5343,7 @@ static bool vm_net_mock_monster_mark_scene_battle_exclusions(
             "entry_id INT UNSIGNED NOT NULL AUTO_INCREMENT,"
             "scene VARBINARY(64) NOT NULL,monster_id SMALLINT UNSIGNED NOT NULL,"
             "pos_x SMALLINT UNSIGNED NOT NULL,pos_y SMALLINT UNSIGNED NOT NULL,"
+            "quantity TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "display_name VARBINARY(30) NOT NULL,actor_resource VARBINARY(64) NOT NULL,"
             "effect_resource VARBINARY(64) NOT NULL DEFAULT 'e_ghostfireR.actor',"
             "visual_hint TINYINT UNSIGNED NOT NULL DEFAULT 5,enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
@@ -5966,6 +5967,358 @@ mysql_failed:
         *errorOut = "智能装备掉落事务失败，请检查服务端 MySQL 日志";
     printf("[error][mock-admin] monster_equipment_drop_assign_failed error=%s\n",
            mysqlError);
+
+done:
+    free(monsters);
+    return ok;
+}
+
+typedef enum
+{
+    VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_ALL = 0,
+    VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_BOSS = 1,
+    VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_NON_BOSS = 2
+} vm_net_mock_monster_drop_batch_family;
+
+typedef enum
+{
+    VM_NET_MOCK_MONSTER_DROP_BATCH_ADD = 1,
+    VM_NET_MOCK_MONSTER_DROP_BATCH_REMOVE = 2
+} vm_net_mock_monster_drop_batch_mode;
+
+typedef struct
+{
+    u32 matchedMonsters;
+    u32 changedMonsters;
+    u32 addedDrops;
+    u32 removedDrops;
+    u32 alreadyPresent;
+    u32 capacitySkipped;
+    u32 sceneBattleExcluded;
+} vm_net_mock_monster_drop_batch_result;
+
+static bool vm_net_mock_monster_drop_batch_matches(
+    const vm_net_mock_monster_admin_row *row,
+    vm_net_mock_monster_drop_batch_family family, u32 levelMin,
+    u32 levelMax)
+{
+    if (row == NULL || row->level < levelMin || row->level > levelMax)
+        return false;
+    if (family == VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_BOSS)
+        return row->family == VM_NET_MOCK_MONSTER_BOSS;
+    if (family == VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_NON_BOSS)
+        return row->family != VM_NET_MOCK_MONSTER_BOSS;
+    return family == VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_ALL;
+}
+
+/* Plan against effective monster rows before the transaction.  Explicit
+ * deletion may remove a task material; that is intentionally distinct from
+ * the smart allocator, which preserves authored task drops by contract. */
+static bool vm_net_mock_monster_admin_plan_drop_batch(
+    vm_net_mock_monster_admin_row *monsters, u32 monsterCount,
+    const u32 *itemIds, u32 itemCount, vm_net_mock_monster_drop_batch_mode mode,
+    vm_net_mock_monster_drop_batch_family family, u32 levelMin, u32 levelMax,
+    u16 addRateBasisPoints, bool *changedOut,
+    vm_net_mock_monster_drop_batch_result *resultOut, const char **errorOut)
+{
+    vm_net_mock_monster_drop_batch_result result;
+
+    memset(&result, 0, sizeof(result));
+    if (errorOut)
+        *errorOut = "批量掉落配置参数无效";
+    if (resultOut)
+        memset(resultOut, 0, sizeof(*resultOut));
+    if (monsters == NULL || monsterCount == 0 ||
+        monsterCount > VM_NET_MOCK_MONSTER_CATALOG_MAX || itemIds == NULL ||
+        itemCount == 0 || itemCount > VM_NET_MOCK_MONSTER_DROP_MAX ||
+        changedOut == NULL || levelMin == 0 || levelMax == 0 ||
+        levelMin > levelMax || levelMax > 0xffu ||
+        family > VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_NON_BOSS ||
+        (mode != VM_NET_MOCK_MONSTER_DROP_BATCH_ADD &&
+         mode != VM_NET_MOCK_MONSTER_DROP_BATCH_REMOVE) ||
+        (mode == VM_NET_MOCK_MONSTER_DROP_BATCH_ADD &&
+         (addRateBasisPoints == 0 ||
+          addRateBasisPoints > VM_NET_MOCK_DROP_RATE_BASIS_POINTS_MAX)))
+    {
+        return false;
+    }
+    memset(changedOut, 0, sizeof(*changedOut) * monsterCount);
+    for (u32 item = 0; item < itemCount; ++item)
+    {
+        if (itemIds[item] == 0 ||
+            vm_net_mock_find_shop_catalog_item(itemIds[item]) == NULL)
+        {
+            if (errorOut)
+                *errorOut = "批量掉落中存在不在物品目录内的物品";
+            return false;
+        }
+        for (u32 previous = 0; previous < item; ++previous)
+        {
+            if (itemIds[previous] == itemIds[item])
+            {
+                if (errorOut)
+                    *errorOut = "批量掉落中不能重复选择同一物品";
+                return false;
+            }
+        }
+    }
+    for (u32 monster = 0; monster < monsterCount; ++monster)
+    {
+        vm_net_mock_monster_admin_row *row = &monsters[monster];
+        bool changed = false;
+
+        if (!vm_net_mock_monster_drop_batch_matches(row, family, levelMin,
+                                                     levelMax))
+        {
+            continue;
+        }
+        if (row->smartDropExcluded)
+        {
+            ++result.sceneBattleExcluded;
+            continue;
+        }
+        ++result.matchedMonsters;
+        for (u32 item = 0; item < itemCount; ++item)
+        {
+            if (mode == VM_NET_MOCK_MONSTER_DROP_BATCH_ADD)
+            {
+                if (vm_net_mock_monster_drop_row_has_item(row, itemIds[item]))
+                {
+                    ++result.alreadyPresent;
+                    continue;
+                }
+                if (row->dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX)
+                {
+                    ++result.capacitySkipped;
+                    continue;
+                }
+                row->drops[row->dropCount].itemId = itemIds[item];
+                row->drops[row->dropCount].rateBasisPoints = addRateBasisPoints;
+                ++row->dropCount;
+                ++result.addedDrops;
+                changed = true;
+                continue;
+            }
+            for (u8 drop = 0; drop < row->dropCount; ++drop)
+            {
+                if (row->drops[drop].itemId != itemIds[item])
+                    continue;
+                for (u8 next = drop + 1u; next < row->dropCount; ++next)
+                    row->drops[next - 1u] = row->drops[next];
+                memset(&row->drops[row->dropCount - 1u], 0,
+                       sizeof(row->drops[0]));
+                --row->dropCount;
+                ++result.removedDrops;
+                changed = true;
+                break;
+            }
+        }
+        if (changed)
+        {
+            changedOut[monster] = true;
+            ++result.changedMonsters;
+        }
+    }
+    if (result.matchedMonsters == 0)
+    {
+        if (errorOut)
+        {
+            *errorOut = result.sceneBattleExcluded != 0
+                            ? "筛选范围内只有受保护的场景战斗怪"
+                            : "没有怪物符合首领类型和等级范围筛选";
+        }
+        return false;
+    }
+    if (resultOut)
+        *resultOut = result;
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+static bool vm_net_mock_monster_admin_write_drop_override(
+    const vm_net_mock_monster_admin_row *row, char *query, size_t queryCap)
+{
+    if (row == NULL || query == NULL || queryCap == 0)
+        return false;
+    snprintf(query, queryCap,
+             "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
+             "defense_value,reward_exp,reward_money,drop_item_id,drop_rate_percent) "
+             "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,0,0) ON DUPLICATE KEY UPDATE "
+             "level=VALUES(level),family=VALUES(family),hp=VALUES(hp),mp=VALUES(mp),"
+             "attack_value=VALUES(attack_value),defense_value=VALUES(defense_value),"
+             "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),"
+             "drop_item_id=0,drop_rate_percent=0",
+             row->enemyId, row->level, row->family, row->hp, row->mp,
+             row->attack, row->defense, row->exp, row->gold);
+    if (!vm_mysql_exec(query))
+        return false;
+    snprintf(query, queryCap,
+             "DELETE FROM server_monster_drops WHERE monster_id=%u",
+             row->enemyId);
+    if (!vm_mysql_exec(query))
+        return false;
+    for (u8 drop = 0; drop < row->dropCount; ++drop)
+    {
+        char rateText[16];
+
+        memset(rateText, 0, sizeof(rateText));
+        vm_net_mock_format_drop_rate_basis_points(
+            row->drops[drop].rateBasisPoints, rateText, sizeof(rateText));
+        snprintf(query, queryCap,
+                 "INSERT INTO server_monster_drops("
+                 "monster_id,drop_slot,item_id,drop_rate_percent) "
+                 "VALUES(%u,%u,%u,%s)",
+                 row->enemyId, (u32)drop + 1u, row->drops[drop].itemId,
+                 rateText);
+        if (!vm_mysql_exec(query))
+            return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_monster_admin_publish_drop_override(
+    const vm_net_mock_monster_admin_row *row)
+{
+    int index = -1;
+    vm_net_mock_monster_override *override = NULL;
+
+    if (row == NULL || (index = vm_net_mock_monster_catalog_index(row->enemyId)) < 0)
+        return false;
+    override = &g_vm_net_mock_monster_overrides[index];
+    memset(override, 0, sizeof(*override));
+    override->used = true;
+    override->family = row->family;
+    override->stats.enemyId = row->enemyId;
+    override->stats.level = row->level;
+    override->stats.hp = row->hp;
+    override->stats.mp = row->mp;
+    override->stats.attack = row->attack;
+    override->stats.defense = row->defense;
+    override->stats.exp = row->exp;
+    override->stats.gold = row->gold;
+    override->dropCount = row->dropCount;
+    if (row->dropCount != 0)
+    {
+        memcpy(override->drops, row->drops,
+               sizeof(override->drops[0]) * row->dropCount);
+    }
+    return true;
+}
+
+/* Persist only affected rows in one transaction, then publish their overrides
+ * after COMMIT so failed writes cannot become live game state. */
+static bool vm_net_mock_monster_admin_apply_drop_batch(
+    const u32 *itemIds, u32 itemCount, vm_net_mock_monster_drop_batch_mode mode,
+    vm_net_mock_monster_drop_batch_family family, u32 levelMin, u32 levelMax,
+    u16 addRateBasisPoints, vm_net_mock_monster_drop_batch_result *resultOut,
+    const char **errorOut)
+{
+    vm_net_mock_monster_admin_row *monsters = NULL;
+    vm_net_mock_monster_drop_batch_result result;
+    bool changed[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    char query[1024];
+    char mysqlError[512];
+    u32 total = 0;
+    u32 listed = 0;
+    bool transactionStarted = false;
+    bool ok = false;
+
+    memset(&result, 0, sizeof(result));
+    memset(changed, 0, sizeof(changed));
+    if (resultOut)
+        memset(resultOut, 0, sizeof(*resultOut));
+    if (errorOut)
+        *errorOut = "批量掉落配置失败";
+    if (!g_vm_net_mock_monster_db_valid)
+    {
+        g_vm_net_mock_monster_db_loaded = false;
+        if (!vm_net_mock_monster_db_load())
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
+    total = vm_net_mock_monster_admin_list(NULL, 0);
+    if (total == 0 || total > VM_NET_MOCK_MONSTER_CATALOG_MAX)
+    {
+        if (errorOut)
+            *errorOut = "怪物目录为空或超过批量配置上限";
+        return false;
+    }
+    monsters = (vm_net_mock_monster_admin_row *)calloc(total, sizeof(*monsters));
+    if (monsters == NULL)
+    {
+        if (errorOut)
+            *errorOut = "批量掉落配置内存不足";
+        return false;
+    }
+    listed = vm_net_mock_monster_admin_list(monsters, total);
+    if (listed != total ||
+        !vm_net_mock_monster_mark_scene_battle_exclusions(monsters, total, NULL) ||
+        !vm_net_mock_monster_admin_plan_drop_batch(
+            monsters, total, itemIds, itemCount, mode, family, levelMin,
+            levelMax, addRateBasisPoints, changed, &result, errorOut))
+    {
+        if (listed != total && errorOut)
+            *errorOut = "怪物目录在批量配置期间发生变化";
+        goto done;
+    }
+    if (result.changedMonsters != 0)
+    {
+        if (!vm_mysql_exec("START TRANSACTION"))
+            goto mysql_failed;
+        transactionStarted = true;
+        for (u32 monster = 0; monster < total; ++monster)
+        {
+            if (changed[monster] && !vm_net_mock_monster_admin_write_drop_override(
+                                        &monsters[monster], query,
+                                        sizeof(query)))
+            {
+                goto mysql_failed;
+            }
+        }
+        if (!vm_mysql_exec("COMMIT"))
+            goto mysql_failed;
+        transactionStarted = false;
+        for (u32 monster = 0; monster < total; ++monster)
+        {
+            if (changed[monster] &&
+                !vm_net_mock_monster_admin_publish_drop_override(&monsters[monster]))
+            {
+                if (errorOut)
+                    *errorOut = "怪物目录在批量提交后发生变化";
+                goto done;
+            }
+        }
+    }
+    printf("[info][mock-admin] monster_drop_batch mode=%s family=%u levels=%u-%u "
+           "requested=%u matched=%u changed=%u added=%u removed=%u existing=%u "
+           "capacity_skipped=%u scene_excluded=%u transaction=%s\n",
+           mode == VM_NET_MOCK_MONSTER_DROP_BATCH_ADD ? "add" : "remove",
+           (u32)family, levelMin, levelMax, itemCount, result.matchedMonsters,
+           result.changedMonsters, result.addedDrops, result.removedDrops,
+           result.alreadyPresent, result.capacitySkipped,
+           result.sceneBattleExcluded,
+           result.changedMonsters == 0 ? "not-needed" : "committed");
+    if (resultOut)
+        *resultOut = result;
+    if (errorOut)
+        *errorOut = "ok";
+    ok = true;
+    goto done;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_drop_batch_failed mode=%u family=%u "
+           "levels=%u-%u requested=%u staged=%u error=%s\n",
+           (u32)mode, (u32)family, levelMin, levelMax, itemCount,
+           result.changedMonsters, mysqlError);
+    if (errorOut)
+        *errorOut = "批量掉落配置保存失败，请检查服务端 MySQL 日志";
 
 done:
     free(monsters);

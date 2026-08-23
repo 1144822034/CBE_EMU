@@ -61,7 +61,7 @@ UNICORN_LIB := Lib/unicorn-2.1.4/unicorn-import.lib
 SDL2_DIR := Lib/sdl2-2.0.10
 CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
-SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32
+SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
 .PHONY: all build client server boundary-check clean
 

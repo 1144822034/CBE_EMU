@@ -19,6 +19,10 @@ int main(void)
         "c04\xC1\xD9\xB0\xB2\xB8\xAE_10.sce"; /* c04临安府_10.sce */
     static const char linanSouthScene[] =
         "c04\xC1\xD9\xB0\xB2\xB8\xAE_01.sce"; /* c04临安府_01.sce */
+    static const char panlongNorthScene[] =
+        "23\xF3\xB4\xC1\xFA\xD5\xAF_03.sce"; /* 23蟠龙寨_03.sce */
+    static const char panlongSafeScene[] =
+        "23\xF3\xB4\xC1\xFA\xD5\xAF_02.sce"; /* 23蟠龙寨_02.sce (止水堂) */
     vm_net_mock_scene_recovery_map map;
     vm_net_mock_scene_change_target target;
     char respawnScene[64];
@@ -49,15 +53,15 @@ int main(void)
         return 1;
     }
 
-    if (!vm_net_mock_resolve_nearest_town_center_respawn(taiyiScene,
-                                                           respawnScene,
-                                                           sizeof(respawnScene),
-                                                           &x,
-                                                           &y,
-                                                           &sourceRow,
-                                                           &targetRow,
-                                                           &distance,
-                                                           &route) ||
+    if (!vm_net_mock_resolve_nearest_safe_respawn(taiyiScene,
+                                                   respawnScene,
+                                                   sizeof(respawnScene),
+                                                   &x,
+                                                   &y,
+                                                   &sourceRow,
+                                                   &targetRow,
+                                                   &distance,
+                                                   &route) ||
         strcmp(respawnScene, linanCenterScene) != 0 ||
         sourceRow != 90 || targetRow != 56 || distance != 1 ||
         route == NULL || strcmp(route, "wmap-nearest-town-center") != 0 ||
@@ -69,20 +73,44 @@ int main(void)
         return 1;
     }
 
-    if (!vm_net_mock_resolve_nearest_town_center_respawn(linanSouthScene,
-                                                           respawnScene,
-                                                           sizeof(respawnScene),
-                                                           &x,
-                                                           &y,
-                                                           &sourceRow,
-                                                           &targetRow,
-                                                           &distance,
-                                                           &route) ||
+    if (!vm_net_mock_resolve_nearest_safe_respawn(linanSouthScene,
+                                                   respawnScene,
+                                                   sizeof(respawnScene),
+                                                   &x,
+                                                   &y,
+                                                   &sourceRow,
+                                                   &targetRow,
+                                                   &distance,
+                                                   &route) ||
         strcmp(respawnScene, linanCenterScene) != 0 ||
         sourceRow != 47 || targetRow != 56 || distance != 0 ||
         route == NULL || strcmp(route, "wmap-nearest-town-center") != 0)
     {
         fputs("Linan ordinary-death respawn did not retain its town centre\n",
+              stderr);
+        return 1;
+    }
+
+    /* 23蟠龙寨_03 has no safety marker itself, but its local sMap graph
+     * reaches the authored safe 23蟠龙寨_02 in two hops.  The old city-only
+     * search instead observed the one-hop wMap edge to Penglai and made the
+     * same wrong respawn choice from this whole map group. */
+    if (!vm_net_mock_resolve_nearest_safe_respawn(panlongNorthScene,
+                                                   respawnScene,
+                                                   sizeof(respawnScene),
+                                                   &x,
+                                                   &y,
+                                                   &sourceRow,
+                                                   &targetRow,
+                                                   &distance,
+                                                   &route) ||
+        strcmp(respawnScene, panlongSafeScene) != 0 ||
+        sourceRow != 154 || targetRow != 153 || distance != 2 ||
+        route == NULL || strcmp(route, "smap-nearest-safe-scene") != 0 ||
+        !vm_net_mock_scene_recovery_load_map(respawnScene, &map) ||
+        !vm_net_mock_scene_recovery_candidate_is_clear(&map, x, y))
+    {
+        fputs("Panlong local safe-scene respawn incorrectly fell back to Penglai\n",
               stderr);
         return 1;
     }

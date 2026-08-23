@@ -156,7 +156,7 @@ static void vm_mock_admin_render_global_rewards_page(
     vm_mock_admin_text_appendf(
         &page,
         "<section class=\"card\"><h2>发放全服奖励</h2><p class=\"hint\">提交后立即给当前拥有角色的账号各创建一封收件；同账号任一角色领取后不可重复领取。至少一个附件。撤回仅关闭未领取收件，已领取物品不会删除。</p>"
-        "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"send-global-reward\"><div class=\"fields\"><label class=\"field\"><span>邮件标题</span><input name=\"title\" maxlength=\"30\" required></label><label class=\"field wide\"><span>邮件正文</span><textarea name=\"body_text\" maxlength=\"120\" required></textarea></label></div><h3>附件</h3><div class=\"items\" id=\"global-reward-items\">");
+        "<form method=\"post\" action=\"/action\" data-global-reward-form><input type=\"hidden\" name=\"action\" value=\"send-global-reward\"><div class=\"fields\"><label class=\"field\"><span>邮件标题</span><input name=\"title\" maxlength=\"30\" required></label><label class=\"field wide\"><span>邮件正文</span><textarea name=\"body_text\" maxlength=\"120\" required></textarea></label></div><h3>附件</h3><div class=\"items\" id=\"global-reward-items\">");
     for (u32 i = 0; i < VM_MOCK_ADMIN_GLOBAL_REWARD_ITEM_MAX; ++i)
     {
         char pickerId[48];
@@ -178,8 +178,8 @@ static void vm_mock_admin_render_global_rewards_page(
     }
     vm_mock_admin_text_appendf(
         &page,
-        "</div><div class=\"attachment-actions\"><button class=\"add-attachment\" id=\"global-reward-add-item\" type=\"button\">添加附件</button>"
-        "<span class=\"attachment-count\" id=\"global-reward-item-count\">已添加 1 / %u</span></div>"
+        "</div><div class=\"attachment-actions\"><button class=\"add-attachment\" id=\"global-reward-add-item\" data-global-reward-add type=\"button\">添加附件</button>"
+        "<span class=\"attachment-count\" id=\"global-reward-item-count\" data-global-reward-item-count>已添加 1 / %u</span></div>"
         "<div class=\"actions\"><button type=\"submit\">立即发放给全服账号</button></div></form></section>",
         VM_MOCK_ADMIN_GLOBAL_REWARD_ITEM_MAX);
     vm_mock_admin_render_item_picker_modal(&page, true);
@@ -206,17 +206,7 @@ static void vm_mock_admin_render_global_rewards_page(
         vm_mock_admin_text_append_html(&page, row->itemSummary[0] ? row->itemSummary : "—");
         vm_mock_admin_text_appendf(&page, "</p></article>");
     }
-    vm_mock_admin_text_appendf(
-        &page,
-        "</section></main><script>document.addEventListener('DOMContentLoaded',()=>{"
-        "const rows=[...document.querySelectorAll('[data-global-reward-row]')],add=document.querySelector('#global-reward-add-item'),counter=document.querySelector('#global-reward-item-count');"
-        "if(!rows.length||!add||!counter)return;"
-        "const fields=row=>({item:row.querySelector('[data-item-picker-input]'),count:row.querySelector('[data-global-reward-count]')});"
-        "const assign=(row,itemValue,countValue)=>{const field=fields(row);if(field.item){field.item.value=itemValue||'0';field.item.dispatchEvent(new Event('change',{bubbles:true}));window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:field.item.id}}));}if(field.count)field.count.value=countValue||'0';};"
-        "const sync=()=>{const visible=rows.filter(row=>!row.hidden);visible.forEach((row,index)=>{const order=row.querySelector('.reward-order');if(order)order.textContent=`#${index+1}`;});counter.textContent=`已添加 ${visible.length} / ${rows.length}`;add.disabled=visible.length>=rows.length;};"
-        "const clear=row=>assign(row,'0','0');"
-        "add.addEventListener('click',()=>{const row=rows.find(entry=>entry.hidden);if(!row)return;row.hidden=false;sync();const trigger=row.querySelector('[data-item-picker-open]');if(trigger)trigger.focus();});"
-        "for(const row of rows){const field=fields(row),remove=row.querySelector('[data-global-reward-remove]');if(field.item&&field.count)field.item.addEventListener('change',()=>{if(field.item.value&&field.item.value!=='0'&&Number(field.count.value)===0)field.count.value='1';});if(remove)remove.addEventListener('click',()=>{const visible=rows.filter(entry=>!entry.hidden),index=visible.indexOf(row);if(index<0)return;for(let i=index;i+1<visible.length;i++){const next=fields(visible[i+1]);assign(visible[i],next.item?next.item.value:'0',next.count?next.count.value:'0');}const last=visible[visible.length-1];clear(last);if(visible.length>1)last.hidden=true;sync();});}sync();});</script></body></html>");
+    vm_mock_admin_text_appendf(&page, "</section></main></body></html>");
 }
 
 static bool vm_mock_admin_global_reward_send(

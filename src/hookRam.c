@@ -519,6 +519,49 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 }
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
+    u32 faultRegs[10] = {0};
+    u32 sp = 0;
+    u32 lr = 0;
+    u32 pc = 0;
+    u32 cpsr = 0;
+    u32 stackWords[16] = {0};
+    u32 stackWordCount = 0;
+    int faultRegIds[10] = {
+        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+        UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,
+        UC_ARM_REG_R8, UC_ARM_REG_R9,
+    };
+    FILE *faultTrace = NULL;
+
+    (void)data;
+    for (u32 i = 0; i < 10u; ++i)
+        (void)uc_reg_read(uc, faultRegIds[i], &faultRegs[i]);
+    (void)uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+    (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    (void)uc_reg_read(uc, UC_ARM_REG_CPSR, &cpsr);
+    if (sp >= STACK_ADDRESS && sp <= STACK_ADDRESS + 0x100000u &&
+        uc_mem_read(uc, sp, stackWords, sizeof(stackWords)) == UC_ERR_OK)
+    {
+        stackWordCount = (u32)(sizeof(stackWords) / sizeof(stackWords[0]));
+    }
+    faultTrace = fopen("logs/guest-memory-fault.log", "ab");
+    if (faultTrace != NULL)
+    {
+        fprintf(faultTrace,
+                "guest_memory_fault address=%llx type=%d size=%u value=%llx "
+                "pc=%08x last=%08x lr=%08x sp=%08x cpsr=%08x",
+                (unsigned long long)address, (int)type, size,
+                (unsigned long long)(uint64_t)value, pc, lastAddress, lr, sp,
+                cpsr);
+        for (u32 i = 0; i < 10u; ++i)
+            fprintf(faultTrace, " r%u=%08x", i, faultRegs[i]);
+        for (u32 i = 0; i < stackWordCount; ++i)
+            fprintf(faultTrace, " stack%u=%08x", i, stackWords[i]);
+        fputc('\n', faultTrace);
+        fflush(faultTrace);
+        fclose(faultTrace);
+    }
     printf("地址无法访问:%x type:%d size:%u value:%llx\n", address, type, size, value);
     dumpCpuInfo();
     int regs[] = {
@@ -542,8 +585,6 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
             dumpVirtMemory(ptr, 96);
         }
     }
-    u32 sp;
-    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
     if (sp >= STACK_ADDRESS && sp <= STACK_ADDRESS + 0x100000)
         dumpVirtMemory(sp - 64, 128);
     assert(0);

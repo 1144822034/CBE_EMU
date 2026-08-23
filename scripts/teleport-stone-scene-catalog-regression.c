@@ -56,20 +56,31 @@ int main(void)
     u32 exitInfoLen = 0;
     u32 exitInfoCount = 0;
     u32 requestLen = 0;
-    u32 penglai04ExitId = 0;
+    u16 taiyiStoneX = 0;
+    u16 taiyiStoneY = 0;
+    u16 taiyiLandingX = 0;
+    u16 taiyiLandingY = 0;
     bool taiyiFound = false;
     bool penglai04Found = false;
 
     destinationCount = vm_net_mock_collect_teleport_stone_destinations(
         destinations, sizeof(destinations) / sizeof(destinations[0]));
-    if (destinationCount != 28)
-        return fail("expected every 28 authored n_telestone SCE scenes");
+    if (destinationCount == 0 ||
+        destinationCount >= VM_NET_MOCK_TELEPORT_STONE_DESTINATION_MAX)
+    {
+        return fail("expected a non-empty bounded map-backed teleport catalog");
+    }
     for (u32 i = 0; i < destinationCount; ++i)
     {
         if (!vm_net_mock_death_respawn_scene_has_teleport_stone(
                 destinations[i].scene))
         {
             return fail("catalog exposed a scene without the n_telestone actor");
+        }
+        if (!destinations[i].hasSmapRow || destinations[i].exitId == 0 ||
+            destinations[i].stoneX == 0 || destinations[i].stoneY == 0)
+        {
+            return fail("catalog exposed a scene without an sMap row or stone anchor");
         }
         if (strcmp(destinations[i].scene, taiyiScene) == 0)
         {
@@ -80,56 +91,56 @@ int main(void)
             {
                 return fail("Taiyi Peak did not retain its sMap id and alias");
             }
+            taiyiStoneX = destinations[i].stoneX;
+            taiyiStoneY = destinations[i].stoneY;
             taiyiFound = true;
         }
         if (strcmp(destinations[i].scene, penglai04Scene) == 0)
         {
-            if (destinations[i].hasSmapRow ||
-                destinations[i].exitId <
-                    VM_NET_MOCK_TELEPORT_STONE_SYNTHETIC_EXIT_BASE)
-            {
-                return fail("unmapped authored teleport scene did not get a stable id");
-            }
-            penglai04ExitId = destinations[i].exitId;
             penglai04Found = true;
         }
     }
-    if (!taiyiFound || !penglai04Found)
-        return fail("known authored teleport-stone scenes are missing from the catalog");
+    if (!taiyiFound)
+        return fail("known map-backed teleport-stone scene is missing from the catalog");
+    if (penglai04Found)
+        return fail("unmapped teleport-stone scene must not be in the catalog");
+    taiyiLandingX = taiyiStoneX;
+    taiyiLandingY = taiyiStoneY;
+    vm_net_mock_adjust_safe_player_pos_for_scene(
+        taiyiScene, &taiyiLandingX, &taiyiLandingY);
 
     if (!vm_net_mock_build_teleport_stone_exitinfo_blob(
-            exitInfo, sizeof(exitInfo), &exitInfoLen, &exitInfoCount) ||
-        exitInfoLen == 0 || exitInfoCount != destinationCount ||
-        exitInfo[0] != (u8)destinationCount)
+            exitInfo, sizeof(exitInfo), &exitInfoLen, &exitInfoCount))
     {
-        return fail("16/1 exitinfo did not serialize the complete catalog");
+        return fail("16/1 exitinfo builder rejected the map-backed catalog");
+    }
+    if (exitInfoLen < 3 || exitInfoCount != destinationCount ||
+        exitInfo[0] != 0 || exitInfo[1] != 1 ||
+        exitInfo[2] != (u8)destinationCount)
+    {
+        return fail("16/1 exitinfo metadata does not match the catalog");
     }
 
     memset(&target, 0, sizeof(target));
     if (!vm_net_mock_get_teleport_stone_catalog_target(90, &target) ||
-        strcmp(target.scene, taiyiScene) != 0 || target.exitId != 90)
+        strcmp(target.scene, taiyiScene) != 0 || target.exitId != 90 ||
+        target.x != taiyiLandingX || target.y != taiyiLandingY)
     {
-        return fail("Taiyi Peak list id did not resolve to its exact scene");
-    }
-    memset(&target, 0, sizeof(target));
-    if (!vm_net_mock_get_teleport_stone_catalog_target(penglai04ExitId, &target) ||
-        strcmp(target.scene, penglai04Scene) != 0 ||
-        target.exitId != penglai04ExitId)
-    {
-        return fail("unmapped authored list id did not resolve to its exact scene");
+        return fail("Taiyi Peak list id did not resolve to its stone anchor");
     }
 
     if (!build_exit_select_request(90, request, sizeof(request), &requestLen))
         return fail("unable to construct a 16/2 scene-stone selection request");
     memset(&target, 0, sizeof(target));
     if (!vm_net_mock_get_teleport_stone_target(request, requestLen, &target) ||
-        strcmp(target.scene, taiyiScene) != 0 || target.exitId != 90)
+        strcmp(target.scene, taiyiScene) != 0 || target.exitId != 90 ||
+        target.x != taiyiLandingX || target.y != taiyiLandingY)
     {
-        return fail("16/2 selection did not use its teleport-stone list id");
+        return fail("16/2 selection did not use its teleport-stone anchor");
     }
 
     printf("teleport-stone-scene-catalog regression passed: "
-           "entries=%u taiyi_exit=90 synthetic_exit=%u\n",
-           destinationCount, penglai04ExitId);
+           "entries=%u taiyi_exit=90 taiyi_stone=(%u,%u)\n",
+           destinationCount, taiyiStoneX, taiyiStoneY);
     return 0;
 }

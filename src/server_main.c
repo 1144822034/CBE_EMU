@@ -9,6 +9,11 @@
 #include <stdint.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <dbghelp.h>
+#else
+#include <execinfo.h>
+#include <fcntl.h>
+#include <signal.h>
 #endif
 
 #include "main.h"
@@ -21,6 +26,290 @@
 #define VM_SCHED_MAX_NET_TASKS 8
 #define VM_SCHED_MAX_TIMERS 20
 #define VM_SCHED_FRAME_MS 100u
+
+/*
+ * A service crash used to leave only the shell's "Segmentation fault" text,
+ * after the last protocol trace. Keep an out-of-band, host-only record of the
+ * failing instruction and last request boundary. It does not participate in
+ * WT construction, persistence, or client-visible state.
+ */
+typedef struct
+{
+    u32 clientId;
+    u32 requestLen;
+    u32 responseLen;
+    u32 sequence;
+    u8 wtKind;
+    u8 wtSubtype;
+    char stage[48];
+    char source[64];
+} vm_server_crash_protocol_context;
+
+static vm_server_crash_protocol_context g_vm_server_crash_protocol_context;
+
+static void vm_server_crash_note_protocol(const char *stage, u32 clientId,
+                                          u8 wtKind, u8 wtSubtype,
+                                          u32 requestLen, u32 responseLen,
+                                          const char *source)
+{
+    vm_server_crash_protocol_context *context =
+        &g_vm_server_crash_protocol_context;
+
+    ++context->sequence;
+    context->clientId = clientId;
+    context->wtKind = wtKind;
+    context->wtSubtype = wtSubtype;
+    context->requestLen = requestLen;
+    context->responseLen = responseLen;
+    snprintf(context->stage, sizeof(context->stage), "%s",
+             stage ? stage : "-");
+    snprintf(context->source, sizeof(context->source), "%s",
+             source ? source : "-");
+}
+
+static void vm_server_crash_note_protocol_stage(const char *stage)
+{
+    vm_server_crash_protocol_context *context =
+        &g_vm_server_crash_protocol_context;
+
+    ++context->sequence;
+    snprintf(context->stage, sizeof(context->stage), "%s",
+             stage ? stage : "-");
+}
+
+static void vm_server_crash_report_path(char *out, size_t outCap,
+                                        const char *suffix)
+{
+    const char *configuredDir = getenv("CBE_MOCK_CRASH_DIR");
+    time_t now = time(NULL);
+    struct tm localNow;
+
+    if (out == NULL || outCap == 0)
+        return;
+    memset(&localNow, 0, sizeof(localNow));
+#ifdef _WIN32
+    {
+        SYSTEMTIME systemTime;
+        GetLocalTime(&systemTime);
+        localNow.tm_year = (int)systemTime.wYear - 1900;
+        localNow.tm_mon = (int)systemTime.wMonth - 1;
+        localNow.tm_mday = (int)systemTime.wDay;
+        localNow.tm_hour = (int)systemTime.wHour;
+        localNow.tm_min = (int)systemTime.wMinute;
+        localNow.tm_sec = (int)systemTime.wSecond;
+        if (configuredDir == NULL || configuredDir[0] == 0)
+        {
+            CreateDirectoryA("logs", NULL);
+            CreateDirectoryA("logs\\crashes", NULL);
+        }
+    }
+#else
+    localtime_r(&now, &localNow);
+    if (configuredDir == NULL || configuredDir[0] == 0)
+    {
+        mkdir("logs", 0777);
+        mkdir("logs/crashes", 0777);
+    }
+#endif
+    snprintf(out, outCap, "%s/server-crash-%04d%02d%02d-%02d%02d%02d-%lu.%s",
+             configuredDir && configuredDir[0] ? configuredDir :
+#ifdef _WIN32
+             "logs\\crashes",
+#else
+             "logs/crashes",
+#endif
+             localNow.tm_year + 1900, localNow.tm_mon + 1, localNow.tm_mday,
+             localNow.tm_hour, localNow.tm_min, localNow.tm_sec,
+#ifdef _WIN32
+             (unsigned long)GetCurrentProcessId(),
+#else
+             (unsigned long)getpid(),
+#endif
+             suffix ? suffix : "log");
+}
+
+static void vm_server_crash_write_protocol_context(FILE *report)
+{
+    const vm_server_crash_protocol_context *context =
+        &g_vm_server_crash_protocol_context;
+
+    if (report == NULL)
+        return;
+    fprintf(report,
+            "last_protocol sequence=%u stage=%s client=%08x wt=%u/%u "
+            "request=%u response=%u source=%s\n",
+            context->sequence, context->stage, context->clientId,
+            context->wtKind, context->wtSubtype, context->requestLen,
+            context->responseLen, context->source);
+}
+
+#ifdef _WIN32
+static LONG WINAPI vm_server_unhandled_exception_filter(
+    EXCEPTION_POINTERS *exceptionPointers)
+{
+    static volatile LONG reporting = 0;
+    char reportPath[MAX_PATH];
+    char dumpPath[MAX_PATH];
+    FILE *report = NULL;
+    void *frames[48];
+    USHORT frameCount = 0;
+
+    if (InterlockedCompareExchange(&reporting, 1, 0) != 0)
+        return EXCEPTION_EXECUTE_HANDLER;
+    vm_server_crash_report_path(reportPath, sizeof(reportPath), "log");
+    vm_server_crash_report_path(dumpPath, sizeof(dumpPath), "dmp");
+    report = fopen(reportPath, "wb");
+    if (report != NULL)
+    {
+        EXCEPTION_RECORD *record = exceptionPointers &&
+                                            exceptionPointers->ExceptionRecord
+                                        ? exceptionPointers->ExceptionRecord
+                                        : NULL;
+        fprintf(report, "process=%lu thread=%lu\n",
+                (unsigned long)GetCurrentProcessId(),
+                (unsigned long)GetCurrentThreadId());
+        if (record != NULL)
+        {
+            fprintf(report, "exception=0x%08lx address=%p flags=0x%08lx\n",
+                    (unsigned long)record->ExceptionCode,
+                    record->ExceptionAddress,
+                    (unsigned long)record->ExceptionFlags);
+        }
+        if (exceptionPointers != NULL && exceptionPointers->ContextRecord != NULL)
+        {
+            CONTEXT *context = exceptionPointers->ContextRecord;
+#if defined(_M_X64) || defined(__x86_64__)
+            fprintf(report,
+                    "registers rip=%llx rsp=%llx rbp=%llx rax=%llx rbx=%llx "
+                    "rcx=%llx rdx=%llx rsi=%llx rdi=%llx\n",
+                    (unsigned long long)context->Rip,
+                    (unsigned long long)context->Rsp,
+                    (unsigned long long)context->Rbp,
+                    (unsigned long long)context->Rax,
+                    (unsigned long long)context->Rbx,
+                    (unsigned long long)context->Rcx,
+                    (unsigned long long)context->Rdx,
+                    (unsigned long long)context->Rsi,
+                    (unsigned long long)context->Rdi);
+#elif defined(_M_IX86) || defined(__i386__)
+            fprintf(report,
+                    "registers eip=%08lx esp=%08lx ebp=%08lx eax=%08lx ebx=%08lx "
+                    "ecx=%08lx edx=%08lx esi=%08lx edi=%08lx\n",
+                    (unsigned long)context->Eip, (unsigned long)context->Esp,
+                    (unsigned long)context->Ebp, (unsigned long)context->Eax,
+                    (unsigned long)context->Ebx, (unsigned long)context->Ecx,
+                    (unsigned long)context->Edx, (unsigned long)context->Esi,
+                    (unsigned long)context->Edi);
+#endif
+        }
+        vm_server_crash_write_protocol_context(report);
+        frameCount = CaptureStackBackTrace(0, (ULONG)(sizeof(frames) / sizeof(frames[0])),
+                                            frames, NULL);
+        fprintf(report, "stack_frames=%u\n", (unsigned)frameCount);
+        for (USHORT i = 0; i < frameCount; ++i)
+            fprintf(report, "  #%u %p\n", (unsigned)i, frames[i]);
+        fflush(report);
+        fclose(report);
+    }
+    if (exceptionPointers != NULL)
+    {
+        HANDLE dump = CreateFileA(dumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, NULL);
+        if (dump != INVALID_HANDLE_VALUE)
+        {
+            MINIDUMP_EXCEPTION_INFORMATION exceptionInfo;
+            memset(&exceptionInfo, 0, sizeof(exceptionInfo));
+            exceptionInfo.ThreadId = GetCurrentThreadId();
+            exceptionInfo.ExceptionPointers = exceptionPointers;
+            exceptionInfo.ClientPointers = FALSE;
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), dump,
+                              MiniDumpWithDataSegs | MiniDumpWithThreadInfo,
+                              &exceptionInfo, NULL, NULL);
+            CloseHandle(dump);
+        }
+    }
+    fprintf(stderr, "[fatal][mock-service] crash report=%s dump=%s\n",
+            reportPath, dumpPath);
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#else
+static volatile sig_atomic_t g_vm_server_crash_reporting = 0;
+
+static void vm_server_posix_crash_signal_handler(int signalNumber,
+                                                 siginfo_t *signalInfo,
+                                                 void *opaque)
+{
+    char reportPath[512];
+    char line[512];
+    void *frames[48];
+    int fd = -1;
+    int frameCount = 0;
+    int lineLen = 0;
+    (void)opaque;
+
+    if (g_vm_server_crash_reporting)
+        _Exit(128 + signalNumber);
+    g_vm_server_crash_reporting = 1;
+    vm_server_crash_report_path(reportPath, sizeof(reportPath), "log");
+    fd = open(reportPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    lineLen = snprintf(line, sizeof(line),
+                       "signal=%d address=%p pid=%lu\n",
+                       signalNumber, signalInfo ? signalInfo->si_addr : NULL,
+                       (unsigned long)getpid());
+    if (fd >= 0)
+    {
+        if (lineLen > 0)
+            (void)write(fd, line, (size_t)lineLen);
+        lineLen = snprintf(line, sizeof(line),
+                           "last_protocol sequence=%u stage=%s client=%08x "
+                           "wt=%u/%u request=%u response=%u source=%s\n",
+                           g_vm_server_crash_protocol_context.sequence,
+                           g_vm_server_crash_protocol_context.stage,
+                           g_vm_server_crash_protocol_context.clientId,
+                           g_vm_server_crash_protocol_context.wtKind,
+                           g_vm_server_crash_protocol_context.wtSubtype,
+                           g_vm_server_crash_protocol_context.requestLen,
+                           g_vm_server_crash_protocol_context.responseLen,
+                           g_vm_server_crash_protocol_context.source);
+        if (lineLen > 0)
+            (void)write(fd, line, (size_t)lineLen);
+        frameCount = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+        if (frameCount > 0)
+            backtrace_symbols_fd(frames, frameCount, fd);
+        close(fd);
+    }
+    fprintf(stderr, "[fatal][mock-service] crash report=%s\n", reportPath);
+    fflush(stderr);
+    signal(signalNumber, SIG_DFL);
+    raise(signalNumber);
+    _Exit(128 + signalNumber);
+}
+#endif
+
+static void vm_server_install_crash_reporter(void)
+{
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(vm_server_unhandled_exception_filter);
+#else
+    const int crashSignals[] = {SIGSEGV, SIGABRT, SIGFPE, SIGILL,
+#ifdef SIGBUS
+                                SIGBUS,
+#endif
+    };
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = vm_server_posix_crash_signal_handler;
+    action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&action.sa_mask);
+    for (u32 i = 0; i < sizeof(crashSignals) / sizeof(crashSignals[0]); ++i)
+        sigaction(crashSignals[i], &action, NULL);
+#endif
+    printf("[info][mock-service] crash_capture enabled dir=%s\n",
+           getenv("CBE_MOCK_CRASH_DIR") && getenv("CBE_MOCK_CRASH_DIR")[0]
+               ? getenv("CBE_MOCK_CRASH_DIR")
+               : "logs/crashes");
+}
 
 typedef struct
 {
@@ -254,6 +543,7 @@ int main(int argc, char *args[])
 
     setvbuf(stdout, NULL, _IOFBF, 262144);
     setvbuf(stderr, NULL, _IONBF, 0);
+    vm_server_install_crash_reporter();
     originalCwd[0] = 0;
     resourceCandidate[0] = 0;
     (void)getcwd(originalCwd, sizeof(originalCwd));

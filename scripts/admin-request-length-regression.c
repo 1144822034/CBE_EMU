@@ -38,6 +38,7 @@ int main(int argc, char **argv)
     char serviceForm[2048];
     char renderedNpcFields[32768];
     char renderedPortalFields[16384];
+    char renderedMonsterDropBatch[24576];
     char endpointHost[64];
     u16 endpointPort = 0;
     size_t serviceFormLen = 0;
@@ -46,10 +47,17 @@ int main(int argc, char **argv)
     u32 operationFilter = 0;
     vm_mock_admin_text renderedPage;
     vm_mock_admin_text renderedPortalPage;
+    vm_mock_admin_text renderedMonsterDropBatchPage;
     vm_mock_admin_scene_file sceneFixtures[2];
     vm_mock_admin_scene_portal portalFixture;
     vm_net_mock_npc_service_option
         serviceOptions[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
+    vm_net_mock_monster_admin_row dropFilterFixture;
+    vm_net_mock_monster_admin_row dropBatchFixtures[3];
+    vm_net_mock_monster_drop_batch_result dropBatchResult;
+    bool dropBatchChanged[3];
+    const char *dropBatchError = NULL;
+    u32 dropBatchItemId = 0;
     u32 serviceOptionCount = 0;
 
     endpointPort = 19090;
@@ -224,6 +232,126 @@ int main(int argc, char **argv)
                 "from the shared admin script\n");
         return 1;
     }
+    if (strstr(g_vm_mock_admin_script,
+               "const setupMonsterDropBatchModal") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-monster-drop-batch-open") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "data-monster-drop-batch-mode") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "data-monster-drop-batch-ids") == NULL ||
+        strstr(g_vm_mock_admin_script, "setupMonsterDropBatchModal();") == NULL)
+    {
+        fprintf(stderr,
+                "monster drop batch modal script setup is missing\n");
+        return 1;
+    }
+    vm_mock_admin_text_init(&renderedMonsterDropBatchPage,
+                            renderedMonsterDropBatch,
+                            sizeof(renderedMonsterDropBatch));
+    vm_mock_admin_render_monster_drop_batch_modal(
+        &renderedMonsterDropBatchPage, 13);
+    if (renderedMonsterDropBatchPage.truncated ||
+        strstr(renderedMonsterDropBatch,
+               "batch-configure-monster-drops") == NULL ||
+        strstr(renderedMonsterDropBatch,
+               "data-monster-drop-batch-family") == NULL ||
+        strstr(renderedMonsterDropBatch,
+               "data-monster-drop-batch-mode") == NULL ||
+        strstr(renderedMonsterDropBatch,
+               "name=\"drop_batch_level_min\"") == NULL ||
+        strstr(renderedMonsterDropBatch,
+               "name=\"drop_batch_level_max\"") == NULL ||
+        strstr(renderedMonsterDropBatch,
+               "name=\"drop_batch_item_ids\"") == NULL)
+    {
+        fprintf(stderr,
+                "monster drop batch modal configuration markup is incomplete\n");
+        return 1;
+    }
+    memset(&dropFilterFixture, 0, sizeof(dropFilterFixture));
+    dropFilterFixture.level = 40;
+    dropFilterFixture.family = VM_NET_MOCK_MONSTER_BOSS;
+    if (!vm_net_mock_monster_drop_batch_matches(
+            &dropFilterFixture, VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_ALL,
+            1, 255) ||
+        !vm_net_mock_monster_drop_batch_matches(
+            &dropFilterFixture, VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_BOSS,
+            40, 40) ||
+        vm_net_mock_monster_drop_batch_matches(
+            &dropFilterFixture,
+            VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_NON_BOSS, 1, 255))
+    {
+        fprintf(stderr, "boss and level drop-batch filtering failed\n");
+        return 1;
+    }
+    dropFilterFixture.level = 12;
+    dropFilterFixture.family = VM_NET_MOCK_MONSTER_BEAST;
+    if (!vm_net_mock_monster_drop_batch_matches(
+            &dropFilterFixture,
+            VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_NON_BOSS, 10, 15) ||
+        vm_net_mock_monster_drop_batch_matches(
+            &dropFilterFixture, VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_BOSS,
+            1, 255) ||
+        vm_net_mock_monster_drop_batch_matches(
+            &dropFilterFixture,
+            VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_NON_BOSS, 13, 20))
+    {
+        fprintf(stderr, "non-boss or range drop-batch filtering failed\n");
+        return 1;
+    }
+    if (vm_net_mock_load_shop_catalog() == 0 ||
+        g_vm_net_mock_shop_catalog[0].itemId == 0)
+    {
+        fprintf(stderr, "shop catalog fixture is unavailable for drop-batch planning\n");
+        return 1;
+    }
+    dropBatchItemId = g_vm_net_mock_shop_catalog[0].itemId;
+    memset(dropBatchFixtures, 0, sizeof(dropBatchFixtures));
+    memset(dropBatchChanged, 0, sizeof(dropBatchChanged));
+    memset(&dropBatchResult, 0, sizeof(dropBatchResult));
+    dropBatchFixtures[0].enemyId = 1;
+    dropBatchFixtures[0].level = 40;
+    dropBatchFixtures[0].family = VM_NET_MOCK_MONSTER_BOSS;
+    dropBatchFixtures[1].enemyId = 2;
+    dropBatchFixtures[1].level = 40;
+    dropBatchFixtures[1].family = VM_NET_MOCK_MONSTER_BEAST;
+    dropBatchFixtures[2].enemyId = 3;
+    dropBatchFixtures[2].level = 40;
+    dropBatchFixtures[2].family = VM_NET_MOCK_MONSTER_BOSS;
+    dropBatchFixtures[2].smartDropExcluded = true;
+    if (!vm_net_mock_monster_admin_plan_drop_batch(
+            dropBatchFixtures, 3, &dropBatchItemId, 1,
+            VM_NET_MOCK_MONSTER_DROP_BATCH_ADD,
+            VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_BOSS, 35, 45, 250,
+            dropBatchChanged, &dropBatchResult, &dropBatchError) ||
+        dropBatchResult.matchedMonsters != 1 ||
+        dropBatchResult.changedMonsters != 1 ||
+        dropBatchResult.addedDrops != 1 ||
+        dropBatchResult.sceneBattleExcluded != 1 ||
+        !dropBatchChanged[0] || dropBatchChanged[1] || dropBatchChanged[2] ||
+        dropBatchFixtures[0].dropCount != 1 ||
+        dropBatchFixtures[0].drops[0].itemId != dropBatchItemId ||
+        dropBatchFixtures[0].drops[0].rateBasisPoints != 250)
+    {
+        fprintf(stderr, "boss-range batch drop addition planning failed: %s\n",
+                dropBatchError ? dropBatchError : "unknown");
+        return 1;
+    }
+    memset(dropBatchChanged, 0, sizeof(dropBatchChanged));
+    memset(&dropBatchResult, 0, sizeof(dropBatchResult));
+    if (!vm_net_mock_monster_admin_plan_drop_batch(
+            dropBatchFixtures, 3, &dropBatchItemId, 1,
+            VM_NET_MOCK_MONSTER_DROP_BATCH_REMOVE,
+            VM_NET_MOCK_MONSTER_DROP_BATCH_FAMILY_BOSS, 35, 45, 0,
+            dropBatchChanged, &dropBatchResult, &dropBatchError) ||
+        dropBatchResult.changedMonsters != 1 ||
+        dropBatchResult.removedDrops != 1 || !dropBatchChanged[0] ||
+        dropBatchFixtures[0].dropCount != 0)
+    {
+        fprintf(stderr, "boss-range batch drop removal planning failed: %s\n",
+                dropBatchError ? dropBatchError : "unknown");
+        return 1;
+    }
     if (strstr(g_vm_mock_admin_script, "const setupNpcServices") == NULL ||
         strstr(g_vm_mock_admin_script, "data-npc-service-toggle") == NULL ||
         strstr(g_vm_mock_admin_script,
@@ -266,21 +394,44 @@ int main(int argc, char **argv)
                 "queued five-second admin toast notifications are missing\n");
         return 1;
     }
+    if (strstr(g_vm_mock_admin_script, "const setupGlobalRewards") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-global-reward-form") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-global-reward-add") == NULL ||
+        strstr(g_vm_mock_admin_script, "row.hidden=false") == NULL ||
+        strstr(g_vm_mock_admin_script, "setupGlobalRewards();") == NULL)
+    {
+        fprintf(stderr,
+                "global-reward attachment controls are not owned by the shared admin script\n");
+        return 1;
+    }
     if (strstr(g_vm_mock_admin_script, "操作日志") == NULL ||
         strcmp(vm_mock_admin_operation_log_action_label("set-role-level"),
                "设置角色等级") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("add-money"),
                "增加普通钱币") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("grant-item"),
-               "发放物品/装备") != 0)
+               "发放物品/装备") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("player-trade"),
+               "玩家交易") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("discard-equipment"),
+               "丢弃装备") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("recycle-equipment"),
+               "装备回收") != 0)
     {
         fprintf(stderr,
                 "admin operation log navigation or action labels are missing\n");
         return 1;
     }
     operationFilter = vm_mock_admin_operation_log_action_filter_from_query(
-        "type=add-money&type=spend-wcoin-shop&type=spend-wcoin-instance");
+        "type=add-money&type=player-trade&type=discard-equipment"
+        "&type=recycle-equipment&type=spend-wcoin-shop&type=spend-wcoin-instance");
     if (operationFilter == 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("player-trade"),
+               "玩家交易") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("discard-equipment"),
+               "丢弃装备") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("recycle-equipment"),
+               "装备回收") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("spend-wcoin-shop"),
                "游戏内商城消费 W 币") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("spend-wcoin-instance"),
@@ -290,6 +441,9 @@ int main(int argc, char **argv)
                                                   operationFilterSql,
                                                   sizeof(operationFilterSql)) ||
         strstr(operationFilterSql, "action_code='add-money'") == NULL ||
+        strstr(operationFilterSql, "action_code='player-trade'") == NULL ||
+        strstr(operationFilterSql, "action_code='discard-equipment'") == NULL ||
+        strstr(operationFilterSql, "action_code='recycle-equipment'") == NULL ||
         strstr(operationFilterSql, "action_code='spend-wcoin-shop'") == NULL ||
         strstr(operationFilterSql, "action_code='spend-wcoin-instance'") == NULL)
     {
@@ -300,6 +454,9 @@ int main(int argc, char **argv)
     vm_mock_admin_operation_log_append_action_filter_query(
         operationFilter, operationFilterQuery, sizeof(operationFilterQuery));
     if (strstr(operationFilterQuery, "&amp;type=add-money") == NULL ||
+        strstr(operationFilterQuery, "&amp;type=player-trade") == NULL ||
+        strstr(operationFilterQuery, "&amp;type=discard-equipment") == NULL ||
+        strstr(operationFilterQuery, "&amp;type=recycle-equipment") == NULL ||
         strstr(operationFilterQuery, "&amp;type=spend-wcoin-shop") == NULL ||
         strstr(operationFilterQuery, "&amp;type=spend-wcoin-instance") == NULL)
     {
@@ -343,6 +500,6 @@ int main(int argc, char **argv)
         }
         fclose(file);
     }
-    puts("admin request-length regression passed: service endpoint parsing + queued admin notifications + multi-type account operation logs + in-game W-coin labels + empty display + NPC service toggle/configuration + searchable SCE/GIF catalog + 24KiB body + monster search + bulk drops");
+    puts("admin request-length regression passed: service endpoint parsing + queued admin notifications + multi-type account operation logs + player trade/discard/recovery and W-coin labels + empty display + NPC service toggle/configuration + searchable SCE/GIF catalog + 24KiB body + monster search + bulk drops");
     return 0;
 }

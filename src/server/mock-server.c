@@ -92,11 +92,11 @@ static bool vm_mock_admin_operation_log_record(
 #include "mock_server_ranking.c"
 
 /* Death recovery owns the role mutation in mock_server_equipment_npc.c, while
- * the nearest safe town centre is derived from sMap/wMap topology and SCE
+ * the nearest safe local scene or town fallback is derived from sMap/wMap topology and SCE
  * resources in mock_server_scene_task.c.  Keep this narrow declaration here
  * so both pieces remain in their proper business module despite the single
  * aggregation unit. */
-static bool vm_net_mock_resolve_nearest_town_center_respawn(
+static bool vm_net_mock_resolve_nearest_safe_respawn(
     const char *fromScene, char *sceneOut, size_t sceneOutCap,
     u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
     u32 *distanceOut, const char **routeOut);

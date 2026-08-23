@@ -608,6 +608,12 @@ static u32 vm_net_mock_process_request_bytes(u32 connectId,
      * new screen then stalls before emitting its post-enter follow-up request.
      */
     source = g_netLastHandledValid ? g_netLastHandledSource : "-";
+#ifdef CBE_SERVER_ONLY
+    vm_server_crash_note_protocol("response-built",
+                                  g_vm_mock_service_active_client_id,
+                                  requestWtKind, requestWtSubtype,
+                                  requestLen, responseLen, source);
+#endif
     if (haveWtHeader)
     {
         vm_autotest_note("net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
@@ -1166,6 +1172,10 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     g_schedulerTick = scheduler_get_tick_ms() / VM_SCHED_FRAME_MS;
     g_vm_mock_service_active_client_id = requestMeta.clientId;
     requestProcessStartMs = scheduler_get_tick_ms();
+#ifdef CBE_SERVER_ONLY
+    vm_server_crash_note_protocol("request-dispatch", requestMeta.clientId,
+                                  0, 0, payloadLen, 0, "-");
+#endif
     responseLen = vm_net_mock_process_request_bytes(0,
                                                     requestBuffer + requestMetaLen,
                                                     payloadLen,
@@ -1179,6 +1189,9 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         vm_mock_service_capture_session_presence(requestMeta.clientId);
         vm_mock_service_account_capture(accountState);
     }
+#ifdef CBE_SERVER_ONLY
+    vm_server_crash_note_protocol_stage("state-captured");
+#endif
     memset(g_vm_mock_service_login_issue_username, 0, sizeof(g_vm_mock_service_login_issue_username));
     memset(g_vm_mock_service_login_issue_password, 0, sizeof(g_vm_mock_service_login_issue_password));
     g_vm_mock_service_login_issue_result = 0;
@@ -1195,6 +1208,9 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             responseBuffer, responseLen, VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX,
             19);
     }
+#ifdef CBE_SERVER_ONLY
+    vm_server_crash_note_protocol_stage("response-audited");
+#endif
     if (closeAfterData)
         responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA;
 
@@ -1208,6 +1224,9 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                    requestProcessEndMs - requestProcessStartMs : 0);
         return 0;
     }
+#ifdef CBE_SERVER_ONLY
+    vm_server_crash_note_protocol_stage("response-header-sent");
+#endif
     if (responseLen > 0 && !vm_mock_service_send_all(client, responseBuffer, responseLen))
     {
         printf("[warn][mock-service] response_send_failed stage=body account=%s request=%u response=%u process_ms=%u\n",
@@ -1216,6 +1235,9 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                    requestProcessEndMs - requestProcessStartMs : 0);
         return 0;
     }
+#ifdef CBE_SERVER_ONLY
+    vm_server_crash_note_protocol_stage("response-body-sent");
+#endif
 
     if (vm_net_mock_verbose_logging_enabled() && handledValid &&
         strcmp(handledSource, "builtin-actor-moveinfo-ack") == 0)

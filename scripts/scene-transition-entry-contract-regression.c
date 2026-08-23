@@ -388,57 +388,37 @@ static int assert_invalidated_scene_completion_order(const char *targetScene)
               stderr);
         return 1;
     }
+    /* A missing SCE requests WT18/7 before scene_runtime_init_and_sync can
+     * emit WT6/1. Its Actor dependencies can already exist in the client
+     * cache, so the first real WT6/1 after the final SCE chunk is evidence
+     * that those pending manifest names were resolved without downloads.
+     * This is deliberately not an instance-guide target: an ordinary entered
+     * scene must still complete directly with one no-posinfo 30/2. */
+    vm_net_mock_note_update_chunk_complete(targetScene);
     responseLen = vm_net_mock_build_scene_resource_followup_response(
-        taskSubset, taskSubsetLen, response, sizeof(response));
-    if (responseLen == 0 ||
-        response_has_object(response, responseLen, 0x1e, 1) ||
-        response_has_object(response, responseLen, 0x1e, 2) ||
-        !g_vm_net_mock_last_scene_change_target_valid ||
-        !g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent)
-    {
-        fputs("pending instance-style WT6/1 repeated or completed the scene\n",
-              stderr);
-        return 1;
-    }
-
-    vm_net_mock_content_client_mark_resource_installed(clientId, targetScene);
-    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
-        taskSubset, taskSubsetLen, response, sizeof(response));
-    if (responseLen == 0 ||
-        count_scene_result_posinfo(response, responseLen, true) != 0 ||
-        count_scene_result_posinfo(response, responseLen, false) != 0 ||
-        !g_vm_net_mock_last_scene_change_target_valid)
-    {
-        fputs("SCE completion ignored a pending combat Actor\n", stderr);
-        return 1;
-    }
-
-    vm_net_mock_content_client_mark_resource_installed(
-        clientId, spawn.actorResource);
-    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
-        taskSubset, taskSubsetLen, response, sizeof(response));
-    if (responseLen == 0 ||
-        count_scene_result_posinfo(response, responseLen, true) != 0 ||
-        count_scene_result_posinfo(response, responseLen, false) != 0 ||
-        !g_vm_net_mock_last_scene_change_target_valid)
-    {
-        fputs("motion Actor completion ignored a pending effect Actor\n",
-              stderr);
-        return 1;
-    }
-
-    vm_net_mock_content_client_mark_resource_installed(
-        clientId, spawn.effectResource);
-    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
         taskSubset, taskSubsetLen, response, sizeof(response));
     if (responseLen == 0 ||
         count_scene_result_posinfo(response, responseLen, true) != 0 ||
         count_scene_result_posinfo(response, responseLen, false) != 1 ||
         g_vm_net_mock_last_scene_change_target_valid ||
         !g_vm_net_mock_last_completed_scene_change_target_valid ||
-        !g_vm_net_mock_last_completed_scene_change_target.sceneCompletionSent)
+        !g_vm_net_mock_last_completed_scene_change_target.sceneCompletionSent ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.actorResource) ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.effectResource))
     {
-        fputs("final WT18/7 follow-up did not complete the scene exactly once\n",
+        fputs("WT6/1 did not reconcile cached combat dependencies and complete once\n",
+              stderr);
+        return 1;
+    }
+    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
+        taskSubset, taskSubsetLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        count_scene_result_posinfo(response, responseLen, false) != 0)
+    {
+        fputs("repeated WT6/1 completed the cache-hit scene more than once\n",
               stderr);
         return 1;
     }
@@ -482,6 +462,8 @@ static int assert_invalidated_scene_completion_order(const char *targetScene)
     }
 
     g_vm_mock_service_active_client_id = 0;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
     memset(g_vm_net_mock_content_client_states, 0,
            sizeof(g_vm_net_mock_content_client_states));
     memset(&g_vm_net_mock_content_update, 0,
@@ -524,6 +506,8 @@ static int assert_instance_direct_enter_followup_order(const char *targetScene)
     g_vm_net_mock_scene_moveinfo_npc_seeded = false;
     g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] = 0;
     g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] = 0;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
 
     memset(&seed, 0, sizeof(seed));
     seed.actorId = 20092;
@@ -601,6 +585,332 @@ cleanup:
     g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
     g_vm_net_mock_role_db_valid = savedRoleDbValid;
     return result;
+}
+
+/* A direct NPC instance is different from a normal 30/1 target only when the
+ * target SCE was actually delivered through WT18/7. The first runtime-sync
+ * request after that install must re-enter once through 30/1, then the
+ * client's natural second runtime request owns the existing NPC/30/2
+ * completion. */
+static int assert_instance_sce_install_reenter_order(const char *targetScene)
+{
+    const u32 clientId = 0x40506070u;
+    vm_net_mock_scene_npcinfo_seed seed;
+    u8 taskSubset[256];
+    u8 response[4096];
+    u8 sceneData[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    vm_net_mock_sce_combat_spawn spawn;
+    u32 taskSubsetLen = 0;
+    u32 responseLen = 0;
+    u32 initialTargetSerial = 0;
+    u32 sceneLen = 0;
+    u32 sceneStart = 0;
+    bool haveSpawn = false;
+
+    memset(&spawn, 0, sizeof(spawn));
+    sceneLen = vm_net_mock_load_scene_resource(targetScene, sceneData,
+                                                sizeof(sceneData));
+    sceneStart = vm_net_mock_scene_payload_start(sceneData, sceneLen);
+    for (u32 off = sceneStart; sceneStart != 0 && off + 14 <= sceneLen; ++off)
+    {
+        u32 end = 0;
+
+        if (!vm_net_mock_parse_sce_combat_spawn_at(
+                sceneData, sceneLen, off, &spawn, &end))
+        {
+            continue;
+        }
+        haveSpawn = true;
+        break;
+    }
+    if (!haveSpawn)
+    {
+        fputs("instance SCE-install fixture has no structured combat dependency\n",
+              stderr);
+        return 1;
+    }
+
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = 1;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    g_vm_net_mock_role_db.roles[0].roleId = 1;
+    snprintf(g_vm_net_mock_role_db.roles[0].scene,
+             sizeof(g_vm_net_mock_role_db.roles[0].scene), "%s", targetScene);
+    g_vm_net_mock_role_db.roles[0].x = 120;
+    g_vm_net_mock_role_db.roles[0].y = 120;
+    memset(&g_vm_net_mock_last_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_scene_change_target));
+    memset(&g_vm_net_mock_last_completed_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_completed_scene_change_target));
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    g_vm_net_mock_scene_moveinfo_npc_pending = false;
+    g_vm_net_mock_scene_moveinfo_npc_seeded = false;
+    g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] = 0;
+    g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] = 0;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    g_vm_net_mock_content_update_loaded = true;
+    g_vm_net_mock_content_update.enabled = true;
+    g_vm_net_mock_content_update.id = 903;
+    g_vm_net_mock_content_update.code = 904;
+    g_vm_net_mock_content_update.nameCount = 3;
+    snprintf(g_vm_net_mock_content_update.names[0],
+             sizeof(g_vm_net_mock_content_update.names[0]), "%s", targetScene);
+    snprintf(g_vm_net_mock_content_update.names[1],
+             sizeof(g_vm_net_mock_content_update.names[1]), "%s",
+             spawn.actorResource);
+    snprintf(g_vm_net_mock_content_update.names[2],
+             sizeof(g_vm_net_mock_content_update.names[2]), "%s",
+             spawn.effectResource);
+    g_vm_mock_service_active_client_id = clientId;
+    vm_net_mock_content_client_note_version(clientId, true, false);
+
+    memset(&seed, 0, sizeof(seed));
+    seed.actorId = 20092;
+    snprintf(seed.instanceScene, sizeof(seed.instanceScene), "%s", targetScene);
+    seed.instanceX = 120;
+    seed.instanceY = 120;
+    responseLen = vm_net_mock_build_instance_enter_response(
+        &seed, response, sizeof(response));
+    if (responseLen == 0 ||
+        response[4] != 1 ||
+        !response_has_object(response, responseLen, 0x1e, 1) ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_scene_change_target.reenterAfterSceInstall ||
+        g_vm_net_mock_last_scene_change_target.reenterAfterSceInstallSent ||
+        g_vm_net_mock_last_scene_change_target.sceInstallGenerationAtEnter != 0)
+    {
+        fputs("instance 30/1 did not arm the SCE-install re-entry contract\n",
+              stderr);
+        return 1;
+    }
+    initialTargetSerial = g_vm_net_mock_last_scene_change_target_serial;
+    if (!build_scene_task_subset_request(taskSubset, sizeof(taskSubset),
+                                         &taskSubsetLen) || taskSubsetLen != 39)
+    {
+        fputs("could not construct instance SCE-install runtime request\n", stderr);
+        return 1;
+    }
+
+    vm_net_mock_note_update_chunk_complete(targetScene);
+    /* Deliberately complete another target dependency after the SCE. The old
+     * one-name marker was overwritten here and could no longer prove that the
+     * SCE itself installed after direct entry. */
+    vm_net_mock_note_update_chunk_complete(spawn.effectResource);
+    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
+        taskSubset, taskSubsetLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        response[4] != 1 ||
+        !response_has_object(response, responseLen, 0x1e, 1) ||
+        count_scene_result_posinfo(response, responseLen, false) != 0 ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_scene_change_target.reenterAfterSceInstallSent ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.actorResource) ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.effectResource) ||
+        g_vm_net_mock_last_scene_change_target_serial == initialTargetSerial)
+    {
+        fputs("first composite runtime request after final SCE install did not re-enter once\n",
+              stderr);
+        return 1;
+    }
+
+    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
+        taskSubset, taskSubsetLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        response_has_object(response, responseLen, 0x1e, 1) ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        count_scene_result_posinfo(response, responseLen, false) != 1 ||
+        g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_completed_scene_change_target_valid ||
+        !g_vm_net_mock_last_completed_scene_change_target.sceneCompletionSent)
+    {
+        fputs("second instance runtime request did not finish with one no-posinfo 30/2\n",
+              stderr);
+        return 1;
+    }
+
+    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
+        taskSubset, taskSubsetLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        response_has_object(response, responseLen, 0x1e, 1) ||
+        response_has_object(response, responseLen, 0x1e, 2))
+    {
+        fputs("repeated post-install instance runtime request emitted another scene object\n",
+              stderr);
+        return 1;
+    }
+
+    g_vm_mock_service_active_client_id = 0;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
+    return 0;
+}
+
+/* Role-select has already created its first scene shell from actorinfo. A
+ * later SCE install must finish that shell's startup, never inject another
+ * 30/1. The client can follow an invalid second 30/1 with WT2/3 then WT25/5;
+ * model that observed shape and keep every response position-free. */
+static int assert_startup_sce_install_no_reenter_order(const char *targetScene)
+{
+    const u32 clientId = 0x50607080u;
+    vm_net_mock_sce_combat_spawn spawn;
+    u8 taskSubset[256];
+    u8 sceneChange[256];
+    u8 response[4096];
+    u8 sceneData[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u32 taskSubsetLen = 0;
+    u32 sceneChangeLen = 0;
+    u32 responseLen = 0;
+    u32 sceneLen = 0;
+    u32 sceneStart = 0;
+    bool haveSpawn = false;
+
+    memset(&spawn, 0, sizeof(spawn));
+    sceneLen = vm_net_mock_load_scene_resource(targetScene, sceneData,
+                                                sizeof(sceneData));
+    sceneStart = vm_net_mock_scene_payload_start(sceneData, sceneLen);
+    for (u32 off = sceneStart; sceneStart != 0 && off + 14 <= sceneLen; ++off)
+    {
+        u32 end = 0;
+
+        if (!vm_net_mock_parse_sce_combat_spawn_at(
+                sceneData, sceneLen, off, &spawn, &end))
+        {
+            continue;
+        }
+        haveSpawn = true;
+        break;
+    }
+    if (!haveSpawn)
+    {
+        fputs("startup SCE-install fixture has no structured combat dependency\n",
+              stderr);
+        return 1;
+    }
+
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = 1;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    g_vm_net_mock_role_db.roles[0].roleId = 1;
+    snprintf(g_vm_net_mock_role_db.roles[0].scene,
+             sizeof(g_vm_net_mock_role_db.roles[0].scene), "%s", targetScene);
+    g_vm_net_mock_role_db.roles[0].x = 120;
+    g_vm_net_mock_role_db.roles[0].y = 120;
+    memset(&g_vm_net_mock_last_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_scene_change_target));
+    memset(&g_vm_net_mock_last_completed_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_completed_scene_change_target));
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    g_vm_net_mock_scene_moveinfo_npc_pending = false;
+    g_vm_net_mock_scene_moveinfo_npc_seeded = false;
+    g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] = 0;
+    g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] = 0;
+    g_vm_net_mock_title_role_scene_followup_pending = true;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    g_vm_net_mock_content_update_loaded = true;
+    g_vm_net_mock_content_update.enabled = true;
+    g_vm_net_mock_content_update.id = 905;
+    g_vm_net_mock_content_update.code = 906;
+    g_vm_net_mock_content_update.nameCount = 3;
+    snprintf(g_vm_net_mock_content_update.names[0],
+             sizeof(g_vm_net_mock_content_update.names[0]), "%s", targetScene);
+    snprintf(g_vm_net_mock_content_update.names[1],
+             sizeof(g_vm_net_mock_content_update.names[1]), "%s",
+             spawn.actorResource);
+    snprintf(g_vm_net_mock_content_update.names[2],
+             sizeof(g_vm_net_mock_content_update.names[2]), "%s",
+             spawn.effectResource);
+    g_vm_mock_service_active_client_id = clientId;
+    vm_net_mock_content_client_note_version(clientId, true, false);
+
+    if (!build_scene_task_subset_request(taskSubset, sizeof(taskSubset),
+                                         &taskSubsetLen) || taskSubsetLen != 39)
+    {
+        fputs("could not construct startup SCE-install runtime request\n", stderr);
+        return 1;
+    }
+
+    vm_net_mock_note_update_chunk_complete(targetScene);
+    vm_net_mock_note_update_chunk_complete(spawn.effectResource);
+    responseLen = vm_net_mock_build_scene_resource_followup_response(
+        taskSubset, taskSubsetLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        count_scene_result_posinfo(response, responseLen, false) > 1 ||
+        g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_completed_scene_change_target_valid ||
+        g_vm_net_mock_title_role_scene_followup_pending ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.actorResource) ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.effectResource))
+    {
+        fputs("startup final SCE install injected another scene entry\n",
+              stderr);
+        return 1;
+    }
+
+    if (!build_scene_change_request(
+            sceneChange, sizeof(sceneChange), targetScene,
+            g_vm_net_mock_last_completed_scene_change_target.exitId,
+            &sceneChangeLen))
+    {
+        fputs("could not construct startup post-followup WT2/3 request\n", stderr);
+        return 1;
+    }
+    responseLen = vm_net_mock_build_scene_change_combo_response(
+        sceneChange, sceneChangeLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_completed_scene_change_target_valid)
+    {
+        fputs("startup WT2/3 re-opened a completed scene\n",
+              stderr);
+        return 1;
+    }
+
+    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
+        taskSubset, taskSubsetLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        g_vm_net_mock_last_scene_change_target_valid)
+    {
+        fputs("startup WT25/5 re-opened a completed scene\n",
+              stderr);
+        return 1;
+    }
+
+    g_vm_mock_service_active_client_id = 0;
+    g_vm_net_mock_title_role_scene_followup_pending = false;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
+    return 0;
 }
 
 static int assert_post_enter_npc_seed_handoff(void)
@@ -989,6 +1299,10 @@ int main(void)
     if (assert_invalidated_scene_completion_order(targetScene) != 0)
         return 1;
     if (assert_instance_direct_enter_followup_order(targetScene) != 0)
+        return 1;
+    if (assert_instance_sce_install_reenter_order(targetScene) != 0)
+        return 1;
+    if (assert_startup_sce_install_no_reenter_order(targetScene) != 0)
         return 1;
 
     puts("scene transition entry contract regression passed");
