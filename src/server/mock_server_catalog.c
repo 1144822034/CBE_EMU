@@ -1935,86 +1935,69 @@ static const vm_net_mock_shop_catalog_item *vm_net_mock_find_shop_catalog_item(u
     return NULL;
 }
 
-/* Battle心得 may free a single physical bag row only when a rolled reward
- * cannot be inserted.  Sell the least valuable ordinary equipment instance
- * first, use the same 10% base-price rule as the explicit recovery NPC, and
- * never touch consumables, quest items, equipped instances or enhanced-price
- * guesses.  The caller retries its normal grant only after this commit. */
-static bool vm_net_mock_battle_insight_auto_sell_one_equipment(
-    vm_net_mock_role_state *role, u32 *soldItemIdOut, u16 *soldSeqOut,
-    u32 *salePriceOut)
+/* A Battle Insight full-bag conversion may only affect the rolled reward.
+ * First distinguish a physical no-space condition from a failed persistent
+ * write: the latter must leave both the reward and all existing backpack rows
+ * untouched.  The projected add also covers stack merging, so a full bag with
+ * room in an existing stack is still a normal grant rather than a sale. */
+static bool vm_net_mock_battle_insight_overflow_drop_requires_sale(
+    const vm_net_mock_role_state *role, u32 itemId, u32 count)
 {
-    vm_net_mock_role_state before;
-    const vm_net_mock_shop_catalog_item *bestCatalog = NULL;
-    vm_net_mock_backpack_item_state *bestItem = NULL;
-    u32 bestPrice = 0;
-    u32 bestItemId = 0;
-    u16 bestItemSeq = 0;
-    u32 remaining = 0;
+    vm_net_mock_role_state projected;
 
-    if (soldItemIdOut)
-        *soldItemIdOut = 0;
-    if (soldSeqOut)
-        *soldSeqOut = 0;
-    if (salePriceOut)
-        *salePriceOut = 0;
-    if (role == NULL ||
+    if (role == NULL || itemId == 0 || count == 0 ||
         vm_net_mock_role_backpack_count(role) < role->backpackCapacity)
     {
         return false;
     }
-    for (u32 index = 0; index < vm_net_mock_role_backpack_count(role); ++index)
-    {
-        vm_net_mock_backpack_item_state *item = &role->backpackItems[index];
-        const vm_net_mock_shop_catalog_item *catalog =
-            vm_net_mock_find_shop_catalog_item(item->itemId);
-        u32 resale = 0;
+    projected = *role;
+    return !vm_net_mock_role_add_backpack_item_to_role_in_memory(
+        &projected, itemId, count, NULL);
+}
 
-        if (item->itemId == 0 || item->seq == 0 || item->count != 1 ||
-            catalog == NULL || !catalog->isEquip || catalog->price == 0)
-        {
-            continue;
-        }
-        resale = (catalog->price / 100u) *
-                     VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
-                 (((catalog->price % 100u) *
-                       VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
-                   99u) /
-                  100u);
-        if (bestItem == NULL || resale < bestPrice ||
-            (resale == bestPrice && item->seq < bestItem->seq))
-        {
-            bestItem = item;
-            bestCatalog = catalog;
-            bestPrice = resale;
-            bestItemId = item->itemId;
-            bestItemSeq = item->seq;
-        }
+/* Credit the value of a reward that cannot enter an already full backpack.
+ * This deliberately never reads, consumes, reorders, or otherwise mutates a
+ * backpack row.  The caller owns the one role-state persistence transaction
+ * and restores its snapshot if that commit fails. */
+static bool vm_net_mock_battle_insight_apply_overflow_drop_sale(
+    vm_net_mock_role_state *role, u32 itemId, u32 count,
+    u32 *unitPriceOut, u32 *saleTotalOut)
+{
+    const vm_net_mock_shop_catalog_item *catalog =
+        vm_net_mock_find_shop_catalog_item(itemId);
+    u32 unitPrice = 0;
+    u32 saleTotal = 0;
+
+    if (unitPriceOut)
+        *unitPriceOut = 0;
+    if (saleTotalOut)
+        *saleTotalOut = 0;
+    if (role == NULL || itemId == 0 || count == 0 || catalog == NULL ||
+        catalog->price == 0)
+    {
+        return false;
     }
-    if (bestItem == NULL || bestCatalog == NULL || bestPrice == 0)
+    unitPrice = (catalog->price / 100u) *
+                    VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
+                (((catalog->price % 100u) *
+                      VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
+                  99u) /
+                 100u);
+    {
+        uint64_t exactTotal = (uint64_t)unitPrice * count;
+        saleTotal = exactTotal > 0xffffffffull ? 0xffffffffu :
+                                                 (u32)exactTotal;
+    }
+    if (unitPrice == 0 || saleTotal == 0)
         return false;
 
-    before = *role;
-    if (!vm_net_mock_role_consume_backpack_item(role, bestItemId,
-                                                 bestItemSeq, 1, &remaining) ||
-        remaining != 0)
-    {
-        *role = before;
-        return false;
-    }
-    role->money = 0xffffffffu - role->money < bestPrice ?
-                      0xffffffffu : role->money + bestPrice;
-    if (!vm_net_mock_role_db_save("battle-insight-auto-sell"))
-    {
-        *role = before;
-        return false;
-    }
-    if (soldItemIdOut)
-        *soldItemIdOut = bestCatalog->itemId;
-    if (soldSeqOut)
-        *soldSeqOut = bestItemSeq;
-    if (salePriceOut)
-        *salePriceOut = bestPrice;
+    role->money = 0xffffffffu - role->money < saleTotal
+                      ? 0xffffffffu
+                      : role->money + saleTotal;
+    if (unitPriceOut)
+        *unitPriceOut = unitPrice;
+    if (saleTotalOut)
+        *saleTotalOut = saleTotal;
     return true;
 }
 
