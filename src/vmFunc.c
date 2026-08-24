@@ -671,18 +671,67 @@ static int vm_resource_is_bare_client_asset(const char *name)
     extension = strrchr(name, '.');
     return extension != NULL &&
            (_stricmp(extension, ".actor") == 0 ||
-            _stricmp(extension, ".gif") == 0);
+             _stricmp(extension, ".gif") == 0);
+}
+
+/* Temporary, bounded evidence for scene Actor resolution.  Limit generic
+ * entries to the SCE parser range so startup UI Actor/GIF traffic cannot
+ * consume the trace budget before a scene body Actor is examined.  The exact
+ * test body name remains visible at any CBE PC.  This observes host API
+ * parameters only; it neither changes guest state nor alters a result. */
+static void vm_actor_resource_trace(const char *phase, const char *name,
+                                    u32 dataPackage, int fileId, u32 result)
+{
+    static u32 traceCount = 0;
+    static u32 testBodyTraceCount = 0;
+    char normalized[256];
+    const char *baseName = NULL;
+    FILE *trace = NULL;
+    u32 pc = 0;
+
+    if (name == NULL || name[0] == 0)
+        return;
+    vm_file_normalize_host_path(name, normalized, sizeof(normalized));
+    baseName = vm_path_basename(normalized[0] ? normalized : name);
+    if (!vm_resource_is_bare_client_asset(baseName))
+        return;
+    if (MTK != NULL)
+        (void)uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    if (_stricmp(baseName, "e_tiger.actor") == 0)
+    {
+        if (testBodyTraceCount >= 32u)
+            return;
+        ++testBodyTraceCount;
+    }
+    else if (traceCount >= 128u ||
+             pc < 0x0100D6E2u || pc > 0x0100F5B4u)
+    {
+        return;
+    }
+    trace = fopen("logs/actor-resource-cache.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "actor_resource_trace seq=%u module=JianghuOL.CBE pc=%08x "
+            "phase=%s name=%s basename=%s package=%08x file_id=%d result=%08x\n",
+            traceCount, pc, phase ? phase : "-", name, baseName, dataPackage,
+            fileId, result);
+    fclose(trace);
 }
 
 static int vm_resource_cache_resolve_client_path(const char *name,
-                                                 char *pathOut,
+                                                  char *pathOut,
                                                  size_t pathOutSize)
 {
     if (name == NULL || pathOut == NULL || pathOutSize == 0)
         return 0;
     pathOut[0] = 0;
     if (vm_resource_host_file_exists(name))
+    {
+        vm_actor_resource_trace("resolve-direct", name, 0, -1, 1);
         return snprintf(pathOut, pathOutSize, "%s", name) < (int)pathOutSize;
+    }
     if (!vm_resource_is_bare_client_asset(name) ||
         snprintf(pathOut, pathOutSize, "JHOnlineData/%s", name) >=
             (int)pathOutSize)
@@ -693,10 +742,14 @@ static int vm_resource_cache_resolve_client_path(const char *name,
     if (!vm_resource_host_file_exists(pathOut) &&
         !vm_file_try_download_named_resource(pathOut))
     {
+        vm_actor_resource_trace("resolve-download-failed", name, 0, -1, 0);
         pathOut[0] = 0;
         return 0;
     }
-    return vm_resource_host_file_exists(pathOut);
+    int resolved = vm_resource_host_file_exists(pathOut);
+    vm_actor_resource_trace(resolved ? "resolve-ready" : "resolve-missing",
+                            name, 0, -1, (u32)resolved);
+    return resolved;
 }
 
 static u32 vm_resource_cache_lookup_id(const char *name)
@@ -710,7 +763,11 @@ static u32 vm_resource_cache_lookup_id(const char *name)
      * the client carry a body Actor with no backing visual resource into the
      * battle unit. */
     if (entry && entry->path[0] && vm_resource_host_file_exists(entry->path))
+    {
+        vm_actor_resource_trace("lookup-cache-hit", name, 0, (int)entry->id,
+                                entry->id);
         return entry->id;
+    }
     if (vm_resource_cache_resolve_client_path(name, resolvedPath,
                                               sizeof(resolvedPath)))
     {
@@ -719,9 +776,12 @@ static u32 vm_resource_cache_lookup_id(const char *name)
         if (entry)
         {
             snprintf(entry->path, sizeof(entry->path), "%s", resolvedPath);
+            vm_actor_resource_trace("lookup-resolved", name, 0,
+                                    (int)entry->id, entry->id);
             return entry->id;
         }
     }
+    vm_actor_resource_trace("lookup-miss", name, 0, -1, (u32)-1);
     return (u32)-1;
 }
 
@@ -800,15 +860,24 @@ static u32 vm_resource_cache_load_by_name(const char *name)
      * backing file has been removed.  Treat it exactly like a name-only
      * package record so the normal WT18/7 cache-miss path reinstalls it. */
     if (entry && entry->path[0] && vm_resource_host_file_exists(entry->path))
-        return vm_resource_cache_load_file(entry->path);
+    {
+        u32 loaded = vm_resource_cache_load_file(entry->path);
+        vm_actor_resource_trace("load-cache-hit", name, 0, (int)entry->id,
+                                loaded);
+        return loaded;
+    }
     if (vm_resource_cache_resolve_client_path(name, resolvedPath,
                                               sizeof(resolvedPath)))
     {
         entry = vm_resource_cache_note_name(name);
         if (entry)
             snprintf(entry->path, sizeof(entry->path), "%s", resolvedPath);
-        return vm_resource_cache_load_file(resolvedPath);
+        u32 loaded = vm_resource_cache_load_file(resolvedPath);
+        vm_actor_resource_trace("load-resolved", name, 0,
+                                entry ? (int)entry->id : -1, loaded);
+        return loaded;
     }
+    vm_actor_resource_trace("load-miss", name, 0, -1, 0);
     return 0;
 }
 
@@ -1082,6 +1151,7 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
     vm_file_normalize_host_path(nameBuf, normalizedName, sizeof(normalizedName));
     if (normalizedName[0] == 0)
         snprintf(normalizedName, sizeof(normalizedName), "%s", nameBuf);
+    vm_actor_resource_trace("file-open-enter", normalizedName, 0, -1, 0);
     if (vm_file_try_resolve_map_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
     {
         snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
@@ -1138,6 +1208,8 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
             snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", normalizedName);
             if (vm_file_has_extension(normalizedName))
                 vm_resource_cache_note_path(normalizedName);
+            vm_actor_resource_trace("file-open-ready", normalizedName, 0,
+                                    i, 1);
             return i;
         }
     }
@@ -1522,6 +1594,7 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
     char packageName[128] = {0};
     if (srcPtr)
         vm_readStringByPtr(srcPtr, packageName);
+    vm_actor_resource_trace("package-load", packageName, (u32)a1, -1, 0);
 
     /* src == NULL -> set first byte at a1 to 0 and return 0 */
     if (srcPtr == 0)
@@ -1932,6 +2005,15 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
             vm_DF_ReadStringEx(v17, v27, v22);
             namePtr = vm_get_var(v17);
             v19 = vm_DF_ReadInt(v27, v22);
+            if (namePtr)
+            {
+                char entryName[128] = {0};
+
+                vm_read_path_string((u32)namePtr, entryName,
+                                    sizeof(entryName));
+                vm_actor_resource_trace("tresource-package-entry", entryName,
+                                        (u32)a1, -1, 0);
+            }
         }
         else
         {
@@ -2840,6 +2922,8 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
     if (vm_resource_is_bare_client_asset(resourceName))
     {
         result = (int)vm_resource_cache_lookup_id(resourceName);
+        vm_actor_resource_trace("package-get-file-id", resourceName, a1,
+                                result, (u32)result);
         if (result >= 0)
         {
             uc_reg_write(uc, UC_ARM_REG_R0, &result);
@@ -2971,6 +3055,7 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
     int16_t j = 0;
     int16_t count1 = 0;
     int16_t count2 = 0;
+    u32 name_base = 0;
     u32 id_base = 0;
     u32 data_base = 0;
     u32 offset_base = 0;
@@ -2981,6 +3066,7 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
     u32 data_ptr = 0;
     u32 offset = 0;
     int result = 0;
+    char resourceName[128] = {0};
     uc_engine *uc = MTK;
     if (fileId == (u32)-1)
         return vm_set_call_result(0);
@@ -2992,6 +3078,7 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
     if (a1 == 0)
         return vm_set_call_result(0);
     count1 = (int16_t)vm_get_var_short(a1 + 8);
+    name_base = vm_get_var(a1 + 12);
     id_base = vm_get_var(a1 + 20);
     data_base = vm_get_var(a1 + 16);
     offset_base = vm_get_var(a1 + 24);
@@ -3003,6 +3090,23 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
 
         if (file_id == (int16_t)fileId)
         {
+            u32 name_ptr = name_base ? vm_get_var(name_base + i * 4) : 0;
+
+            if (name_ptr != 0)
+                vm_read_path_string(name_ptr, resourceName,
+                                    sizeof(resourceName));
+            /* CBE can retain the package-local ID and call this virtual slot
+             * directly, without first passing through GetFileID().  A bare
+             * Actor/GIF package row is only a name reference; returning its
+             * package payload would leave the scene unit without the client
+             * visual resource. */
+            if (vm_resource_is_bare_client_asset(resourceName))
+            {
+                u32 cached = vm_resource_cache_load_by_name(resourceName);
+                vm_actor_resource_trace("package-get-file-by-id",
+                                        resourceName, a1, fileId, cached);
+                return vm_set_call_result(cached);
+            }
             if (!vm_uses_be_fixed_df_layout())
                 uc_mem_read(uc, a1 + 84, &flag, 1);
 
@@ -3050,7 +3154,12 @@ int vm_DF_DataPackage_GetFile(int a1, int namePtr)
     /* This virtual entry is used directly by the scene Actor parser.  Do not
      * let a name-only package record substitute for an absent client asset. */
     if (vm_resource_is_bare_client_asset(resourceName))
-        return vm_set_call_result(vm_resource_cache_load_by_name(resourceName));
+    {
+        u32 cached = vm_resource_cache_load_by_name(resourceName);
+        vm_actor_resource_trace("package-get-file", resourceName, a1, -1,
+                                cached);
+        return vm_set_call_result(cached);
+    }
 
     int FileID = vm_DF_DataPackage_GetFileID(a1, namePtr);
     if (FileID < 0)
@@ -3136,6 +3245,8 @@ u32 vm_DF_GetResourceIDByFileName(int a1)
     if (vm_resource_is_bare_client_asset(name))
     {
         result = (int)vm_resource_cache_lookup_id(name);
+        vm_actor_resource_trace("resource-id-by-name", name, 0, result,
+                                (u32)result);
         if (result >= 0)
             return vm_set_call_result((u32)result);
     }
@@ -3158,6 +3269,7 @@ int vm_DF_GetResourceByFileName(int a1)
     memset(name, 0, sizeof(name));
     if (a1)
         vm_read_path_string(a1, name, sizeof(name));
+    vm_actor_resource_trace("resource-by-name-enter", name, 0, -1, 0);
 
     /* A scene kind-3 body Actor is addressed by its bare leaf.  The active
      * package can contain a name-only entry after content invalidation, which
@@ -3174,6 +3286,8 @@ int vm_DF_GetResourceByFileName(int a1)
             !vm_resource_host_file_exists(clientPath))
         {
             result = (int)vm_resource_cache_load_by_name(name);
+            vm_actor_resource_trace("resource-by-name-pre-package", name, 0,
+                                    -1, (u32)result);
             if (result != 0)
                 return vm_set_call_result((u32)result);
         }
@@ -3234,8 +3348,14 @@ void vm_DF_GetResourceNameByID(int a1)
 int vm_DF_GetTResource(int a1)
 {
     u32 DreamFactoryResourceBuffer; // r0
+    char name[128] = {0};
+
+    if (a1)
+        vm_read_path_string((u32)a1, name, sizeof(name));
     // todo DF_FactoryCharB_Init();
     DreamFactoryResourceBuffer = vm_DF_GetResourceByFileName(a1);
+    vm_actor_resource_trace("get-t-resource", name, 0, -1,
+                            DreamFactoryResourceBuffer);
     vm_set_var(VM_DreamFactoryResourceBuffer_ADDRESS, DreamFactoryResourceBuffer);
     return DreamFactoryResourceBuffer;
 }

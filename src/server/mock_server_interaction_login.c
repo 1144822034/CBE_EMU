@@ -4749,7 +4749,8 @@ static u32 vm_net_mock_build_login_response(const u8 *request, u32 requestLen, u
                                                                     sizeof(loginRequest.password));
     noAccountAlt12Login = vm_mock_service_login_is_no_account(&loginRequest);
 
-    if (!vm_mock_service_authenticate_login_request(&loginRequest, &authError))
+    if (!vm_mock_service_authenticate_login_request(&loginRequest, &authError,
+                                                    NULL))
         return vm_net_mock_build_login_failure_response(requestSubtype,
                                                         authError ? authError : "account or password error",
                                                         out, outCap);

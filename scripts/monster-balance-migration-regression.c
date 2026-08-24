@@ -1,11 +1,12 @@
 /*
- * Isolated persistence regression for the V4 combat and V5 EXP migrations.
+ * Isolated persistence regression for the V4 combat and V11 reward-profile
+ * migrations.
  *
  * The launcher creates a disposable cbe_auto_* database.  This test inserts
- * one V4 reward row, one deliberately edited row, and one short-lived V5
- * 0.050%-reward row, then loads the real service database layer.  It proves
- * the transactional migrations update only formula-derived fields and record
- * every migration marker.
+ * one fully automatic V4 reward row, one deliberately edited row, and one
+ * short-lived V5 0.050%-reward row, then loads the real service database
+ * layer.  It proves the transactional migrations update only fully automatic
+ * reward profiles and record every migration marker.
  */
 
 #include <stdio.h>
@@ -76,9 +77,10 @@ int main(void)
     vm_net_mock_monster_entry predecessorEntry;
     vm_net_mock_monster_stats automaticV1;
     vm_net_mock_monster_stats automaticV4;
-    vm_net_mock_monster_stats automaticV5;
+    vm_net_mock_monster_stats automaticV6;
     vm_net_mock_monster_stats manualV1;
     vm_net_mock_monster_stats manualV4;
+    vm_net_mock_monster_stats manualV6;
     vm_net_mock_monster_stats predecessorV1;
     vm_net_mock_monster_stats predecessorV4;
     vm_net_mock_monster_override *automaticOverride = NULL;
@@ -115,12 +117,14 @@ int main(void)
         &automaticEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1);
     automaticV4 = vm_net_mock_monster_base_stats_for_entry_curve(
         &automaticEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4);
-    automaticV5 = vm_net_mock_monster_base_stats_for_entry_curve(
-        &automaticEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V5);
+    automaticV6 = vm_net_mock_monster_base_stats_for_entry_curve(
+        &automaticEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6);
     manualV1 = vm_net_mock_monster_base_stats_for_entry_curve(
         &manualEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1);
     manualV4 = vm_net_mock_monster_base_stats_for_entry_curve(
         &manualEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4);
+    manualV6 = vm_net_mock_monster_base_stats_for_entry_curve(
+        &manualEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6);
     predecessorV1 = vm_net_mock_monster_base_stats_for_entry_curve(
         &predecessorEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1);
     predecessorV4 = vm_net_mock_monster_base_stats_for_entry_curve(
@@ -134,19 +138,28 @@ int main(void)
     snprintf(query, sizeof(query),
              "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
              "defense_value,reward_exp,reward_money) VALUES "
-             "(%u,60,%u,%u,%u,%u,%u,%u,902),"
-             "(%u,60,%u,%u,%u,%u,%u,%u,904),"
-             "(%u,60,%u,%u,%u,%u,%u,%u,906)",
+             "(%u,60,%u,%u,%u,%u,%u,%u,%u),"
+             "(%u,60,%u,%u,%u,%u,%u,%u,%u),"
+             "(%u,60,%u,%u,%u,%u,%u,%u,%u)",
              automaticEntry.enemyId, automaticEntry.family,
              automaticV1.hp, automaticV1.mp, automaticV1.attack,
              automaticV1.defense, automaticV4.exp,
+             vm_net_mock_monster_reward_gold_v7_predecessor(
+                 (vm_net_mock_monster_family)automaticEntry.family,
+                 automaticEntry.level),
              manualEntry.enemyId, manualEntry.family,
              manualV1.hp + 1u, manualV1.mp, manualV1.attack, manualV1.defense,
              manualV4.exp + 1u,
+             vm_net_mock_monster_reward_gold_v7_predecessor(
+                 (vm_net_mock_monster_family)manualEntry.family,
+                 manualEntry.level) + 1u,
              predecessorEntry.enemyId, predecessorEntry.family,
              predecessorV1.hp, predecessorV1.mp, predecessorV1.attack,
              predecessorV1.defense,
-             vm_net_mock_normal_monster_exp_for_level_v5_predecessor(60));
+             vm_net_mock_normal_monster_exp_for_level_v5_predecessor(60),
+             vm_net_mock_monster_reward_gold_v7_predecessor(
+                 (vm_net_mock_monster_family)predecessorEntry.family,
+                 predecessorEntry.level));
     if (!vm_mysql_exec(query))
     {
         fprintf(stderr, "seed rows failed: %s\n", vm_mysql_last_error());
@@ -175,20 +188,23 @@ int main(void)
         automaticOverride->stats.mp != automaticV4.mp ||
         automaticOverride->stats.attack != automaticV4.attack ||
         automaticOverride->stats.defense != automaticV4.defense ||
-        automaticOverride->stats.exp != automaticV5.exp ||
-        automaticOverride->stats.gold != 902u ||
+        automaticOverride->stats.exp != automaticV6.exp ||
+        automaticOverride->stats.gold != automaticV6.gold ||
         manualOverride->stats.hp != manualV1.hp + 1u ||
         manualOverride->stats.mp != manualV1.mp ||
         manualOverride->stats.attack != manualV1.attack ||
         manualOverride->stats.defense != manualV1.defense ||
         manualOverride->stats.exp != manualV4.exp + 1u ||
-        manualOverride->stats.gold != 904u ||
+        manualOverride->stats.gold !=
+            vm_net_mock_monster_reward_gold_v7_predecessor(
+                (vm_net_mock_monster_family)manualEntry.family,
+                manualEntry.level) + 1u ||
         predecessorOverride->stats.hp != predecessorV4.hp ||
         predecessorOverride->stats.mp != predecessorV4.mp ||
         predecessorOverride->stats.attack != predecessorV4.attack ||
         predecessorOverride->stats.defense != predecessorV4.defense ||
-        predecessorOverride->stats.exp != automaticV5.exp ||
-        predecessorOverride->stats.gold != 906u ||
+        predecessorOverride->stats.exp != automaticV6.exp ||
+        predecessorOverride->stats.gold != automaticV6.gold ||
         !query_count(
             "SELECT COUNT(*) FROM server_data_migrations "
             "WHERE migration_name='monster-quality-zero-balance-v2'",
@@ -212,6 +228,10 @@ int main(void)
         !query_count(
             "SELECT COUNT(*) FROM server_data_migrations "
             "WHERE migration_name='monster-exp-reward-v4'",
+            &markerCount) || markerCount != 1u ||
+        !query_count(
+            "SELECT COUNT(*) FROM server_data_migrations "
+            "WHERE migration_name='monster-reward-profile-v5'",
             &markerCount) || markerCount != 1u)
     {
         fputs("formula/default migration did not preserve the explicit override boundary\n",
@@ -219,20 +239,19 @@ int main(void)
         return 1;
     }
 
-    /* The admin action is deliberately named \"reset four combat attributes\".
-     * Verify it promotes the manually edited row to V4 while preserving its
-     * separately managed experience and money, both in memory and after a
-     * fresh database load. */
+    /* The admin reset now restores the complete combat reward profile:
+     * HP, MP, attack, defense, experience, and money.  Drops stay independent.
+     * Verify the result both in memory and after a fresh database load. */
     if (!vm_net_mock_monster_admin_reset_combat_stats(
             manualEntry.enemyId, &resetError) ||
         manualOverride->stats.hp != manualV4.hp ||
         manualOverride->stats.mp != manualV4.mp ||
         manualOverride->stats.attack != manualV4.attack ||
         manualOverride->stats.defense != manualV4.defense ||
-        manualOverride->stats.exp != manualV4.exp + 1u ||
-        manualOverride->stats.gold != 904u)
+        manualOverride->stats.exp != manualV6.exp ||
+        manualOverride->stats.gold != manualV6.gold)
     {
-        fprintf(stderr, "combat reset changed non-combat fields: %s\n",
+        fprintf(stderr, "combat reward reset did not restore defaults: %s\n",
                 resetError != NULL ? resetError : "unknown error");
         return 1;
     }
@@ -250,13 +269,13 @@ int main(void)
         manualOverride->stats.mp != manualV4.mp ||
         manualOverride->stats.attack != manualV4.attack ||
         manualOverride->stats.defense != manualV4.defense ||
-        manualOverride->stats.exp != manualV4.exp + 1u ||
-        manualOverride->stats.gold != 904u)
+        manualOverride->stats.exp != manualV6.exp ||
+        manualOverride->stats.gold != manualV6.gold)
     {
-        fputs("combat reset persistence did not preserve experience or money\n", stderr);
+        fputs("combat reward reset persistence did not restore rewards\n", stderr);
         return 1;
     }
     vm_mysql_close();
-    puts("monster balance migration regression passed: default migration and four-attribute reset preserve rewards");
+    puts("monster balance migration regression passed: default reward migration and six-field reset");
     return 0;
 }

@@ -1,7 +1,9 @@
 enum
 {
     VM_MOCK_ADMIN_GLOBAL_REWARD_ITEM_MAX = 12,
-    VM_MOCK_ADMIN_GLOBAL_REWARD_LIST_MAX = 100
+    VM_MOCK_ADMIN_GLOBAL_REWARD_LIST_MAX = 100,
+    VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX = 64,
+    VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP = 64
 };
 
 typedef struct
@@ -28,6 +30,166 @@ typedef struct
     u32 count;
     bool invalid;
 } vm_mock_admin_global_reward_list;
+
+static bool vm_mock_admin_global_reward_recipient_account_is_valid(
+    const char *accountId)
+{
+    size_t length = accountId != NULL ? strlen(accountId) : 0;
+
+    if (length < 4 || length > 32)
+        return false;
+    for (size_t i = 0; i < length; ++i)
+    {
+        unsigned char ch = (unsigned char)accountId[i];
+
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool vm_mock_admin_global_reward_recipient_delimiter(unsigned char ch)
+{
+    return ch == ',' || ch == ';' || ch == ' ' || ch == '\t' || ch == '\r' ||
+           ch == '\n';
+}
+
+static bool vm_mock_admin_global_reward_parse_recipients(
+    const char *text,
+    char recipients[][VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP],
+    u32 recipientCap, u32 *recipientCountOut, const char **errorOut)
+{
+    const char *cursor = text != NULL ? text : "";
+    char accountId[VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP];
+    size_t accountLength = 0;
+    u32 recipientCount = 0;
+    bool sawAccountText = false;
+
+    if (recipientCountOut != NULL)
+        *recipientCountOut = 0;
+    if (errorOut != NULL)
+        *errorOut = "指定账号格式无效";
+    if (recipients == NULL || recipientCap == 0)
+        return false;
+    memset(recipients, 0,
+           (size_t)recipientCap *
+               VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP);
+    if (cursor[0] == 0)
+    {
+        if (errorOut != NULL)
+            *errorOut = NULL;
+        return true;
+    }
+    for (;;)
+    {
+        unsigned char ch = (unsigned char)*cursor;
+
+        if (ch == 0 || vm_mock_admin_global_reward_recipient_delimiter(ch))
+        {
+            if (accountLength != 0)
+            {
+                bool duplicate = false;
+
+                accountId[accountLength] = 0;
+                sawAccountText = true;
+                if (!vm_mock_admin_global_reward_recipient_account_is_valid(
+                        accountId))
+                {
+                    if (errorOut != NULL)
+                        *errorOut = "账号只能使用 4-32 位字母、数字或下划线";
+                    return false;
+                }
+                for (u32 i = 0; i < recipientCount; ++i)
+                {
+                    if (strcmp(recipients[i], accountId) == 0)
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate)
+                {
+                    if (recipientCount >= recipientCap)
+                    {
+                        if (errorOut != NULL)
+                            *errorOut = "一次最多指定 64 个账号";
+                        return false;
+                    }
+                    snprintf(recipients[recipientCount],
+                             VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP,
+                             "%s", accountId);
+                    ++recipientCount;
+                }
+                accountLength = 0;
+            }
+            if (ch == 0)
+                break;
+        }
+        else
+        {
+            sawAccountText = true;
+            if (accountLength + 1 >= sizeof(accountId))
+            {
+                if (errorOut != NULL)
+                    *errorOut = "账号只能使用 4-32 位字母、数字或下划线";
+                return false;
+            }
+            accountId[accountLength++] = (char)ch;
+        }
+        ++cursor;
+    }
+    if (!sawAccountText || recipientCount == 0)
+    {
+        if (errorOut != NULL)
+            *errorOut = "请至少输入一个指定账号，或留空后发放给全服";
+        return false;
+    }
+    if (recipientCountOut != NULL)
+        *recipientCountOut = recipientCount;
+    if (errorOut != NULL)
+        *errorOut = NULL;
+    return true;
+}
+
+static bool vm_mock_admin_global_reward_form_has_field(const char *form,
+                                                        const char *key)
+{
+    size_t keyLength = key != NULL ? strlen(key) : 0;
+    const char *cursor = form;
+
+    if (form == NULL || keyLength == 0)
+        return false;
+    if (strncmp(form, "--", 2) == 0)
+    {
+        char marker[96];
+
+        if (keyLength + sizeof("name=\"\"") > sizeof(marker))
+            return false;
+        snprintf(marker, sizeof(marker), "name=\"%s\"", key);
+        return strstr(form, marker) != NULL;
+    }
+    while (*cursor != 0)
+    {
+        const char *pairEnd = strchr(cursor, '&');
+        const char *equals = strchr(cursor, '=');
+        size_t pairLength = pairEnd ? (size_t)(pairEnd - cursor)
+                                   : strlen(cursor);
+
+        if (equals != NULL && (size_t)(equals - cursor) == keyLength &&
+            (size_t)(equals - cursor) < pairLength &&
+            memcmp(cursor, key, keyLength) == 0)
+        {
+            return true;
+        }
+        if (pairEnd == NULL)
+            break;
+        cursor = pairEnd + 1;
+    }
+    return false;
+}
 
 static bool vm_mock_admin_global_reward_row_callback(
     void *contextValue, unsigned int columnCount, const char *const *values,
@@ -109,7 +271,8 @@ static void vm_mock_admin_global_reward_render_nav(vm_mock_admin_text *page)
     vm_mock_admin_text_appendf(
         page,
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab on\" href=\"/?tab=global-rewards\">全服奖励管理</a>"
+        "<a class=\"tab on\" href=\"/?tab=global-rewards\">奖励邮件管理</a>"
+        "<a class=\"tab\" href=\"/?tab=designations\">称号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
@@ -142,9 +305,9 @@ static void vm_mock_admin_render_global_rewards_page(
         &page,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<title>江湖OL 全服奖励管理</title><style>"
+        "<title>江湖OL 奖励邮件管理</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1280px;margin:auto;padding:24px 18px}.head{display:flex;justify-content:space-between;gap:16px}.head h1{margin:0}.sub{color:#667085;margin:4px 0 16px}.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}.tab{padding:8px 12px;border:1px solid #e4e7ec;border-radius:7px;background:#fff;color:#475467;text-decoration:none}.tab.on{background:#175cd3;color:#fff}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:13px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field{display:grid;gap:4px}.wide{grid-column:1/-1}.items{display:grid;gap:8px}.reward-item{display:grid;grid-template-columns:44px minmax(260px,1fr) 140px 76px;gap:10px;align-items:end;padding:10px;border:1px solid #dbe3ef;border-radius:7px;background:#f8fafc}.reward-item[hidden]{display:none}.reward-order{align-self:center;text-align:center;color:#667085;font-weight:600}.reward-item .field,.reward-item .item-field{min-width:0}.reward-remove{background:#fff;color:#b42318;border:1px solid #fda29b}.attachment-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px}.add-attachment{background:#fff;color:#175cd3;border:1px solid #84adff}.add-attachment:disabled{color:#98a2b3;border-color:#d0d5dd;cursor:not-allowed}.attachment-count{color:#667085;font-size:12px}input,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:7px;padding:9px}textarea{min-height:100px}.actions{display:flex;justify-content:flex-end;margin-top:14px}button{border:0;border-radius:7px;padding:9px 14px;background:#175cd3;color:#fff;cursor:pointer}.danger{background:#b42318}.mail{border-top:1px solid #eaecf0;padding:14px 0}.mail:first-of-type{border-top:0}.mail-head{display:flex;justify-content:space-between;gap:12px}.badges{display:flex;gap:6px;flex-wrap:wrap}.badge{padding:2px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.badge.revoked{background:#f2f4f7;color:#667085}.body{white-space:pre-wrap;color:#475467}.items-text{color:#344054}.hint{color:#667085;font-size:12px}.logout{background:#fff;color:#475467;border:1px solid #d0d5dd}@media(max-width:850px){.fields{grid-template-columns:1fr}.wide{grid-column:auto}.reward-item{grid-template-columns:36px minmax(0,1fr) 110px}.reward-remove{grid-column:2/-1;justify-self:end}.attachment-actions{align-items:flex-start;flex-direction:column}}</style>"
-        "<script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header class=\"head\"><div><h1>江湖 OL 后台管理</h1><p class=\"sub\">全服奖励管理 · 多物品系统邮件</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
+        "<script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header class=\"head\"><div><h1>江湖 OL 后台管理</h1><p class=\"sub\">奖励邮件管理 · 全服或指定账号 · 多物品系统邮件</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
     vm_mock_admin_global_reward_render_nav(&page);
     if (message[0] != 0)
     {
@@ -155,8 +318,8 @@ static void vm_mock_admin_render_global_rewards_page(
     }
     vm_mock_admin_text_appendf(
         &page,
-        "<section class=\"card\"><h2>发放全服奖励</h2><p class=\"hint\">提交后立即给当前拥有角色的账号各创建一封收件；同账号任一角色领取后不可重复领取。至少一个附件。撤回仅关闭未领取收件，已领取物品不会删除。</p>"
-        "<form method=\"post\" action=\"/action\" data-global-reward-form><input type=\"hidden\" name=\"action\" value=\"send-global-reward\"><div class=\"fields\"><label class=\"field\"><span>邮件标题</span><input name=\"title\" maxlength=\"30\" required></label><label class=\"field wide\"><span>邮件正文</span><textarea name=\"body_text\" maxlength=\"120\" required></textarea></label></div><h3>附件</h3><div class=\"items\" id=\"global-reward-items\">");
+        "<section class=\"card\"><h2>发放奖励</h2><p class=\"hint\">指定账号留空时，立即给当前拥有角色的全部账号各创建一封收件；填写账号时仅向指定账号发放。多个账号可用逗号、分号、空格或换行分隔，重复账号会自动去重。指定账号必须已存在且拥有角色。同账号任一角色领取后不可重复领取。至少一个附件。撤回仅关闭未领取收件，已领取物品不会删除。</p>"
+        "<form method=\"post\" action=\"/action\" data-global-reward-form><input type=\"hidden\" name=\"action\" value=\"send-global-reward\"><div class=\"fields\"><label class=\"field\"><span>邮件标题</span><input name=\"title\" maxlength=\"30\" required></label><label class=\"field wide\"><span>邮件正文</span><textarea name=\"body_text\" maxlength=\"120\" required></textarea></label><label class=\"field wide\"><span>指定账号（可选）</span><textarea name=\"recipient_accounts\" maxlength=\"4095\" placeholder=\"留空即全服；多个账号用逗号、空格或换行分隔，最多 64 个\"></textarea></label></div><h3>附件</h3><div class=\"items\" id=\"global-reward-items\">");
     for (u32 i = 0; i < VM_MOCK_ADMIN_GLOBAL_REWARD_ITEM_MAX; ++i)
     {
         char pickerId[48];
@@ -180,12 +343,12 @@ static void vm_mock_admin_render_global_rewards_page(
         &page,
         "</div><div class=\"attachment-actions\"><button class=\"add-attachment\" id=\"global-reward-add-item\" data-global-reward-add type=\"button\">添加附件</button>"
         "<span class=\"attachment-count\" id=\"global-reward-item-count\" data-global-reward-item-count>已添加 1 / %u</span></div>"
-        "<div class=\"actions\"><button type=\"submit\">立即发放给全服账号</button></div></form></section>",
+        "<div class=\"actions\"><button type=\"submit\">立即发放奖励</button></div></form></section>",
         VM_MOCK_ADMIN_GLOBAL_REWARD_ITEM_MAX);
     vm_mock_admin_render_item_picker_modal(&page, true);
     vm_mock_admin_text_appendf(&page, "<section class=\"card\"><h2>历史奖励邮件</h2>");
     if (list.count == 0)
-        vm_mock_admin_text_appendf(&page, "<p class=\"hint\">暂无全服奖励邮件。</p>");
+        vm_mock_admin_text_appendf(&page, "<p class=\"hint\">暂无奖励邮件。</p>");
     for (u32 i = 0; i < list.count; ++i)
     {
         vm_mock_admin_global_reward_row *row = &list.rows[i];
@@ -212,6 +375,8 @@ static void vm_mock_admin_render_global_rewards_page(
 static bool vm_mock_admin_global_reward_send(
     const char *titleGbk, const char *bodyGbk,
     const vm_mock_admin_global_reward_item *items, u32 itemCount,
+    const char recipientAccounts[][VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP],
+    u32 recipientAccountCount,
     u32 *mailIdOut, u32 *recipientCountOut, const char **errorOut)
 {
     char titleHex[128];
@@ -226,9 +391,11 @@ static bool vm_mock_admin_global_reward_send(
     if (recipientCountOut != NULL)
         *recipientCountOut = 0;
     if (errorOut != NULL)
-        *errorOut = "全服奖励发放失败";
+        *errorOut = "奖励发放失败";
     if (titleGbk == NULL || bodyGbk == NULL || titleGbk[0] == 0 ||
         bodyGbk[0] == 0 || items == NULL || itemCount == 0 ||
+        recipientAccountCount > VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX ||
+        (recipientAccountCount != 0 && recipientAccounts == NULL) ||
         !vm_net_mock_mailbox_prepare_schema() ||
         vm_mysql_hex_encode(titleGbk, strlen(titleGbk), titleHex,
                             sizeof(titleHex)) == 0 ||
@@ -260,13 +427,57 @@ static bool vm_mock_admin_global_reward_send(
         if (!vm_mysql_exec(query))
             goto failed;
     }
-    snprintf(query, sizeof(query),
-             "INSERT INTO account_reward_mails(mail_id,account_id) "
-             "SELECT DISTINCT %u,ar.account_id FROM account_roles ar JOIN accounts a "
-             "ON a.account_id=ar.account_id",
-             idContext.value);
-    if (!vm_mysql_exec(query))
-        goto failed;
+    if (recipientAccountCount == 0)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_reward_mails(mail_id,account_id) "
+                 "SELECT DISTINCT %u,ar.account_id FROM account_roles ar JOIN accounts a "
+                 "ON a.account_id=ar.account_id",
+                 idContext.value);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    else
+    {
+        for (u32 i = 0; i < recipientAccountCount; ++i)
+        {
+            char accountHex[
+                VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP * 2u + 1u];
+            vm_mock_mysql_u32_context roleContext;
+
+            memset(accountHex, 0, sizeof(accountHex));
+            memset(&roleContext, 0, sizeof(roleContext));
+            if (!vm_mock_admin_global_reward_recipient_account_is_valid(
+                    recipientAccounts[i]) ||
+                vm_mysql_hex_encode(recipientAccounts[i],
+                                    strlen(recipientAccounts[i]), accountHex,
+                                    sizeof(accountHex)) == 0)
+            {
+                if (errorOut != NULL)
+                    *errorOut = "指定账号格式无效";
+                goto failed;
+            }
+            snprintf(query, sizeof(query),
+                     "SELECT COUNT(*) FROM account_roles "
+                     "WHERE account_id=CAST(X'%s' AS CHAR)",
+                     accountHex);
+            if (!vm_mysql_query(query, vm_mock_mysql_single_u32_row,
+                                &roleContext) ||
+                roleContext.invalid || !roleContext.found ||
+                roleContext.value == 0)
+            {
+                if (errorOut != NULL)
+                    *errorOut = "指定账号不存在或尚未创建角色";
+                goto failed;
+            }
+            snprintf(query, sizeof(query),
+                     "INSERT INTO account_reward_mails(mail_id,account_id) "
+                     "VALUES(%u,CAST(X'%s' AS CHAR))",
+                     idContext.value, accountHex);
+            if (!vm_mysql_exec(query))
+                goto failed;
+        }
+    }
     memset(&countContext, 0, sizeof(countContext));
     snprintf(query, sizeof(query),
              "SELECT COUNT(*) FROM account_reward_mails WHERE mail_id=%u",
@@ -291,8 +502,9 @@ static bool vm_mock_admin_global_reward_send(
         *recipientCountOut = countContext.value;
     if (errorOut != NULL)
         *errorOut = NULL;
-    printf("[info][mock-admin] global_reward_send mail=%u recipient_accounts=%u items=%u action=committed\n",
-           idContext.value, countContext.value, itemCount);
+    printf("[info][mock-admin] global_reward_send mail=%u recipient_scope=%s recipient_accounts=%u items=%u action=committed\n",
+           idContext.value, recipientAccountCount == 0 ? "all" : "selected",
+           countContext.value, itemCount);
     return true;
 
 failed:
@@ -369,7 +581,7 @@ static void vm_mock_admin_handle_global_reward_action(
             return;
         }
         vm_mock_admin_redirect_global_rewards(
-            client, "ok", "未领取的全服奖励已经撤回；已领取物品保持不变");
+            client, "ok", "未领取奖励已经撤回；已领取物品保持不变");
         return;
     }
     if (strcmp(action, "send-global-reward") == 0)
@@ -378,8 +590,12 @@ static void vm_mock_admin_handle_global_reward_action(
         char bodyUtf8[768];
         char titleGbk[64];
         char bodyGbk[256];
+        char recipientText[4096];
+        char recipientAccounts[VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX]
+                              [VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP];
         vm_mock_admin_global_reward_item items[VM_MOCK_ADMIN_GLOBAL_REWARD_ITEM_MAX];
         u32 itemCount = 0;
+        u32 recipientAccountCount = 0;
         u32 mailId = 0;
         u32 recipientCount = 0;
         char message[256];
@@ -388,6 +604,8 @@ static void vm_mock_admin_handle_global_reward_action(
         memset(bodyUtf8, 0, sizeof(bodyUtf8));
         memset(titleGbk, 0, sizeof(titleGbk));
         memset(bodyGbk, 0, sizeof(bodyGbk));
+        memset(recipientText, 0, sizeof(recipientText));
+        memset(recipientAccounts, 0, sizeof(recipientAccounts));
         memset(items, 0, sizeof(items));
         if (!vm_mock_admin_form_value(body, "title", titleUtf8,
                                       sizeof(titleUtf8)) ||
@@ -401,6 +619,24 @@ static void vm_mock_admin_handle_global_reward_action(
         {
             vm_mock_admin_redirect_global_rewards(
                 client, "error", "邮件标题或正文无效，或超过客户端 GBK 长度上限");
+            return;
+        }
+        if (vm_mock_admin_global_reward_form_has_field(
+                body, "recipient_accounts") &&
+            !vm_mock_admin_form_value(body, "recipient_accounts",
+                                      recipientText, sizeof(recipientText)))
+        {
+            vm_mock_admin_redirect_global_rewards(
+                client, "error", "指定账号字段无效或长度超限");
+            return;
+        }
+        if (!vm_mock_admin_global_reward_parse_recipients(
+                recipientText, recipientAccounts,
+                VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX,
+                &recipientAccountCount, &error))
+        {
+            vm_mock_admin_redirect_global_rewards(
+                client, "error", error ? error : "指定账号格式无效");
             return;
         }
         for (u32 slot = 0; slot < VM_MOCK_ADMIN_GLOBAL_REWARD_ITEM_MAX; ++slot)
@@ -441,16 +677,26 @@ static void vm_mock_admin_handle_global_reward_action(
         }
         if (itemCount == 0 ||
             !vm_mock_admin_global_reward_send(titleGbk, bodyGbk, items,
-                                              itemCount, &mailId,
+                                              itemCount, recipientAccounts,
+                                              recipientAccountCount, &mailId,
                                               &recipientCount, &error))
         {
             vm_mock_admin_redirect_global_rewards(
-                client, "error", error ? error : "全服奖励发放失败");
+                client, "error", error ? error : "奖励发放失败");
             return;
         }
-        snprintf(message, sizeof(message),
-                 "奖励邮件 #%u 已发放给 %u 个账号，共 %u 种附件",
-                 mailId, recipientCount, itemCount);
+        if (recipientAccountCount == 0)
+        {
+            snprintf(message, sizeof(message),
+                     "奖励邮件 #%u 已向全服 %u 个账号发放，共 %u 种附件",
+                     mailId, recipientCount, itemCount);
+        }
+        else
+        {
+            snprintf(message, sizeof(message),
+                     "奖励邮件 #%u 已向 %u 个指定账号发放，共 %u 种附件",
+                     mailId, recipientCount, itemCount);
+        }
         vm_mock_admin_redirect_global_rewards(client, "ok", message);
         return;
     }

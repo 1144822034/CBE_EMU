@@ -45,6 +45,35 @@ SELECT 'admin', `password_value`, `failed_attempts`, `locked`
 FROM `server_admin_config`
 WHERE `config_id` = 1;
 
+-- 游戏、账号中心和后台管理共用的来源 IPv4 登录失败计数。达到 15 次后
+-- 服务直接静默关闭该 IP 的后续连接，不再发送任何协议或 HTTP 响应。
+CREATE TABLE IF NOT EXISTS `server_login_ip_blocks` (
+  `ip_address` VARCHAR(45) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `failed_attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `blocked` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `blocked_at` TIMESTAMP NULL DEFAULT NULL,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`ip_address`),
+  KEY `idx_login_ip_blocks_blocked` (`blocked`)
+) ENGINE=InnoDB;
+
+-- 网页反向代理的可信 TCP 来源。只有来源 IP 匹配且启用时，服务端才会
+-- 采信对应的真实客户端 IP 请求头；127.0.0.1 是同机 nginx 的安全默认项。
+CREATE TABLE IF NOT EXISTS `server_trusted_proxy_sources` (
+  `source_ip` VARCHAR(15) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `trust_x_real_ip` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `trust_x_forwarded_for` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`source_ip`)
+) ENGINE=InnoDB;
+
+INSERT IGNORE INTO `server_trusted_proxy_sources`
+  (`source_ip`, `trust_x_real_ip`, `trust_x_forwarded_for`, `enabled`)
+VALUES
+  ('127.0.0.1', 1, 1, 1);
+
 CREATE TABLE IF NOT EXISTS `server_payment_config` (
   `config_id` TINYINT UNSIGNED NOT NULL,
   `api_base_url` VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -246,6 +275,17 @@ CREATE TABLE IF NOT EXISTS `server_admin_operation_logs` (
   PRIMARY KEY (`log_id`),
   KEY `idx_admin_operation_logs_account` (`target_account_id`, `log_id`),
   KEY `idx_admin_operation_logs_created` (`created_at`, `log_id`)
+) ENGINE=InnoDB;
+
+-- 称号名称和资源编号由客户端已验证目录固定。condition_kind：1=持有铜钱，
+-- 2=角色等级，3=固定的全套装备；后台只配置允许编辑的启用状态及达成门槛。
+CREATE TABLE IF NOT EXISTS `server_role_designations` (
+  `designation_id` TINYINT UNSIGNED NOT NULL,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `condition_kind` TINYINT UNSIGNED NOT NULL,
+  `condition_value` INT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`designation_id`)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS `account_role_transfer_codes` (

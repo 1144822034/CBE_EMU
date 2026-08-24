@@ -5647,11 +5647,14 @@ enum
      * their old-level progress to the V2 interval before normalization.
      * Version 10 scales the same curve to a 100M cap so low-level percentage
      * rewards do not collapse to one EXP; V9 rows retain level and interval
-     * progress when they move to the new curve. */
+     * progress when they move to the new curve.  Version 11 replaces that
+     * percentage curve with the live 7,200-battle/day progression bands;
+     * V10 rows retain their level and interval progress during the remap. */
     VM_NET_MOCK_ROLE_DB_EXP_CURVE_V1_VERSION = 7,
     VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION = 8,
     VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION = 9,
-    VM_NET_MOCK_ROLE_DB_VERSION = 10,
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION = 10,
+    VM_NET_MOCK_ROLE_DB_VERSION = 11,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
@@ -6328,7 +6331,8 @@ static u8 g_vm_mock_service_login_issue_result = 0;
 
 static bool vm_mock_service_login_is_no_account(const vm_mock_service_login_request *login);
 static bool vm_mock_service_authenticate_login_request(const vm_mock_service_login_request *login,
-                                                       const char **errorOut);
+                                                       const char **errorOut,
+                                                       bool *credentialFailureOut);
 
 typedef struct
 {

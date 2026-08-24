@@ -5642,7 +5642,6 @@ static bool vm_net_mock_append_battle_status7_object(
     u32 rewardGold = 0;
     bool victory = g_mockBattleEnemyHpCurrent == 0 &&
                    (forceTeamVictory || roleHp > 0);
-    bool rewardAlreadyGranted = false;
     bool mpRecoveryApplied = false;
 
     if (autoFlaskOut != NULL)
@@ -5652,25 +5651,16 @@ static bool vm_net_mock_append_battle_status7_object(
 
     if (victory)
     {
-        rewardAlreadyGranted = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial);
         applyRewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
                                                                &dropSeq,
                                                                &dropCount,
                                                                &dropGranted,
-                                                               &rewardGranted);
+                                                               &rewardGranted,
+                                                               &rewardGold);
         displayExpGain = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial)
                              ? g_vm_net_mock_battle_rewarded_exp
                              : applyRewardExp;
     }
-    rewardGold = (victory && !rewardAlreadyGranted && rewardGranted)
-                     ? vm_net_mock_mul_capped_u32(
-                           vm_net_mock_env_u32_if_set(
-                               "CBE_BATTLE_REWARD_GOLD",
-                               vm_net_mock_battle_reward_gold_for_enemy(
-                                   g_vm_net_mock_battle_enemy_id_current)),
-                           vm_net_mock_battle_enemy_count_current())
-                     : 0;
-
     if (autoFlaskOut != NULL)
         vm_net_mock_battle_auto_use_vitality_flasks(autoFlaskOut);
     if (role != NULL)

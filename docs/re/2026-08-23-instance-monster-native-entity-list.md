@@ -1181,3 +1181,622 @@ CBE 指令、碰撞或战斗协议。
 干净的测试客户端缓存进入测试地图，确认 `e_tiger.actor` 及其 Actor 描述符引用的 GIF 都有
 `WT18/7` 完成记录，随后触碰生成 `WT4/1 -> WT4/5` 且首帧战斗 UI 不再进入
 `DrawMapTileLayer(0x01004EA8)` 空上下文。
+
+### 9.28 package 本地 ID 仍可绕过 Actor 缓存（2026-08-24）
+
+9.27 后的全新客户端复测仍在同一首帧崩溃。本次原始证据与此前一致：
+`guest-memory-fault.log` 记录 `JianghuOL.CBE:0x01004EA8` 以 `R0=0` 读取
+`+0x0C`；`bin/server_out.txt` 记录清单有三项，且 `测试地图.sce` 与
+`e_ghostfireR.actor` 的 `WT18/7` 已完成，随后
+`scene-task-subset-followup` 明确报告 `missing=e_tiger.actor`。客户端缓存中只有
+`e_tiger.gif`，没有 `e_tiger.actor`，也没有该 Actor 的后续 `WT18/7` 请求。
+
+这排除了任务、碰撞、`WT4/1 -> WT4/5` 和 manifest 缺项：9.25 已保存的 46-byte
+`mmorpg_updatetemp` 也证明第三项正是 `e_tiger.actor`。新的首次偏离在
+`vm_DF_DataPackage_GetFileByID()`：9.27 只在参数已经是宿主缓存保留 ID 时转到缓存。
+CBE 可以直接携带 package 表内的原始文件 ID 调用该虚表槽（`main.c` 分派 idx 8）；
+旧实现随即返回该表的数据指针。对外部 Actor，此指针仍是 package 的名称占位而不是
+`JHOnlineData/e_tiger.actor` 字节，因而既不执行缓存缺失下载，也不创建 visual context。
+
+修复在 package ID 命中后读取同槽位文件名。裸 `*.actor`/`*.gif` 必须通过
+`vm_resource_cache_load_by_name()` 读取客户端缓存；缓存缺失时该函数按既有同步
+`WT18/7` 传输安装资源，失败则返回正常的未找到结果，绝不退回 package 占位指针。
+非 Actor package 文件、包内子表递归和战斗协议保持不变；没有改写 CBE 内存、寄存器、
+PC/LR 或指令。
+
+`scripts/scene-battle-actor-cache-regression.c` 增加一个最小 package 表，其中裸
+`e_monkey.actor` 使用 package 本地 ID `7` 和可识别的假数据指针。回归断言
+`DataPackage_GetFileByID(package, 7)` 返回的是缓存字节而不是该占位指针，并验证 R0
+与返回值一致；将名称替换为缺失的 `e_missing_body.actor` 时，它必须返回 0，不能重新
+落回 package 数据指针。验证：`make -j2`、重新编译后的该客户端回归、
+`obj/server/scene-battle-monster-field18-regression.exe` 和
+`obj/server/content-update-manifest-regression.exe` 均通过；最后一项使用独立、多文件
+fixture 验证 `WT18/9 -> WT18/8` 清单契约且不触碰数据库或客户端缓存。端到端复测的首个
+正向证据仍必须是
+`WT18/7(e_tiger.actor)` 完成，其后再验证 GIF 依赖、`WT4/1 -> WT4/5` 和无崩溃首帧。
+
+### 9.29 资源 API 调用链取证（2026-08-24）
+
+9.28 后的新运行仍只有清单索引 0、1 的 `WT18/7` 完成；服务端以新 client ID 记录
+`missing=e_tiger.actor`，客户端缓存仍无该文件并再次在 `0x01004EA8` 以空 `R0` 崩溃。
+这证明 package-ID 修复尚未由运行时日志证实，不能再假定 CBE 调用了某一个特定
+DreamFactory 虚表槽。
+
+在确定下一处契约前，`vmFunc.c` 增加受限的只读取取证：仅名称精确为
+`e_tiger.actor`、最多 64 条，写入当前客户端的
+`logs/actor-resource-cache.log`。每行记录模块、当前 PC、API 阶段、package 指针、
+file ID 与返回值，覆盖缓存解析及 `DataPackage_GetFileID/GetFile/GetFileByID`、
+`GetResourceIDByFileName/GetResourceByFileName`。日志不会写入客户机内存、寄存器、
+PC/LR、CBE 指令或服务端响应；下一次复测以该日志的第一条记录确定真实入口。
+
+### 9.30 首轮精确名称插桩的负证与路径级取证（2026-08-24）
+
+用户使用包含 9.29 字符串的 `bin/main.exe` 再次复测，仍于
+`JianghuOL.CBE:0x01004EA8` 以 `R0=0` 崩溃。二进制中可检出
+`logs/actor-resource-cache.log` 与 `package-get-file-by-id`，但整个工作区没有生成该日志；
+这排除了“仍在运行旧二进制”。同一次 `server_out.txt` 仍只有 index 0 的测试地图和 index
+1 的 `e_ghostfireR.actor` 完成 `WT18/7`，随后场景后续请求记录
+`missing=e_tiger.actor`，并在之后收到真实 `WT4/1`。
+
+该负证尚不能证明所有 Actor API 都未执行：9.29 的 logger 只接受字面裸
+`e_tiger.actor`，而 `GetTResource` 或文件打开层可能收到
+`JHOnlineData/e_tiger.actor`。下一版将过滤改为既有的规范化 basename 比较，并增加至
+`DataPackage_LoadPackage`、`LoadFromTResource` 的 package entry、
+`GetResourceByFileName`/`GetTResource` 入口和 `vm_get_file_handle` 的进入/成功点。仍只对
+该一个文件、最多 64 行记录，不改变 API 结果、客户机状态、网络包或事件时序。下次复测以最早
+一行的 phase、PC 和原始路径决定是否应修内容清单调度或 Actor 读取路径。
+
+修改后 `make -j2` 通过；重新以客户端对象依赖编译的
+`obj/client/scene-battle-actor-cache-regression.exe` 通过，证明路径级记录没有改变裸 Actor 的
+缓存 ID、按 ID/名称加载或缺失资源返回契约。`obj/server/scene-battle-monster-field18-regression.exe`
+也通过。该回归不启动窗口、网络或服务端；端到端结论仍以后续新日志为准。
+
+### 9.31 崩溃前 ActorSceneNode 分配的强制只读快照（2026-08-24）
+
+本轮用户以新 `bin/main.exe` 复现后，`player-3/logs/guest-memory-fault.log` 先记录
+`JianghuOL.CBE:0x0100DA4E` 的 `R1=0`、`R2=0x13B`、`R0=3`、
+`LR=0x01017801`，随后才是 `DrawMapTileLayer(0x01004EA8)` 的空 visual context。
+`0x01017801` 是 `AllocActorSceneNode(0x010177DA)` 对
+`scene_node_claim_slot(0x0100EF7E)` 的返回点；结合 `0x0100DA14` 的 `b` 首字节分支，
+这再次证明较早的失败是战斗/背景 Actor 数组中的空节点分配，而不是绘制地址或
+`e_tiger.actor` 文件读取。
+
+服务端同一 session `7b49ce03` 的顺序也已固定：三项 `WT18/9` manifest 中只有
+`测试地图.sce` 与 `e_ghostfireR.actor` 完成 `WT18/7`；`WT25/5` 后服务端记录
+`mock_scene_enter_defer ... missing=e_tiger.actor keep_pending=1`；随后客户端仍发出 60-byte
+`WT4/1`，`builtin-challenge-interaction` 立即返回含 `WT2/2 + WT4/5` 的 185-byte 响应。
+这个 pending/battle 生命周期矛盾是候选的更早服务端契约问题，但当前证据还没有把它与
+具体的 `b_*.sce` 描述符、数组容量和 `FreeBattleActorArray` 顺序连接起来，故根因仍为
+`unresolved`，没有改变 battle handler 或在绘制处加兜底。
+
+此前容量文件最后更新时间早于本次复现，因为直接/多人启动器默认关闭
+`CBE_TRACE_ACTOR_SCENE_CAPACITY`。为消除这个取证缺口，`main.c` 现在在保持普通 tracing
+关闭时也只读取 `0x01017E34/0x01017E54` 的 allocator 容量边界；若且仅若
+`0x0100DA4E` 的返回节点 `R1` 为零，会写一条不受环境开关影响的
+`logs/actor-scene-node-capacity.log` 快照。它记录当前 descriptor resource、子项、两张表和
+已观测的战斗/背景容量。常规路径不写日志，不改变客户机内存、寄存器、PC/LR、CBE 指令、
+网络请求或响应。
+
+同一补充还将已启用的 `scene_battle_uplink phase=wt-4-1` 记录扩展为完整原始 `hex=`，
+长度上限仍为读入的 512 byte 本地缓冲。这使下次可将 client 的 `id/index/posx/posy/moveinfo`
+与服务端 `mock_challenge_battle_start` 的字段解析逐字节核对，而不靠日志字段猜测。
+
+验证：`make -j2`、`obj/client/scene-battle-actor-cache-regression.exe`、
+`obj/server/scene-battle-monster-field18-regression.exe` 和
+`obj/server/scene-transition-entry-contract-regression.exe` 均通过；`git diff --check` 通过。
+下一次人工复现须完全退出旧进程后启动本次构建，保留同一运行目录的
+`actor-scene-node-capacity.log`、`scene-battle-collision.log`、`guest-memory-fault.log` 与
+`bin/server_out.txt`。决定性记录是 `R1=0` 那条的 `resource`、`count`、
+`battle-background capacity/rows`，及其之前最近的 alloc/free 行；只有该记录能决定修复应在
+场景重入生命周期还是 `WT4/5` 的 battle parser 契约层。
+
+### 9.32 player-3 启动器的容量追踪默认值（2026-08-24）
+
+9.31 构建后的 session `269aebb4` 已在
+`scene-battle-collision.log` 写出新的 `WT4/1 hex=`，故可排除旧 `main.exe`；其原始请求为
+`id=1001,index=4,posx=104,posy=160`，和
+`mock_challenge_battle_start req_index=4 req_pos=(104,160)` 完全一致。崩溃仍先为
+`0x0100DA4E, R1=0, LR=0x01017801`，随后才到 `0x01004EA8`。
+
+但该运行的 `actor-scene-node-capacity.log` 时间戳仍停在旧会话。启动器检查表明
+`start-player-3.bat` 只默认打开碰撞追踪，而共同启动器把
+`CBE_TRACE_ACTOR_SCENE_CAPACITY` 默认设为 `0`；因此通常的 alloc/free 链没有被采集。
+9.31 的空结果兜底本应补一行，但本次未落盘，原因在当前 code-hook/非法访问执行次序上仍为
+`unresolved`，不能将其当作容量已被观测的证据。
+
+为获得下一次的完整、可审计链，`bin/multiplayer/start-player-common.bat` 现仅把该环境变量的
+未设置默认值改为 `1`（显式设为 `0` 仍可关闭）。它不影响 CBE、缓存、输入、请求、响应、
+事件投递或 battle handler；仅在已有的只读 `main.c` probe 写入 descriptor、array alloc/free
+和节点表。验证：`make -j2`、`scene-battle-actor-cache-regression`、
+`scene-battle-monster-field18-regression` 与 `git diff --check` 均通过。
+
+### 9.33 同场景 `16/3` 重入是最早的数组所有权违约（2026-08-24）
+
+启用容量追踪后的 session `53cf6b6d` 推翻了 9.23 的“final `WT18/7` 后仍需一次
+`16/3(result=2)` 重建”结论。`actor-scene-node-capacity.log` 记录首次场景初始化为
+`b_01桃花岛.sce` 的两个 background descriptor 分配 `680 = 2 * 340` 字节的 Actor 数组，
+两次 `AllocActorSceneNode` 分别占用 row 0 和 row 1。随后同一数组地址仍存活、没有
+`FreeBattleActorArray` 记录，却出现第二次 `scene-init-reset-count` 和同一
+`b_01桃花岛.sce` 的两个 descriptor；第二轮返回的节点地址已经越过这两行，最终
+`AllocActorSceneNode(0x010177DA)` 经 `scene_node_claim_slot(0x0100EF7E)` 返回零。
+`parse_actor_motion_descriptor(0x0100DA4E)` 随即以 `R1=0` 写 `+0x13B`，其后的
+`DrawMapTileLayer(0x01004EA8)` 空 visual context 只是该更早失败的结果。
+
+同一 session 的 `server_out.txt` 将第二次 init 唯一对应到已经完成 startup follow-up 后的
+独立 `WT25/5`：`builtin-startup-sce-install-scene-enter` 返回
+`16/3 result=2`，而 `mmGameMstarWqvga.cbm:sub_11CE(0x11CE)` 的该对象分支会经
+`sub_BCC(0x0BCC)` 调用 main API `+116`，正好重走初始化。`WT4/1` 的原始字节解析为
+`id=1001,index=3,pos=(120,160)`，与服务端收到的 tuple 一致，因此请求解码和 `WT4/5`
+不是首次偏离。
+
+根因修复位于启动资源安装 handler：角色选择已经拥有活动场景壳及其 background Actor
+数组时，final `WT18/7` 后不再 arm `16/3`。首个及后续独立 `WT25/5` 回到既有 control ACK，
+不携带 scene/posinfo，也不会安排第二次 scene-runtime init。该改动没有修改 CBE/CBM、
+客户机内存、寄存器、PC/LR、网络事件机制或 battle 包。
+
+`scene-transition-entry-contract-regression` 已改为断言 startup final `WT18/7` 后 arm 状态为
+false，并验证连续两次 standalone `WT25/5` 均为 `19/5` control ACK、绝不含位置型
+`16/3`；传送石和 settings 的既有 `16/3` 契约仍由各自专用路径覆盖。后续人工复测的首要
+验收证据是容量日志中不再出现“非零 background 数组仍存活”的第二次
+`scene-init-reset-count`，且不再出现 `0x0100DA4E`。其后仍必须单独完成
+`e_tiger.actor` 的 `WT18/7` 安装和战斗首帧验收，不能把本次生命周期修复视为资源契约已验收。
+
+验证：`make -j2` 通过；以服务端同一宿主对象重新编译并运行
+`obj/server/scene-transition-entry-contract-regression.exe` 通过，输出明确记录三项
+`WT18/7` 完成后 `mock_startup_sce_install_scene_enter_suppressed`，随后 startup follow-up
+为 `action=no-second-scene-enter`。重新编译并运行
+`obj/server/scene-battle-monster-field18-regression.exe` 通过（196 个发布 SCE，测试地图的
+counted entity 记录仍为 73 byte）；`obj/client/scene-battle-actor-cache-regression.exe` 亦以
+零退出码通过。该进入回归的旧夹具此前只完成 SCE/effect 却断言 body Actor 已缓存，现已显式
+模拟 body 与 effect 的 final `WT18/7`，与 9.28 的真实资源所有权契约一致。
+
+### 9.34 无崩溃后的未触发战斗与资源路径负证（2026-08-24）
+
+用户以 9.33 构建重新进入测试地图后，`actor-scene-node-capacity.log` 的本次记录只有一次
+background Actor 数组初始化；没有“非零数组仍存活”的第二次 `scene-init-reset-count`，也没有
+`0x0100DA4E` 或 `0x01004EA8`。这确认单独的 startup `WT25/5 -> 16/3(result=2)` 已被正确
+撤回，但并不等于首场景已经具备战斗契约。
+
+同一 session `d9792bac` 的 `server_out.txt` 只有 `测试地图.sce` 与
+`e_ghostfireR.actor` 的 final `WT18/7`；没有 `e_tiger.actor` 的请求或安装。客户端仍解析出
+五个 `actor=1001` 节点，且 `scene-battle-collision.log` 显示主 API `+52` 已注册 mmGame
+输入回调，但随后服务端只收到移动 `WT2/1`，没有客户端生成的 `WT4/1`。故 battle handler、
+`WT4/5` 和绘制不在这次失败链上。
+
+历史正常“脱离卡死”重入的容量记录则在下一次 `scene-init-reset-count` 前明确出现
+`battle-array-free-entry -> battle-array-free-before-null`。其 server 契约是客户端请求
+`WT16/2(type)`、服务端回已验证的 `16/2(result=1, scene, posinfo)`，随后客户端自己发送
+`16/3(type=0,current-X) + 27/11 + 7/42`。这条完整路径可恢复碰撞，但不能把它未经证实地
+塞回 standalone `WT25/5`；此前直接回 `16/3(result=2)` 的反例正是未释放数组并崩溃。
+
+9.28/9.29 的 `DataPackage_GetFileID/GetFile/GetFileByID` 缓存修复仍在当前二进制中，但本次
+没有生成原先仅过滤 `e_tiger.actor` 的 `actor-resource-cache.log`，同时 player-3 缓存确无
+`e_tiger.actor`（只有 `e_tiger.gif`）。这只能证明实际加载调用没有以该精确名字经过已记录
+入口，不能证明 body Actor 已正确取得。下一版把同一个上限取证改为记录所有裸 `.actor/.gif`
+资源 API 调用（最多 128 条，仍只读参数/PC/包 ID/返回值）；下一次复测以第一条与 body Actor
+相关的 phase 决定修复应位于资源打开、DreamFactory 虚表或上游资源声明，期间不恢复任何
+startup 场景重入包。
+
+### 9.35 启动 `WT25/5` 的 `16/2(result=1)` 直接进入契约（2026-08-24）
+
+9.34 的新运行不再崩溃，但触碰后只有 `WT2/1`，没有 `WT4/1`。与此同时，
+`scene-battle-collision.log` 记录场景已解析五个 `actor=1001` 的碰撞节点并注册了 mmGame 输入回调，
+但活动逻辑仍是首场景壳的 `0x05017776`。这是 9.33 撤回 `16/3(result=2)` 后的首次偏离：
+它避免了数组重入，但也没有建立直接进入后的碰撞运行流。
+
+IDA 对 `mmGameMstarWqvga.cbm:sub_11CE(0x11CE)` 的证明引入了一个已知契约：该回调按响应对象遍历，
+`16/2` 的 `result=1` 不走 `result=2` 的充值提示分支，而是与 `16/3(result=2)` 同样进入
+`sub_BCC(0x0BCC)`。`sub_BCC` 只读 `scene`/`posinfo`/`exitid`，然后调用主 CBE API `+116`。历史“脱离卡死”的
+`WT16/2(type) -> 16/2(result=1,scene,posinfo)` 运行既已证明这条路径在再初始化前先有
+`battle-array-free-entry -> battle-array-free-before-null`，且客户端自行发出
+`16/3(type=0,current-X) + 27/11 + 7/42`。
+
+因此启动 SCE 的 arm 保留原来的严格范围：只有角色选择后、相同场景、有对应最终
+`WT18/7` install generation、并且只处理首个独立 `WT25/5`。响应改为一个 `16/2(result=1)`，绝不再发送
+`16/3(result=2)`。后续 `16/3 + 27/11 + 7/42` 仍完全由客户端产生，服务端仅按已有 direct-enter
+object-stream 处理它；同时重新 arm 一次 NPC 目录，供客户端请求的 `27/11` 消费。没有改写 CBE/CBM、
+客户内存、寄存器、PC/LR、碰撞或战斗包。
+
+`scene-transition-entry-contract-regression` 修订为断言最终 install 会引起一次性 arm，首个 `WT25/5`
+只回 `16/2(result=1)` 且不含 `16/3`，紧随的客户端 `16/3 + 27/11 + 7/42` 只由既有 object-stream
+handler 回目录/技能书对象，第二个 `WT25/5` 回普通 `19/5` control ACK。资源路径另外收窄了
+`actor-resource-cache.log`：通用 `.actor/.gif` 记录仅取 SCE parser PC 区间 `0x0100D6E2..0x0100F5B4`，而
+`精确 e_tiger.actor` 仍在任意 PC 下记录，避免启动 UI 耗尽 128 条上限。待人工验收：必须看到先 free 后重建、
+客户端 direct-enter 请求流、`WT4/1`，以及 `e_tiger.actor` 的真实 `WT18/7` 安装；没有任一项都不能将其认定为战斗修复已完成。
+
+### 9.36 `16/2` startup 重入反证与缓存打开边界（2026-08-24）
+
+9.35 构建的 player-3 会话 `46b269cd` 已排除“没有走到 direct-enter”的可能：服务端记录
+`mock_startup_sce_install_scene_enter ... response=16/2-result1`，随后客户端确实生成了 88-byte
+`WT4/1(id=1001,index=3,pos=(120,160))`，服务端按 `builtin-challenge-interaction` 返回 191-byte
+正常战斗响应。但是它并未修复崩溃。容量日志在该 `16/2` 之后记录第二次
+`scene-init-reset-count`，`array_ptr=05067388` 和 `guest_count=2` 仍非零，直到第二轮为同一
+`b_01桃花岛.sce` 分配两个 child 才在 `0x0100DA4E` 得到 `R1=0`；期间没有
+`battle-array-free-entry` 或 `battle-array-free-before-null`。随后
+`DrawMapTileLayer(0x01004EA8)` 的空视觉上下文故障重现。
+
+IDA 的 `mmGameMstarWqvga.cbm:sub_11CE(0x11CE)` 完整分支说明了差异：当前
+`16/2(result=1)` 不命中 `result=2` 的回调投递分支，随后落入 `sub_BCC(0x0BCC)`；
+`result=2` 则只投递 `sub_24A8`，不会同步调用 `sub_BCC`。前者只取
+`scene`、`posinfo`、`exitid`，调用 main API `+116`，再清自身请求标志。它没有释放首场景的
+background Actor 数组。设置“脱离卡死”路径中的 free 是其旧 UI/场景生命周期已经完成的前置条件，
+不能转嫁给 standalone `WT25/5`。因此 9.35 的 startup `16/2` 假设已被否定；当前 handler
+恢复为严格 suppression，首个 `WT25/5` 交给既有无位置 startup follow-up，后续请求为普通
+control ACK，均不得含 `16/2` 或 `16/3`。
+
+资源侧的证据也更精确了：本轮 `WT18/9 -> WT18/8` 声明 `files=3`，且客户端
+`mmorpg_updatetemp` 的 46-byte payload 正是 `测试地图.sce`、`e_ghostfireR.actor`、
+`e_tiger.actor`。缓存目录仍只有 `e_tiger.gif`，但客户端只对索引 0、1 发了 `WT18/7`；之后的
+scene task follow-up 才报告 `missing=e_tiger.actor`。故 field17 本体没有从内容清单丢失，首次
+未解释的边界收敛为客户端对该第三个 manifest 项的文件打开/资源取得路径。
+
+为收集该边界，`vm_actor_resource_trace` 现在先规范化路径并以 basename 识别
+`JHOnlineData/e_tiger.actor`；通用 SCE parser trace 仍最多 128 条，而测试本体另有 32 条上限。
+它记录 `file-open-enter`、`file-open-ready`、资源 API 和 `named-download-enter` 阶段，仅读取
+宿主参数/PC 并写入日志，不改客户机状态、寄存器、CBE 指令或网络数据。下轮先验收该日志中
+`e_tiger.actor` 的最早 phase：若到达 `named-download-enter`，必须出现正常的 WT18/7；若只到
+file-open 或完全没有记录，再以该 PC 定位真实读取入口。不得恢复任何 startup 场景重入包。
+
+验证：`make -j2` 通过；重新编译并运行
+`obj/server/scene-transition-entry-contract-regression.exe`、
+`obj/server/scene-battle-monster-field18-regression.exe` 与
+`obj/client/scene-battle-actor-cache-regression.exe` 均通过。前者显式覆盖 final WT18/7 后第一个
+startup WT25/5 的无重入 follow-up 和第二个 `19/5` control ACK；后两者分别保持 SCE kind-3
+field17/field18 与客户端缓存 ID/按 ID 读取契约。端到端根因仍为 `unresolved`，以新的资源日志
+决定下一处实现，而非以“暂不崩溃”替代验收。
+
+### 9.37 当前发布内容与未进入碰撞扫描（2026-08-24）
+
+本轮 player-3 会话在 `18:29` 安装的 `测试地图.sce` 不是此前假定的 tiger 本体版本。
+缓存 SCE 原始字符串记录五个新增 kind-3 节点的 field17 都是 `e_monkey.actor`，其 field18
+均为 `e_ghostfireR.actor`；同一 SCE 还保留一个 `e_batB.actor` 节点。相应的
+`mmorpg_updatetemp` 是 61-byte、四项的清单：`测试地图.sce`、`e_ghostfireR.actor`、
+`e_tiger.actor`、`e_monkey.actor`。服务端只收到前两项的 WT18/7，客户端缓存中没有
+`e_tiger.actor`，但这是当前 SCE field17 并不引用 tiger 的直接结果，不能再将“未下载 tiger”
+作为本次场景本体缺失的证据。
+
+根因在发布层也有明确解释：`mock_server_core.c:vm_net_mock_content_update_publish_files()` 保留并
+更新既有 manifest 名称，不会在一次发布时删除旧条目。因此四项清单中的 `e_tiger.actor` 是此前
+发布遗留项，而不是本次 `scene_battle_monster_deploy` 所生成 SCE 的依赖。后续应以实际 SCE
+kind-3 record 收集依赖；不得从累积 WT18/8 清单的某一条目倒推出当前场景 field17。
+
+本次同时没有新的 `0x0100DA4E` 或 `0x01004EA8` fault。`actor-scene-node-capacity.log` 只有
+一轮 background Actor 数组初始化，两个 child 都取得非零 node。客户端持续发送移动 WT2/1，
+但没有 WT4/1；`scene-battle-collision.log` 证明 scene input callback 已注册，却没有任何
+`TriggerAutoBattle(0x010183A0)` entry。IDA 显示该函数才会枚举 25 个节点、调用 node +64
+collision callback 并在成功后产生 WT4/1，因此 battle handler 和 WT4/5 不在本轮失败链。
+
+为区分 normal scene tick 根本未到达与其 readiness gate 返回，`main.c` 增加
+`scene_battle_tick` 的只读、去重日志，分别记录 `scene_runtime_tick` 的
+`gate-runtime-ready(0x01014D74)`、`loading-return(0x01014D80)`、
+`normal-tick(0x01014D8A)` 及两个 readiness 字节。该取证不写 CBE 内存、寄存器、PC/LR、
+指令或网络响应。下次复测必须保留该三类日志、WT2/1/WT4/1 及最新 `mmorpg_updatetemp`；只有
+normal tick 已运行而仍无 `TriggerAutoBattle` 时，才继续追踪 scene screen callback 到 slot +108。
+
+验证：`make -j2` 通过；`obj/client/scene-battle-actor-cache-regression.exe` 与
+`obj/server/scene-battle-monster-field18-regression.exe` 均通过。尚未用含本次 tracing 的新
+`bin/main.exe` 做人工端到端复测。
+
+### 9.38 首场景 action 回调与原始方向键不是同一条路径（2026-08-24）
+
+本轮用户以新的 `bin/main.exe` 再次进入测试地图后，仍没有崩溃，但也没有 `WT4/1`。同一
+`7d18eb76` 会话的服务端只收到 `WT2/1`；客户端日志则已证明 scene tick 和硬件输入都在自然
+运行。例如最后一组动作中，玩家在 `(18,53)`、最近 `actor=1001` 节点在 `(20,56)`，距离平方为
+`13`，随后仍没有 `TriggerAutoBattle(0x010183A0)`。
+
+这次复核修正了此前将 `main API +52` 误称为“方向键 callback”的说法。IDA 证据如下：
+
+```text
+SetMapCtrlField6172(0x0101807E): R9+0x5D28 <- R0
+mmGame:sub_1444(0x1444):          API+52 <- sub_8A8
+SceneTickUpdatePositions(0x010163A4, API+88):
+  raw key mask only dispatches R9+0x5D24 in its applicable UI/control states
+SceneTickProcessActors(0x01016D2E):
+  R9+0x5D2C is a separate touch-region delegate
+```
+
+`sub_8A8` 只在 action `2/3/4` 时经 `sub_68E` 调用 `TriggerAutoBattle`，不是 raw key mask 的
+直接处理器。本次 watch 的唯一非零写是 `0x01018084` 由 `mmGame:sub_1444` 写入
+`R9+0x5D28=0x05017AB9`；其后 `scene_runtime_init_and_sync(0x01013896/0x01013898)` 只清零
+`R9+0x5D24` 与 `R9+0x5D2C`，没有任何后续非零写入。因而当前能证明的是：测试图尚未产生能够
+进入 action dispatch 的客户端事件；不能把 `R9+0x5D24=0` 本身当作服务端可写的根因，也不能
+直接调用 `sub_8A8` 或伪造 `WT4/1`。
+
+下一项必要证据是用同一构建重新进入原生 `00蓬莱仙岛_02.sce` 并触碰小猴子，保留同一
+`scene-battle-collision.log`。若原生在 action 前写入或调用 `R9+0x5D24`，再追踪这条状态由何种
+合法场景生命周期建立；若原生同样保持该槽为零但仍进入 `sub_8A8`，则以其 `sub_8A8` caller
+作为唯一继续逆向的入口。此前已确认会重入 live background Actor 数组的 startup `16/2`、`16/3`
+和 `30/1` 均不恢复；战斗 handler、`WT4/5` 与资源缓存也不在本轮失败链中。
+
+### 9.39 fresh-load 测试图仍缺 action 调度（2026-08-24）
+
+用户再次以当前构建进入测试地图并触碰 `actor=1001`。本次没有新的
+`0x0100DA4E` 或 `0x01004EA8` fault，服务端也未收到 `WT4/1`；它只记录了测试地图及
+`e_ghostfireR.actor` 的 install、startup follow-up 和之后的移动 `WT2/1`。最后一次接近记录为
+玩家 `(18,53)`、最近 `actor=1001,index=7` 在 `(20,56)`、`distance2=13`，但没有
+`TriggerAutoBattle(0x010183A0)`、碰撞回调或 battle uplink。
+
+该运行补充了一个有用但尚非因果结论的场景壳差异：当前活动 screen 是
+`0x01053450`，其输入 logic 为本次 mmGame 装载的 `sub_566`，并自然完成
+`sub_1444 -> API+52 <- sub_8A8` 注册；`R9+0x5D24` 与 `R9+0x5D2C` 在 runtime init 后仍为零。
+历史真实测试怪 `WT4/1` 成功链发生在另一活动 screen 壳（当次地址
+`0x01053F78`）。screen 地址本身受分配影响，不能把地址值或其中任一 callback 直接写回当前
+客户机；现有 `16/2`、`16/3`、`30/1` startup re-entry 虽能改动壳生命周期，但都已经实证会在
+仍存活的 background Actor array 上二次初始化，最终导致已排除的崩溃，故不得恢复。
+
+因此最早未解释的边界仍在客户端本地的 action dispatch，而非 SCE kind-3、Actor 资源、节点
+`+64` 碰撞、`WT4/1` detector 或 `WT4/5` builder。下一项决定性证据必须是同一 `bin/main.exe`
+下的原生 `00蓬莱仙岛_02.sce` 小猴子触碰：保留 `scene-battle-collision.log` 与
+`server_out.txt`，并将原生 `sub_8A8 -> sub_68E -> TriggerAutoBattle` 的实际 caller / screen
+生命周期和本次测试图并列。若原生也保持 `R9+0x5D24=0`，继续以原生 `sub_8A8` caller 反查；若
+该槽或 screen 生命周期先改变，才追踪其合法的 parser 或 screen-manager 来源。当前没有据此
+修改 CBE/CBM、客户内存、寄存器、PC/LR、输入、网络包或服务端业务响应。
+
+### 9.40 动态测试 SCE 不能作为 fresh-load 首场景（2026-08-24）
+
+最新 session `52d7a46c` 固定了本轮的首次偏离。`WT18/9 -> WT18/8` 先声明四项
+清单，但角色选择的 actorinfo 已以 `测试地图.sce` 建立首场景壳；随后才完成
+`WT18/7(测试地图.sce)` 与 `WT18/7(e_ghostfireR.actor)`。首个 `WT6/1` 的
+`mock_scene_startup_followup_complete` 因 9.33/9.36 的数组所有权反证只能返回普通
+control ACK。客户端可解析 kind-3 节点并发送 `WT2/1`，但不会进入
+`TriggerAutoBattle(0x010183A0)`，所以不可能产生 `WT4/1`。
+
+这不是碰撞或 battle handler 的缺陷。IDA 复核了原先的简化表述：
+`mmGame:sub_8A8(0x8A8)` 的 action `2/3/4` 调用 `sub_68E(0x68E)`；后者先调用
+main API `+68(1)`，再调用由 main API `+36` 返回的 action object 的 `+20` 回调。
+该回调才会自然进入 `TriggerAutoBattle`。因此 raw direction key、`sub_8A8` 注册和
+scene tick 均不是“必然每帧扫描碰撞”的证据。历史成功壳的
+`TriggerAutoBattle` 调用者为该 action object 的动态代码 `0x0502F98A`，不能将其地址、
+screen 地址或 callback 指针写入 fresh-load 壳。
+
+同一仓库已有且已由历史成功链证明的合法重入入口是用户在 mmGame 菜单选择“脱离卡死”。
+该操作先由客户端自己的 UI/场景生命周期退出旧壳，随后分别走已存在的
+`12/3 + 16/3`、`16/2(result=1)` 或 default-event `30/1` 合同；它与 startup 时在 live
+background Actor array 上直接插入 `16/2`、`16/3`、`30/1` 完全不同。其 server handler
+仍以当前 scene 和客户端上传位置建立 target，不能改成自动触发、不能替换目标场景、也不能
+当作 role scene fallback。
+
+下一次人工验收应在当前测试地图中由用户主动执行一次“脱离卡死”，等待客户端自行完成
+场景重入后再触碰 `actor=1001`。通过边界必须依序包括：服务端
+`mock_settings_unstuck` 或 `mock_scene_current_reload`、客户端的新 scene lifecycle、
+`TriggerAutoBattle`、真实 `WT4/1 -> WT2/2 + WT4/5`，且没有
+`0x0100DA4E`/`0x01004EA8`。若这条已验证的用户触发重入仍不进入 action object，则保留同一
+运行的 `scene-battle-collision.log`、`server_out.txt`、网络包和 fault log，以第一个缺失的
+parser/callback 为准继续调查；不得恢复 startup re-entry 或按绘制地址加兜底。
+
+### 9.41 更正：脱离卡死的同场景 direct-enter 仍违反背景 Actor 数组生命周期（2026-08-24）
+
+9.40 的最后一项人工验收已被 session `93657c8a` 否定，不能再将“脱离卡死”描述为安全的
+测试地图重入手段。该运行的原始服务端顺序为：
+
+```text
+WT16/2(type)
+-> 16/2(result=1, 测试地图.sce, posinfo)
+-> client WT16/3 + WT27/11 + WT7/42
+-> WT6/1 follow-up
+-> client WT4/1
+-> WT2/2 + WT4/5
+```
+
+因此 `WT4/1`、战斗 detector、`WT4/5` 及绘制前的战斗网络事件不是这次的首次偏离。客户端确实
+经 `mmGameMstarWqvga:sub_11CE -> sub_BCC -> main API +116` 进入同场景初始化；screen lifecycle
+也执行了该 scene screen 的 destroy/init。可是 `FreeBattleActorArray(0x01017E3C)` 并未出现：
+
+```text
+scene-init-reset-count: array_ptr=050673a8, guest_count=2, capacity=2
+background b_01*.sce child 0/1 再次解析
+AllocBattleActorArray: 因 array_ptr 非零不分配
+AllocActorSceneNode: 返回容量外的伪节点
+DrawMapTileLayer(0x01004EA8): R0=0
+```
+
+这证明 screen destroy 与场景系统 shutdown 不是同一契约。历史跨场景进入在下一次
+`scene-init-reset-count` 前有 `battle-array-free-entry -> battle-array-free-before-null`，而本运行没有。
+故 9.40 中“用户主动脱离卡死即可验收”的建议撤回；不得自动触发该操作，也不得恢复 startup 的
+`16/2`、`16/3` 或 `30/1` 同场景重入。
+
+当前根因陈述：测试地图以 role actorinfo 的首场景壳载入后，服务端允许同一 `.sce` 的
+`16/2(result=1)` direct-enter。该客户端路径会重跑 scene runtime init，却不会先完成拥有背景
+Actor array 的 scene-system shutdown，违反“array 必须为空后才能按 descriptor 重新建表”的生命周期
+契约。`0x01004EA8` 是越界初始化后的下游症状，不能在该地址加空指针兜底。
+
+待证实的修复边界是测试地图的合法跨场景 `30/1`/instance 入口，或宿主 screen/scene-system 对该
+正式进入路径遗漏的 lifecycle event。后续必须将进入前后的 `FreeBattleActorArray`、响应对象、
+screen lifecycle 和 actor-array 容量放在同一运行中比较；在此之前只允许增加只读取证，不改变
+`settings-unstuck`、战斗或 CBE 客户端状态。
+
+### 9.42 `settings-unstuck` 丢弃 SCE entry `exitid`（2026-08-24）
+
+用户在测试地图主动执行“脱离卡死”后，服务端记录已经从当前 `.sce` 找到安全落点
+`entry=1`，但 `vm_net_mock_get_current_scene_unstuck_target()` 随后无条件把
+`target->exitId` 写为 `0`。这不是一个未使用的服务器字段：`16/2(result=1)` 的统一
+builder 始终编码 `scene`、`posinfo` 和 `exitid`，而
+`mmGameMstarWqvga:sub_11CE -> sub_BCC -> main API +116` 会读取这一对象后重走场景进入。
+普通 SCE portal target 已保留对应 `portal.entryId`；只有 recovery target 丢弃了同一份
+已解析的权威入口数据。用户复现包中的 `exitid=0` 因而是该响应首次可观察的契约偏离，不能
+以 `DrawMapTileLayer(0x01004EA8)` 空指针兜底处理。
+
+修复仅位于服务端 target 构造：当 SCE nearest-entry lookup 返回 entry ID 时，直接赋给
+`target->exitId`；中心点/当前位置等没有 entry 的 fallback 保持 wire 值 `0`，绝不泄漏内部
+`0xffff` sentinel。日志现同时输出 `entry` 和实际 `exit`，便于人工运行逐次确认。没有修改
+CBE/CBM、客户机内存、寄存器、PC/LR、输入队列、战斗包或数组释放函数。
+
+`scene-transition-entry-contract-regression` 新增两项断言：以发布的 `01桃花岛_01.sce`
+验证 SCE `entry=1` 同时出现在 unstuck target 与 `WT16/2.exitid`；以不可解析的有效 `.sce`
+key 验证无 entry 时 target 和响应都保持 `0`。`make -j2`、重新编译运行
+`obj/server/scene-transition-entry-contract-regression.exe`、
+`obj/server/scene-battle-monster-field18-regression.exe` 与重新链接运行
+`obj/client/scene-battle-actor-cache-regression.exe` 均通过。
+
+端到端结论仍为 `unresolved`：用户必须完全退出旧进程后启动新构建，主动执行一次“脱离卡死”，
+先确认 `mock_unstuck_target ... entry=1 exit=1` 和响应 `16/2.exitid=1`，再观察第二次
+`scene-init-reset-count` 前是否出现 `battle-array-free-entry -> battle-array-free-before-null`。只有
+随后真实 `WT4/1 -> WT2/2 + WT4/5` 且战斗首帧没有 `0x0100DA4E`/`0x01004EA8`，才能确认该字段
+修复覆盖了实际生命周期故障；否则保留同一 run 的 server/resource/network/capacity/fault 日志，
+以第一次未满足的项继续取证。
+
+构建注意：本轮初次普通 `make -j2` 只重建了 `bin/jh-online-server.exe`，没有重编
+直接包含 mock-server fragment 的 `bin/main.exe`。已将 `$(MOCK_SERVER_FRAGMENTS)` 加入
+`obj/client/main.o` 的 Makefile 依赖，按 client 的正常编译参数重建 `obj/client/main.o`，再执行
+`make bin/main.exe` 完成链接。此后普通 `make -j2` 会在 fragment 改变时自动重编；人工验收仍必须
+使用这个重新链接的 `bin/main.exe`，不能把先前的 main 二进制当作本修复结果。
+
+### 9.43 `exitid` 修复反证与 lifecycle 调用者取证（2026-08-24）
+
+新会话 `1b0bcac1` 已使用包含 9.42 的 `bin/main.exe`：服务端记录
+`mock_unstuck_target ... entry=1 exit=1`，并返回紧凑 `WT16/2` 的
+`16/2(result=1, scene, posinfo, exitid=1)`。客户端随后发送 `WT16/3`、`WT6/1` 和
+`WT4/1`，服务端返回 `WT2/2 + WT4/5`；因此 `exitid=0` 是真实协议缺陷，但不是这次
+`DrawMapTileLayer(0x01004EA8)` 的充分根因。
+
+首个错误仍在战斗包之前：第二次 `scene-init-reset-count` 时 background Actor array 的
+pointer、count 和 capacity 均保留为上一场景的两个 child，直到 `0x0100DA4E` 的 node
+allocation 返回空，再由 `0x01004EA8` 解引用。该运行没有
+`battle-array-free-entry`。紧凑 `WT16/2(type)` 不能改为 `result=2`：已记录的
+`mmGameMstarWqvga:sub_11CE(0x11CE)` 证明该值走“酷宝不足/充值”回调，而不是脱离卡死的
+scene-entry 契约。
+
+下一构建只扩展只读 `actor-scene-node-capacity.log`：每个
+`scene-init-reset-count`、battle-array alloc/free probe 都记录 LR 与八个栈返回地址的模块、
+load base 和本地 offset。下次将把测试地图失败的 init 调用者与一条确实执行
+`FreeBattleActorArray` 的合法跨场景路径逐项对照。这个 probe 不改写 CBE/CBM、客户内存、
+寄存器、PC/LR、响应对象或 screen/scene 状态；在调用者和缺失 lifecycle event 未确认前，
+不得改动 `settings-unstuck`、battle response 或数组释放逻辑。
+
+### 9.44 动态 mmGame 调用者归属的 loader 表反证（2026-08-24）
+
+23:00 的原始容量日志产生于包含 `exitid=1`、但尚未包含 9.43 `lr_callsite` 格式的
+`main.exe`；随后构建的根 `bin/main.exe` 时间为 23:01。因此不能将该日志中缺少
+`lr_callsite` 误解释为探针未命中，也不能据此推断 `0x051907D5` 不属于已装载模块。
+
+源码复核还发现 `g_vmDlLoadedApps[].buffer/spBf` 在当前加载器实现中只有定义和读取，
+没有实际的 `vm_dl_set_loaded_buffer()`、`vm_dl_set_loaded_sp_bf()` 或
+`vm_dl_set_current_app()` 调用点。它不能作为本客户端会话 CBM 代码范围的权威来源，故旧
+`vm_dl_find_loaded_index_by_pc()` 对动态 LR 的 `unmapped` 只是观察器的数据源不足，不能作为
+模块卸载或场景协议结论。
+
+另有独立的已验证边界：`mmGameMstarWqvga.cbm:sub_1444(0x1444)` 经主 API `+52` 自然注册
+`sub_8A8(0x8A8)`；回调减 `0x8A8` 后，动态内存中的 `sub_604(0x604)` 与 `sub_8A8` 均须匹配
+已记录的八字节 Thumb 指纹。新 probe 只在这两个运行时指纹同时成立时，保存这个 host-only
+mmGame code base；格式化 `actor-scene-node-capacity.log` 的 LR/栈地址时还会重新读取同一对
+指纹，并仅接受该基址起的 `0xC000` 页对齐代码窗口。否则仍输出 `unmapped`。它不修改客户内存、
+寄存器、PC/LR、CBE/CBM 指令、响应对象、screen/scene 状态或 Actor array。
+
+这将把本轮直接进入时已观测的 `LR=0x051907D5` 显式归属到
+`mmGameMstarWqvga.cbm:<runtime-base>:0x0000181C`（前提是下一次运行再次通过双指纹），以便用
+已安装的 CBM 反汇编其本地调用点，并同一日志中与真正触发
+`FreeBattleActorArray(0x01017E3C)` 的调用者比较。修复边界仍为 `unresolved`：在该比较得到
+“谁遗漏了 scene-system shutdown”之前，不得改动 `16/2`、`16/3`、`WT4/5` 或释放函数。
+
+为将两类证据放到同一 run，公共多人启动器把已有的
+`CBE_TRACE_SCREEN_LIFECYCLE_ORDER` 未设置默认值改为 `1`（用户显式设为 `0` 仍可关闭）。
+该 probe 每类记录最多 256 条，只读取 screen manager 的 AddScreen 决策、before/after
+pause/destroy/init、回调地址、栈深和当前 Actor array 指针；不干预 screen 决策或 guest
+状态。下一次复现的首项比较是 `manager-add`/`before-destroy`/`before-init` 与对应的
+`scene-init-reset-count`：若没有合法 scene-system shutdown，则继续定位其正式调用条件，
+不得由宿主直接调用 `FreeBattleActorArray`。
+
+静态复核也已用 `bin/JHOnlineData/mmGameMstarWqvga.cbm` 的本地 Thumb 字节完成：候选
+`0x181C` 位于一个以 `0x1838: pop {...,pc}` 收尾的函数体中，而不是
+`sub_BCC(0xBCC)` 或 `FreeBattleActorArray` 的入口。它只能说明直接进入的 LR 继续落在
+mmGame 正常业务代码，不能单靠该中段反汇编断言哪个调用者漏掉 shutdown；仍必须以新日志中的
+已验证 runtime base 为准。
+
+验证：当前根 `bin/main.exe` 已在 23:10:08 由 `src/main.c` 重新链接；随后 `make -j2`
+成功完成（无待建目标），`git diff --check` 除工作区既有 CRLF 提示外无错误。
+`obj/client/scene-battle-actor-cache-regression.exe`、
+`obj/server/scene-battle-monster-field18-regression.exe` 和
+`obj/server/scene-transition-entry-contract-regression.exe` 均通过。它们覆盖 Actor 缓存、
+测试图 kind-3/field18 战斗实体以及 `16/2.exitid`，但不会替代一次真实客户端重入的生命周期证据。
+
+### 9.45 Dynamic NPC instance ownership versus ActorInfo bootstrap (2026-08-24)
+
+Status: hypothesis under investigation; no protocol or lifecycle behavior was changed in
+this section.
+
+The latest reproduced crash does not begin with the monster request or with resource
+resolution. The trace order is:
+
+```text
+role select -> ActorInfo(scene=测试地图.sce)
+-> compact WT16/2 {result=1, scene, posinfo, exitid=1}
+-> mmGame:sub_11CE -> sub_BCC -> main API +116
+-> WT16/3 + WT27/11 + WT7/42 + WT6/1
+-> WT4/1 -> WT2/2 + WT4/5
+-> JianghuOL.CBE:DrawMapTileLayer(0x01004EA8) fault
+```
+
+The server and client evidence for this run is in `bin/server_out.txt`,
+`bin/multiplayer-data/player-3/logs/actor-scene-node-capacity.log`,
+`scene-battle-collision.log`, and `guest-memory-fault.log`. The collision request is
+real `WT4/1` and the server sends its existing `WT2/2 + WT4/5` battle-start contract.
+The first invalid client state predates it: the first scene initialization allocates a
+two-row battle Actor array for the two `b_01桃花岛.sce` background children; the second
+initialization retains that array/count, allocates those children again, and reaches
+`parse_actor_motion_descriptor(0x0100DA4E)` with an invalid empty node. The final
+`DrawMapTileLayer` null visual-context dereference is therefore a consequence, not a
+valid guard location.
+
+The current dynamic NPC entry implementation establishes the earliest server-side
+candidate for that invalid reinitialization:
+
+```text
+mock_server_scene_sync.c:vm_net_mock_build_instance_enter_response()
+  -> client-native WT30/1 {scene=instanceScene,posinfo}
+  -> vm_net_mock_remember_scene_change_target()
+  -> vm_net_mock_save_player_pos_state(instanceScene, instanceX, instanceY,
+                                       "npc-instance-enter")
+  -> vm_net_mock_role_set_position() -> account_roles.scene/pos_x/pos_y
+  -> next role selection serializes role->scene into ActorInfo
+```
+
+`vm_net_mock_build_actor_info()` obtains `sceneKey` through
+`vm_net_mock_scene_key_name()`, which selects `role->scene`; role selection subsequently
+uses that ActorInfo as the first scene shell. The test destination is a dynamic NPC
+instance entered through `WT30/1`, not a verified durable world respawn destination.
+Persisting it means a later login starts with its already-live background shell, and the
+settings `WT16/2(result=1)` path enters that shell a second time without the expected
+array lifecycle transition.
+
+IDA confirms the direct-enter behavior but does **not** authorize host cleanup:
+
+- `mmGameMstarWqvga.cbm:sub_11CE(0x11CE)` dispatches `WT16/2(result=1)` to
+  `sub_BCC(0xBCC)`.
+- `sub_BCC` reads `scene`, tagged `posinfo`, and `exitid`, then calls main API slot
+  `+116`; it does not establish the missing battle-Actor-array release.
+- The captured second-init LR maps to mmGame local `0x181C` when the runtime fingerprint
+  is valid. Historical `FreeBattleActorArray(0x01017E3C)` evidence instead maps to
+  `mmBattleMstarWqvga.cbm` local `0x1E50` (`sub_17AC` dispatcher). These are distinct
+  client lifecycles.
+- `scene_system_shutdown(0x01003A1E)` is a broad CBE shutdown path, not a substitute for
+  screen destruction. It must not be invoked from host code.
+
+An existing but still unobserved client exit path was also identified. `JianghuOL.CBE`
+`HandleSceneExitConfirm(0x0101791E)` sends an event containing `mapID` and `exitID`;
+`SendSceneExitEvent(0x01018ED6)` sends `exitID` and, for selected variants, `type`.
+Current `vm_net_mock_is_scene_change_request()` only accepts the separate `WT2/3`
+shape that contains `maptype`, `mapID`, and `exitID`. No latest trace contains the
+native exit request, its response, or a parser-backed return target. It is therefore
+invalid to invent a default return scene or to retrofit this detector as a recovery
+response.
+
+The session structure already distinguishes visible/runtime scene state
+(`sceneVisibleScene`, `onlineScene`, pending target state) from durable role state, but
+many current request paths still use `role->scene` through
+`vm_net_mock_current_scene_name()` and movement persistence. Merely removing the
+`npc-instance-enter` save would break active-session ownership unless a scoped transient
+instance target is proved across `WT2/1`, `WT6/1`, moveinfo, NPC catalog, battle, and
+disconnect. The required design remains unresolved:
+
+1. Capture a verified world return anchor before a configured dynamic instance enters.
+2. Keep the active instance target session-owned while its normal scene traffic runs.
+3. On a new login, abandon that transient target and build ActorInfo from the verified
+   durable anchor.
+4. Define an explicit migration/recovery policy for legacy `account_roles` rows already
+   pointing at an instance, without a fabricated scene fallback.
+
+Until an observed native exit/relogin contract supplies the return authority, do not
+change `WT16/2`, `WT30/1`, battle packets, rendering, Actor-array release, client memory,
+registers, PC/LR, or CBE/CBM instructions. Next evidence needed: one real instance exit
+or disconnect/relogin trace with the exact request/response pair, plus a narrow audit of
+all active-session scene consumers before any persistence-boundary implementation.
