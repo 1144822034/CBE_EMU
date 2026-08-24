@@ -1,0 +1,300 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- Game fills all space above the compact control strip. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="0dp">
+
+        <FrameLayout
+            android:id="@+id/screen_frame"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:background="#000000"
+            android:padding="0dp">
+
+            <com.xiaoxiao.mt6252simulator.ScreenView
+                android:id="@+id/screen"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_gravity="top|center_horizontal"
+                android:background="#000000" />
+
+            <TextView
+                android:id="@+id/log"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom|left"
+                android:background="#66000000"
+                android:paddingLeft="6dp"
+                android:paddingTop="3dp"
+                android:paddingRight="6dp"
+                android:paddingBottom="3dp"
+                android:textColor="#7ED8A9"
+                android:textSize="11sp" />
+
+            <com.xiaoxiao.mt6252simulator.VirtualPadView
+                android:id="@+id/virtual_pad"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:visibility="gone" />
+        </FrameLayout>
+
+        <LinearLayout
+            android:id="@+id/controls_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_controls_panel"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:gravity="top"
+            android:orientation="horizontal"
+            android:paddingLeft="0dp"
+            android:paddingTop="2dp"
+            android:paddingRight="0dp"
+            android:paddingBottom="2dp">
+
+            <LinearLayout
+                android:id="@+id/soft_left_column"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:clipChildren="false"
+                android:gravity="left|top"
+                android:orientation="vertical"
+                android:paddingLeft="2dp">
+
+                <Button
+                    android:id="@+id/confirm"
+                    style="@style/JianghuButton.Action"
+                    android:layout_width="@dimen/ctrl_soft_key_width"
+                    android:layout_height="@dimen/ctrl_soft_key_height"
+                    android:layout_gravity="left"
+                    android:layout_marginBottom="@dimen/ctrl_tools_key_gap"
+                    android:text="左软"
+                    android:textSize="@dimen/ctrl_soft_key_text" />
+
+                <Button
+                    android:id="@+id/btn_auto"
+                    style="@style/JianghuButton.Action"
+                    android:layout_width="@dimen/ctrl_soft_key_width"
+                    android:layout_height="@dimen/ctrl_soft_key_height"
+                    android:layout_gravity="left"
+                    android:layout_marginBottom="@dimen/ctrl_tools_key_gap"
+                    android:text="自动"
+                    android:textSize="@dimen/ctrl_soft_key_text" />
+
+                <Button
+                    android:id="@+id/manage_account"
+                    style="@style/JianghuButton.Action"
+                    android:layout_width="@dimen/ctrl_soft_key_width"
+                    android:layout_height="@dimen/ctrl_soft_key_height"
+                    android:layout_gravity="left"
+                    android:layout_marginBottom="@dimen/ctrl_tools_key_gap"
+                    android:text="账号"
+                    android:textSize="@dimen/ctrl_soft_key_text" />
+
+                <!-- Keyboard bottom-left: 轮盘 / 清缓存 / 退出. -->
+                <View
+                    android:id="@+id/extra_tools_dot"
+                    android:layout_width="@dimen/ctrl_extra_dot_size"
+                    android:layout_height="@dimen/ctrl_extra_dot_size"
+                    android:layout_gravity="left"
+                    android:layout_marginLeft="4dp"
+                    android:layout_marginTop="2dp"
+                    android:alpha="0.9"
+                    android:background="@drawable/bg_extra_tools_dot"
+                    android:clickable="true"
+                    android:contentDescription="更多"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/center_keys"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="2"
+                android:clipChildren="false"
+                android:gravity="center_horizontal|top"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:id="@+id/dpad_up_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <com.xiaoxiao.mt6252simulator.SquareButton
+                        android:id="@+id/up"
+                        style="@style/JianghuButton.Round"
+                        android:layout_width="@dimen/ctrl_dpad_size"
+                        android:layout_height="@dimen/ctrl_dpad_size"
+                        android:text="▲" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/ctrl_key_gap"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <com.xiaoxiao.mt6252simulator.SquareButton
+                        android:id="@+id/left"
+                        style="@style/JianghuButton.Round"
+                        android:layout_width="@dimen/ctrl_dpad_size"
+                        android:layout_height="@dimen/ctrl_dpad_size"
+                        android:layout_marginRight="@dimen/ctrl_key_gap"
+                        android:text="◀" />
+
+                    <com.xiaoxiao.mt6252simulator.SquareButton
+                        android:id="@+id/ok"
+                        style="@style/JianghuButton.Ok"
+                        android:layout_width="@dimen/ctrl_dpad_size"
+                        android:layout_height="@dimen/ctrl_dpad_size"
+                        android:text="OK" />
+
+                    <com.xiaoxiao.mt6252simulator.SquareButton
+                        android:id="@+id/right"
+                        style="@style/JianghuButton.Round"
+                        android:layout_width="@dimen/ctrl_dpad_size"
+                        android:layout_height="@dimen/ctrl_dpad_size"
+                        android:layout_marginLeft="@dimen/ctrl_key_gap"
+                        android:text="▶" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/dpad_down_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/ctrl_key_gap"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <com.xiaoxiao.mt6252simulator.SquareButton
+                        android:id="@+id/down"
+                        style="@style/JianghuButton.Round"
+                        android:layout_width="@dimen/ctrl_dpad_size"
+                        android:layout_height="@dimen/ctrl_dpad_size"
+                        android:text="▼" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/soft_right_column"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:clipChildren="false"
+                android:gravity="right|top"
+                android:orientation="vertical"
+                android:paddingRight="2dp">
+
+                <Button
+                    android:id="@+id/cancel"
+                    style="@style/JianghuButton.Danger"
+                    android:layout_width="@dimen/ctrl_soft_key_width"
+                    android:layout_height="@dimen/ctrl_soft_key_height"
+                    android:layout_gravity="right"
+                    android:layout_marginBottom="@dimen/ctrl_tools_key_gap"
+                    android:text="右软"
+                    android:textSize="@dimen/ctrl_soft_key_text" />
+
+                <Button
+                    android:id="@+id/btn_chat"
+                    style="@style/JianghuButton.Action"
+                    android:layout_width="@dimen/ctrl_soft_key_width"
+                    android:layout_height="@dimen/ctrl_soft_key_height"
+                    android:layout_gravity="right"
+                    android:layout_marginBottom="@dimen/ctrl_tools_key_gap"
+                    android:text="聊天"
+                    android:textSize="@dimen/ctrl_soft_key_text" />
+
+                <Button
+                    android:id="@+id/btn_map"
+                    style="@style/JianghuButton.Action"
+                    android:layout_width="@dimen/ctrl_soft_key_width"
+                    android:layout_height="@dimen/ctrl_soft_key_height"
+                    android:layout_gravity="right"
+                    android:text="地图"
+                    android:textSize="@dimen/ctrl_soft_key_text" />
+            </LinearLayout>
+
+            <!-- Kept for optional debug wiring; not shown in the strip. -->
+            <Button
+                android:id="@+id/toggle_virtual_pad"
+                style="@style/JianghuButton.Action"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:text="轮盘"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/restart"
+                style="@style/JianghuButton.System"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:text="清缓存"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/btn_exit"
+                style="@style/JianghuButton.Danger"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:text="退出"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/dump"
+                style="@style/JianghuButton.System"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:text="CPU"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/reboot"
+                style="@style/JianghuButton.System"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:text="重启"
+                android:visibility="gone" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/asset_loading_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#E6000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="32dp">
+
+        <ProgressBar
+            style="?android:attr/progressBarStyleLarge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:indeterminate="true" />
+
+        <TextView
+            android:id="@+id/asset_loading_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:gravity="center"
+            android:text="正在解压游戏资源，请稍候…"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp" />
+    </LinearLayout>
+</FrameLayout>

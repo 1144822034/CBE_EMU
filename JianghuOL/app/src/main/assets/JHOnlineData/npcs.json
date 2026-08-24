@@ -1,0 +1,7 @@
+{
+"c00≈Ó¿≥œ…µ∫_01.sce":[{"actorId":4,"x":120,"y":280,"finalActorId":4,"displayName":"Ω£œ…–°∫⁄","actorResource":"n_swordmaster.actor","scriptName":"task0.xse"},{"actorId":5,"x":220,"y":180,"finalActorId":5,"displayName":"¬Î≈©∞¢¿Í","actorResource":"n_boy.actor","scriptName":"task0.xse"}],
+"00≈Ó¿≥œ…µ∫_02.scex":[{"actorId":1,"x":150,"y":350,"finalActorId":1,"displayName":"≤‚ ‘NPC1","actorResource":"n_swordmaster.actor","scriptName":"task0.xse"},{"actorId":2,"x":250,"y":200,"finalActorId":1,"displayName":"≤‚ ‘NPC2","actorResource":"n_boy.actor","scriptName":"task0.xse"},{"actorId":3,"x":200,"y":150,"finalActorId":3,"displayName":"≤‚ ‘NPC3","actorResource":"n_solider1.actor","scriptName":"task0.xse"},{"actorId":5,"x":376,"y":125,"finalActorId":5,"displayName":"–°∫Ô◊”","actorResource":"n_boy.actor","scriptName":"task0.xse"}],
+"c00≈Ó¿≥œ…µ∫_03x":[{"actorId":1,"x":265,"y":279,"finalActorId":1,"displayName":"–°∫Ô◊”","actorResource":"e_monkey.actor","scriptName":"task0.xse"}],
+"01Ã“ª®µ∫_01.scex":[{"actorId":1,"x":107,"y":150,"finalActorId":1,"displayName":"–°∫Ô◊”","actorResource":"e_monkey.actor","scriptName":"task0.xse"}],
+"c04¡Ÿ∞≤∏Æ_01":[{"actorId":10,"x":200,"y":300,"finalActorId":10,"displayName":"¡Ÿ∞≤Œ¿±¯","actorResource":"n_solider1.actor","scriptName":"04¡Ÿ∞≤Œ¿±¯.xse"},{"actorId":11,"x":300,"y":250,"finalActorId":11,"displayName":"¡Ÿ∞≤≤∂øÏ","actorResource":"n_solider2.actor","scriptName":"04¡Ÿ∞≤∞¸≤ªÕ¨.xse"}]
+}

@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">江湖Online</string>
+    <string name="keepalive_channel_name">游戏常驻连接</string>
+    <string name="keepalive_channel_desc">锁屏或切到后台时保持与服务器通信</string>
+    <string name="keepalive_notification_title">江湖Online 运行中</string>
+    <string name="keepalive_notification_text">已保持网络连接，点按返回游戏</string>
+</resources>

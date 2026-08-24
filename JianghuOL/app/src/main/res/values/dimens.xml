@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="ctrl_key_width">50dp</dimen>
+    <dimen name="ctrl_key_height">28dp</dimen>
+    <dimen name="ctrl_soft_key_width">75dp</dimen>
+    <dimen name="ctrl_soft_key_height">42dp</dimen>
+    <!-- Tool buttons (轮盘/账号/聊天/地图) match soft-key size. -->
+    <dimen name="ctrl_tools_key_width">75dp</dimen>
+    <dimen name="ctrl_tools_key_height">42dp</dimen>
+    <dimen name="ctrl_tools_key_gap">2dp</dimen>
+    <dimen name="ctrl_extra_dot_size">22dp</dimen>
+    <dimen name="ctrl_dpad_size">60dp</dimen>
+    <dimen name="ctrl_key_gap">2dp</dimen>
+    <dimen name="ctrl_key_text">10sp</dimen>
+    <dimen name="ctrl_soft_key_text">16sp</dimen>
+    <dimen name="ctrl_tools_key_text">16sp</dimen>
+    <dimen name="ctrl_dpad_text">17sp</dimen>
+    <dimen name="ctrl_ok_text">13sp</dimen>
+    <dimen name="ctrl_key_size">28dp</dimen>
+</resources>
