@@ -95,29 +95,37 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_conte
 字节变化时，客户端才会因 `id/code` 不同而删除并重取其中资源。服务启动也会自动补齐
 旧表的 `resource_checksum` 列，并一次性迁移旧 `server_content_update.tsv`（若存在）。
 
-已有数据库升级到用户账号中心和数据库后台密码时执行：
+已有数据库升级到用户账号中心和旧版数据库后台密码时执行：
 
 ```powershell
 mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_web_accounts.sql
 ```
 
-脚本新增 `server_admin_config`，不会修改游戏账号或角色数据。后台入口为
-`/admin-418yz6/`，管理密码、连续失败次数和锁定状态都从该表读取。默认密码只在
-首次建表时写入为 `123456`，已有配置不会被覆盖。连续错误 5 次后，即使输入正确
-密码也无法登录，执行下面的 SQL 可解锁：
+脚本新增 `server_admin_config`，这是旧版单一后台密码的兼容来源；不会修改游戏账号
+或角色数据。完成下面的多账号迁移后，后台入口 `/admin-418yz6/` 改为使用独立的
+后台账号登录，不再读取玩家 `accounts` 表。
 
-```sql
-UPDATE server_admin_config
-SET failed_attempts = 0, locked = 0
-WHERE config_id = 1;
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_admin_users.sql
 ```
 
-修改密码时建议同时清除失败次数和锁定状态：
+迁移会将原有共享密码平滑复制为默认后台账号 `admin`，不会覆盖已有 `admin` 记录；
+请立即为每位操作者创建独立账号并修改默认密码。账号名仅允许字母、数字、`. _ - @`：
 
 ```sql
-UPDATE server_admin_config
+INSERT INTO server_admin_users
+  (account_id, password_value, failed_attempts, locked)
+VALUES
+  ('operator.alice', '请替换为强密码', 0, 0);
+```
+
+每个后台账号独立计算连续失败次数；错误 5 次只会锁定该账号。解锁或改密时同时清除
+该账号的失败状态：
+
+```sql
+UPDATE server_admin_users
 SET password_value = '新密码', failed_attempts = 0, locked = 0
-WHERE config_id = 1;
+WHERE account_id = 'operator.alice';
 ```
 
 已有数据库增加 W 币充值功能时执行：
@@ -329,8 +337,9 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 ## 表说明
 
 - `accounts`：账号与登录密码。
-- `server_admin_config`：后台管理密码、连续失败次数和数据库锁定状态。
-- `server_admin_operation_logs`：后台对账号和角色执行成功操作、以及游戏内成功 W 币消费的追加式审计记录，包含操作时间、目标账号/角色、金额或物品信息及说明。
+- `server_admin_config`：旧版单一后台密码的兼容迁移来源；升级后不再用于登录验证。
+- `server_admin_users`：独立后台操作员账号、密码、连续失败次数和锁定状态；与玩家账号表隔离。
+- `server_admin_operation_logs`：后台对账号和角色执行成功操作、以及游戏内成功 W 币消费的追加式审计记录，包含操作人（后台账号或游戏内）、时间、目标账号/角色、金额或物品信息及说明。
 - `server_payment_config`：支付接口地址、通讯密钥、公开回调地址和 W 币兑换比例。
 - `wcoin_recharge_orders`：充值订单、支付确认及幂等入账状态。
 - `server_data_migrations`：记录一次性数据语义迁移，防止重复换算。

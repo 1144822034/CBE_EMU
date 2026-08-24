@@ -7130,7 +7130,7 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
                                 "discard-equipment",
                                 g_vm_mock_service_active_account_id,
                                 role->roleId, itemId, discardCount, 0,
-                                operationDetail))
+                                operationDetail, NULL))
                         {
                             printf("[error][mock-service] "
                                    "operation_log_equipment_discard_failed "

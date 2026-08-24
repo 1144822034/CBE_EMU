@@ -854,6 +854,7 @@ static void vm_net_mock_note_startup_sce_runtime_ready(const char *scene)
         return;
     }
     (void)vm_net_mock_scene_client_note_runtime_ready(scene);
+    vm_net_mock_arm_startup_sce_install_scene_enter(scene);
 }
 
 static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request, u32 requestLen,
@@ -2960,7 +2961,7 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
                  cost, itemId, count, wcoinBefore, wcoinAfter);
         if (!vm_mock_admin_operation_log_record(
                 "spend-wcoin-shop", g_vm_mock_service_active_account_id,
-                role->roleId, itemId, count, cost, operationDetail))
+                role->roleId, itemId, count, cost, operationDetail, NULL))
         {
             printf("[error][mock-service] operation_log_game_wcoin_failed source=shop account=%s role=%u item=%u count=%u cost=%u error=%s\n",
                    g_vm_mock_service_active_account_id, role->roleId, itemId,
@@ -4484,6 +4485,11 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          * transition on relogin and can produce a second full bootstrap.
          */
         g_vm_net_mock_title_role_scene_followup_pending = true;
+        memset(&g_vm_net_mock_startup_sce_enter_target, 0,
+               sizeof(g_vm_net_mock_startup_sce_enter_target));
+        g_vm_net_mock_startup_sce_enter_pending = false;
+        g_vm_net_mock_startup_sce_enter_install_generation = 0;
+        g_vm_net_mock_startup_sce_enter_armed_tick = 0;
         /*
          * HandleItemGridResponse (JianghuOL.CBE:0x01039952) initializes the
          * main item manager from 30/21 during the following 5/10 + 7/7 type-1

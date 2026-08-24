@@ -6390,11 +6390,11 @@ static bool vm_net_mock_scene_client_content_ready(
     return true;
 }
 
-/* scene_runtime_init_and_sync issues WT6/1 only after the SCE loader has
- * resolved the scene's Actor queue.  Manifest entries that remain pending at
- * this boundary were cache hits: a genuinely missing file would have produced
- * WT18/7 before runtime sync.  Reconcile only the exact pending scene and the
- * dependencies parsed from its authoritative counted kind-3 records. */
+/* WT6/1 proves that the scene itself reached runtime sync.  It does not prove
+ * that a kind-3 body Actor was installed: the CBE can defer that DreamFactory
+ * lookup until the battle renderer consumes the copied node.  Marking the body
+ * as a cache hit here hid a missing Actor and let 4/5 construct a unit with a
+ * null visual context. */
 static u32 vm_net_mock_scene_client_note_runtime_ready(const char *scene)
 {
     u8 data[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
@@ -6427,12 +6427,6 @@ static u32 vm_net_mock_scene_client_note_runtime_ready(const char *scene)
                 data, len, combatOrdinal, &spawn, NULL))
         {
             return readyCount;
-        }
-        if (vm_net_mock_content_client_mark_resource_runtime_ready(
-                g_vm_mock_service_active_client_id, spawn.actorResource,
-                scene))
-        {
-            ++readyCount;
         }
         if (vm_net_mock_content_client_mark_resource_runtime_ready(
                 g_vm_mock_service_active_client_id, spawn.effectResource,
@@ -7827,6 +7821,58 @@ static void vm_net_mock_complete_startup_scene_followup(const char *currentScene
            target.scene, target.x, target.y, source ? source : "-", objectCount, responseLen);
     vm_autotest_note("mock_scene_startup_followup_complete scene=%s pos=(%u,%u) source=%s objects=%u response=no-scene-pos-reenter evidence=JianghuOL.CBE:0x010137CA+0x010396D6\n",
                      target.scene, target.x, target.y, source ? source : "-", objectCount);
+}
+
+/* Role-select has already built a scene shell from actorinfo. If that exact
+ * role scene was invalidated and then installed through final WT18/7, the
+ * client needs the native mmGame 16/3(result=2) path to rebuild input/action
+ * state. This arms only the first later standalone WT25/5. */
+static void vm_net_mock_arm_startup_sce_install_scene_enter(const char *scene)
+{
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_scene_change_target target;
+    u16 targetX = vm_net_mock_scene_spawn_x();
+    u16 targetY = vm_net_mock_scene_spawn_y();
+    u32 installGeneration = 0;
+
+    if (g_vm_net_mock_startup_sce_enter_pending ||
+        !g_vm_net_mock_title_role_scene_followup_pending ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return;
+    }
+    installGeneration = vm_net_mock_content_client_resource_install_generation(
+        g_vm_mock_service_active_client_id, scene);
+    role = vm_net_mock_active_role();
+    if (installGeneration == 0 || role == NULL ||
+        !vm_net_mock_scene_names_equal_exact(role->scene, scene))
+    {
+        return;
+    }
+    if (!vm_net_mock_read_current_player_grid(NULL, NULL, &targetX, &targetY,
+                                               NULL, NULL))
+    {
+        vm_net_mock_adjust_safe_player_pos_for_scene(scene, &targetX, &targetY);
+    }
+    if (targetX == 0 || targetY == 0)
+        return;
+
+    memset(&target, 0, sizeof(target));
+    snprintf(target.scene, sizeof(target.scene), "%s", scene);
+    target.x = targetX;
+    target.y = targetY;
+    target.mapType = 2;
+    target.exitId = 0;
+    target.hasSceEntry = true;
+    target.needsSceneDownload = false;
+    g_vm_net_mock_startup_sce_enter_target = target;
+    g_vm_net_mock_startup_sce_enter_install_generation = installGeneration;
+    g_vm_net_mock_startup_sce_enter_armed_tick = g_schedulerTick;
+    g_vm_net_mock_startup_sce_enter_pending = true;
+    printf("[info][network] mock_startup_sce_install_scene_enter_arm scene=%s pos=(%u,%u) install_generation=%u next=WT25/5 evidence=WT18/7+mmGame:0x11CE->0x0BCC\n",
+           target.scene, target.x, target.y, installGeneration);
+    vm_autotest_note("mock_startup_sce_install_scene_enter_arm scene=%s pos=(%u,%u) install_generation=%u next=WT25/5 evidence=WT18/7+mmGame:0x11CE->0x0BCC\n",
+                     target.scene, target.x, target.y, installGeneration);
 }
 
 static bool vm_net_mock_is_recent_completed_scene_change_target(const vm_net_mock_scene_change_target *target)
@@ -9805,6 +9851,62 @@ static bool vm_net_mock_append_mmgame_scene_transfer_object_with_result(u8 *out,
     return true;
 }
 
+static u32 vm_net_mock_build_startup_sce_install_scene_enter_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_scene_change_target target;
+    vm_net_mock_role_state *role = NULL;
+    const char *currentScene = NULL;
+    u32 installGeneration = 0;
+    u32 pos = 5;
+
+    if (!vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x19, 5) ||
+        !g_vm_net_mock_startup_sce_enter_pending)
+    {
+        return 0;
+    }
+    target = g_vm_net_mock_startup_sce_enter_target;
+    if (out == NULL || outCap < pos ||
+        g_schedulerTick - g_vm_net_mock_startup_sce_enter_armed_tick > 90u ||
+        !g_vm_net_mock_last_completed_scene_change_target_valid ||
+        !vm_net_mock_scene_change_targets_same_arrival(
+            &target, &g_vm_net_mock_last_completed_scene_change_target))
+    {
+        g_vm_net_mock_startup_sce_enter_pending = false;
+        return 0;
+    }
+    role = vm_net_mock_active_role();
+    currentScene = vm_net_mock_current_scene_name();
+    installGeneration = vm_net_mock_content_client_resource_install_generation(
+        g_vm_mock_service_active_client_id, target.scene);
+    if (role == NULL ||
+        !vm_net_mock_scene_names_equal_exact(role->scene, target.scene) ||
+        !vm_net_mock_scene_names_equal_exact(currentScene, target.scene) ||
+        installGeneration == 0 ||
+        installGeneration != g_vm_net_mock_startup_sce_enter_install_generation)
+    {
+        g_vm_net_mock_startup_sce_enter_pending = false;
+        return 0;
+    }
+    if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(
+            out, outCap, &pos, 3, 2, &target))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    g_vm_net_mock_startup_sce_enter_pending = false;
+    vm_net_mock_mark_direct_scene_enter_completed(
+        &target, "startup-sce-install-25-5");
+    vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
+    printf("[info][network] mock_scene_npc_rearm scene=%s trigger=startup-sce-install response=16/3-result2 immediate=0 next=WT6/1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
+           target.scene);
+    printf("[info][network] mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/3-result2 next=runtime-sync evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
+           target.scene, target.x, target.y, installGeneration);
+    vm_autotest_note("mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/3-result2 next=runtime-sync evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
+                     target.scene, target.x, target.y, installGeneration);
+    return pos;
+}
+
 static bool vm_net_mock_append_mmgame_scene_transfer_empty_object(u8 *out, u32 outCap, u32 *pos,
                                                                   u8 subtype)
 {
@@ -10337,7 +10439,7 @@ static u32 vm_net_mock_build_named_portal_access_response(const u8 *request,
                      wcoinCost, targetEntryId, wcoinBefore, wcoinAfter);
             if (!vm_mock_admin_operation_log_record(
                     "spend-wcoin-instance", g_vm_mock_service_active_account_id,
-                    role->roleId, 0, 0, wcoinCost, operationDetail))
+                    role->roleId, 0, 0, wcoinCost, operationDetail, NULL))
             {
                 printf("[error][mock-service] operation_log_game_wcoin_failed source=paid-instance account=%s role=%u entry=%u cost=%u error=%s\n",
                        g_vm_mock_service_active_account_id, role->roleId,

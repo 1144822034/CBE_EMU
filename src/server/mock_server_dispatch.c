@@ -810,6 +810,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_startup_sce_install_scene_enter_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-startup-sce-install-scene-enter", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     if (vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x19, 5))
     {
         hookedLen = vm_net_mock_build_scene_default_event_response(out, outCap);

@@ -646,17 +646,79 @@ static int vm_resource_host_file_exists(const char *path)
     return 1;
 }
 
+/* Actor resources are referenced by their bare leaf name from SCE kind-3
+ * records.  Unlike .dsh packages they are loaded through DreamFactory's
+ * resource cache, so resolve the client cache here before returning a resource
+ * id.  A cache miss remains a normal WT18/7 request; this must not fall back to
+ * the service's web/fs directory in a client process. */
+static int vm_resource_is_bare_client_asset(const char *name)
+{
+    const char *extension;
+
+    if (name == NULL || name[0] == 0 || vm_path_has_separator(name))
+        return 0;
+    for (const unsigned char *cursor = (const unsigned char *)name;
+         *cursor != 0; ++cursor)
+    {
+        if (!((*cursor >= 'a' && *cursor <= 'z') ||
+              (*cursor >= 'A' && *cursor <= 'Z') ||
+              (*cursor >= '0' && *cursor <= '9') || *cursor == '_' ||
+              *cursor == '-' || *cursor == '.'))
+        {
+            return 0;
+        }
+    }
+    extension = strrchr(name, '.');
+    return extension != NULL &&
+           (_stricmp(extension, ".actor") == 0 ||
+            _stricmp(extension, ".gif") == 0);
+}
+
+static int vm_resource_cache_resolve_client_path(const char *name,
+                                                 char *pathOut,
+                                                 size_t pathOutSize)
+{
+    if (name == NULL || pathOut == NULL || pathOutSize == 0)
+        return 0;
+    pathOut[0] = 0;
+    if (vm_resource_host_file_exists(name))
+        return snprintf(pathOut, pathOutSize, "%s", name) < (int)pathOutSize;
+    if (!vm_resource_is_bare_client_asset(name) ||
+        snprintf(pathOut, pathOutSize, "JHOnlineData/%s", name) >=
+            (int)pathOutSize)
+    {
+        pathOut[0] = 0;
+        return 0;
+    }
+    if (!vm_resource_host_file_exists(pathOut) &&
+        !vm_file_try_download_named_resource(pathOut))
+    {
+        pathOut[0] = 0;
+        return 0;
+    }
+    return vm_resource_host_file_exists(pathOut);
+}
+
 static u32 vm_resource_cache_lookup_id(const char *name)
 {
     VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
-    if (entry)
+    char resolvedPath[256];
+
+    /* vm_resource_cache_note_package() records the names exposed by a
+     * DreamFactory package before a host file has necessarily been installed.
+     * A name-only entry is not a usable cache hit: returning its id here lets
+     * the client carry a body Actor with no backing visual resource into the
+     * battle unit. */
+    if (entry && entry->path[0] && vm_resource_host_file_exists(entry->path))
         return entry->id;
-    if (vm_resource_host_file_exists(name))
+    if (vm_resource_cache_resolve_client_path(name, resolvedPath,
+                                              sizeof(resolvedPath)))
     {
-        entry = vm_resource_cache_note_name(name);
+        if (entry == NULL)
+            entry = vm_resource_cache_note_name(name);
         if (entry)
         {
-            snprintf(entry->path, sizeof(entry->path), "%s", name);
+            snprintf(entry->path, sizeof(entry->path), "%s", resolvedPath);
             return entry->id;
         }
     }
@@ -732,10 +794,21 @@ static u32 vm_resource_cache_load_file(const char *path)
 static u32 vm_resource_cache_load_by_name(const char *name)
 {
     VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
-    if (entry && entry->path[0])
+    char resolvedPath[256];
+
+    /* A manifest invalidation can leave an old pathname behind after its
+     * backing file has been removed.  Treat it exactly like a name-only
+     * package record so the normal WT18/7 cache-miss path reinstalls it. */
+    if (entry && entry->path[0] && vm_resource_host_file_exists(entry->path))
         return vm_resource_cache_load_file(entry->path);
-    if (name && vm_resource_host_file_exists(name))
-        return vm_resource_cache_load_file(name);
+    if (vm_resource_cache_resolve_client_path(name, resolvedPath,
+                                              sizeof(resolvedPath)))
+    {
+        entry = vm_resource_cache_note_name(name);
+        if (entry)
+            snprintf(entry->path, sizeof(entry->path), "%s", resolvedPath);
+        return vm_resource_cache_load_file(resolvedPath);
+    }
     return 0;
 }
 
@@ -2753,7 +2826,34 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
     u32 child_base = 0;
     u32 v7 = 0;
     int result = -1;
+    char resourceName[128] = {0};
     uc_engine *uc = MTK;
+
+    if (namePtr)
+        vm_read_path_string(namePtr, resourceName, sizeof(resourceName));
+
+    /* Scene kind-3 records refer to external Actor/GIF leaves through the
+     * package virtual table, bypassing DF_GetResourceIDByFileName().  A
+     * package entry supplies only that name; returning its ID when the local
+     * cache lacks bytes leaves the battle unit without a visual context.
+     * Resolve the real client-owned resource before the package lookup. */
+    if (vm_resource_is_bare_client_asset(resourceName))
+    {
+        result = (int)vm_resource_cache_lookup_id(resourceName);
+        if (result >= 0)
+        {
+            uc_reg_write(uc, UC_ARM_REG_R0, &result);
+            return (u32)result;
+        }
+        uc_reg_write(uc, UC_ARM_REG_R0, &result);
+        return (u32)result;
+    }
+
+    if (a1 == 0)
+    {
+        uc_reg_write(uc, UC_ARM_REG_R0, &result);
+        return (u32)result;
+    }
     // count1 = *(int16 *)(a1 + 8)
     count1 = (int16_t)vm_get_var_short(a1 + 8);
 
@@ -2884,6 +2984,13 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
     uc_engine *uc = MTK;
     if (fileId == (u32)-1)
         return vm_set_call_result(0);
+
+    /* IDs issued for external Actor/GIF cache entries must stay on the
+     * cache path.  They are not IDs into the current data package. */
+    if (vm_resource_cache_find_by_id(fileId) != NULL)
+        return vm_set_call_result(vm_resource_cache_load_by_id(fileId));
+    if (a1 == 0)
+        return vm_set_call_result(0);
     count1 = (int16_t)vm_get_var_short(a1 + 8);
     id_base = vm_get_var(a1 + 20);
     data_base = vm_get_var(a1 + 16);
@@ -2935,13 +3042,20 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
 
 int vm_DF_DataPackage_GetFile(int a1, int namePtr)
 {
+    char resourceName[128] = {0};
+
+    if (namePtr)
+        vm_read_path_string((u32)namePtr, resourceName, sizeof(resourceName));
+
+    /* This virtual entry is used directly by the scene Actor parser.  Do not
+     * let a name-only package record substitute for an absent client asset. */
+    if (vm_resource_is_bare_client_asset(resourceName))
+        return vm_set_call_result(vm_resource_cache_load_by_name(resourceName));
+
     int FileID = vm_DF_DataPackage_GetFileID(a1, namePtr);
     if (FileID < 0)
         return vm_set_call_result(0);
     int data = vm_DF_DataPackage_GetFileByID(a1, FileID);
-    char fileName[128] = {0};
-    if (namePtr)
-        vm_readStringByPtr(namePtr, fileName);
     return data;
 }
 
@@ -2955,6 +3069,20 @@ int vm_DF_DataPackage_GetFileNameByID(int a1, int a2)
     int j;
     int child_ptr;
     int res;
+    VmReleasedResource *cachedResource = vm_resource_cache_find_by_id((u32)a2);
+
+    if (cachedResource != NULL)
+    {
+        u32 length = (u32)strlen(cachedResource->name);
+        u32 stringPtr = vm_malloc(length + 1);
+
+        if (stringPtr == 0)
+            return vm_set_call_result(0);
+        uc_mem_write(MTK, stringPtr, cachedResource->name, length + 1);
+        return vm_set_call_result(stringPtr);
+    }
+    if (a1 == 0)
+        return vm_set_call_result(0);
     /* count = *(__int16 *)(a1 + 8) */
     count = (unsigned short)vm_get_var_short(a1 + 8);
 
@@ -2995,11 +3123,27 @@ u32 vm_DF_GetResourceIDByFileName(int a1)
 {
     u32 tmp1;
     char name[128] = {0};
+    int result = -1;
+
+    if (a1)
+        vm_read_path_string(a1, name, sizeof(name));
+
+    /* Scene kind-3 body Actors are stored as external bare filenames in a
+     * package.  That package entry is only a name reference, not the Actor
+     * bytes.  Resolve the client cache before asking the package for an ID;
+     * otherwise the name reference wins and the missing-file WT18/7 path is
+     * never reached. */
+    if (vm_resource_is_bare_client_asset(name))
+    {
+        result = (int)vm_resource_cache_lookup_id(name);
+        if (result >= 0)
+            return vm_set_call_result((u32)result);
+    }
+
     tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
-    int result = tmp1 ? (int)vm_DF_DataPackage_GetFileID(tmp1, a1) : -1;
+    result = tmp1 ? (int)vm_DF_DataPackage_GetFileID(tmp1, a1) : -1;
     if (result < 0 && a1)
     {
-        vm_read_path_string(a1, name, sizeof(name));
         result = (int)vm_resource_cache_lookup_id(name);
     }
     return vm_set_call_result((u32)result);
@@ -3009,13 +3153,36 @@ int vm_DF_GetResourceByFileName(int a1)
 {
     int tmp1;
     int result = 0;
+    char name[128];
+
+    memset(name, 0, sizeof(name));
+    if (a1)
+        vm_read_path_string(a1, name, sizeof(name));
+
+    /* A scene kind-3 body Actor is addressed by its bare leaf.  The active
+     * package can contain a name-only entry after content invalidation, which
+     * must not suppress the client-cache miss path.  Resolve a missing local
+     * Actor before consulting that package so the existing WT18/7 resource
+     * transport supplies bytes while the scene node is still being created. */
+    if (vm_resource_is_bare_client_asset(name))
+    {
+        char clientPath[256];
+
+        if (snprintf(clientPath, sizeof(clientPath), "JHOnlineData/%s", name) <
+                (int)sizeof(clientPath) &&
+            !vm_resource_host_file_exists(name) &&
+            !vm_resource_host_file_exists(clientPath))
+        {
+            result = (int)vm_resource_cache_load_by_name(name);
+            if (result != 0)
+                return vm_set_call_result((u32)result);
+        }
+    }
     tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
         result = vm_DF_DataPackage_GetFile(tmp1, a1);
     if (result == 0 && a1)
     {
-        char name[128];
-        vm_read_path_string(a1, name, sizeof(name));
         result = (int)vm_resource_cache_load_by_name(name);
     }
     return vm_set_call_result((u32)result);
@@ -3025,6 +3192,15 @@ int vm_DF_GetResourceByResourceID(int a1)
 {
     int tmp1;
     int result = 0;
+
+    /* IDs returned by the cache-first bare Actor lookup are in the reserved
+     * released-resource range.  They must not be resolved back through an
+     * external-name package entry. */
+    if (vm_resource_cache_find_by_id((u32)a1) != NULL)
+    {
+        result = (int)vm_resource_cache_load_by_id((u32)a1);
+        return vm_set_call_result((u32)result);
+    }
     tmp1 = vm_get_var(VM_DreamFactory_DataPackage_ADDRESS);
     if (tmp1)
         result = vm_DF_DataPackage_GetFileByID(tmp1, a1);

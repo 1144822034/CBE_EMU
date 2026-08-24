@@ -918,3 +918,266 @@ action 值不属于 `2/3/4`，或 callback 到达而其下游未执行。业务�
 为区分 setter 之后被覆盖与 callback 未获调度，探针还会在场景 logic 中只在值改变时记录
 `Global_R9+0x5d28` 的实时输入 callback，以及 `sub_68E` 将调用的主 API `+68` 目标。两个值都
 是客户端已有状态的只读快照；它们没有被回写或用于影响事件分发。
+
+### 9.21 主输入分发边界取证（2026-08-23 23:11）
+
+用户随后复现仍不能触发战斗。新的宿主输入记录证明测试地图不是丢失了
+`VM_EVENT_KEYBOARD`：方向键按下和释放均以原有路径调用当前 scene screen：
+
+```text
+screen=01053438 entry=05017137
+event type=0/1, key-mask=00010000/00020000/00008000/00040000
+```
+
+地址归一化曾出现一次算术误判，现已排除：经已验证的 mmGame 装载基址
+`0x05016BD0` 计算，`0x05017137 - 0x05016BD0 = 0x567`，所以该 entry 是
+`mmGameMstarWqvga.cbm:sub_566(0x566)+1`，不是 `sub_742` 的中间地址。
+IDA 显示 `sub_566(a1,eventType,eventArg)` 的 ABI 与宿主实际传参一致；对键盘按下
+`eventType=0`，它读取 `*eventArg` 并调用主 API `+88`。因此不能把 screen logic
+entry 当成错误入口，更不能在宿主侧直接调用 `sub_8A8` 或 `TriggerAutoBattle`。
+
+截至该复现已获得的链路是：
+
+```text
+硬件键盘队列 -> sub_566 -> sub_540 -> main API +88
+                                      ? -> sub_8A8 -> sub_68E -> TriggerAutoBattle
+```
+
+`sub_8A8` 已由 `sub_1444 -> main API +52` 正常注册，且运行期间
+`R9+0x5D28` 保持该 callback；但最新日志尚未记录主 API `+88` 的实际函数入口，所以第一处
+未证明的边界正是这个间接分发器。`src/main.c` 增加了最多 24 条只读
+`scene_battle_input_dispatch phase=entry` 记录：在 scene logic 中读取 `mainApi+88` 的真实目标，
+仅当客户机自然执行到该 PC 时记录 R0-R3、LR 和 `R9+0x5D28` callback。它不改变任何客户机
+内存、寄存器、PC/LR、输入事件、网络请求或响应。
+
+下一次同一路径复现的判定为：
+
+1. 未出现 `input_dispatch`：`sub_540` 的间接调用目标/时序与当前 API 表不一致；
+2. 出现 `input_dispatch` 而未到 `sub_8A8`：在该 CBE 分发器中继续以 R0 键码和状态门为准逆向；
+3. 到达 `sub_8A8` 但 action 非 `2/3/4`：定位键码到 action 的映射契约；
+4. 到达 `sub_68E` 仍无 `TriggerAutoBattle`：检查 `main API +68` 的 callback 所属与返回路径。
+
+本轮没有修改场景包、场景进入包或战斗包，也没有恢复已确认会导致
+`parse_actor_motion_descriptor(0x0100DA4E)` 崩溃的启动 `30/1` 重入。
+
+验证：`make -j2` 通过；`obj/server/scene-battle-monster-field18-regression.exe` 通过。
+当前环境未设置 `CBE_AUTOMATION_MYSQL_PASSWORD`，因此无法在不触碰用户 `jh_online` 数据库的前提下
+启动隔离端到端客户端自动化；没有把静态回归误作客户端战斗已验收。
+
+### 9.22 启动资源失效与原生场景重建入口（2026-08-24）
+
+重查本次失败运行的原始服务端序列后，蓬莱与测试地图的可检验差异已收敛到资源生命周期，而非
+挑战小猴子任务：
+
+```text
+WT18/9 manifest(测试地图.sce, e_ghostfireR.actor, e_tiger.actor)
+-> 角色选择建立首个测试场景壳
+-> WT18/7(测试地图.sce final install)
+-> WT18/7(e_ghostfireR.actor final install)
+-> WT6/1(scene-runtime-init)
+-> mock_scene_startup_followup_complete(action=no-second-scene-enter)
+-> 仅 WT2/1，未有 WT4/1
+```
+
+蓬莱铸剑谷的资源在首场景创建前已可用；测试地图在角色选择后才被启动内容清单失效并由
+`WT18/7` 安装。相同测试地图经过用户主动的“脱离卡死”流程后，`16/2 -> 16/3(result=2)`
+可正常重建并恢复 `sub_8A8 -> sub_68E -> TriggerAutoBattle -> WT4/1`。因此任务、SCE
+实体、碰撞函数和战斗响应均不是首次偏离。
+
+IDA 复核了两个不能混淆的客户端契约：
+
+1. `JianghuOL.CBE:SceneTickUpdatePositions(0x010163A4)` 是主 API `+88`。方向键传入的是
+   原始 bitmask；它按 `R9+0x5C82` 控制状态调用 `R9+0x5D24` 的控制委托，不能据
+   `R9+0x5D28=sub_8A8` 已注册就推断该 raw-key 路径应直接进入战斗 action。
+2. `mmGame:sub_11CE(0x11CE)` 是注册到主 API `+48` 的响应对象扫描器。仅当网络响应对象
+   本身为 `16/3` 且 `result=2` 时，它调用 `sub_BCC(0x0BCC)`；后者读取 `scene`、`posinfo`
+   和 `exitid`，调用主 API `+116` 建立场景，随后经 `+68(0)` 清除场景模式。这个入口正是
+   已成功的同场景重建所使用的客户端路径。
+
+此前的 `30/1(scene,posinfo)` 启动重入已经在真实客户端触发
+`parse_actor_motion_descriptor(0x0100DA4E)` 的节点容量崩溃，不能重新启用。也不能仅因
+`16/3` 在其它业务请求中有效，就猜测性地把它塞进 `WT6/1` 响应。
+
+`src/main.c` 的下一次只读运行证据会在已验证的 mmGame 模块基址上记录：
+
+```text
+scene_battle_lifecycle phase=response-dispatch      # sub_11CE
+scene_battle_lifecycle phase=scene-enter-object     # sub_BCC
+```
+
+记录包含自然到达的寄存器、LR 和主 API `+116` 目标。判定规则为：若 `WT6/1` 的现有响应已经
+触发 `sub_11CE`，则对象流具备模块扫描的接收边界；若没有 `sub_BCC`，缺失的是合法场景进入对象
+而非输入/碰撞数据。只有同时取得该运行时证据和相同 header/object 组合的 parser 证据后，才可在
+拥有 `WT6/1` 响应契约的服务端层补充精确对象；否则保持 `unresolved`。
+
+本轮仅增加有上限的只读 tracing。`make -j2` 与
+`obj/server/scene-battle-monster-field18-regression.exe` 均通过；没有修改服务器响应、客户机
+内存、寄存器、PC/LR 或场景资源字节。
+
+### 9.23 首场景 SCE 安装后的原生重建修复（2026-08-24）
+
+新的用户复现取得了 9.22 规定的判定证据：正常 `WT6/1` 响应流自然进入
+`mmGameMstarWqvga.cbm:sub_11CE(0x11CE)`，但未进入它唯一的场景对象分支
+`sub_BCC(0x0BCC)`。该响应没有 `16/3(result=2)`；因此客户端保留了由角色选择
+actorinfo 创建、但在 SCE 安装前初始化的场景壳。测试怪实体、碰撞数据、`sub_8A8` 注册和
+任务均在该壳中存在，却没有通过 `main API +116` 完成原生场景重建，最终没有 `WT4/1`。
+
+蓬莱铸剑谷不是因“挑战小猴子”任务才可战斗：它的首场景资源在 actorinfo 建壳前已可用，不会
+经历这个失效-再安装的生命周期。测试地图则经历：
+
+```text
+WT18/9(测试地图.sce, Actor/effect manifest)
+-> 角色选择 actorinfo 创建首场景壳
+-> WT18/7(测试地图.sce final install)
+-> WT6/1 完成业务/资源 follow-up
+-> standalone WT25/5
+```
+
+修复在服务端保存每账号、每会话的精确 startup-SCE 状态，只有同时满足以下条件才处理该
+独立 `WT25/5`：
+
+1. 角色选择首场景 follow-up 已启动，活动角色与当前场景名称、当前网格坐标一致；
+2. 当前场景 SCE 在本轮 manifest 中实际经 final `WT18/7` 安装，安装代次非零且未变化；
+3. 首个 startup follow-up 已将同一 scene/position 标为 completed；
+4. 事件在 arm 后 90 scheduler tick 内，且该一次性标记尚未消费。
+
+匹配时 `vm_net_mock_build_startup_sce_install_scene_enter_response()` 只返回一个已由 IDA 和
+运行时共同证明的对象：`16/3 { result: typed-u8(2), scene, posinfo, exitid }`。正常网络响应
+事件随后令客户端自然执行：
+
+```text
+sub_11CE -> sub_BCC -> main API +116 -> scene_runtime_init_and_sync
+```
+
+handler 随即清除一次性标记，并 re-arm 现有 `WT6/1` NPC runtime catalog；第二次 `WT25/5`
+继续回到原有 scene-default ACK。它不处理组合 `WT25/5 + 6/*`，不处理蓬莱、传送石、战斗关闭、
+普通 refresh 或未安装 SCE。启动路径没有恢复 `30/1(scene,posinfo)`，所以不会重新触发已取证的
+`parse_actor_motion_descriptor(0x0100DA4E)` 场景节点耗尽崩溃。
+
+修改点：`mock_server_equipment_npc.c` 负责会话隔离状态；
+`mock_server_interaction_login.c` 在已验证的 startup SCE runtime-ready 边界 arm；
+`mock_server_scene_task.c` 负责精确 `16/3` 对象与 parser 对应字段；
+`mock_server_dispatch.c` 在通用 `WT25/5` ACK 前选择该 handler。
+
+验证结果：
+
+- `make -j2` 通过。
+- 重新编译并运行 `obj/server/scene-transition-entry-contract-regression.exe` 通过；它验证 final
+  `WT18/7` 不发第二个 `30/1`、首个独立 `WT25/5` 恰发一个 `16/3(result=2)`、第二个独立
+  `WT25/5` 不重复发场景进入对象。
+- 重新编译并运行 `obj/server/scene-battle-monster-field18-regression.exe` 通过；196 个发布 SCE
+  和测试地图五个 kind-3 战斗节点的解析结果未变化。
+
+本机没有 `CBE_AUTOMATION_MYSQL_PASSWORD`，未启动隔离端到端客户端自动化，亦未连接或写入用户的
+`jh_online` 数据库。人工复测应从角色选择进入测试地图，服务端应记录
+`builtin-startup-sce-install-scene-enter` 与
+`mock_startup_sce_install_scene_enter ... response=16/3-result2`；客户端应继续产生 runtime-sync，
+随后触碰测试怪应出现正常 `WT4/1`。
+
+### 9.24 触碰后的 `0x01004EA8` 空视觉上下文（2026-08-24）
+
+最新复现已不再是碰撞未触发：测试火团产生了真实
+`WT4/1 { id=1001, index=5, pos=(136,160) }`，服务端保持该 live tuple 并返回
+`WT2/2 + WT4/5`。客户端随后在首个战斗绘制帧于
+`JianghuOL.CBE:DrawMapTileLayer(0x01004EA8)` 解引用空的视觉上下文 `R0+0x0C`。
+
+第一次违约在本体 Actor 的资源所有权，不在任务或碰撞逻辑：测试 SCE 的 field17 是
+`e_tiger.actor`，该文件存在于服务端 `web/fs/JHOnlineData`，但不在客户端
+`bin/JHOnlineData`。field18 的 `e_ghostfireR.actor` 已下载，所以火团仍可见；这不能证明
+field17 已经由 DreamFactory 解析。服务端又在 `WT6/1` 将未下载的 body Actor 标记为
+`scene-runtime-cache-hit`，掩盖了该缺失。
+
+蓬莱铸剑谷正常不是因为“挑战小猴子”任务。它的 kind-3 使用已存在于客户端资源目录的
+`e_monkey.actor`，并同样以 `e_ghostfireR.actor` 作为 field18。任务只影响任务状态，不参与
+`WT4/1` 的 live index 或 `WT4/5` 的场景节点复制。
+
+修复包括两点：
+
+1. 客户端 DreamFactory 的裸 `*.actor`/`*.gif` 查找现在解析到
+   `JHOnlineData/<name>`；本地不存在时经既有、真实的 `WT18/7` 请求下载，再将实际缓存路径
+   记录到资源表。
+2. 服务端 `WT6/1` runtime-sync 仅可证明 SCE 已运行，不再把 kind-3 field17 body Actor
+   伪记为安装完成。field17 的安装只以实际 `WT18/7` 完成或客户端资源查找结果为准。
+
+新增 `scripts/scene-battle-actor-cache-regression.c` 覆盖裸 Actor/GIF 名称边界，以及
+`e_monkey.actor -> JHOnlineData/e_monkey.actor` 的客户端缓存解析。该回归不启动 VM、窗口、服务端
+或数据库；完整战斗验收仍需在隔离客户端路径中确认 `WT18/7(e_tiger.actor)`、`WT4/5` parser 和
+首帧战斗 UI。
+
+### 9.25 `e_tiger.actor` 名称占位掩盖缓存缺失（2026-08-24）
+
+后续崩溃复现保留了客户端实际收到的 46-byte `mmorpg_updatetemp` 清单。它按长度前缀完整包含
+三项：`测试地图.sce`、`e_ghostfireR.actor`、`e_tiger.actor`。因此第三项不是 manifest 编码、
+分块截断或数据库排序问题。启动清单的语义是失效本地文件；之后仍由实际资源访问触发 `WT18/7`，
+不会保证按清单顺序预下载所有项。
+
+本轮首次违约在 DreamFactory 宿主资源缓存：`vm_resource_cache_note_package()` 可以先登记 Actor
+名称而没有本地文件路径。旧 `vm_resource_cache_lookup_id()` 把这种 name-only 记录直接当作命中；
+`vm_DF_GetResourceByFileName()` 也先接受同名 package entry。测试图 field17 的
+`e_tiger.actor` 因而没有进入 `JHOnlineData/e_tiger.actor` 的缺失资源路径，服务端也没有收到
+对应 `WT18/7`。field18 火团可单独下载和显示，但 field17 的 visual context 保持空，直到
+`WT4/5` 复制场景节点并在 `DrawMapTileLayer(0x01004EA8)` 解引用 `+0x0C` 才崩溃。
+
+修复使两条资源入口一致：无有效本地路径的 cache entry 不再返回资源 ID；对裸
+`*.actor`/`*.gif`，若 `JHOnlineData/<leaf>` 缺失，DreamFactory 会先走既有的本地缓存缺失资源
+传输并在成功后加载，再允许 package 查找。它不伪造战斗、修改客户内存或跳过 parser。新增回归还
+断言 name-only `e_missing_body.actor` 不得作为已安装资源返回 ID，并覆盖非空但文件已被
+manifest 失效删除的陈旧路径；两者都必须重新走缺失资源传输。待人工复测的正向证据是
+`WT18/7(e_tiger.actor)`、最终安装日志，以及随后正常的 `WT4/5` 和首帧战斗画面。
+
+### 9.26 Package 名称 ID 绕过本地 Actor 缓存（2026-08-24）
+
+9.25 的缓存修复后，用户仍复现同一 `JianghuOL.CBE:0x01004EA8` 空上下文崩溃。该复现提供了
+反证：`bin/JHOnlineData/e_tiger.actor` 仍不存在，服务端只收到 SCE 与火团的 `WT18/7`；但是场景
+解析日志的 `node+248` 已非零并被记录为 `resource=e_tiger.actor`。该字段实际是 CBE node 保存的
+名称字符串指针，不能代表 Actor bytes 已被加载或 visual context 已建立。因此不得继续依据这个
+日志字段推断 Actor 已安装。
+
+最早违约位于 DreamFactory 的两个 Host API：旧
+`vm_DF_GetResourceIDByFileName()` 先调用 `DataPackage_GetFileID()`，只有 package ID 不存在时才查询
+本地缓存。测试 SCE 的外部 body Actor 名称在 package 中存在，因此先返回 package 的名称 ID，完全
+跳过了 9.25 的缺失文件路径；后续 `vm_DF_GetResourceByResourceID()` 又优先用该 package ID 取名称
+引用。碰撞可正常发送 `WT4/1`，服务端也正常回复 `WT2/2 + WT4/5`，但 battle parser 没有实际的
+Actor visual context，首帧绘制仍以 `R0=0` 访问 `+0x0C`。
+
+修复把裸 `*.actor`/`*.gif` 的所有权放在这条真实 ID 链的最前端：它先调用缓存解析，必要时按既有
+`WT18/7` 传输下载并返回保留的本地 resource ID；按 ID 取资源时，保留 ID 也先回到本地缓存，不能
+重新落回 package 名称引用。package 中的非 Actor 数据及未安装时的正常错误路径不变。没有修改碰撞、
+战斗请求/响应、客户机内存、寄存器、PC/LR 或 CBE 指令。
+
+`scripts/scene-battle-actor-cache-regression.c` 现以最小 Unicorn 客户机内存直接调用
+`vm_DF_GetResourceIDByFileName("e_monkey.actor")`，断言得到的是本地缓存 ID 且 Host API 将同一值写回
+`R0`，并保留 name-only 与陈旧路径断言。`make -j2` 和该回归均通过。待人工路径验收的首个正向证据
+必须是 `WT18/7(e_tiger.actor)`；其后才检查 `WT4/5` parser 和战斗首帧。
+
+### 9.27 直接 DataPackage 虚表绕过 Actor 缓存（2026-08-24）
+
+9.26 的外层 `DF_GetResource*` 修复后，用户仍在触碰测试火团时复现同一崩溃：
+`DrawMapTileLayer(0x01004EA8)` 以空 `R0+0x0C` 绘制战斗单位。最新
+`bin/server_out.txt` 给出首个可观察偏离：客户端只对 `测试地图.sce` 和
+`e_ghostfireR.actor` 完成 `WT18/7`，服务端随后明确记录
+`scene-task-subset-followup missing=e_tiger.actor`，但客户端仍可发送真实的
+`WT4/1`，服务端随即返回 `WT2/2 + WT4/5`。
+
+根因不是挑战小猴子任务，也不是 `WT4/5` 字段。`main.c` 的 DreamFactory
+虚表分派表明，CBE 场景 Actor 解析还会直接调用
+`DF_DataPackage_GetFileID`、`DF_DataPackage_GetFile` 和
+`DF_DataPackage_GetFileByID`。这些入口此前仍先把 package 中的同名记录当成
+资源本体，完全绕开 9.26 修复过的 `DF_GetResource*` 包装函数。该记录只有
+`e_tiger.actor` 的名称而没有客户端文件字节，因此战斗单位继承空视觉上下文；
+火团 field18 的独立下载无法弥补 field17 body Actor。
+
+修复下沉到 `src/vmFunc.c` 的三条实际虚表路径：裸 `*.actor`/`*.gif` 名称先通过
+客户端 `JHOnlineData` 缓存解析，缺失时走既有同步 `WT18/7` 资源传输；成功后返回
+保留的本地 resource ID。`DataPackage_GetFileByID` 和
+`DataPackage_GetFileNameByID` 也优先识别此 ID，不能再落回 package 名称占位。
+资源无法取得时返回正常的未找到结果，不再伪造 package 命中。没有改写客户内存、寄存器、
+CBE 指令、碰撞或战斗协议。
+
+验证：`make -j2` 通过；重新编译并运行
+`obj/client/scene-battle-actor-cache-regression.exe` 通过。回归覆盖外层 API 和直接
+`DataPackage` 的 ID 查询、按 ID 读文件、按名称读文件、ID 反查名称四条路径；
+`obj/server/scene-battle-monster-field18-regression.exe` 也通过。端到端人工验收仍需从
+干净的测试客户端缓存进入测试地图，确认 `e_tiger.actor` 及其 Actor 描述符引用的 GIF 都有
+`WT18/7` 完成记录，随后触碰生成 `WT4/1 -> WT4/5` 且首帧战斗 UI 不再进入
+`DrawMapTileLayer(0x01004EA8)` 空上下文。

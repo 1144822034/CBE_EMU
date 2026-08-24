@@ -6436,7 +6436,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                 if (!vm_mock_admin_operation_log_record(
                                         "recycle-equipment", auditAccountId,
                                         role->roleId, soldItemId, 1, price,
-                                        operationDetail))
+                                        operationDetail, NULL))
                                 {
                                     printf("[error][mock-service] "
                                            "operation_log_equipment_recycle_failed "

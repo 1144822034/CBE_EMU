@@ -760,19 +760,20 @@ static int assert_instance_sce_install_reenter_order(const char *targetScene)
 }
 
 /* Role-select has already created its first scene shell from actorinfo. A
- * later SCE install must finish that shell's startup, never inject another
- * 30/1. The client can follow an invalid second 30/1 with WT2/3 then WT25/5;
- * model that observed shape and keep every response position-free. */
-static int assert_startup_sce_install_no_reenter_order(const char *targetScene)
+ * later final WT18/7 must not inject a second 30/1; its one safe follow-up is
+ * the documented native mmGame 16/3(result=2) response on standalone WT25/5. */
+static int assert_startup_sce_install_native_reenter_order(const char *targetScene)
 {
     const u32 clientId = 0x50607080u;
     vm_net_mock_sce_combat_spawn spawn;
+    u8 defaultEvent[64];
     u8 taskSubset[256];
     u8 sceneChange[256];
     u8 response[4096];
     u8 sceneData[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
     u32 taskSubsetLen = 0;
     u32 sceneChangeLen = 0;
+    u32 defaultEventLen = 0;
     u32 responseLen = 0;
     u32 sceneLen = 0;
     u32 sceneStart = 0;
@@ -817,6 +818,11 @@ static int assert_startup_sce_install_no_reenter_order(const char *targetScene)
            sizeof(g_vm_net_mock_last_completed_scene_change_target));
     g_vm_net_mock_last_scene_change_target_valid = false;
     g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    memset(&g_vm_net_mock_startup_sce_enter_target, 0,
+           sizeof(g_vm_net_mock_startup_sce_enter_target));
+    g_vm_net_mock_startup_sce_enter_pending = false;
+    g_vm_net_mock_startup_sce_enter_install_generation = 0;
+    g_vm_net_mock_startup_sce_enter_armed_tick = 0;
     g_vm_net_mock_scene_moveinfo_npc_pending = false;
     g_vm_net_mock_scene_moveinfo_npc_seeded = false;
     g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] = 0;
@@ -850,6 +856,13 @@ static int assert_startup_sce_install_no_reenter_order(const char *targetScene)
         fputs("could not construct startup SCE-install runtime request\n", stderr);
         return 1;
     }
+    if (!build_scene_default_event_request(defaultEvent, sizeof(defaultEvent),
+                                           &defaultEventLen))
+    {
+        fputs("could not construct startup native scene-enter WT25/5 request\n",
+              stderr);
+        return 1;
+    }
 
     vm_net_mock_note_update_chunk_complete(targetScene);
     vm_net_mock_note_update_chunk_complete(spawn.effectResource);
@@ -861,12 +874,13 @@ static int assert_startup_sce_install_no_reenter_order(const char *targetScene)
         g_vm_net_mock_last_scene_change_target_valid ||
         !g_vm_net_mock_last_completed_scene_change_target_valid ||
         g_vm_net_mock_title_role_scene_followup_pending ||
+        !g_vm_net_mock_startup_sce_enter_pending ||
         vm_net_mock_content_client_resource_pending(clientId,
                                                     spawn.actorResource) ||
         vm_net_mock_content_client_resource_pending(clientId,
                                                     spawn.effectResource))
     {
-        fputs("startup final SCE install injected another scene entry\n",
+        fputs("startup final SCE install did not arm native scene re-enter\n",
               stderr);
         return 1;
     }
@@ -891,19 +905,42 @@ static int assert_startup_sce_install_no_reenter_order(const char *targetScene)
         return 1;
     }
 
-    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
-        taskSubset, taskSubsetLen, response, sizeof(response));
-    if (responseLen == 0 ||
-        count_scene_result_posinfo(response, responseLen, true) != 0 ||
-        g_vm_net_mock_last_scene_change_target_valid)
     {
-        fputs("startup WT25/5 re-opened a completed scene\n",
+        u8 result = 0;
+
+        responseLen = vm_net_mock_build_response(defaultEvent, defaultEventLen,
+                                                 response, sizeof(response));
+        if (responseLen == 0 || response[4] != 1 ||
+            !response_has_object(response, responseLen, 0x10, 3) ||
+            !response_object_get_u8_field(response, responseLen, 0x10, 3,
+                                          "result", &result) ||
+            result != 2 || g_vm_net_mock_startup_sce_enter_pending ||
+            g_vm_net_mock_last_scene_change_target_valid)
+        {
+            fputs("startup WT25/5 did not deliver one native 16/3 re-enter\n",
+                  stderr);
+            return 1;
+        }
+    }
+
+    responseLen = vm_net_mock_build_response(defaultEvent, defaultEventLen,
+                                             response, sizeof(response));
+    if (responseLen == 0 || response[4] != 1 ||
+        !response_has_object(response, responseLen, 0x19, 5) ||
+        response_has_object(response, responseLen, 0x10, 3))
+    {
+        fputs("startup native 16/3 re-enter was not one-shot\n",
               stderr);
         return 1;
     }
 
     g_vm_mock_service_active_client_id = 0;
     g_vm_net_mock_title_role_scene_followup_pending = false;
+    g_vm_net_mock_startup_sce_enter_pending = false;
+    g_vm_net_mock_startup_sce_enter_install_generation = 0;
+    g_vm_net_mock_startup_sce_enter_armed_tick = 0;
+    memset(&g_vm_net_mock_startup_sce_enter_target, 0,
+           sizeof(g_vm_net_mock_startup_sce_enter_target));
     g_vm_net_mock_update_completed_reenter_pending = false;
     g_vm_net_mock_update_completed_name[0] = 0;
     memset(g_vm_net_mock_content_client_states, 0,
@@ -1302,7 +1339,7 @@ int main(void)
         return 1;
     if (assert_instance_sce_install_reenter_order(targetScene) != 0)
         return 1;
-    if (assert_startup_sce_install_no_reenter_order(targetScene) != 0)
+    if (assert_startup_sce_install_native_reenter_order(targetScene) != 0)
         return 1;
 
     puts("scene transition entry contract regression passed");

@@ -5327,6 +5327,54 @@ done:
 
 static uc_err scheduler_dispatch_input_event(vm_event *evt);
 
+/* Trace the two host input exits that can reach an active scene.  This stays
+ * observational: the event has already been dequeued, and the existing call
+ * path owns all register setup, invocation, and cleanup. */
+static void vm_trace_scene_battle_host_input(const char *route,
+                                             const char *phase,
+                                             const vm_event *evt,
+                                             u32 screenPtr,
+                                             u32 entry,
+                                             u32 eventType,
+                                             u32 eventArg,
+                                             u32 eventArgValue,
+                                             uc_err result)
+{
+    static int enabled = -1;
+    static u32 traceCount = 0;
+    const char *setting;
+    FILE *trace;
+
+    if (evt == NULL || (evt->event != VM_EVENT_KEYBOARD &&
+                        evt->event != VM_EVENT_TOUCHSCREEN))
+    {
+        return;
+    }
+    if (enabled < 0)
+    {
+        setting = getenv("CBE_TRACE_SCENE_BATTLE_COLLISION");
+        enabled = setting != NULL && setting[0] != 0 &&
+                  strcmp(setting, "0") != 0 &&
+                  strcmp(setting, "off") != 0 &&
+                  strcmp(setting, "false") != 0;
+    }
+    if (!enabled || traceCount >= 256u)
+        return;
+
+    trace = fopen("logs/scene-battle-collision.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_battle_host_input route=%s phase=%s call=%u "
+            "event=%u code=%08x state=%08x screen=%08x entry=%08x "
+            "type=%u arg=%08x arg_value=%08x result=%u scene=%s\n",
+            route, phase, traceCount, evt->event, evt->r0, evt->r1,
+            screenPtr, entry, eventType, eventArg, eventArgValue,
+            (unsigned)result, g_lastSceLoadName[0] ? g_lastSceLoadName : "-");
+    fclose(trace);
+}
+
 static u32 vm_net_queue_http_get_mock_response(u32 urlPtr, u32 callback, u32 context)
 {
     char url[512];
@@ -5465,7 +5513,15 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
         keyMask = vm_key_mask_from_code(evt->r0);
         u32 keyPtr = vm_malloc_var();
         vm_set_var(keyPtr, keyMask);
+        vm_trace_scene_battle_host_input("tscreen-event", "before", evt,
+                                         screenPtr, tScreenEventEntry,
+                                         evt->r1 ? 0u : 1u, keyPtr, keyMask,
+                                         UC_ERR_OK);
         uc_err err = vm_call4(tScreenEventEntry, screenPtr, evt->r1 ? 0 : 1, keyPtr, 0);
+        vm_trace_scene_battle_host_input("tscreen-event", "after", evt,
+                                         screenPtr, tScreenEventEntry,
+                                         evt->r1 ? 0u : 1u, keyPtr, keyMask,
+                                         err);
         vm_free_var(keyPtr);
         return err;
     }
@@ -5484,7 +5540,15 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
         u32 touchEventType = evt->r0 == MR_MOUSE_UP ? 4 : (evt->r0 == MR_MOUSE_MOVE ? 5 : 3);
         u32 touchPtr = vm_malloc_var();
         vm_set_var(touchPtr, evt->r1);
+        vm_trace_scene_battle_host_input("tscreen-event", "before", evt,
+                                         screenPtr, tScreenEventEntry,
+                                         touchEventType, touchPtr, evt->r1,
+                                         UC_ERR_OK);
         uc_err err = vm_call4(tScreenEventEntry, screenPtr, touchEventType, touchPtr, 0);
+        vm_trace_scene_battle_host_input("tscreen-event", "after", evt,
+                                         screenPtr, tScreenEventEntry,
+                                         touchEventType, touchPtr, evt->r1,
+                                         err);
         vm_free_var(touchPtr);
         return err;
     }
@@ -12981,7 +13045,15 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
     static u32 actionCallbackTraceCount = 0;
     static u32 inputRegistryTarget = 0;
     static u32 inputDispatchCallback = 0;
+    static u32 mainInputDispatcher = 0;
+    static u32 mainRenderDispatcher = 0;
+    static u32 mainSceneStateSetter = 0;
     static u32 inputRegistryTraceCount = 0;
+    static u32 mainInputDispatcherTraceCount = 0;
+    static u32 mainRenderDispatcherTraceCount = 0;
+    static u32 mainSceneStateSetterTraceCount = 0;
+    static u32 sceneResponseDispatchTraceCount = 0;
+    static u32 sceneResponseEnterTraceCount = 0;
     static u32 lastLiveInputDispatchCallback = UINT32_MAX;
     static u32 lastMainActionCallback = UINT32_MAX;
     static bool inputDispatchSlotSeen = false;
@@ -13070,7 +13142,15 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         actionCallbackTraceCount = 0;
         inputRegistryTarget = 0;
         inputDispatchCallback = 0;
+        mainInputDispatcher = 0;
+        mainRenderDispatcher = 0;
+        mainSceneStateSetter = 0;
         inputRegistryTraceCount = 0;
+        mainInputDispatcherTraceCount = 0;
+        mainRenderDispatcherTraceCount = 0;
+        mainSceneStateSetterTraceCount = 0;
+        sceneResponseDispatchTraceCount = 0;
+        sceneResponseEnterTraceCount = 0;
         lastLiveInputDispatchCallback = UINT32_MAX;
         lastMainActionCallback = UINT32_MAX;
         inputDispatchSlotSeen = false;
@@ -13176,9 +13256,14 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         pc != activeLogic && pc != (sceneControlCallback & ~1u) &&
         pc != (inputRegistryTarget & ~1u) &&
         pc != (inputDispatchCallback & ~1u) &&
+        pc != (mainInputDispatcher & ~1u) &&
+        pc != (mainRenderDispatcher & ~1u) &&
+        pc != (mainSceneStateSetter & ~1u) &&
         pc != inputDispatchModuleBase + 0x8A8u &&
         pc != inputDispatchModuleBase + 0xAC4u &&
-        pc != inputDispatchModuleBase + 0x68Eu)
+        pc != inputDispatchModuleBase + 0x68Eu &&
+        pc != inputDispatchModuleBase + 0xBCCu &&
+        pc != inputDispatchModuleBase + 0x11CEu)
     {
         bool dynamicTarget = false;
 
@@ -13365,6 +13450,180 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         return;
     }
 
+    if (inputDispatchModuleBase != 0 &&
+        (pc == inputDispatchModuleBase + 0x11CEu ||
+         pc == inputDispatchModuleBase + 0xBCCu))
+    {
+        const char *phase = pc == inputDispatchModuleBase + 0x11CEu
+                                ? "response-dispatch"
+                                : "scene-enter-object";
+        u32 *phaseCount = pc == inputDispatchModuleBase + 0x11CEu
+                              ? &sceneResponseDispatchTraceCount
+                              : &sceneResponseEnterTraceCount;
+        u32 lr = 0;
+        u32 regs[4] = {0, 0, 0, 0};
+        u32 moduleR9 = 0;
+        u32 mainApi = 0;
+        u32 sceneEnterCallback = 0;
+
+        if (*phaseCount >= 24u)
+            return;
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0)
+        {
+            (void)uc_mem_read(MTK, moduleR9 + 0x2054u, &mainApi,
+                              sizeof(mainApi));
+        }
+        if (mainApi != 0)
+        {
+            (void)uc_mem_read(MTK, mainApi + 116u, &sceneEnterCallback,
+                              sizeof(sceneEnterCallback));
+        }
+        ++*phaseCount;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_lifecycle phase=%s call=%u pc=%08x lr=%08x "
+                    "regs=%08x,%08x,%08x,%08x main_api=%08x "
+                    "scene_enter_callback=%08x scene=%s\n",
+                    phase, *phaseCount, pc, lr, regs[0], regs[1], regs[2],
+                    regs[3], mainApi, sceneEnterCallback, g_lastSceLoadName);
+            fclose(trace);
+        }
+        return;
+    }
+
+    if (mainInputDispatcher != 0 &&
+        pc == (mainInputDispatcher & ~1u) &&
+        mainInputDispatcherTraceCount < 24u)
+    {
+        u32 lr = 0;
+        u32 regs[4] = {0, 0, 0, 0};
+        u32 moduleR9 = 0;
+        u32 controlDelegate = 0;
+        u32 liveCallback = 0;
+        u32 touchDelegate = 0;
+        u16 sceneControlState = 0;
+        u8 sceneLifecycleState = 0;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0)
+        {
+            (void)uc_mem_read(MTK, moduleR9 + 23844u, &controlDelegate,
+                              sizeof(controlDelegate));
+            (void)uc_mem_read(MTK, moduleR9 + 0x5D28u, &liveCallback,
+                              sizeof(liveCallback));
+            (void)uc_mem_read(MTK, moduleR9 + 23852u, &touchDelegate,
+                              sizeof(touchDelegate));
+            (void)uc_mem_read(MTK, moduleR9 + 23682u, &sceneControlState,
+                              sizeof(sceneControlState));
+            (void)uc_mem_read(MTK, moduleR9 + 19638u, &sceneLifecycleState,
+                              sizeof(sceneLifecycleState));
+        }
+        ++mainInputDispatcherTraceCount;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_input_dispatch phase=entry call=%u "
+                    "pc=%08x lr=%08x regs=%08x,%08x,%08x,%08x "
+                    "control_delegate=%08x input_callback=%08x "
+                    "touch_delegate=%08x control_state=%u lifecycle_state=%u "
+                    "scene=%s\n",
+                    mainInputDispatcherTraceCount, pc, lr, regs[0], regs[1],
+                    regs[2], regs[3], controlDelegate, liveCallback, touchDelegate,
+                    (unsigned)sceneControlState, (unsigned)sceneLifecycleState,
+                    g_lastSceLoadName);
+            fclose(trace);
+        }
+        return;
+    }
+
+    if (mainRenderDispatcher != 0 &&
+        pc == (mainRenderDispatcher & ~1u) &&
+        mainRenderDispatcherTraceCount < 48u)
+    {
+        u32 lr = 0;
+        u32 moduleR9 = 0;
+        u32 controlDelegate = 0;
+        u32 liveCallback = 0;
+        u32 touchDelegate = 0;
+        u16 sceneControlState = 0;
+        u8 sceneLifecycleState = 0;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0)
+        {
+            (void)uc_mem_read(MTK, moduleR9 + 23844u, &controlDelegate,
+                              sizeof(controlDelegate));
+            (void)uc_mem_read(MTK, moduleR9 + 0x5D28u, &liveCallback,
+                              sizeof(liveCallback));
+            (void)uc_mem_read(MTK, moduleR9 + 23852u, &touchDelegate,
+                              sizeof(touchDelegate));
+            (void)uc_mem_read(MTK, moduleR9 + 23682u, &sceneControlState,
+                              sizeof(sceneControlState));
+            (void)uc_mem_read(MTK, moduleR9 + 19638u, &sceneLifecycleState,
+                              sizeof(sceneLifecycleState));
+        }
+        ++mainRenderDispatcherTraceCount;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_render_dispatch phase=entry call=%u "
+                    "pc=%08x lr=%08x control_delegate=%08x input_callback=%08x "
+                    "touch_delegate=%08x control_state=%u lifecycle_state=%u scene=%s\n",
+                    mainRenderDispatcherTraceCount, pc, lr, controlDelegate,
+                    liveCallback, touchDelegate, (unsigned)sceneControlState,
+                    (unsigned)sceneLifecycleState, g_lastSceLoadName);
+            fclose(trace);
+        }
+        return;
+    }
+
+    if (mainSceneStateSetter != 0 &&
+        pc == (mainSceneStateSetter & ~1u) &&
+        mainSceneStateSetterTraceCount < 24u)
+    {
+        u32 lr = 0;
+        u32 nextState = 0;
+        u32 moduleR9 = 0;
+        u16 priorState = 0;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &nextState);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (moduleR9 != 0)
+        {
+            (void)uc_mem_read(MTK, moduleR9 + 23682u, &priorState,
+                              sizeof(priorState));
+        }
+        ++mainSceneStateSetterTraceCount;
+        trace = fopen("logs/scene-battle-collision.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "scene_battle_control_state phase=setter-entry call=%u "
+                    "pc=%08x lr=%08x prior=%u next=%u scene=%s\n",
+                    mainSceneStateSetterTraceCount, pc, lr,
+                    (unsigned)priorState, nextState, g_lastSceLoadName);
+            fclose(trace);
+        }
+        return;
+    }
+
     if (tracedLogicEntry != 0)
     {
         static const char *const targetNames[7] = {
@@ -13448,6 +13707,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         u32 mainApi = 0;
         u32 liveInputDispatchCallback = 0;
         u32 mainActionCallback = 0;
+        u32 nextMainInputDispatcher = 0;
+        u32 nextMainRenderDispatcher = 0;
         u32 privateObject = 0;
         u32 controlCallback = 0;
         u32 triggerSlot = 0;
@@ -13471,6 +13732,12 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                               sizeof(triggerSlot));
             (void)uc_mem_read(MTK, mainApi + 68u, &mainActionCallback,
                               sizeof(mainActionCallback));
+            (void)uc_mem_read(MTK, mainApi + 88u,
+                              &nextMainInputDispatcher,
+                              sizeof(nextMainInputDispatcher));
+            (void)uc_mem_read(MTK, mainApi + 112u,
+                              &nextMainRenderDispatcher,
+                              sizeof(nextMainRenderDispatcher));
             (void)uc_mem_read(MTK, mainApi + 52u,
                               &nextInputRegistryTarget,
                               sizeof(nextInputRegistryTarget));
@@ -13492,13 +13759,30 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                         "logic=%08x module_r9=%08x main_api=%08x "
                         "live_callback=%08x registered_callback=%08x "
                         "input_module_base=%08x main_action_callback=%08x "
+                        "main_input_dispatcher=%08x main_render_dispatcher=%08x "
                         "scene=%s\n",
                         activeLogic, moduleR9, mainApi,
                         liveInputDispatchCallback, inputDispatchCallback,
                         inputDispatchModuleBase, mainActionCallback,
+                        nextMainInputDispatcher, nextMainRenderDispatcher,
                         g_lastSceLoadName);
                 fclose(trace);
             }
+        }
+        if (mainInputDispatcher != nextMainInputDispatcher)
+        {
+            mainInputDispatcher = nextMainInputDispatcher;
+            mainInputDispatcherTraceCount = 0;
+        }
+        if (mainRenderDispatcher != nextMainRenderDispatcher)
+        {
+            mainRenderDispatcher = nextMainRenderDispatcher;
+            mainRenderDispatcherTraceCount = 0;
+        }
+        if (mainSceneStateSetter != mainActionCallback)
+        {
+            mainSceneStateSetter = mainActionCallback;
+            mainSceneStateSetterTraceCount = 0;
         }
         if (mainApi != 0)
         {
@@ -15252,19 +15536,29 @@ void RunArmProgram(void *param)
                             {
                                 u32 eventType = 0;
                                 u32 eventArg = 0;
+                                u32 eventArgValue = 0;
                                 if (evt->event == VM_EVENT_KEYBOARD)
                                 {
                                     u32 keyMask = vm_key_mask_from_code(evt->r0);
                                     eventType = evt->r1 ? 0 : 1;
                                     eventArg = vm_malloc_var();
+                                    eventArgValue = keyMask;
                                     vm_set_var(eventArg, keyMask);
                                 }
                                 else
                                 {
                                     eventType = evt->r0 == MR_MOUSE_UP ? 4 : (evt->r0 == MR_MOUSE_MOVE ? 5 : 3);
                                     eventArg = vm_malloc_var();
+                                    eventArgValue = evt->r1;
                                     vm_set_var(eventArg, evt->r1);
                                 }
+                                vm_trace_scene_battle_host_input("screen-logic",
+                                                                 "before", evt,
+                                                                 screenThisPtr,
+                                                                 screenLogicEntry,
+                                                                 eventType, eventArg,
+                                                                 eventArgValue,
+                                                                 UC_ERR_OK);
                                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                                 scheduler_prepare_screen_call(screenThisPtr);
                                 uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
@@ -15295,6 +15589,12 @@ void RunArmProgram(void *param)
                                                               evt->r0,
                                                               screenLogicEntry,
                                                               screenThisPtr);
+                                vm_trace_scene_battle_host_input("screen-logic",
+                                                                 "after", evt,
+                                                                 screenThisPtr,
+                                                                 screenLogicEntry,
+                                                                 eventType, eventArg,
+                                                                 eventArgValue, p);
                                 if (evt->event == VM_EVENT_KEYBOARD || evt->event == VM_EVENT_TOUCHSCREEN)
                                     vm_free_var(eventArg);
                                 if (p != UC_ERR_OK)

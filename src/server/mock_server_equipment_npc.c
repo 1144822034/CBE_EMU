@@ -2394,6 +2394,13 @@ static u32 g_vm_net_mock_last_completed_scene_change_tick = 0;
  * carry another scene+posinfo enter object.
  */
 static bool g_vm_net_mock_title_role_scene_followup_pending = false;
+/* A role-select can create its first scene shell before a stale target SCE
+ * completes WT18/7. Keep the one native mmGame re-enter response scoped to
+ * that exact install and its first subsequent WT25/5. */
+static vm_net_mock_scene_change_target g_vm_net_mock_startup_sce_enter_target;
+static bool g_vm_net_mock_startup_sce_enter_pending = false;
+static u32 g_vm_net_mock_startup_sce_enter_install_generation = 0;
+static u32 g_vm_net_mock_startup_sce_enter_armed_tick = 0;
 static char g_vm_net_mock_last_current_scene_reload_scene[64];
 static bool g_vm_net_mock_last_current_scene_reload_valid = false;
 static u32 g_vm_net_mock_last_current_scene_reload_tick = 0;
@@ -2499,6 +2506,10 @@ typedef struct vm_mock_service_account_state
     bool lastCompletedSceneChangeTargetValid;
     u32 lastCompletedSceneChangeTick;
     bool titleRoleSceneFollowupPending;
+    vm_net_mock_scene_change_target startupSceEnterTarget;
+    bool startupSceEnterPending;
+    u32 startupSceEnterInstallGeneration;
+    u32 startupSceEnterArmedTick;
 
     char lastCurrentSceneReloadScene[64];
     bool lastCurrentSceneReloadValid;
@@ -3149,6 +3160,11 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->lastCompletedSceneChangeTargetValid = g_vm_net_mock_last_completed_scene_change_target_valid;
     state->lastCompletedSceneChangeTick = g_vm_net_mock_last_completed_scene_change_tick;
     state->titleRoleSceneFollowupPending = g_vm_net_mock_title_role_scene_followup_pending;
+    state->startupSceEnterTarget = g_vm_net_mock_startup_sce_enter_target;
+    state->startupSceEnterPending = g_vm_net_mock_startup_sce_enter_pending;
+    state->startupSceEnterInstallGeneration =
+        g_vm_net_mock_startup_sce_enter_install_generation;
+    state->startupSceEnterArmedTick = g_vm_net_mock_startup_sce_enter_armed_tick;
     memcpy(state->lastCurrentSceneReloadScene, g_vm_net_mock_last_current_scene_reload_scene,
            sizeof(state->lastCurrentSceneReloadScene));
     state->lastCurrentSceneReloadValid = g_vm_net_mock_last_current_scene_reload_valid;
@@ -3270,6 +3286,11 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_last_completed_scene_change_target_valid = state->lastCompletedSceneChangeTargetValid;
     g_vm_net_mock_last_completed_scene_change_tick = state->lastCompletedSceneChangeTick;
     g_vm_net_mock_title_role_scene_followup_pending = state->titleRoleSceneFollowupPending;
+    g_vm_net_mock_startup_sce_enter_target = state->startupSceEnterTarget;
+    g_vm_net_mock_startup_sce_enter_pending = state->startupSceEnterPending;
+    g_vm_net_mock_startup_sce_enter_install_generation =
+        state->startupSceEnterInstallGeneration;
+    g_vm_net_mock_startup_sce_enter_armed_tick = state->startupSceEnterArmedTick;
     memcpy(g_vm_net_mock_last_current_scene_reload_scene, state->lastCurrentSceneReloadScene,
            sizeof(g_vm_net_mock_last_current_scene_reload_scene));
     g_vm_net_mock_last_current_scene_reload_valid = state->lastCurrentSceneReloadValid;

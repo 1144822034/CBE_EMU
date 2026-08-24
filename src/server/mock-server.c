@@ -85,7 +85,8 @@ static bool vm_mock_world_chat_publish_chest_reward(
  * only after their own authoritative debit transaction has committed. */
 static bool vm_mock_admin_operation_log_record(
     const char *actionCode, const char *accountId, u32 roleId, u32 itemId,
-    u32 itemCount, u32 changeAmount, const char *detail);
+    u32 itemCount, u32 changeAmount, const char *detail,
+    const char *operatorAccountId);
 
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
@@ -102,6 +103,11 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
     u32 *distanceOut, const char **routeOut);
 static bool vm_net_mock_adjust_recovery_landing_to_map_safe(
     const char *scene, u16 *x, u16 *y);
+/* The scene-startup recovery must distinguish a standalone WT25/5 from the
+ * same object embedded in a task/runtime composite. The detector is owned by
+ * the later social fragment, so declare that narrow existing contract here. */
+static bool vm_net_mock_is_short_wt_control_packet(
+    const u8 *request, u32 requestLen, u8 kind, u8 subtype);
 
 #include "mock_server_equipment_npc.c"
 #include "mock_server_mailbox.c"
