@@ -1447,9 +1447,11 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                                                 u16 *dropSeqOut,
                                                 u32 *dropCountOut,
                                                 bool *dropGrantedOut,
-                                                bool *rewardGrantedOut)
+                                                bool *rewardGrantedOut,
+                                                u32 *rewardGoldOut)
 {
     u32 rewardExp = 0;
+    u32 rewardGold = 0;
     u32 dropItemId = 0;
     u16 dropSeq = 0;
     u32 dropCount = 0;
@@ -1460,8 +1462,16 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     u8 configuredDropCount = 0;
     u8 resultCount = 0;
     u32 baseRewardExp = 0;
+    u32 baseRewardGold = 0;
     u32 expCardMultiplier = 1;
     u32 battleInsightBonusPercent = 0;
+    u32 normalExpCap = 0;
+    u32 normalGoldCap = 0;
+    u32 perEnemyExp = 0;
+    u32 perEnemyGold = 0;
+    u32 rewardUnits = 0;
+    u32 usedRewardUnits = 0;
+    bool dailyRewardGranted = false;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
 
     if (dropItemIdOut)
@@ -1474,6 +1484,8 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         *dropGrantedOut = false;
     if (rewardGrantedOut)
         *rewardGrantedOut = false;
+    if (rewardGoldOut)
+        *rewardGoldOut = 0;
 
     if (g_mockBattleOperateSessionSerial == 0)
         return 0;
@@ -1507,10 +1519,29 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     vm_net_mock_task_progress_after_battle(
         g_vm_net_mock_battle_enemy_id_current, enemyCount, 0, 0);
 
-    baseRewardExp = vm_net_mock_mul_capped_u32(
-        vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
-                                   vm_net_mock_battle_reward_exp_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
-        enemyCount);
+    normalExpCap = vm_net_mock_normal_monster_exp_for_level(
+        role != NULL ? vm_net_mock_role_level_from_exp(role->exp) : 1u);
+    normalGoldCap = vm_net_mock_normal_monster_gold_for_level(
+        role != NULL ? vm_net_mock_role_level_from_exp(role->exp) : 1u);
+    perEnemyExp = vm_net_mock_env_u32_if_set(
+        "CBE_BATTLE_REWARD_EXP",
+        vm_net_mock_battle_reward_exp_for_enemy(
+            g_vm_net_mock_battle_enemy_id_current));
+    perEnemyGold = vm_net_mock_env_u32_if_set(
+        "CBE_BATTLE_REWARD_GOLD",
+        vm_net_mock_battle_reward_gold_for_enemy(
+            g_vm_net_mock_battle_enemy_id_current));
+    /* Bosses are manual-only encounters.  Their combat and drop identity
+     * remains distinct, but reward progression intentionally follows the
+     * same role-level cap, card effect, and one-monster daily unit as every
+     * ordinary kill. */
+    if (perEnemyExp > normalExpCap)
+        perEnemyExp = normalExpCap;
+    if (perEnemyGold > normalGoldCap)
+        perEnemyGold = normalGoldCap;
+    rewardUnits = enemyCount;
+    baseRewardExp = vm_net_mock_mul_capped_u32(perEnemyExp, enemyCount);
+    baseRewardGold = vm_net_mock_mul_capped_u32(perEnemyGold, enemyCount);
     rewardExp = baseRewardExp;
     if (role != NULL)
     {
@@ -1531,6 +1562,18 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                     rewardExp, bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
             }
         }
+        if (!vm_net_mock_role_consume_monster_reward_units(
+                role, rewardUnits, &dailyRewardGranted, &usedRewardUnits) ||
+            !dailyRewardGranted)
+        {
+            printf("[info][network] mock_battle_reward_quota enemy=%u role=%u units=%u used=%u cap=%u action=%s\n",
+                   g_vm_net_mock_battle_enemy_id_current, role->roleId,
+                   rewardUnits, usedRewardUnits,
+                   VM_NET_MOCK_MONSTER_REWARD_DAILY_UNIT_CAP,
+                   dailyRewardGranted ? "unexpected" : "reward-suppressed");
+            rewardExp = 0;
+            baseRewardGold = 0;
+        }
     }
     if (rewardExp != baseRewardExp)
     {
@@ -1539,6 +1582,7 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                baseRewardExp, expCardMultiplier, battleInsightBonusPercent,
                rewardExp);
     }
+    rewardGold = baseRewardGold;
     memset(configuredDrops, 0, sizeof(configuredDrops));
     memset(results, 0, sizeof(results));
     configuredDropCount = vm_net_mock_monster_drops_for_enemy(
@@ -1718,6 +1762,8 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         *dropCountOut = dropCount;
     if (dropGrantedOut)
         *dropGrantedOut = dropGranted;
+    if (rewardGoldOut)
+        *rewardGoldOut = rewardGold;
     return rewardExp;
 }
 
@@ -1824,7 +1870,6 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
      * state.  Solo callers keep the normal living-player requirement. */
     bool victory = g_mockBattleEnemyHpCurrent == 0 &&
                    (forceTeamVictory || roleHp > 0);
-    bool rewardAlreadyGranted = false;
     /* Automatic MP recovery uses the same persistent/displayed-state contract
      * as every other victory. */
     u32 recoverMp = vm_net_mock_battle_recover_mp_value();
@@ -1834,17 +1879,12 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
         return;
     if (victory)
     {
-        rewardAlreadyGranted = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial);
         rewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
                                                          &dropSeq,
                                                          &dropCount,
                                                          &dropGranted,
-                                                         &rewardGranted);
-        if (!rewardAlreadyGranted && rewardGranted)
-            rewardGold = vm_net_mock_mul_capped_u32(
-                vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
-                                           vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
-                vm_net_mock_battle_enemy_count_current());
+                                                         &rewardGranted,
+                                                         &rewardGold);
     }
     roleMp = vm_net_mock_battle_apply_mp_recovery_once(role, roleMp, recoverMp,
                                                        &mpRecoveryApplied);
@@ -2395,8 +2435,8 @@ static u32 g_vm_net_mock_last_completed_scene_change_tick = 0;
  */
 static bool g_vm_net_mock_title_role_scene_followup_pending = false;
 /* A role-select can create its first scene shell before a stale target SCE
- * completes WT18/7. Keep the one native mmGame re-enter response scoped to
- * that exact install and its first subsequent WT25/5. */
+ * completes WT18/7. Keep one native mmGame 16/2(result=1) direct-enter
+ * response scoped to that exact install and its first subsequent WT25/5. */
 static vm_net_mock_scene_change_target g_vm_net_mock_startup_sce_enter_target;
 static bool g_vm_net_mock_startup_sce_enter_pending = false;
 static u32 g_vm_net_mock_startup_sce_enter_install_generation = 0;
@@ -6612,6 +6652,117 @@ static bool vm_mock_service_account_set_role_level(const char *accountId,
         *messageOut = disconnected != 0
                           ? "已强制断开在线游戏连接；角色等级已更新，经验已重置为该等级起点"
                           : "角色等级已更新，经验已重置为该等级起点";
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
+/* Admin equipment edits are an explicit offline maintenance operation.  An
+ * equipped item is a durable instance: direct level changes retain its four
+ * pre-rolled stage attributes, which are applied only after their +4/+8/+12/
+ * +16 thresholds and must not be regenerated on a later relogin. */
+static bool vm_mock_service_account_set_equipped_enhance_level(
+    const char *accountId, const char *roleSelector, u32 requestedSlot,
+    u32 requestedLevel, u32 *itemIdOut, u16 *previousLevelOut,
+    const char **messageOut)
+{
+    vm_mock_service_account_state *state = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_state before;
+    vm_net_mock_equipped_item_state *equipped = NULL;
+    const vm_net_mock_equipment_catalog_item *catalog = NULL;
+    u32 disconnected = 0;
+
+    if (itemIdOut != NULL)
+        *itemIdOut = 0;
+    if (previousLevelOut != NULL)
+        *previousLevelOut = 0;
+    if (messageOut != NULL)
+        *messageOut = "穿戴装备强化等级设置失败";
+    if (accountId == NULL || accountId[0] == 0 ||
+        roleSelector == NULL || roleSelector[0] == 0 ||
+        requestedSlot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+        requestedLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
+    {
+        if (messageOut != NULL)
+            *messageOut = "角色、装备位或强化等级参数无效";
+        return false;
+    }
+
+    /* A bound game session owns a separate role snapshot.  Complete its
+     * normal offline lifecycle before changing a persisted equipment instance,
+     * otherwise its later save could restore the old enhancement level. */
+    disconnected = vm_mock_service_account_disconnect_bound_sessions(
+        accountId, "admin-set-equipped-enhance");
+    state = vm_mock_service_open_account_role_db_for_management(accountId,
+                                                                  messageOut);
+    if (state == NULL)
+        return false;
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut != NULL)
+            *messageOut = "角色不存在";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    equipped = &role->equippedItems[requestedSlot];
+    catalog = equipped->itemId != 0 ?
+                  vm_net_mock_find_equipment_catalog_item(equipped->itemId) :
+                  NULL;
+    if (catalog == NULL || catalog->slot != requestedSlot)
+    {
+        if (messageOut != NULL)
+            *messageOut = "该装备位没有可验证的已穿戴装备";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+
+    if (itemIdOut != NULL)
+        *itemIdOut = equipped->itemId;
+    if (previousLevelOut != NULL)
+        *previousLevelOut = equipped->enhanceLevel;
+    if (equipped->enhanceLevel == requestedLevel)
+    {
+        if (messageOut != NULL)
+            *messageOut = "穿戴装备强化等级没有变化";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return true;
+    }
+
+    before = *role;
+    equipped->enhanceLevel = (u16)requestedLevel;
+    (void)vm_net_mock_equipment_enhancement_ensure_affixes(
+        catalog, (u8)equipped->enhanceLevel, &equipped->enhanceAffixes,
+        role->roleId ^ equipped->itemId ^
+            ((requestedSlot + 1u) * 0x9e3779b9u));
+    vm_net_mock_role_sync_derived_vitals(role);
+    if (!vm_net_mock_role_db_save_relational(
+            "admin-set-equipped-enhance", NULL, NULL, 0, true, NULL, NULL,
+            NULL))
+    {
+        *role = before;
+        vm_mock_service_account_capture(state);
+        if (messageOut != NULL)
+            *messageOut = "穿戴装备强化等级保存失败，未修改角色数据";
+        printf("[error][mock-admin] equipped_enhance_set_failed account=%s role=%u slot=%u item=%u target=%u error=%s\n",
+               accountId, before.roleId, requestedSlot,
+               before.equippedItems[requestedSlot].itemId, requestedLevel,
+               vm_mysql_last_error());
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
+
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-admin] equipped_enhance_set account=%s role=%u slot=%u item=%u old=%u new=%u disconnected=%u action=commit\n",
+           accountId, role->roleId, requestedSlot, equipped->itemId,
+           before.equippedItems[requestedSlot].enhanceLevel,
+           equipped->enhanceLevel, disconnected);
+    if (messageOut != NULL)
+    {
+        *messageOut = disconnected != 0
+                          ? "已强制断开在线游戏连接；穿戴装备强化等级已更新"
+                          : "穿戴装备强化等级已更新";
+    }
     vm_mock_service_close_account_role_db_for_management(state, false);
     return true;
 }

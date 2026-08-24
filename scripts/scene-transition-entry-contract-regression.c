@@ -230,6 +230,41 @@ static bool response_object_get_u8_field(const u8 *packet, u32 length,
     return false;
 }
 
+static bool response_object_get_u16_field(const u8 *packet, u32 length,
+                                          u8 kind, u8 subtype,
+                                          const char *fieldName, u16 *valueOut)
+{
+    u32 offset = 5;
+
+    if (valueOut)
+        *valueOut = 0;
+    if (packet == NULL || length < 5 || packet[0] != 'W' || packet[1] != 'T' ||
+        fieldName == NULL || fieldName[0] == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < packet[4]; ++i)
+    {
+        u16 objectLen = 0;
+
+        if (offset + 6 > length)
+            return false;
+        objectLen = (u16)((packet[offset + 4] << 8) | packet[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > length)
+            return false;
+        if (packet[offset] != 1 || packet[offset + 1] != kind ||
+            packet[offset + 2] != subtype)
+        {
+            offset += objectLen;
+            continue;
+        }
+        return vm_net_mock_get_object_u16_field(packet + offset + 6,
+                                                objectLen - 6, fieldName,
+                                                valueOut);
+    }
+    return false;
+}
+
 static int count_scene_result_posinfo(const u8 *packet, u32 length,
                                       bool wantPosinfo)
 {
@@ -389,12 +424,14 @@ static int assert_invalidated_scene_completion_order(const char *targetScene)
         return 1;
     }
     /* A missing SCE requests WT18/7 before scene_runtime_init_and_sync can
-     * emit WT6/1. Its Actor dependencies can already exist in the client
-     * cache, so the first real WT6/1 after the final SCE chunk is evidence
-     * that those pending manifest names were resolved without downloads.
-     * This is deliberately not an instance-guide target: an ordinary entered
-     * scene must still complete directly with one no-posinfo 30/2. */
+     * emit WT6/1. Complete the body and effect manifests explicitly before
+     * that runtime request: field17 is not a synthetic cache hit, and the
+     * client may not enter while its Actor download remains pending. This is
+     * deliberately not an instance-guide target: an ordinary entered scene
+     * must still complete directly with one no-posinfo 30/2. */
     vm_net_mock_note_update_chunk_complete(targetScene);
+    vm_net_mock_note_update_chunk_complete(spawn.actorResource);
+    vm_net_mock_note_update_chunk_complete(spawn.effectResource);
     responseLen = vm_net_mock_build_scene_resource_followup_response(
         taskSubset, taskSubsetLen, response, sizeof(response));
     if (responseLen == 0 ||
@@ -700,9 +737,11 @@ static int assert_instance_sce_install_reenter_order(const char *targetScene)
     }
 
     vm_net_mock_note_update_chunk_complete(targetScene);
-    /* Deliberately complete another target dependency after the SCE. The old
-     * one-name marker was overwritten here and could no longer prove that the
-     * SCE itself installed after direct entry. */
+    /* Complete both descriptor dependencies after the SCE. The old one-name
+     * marker was overwritten here and could no longer prove that the SCE
+     * itself installed after direct entry; a field17 Actor must never be
+     * silently treated as a cache hit. */
+    vm_net_mock_note_update_chunk_complete(spawn.actorResource);
     vm_net_mock_note_update_chunk_complete(spawn.effectResource);
     responseLen = vm_net_mock_build_scene_task_subset_followup_response(
         taskSubset, taskSubsetLen, response, sizeof(response));
@@ -759,20 +798,19 @@ static int assert_instance_sce_install_reenter_order(const char *targetScene)
     return 0;
 }
 
-/* Role-select has already created its first scene shell from actorinfo. A
- * later final WT18/7 must not inject a second 30/1; its one safe follow-up is
- * the documented native mmGame 16/3(result=2) response on standalone WT25/5. */
-static int assert_startup_sce_install_native_reenter_order(const char *targetScene)
+/* Role-select has already created its first scene shell from actorinfo.  A
+ * later final WT18/7 must not turn standalone WT25/5 into either 16/2 or
+ * 16/3 scene re-entry: both retain the live background Actor array in this
+ * startup context. */
+static int assert_startup_sce_install_no_second_scene_enter(const char *targetScene)
 {
     const u32 clientId = 0x50607080u;
     vm_net_mock_sce_combat_spawn spawn;
     u8 defaultEvent[64];
     u8 taskSubset[256];
-    u8 sceneChange[256];
     u8 response[4096];
     u8 sceneData[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
     u32 taskSubsetLen = 0;
-    u32 sceneChangeLen = 0;
     u32 defaultEventLen = 0;
     u32 responseLen = 0;
     u32 sceneLen = 0;
@@ -865,6 +903,7 @@ static int assert_startup_sce_install_native_reenter_order(const char *targetSce
     }
 
     vm_net_mock_note_update_chunk_complete(targetScene);
+    vm_net_mock_note_update_chunk_complete(spawn.actorResource);
     vm_net_mock_note_update_chunk_complete(spawn.effectResource);
     responseLen = vm_net_mock_build_scene_resource_followup_response(
         taskSubset, taskSubsetLen, response, sizeof(response));
@@ -874,63 +913,42 @@ static int assert_startup_sce_install_native_reenter_order(const char *targetSce
         g_vm_net_mock_last_scene_change_target_valid ||
         !g_vm_net_mock_last_completed_scene_change_target_valid ||
         g_vm_net_mock_title_role_scene_followup_pending ||
-        !g_vm_net_mock_startup_sce_enter_pending ||
+        g_vm_net_mock_startup_sce_enter_pending ||
+        g_vm_net_mock_startup_sce_enter_install_generation != 0 ||
         vm_net_mock_content_client_resource_pending(clientId,
                                                     spawn.actorResource) ||
         vm_net_mock_content_client_resource_pending(clientId,
                                                     spawn.effectResource))
     {
-        fputs("startup final SCE install did not arm native scene re-enter\n",
+        fputs("startup final SCE install changed the completed-scene contract\n",
               stderr);
         return 1;
     }
 
-    if (!build_scene_change_request(
-            sceneChange, sizeof(sceneChange), targetScene,
-            g_vm_net_mock_last_completed_scene_change_target.exitId,
-            &sceneChangeLen))
-    {
-        fputs("could not construct startup post-followup WT2/3 request\n", stderr);
-        return 1;
-    }
-    responseLen = vm_net_mock_build_scene_change_combo_response(
-        sceneChange, sceneChangeLen, response, sizeof(response));
+    responseLen = vm_net_mock_build_response(defaultEvent, defaultEventLen,
+                                             response, sizeof(response));
     if (responseLen == 0 ||
+        response_has_object(response, responseLen, 0x10, 2) ||
+        response_has_object(response, responseLen, 0x10, 3) ||
         count_scene_result_posinfo(response, responseLen, true) != 0 ||
-        g_vm_net_mock_last_scene_change_target_valid ||
-        !g_vm_net_mock_last_completed_scene_change_target_valid)
+        g_vm_net_mock_startup_sce_enter_pending ||
+        g_vm_net_mock_last_scene_change_target_valid)
     {
-        fputs("startup WT2/3 re-opened a completed scene\n",
+        fputs("startup WT25/5 emitted a scene re-entry or incomplete followup\n",
               stderr);
         return 1;
-    }
-
-    {
-        u8 result = 0;
-
-        responseLen = vm_net_mock_build_response(defaultEvent, defaultEventLen,
-                                                 response, sizeof(response));
-        if (responseLen == 0 || response[4] != 1 ||
-            !response_has_object(response, responseLen, 0x10, 3) ||
-            !response_object_get_u8_field(response, responseLen, 0x10, 3,
-                                          "result", &result) ||
-            result != 2 || g_vm_net_mock_startup_sce_enter_pending ||
-            g_vm_net_mock_last_scene_change_target_valid)
-        {
-            fputs("startup WT25/5 did not deliver one native 16/3 re-enter\n",
-                  stderr);
-            return 1;
-        }
     }
 
     responseLen = vm_net_mock_build_response(defaultEvent, defaultEventLen,
                                              response, sizeof(response));
     if (responseLen == 0 || response[4] != 1 ||
         !response_has_object(response, responseLen, 0x19, 5) ||
-        response_has_object(response, responseLen, 0x10, 3))
+        response_has_object(response, responseLen, 0x10, 2) ||
+        response_has_object(response, responseLen, 0x10, 3) ||
+        g_vm_net_mock_startup_sce_enter_pending ||
+        g_vm_net_mock_last_scene_change_target_valid)
     {
-        fputs("startup native 16/3 re-enter was not one-shot\n",
-              stderr);
+        fputs("repeated startup WT25/5 did not remain a control ACK\n", stderr);
         return 1;
     }
 
@@ -1141,6 +1159,7 @@ static int assert_settings_unstuck_npc_reseed_handoff(void)
     snprintf(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
              sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene), "%s", targetScene);
     g_schedulerTick = 100;
+
     memset(&target, 0, sizeof(target));
     snprintf(target.scene, sizeof(target.scene), "%s", targetScene);
     target.x = 200;
@@ -1216,6 +1235,106 @@ cleanup:
     memcpy(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, savedNpcSeededScene,
            sizeof(savedNpcSeededScene));
     g_schedulerTick = savedSchedulerTick;
+    return result;
+}
+
+/* The recovery target is selected from an SCE edge entry, then carried in the
+ * mmGame 16/2 direct-enter object.  Use an SCE fixture with entry 1 so this
+ * exercises the nonzero protocol branch separately from the Linan entry-0
+ * NPC-reseed test above. */
+static int assert_settings_unstuck_preserves_sce_entry_exitid(void)
+{
+    static const char targetScene[] =
+        "01\xCC\xD2\xBB\xA8\xB5\xBA_01.sce"; /* 01桃花岛_01.sce */
+    vm_net_mock_role_db_file savedRoleDb = g_vm_net_mock_role_db;
+    bool savedRoleDbLoaded = g_vm_net_mock_role_db_loaded;
+    bool savedRoleDbValid = g_vm_net_mock_role_db_valid;
+    vm_net_mock_scene_change_target target;
+    u8 response[256];
+    u32 responseLen = 5;
+    u16 expectedEntryId = 0xffff;
+    u16 expectedEntryX = 0;
+    u16 expectedEntryY = 0;
+    u16 responseExitId = 0;
+    int result = 1;
+
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = 1;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    g_vm_net_mock_role_db.roles[0].roleId = 1;
+    snprintf(g_vm_net_mock_role_db.roles[0].scene,
+             sizeof(g_vm_net_mock_role_db.roles[0].scene), "%s", targetScene);
+    g_vm_net_mock_role_db.roles[0].x = 120;
+    g_vm_net_mock_role_db.roles[0].y = 160;
+
+    if (!vm_net_mock_get_scene_nearest_entry_spawn_from_sce(
+            targetScene, g_vm_net_mock_role_db.roles[0].x,
+            g_vm_net_mock_role_db.roles[0].y, &expectedEntryX,
+            &expectedEntryY, &expectedEntryId) ||
+        expectedEntryId == 0 || expectedEntryId == 0xffff)
+    {
+        fputs("settings-unstuck exitid fixture has no nonzero SCE entry\n", stderr);
+        goto cleanup;
+    }
+    vm_net_mock_get_current_scene_unstuck_target(&target);
+    if (target.exitId != expectedEntryId)
+    {
+        fputs("settings-unstuck target discarded its SCE entry contract\n", stderr);
+        goto cleanup;
+    }
+    if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(
+            response, sizeof(response), &responseLen, 2, 1, &target))
+    {
+        fputs("could not build settings-unstuck WT16/2 response\n", stderr);
+        goto cleanup;
+    }
+    vm_net_mock_finish_wt_packet(response, responseLen, 1);
+    if (!response_object_get_u16_field(response, responseLen, 0x10, 2,
+                                       "exitid", &responseExitId) ||
+        responseExitId != expectedEntryId)
+    {
+        fputs("settings-unstuck WT16/2 omitted its SCE exitid\n", stderr);
+        goto cleanup;
+    }
+
+    /* An unresolved, but syntactically valid, resource key has no SCE entry.
+     * Keep the wire default at zero rather than leaking the internal 0xffff
+     * sentinel used by the SCE lookup helper. */
+    snprintf(g_vm_net_mock_role_db.roles[0].scene,
+             sizeof(g_vm_net_mock_role_db.roles[0].scene),
+             "missing-unstuck-entry-fixture.sce");
+    g_vm_net_mock_role_db.roles[0].x = 120;
+    g_vm_net_mock_role_db.roles[0].y = 160;
+    vm_net_mock_get_current_scene_unstuck_target(&target);
+    if (target.exitId != 0)
+    {
+        fputs("settings-unstuck fallback did not keep exitid zero\n", stderr);
+        goto cleanup;
+    }
+    responseLen = 5;
+    if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(
+            response, sizeof(response), &responseLen, 2, 1, &target))
+    {
+        fputs("could not build fallback settings-unstuck WT16/2 response\n", stderr);
+        goto cleanup;
+    }
+    vm_net_mock_finish_wt_packet(response, responseLen, 1);
+    if (!response_object_get_u16_field(response, responseLen, 0x10, 2,
+                                       "exitid", &responseExitId) ||
+        responseExitId != 0)
+    {
+        fputs("settings-unstuck fallback WT16/2 did not keep exitid zero\n",
+              stderr);
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    g_vm_net_mock_role_db = savedRoleDb;
+    g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
+    g_vm_net_mock_role_db_valid = savedRoleDbValid;
     return result;
 }
 
@@ -1333,13 +1452,15 @@ int main(void)
         return 1;
     if (assert_settings_unstuck_npc_reseed_handoff() != 0)
         return 1;
+    if (assert_settings_unstuck_preserves_sce_entry_exitid() != 0)
+        return 1;
     if (assert_invalidated_scene_completion_order(targetScene) != 0)
         return 1;
     if (assert_instance_direct_enter_followup_order(targetScene) != 0)
         return 1;
     if (assert_instance_sce_install_reenter_order(targetScene) != 0)
         return 1;
-    if (assert_startup_sce_install_native_reenter_order(targetScene) != 0)
+    if (assert_startup_sce_install_no_second_scene_enter(targetScene) != 0)
         return 1;
 
     puts("scene transition entry contract regression passed");

@@ -500,6 +500,10 @@ static u32 g_currentScreenDataPackage = 0;
 static u32 g_dlSpBf = 0;
 static u32 g_poolModuleR9s[16];
 static u32 g_poolModuleR9Count = 0;
+/* A read-only trace anchor for the currently validated mmGame code image.
+ * It is set only after the live sub_604/sub_8A8 pair matches the installed
+ * module's instruction fingerprints. */
+static u32 g_vmTraceMmGameInputCodeBase = 0;
 typedef struct
 {
     u16 appId;
@@ -1734,6 +1738,7 @@ static void vm_dl_reset_state(void)
     g_vmDlPreAppId = 0;
     g_vmDlCurrType = 0;
     g_dlSpBf = 0;
+    g_vmTraceMmGameInputCodeBase = 0;
 }
 
 static int vm_dl_find_loaded_index_by_app_id(u16 appId)
@@ -5229,6 +5234,7 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
         leaf = normalizedPath;
     if (!vm_named_resource_leaf_is_safe(leaf))
         return false;
+    vm_actor_resource_trace("named-download-enter", leaf, 0, -1, 0);
     snprintf(target, sizeof(target), "%s", normalizedPath);
     if (snprintf(temp, sizeof(temp), "%s.cbe-download.tmp", target) >=
         (int)sizeof(temp))
@@ -13019,6 +13025,56 @@ static void vm_trace_action13_boundary_pc(u32 pc)
 }
 
 /*
+ * scene_runtime_tick() returns through the loading renderer until both scene
+ * readiness bytes are set.  TriggerAutoBattle is downstream of the normal
+ * tick branch, so record this gate before inferring anything from a missing
+ * collision scan.  This observes guest state only and writes no guest data.
+ */
+static void vm_trace_scene_runtime_tick_gate_pc(u32 pc)
+{
+    static int lastPhase = -1;
+    static int lastRuntimeReady = -1;
+    static int lastAssetsReady = -1;
+    u8 runtimeReady = 0;
+    u8 assetsReady = 0;
+    const char *phase = NULL;
+    FILE *trace = NULL;
+
+    if (pc == 0x01014D74u)
+        phase = "gate-runtime-ready";
+    else if (pc == 0x01014D80u)
+        phase = "loading-return";
+    else if (pc == 0x01014D8Au)
+        phase = "normal-tick";
+    else
+        return;
+    if (MTK == NULL)
+        return;
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C67u, &runtimeReady,
+                      sizeof(runtimeReady));
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C68u, &assetsReady,
+                      sizeof(assetsReady));
+    if (lastPhase == (int)pc && lastRuntimeReady == (int)runtimeReady &&
+        lastAssetsReady == (int)assetsReady)
+    {
+        return;
+    }
+    lastPhase = (int)pc;
+    lastRuntimeReady = (int)runtimeReady;
+    lastAssetsReady = (int)assetsReady;
+    trace = fopen("logs/scene-battle-collision.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "scene_battle_tick phase=%s pc=%08x runtime_ready=%u "
+            "assets_ready=%u screen=%08x screen_this=%08x scene=%s\n",
+            phase, pc, (unsigned)runtimeReady, (unsigned)assetsReady,
+            vmAddedScreen, g_currentScreenThis,
+            g_lastSceLoadName[0] ? g_lastSceLoadName : "-");
+    fclose(trace);
+}
+
+/*
  * Read-only probe for the native scene-monster collision function.
  * Runtime evidence ties TriggerAutoBattle to the real scene WT 4/1 sender.
  * Trace one actor's scan/callback state and the owning scene-control dispatch.
@@ -13336,6 +13392,7 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                        sizeof(actionFingerprint)) == 0)
             {
                 inputDispatchModuleBase = registeredModuleBase;
+                g_vmTraceMmGameInputCodeBase = registeredModuleBase;
                 inputDispatchCallback = callback;
                 actionDispatchTraceCount = 0;
                 actionRouteTraceCount = 0;
@@ -14407,6 +14464,8 @@ static void vm_trace_scene_battle_uplink(u32 dataPtr, u32 dataLen, u32 lr,
     u8 kind = 0;
     u8 subtype = 0;
     u32 packetLen = 0;
+    char packetHex[sizeof(packet) * 2u + 1u];
+    static const char hex[] = "0123456789ABCDEF";
     u32 stackWords[24];
     char callers[768];
     size_t used = 0;
@@ -14431,6 +14490,12 @@ static void vm_trace_scene_battle_uplink(u32 dataPtr, u32 dataLen, u32 lr,
     {
         return;
     }
+    for (u32 index = 0; index < packetLen; ++index)
+    {
+        packetHex[index * 2u] = hex[packet[index] >> 4];
+        packetHex[index * 2u + 1u] = hex[packet[index] & 0x0fu];
+    }
+    packetHex[packetLen * 2u] = 0;
 
     memset(stackWords, 0, sizeof(stackWords));
     if (sp != 0)
@@ -14484,11 +14549,11 @@ static void vm_trace_scene_battle_uplink(u32 dataPtr, u32 dataLen, u32 lr,
         return;
     ++sequence;
     fprintf(trace,
-            "scene_battle_uplink phase=wt-4-1 sequence=%u len=%u data=%08x "
+            "scene_battle_uplink phase=wt-4-1 sequence=%u len=%u data=%08x hex=%s "
             "network_lr=%08x network_sp=%08x regs=%08x,%08x,%08x,%08x "
             "scene=%s screen=%08x screen_this=%08x screen_module=%08x "
             "stack_callers=[%s]\n",
-            sequence, dataLen, dataPtr, lr, sp, r4, r5, r6, r7,
+            sequence, dataLen, dataPtr, packetHex, lr, sp, r4, r5, r6, r7,
             g_lastSceLoadName, vmAddedScreen, g_currentScreenThis,
             g_currentScreenModuleBase, callers[0] ? callers : "-");
     fclose(trace);
@@ -14538,6 +14603,92 @@ static void vm_trace_actor_scene_capacity_table(FILE *trace, const char *name,
     fprintf(trace, "] blocked=%u free=%u\n", blocked, rowCount - blocked);
 }
 
+/* The current mmGame base is not reported by the incomplete load-manager
+ * table.  It is usable for trace attribution only while the exact live
+ * sub_604/sub_8A8 fingerprint that established it still exists. */
+static bool vm_trace_mmgame_input_base_is_live(u32 base)
+{
+    static const u8 logicFingerprint[8] = {
+        0x10u, 0xB5u, 0x84u, 0x4Cu, 0x01u, 0x21u, 0x4Cu, 0x44u};
+    static const u8 actionFingerprint[8] = {
+        0xFEu, 0xB5u, 0x02u, 0x1Cu, 0xEBu, 0x48u, 0x0Cu, 0x1Cu};
+    u8 observedLogic[sizeof(logicFingerprint)] = {0};
+    u8 observedAction[sizeof(actionFingerprint)] = {0};
+
+    if (MTK == NULL ||
+        base < VM_Memory_Pool_ADDRESS ||
+        base > VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE - 0x8B0u)
+    {
+        return false;
+    }
+    return uc_mem_read(MTK, base + 0x604u, observedLogic,
+                       sizeof(observedLogic)) == UC_ERR_OK &&
+           uc_mem_read(MTK, base + 0x8A8u, observedAction,
+                       sizeof(observedAction)) == UC_ERR_OK &&
+           memcmp(observedLogic, logicFingerprint,
+                  sizeof(logicFingerprint)) == 0 &&
+           memcmp(observedAction, actionFingerprint,
+                  sizeof(actionFingerprint)) == 0;
+}
+
+/* Format a guest return address without changing its owner or execution.
+ * The scene-array probe uses this only to compare the lifecycle caller that
+ * reaches init against the caller that reaches the real free routine. */
+static void vm_trace_format_guest_callsite(char *out, size_t outSize, u32 address)
+{
+    u32 candidate = address & ~1u;
+    u32 base = 0;
+    u32 local = UINT32_MAX;
+    u16 appId = 0;
+    const char *module = NULL;
+    int appIndex = -1;
+
+    if (out == NULL || outSize == 0)
+        return;
+    out[0] = 0;
+    if (candidate >= Program_ROM_Address &&
+        candidate < Program_ROM_Address + Program_ROM_Mapped_Size)
+    {
+        module = "JianghuOL.CBE";
+        base = Program_ROM_Address;
+        local = candidate - base;
+    }
+    else
+    {
+        /* The installed mmGame code is 48,858 bytes including its 0x9A-byte
+         * container header.  Its live payload is page-aligned by the VM, so
+         * a 0xC000 window admits every real code offset while excluding the
+         * next pool allocation. */
+        if (g_vmTraceMmGameInputCodeBase != 0 &&
+            candidate >= g_vmTraceMmGameInputCodeBase &&
+            candidate - g_vmTraceMmGameInputCodeBase < 0xC000u &&
+            vm_trace_mmgame_input_base_is_live(g_vmTraceMmGameInputCodeBase))
+        {
+            module = "mmGameMstarWqvga.cbm";
+            base = g_vmTraceMmGameInputCodeBase;
+            local = candidate - base;
+        }
+        else
+        {
+            appIndex = vm_dl_find_loaded_index_by_pc(candidate);
+            if (appIndex >= 0)
+            {
+                module = "loaded-cbm";
+                base = g_vmDlLoadedApps[appIndex].buffer;
+                local = candidate - base;
+                appId = g_vmDlLoadedApps[appIndex].appId;
+            }
+        }
+    }
+    if (module == NULL)
+    {
+        snprintf(out, outSize, "unmapped:%08x", candidate);
+        return;
+    }
+    snprintf(out, outSize, "%s:%u:%08x:%08x", module,
+             (unsigned)appId, base, local);
+}
+
 /*
  * Read-only probe for the Actor motion-descriptor allocation failure at
  * JianghuOL.CBE:0x0100DA4E.  The parser stores a stream-provided count at
@@ -14572,6 +14723,7 @@ static void vm_trace_actor_scene_capacity_pc(u32 pc)
     u32 resourcePtr = 0;
     u32 childData = 0;
     u32 loopIndex = UINT32_MAX;
+    int forceNullResult = 0;
     int16_t descriptorCount = 0;
     int16_t pendingCount = 0;
     char resource[128];
@@ -14586,11 +14738,28 @@ static void vm_trace_actor_scene_capacity_pc(u32 pc)
     {
         return;
     }
+    /* Retain the allocator's observed capacity even when ordinary tracing is
+     * off, so the one mandatory null-result snapshot has a valid table size. */
+    if (pc == 0x01017E34)
+    {
+        (void)uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+        battleArrayCapacity = r4 / 340u;
+    }
+    else if (pc == 0x01017E54)
+    {
+        battleArrayCapacity = 0;
+    }
+    if (pc == 0x0100DA4E)
+    {
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        forceNullResult = r1 == 0;
+    }
     enabled = getenv("CBE_TRACE_ACTOR_SCENE_CAPACITY");
     if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
         strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
     {
-        return;
+        if (!forceNullResult)
+            return;
     }
     maxText = getenv("CBE_TRACE_ACTOR_SCENE_CAPACITY_MAX");
     if (maxText != NULL && maxText[0] != 0)
@@ -14617,11 +14786,23 @@ static void vm_trace_actor_scene_capacity_pc(u32 pc)
     {
         u32 arrayPtr = 0;
         u8 guestCount = 0;
+        u32 stackWords[8] = {0};
+        char lrCallsite[64];
+        char stackCallsites[8][64];
 
         (void)uc_mem_read(MTK, Global_R9 + 0x5CB4u, &arrayPtr,
                           sizeof(arrayPtr));
         (void)uc_mem_read(MTK, Global_R9 + 0x5C73u, &guestCount,
                           sizeof(guestCount));
+        if (sp != 0)
+            (void)uc_mem_read(MTK, sp, stackWords, sizeof(stackWords));
+        vm_trace_format_guest_callsite(lrCallsite, sizeof(lrCallsite), lr);
+        for (u32 index = 0; index < mySizeOf(stackWords); ++index)
+        {
+            vm_trace_format_guest_callsite(stackCallsites[index],
+                                           sizeof(stackCallsites[index]),
+                                           stackWords[index]);
+        }
         if (pc == 0x01017E34)
             battleArrayCapacity = r4 / 340u;
         if (pc == 0x01012FE6)
@@ -14647,9 +14828,13 @@ static void vm_trace_actor_scene_capacity_pc(u32 pc)
         fprintf(trace,
                 "actor_scene_capacity seq=%u phase=%s pc=%08x lr=%08x "
                 "array_ptr=%08x guest_count=%u observed_capacity=%u "
-                "request_or_result=%08x bytes=%u\n",
+                "request_or_result=%08x bytes=%u lr_callsite=%s "
+                "stack_callsites=[%s;%s;%s;%s;%s;%s;%s;%s]\n",
                 traceCount, phase, pc, lr, arrayPtr, (unsigned)guestCount,
-                battleArrayCapacity, r0, r4);
+                battleArrayCapacity, r0, r4, lrCallsite,
+                stackCallsites[0], stackCallsites[1], stackCallsites[2],
+                stackCallsites[3], stackCallsites[4], stackCallsites[5],
+                stackCallsites[6], stackCallsites[7]);
         fclose(trace);
         if (pc == 0x01017E54)
             battleArrayCapacity = 0;
@@ -22866,6 +23051,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_trace_scene_challenge_node_table_pc((u32)address & ~1u);
     vm_trace_action13_boundary_pc((u32)address & ~1u);
     vm_trace_scene_node_create_pc((u32)address & ~1u);
+    vm_trace_scene_runtime_tick_gate_pc((u32)address & ~1u);
     vm_trace_scene_battle_collision_pc((u32)address & ~1u);
     vm_trace_actor_scene_capacity_pc((u32)address & ~1u);
     vm_trace_scene_asset_lifecycle_pc((u32)address & ~1u);

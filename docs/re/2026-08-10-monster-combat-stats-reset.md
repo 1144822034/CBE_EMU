@@ -22,9 +22,9 @@
 
 ## 可观察证据与验证
 
-- 成功日志：`monster_combat_stats_reset ... preserve=reward-and-drops`；无覆盖时为
+- 成功日志：`monster_combat_stats_reset ... preserve=drops`；无覆盖时为
   `source=server-default action=noop`。
-- 后台成功提示明确说明只改四项战斗属性。
+- 后台成功提示明确说明会同时重置 HP、MP、攻击、防御、经验和铜钱；物品掉落不变。
 - 构建验证：`make -j2`。
 
 人工回归：编辑怪物的等级、奖励和多项掉落后将四项战斗属性改为任意值；点击新按钮应使

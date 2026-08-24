@@ -2332,11 +2332,10 @@ static const u32 g_vm_net_mock_role_level_start_exp_v2[
     7069758
 };
 
-/* V3 keeps the 13% level-to-level shape but is anchored at 2,829 EXP for
- * level 2.  It reaches 100,001,769 cumulative EXP at level 70, deliberately
- * near the requested 100M target.  That scale keeps the 0.04% ordinary
- * monster budget visible at the early levels instead of rounding to one. */
-static const u32 g_vm_net_mock_role_level_start_exp[
+/* V3 kept the 13% level-to-level shape but was budgeted around only 300
+ * rewarded battles per day.  Version 11 maps it into the live curve below
+ * while retaining each role's level and progress within that level. */
+static const u32 g_vm_net_mock_role_level_start_exp_v3[
     VM_NET_MOCK_ROLE_LEVEL_CAP + 1] = {
     0, 0, 2829, 6026, 9638, 13720, 18333, 23545, 29435, 36091,
     43612, 52110, 61713, 72565, 84827, 98683, 114341, 132034, 152027, 174620,
@@ -2346,6 +2345,28 @@ static const u32 g_vm_net_mock_role_level_start_exp[
     8658508, 9786943, 11062075, 12502974, 14131190, 15971074, 18050143, 20399491, 23054254, 26054136,
     29444003, 33274553, 37603074, 42494303, 48021392, 54267002, 61324542, 69299562, 78311334, 88494637,
     100001769
+};
+
+/* V4 is the live 7,200-equivalent-battle/day curve.  Levels 1--30 retain a
+ * deliberately quick introduction; from level 31 onward every five-level
+ * band raises the per-level battle requirement.  The values are cumulative
+ * so every consumer continues to treat EXP as one durable total. */
+static const u32 g_vm_net_mock_role_level_start_exp[
+    VM_NET_MOCK_ROLE_LEVEL_CAP + 1] = {
+    0, 0, 6750, 13500, 20250, 27000,
+    39000, 51000, 63000, 75000, 87000,
+    112600, 138200, 163800, 189400, 215000,
+    265400, 315800, 366200, 416600, 467000,
+    567800, 668600, 769400, 870200, 971000,
+    1176200, 1381400, 1586600, 1791800, 1997000,
+    2477000, 2957000, 3437000, 3917000, 4397000,
+    5477000, 6557000, 7637000, 8717000, 9797000,
+    12317000, 14837000, 17357000, 19877000, 22397000,
+    27932000, 33467000, 39002000, 44537000, 50072000,
+    61672000, 73272000, 84872000, 96472000, 108072000,
+    130872000, 153672000, 176472000, 199272000, 222072000,
+    258972000, 295872000, 332772000, 369672000, 406572000,
+    468807000, 531042000, 593277000, 655512000, 717747000
 };
 
 static u32 vm_net_mock_role_level_start_exp_from_curve(
@@ -2470,7 +2491,7 @@ static u32 vm_net_mock_role_legacy_level_from_exp(u32 exp)
 
 static bool vm_net_mock_role_migrate_exp_curve_v3(
     vm_net_mock_role_state *role, bool sourceUsesLegacyLinearCurve,
-    bool sourceUsesV2Curve,
+    bool sourceUsesV2Curve, bool sourceUsesV3Curve,
     u32 *oldLevelOut, bool *sourceCappedOut)
 {
     u32 oldExp = 0;
@@ -2496,6 +2517,9 @@ static bool vm_net_mock_role_migrate_exp_curve_v3(
     else if (sourceUsesV2Curve)
         oldLevel = vm_net_mock_role_level_from_exp_for_curve(
             g_vm_net_mock_role_level_start_exp_v2, oldExp);
+    else if (sourceUsesV3Curve)
+        oldLevel = vm_net_mock_role_level_from_exp_for_curve(
+            g_vm_net_mock_role_level_start_exp_v3, oldExp);
     else
         oldLevel = vm_net_mock_role_level_from_exp_for_curve(
             g_vm_net_mock_role_level_start_exp_v1, oldExp);
@@ -2526,6 +2550,13 @@ static bool vm_net_mock_role_migrate_exp_curve_v3(
             g_vm_net_mock_role_level_start_exp_v2, oldLevel);
         oldNextLevelStart = vm_net_mock_role_level_start_exp_from_curve(
             g_vm_net_mock_role_level_start_exp_v2, oldLevel + 1);
+    }
+    else if (sourceUsesV3Curve)
+    {
+        oldLevelStart = vm_net_mock_role_level_start_exp_from_curve(
+            g_vm_net_mock_role_level_start_exp_v3, oldLevel);
+        oldNextLevelStart = vm_net_mock_role_level_start_exp_from_curve(
+            g_vm_net_mock_role_level_start_exp_v3, oldLevel + 1);
     }
     else
     {
@@ -2578,7 +2609,42 @@ typedef struct
 enum
 {
     VM_NET_MOCK_DESIGNATION_MONEY_PER_GOLD = 1000u,
+    VM_NET_MOCK_DESIGNATION_CONDITION_MONEY = 1,
+    VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL = 2,
+    /* Operational titles whose eligibility is derived from durable equipment
+     * instances rather than a numeric role statistic. */
+    VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET = 3,
+    VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_CHRISTMAS = 1,
+    VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_WULIN = 2,
 };
+
+static u32 vm_net_mock_designation_equipment_set_for_id(u8 designationId)
+{
+    switch (designationId)
+    {
+    case 33: return VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_CHRISTMAS;
+    case 34: return VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_WULIN;
+    default: return 0;
+    }
+}
+
+static const char *vm_net_mock_designation_equipment_set_label(u32 setId)
+{
+    switch (setId)
+    {
+    case VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_CHRISTMAS:
+        return "全套圣诞装";
+    case VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_WULIN:
+        return "全套武林装";
+    default:
+        return "未知套装";
+    }
+}
+
+static bool vm_net_mock_role_equipment_slot_is_usable(
+    const vm_net_mock_role_state *role, u32 slot);
+static bool vm_net_mock_role_wears_designation_equipment_set(
+    const vm_net_mock_role_state *role, u32 setId);
 
 static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] = {
     {
@@ -2755,12 +2821,345 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "60" "\xBC\xB6", /* level 60 */
         "level_name12.gif",
     },
+    /* These operational titles deliberately use an empty overhead resource.
+     * The recovered client only accepts a real local badge filename there;
+     * inserting the Chinese title text would make it request a nonexistent
+     * file. The title list and actor short-title fields still receive the
+     * verified GBK names below. */
+    {
+        32, 0, 0, 0,
+        "\xD7\xCA\xC9\xEE\xC0\xCF\xD3\xD1", /* GBK: zi shen lao you */
+        "\xCC\xD8\xCA\xE2\xB3\xC6\xBA\xC5", /* GBK: te shu cheng hao */
+        "",
+    },
+    {
+        33, 0, 0, 0,
+        "\xCA\xA5\xB5\xAE\xC6\xEF\xCA\xBF", /* GBK: sheng dan qi shi */
+        "\xCC\xD8\xCA\xE2\xB3\xC6\xBA\xC5", /* GBK: te shu cheng hao */
+        "",
+    },
+    {
+        34, 0, 0, 0,
+        "\xCE\xE4\xC1\xD6\xB4\xAB\xC6\xE6", /* GBK: wu lin chuan qi */
+        "\xCC\xD8\xCA\xE2\xB3\xC6\xBA\xC5", /* GBK: te shu cheng hao */
+        "",
+    },
+    {
+        35, 0, 0, 0,
+        "\xD3\xC2\xD5\xDF\xCD\xF5", /* GBK: yong zhe wang */
+        "\xCC\xD8\xCA\xE2\xB3\xC6\xBA\xC5", /* GBK: te shu cheng hao */
+        "",
+    },
 };
+
+typedef struct
+{
+    u8 designationId;
+    u8 enabled;
+    u8 conditionKind;
+    u8 special;
+    u32 conditionValue;
+} vm_net_mock_designation_config;
+
+typedef struct
+{
+    u8 designationId;
+    u8 enabled;
+    u8 conditionKind;
+    u8 special;
+    u32 conditionValue;
+    const char *name;
+    const char *description;
+    const char *overheadResource;
+} vm_net_mock_designation_admin_row;
+
+typedef struct
+{
+    bool invalid;
+    u32 rows;
+} vm_net_mock_designation_config_load_context;
+
+static vm_net_mock_designation_config
+    g_vm_net_mock_designation_configs[
+        sizeof(g_vm_net_mock_designation_entries) /
+        sizeof(g_vm_net_mock_designation_entries[0])];
+static bool g_vm_net_mock_designation_config_initialized = false;
+static bool g_vm_net_mock_designation_config_db_loaded = false;
+static bool g_vm_net_mock_designation_config_db_valid = false;
 
 static u32 vm_net_mock_designation_entry_count(void)
 {
     return (u32)(sizeof(g_vm_net_mock_designation_entries) /
                  sizeof(g_vm_net_mock_designation_entries[0]));
+}
+
+static int vm_net_mock_designation_index_by_id(u8 designationId)
+{
+    u32 count = vm_net_mock_designation_entry_count();
+
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (g_vm_net_mock_designation_entries[i].id == designationId)
+            return (int)i;
+    }
+    return -1;
+}
+
+static void vm_net_mock_designation_config_reset_to_defaults(void)
+{
+    u32 count = vm_net_mock_designation_entry_count();
+
+    memset(g_vm_net_mock_designation_configs, 0,
+           sizeof(g_vm_net_mock_designation_configs));
+    for (u32 i = 0; i < count; ++i)
+    {
+        const vm_net_mock_designation_entry *entry =
+            &g_vm_net_mock_designation_entries[i];
+        vm_net_mock_designation_config *config =
+            &g_vm_net_mock_designation_configs[i];
+
+        config->designationId = entry->id;
+        config->special = entry->id >= 32 ? 1 : 0;
+        config->enabled = config->special ? 0 : 1;
+        if (vm_net_mock_designation_equipment_set_for_id(entry->id) != 0)
+        {
+            config->conditionKind =
+                VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET;
+            config->conditionValue =
+                vm_net_mock_designation_equipment_set_for_id(entry->id);
+        }
+        else if (entry->id <= 9)
+        {
+            config->conditionKind = VM_NET_MOCK_DESIGNATION_CONDITION_MONEY;
+            config->conditionValue = entry->minMoney;
+        }
+        else
+        {
+            config->conditionKind = VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL;
+            config->conditionValue = entry->minLevel != 0 ? entry->minLevel : 1;
+        }
+    }
+    g_vm_net_mock_designation_config_initialized = true;
+}
+
+static vm_net_mock_designation_config *vm_net_mock_designation_config_by_id(
+    u8 designationId)
+{
+    int index = vm_net_mock_designation_index_by_id(designationId);
+
+    if (!g_vm_net_mock_designation_config_initialized)
+        vm_net_mock_designation_config_reset_to_defaults();
+    if (index < 0 || (u32)index >= vm_net_mock_designation_entry_count())
+        return NULL;
+    return &g_vm_net_mock_designation_configs[index];
+}
+
+static bool vm_net_mock_designation_config_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_designation_config_load_context *context =
+        (vm_net_mock_designation_config_load_context *)contextValue;
+    u32 designationId = 0;
+    u32 enabled = 0;
+    u32 conditionKind = 0;
+    u32 conditionValue = 0;
+    vm_net_mock_designation_config *config = NULL;
+
+    if (context == NULL || columnCount != 4 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &designationId) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &enabled) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &conditionKind) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &conditionValue) ||
+        designationId > 0xffu || enabled > 1 ||
+        (conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_MONEY &&
+         conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL &&
+         conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET) ||
+        (conditionKind == VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL &&
+         (conditionValue == 0 || conditionValue > VM_NET_MOCK_ROLE_LEVEL_CAP)) ||
+        (config = vm_net_mock_designation_config_by_id((u8)designationId)) == NULL ||
+        (vm_net_mock_designation_equipment_set_for_id((u8)designationId) != 0 &&
+         (conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET ||
+          conditionValue !=
+              vm_net_mock_designation_equipment_set_for_id((u8)designationId))) ||
+        (conditionKind == VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET &&
+         conditionValue !=
+             vm_net_mock_designation_equipment_set_for_id((u8)designationId)) ||
+        (designationId == 0 &&
+         (enabled == 0 ||
+          conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_MONEY ||
+          conditionValue != 0)))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    config->enabled = (u8)enabled;
+    config->conditionKind = (u8)conditionKind;
+    config->conditionValue = conditionValue;
+    ++context->rows;
+    return true;
+}
+
+static bool vm_net_mock_designation_config_db_load(void)
+{
+    vm_net_mock_designation_config_load_context context;
+    u32 count = vm_net_mock_designation_entry_count();
+
+    if (g_vm_net_mock_designation_config_db_loaded)
+        return g_vm_net_mock_designation_config_db_valid;
+    g_vm_net_mock_designation_config_db_loaded = true;
+    g_vm_net_mock_designation_config_db_valid = false;
+    memset(&context, 0, sizeof(context));
+    vm_net_mock_designation_config_reset_to_defaults();
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_role_designations ("
+            "designation_id TINYINT UNSIGNED NOT NULL,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "condition_kind TINYINT UNSIGNED NOT NULL,"
+            "condition_value INT UNSIGNED NOT NULL DEFAULT 0,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(designation_id)) ENGINE=InnoDB"))
+    {
+        printf("[error][mock-admin] designation_config_schema failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    /* These two special-title rules are fixed gameplay contracts.  Older
+     * installations stored their temporary level-1 placeholders, so rewrite
+     * only the two corresponding configuration rows before loading them. */
+    if (!vm_mysql_exec(
+            "UPDATE server_role_designations SET condition_kind=3,condition_value=1 "
+            "WHERE designation_id=33 AND (condition_kind<>3 OR condition_value<>1)") ||
+        !vm_mysql_exec(
+            "UPDATE server_role_designations SET condition_kind=3,condition_value=2 "
+            "WHERE designation_id=34 AND (condition_kind<>3 OR condition_value<>2)"))
+    {
+        printf("[error][mock-admin] designation_config_equipment_set_migrate failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    for (u32 i = 0; i < count; ++i)
+    {
+        const vm_net_mock_designation_config *config =
+            &g_vm_net_mock_designation_configs[i];
+        char query[384];
+
+        snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO server_role_designations"
+                 "(designation_id,enabled,condition_kind,condition_value) "
+                 "VALUES(%u,%u,%u,%u)",
+                 config->designationId, config->enabled, config->conditionKind,
+                 config->conditionValue);
+        if (!vm_mysql_exec(query))
+        {
+            printf("[error][mock-admin] designation_config_seed failed id=%u error=%s\n",
+                   config->designationId, vm_mysql_last_error());
+            return false;
+        }
+    }
+    if (!vm_mysql_query(
+            "SELECT designation_id,enabled,condition_kind,condition_value "
+            "FROM server_role_designations ORDER BY designation_id",
+            vm_net_mock_designation_config_row, &context) || context.invalid ||
+        context.rows != count)
+    {
+        vm_net_mock_designation_config_reset_to_defaults();
+        printf("[error][mock-admin] designation_config_load failed rows=%u expected=%u error=%s\n",
+               context.rows, count, vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_designation_config_db_valid = true;
+    printf("[info][mock-admin] designation_config_load rows=%u\n", context.rows);
+    return true;
+}
+
+static u32 vm_net_mock_designation_admin_list(
+    vm_net_mock_designation_admin_row *rows, u32 rowCap)
+{
+    u32 count = vm_net_mock_designation_entry_count();
+
+    if (!vm_net_mock_designation_config_db_load())
+        return 0;
+    if (rows != NULL && rowCap != 0)
+    {
+        u32 copied = rowCap < count ? rowCap : count;
+
+        memset(rows, 0, sizeof(*rows) * copied);
+        for (u32 i = 0; i < copied; ++i)
+        {
+            const vm_net_mock_designation_entry *entry =
+                &g_vm_net_mock_designation_entries[i];
+            const vm_net_mock_designation_config *config =
+                &g_vm_net_mock_designation_configs[i];
+
+            rows[i].designationId = entry->id;
+            rows[i].enabled = config->enabled;
+            rows[i].conditionKind = config->conditionKind;
+            rows[i].conditionValue = config->conditionValue;
+            rows[i].special = config->special;
+            rows[i].name = entry->name;
+            rows[i].description = entry->description;
+            rows[i].overheadResource = entry->overheadResource;
+        }
+    }
+    return count;
+}
+
+static bool vm_net_mock_designation_admin_save(u8 designationId, bool enabled,
+                                                u8 conditionKind,
+                                                u32 conditionValue,
+                                                const char **errorOut)
+{
+    vm_net_mock_designation_config *config = NULL;
+    char query[512];
+
+    if (errorOut != NULL)
+        *errorOut = "称号条件无效";
+    if ((conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_MONEY &&
+         conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL &&
+         conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET) ||
+        (conditionKind == VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL &&
+         (conditionValue == 0 || conditionValue > VM_NET_MOCK_ROLE_LEVEL_CAP)) ||
+        (vm_net_mock_designation_equipment_set_for_id(designationId) != 0 &&
+         (conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET ||
+          conditionValue !=
+              vm_net_mock_designation_equipment_set_for_id(designationId))) ||
+        (conditionKind == VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET &&
+         conditionValue !=
+             vm_net_mock_designation_equipment_set_for_id(designationId)) ||
+        (designationId == 0 &&
+         (!enabled ||
+          conditionKind != VM_NET_MOCK_DESIGNATION_CONDITION_MONEY ||
+          conditionValue != 0)) ||
+        !vm_net_mock_designation_config_db_load() ||
+        (config = vm_net_mock_designation_config_by_id(designationId)) == NULL)
+    {
+        if (errorOut != NULL && !g_vm_net_mock_designation_config_db_valid)
+            *errorOut = "称号配置数据库不可用";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_role_designations"
+             "(designation_id,enabled,condition_kind,condition_value) "
+             "VALUES(%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "enabled=VALUES(enabled),condition_kind=VALUES(condition_kind),"
+             "condition_value=VALUES(condition_value)",
+             designationId, enabled ? 1u : 0u, conditionKind, conditionValue);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut != NULL)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    config->enabled = enabled ? 1 : 0;
+    config->conditionKind = conditionKind;
+    config->conditionValue = conditionValue;
+    if (errorOut != NULL)
+        *errorOut = NULL;
+    printf("[info][mock-admin] designation_config_save id=%u enabled=%u condition=%u value=%u\n",
+           designationId, enabled ? 1u : 0u, conditionKind, conditionValue);
+    return true;
 }
 
 static const vm_net_mock_designation_entry *vm_net_mock_designation_by_id(u8 id)
@@ -2779,14 +3178,30 @@ static bool vm_net_mock_designation_is_unlocked(const vm_net_mock_role_state *ro
 {
     u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     u32 level = role ? role->level : 1;
+    vm_net_mock_designation_config *config = NULL;
+
     if (entry == NULL)
         return false;
-    return money >= entry->minMoney && level >= entry->minLevel;
+    (void)vm_net_mock_designation_config_db_load();
+    config = vm_net_mock_designation_config_by_id(entry->id);
+    if (config == NULL || !config->enabled)
+        return false;
+    if (config->conditionKind == VM_NET_MOCK_DESIGNATION_CONDITION_MONEY)
+        return money >= config->conditionValue;
+    if (config->conditionKind == VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL)
+        return level >= config->conditionValue;
+    if (config->conditionKind ==
+        VM_NET_MOCK_DESIGNATION_CONDITION_EQUIPMENT_SET)
+    {
+        return vm_net_mock_role_wears_designation_equipment_set(
+            role, config->conditionValue);
+    }
+    return false;
 }
 
 static const vm_net_mock_designation_entry *vm_net_mock_role_best_designation(const vm_net_mock_role_state *role)
 {
-    const vm_net_mock_designation_entry *best = &g_vm_net_mock_designation_entries[0];
+    const vm_net_mock_designation_entry *best = NULL;
     u32 count = vm_net_mock_designation_entry_count();
     for (u32 i = 0; i < count; ++i)
     {
@@ -2794,7 +3209,7 @@ static const vm_net_mock_designation_entry *vm_net_mock_role_best_designation(co
         if (vm_net_mock_designation_is_unlocked(role, entry))
             best = entry;
     }
-    return best;
+    return best != NULL ? best : &g_vm_net_mock_designation_entries[0];
 }
 
 static const vm_net_mock_designation_entry *vm_net_mock_role_designation(const vm_net_mock_role_state *role)
@@ -2952,6 +3367,71 @@ static bool vm_net_mock_role_equipment_slot_is_usable(
     if (level == 0)
         level = 1;
     return item->levelRequired <= level;
+}
+
+/* Set-title eligibility is based on the same durable equipped instances used
+ * by battle and equipment login.  A matching item in the backpack, a wrong
+ * slot, or an historical over-level equip row must not unlock a title.  Slot
+ * zero accepts the profession-specific weapon variant; the other seven slots
+ * have one recovered item ID per set. */
+static bool vm_net_mock_role_wears_designation_equipment_set(
+    const vm_net_mock_role_state *role, u32 setId)
+{
+    static const u32 christmasBySlot[VM_NET_MOCK_EQUIP_SLOT_COUNT] = {
+        0, 40025, 40023, 40028, 40027, 40024, 40026, 40029,
+    };
+    static const u32 wulinBySlot[VM_NET_MOCK_EQUIP_SLOT_COUNT] = {
+        0, 40155, 40153, 40158, 40157, 40154, 40156, 40159,
+    };
+    static const u32 christmasWeapons[] = {40020, 40021, 40022};
+    static const u32 wulinWeapons[] = {40150, 40151, 40152};
+    const u32 *itemsBySlot = NULL;
+    const u32 *weapons = NULL;
+    u32 weaponCount = 0;
+
+    switch (setId)
+    {
+    case VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_CHRISTMAS:
+        itemsBySlot = christmasBySlot;
+        weapons = christmasWeapons;
+        weaponCount = (u32)(sizeof(christmasWeapons) / sizeof(christmasWeapons[0]));
+        break;
+    case VM_NET_MOCK_DESIGNATION_EQUIPMENT_SET_WULIN:
+        itemsBySlot = wulinBySlot;
+        weapons = wulinWeapons;
+        weaponCount = (u32)(sizeof(wulinWeapons) / sizeof(wulinWeapons[0]));
+        break;
+    default:
+        return false;
+    }
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        u32 equippedItemId = 0;
+
+        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot))
+            return false;
+        equippedItemId = role->equippedItems[slot].itemId;
+        if (slot == 0)
+        {
+            bool weaponMatched = false;
+
+            for (u32 weapon = 0; weapon < weaponCount; ++weapon)
+            {
+                if (equippedItemId == weapons[weapon])
+                {
+                    weaponMatched = true;
+                    break;
+                }
+            }
+            if (!weaponMatched)
+                return false;
+        }
+        else if (equippedItemId != itemsBySlot[slot])
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_state *role,
@@ -3680,9 +4160,12 @@ typedef enum
     VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2 = 2,
     VM_NET_MOCK_MONSTER_BALANCE_CURVE_V3 = 3,
     VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4 = 4,
-    /* V5 keeps the V4 combat profile and replaces only the automatic EXP
-     * reward with a percentage of the relevant level interval. */
-    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V5 = 5
+    /* V5 keeps the V4 combat profile and records the V10 percentage reward
+     * profile.  It remains available only to identify old automatic rows
+     * during migrations. */
+    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V5 = 5,
+    /* V6 is the V11 role-band reward profile. */
+    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6 = 6
 } vm_net_mock_monster_balance_curve;
 
 static u32 vm_net_mock_monster_scale_ceil(u32 value, u32 numerator,
@@ -4002,20 +4485,41 @@ static u32 vm_net_mock_role_exp_interval_for_level(u32 level)
         g_vm_net_mock_role_level_start_exp, level);
 }
 
+/* The progression budget is expressed in five-level role bands rather than
+ * as a percentage of the next EXP interval.  This keeps the awarded values
+ * legible in the client while the number of required 10x-card victories rises
+ * from 225 in the opening band to 9,220 at levels 66--70. */
+static u32 vm_net_mock_monster_reward_band_for_level(u32 level)
+{
+    /* The reward earned while level 5 advances the character to level 6, so
+     * it belongs to the 6--10 target band.  Aligning each cap with its next
+     * level interval makes the 1--70 total exactly 216,000 10x normal kills
+     * (30 days at 7,200 reward units/day). */
+    if (level < 5)
+        return 0;
+    if (level >= VM_NET_MOCK_ROLE_LEVEL_CAP - 5u)
+        return 13;
+    return level / 5u;
+}
+
 static u32 vm_net_mock_normal_monster_exp_for_level(u32 level)
 {
-    u32 interval = vm_net_mock_role_exp_interval_for_level(level);
-    u32 reward = (u32)(((unsigned long long)interval * 40ull + 99999ull) /
-                       100000ull);
+    static const u32 exp_caps[] = {
+        3, 5, 8, 12, 18, 27, 40,
+        60, 90, 135, 200, 300, 450, 675
+    };
 
-    /* This is 0.040% of an interval: 2,500 same-level normal kills per level
-     * before a card.  At the planning baseline of 300 rewarded victories per
-     * day it yields roughly one year from level 1 to 70, or more than one
-     * month with the legacy 10x card, all shipped task rewards, and both
-     * daily practice modes.
-     * The one-EXP floor preserves visible tutorial
-     * progress while the interval is small. */
-    return reward == 0 ? 1 : reward;
+    return exp_caps[vm_net_mock_monster_reward_band_for_level(level)];
+}
+
+static u32 vm_net_mock_normal_monster_gold_for_level(u32 level)
+{
+    static const u32 gold_caps[] = {
+        1, 1, 2, 3, 4, 6, 10,
+        15, 22, 33, 50, 75, 112, 168
+    };
+
+    return gold_caps[vm_net_mock_monster_reward_band_for_level(level)];
 }
 
 /* The initially deployed V5 reward ratio was 0.050%.  Keep this tiny
@@ -4043,6 +4547,46 @@ static u32 vm_net_mock_normal_monster_exp_for_level_v6_predecessor(u32 level)
                        100000ull);
 
     return reward == 0 ? 1 : reward;
+}
+
+/* V10's live curve used the same 0.040%% ratio as V6 but projected it onto
+ * the 100M V3 curve.  It exists only to identify automatically generated
+ * rows during the one-time V11 monster-reward migration. */
+static u32 vm_net_mock_normal_monster_exp_for_level_v7_predecessor(u32 level)
+{
+    u32 interval = vm_net_mock_role_exp_interval_for_curve(
+        g_vm_net_mock_role_level_start_exp_v3, level);
+    u32 reward = (u32)(((unsigned long long)interval * 40ull + 99999ull) /
+                       100000ull);
+
+    return reward == 0 ? 1 : reward;
+}
+
+/* V10 money was a monster-family value independent of the recipient.  Keep
+ * it beside the former V10 EXP helper so the V11 migration can distinguish a
+ * fully automatic reward profile from either field having been edited by an
+ * administrator. */
+static u32 vm_net_mock_monster_reward_gold_v7_predecessor(
+    vm_net_mock_monster_family family, u32 level)
+{
+    switch (family)
+    {
+    case VM_NET_MOCK_MONSTER_REPTILE:
+    case VM_NET_MOCK_MONSTER_UNDEAD:
+        return 4u + level * 2u;
+    case VM_NET_MOCK_MONSTER_SPIRIT:
+    case VM_NET_MOCK_MONSTER_ELEMENTAL:
+    case VM_NET_MOCK_MONSTER_STONE:
+        return 5u + level * 2u;
+    case VM_NET_MOCK_MONSTER_HUMANOID:
+        return 6u + level * 2u;
+    case VM_NET_MOCK_MONSTER_SOLDIER:
+        return 7u + level * 2u;
+    case VM_NET_MOCK_MONSTER_BOSS:
+        return 25u + level * 4u;
+    default:
+        return 3u + level * 2u;
+    }
 }
 
 static vm_net_mock_monster_stats
@@ -4287,16 +4831,29 @@ vm_net_mock_monster_base_stats_for_entry_curve(
         break;
     }
 
-    if (curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V5)
+    if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V5)
     {
-        u32 normalExp = vm_net_mock_normal_monster_exp_for_level(level);
+        u32 normalExp = vm_net_mock_normal_monster_exp_for_level_v7_predecessor(
+            level);
+        u32 normalGold = vm_net_mock_monster_reward_gold_v7_predecessor(
+            (vm_net_mock_monster_family)entry.family, level);
 
-        /* A boss consumes a several-times-longer encounter window and is
-         * budgeted at five normal kills.  This only applies to automatic
-         * catalog values; a server_monsters reward_exp override still wins. */
         stats.exp = entry.family == VM_NET_MOCK_MONSTER_BOSS ?
                         (u32)((unsigned long long)normalExp * 5ull) :
                         normalExp;
+        stats.gold = normalGold;
+    }
+    else if (curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6)
+    {
+        u32 normalExp = vm_net_mock_normal_monster_exp_for_level(level);
+        u32 normalGold = vm_net_mock_normal_monster_gold_for_level(level);
+
+        /* Bosses retain their distinct combat and drop profiles, but their
+         * manual-only battles must not create a second progression economy.
+         * V11 therefore gives every monster family the same role-band base
+         * reward before the recipient-level cap is applied at settlement. */
+        stats.exp = normalExp;
+        stats.gold = normalGold;
     }
 
     if (entry.family != VM_NET_MOCK_MONSTER_BOSS)
@@ -4330,7 +4887,7 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_entry(
     const vm_net_mock_monster_entry *entryValue)
 {
     return vm_net_mock_monster_base_stats_for_entry_curve(
-        entryValue, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V5);
+        entryValue, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6);
 }
 
 static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 enemyId)
@@ -4980,6 +5537,111 @@ static bool vm_net_mock_monster_drop_rate_schema_prepare(void)
     return true;
 }
 
+/* V11 replaces V10's percentage reward and legacy family-money defaults with
+ * the five-level progression table.  Only rows still matching both former
+ * automatic values move; changing either reward in the admin UI remains an
+ * explicit manual override. */
+static bool vm_net_mock_monster_reward_profile_migrate_v5(void)
+{
+    vm_net_mock_monster_balance_migration_mark_context mark;
+    vm_net_mock_monster_balance_migration_pending
+        pending[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    char query[512];
+    char mysqlError[512];
+    u32 pendingCount = 0;
+    u32 preservedManual = 0;
+    bool transactionStarted = false;
+
+    memset(&mark, 0, sizeof(mark));
+    memset(pending, 0, sizeof(pending));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM server_data_migrations "
+            "WHERE migration_name='monster-reward-profile-v5'",
+            vm_net_mock_monster_balance_migration_mark_row, &mark) ||
+        mark.invalid || !mark.found)
+    {
+        return false;
+    }
+    if (mark.count != 0)
+        return true;
+
+    for (u32 i = 0; i < g_vm_net_mock_monster_catalog_count; ++i)
+    {
+        vm_net_mock_monster_override *override =
+            &g_vm_net_mock_monster_overrides[i];
+        vm_net_mock_monster_entry entry;
+        vm_net_mock_monster_stats replacement;
+        u32 predecessorExp = 0;
+        u32 predecessorGold = 0;
+
+        if (!override->used)
+            continue;
+        entry = vm_net_mock_monster_entry_for_enemy(override->stats.enemyId);
+        entry.level = (u8)override->stats.level;
+        entry.family = override->family;
+        predecessorExp = vm_net_mock_normal_monster_exp_for_level_v7_predecessor(
+            entry.level);
+        if (entry.family == VM_NET_MOCK_MONSTER_BOSS)
+            predecessorExp *= 5u;
+        predecessorGold = vm_net_mock_monster_reward_gold_v7_predecessor(
+            (vm_net_mock_monster_family)entry.family, entry.level);
+        if (override->stats.exp != predecessorExp ||
+            override->stats.gold != predecessorGold)
+        {
+            ++preservedManual;
+            continue;
+        }
+        replacement = vm_net_mock_monster_base_stats_for_entry(&entry);
+        pending[pendingCount].index = (int)i;
+        pending[pendingCount].stats = replacement;
+        ++pendingCount;
+    }
+
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto mysql_failed;
+    transactionStarted = true;
+    for (u32 i = 0; i < pendingCount; ++i)
+    {
+        const vm_net_mock_monster_balance_migration_pending *row = &pending[i];
+        const vm_net_mock_monster_override *override =
+            &g_vm_net_mock_monster_overrides[row->index];
+
+        snprintf(query, sizeof(query),
+                 "UPDATE server_monsters SET reward_exp=%u,reward_money=%u "
+                 "WHERE monster_id=%u",
+                 row->stats.exp, row->stats.gold, override->stats.enemyId);
+        if (!vm_mysql_exec(query))
+            goto mysql_failed;
+    }
+    if (!vm_mysql_exec(
+            "INSERT IGNORE INTO server_data_migrations (migration_name) "
+            "VALUES ('monster-reward-profile-v5')") ||
+        !vm_mysql_exec("COMMIT"))
+    {
+        goto mysql_failed;
+    }
+    transactionStarted = false;
+    for (u32 i = 0; i < pendingCount; ++i)
+    {
+        vm_net_mock_monster_override *override =
+            &g_vm_net_mock_monster_overrides[pending[i].index];
+
+        override->stats.exp = pending[i].stats.exp;
+        override->stats.gold = pending[i].stats.gold;
+    }
+    printf("[info][mock-admin] monster_reward_profile_migrate v5 migrated=%u preserved_manual=%u\n",
+           pendingCount, preservedManual);
+    return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_reward_profile_migrate v5 failed error=%s\n",
+           mysqlError);
+    return false;
+}
+
 static bool vm_net_mock_monster_db_load(void)
 {
     vm_net_mock_monster_db_load_context context;
@@ -5051,7 +5713,8 @@ static bool vm_net_mock_monster_db_load(void)
             VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4) ||
         !vm_net_mock_monster_reward_exp_migrate_v2() ||
         !vm_net_mock_monster_reward_exp_migrate_v3() ||
-        !vm_net_mock_monster_reward_exp_migrate_v4())
+        !vm_net_mock_monster_reward_exp_migrate_v4() ||
+        !vm_net_mock_monster_reward_profile_migrate_v5())
     {
         printf("[error][mock-admin] monster_db_load failed error=%s\n",
                vm_mysql_last_error());
@@ -6325,12 +6988,11 @@ done:
     return ok;
 }
 
-/* Recalculate exactly the four combat attributes selected by the admin UI.
- * A batch is one MySQL transaction: validate every selected identity and
- * calculate HP, MP, attack and defense before the first UPDATE, then publish
- * the matching in-memory overrides only after COMMIT.  Experience, money and
- * configured drops are explicit operations settings and must not be changed
- * by an attribute reset. */
+/* Recalculate the combat quartet and the progression-owned EXP/money rewards
+ * selected by the admin UI.  A batch is one MySQL transaction: validate every
+ * selected identity and calculate the defaults before the first UPDATE, then
+ * publish the matching in-memory overrides only after COMMIT.  Drops remain
+ * an explicit operations setting and are never changed by this reset. */
 static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
     const u32 *enemyIds, u32 enemyCount, u32 *updatedOut, u32 *alreadyDefaultOut,
     const char **errorOut)
@@ -6415,10 +7077,10 @@ static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
 
             snprintf(query, sizeof(query),
                      "UPDATE server_monsters SET hp=%u,mp=%u,attack_value=%u,"
-                     "defense_value=%u "
+                     "defense_value=%u,reward_exp=%u,reward_money=%u "
                      "WHERE monster_id=%u",
                      defaults->hp, defaults->mp, defaults->attack,
-                     defaults->defense,
+                     defaults->defense, defaults->exp, defaults->gold,
                      override->stats.enemyId);
             if (!vm_mysql_exec(query))
                 goto mysql_failed;
@@ -6438,10 +7100,13 @@ static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
         override->stats.mp = defaults->mp;
         override->stats.attack = defaults->attack;
         override->stats.defense = defaults->defense;
-        printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u preserve=exp,money,drops\n",
+        override->stats.exp = defaults->exp;
+        override->stats.gold = defaults->gold;
+        printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u preserve=drops\n",
                override->stats.enemyId, override->stats.level,
                override->family, defaults->hp, defaults->mp,
-               defaults->attack, defaults->defense);
+               defaults->attack, defaults->defense, defaults->exp,
+               defaults->gold);
     }
     if (updatedOut)
         *updatedOut = pendingCount;
@@ -8626,6 +9291,7 @@ typedef struct
     bool expCurveMigrationNeeded;
     bool expCurveMigrationFromLegacyLinear;
     bool expCurveMigrationFromV2;
+    bool expCurveMigrationFromV3;
     bool enhancementAffixMigrationNeeded;
     u8 seenRoleMask;
     u8 roleRows;
@@ -8793,6 +9459,7 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
          format_version != VM_NET_MOCK_ROLE_DB_EXP_CURVE_V1_VERSION &&
          format_version != VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION &&
          format_version != VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION &&
+         format_version != VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION &&
          format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
         role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
@@ -8811,6 +9478,8 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
         format_version < VM_NET_MOCK_ROLE_DB_EXP_CURVE_V1_VERSION;
     context->expCurveMigrationFromV2 =
         format_version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION;
+    context->expCurveMigrationFromV3 =
+        format_version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION;
     context->enhancementAffixMigrationNeeded =
         format_version < VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION;
     context->found = true;
@@ -9207,6 +9876,7 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
                                                        bool *exp_curve_migration_out,
                                                        bool *exp_curve_migration_from_legacy_linear_out,
                                                        bool *exp_curve_migration_from_v2_out,
+                                                       bool *exp_curve_migration_from_v3_out,
                                                        bool *enhancement_affix_migration_out)
 {
     char account_hex[129];
@@ -9222,6 +9892,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
         *exp_curve_migration_from_legacy_linear_out = false;
     if (exp_curve_migration_from_v2_out)
         *exp_curve_migration_from_v2_out = false;
+    if (exp_curve_migration_from_v3_out)
+        *exp_curve_migration_from_v3_out = false;
     if (enhancement_affix_migration_out)
         *enhancement_affix_migration_out = false;
     if (!vm_net_mock_mysql_account_hex(account_hex))
@@ -9296,6 +9968,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
     }
     if (exp_curve_migration_from_v2_out)
         *exp_curve_migration_from_v2_out = context.expCurveMigrationFromV2;
+    if (exp_curve_migration_from_v3_out)
+        *exp_curve_migration_from_v3_out = context.expCurveMigrationFromV3;
     if (enhancement_affix_migration_out)
         *enhancement_affix_migration_out = context.enhancementAffixMigrationNeeded;
     return true;
@@ -9309,6 +9983,7 @@ typedef struct
     bool expCurveMigrationNeeded;
     bool expCurveMigrationFromLegacyLinear;
     bool expCurveMigrationFromV2;
+    bool expCurveMigrationFromV3;
     bool enhancementAffixMigrationNeeded;
 } vm_mock_mysql_payload_load_context;
 
@@ -9330,6 +10005,7 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
          format_version != VM_NET_MOCK_ROLE_DB_EXP_CURVE_V1_VERSION &&
          format_version != VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION &&
          format_version != VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION &&
+         format_version != VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION &&
          format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
         role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
@@ -9343,9 +10019,12 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
         format_version < VM_NET_MOCK_ROLE_DB_EXP_CURVE_V1_VERSION;
     context->expCurveMigrationFromV2 =
         format_version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION;
+    context->expCurveMigrationFromV3 =
+        format_version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION;
     context->enhancementAffixMigrationNeeded =
         format_version < VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION;
     if (format_version == VM_NET_MOCK_ROLE_DB_VERSION ||
+        format_version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION ||
         format_version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION ||
         format_version == VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION)
     {
@@ -9416,6 +10095,7 @@ static bool vm_net_mock_role_db_load_mysql_payload_backup(
     bool *found_out, bool *exp_curve_migration_out,
     bool *exp_curve_migration_from_legacy_linear_out,
     bool *exp_curve_migration_from_v2_out,
+    bool *exp_curve_migration_from_v3_out,
     bool *enhancement_affix_migration_out)
 {
     char account_hex[129];
@@ -9429,6 +10109,8 @@ static bool vm_net_mock_role_db_load_mysql_payload_backup(
         *exp_curve_migration_from_legacy_linear_out = false;
     if (exp_curve_migration_from_v2_out)
         *exp_curve_migration_from_v2_out = false;
+    if (exp_curve_migration_from_v3_out)
+        *exp_curve_migration_from_v3_out = false;
     if (enhancement_affix_migration_out)
         *enhancement_affix_migration_out = false;
     if (!vm_net_mock_mysql_account_hex(account_hex))
@@ -9451,6 +10133,8 @@ static bool vm_net_mock_role_db_load_mysql_payload_backup(
     }
     if (exp_curve_migration_from_v2_out)
         *exp_curve_migration_from_v2_out = context.expCurveMigrationFromV2;
+    if (exp_curve_migration_from_v3_out)
+        *exp_curve_migration_from_v3_out = context.expCurveMigrationFromV3;
     if (enhancement_affix_migration_out)
         *enhancement_affix_migration_out = context.enhancementAffixMigrationNeeded;
     return true;
@@ -11460,6 +12144,152 @@ static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     return effect.expiresUnix != 0 ? effect.multiplier : 0;
 }
 
+/* Monster rewards use a role-scoped, China-local calendar day.  The counter
+ * is intentionally independent from one hangup session so reconnecting,
+ * reopening hangup, or switching scenes cannot manufacture a fresh reward
+ * budget.  Every defeated monster consumes one ordinary reward unit. */
+enum { VM_NET_MOCK_MONSTER_REWARD_DAILY_UNIT_CAP = 7200u };
+
+typedef struct
+{
+    u32 epochDay;
+    u32 usedUnits;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_monster_reward_daily_context;
+
+static bool g_vm_net_mock_monster_reward_daily_schema_prepared = false;
+
+static bool vm_mock_mysql_monster_reward_daily_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_mysql_monster_reward_daily_context *context =
+        (vm_mock_mysql_monster_reward_daily_context *)contextValue;
+
+    if (context == NULL || context->found || columnCount != 2 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->epochDay) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &context->usedUnits) ||
+        context->usedUnits > VM_NET_MOCK_MONSTER_REWARD_DAILY_UNIT_CAP)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_monster_reward_daily_prepare_schema(void)
+{
+    if (g_vm_net_mock_monster_reward_daily_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_monster_reward_daily ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "epoch_day INT UNSIGNED NOT NULL DEFAULT 0,"
+            "used_units SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id,role_id),"
+            "CONSTRAINT fk_account_role_monster_reward_daily_role "
+            "FOREIGN KEY(account_id,role_id) REFERENCES account_roles(account_id,role_id) "
+            "ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] monster_reward_daily_schema error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_monster_reward_daily_schema_prepared = true;
+    return true;
+}
+
+/* The caller treats a false return as a database failure and awards nothing.
+ * A true return with grantedOut=false is the normal daily-limit result. */
+static bool vm_net_mock_role_consume_monster_reward_units(
+    const vm_net_mock_role_state *role, u32 units, bool *grantedOut,
+    u32 *usedUnitsOut)
+{
+    char accountHex[129];
+    char query[1024];
+    vm_mock_mysql_monster_reward_daily_context state;
+    vm_mock_mysql_practise_u32_context day;
+    bool transactionStarted = false;
+    bool granted = false;
+
+    if (grantedOut != NULL)
+        *grantedOut = false;
+    if (usedUnitsOut != NULL)
+        *usedUnitsOut = 0;
+    if (role == NULL || role->roleId == 0 || units == 0 ||
+        units > VM_NET_MOCK_MONSTER_REWARD_DAILY_UNIT_CAP ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_monster_reward_daily_prepare_schema())
+    {
+        return false;
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO account_role_monster_reward_daily("
+             "account_id,role_id,epoch_day,used_units) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,0,0)",
+             accountHex, role->roleId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    memset(&state, 0, sizeof(state));
+    snprintf(query, sizeof(query),
+             "SELECT epoch_day,used_units FROM account_role_monster_reward_daily "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u FOR UPDATE",
+             accountHex, role->roleId);
+    if (!vm_mysql_query(query, vm_mock_mysql_monster_reward_daily_row, &state) ||
+        state.invalid || !state.found)
+    {
+        goto failed;
+    }
+    memset(&day, 0, sizeof(day));
+    if (!vm_mysql_query(
+            "SELECT CAST(FLOOR((UNIX_TIMESTAMP()+28800)/86400) AS UNSIGNED)",
+            vm_mock_mysql_practise_u32_row, &day) ||
+        day.invalid || !day.found)
+    {
+        goto failed;
+    }
+    if (state.epochDay != day.value)
+    {
+        state.epochDay = day.value;
+        state.usedUnits = 0;
+    }
+    if (state.usedUnits <= VM_NET_MOCK_MONSTER_REWARD_DAILY_UNIT_CAP - units)
+    {
+        state.usedUnits += units;
+        granted = true;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_monster_reward_daily SET epoch_day=%u,used_units=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             state.epochDay, state.usedUnits, accountHex, role->roleId);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    if (grantedOut != NULL)
+        *grantedOut = granted;
+    if (usedUnitsOut != NULL)
+        *usedUnitsOut = state.usedUnits;
+    return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] monster_reward_daily_consume_failed account=%s role=%u units=%u error=%s\n",
+           g_vm_mock_service_active_account_id ?
+               g_vm_mock_service_active_account_id : "-",
+           role ? role->roleId : 0, units, vm_mysql_last_error());
+    return false;
+}
+
 /* Return all persistent combat effects in one normalized view before a
  * battle formula consumes them.  The individual rows deliberately remain
  * separate: item.dsh has independent attack, defence and combined event
@@ -11634,14 +12464,17 @@ static void vm_net_mock_role_db_load(void)
     bool mysqlExpCurveMigration = false;
     bool mysqlExpCurveMigrationFromLegacyLinear = false;
     bool mysqlExpCurveMigrationFromV2 = false;
+    bool mysqlExpCurveMigrationFromV3 = false;
     bool mysqlEnhancementAffixMigration = false;
     bool payloadExpCurveMigration = false;
     bool payloadExpCurveMigrationFromLegacyLinear = false;
     bool payloadExpCurveMigrationFromV2 = false;
+    bool payloadExpCurveMigrationFromV3 = false;
     bool payloadEnhancementAffixMigration = false;
     bool expCurveMigrationNeeded = false;
     bool expCurveMigrationFromLegacyLinear = false;
     bool expCurveMigrationFromV2 = false;
+    bool expCurveMigrationFromV3 = false;
     bool needsSave = false;
     u32 migratedOldIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
     u32 migratedNewIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
@@ -11673,6 +12506,7 @@ static void vm_net_mock_role_db_load(void)
                                                     &mysqlExpCurveMigration,
                                                     &mysqlExpCurveMigrationFromLegacyLinear,
                                                     &mysqlExpCurveMigrationFromV2,
+                                                    &mysqlExpCurveMigrationFromV3,
                                                     &mysqlEnhancementAffixMigration))
     {
         vm_autotest_note("mock_role_db_mysql_load_failed account=%s storage=relational error=%s\n",
@@ -11686,6 +12520,7 @@ static void vm_net_mock_role_db_load(void)
                                                         &payloadExpCurveMigration,
                                                         &payloadExpCurveMigrationFromLegacyLinear,
                                                         &payloadExpCurveMigrationFromV2,
+                                                        &payloadExpCurveMigrationFromV3,
                                                         &payloadEnhancementAffixMigration))
     {
         vm_autotest_note("mock_role_db_mysql_load_failed account=%s storage=payload-backup error=%s\n",
@@ -11708,6 +12543,7 @@ static void vm_net_mock_role_db_load(void)
         expCurveMigrationFromLegacyLinear =
             mysqlExpCurveMigrationFromLegacyLinear;
         expCurveMigrationFromV2 = mysqlExpCurveMigrationFromV2;
+        expCurveMigrationFromV3 = mysqlExpCurveMigrationFromV3;
     }
     if (loadedFromMysql && mysqlEnhancementAffixMigration)
     {
@@ -11722,6 +12558,7 @@ static void vm_net_mock_role_db_load(void)
         expCurveMigrationFromLegacyLinear =
             payloadExpCurveMigrationFromLegacyLinear;
         expCurveMigrationFromV2 = payloadExpCurveMigrationFromV2;
+        expCurveMigrationFromV3 = payloadExpCurveMigrationFromV3;
     }
     if (loadedFromPayload && payloadEnhancementAffixMigration)
         needsSave = true;
@@ -11746,6 +12583,7 @@ static void vm_net_mock_role_db_load(void)
             memcmp(loaded.magic, "JHR1", 4) == 0 &&
             (loaded.version == VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION ||
              loaded.version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION ||
+             loaded.version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION ||
              loaded.version == VM_NET_MOCK_ROLE_DB_VERSION) &&
             loaded.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
         {
@@ -11755,6 +12593,8 @@ static void vm_net_mock_role_db_load(void)
                 expCurveMigrationFromLegacyLinear = false;
                 expCurveMigrationFromV2 =
                     loaded.version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION;
+                expCurveMigrationFromV3 =
+                    loaded.version == VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION;
             }
             g_vm_net_mock_role_db = loaded;
             g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
@@ -11950,6 +12790,7 @@ static void vm_net_mock_role_db_load(void)
 
             (void)vm_net_mock_role_migrate_exp_curve_v3(
                 role, expCurveMigrationFromLegacyLinear, expCurveMigrationFromV2,
+                expCurveMigrationFromV3,
                 &oldLevel,
                 &sourceCapped);
             if (sourceCapped)
@@ -11961,13 +12802,14 @@ static void vm_net_mock_role_db_load(void)
          * retries safely on the next load instead of partially migrating an
          * account. */
         needsSave = true;
-        vm_autotest_note("mock_role_exp_curve_migrate version=9->10 account=%s roles=%u capped=%u source_curve=%s strategy=preserve-level-progress level49_cost=%u level70_cost=%u cap_exp=%u\n",
+        vm_autotest_note("mock_role_exp_curve_migrate version=10->11 account=%s roles=%u capped=%u source_curve=%s strategy=preserve-level-progress level49_cost=%u level70_cost=%u cap_exp=%u\n",
                          g_vm_mock_service_active_account_id ?
                          g_vm_mock_service_active_account_id : "-",
                          expCurveMigratedRoles, expCurveCappedRoles,
                          expCurveMigrationFromLegacyLinear ? "linear-v0-v6" :
                          (expCurveMigrationFromV2 ? "percentage-v2" :
-                                                    "exponential-v1"),
+                          (expCurveMigrationFromV3 ? "percentage-v3" :
+                                                     "exponential-v1")),
                          vm_net_mock_role_level_start_exp(49) -
                              vm_net_mock_role_level_start_exp(48),
                          vm_net_mock_role_level_start_exp(70) -

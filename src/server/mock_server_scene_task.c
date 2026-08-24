@@ -7823,16 +7823,16 @@ static void vm_net_mock_complete_startup_scene_followup(const char *currentScene
                      target.scene, target.x, target.y, source ? source : "-", objectCount);
 }
 
-/* Role-select has already built a scene shell from actorinfo. If that exact
- * role scene was invalidated and then installed through final WT18/7, the
- * client needs the native mmGame 16/3(result=2) path to rebuild input/action
- * state. This arms only the first later standalone WT25/5. */
+/* Role-select has already built the first scene shell from actorinfo.  A
+ * final SCE WT18/7 must not turn a later standalone WT25/5 into a scene
+ * re-entry.  Runtime evidence shows that mmGame:sub_11CE's 16/2(result=1)
+ * branch calls sub_BCC() and main API +116 without releasing that shell's
+ * live background Actor array.  Sending it here repeats the same unsafe
+ * allocation that 16/3(result=2) caused.  Keep this narrow marker only for
+ * evidence; the normal WT25/5 control-ACK path owns the response. */
 static void vm_net_mock_arm_startup_sce_install_scene_enter(const char *scene)
 {
     vm_net_mock_role_state *role = NULL;
-    vm_net_mock_scene_change_target target;
-    u16 targetX = vm_net_mock_scene_spawn_x();
-    u16 targetY = vm_net_mock_scene_spawn_y();
     u32 installGeneration = 0;
 
     if (g_vm_net_mock_startup_sce_enter_pending ||
@@ -7849,30 +7849,10 @@ static void vm_net_mock_arm_startup_sce_install_scene_enter(const char *scene)
     {
         return;
     }
-    if (!vm_net_mock_read_current_player_grid(NULL, NULL, &targetX, &targetY,
-                                               NULL, NULL))
-    {
-        vm_net_mock_adjust_safe_player_pos_for_scene(scene, &targetX, &targetY);
-    }
-    if (targetX == 0 || targetY == 0)
-        return;
-
-    memset(&target, 0, sizeof(target));
-    snprintf(target.scene, sizeof(target.scene), "%s", scene);
-    target.x = targetX;
-    target.y = targetY;
-    target.mapType = 2;
-    target.exitId = 0;
-    target.hasSceEntry = true;
-    target.needsSceneDownload = false;
-    g_vm_net_mock_startup_sce_enter_target = target;
-    g_vm_net_mock_startup_sce_enter_install_generation = installGeneration;
-    g_vm_net_mock_startup_sce_enter_armed_tick = g_schedulerTick;
-    g_vm_net_mock_startup_sce_enter_pending = true;
-    printf("[info][network] mock_startup_sce_install_scene_enter_arm scene=%s pos=(%u,%u) install_generation=%u next=WT25/5 evidence=WT18/7+mmGame:0x11CE->0x0BCC\n",
-           target.scene, target.x, target.y, installGeneration);
-    vm_autotest_note("mock_startup_sce_install_scene_enter_arm scene=%s pos=(%u,%u) install_generation=%u next=WT25/5 evidence=WT18/7+mmGame:0x11CE->0x0BCC\n",
-                     target.scene, target.x, target.y, installGeneration);
+    printf("[info][network] mock_startup_sce_install_scene_enter_suppressed scene=%s install_generation=%u action=control-ack-only reason=16-2-direct-enter-retains-live-background-array evidence=mmGame:0x11CE->0x0BCC+runtime-array-lifetime\n",
+           scene, installGeneration);
+    vm_autotest_note("mock_startup_sce_install_scene_enter_suppressed scene=%s install_generation=%u action=control-ack-only reason=16-2-direct-enter-retains-live-background-array evidence=mmGame:0x11CE->0x0BCC+runtime-array-lifetime\n",
+                     scene, installGeneration);
 }
 
 static bool vm_net_mock_is_recent_completed_scene_change_target(const vm_net_mock_scene_change_target *target)
@@ -9889,7 +9869,7 @@ static u32 vm_net_mock_build_startup_sce_install_scene_enter_response(
         return 0;
     }
     if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(
-            out, outCap, &pos, 3, 2, &target))
+            out, outCap, &pos, 2, 1, &target))
     {
         return 0;
     }
@@ -9898,11 +9878,11 @@ static u32 vm_net_mock_build_startup_sce_install_scene_enter_response(
     vm_net_mock_mark_direct_scene_enter_completed(
         &target, "startup-sce-install-25-5");
     vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
-    printf("[info][network] mock_scene_npc_rearm scene=%s trigger=startup-sce-install response=16/3-result2 immediate=0 next=WT6/1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
+    printf("[info][network] mock_scene_npc_rearm scene=%s trigger=startup-sce-install response=16/2-result1 immediate=0 next=WT16/3+27/11+7/42 evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
            target.scene);
-    printf("[info][network] mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/3-result2 next=runtime-sync evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
+    printf("[info][network] mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/2-result1 next=client-runtime-16/3+27/11+7/42 evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
            target.scene, target.x, target.y, installGeneration);
-    vm_autotest_note("mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/3-result2 next=runtime-sync evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
+    vm_autotest_note("mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/2-result1 next=client-runtime-16/3+27/11+7/42 evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
                      target.scene, target.x, target.y, installGeneration);
     return pos;
 }
@@ -10080,7 +10060,14 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
     {
         targetSource = "map-collision-safe";
     }
-    target->exitId = 0;
+    /*
+     * The direct mmGame 16/2 response always serializes exitid.  When the
+     * recovery landing came from an SCE edge entry, preserve that entry's
+     * authoritative ID just as the ordinary portal target does.  A centre or
+     * current-position fallback has no such SCE entry and keeps the protocol
+     * default of zero.
+     */
+    target->exitId = (entryId != 0xffffu) ? entryId : 0;
     target->mapType = 2;
     target->hasSceEntry = strcmp(targetSource, "current-pos") != 0;
     target->needsSceneDownload = false;
@@ -10089,7 +10076,7 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
         printf("[warn][network] mock_unstuck_target_unresolved scene=%s action=preserve-exact-key reason=server-sce-not-found\n",
                target->scene);
     }
-    printf("[info][network] mock_unstuck_target scene=%s scene_source=%s from=(%u,%u) from_source=%s pos=(%u,%u) source=%s entry=%u\n",
+    printf("[info][network] mock_unstuck_target scene=%s scene_source=%s from=(%u,%u) from_source=%s pos=(%u,%u) source=%s entry=%u exit=%u\n",
            target->scene,
            sceneSource,
            fromX,
@@ -10098,7 +10085,8 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
            target->x,
            target->y,
            targetSource,
-           entryId);
+           entryId,
+           target->exitId);
 }
 
 static u32 vm_net_mock_build_settings_unstuck_response(const u8 *request, u32 requestLen,

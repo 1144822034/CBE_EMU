@@ -376,22 +376,418 @@ static bool vm_mock_service_login_requires_auth(const vm_mock_service_login_requ
            login->userName[0] != 0 || login->password[0] != 0;
 }
 
+enum
+{
+    VM_MOCK_SERVICE_LOGIN_IP_CAP = 16,
+    VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT = 15,
+    VM_MOCK_SERVICE_LOGIN_IP_BLOCK_CACHE_MAX = 1024
+};
+
+typedef struct
+{
+    char address[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+} vm_mock_service_login_ip_block_entry;
+
+typedef struct
+{
+    pthread_mutex_t mutex;
+    bool loaded;
+    bool available;
+    bool overflow;
+    u32 count;
+    vm_mock_service_login_ip_block_entry
+        entries[VM_MOCK_SERVICE_LOGIN_IP_BLOCK_CACHE_MAX];
+} vm_mock_service_login_ip_block_cache;
+
+typedef struct
+{
+    vm_mock_service_login_ip_block_cache *cache;
+    bool invalid;
+} vm_mock_service_login_ip_block_load_context;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    bool blocked;
+    u32 failedAttempts;
+} vm_mock_service_login_ip_block_state;
+
+static vm_mock_service_login_ip_block_cache g_vmMockServiceLoginIpBlockCache = {
+    PTHREAD_MUTEX_INITIALIZER, false, false, false, 0, {{0}}
+};
+
+#if defined(_MSC_VER)
+#define VM_MOCK_SERVICE_THREAD_LOCAL __declspec(thread)
+#else
+#define VM_MOCK_SERVICE_THREAD_LOCAL __thread
+#endif
+
+static VM_MOCK_SERVICE_THREAD_LOCAL
+    char g_vm_mock_service_login_ip_source[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+
+static bool vm_mock_service_login_ip_is_valid(const char *address)
+{
+    u32 octets = 0;
+    u32 value = 0;
+    bool haveDigit = false;
+
+    if (address == NULL || address[0] == 0)
+        return false;
+    for (const unsigned char *cursor = (const unsigned char *)address;; ++cursor)
+    {
+        if (*cursor >= '0' && *cursor <= '9')
+        {
+            value = value * 10u + (u32)(*cursor - '0');
+            if (value > 255u)
+                return false;
+            haveDigit = true;
+            continue;
+        }
+        if (*cursor == '.' && haveDigit && octets < 3)
+        {
+            ++octets;
+            value = 0;
+            haveDigit = false;
+            continue;
+        }
+        return *cursor == 0 && haveDigit && octets == 3;
+    }
+}
+
+static void vm_mock_service_login_ip_set_source(const char *address)
+{
+    memset(g_vm_mock_service_login_ip_source, 0,
+           sizeof(g_vm_mock_service_login_ip_source));
+    if (vm_mock_service_login_ip_is_valid(address))
+    {
+        snprintf(g_vm_mock_service_login_ip_source,
+                 sizeof(g_vm_mock_service_login_ip_source), "%s", address);
+    }
+}
+
+static const char *vm_mock_service_login_ip_current_source(void)
+{
+    return g_vm_mock_service_login_ip_source;
+}
+
+static bool vm_mock_service_login_ip_block_load_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_service_login_ip_block_load_context *context =
+        (vm_mock_service_login_ip_block_load_context *)contextValue;
+    vm_mock_service_login_ip_block_cache *cache =
+        context != NULL ? context->cache : NULL;
+
+    if (context == NULL || cache == NULL || columnCount != 1 ||
+        values == NULL || values[0] == NULL || lengths == NULL ||
+        lengths[0] == 0 || lengths[0] >= VM_MOCK_SERVICE_LOGIN_IP_CAP)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return false;
+    }
+    if (!vm_mock_service_login_ip_is_valid(values[0]))
+    {
+        context->invalid = true;
+        return false;
+    }
+    if (cache->count >= VM_MOCK_SERVICE_LOGIN_IP_BLOCK_CACHE_MAX)
+    {
+        /* Keep the persistent database as the authority.  A cache miss in
+         * this exceptional state takes the per-IP database fallback below. */
+        cache->overflow = true;
+        return true;
+    }
+    snprintf(cache->entries[cache->count].address,
+             sizeof(cache->entries[cache->count].address), "%s", values[0]);
+    ++cache->count;
+    return true;
+}
+
+static bool vm_mock_service_login_ip_block_state_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_service_login_ip_block_state *state =
+        (vm_mock_service_login_ip_block_state *)contextValue;
+    char attempts[16];
+
+    if (state == NULL || columnCount != 2 || values == NULL ||
+        values[0] == NULL || values[1] == NULL || lengths == NULL ||
+        lengths[0] == 0 || lengths[0] >= sizeof(attempts) || lengths[1] != 1 ||
+        (values[1][0] != '0' && values[1][0] != '1'))
+    {
+        if (state != NULL)
+            state->invalid = true;
+        return false;
+    }
+    memset(attempts, 0, sizeof(attempts));
+    memcpy(attempts, values[0], lengths[0]);
+    if (!vm_net_mock_parse_u32_strict(attempts, &state->failedAttempts))
+    {
+        state->invalid = true;
+        return false;
+    }
+    state->blocked = values[1][0] == '1';
+    state->found = true;
+    return true;
+}
+
+static bool vm_mock_service_login_ip_schema_ensure(void)
+{
+    return vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS server_login_ip_blocks ("
+        "ip_address VARCHAR(45) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+        "failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "blocked TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "blocked_at TIMESTAMP NULL DEFAULT NULL,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(ip_address),KEY idx_login_ip_blocks_blocked(blocked)"
+        ") ENGINE=InnoDB");
+}
+
+static bool vm_mock_service_login_ip_block_cache_contains(
+    const vm_mock_service_login_ip_block_cache *cache, const char *address)
+{
+    if (cache == NULL || address == NULL)
+        return false;
+    for (u32 i = 0; i < cache->count; ++i)
+    {
+        if (strcmp(cache->entries[i].address, address) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void vm_mock_service_login_ip_block_cache_add(
+    vm_mock_service_login_ip_block_cache *cache, const char *address)
+{
+    if (cache == NULL || !vm_mock_service_login_ip_is_valid(address) ||
+        vm_mock_service_login_ip_block_cache_contains(cache, address))
+    {
+        return;
+    }
+    if (cache->count >= VM_MOCK_SERVICE_LOGIN_IP_BLOCK_CACHE_MAX)
+    {
+        cache->overflow = true;
+        return;
+    }
+    snprintf(cache->entries[cache->count].address,
+             sizeof(cache->entries[cache->count].address), "%s", address);
+    ++cache->count;
+}
+
+static bool vm_mock_service_login_ip_block_cache_ensure_locked(
+    vm_mock_service_login_ip_block_cache *cache)
+{
+    vm_mock_service_login_ip_block_load_context context;
+
+    if (cache == NULL)
+        return false;
+    if (cache->loaded)
+        return cache->available;
+    cache->loaded = true;
+    cache->available = false;
+    cache->overflow = false;
+    cache->count = 0;
+    if (!vm_mock_service_login_ip_schema_ensure())
+    {
+        printf("[error][login-ip-lock] schema_prepare_failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    context.cache = cache;
+    if (!vm_mysql_query(
+            "SELECT ip_address FROM server_login_ip_blocks WHERE blocked=1",
+            vm_mock_service_login_ip_block_load_row, &context) ||
+        context.invalid)
+    {
+        cache->count = 0;
+        cache->overflow = false;
+        printf("[error][login-ip-lock] blocklist_load_failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    cache->available = true;
+    return true;
+}
+
+static bool vm_mock_service_login_ip_lookup_blocked_locked(
+    const char *address, bool *blockedOut)
+{
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char query[256];
+    vm_mock_service_login_ip_block_state state;
+
+    if (blockedOut != NULL)
+        *blockedOut = false;
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "SELECT failed_attempts,blocked FROM server_login_ip_blocks "
+             "WHERE ip_address=CAST(X'%s' AS CHAR)", addressHex);
+    memset(&state, 0, sizeof(state));
+    if (!vm_mysql_query(query, vm_mock_service_login_ip_block_state_row,
+                        &state) || state.invalid)
+    {
+        return false;
+    }
+    if (blockedOut != NULL)
+        *blockedOut = state.found && state.blocked;
+    return true;
+}
+
+static bool vm_mock_service_login_ip_is_blocked(const char *address)
+{
+    vm_mock_service_login_ip_block_cache *cache =
+        &g_vmMockServiceLoginIpBlockCache;
+    bool blocked = false;
+
+    if (!vm_mock_service_login_ip_is_valid(address))
+        return false;
+    pthread_mutex_lock(&cache->mutex);
+    if (vm_mock_service_login_ip_block_cache_ensure_locked(cache))
+    {
+        if (vm_mock_service_login_ip_block_cache_contains(cache, address))
+            blocked = true;
+        else if (cache->overflow &&
+                 !vm_mock_service_login_ip_lookup_blocked_locked(address,
+                                                                  &blocked))
+        {
+            printf("[error][login-ip-lock] overflow_lookup_failed ip=%s error=%s\n",
+                   address, vm_mysql_last_error());
+        }
+    }
+    pthread_mutex_unlock(&cache->mutex);
+    return blocked;
+}
+
+static bool vm_mock_service_login_ip_note_failure(const char *address,
+                                                  const char *channel,
+                                                  u32 *attemptsOut)
+{
+    vm_mock_service_login_ip_block_cache *cache =
+        &g_vmMockServiceLoginIpBlockCache;
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char query[768];
+    vm_mock_service_login_ip_block_state state;
+    bool ok = false;
+
+    if (attemptsOut != NULL)
+        *attemptsOut = 0;
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&cache->mutex);
+    if (!vm_mock_service_login_ip_block_cache_ensure_locked(cache))
+        goto done;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_login_ip_blocks "
+             "(ip_address,failed_attempts,blocked) "
+             "VALUES(CAST(X'%s' AS CHAR),1,0) "
+             "ON DUPLICATE KEY UPDATE "
+             "failed_attempts=LEAST(failed_attempts+1,%u),"
+             "blocked=IF(failed_attempts>=%u,1,blocked),"
+             "blocked_at=IF(failed_attempts>=%u,"
+             "COALESCE(blocked_at,CURRENT_TIMESTAMP),blocked_at)",
+             addressHex, VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT,
+             VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT,
+             VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT);
+    if (!vm_mysql_exec(query))
+        goto done;
+    snprintf(query, sizeof(query),
+             "SELECT failed_attempts,blocked FROM server_login_ip_blocks "
+             "WHERE ip_address=CAST(X'%s' AS CHAR)", addressHex);
+    memset(&state, 0, sizeof(state));
+    if (!vm_mysql_query(query, vm_mock_service_login_ip_block_state_row,
+                        &state) || state.invalid || !state.found)
+    {
+        goto done;
+    }
+    if (attemptsOut != NULL)
+        *attemptsOut = state.failedAttempts;
+    if (state.blocked)
+    {
+        vm_mock_service_login_ip_block_cache_add(cache, address);
+        printf("[warn][login-ip-lock] ip=%s blocked=1 failed_attempts=%u channel=%s\n",
+               address, state.failedAttempts, channel ? channel : "-");
+    }
+    ok = true;
+
+done:
+    if (!ok)
+    {
+        printf("[error][login-ip-lock] failure_record_failed ip=%s error=%s\n",
+               address, vm_mysql_last_error());
+    }
+    pthread_mutex_unlock(&cache->mutex);
+    return ok;
+}
+
+static void vm_mock_service_login_ip_note_success(const char *address)
+{
+    vm_mock_service_login_ip_block_cache *cache =
+        &g_vmMockServiceLoginIpBlockCache;
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char query[256];
+
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0)
+    {
+        return;
+    }
+    pthread_mutex_lock(&cache->mutex);
+    if (vm_mock_service_login_ip_block_cache_ensure_locked(cache))
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_login_ip_blocks "
+                 "WHERE ip_address=CAST(X'%s' AS CHAR) AND blocked=0",
+                 addressHex);
+        if (!vm_mysql_exec(query))
+        {
+            printf("[error][login-ip-lock] success_reset_failed ip=%s error=%s\n",
+                   address, vm_mysql_last_error());
+        }
+    }
+    pthread_mutex_unlock(&cache->mutex);
+}
+
 static bool vm_mock_service_authenticate_login_request(const vm_mock_service_login_request *login,
-                                                       const char **errorOut)
+                                                       const char **errorOut,
+                                                       bool *credentialFailureOut)
 {
     bool banned = false;
 
     if (errorOut)
         *errorOut = "account or password error";
+    if (credentialFailureOut)
+        *credentialFailureOut = false;
     if (login == NULL || !vm_mock_service_login_requires_auth(login))
         return true;
     if (!login->haveUserName || !login->havePassword ||
         login->userName[0] == 0 || login->password[0] == 0)
     {
+        if (credentialFailureOut)
+            *credentialFailureOut = true;
         return false;
     }
     if (!vm_mock_service_account_verify_credentials(login->userName, login->password))
+    {
+        if (credentialFailureOut)
+            *credentialFailureOut = true;
         return false;
+    }
     /* Credentials only prove identity.  Account access is a distinct
      * persisted authority managed by the risk-role page; checking it here is
      * the one gateway for every native login path (including title/login
@@ -898,6 +1294,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     u32 protocolHoldMs = 0;
     bool closeAfterData = false;
     bool haveLoginRequest = false;
+    bool credentialFailure = false;
     bool allowStatelessRequest = false;
     bool handledValid = false;
     bool protocolLocked = false;
@@ -1045,8 +1442,18 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     haveLoginRequest = vm_mock_service_parse_login_request(requestBuffer + requestMetaLen,
                                                            payloadLen,
                                                            &loginRequest);
-    if (haveLoginRequest && !vm_mock_service_authenticate_login_request(&loginRequest, &authError))
+    if (haveLoginRequest && !vm_mock_service_authenticate_login_request(
+                                &loginRequest, &authError,
+                                &credentialFailure))
     {
+        if (credentialFailure)
+        {
+            u32 failedAttempts = 0;
+
+            (void)vm_mock_service_login_ip_note_failure(
+                vm_mock_service_login_ip_current_source(), "game",
+                &failedAttempts);
+        }
         responseLen = vm_net_mock_build_login_failure_response(loginRequest.requestSubtype,
                                                                authError ? authError : "account or password error",
                                                                responseBuffer,
@@ -1130,6 +1537,13 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         sessionAccount = vm_mock_service_find_session_account(requestMeta.clientId);
         if (sessionAccount && sessionAccount[0] != 0)
             vm_mock_service_copy_account_id(accountId, sizeof(accountId), sessionAccount);
+    }
+    if (haveLoginRequest &&
+        (vm_mock_service_login_requires_auth(&loginRequest) ||
+         vm_mock_service_login_is_no_account(&loginRequest)))
+    {
+        vm_mock_service_login_ip_note_success(
+            vm_mock_service_login_ip_current_source());
     }
     if (accountId[0] == 0)
     {
@@ -1342,6 +1756,7 @@ typedef struct
 {
     vm_mock_service_socket socket;
     vm_mock_service_connection_kind kind;
+    char sourceIp[VM_MOCK_SERVICE_LOGIN_IP_CAP];
     u32 acceptedMs;
     u32 sequence;
 } vm_mock_service_connection_job;
@@ -1373,6 +1788,9 @@ struct vm_mock_service_worker_pool
 };
 
 static vm_mock_service_worker_pool g_vmMockServiceWorkerPool;
+
+static void vm_mock_service_format_source_ipv4(const struct in_addr *address,
+                                               char *out, size_t outCap);
 
 static u32 vm_mock_service_worker_count_from_environment(void)
 {
@@ -1476,6 +1894,18 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
                    (unsigned long long)job.socket);
             fflush(stdout);
         }
+        vm_mock_service_login_ip_set_source(job.sourceIp);
+        if (job.kind == VM_MOCK_SERVICE_CONNECTION_GAME &&
+            vm_mock_service_login_ip_is_blocked(
+                vm_mock_service_login_ip_current_source()))
+        {
+            /* A game connection has no HTTP proxy headers, so the accepted
+             * TCP peer is its effective source and can be rejected before
+             * reading a protocol frame. */
+            vm_mock_service_login_ip_set_source(NULL);
+            vm_mock_service_socket_close(job.socket);
+            continue;
+        }
         if (job.kind == VM_MOCK_SERVICE_CONNECTION_GAME)
         {
             ok = vm_net_mock_service_handle_client(job.socket,
@@ -1519,6 +1949,7 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
             }
         }
         vm_mock_service_socket_close(job.socket);
+        vm_mock_service_login_ip_set_source(NULL);
     }
 }
 
@@ -1582,6 +2013,7 @@ static bool vm_mock_service_worker_pool_start(vm_mock_service_worker_pool *pool)
 static bool vm_mock_service_worker_pool_enqueue(vm_mock_service_worker_pool *pool,
                                                 vm_mock_service_socket client,
                                                 vm_mock_service_connection_kind kind,
+                                                const char *sourceIp,
                                                 u32 *sequenceOut)
 {
     vm_mock_service_connection_job *job = NULL;
@@ -1602,6 +2034,10 @@ static bool vm_mock_service_worker_pool_enqueue(vm_mock_service_worker_pool *poo
         memset(job, 0, sizeof(*job));
         job->socket = client;
         job->kind = kind;
+        if (vm_mock_service_login_ip_is_valid(sourceIp))
+        {
+            snprintf(job->sourceIp, sizeof(job->sourceIp), "%s", sourceIp);
+        }
         job->acceptedMs = scheduler_get_tick_ms();
         job->sequence = pool->nextSequence++;
         if (pool->nextSequence == 0)
@@ -1786,10 +2222,17 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             if (client != VM_MOCK_SERVICE_INVALID_SOCKET)
             {
                 u32 sequence = 0;
+                char sourceIp[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+
+                memset(sourceIp, 0, sizeof(sourceIp));
+                vm_mock_service_format_source_ipv4(&clientAddr.sin_addr,
+                                                   sourceIp,
+                                                   sizeof(sourceIp));
                 vm_mock_service_configure_accepted_socket(client);
                 if (!vm_mock_service_worker_pool_enqueue(&g_vmMockServiceWorkerPool,
                                                          client,
                                                          VM_MOCK_SERVICE_CONNECTION_GAME,
+                                                         sourceIp,
                                                          &sequence))
                 {
                     printf("[warn][mock-service] connection_rejected kind=game reason=queue-full\n");
@@ -1810,10 +2253,17 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             if (adminClient != VM_MOCK_SERVICE_INVALID_SOCKET)
             {
                 u32 sequence = 0;
+                char sourceIp[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+
+                memset(sourceIp, 0, sizeof(sourceIp));
+                vm_mock_service_format_source_ipv4(&adminClientAddr.sin_addr,
+                                                   sourceIp,
+                                                   sizeof(sourceIp));
                 vm_mock_service_configure_accepted_socket(adminClient);
                 if (!vm_mock_service_worker_pool_enqueue(&g_vmMockServiceWorkerPool,
                                                          adminClient,
                                                          VM_MOCK_SERVICE_CONNECTION_ADMIN,
+                                                         sourceIp,
                                                          &sequence))
                 {
                     printf("[warn][mock-admin] connection_rejected reason=queue-full\n");
@@ -2767,6 +3217,21 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     }
     g_netUpLinkData += dataLen;
 #endif
+}
+
+static void vm_mock_service_format_source_ipv4(const struct in_addr *address,
+                                               char *out, size_t outCap)
+{
+    const u8 *octets = address != NULL ?
+                           (const u8 *)&address->s_addr : NULL;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (octets == NULL || outCap < VM_MOCK_SERVICE_LOGIN_IP_CAP)
+        return;
+    snprintf(out, outCap, "%u.%u.%u.%u", (u32)octets[0], (u32)octets[1],
+             (u32)octets[2], (u32)octets[3]);
 }
 
 static void vm_net_mock_poll_push_if_due(void)

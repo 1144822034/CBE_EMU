@@ -664,6 +664,29 @@ static u32 g_vm_mock_user_session_serial = 0;
 static vm_mock_admin_session g_vm_mock_admin_sessions[VM_MOCK_ADMIN_SESSION_MAX];
 static u32 g_vm_mock_admin_session_serial = 0;
 
+/* A request can pass through a number of resource-specific editor helpers
+ * before it emits its final redirect.  Keep the pending audit on the worker
+ * thread so concurrent administrators can never attribute one another's
+ * edits. */
+typedef struct
+{
+    bool active;
+    bool recorded;
+    char operatorAccountId[64];
+    char actionCode[33];
+    char targetAccountId[64];
+    char detail[256];
+} vm_mock_admin_operation_audit_context;
+
+#if defined(_MSC_VER)
+#define VM_MOCK_ADMIN_THREAD_LOCAL __declspec(thread)
+#else
+#define VM_MOCK_ADMIN_THREAD_LOCAL __thread
+#endif
+
+static VM_MOCK_ADMIN_THREAD_LOCAL vm_mock_admin_operation_audit_context
+    g_vm_mock_admin_operation_audit_context;
+
 #include "web_payment.inc.c"
 
 /*
@@ -793,10 +816,13 @@ static const char g_vm_mock_admin_script[] =
     "const setupAdminToasts=()=>{const state=window.__cbeAdminToastState||(window.__cbeAdminToastState={queue:[],showing:false,observer:null});const host=()=>{let node=document.querySelector('#admin-toast-host');if(node)return node;const style=document.createElement('style');style.id='admin-toast-style';style.textContent='#admin-toast-host{position:fixed;z-index:10050;top:18px;right:18px;display:grid;justify-items:end;pointer-events:none} .admin-toast{width:min(380px,calc(100vw - 36px));display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:10px;align-items:start;padding:13px 12px 13px 15px;border:1px solid #b9d8ff;border-radius:10px;background:#fff;color:#18436f;box-shadow:0 14px 32px #10182833;opacity:0;transform:translateX(calc(100%% + 24px));transition:opacity .22s ease,transform .22s ease;pointer-events:auto} .admin-toast.show{opacity:1;transform:translateX(0)} .admin-toast.error{border-color:#f5b7b1;background:#fff7f6;color:#8f1d1d} .admin-toast.success{border-color:#9be3ba;background:#f3fff7;color:#05603a} .admin-toast-close{width:28px;height:28px;margin:-3px -3px 0 0;padding:0;border:0;border-radius:6px;background:transparent;color:currentColor;font:22px/1 sans-serif;cursor:pointer}@media(max-width:560px){#admin-toast-host{top:10px;right:10px}.admin-toast{width:min(380px,calc(100vw - 20px))}}';document.head.append(style);node=document.createElement('div');node.id='admin-toast-host';node.setAttribute('aria-live','polite');node.setAttribute('aria-atomic','true');document.body.append(node);return node;};const next=()=>{if(state.showing||!state.queue.length)return;state.showing=true;const entry=state.queue.shift(),node=document.createElement('section'),close=document.createElement('button'),dismiss=()=>{if(node.dataset.closing==='1')return;node.dataset.closing='1';node.classList.remove('show');setTimeout(()=>{node.remove();state.showing=false;next();},240);};node.className='admin-toast '+(entry.error?'error':'success');node.setAttribute('role',entry.error?'alert':'status');node.textContent=entry.text;close.type='button';close.className='admin-toast-close';close.setAttribute('aria-label','关闭提示');close.textContent='×';close.addEventListener('click',dismiss);node.append(close);host().append(node);requestAnimationFrame(()=>node.classList.add('show'));setTimeout(dismiss,5000);};const queue=node=>{if(!(node instanceof Element)||node.dataset.adminToastQueued==='1'||node.hasAttribute('data-admin-persistent-notice')||!node.matches('.notice.ok,.notice.error'))return;const text=node.textContent.trim();node.dataset.adminToastQueued='1';if(!text)return;state.queue.push({text,error:node.classList.contains('error')});node.remove();next();};const scan=root=>{if(root instanceof Element)queue(root);if(root.querySelectorAll)for(const node of root.querySelectorAll('.notice.ok,.notice.error'))queue(node);};scan(document);if(state.observer)return;state.observer=new MutationObserver(records=>{for(const record of records)for(const node of record.addedNodes)scan(node);});state.observer.observe(document.body,{childList:true,subtree:true});};"
     "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
     "const setupGlobalRewardsTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const accounts=nav.querySelector('[data-admin-tab=accounts],a[href*=\\\"tab=accounts\\\"]'),add=(key,label)=>{if(!accounts||[...nav.querySelectorAll('[data-admin-tab],a[href]')].some(link=>link.dataset.adminTab===key||link.getAttribute('href')?.includes('tab='+key)))return;const link=document.createElement('a');link.className='tab admin-spa-tab';link.dataset.adminTab=key;link.href='?tab='+key;link.textContent=label;accounts.after(link);};add('operations','操作日志');add('global-rewards','全服奖励管理');const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
-    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
+    "const setupDesignationTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const global=nav.querySelector('[data-admin-tab=global-rewards],a[href*=\\\"tab=global-rewards\\\"]');if(global)global.textContent='奖励邮件管理';let title=nav.querySelector('[data-admin-tab=designations],a[href*=\\\"tab=designations\\\"]');if(!title){title=document.createElement('a');title.className='tab admin-spa-tab';title.dataset.adminTab='designations';title.href='?tab=designations';title.textContent='称号管理';if(global)global.after(title);else nav.append(title);}const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
+    "const setupDesignationDirectory=()=>{for(const root of document.querySelectorAll('[data-designation-directory]')){if(root.dataset.designationDirectoryBound==='1')continue;root.dataset.designationDirectoryBound='1';const buttons=[...root.querySelectorAll('[data-designation-filter]')],cards=[...root.querySelectorAll('[data-designation-category]')],choose=category=>{if(!category)return;root.dataset.activeCategory=category;for(const card of cards)card.hidden=card.dataset.designationCategory!==category;for(const button of buttons){const on=button.dataset.designationFilter===category;button.classList.toggle('on',on);button.setAttribute('aria-pressed',on?'true':'false');}};for(const button of buttons)button.addEventListener('click',()=>choose(button.dataset.designationFilter));choose(root.dataset.activeCategory||buttons[0]?.dataset.designationFilter);}};"
+    "const setupRoleOperationModal=()=>{const state=window.__cbeRoleOperationState||(window.__cbeRoleOperationState={bound:false,active:null,opener:null});const activate=(modal,key)=>{if(!modal||!key)return;for(const pane of modal.querySelectorAll('[data-role-operation-pane]'))pane.hidden=pane.dataset.roleOperationPane!==key;for(const button of modal.querySelectorAll('[data-role-operation-tab]')){const on=button.dataset.roleOperationTab===key;button.classList.toggle('on',on);if(on)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}};const close=modal=>{if(!modal)return;modal.hidden=true;if(state.active===modal)state.active=null;document.body.classList.remove('modal-open');const opener=state.opener;state.opener=null;if(opener&&document.contains(opener))opener.focus();};if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const opener=event.target.closest('[data-role-operation-open]');if(opener){const modal=document.getElementById(opener.dataset.roleOperationOpen);if(!modal)return;for(const other of document.querySelectorAll('[data-role-operation-modal]'))other.hidden=true;state.active=modal;state.opener=opener;modal.hidden=false;document.body.classList.add('modal-open');const focusTarget=modal.querySelector('[data-role-operation-tab].on')||modal.querySelector('[data-role-operation-tab]');focusTarget?.focus();event.preventDefault();return;}const tab=event.target.closest('[data-role-operation-tab]');if(tab){activate(tab.closest('[data-role-operation-modal]'),tab.dataset.roleOperationTab);tab.focus();return;}const closeButton=event.target.closest('[data-role-operation-close]');if(closeButton){close(closeButton.closest('[data-role-operation-modal]'));return;}const modal=event.target.closest('[data-role-operation-modal]');if(modal&&event.target===modal)close(modal);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.active&&!state.active.hidden){event.preventDefault();close(state.active);}});}for(const modal of document.querySelectorAll('[data-role-operation-modal]'))activate(modal,modal.querySelector('[data-role-operation-tab]')?.dataset.roleOperationTab);};"
+    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupDesignationTab();setupDesignationDirectory();setupRoleOperationModal();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
     "const setupAdminLayout=()=>{if(document.querySelector('#admin-spa-layout-style'))return;const style=document.createElement('style');style.id='admin-spa-layout-style';style.textContent='#admin-spa-shell{width:min(1680px,calc(100vw - 48px))!important;max-width:none!important;height:100vh!important;min-height:0!important;overflow:hidden!important;margin:0 auto!important}#admin-spa-content{display:flex!important;align-self:stretch!important;height:100%!important;flex-direction:column!important;min-height:0!important;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable;padding-bottom:2px}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:1 1 auto;min-height:0}#admin-spa-content [data-admin-list]{flex:1 1 auto;min-height:0;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}#admin-spa-content[aria-busy=true]>*{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{width:100%!important;height:auto!important;min-height:100vh!important;overflow:visible!important}#admin-spa-content{align-self:auto!important;height:auto!important;overflow:visible!important;scrollbar-gutter:auto;padding-bottom:0}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:none}#admin-spa-content [data-admin-list]{flex:none;scrollbar-gutter:auto}}';document.head.append(style);};"
     "const setupAdminHeader=()=>{const main=document.querySelector('#admin-spa-shell'),header=main&&[...main.children].find(node=>node.matches&&node.matches('header'));if(!header||header.dataset.adminSpaHeader==='1')return;header.dataset.adminSpaHeader='1';const logout=header.querySelector('form[action$=\"/logout\"]'),intro=document.createElement('div'),style=document.createElement('style');intro.innerHTML='<h1>江湖 OL 后台管理</h1><p class=\"sub\">账号、游戏内容与运营配置统一管理</p>';header.replaceChildren(intro);if(logout)header.append(logout);style.id='admin-spa-header-style';style.textContent='#admin-spa-shell>header[data-admin-spa-header]{display:flex!important;align-items:center;justify-content:space-between;gap:16px;margin:0 0 12px;padding:4px 2px}#admin-spa-shell>header[data-admin-spa-header] h1{margin:0;color:#183d6e;font-size:22px}#admin-spa-shell>header[data-admin-spa-header] .sub{margin:5px 0 0;color:#63738a}';document.head.append(style);};"
-    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险角色管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{display:grid!important;grid-template-columns:216px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);column-gap:16px;align-items:start;min-height:100vh}#admin-spa-shell>header{grid-column:1/-1;grid-row:1}#admin-spa-tabs{display:flex!important;grid-column:1;grid-row:2;position:sticky;top:16px;align-self:start;flex-direction:column;align-items:stretch;gap:6px;flex-wrap:nowrap;margin:0;padding:10px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:flex-start;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding-right:2px}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{display:block!important;min-height:100vh}#admin-spa-tabs{position:static;flex-direction:row;align-items:center;flex-wrap:wrap;margin:0 0 16px}#admin-spa-tabs .admin-spa-tab{justify-content:center}#admin-spa-content{overflow:visible;padding-right:0}}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value);if(missingActor)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
+    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险角色管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{display:grid!important;grid-template-columns:216px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);column-gap:16px;align-items:start;min-height:100vh}#admin-spa-shell>header{grid-column:1/-1;grid-row:1}#admin-spa-tabs{display:flex!important;grid-column:1;grid-row:2;position:sticky;top:16px;align-self:start;flex-direction:column;align-items:stretch;gap:6px;flex-wrap:nowrap;margin:0;padding:10px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:flex-start;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding-right:2px}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{display:block!important;min-height:100vh}#admin-spa-tabs{position:static;flex-direction:row;align-items:center;flex-wrap:wrap;margin:0 0 16px}#admin-spa-tabs .admin-spa-tab{justify-content:center}#admin-spa-content{overflow:visible;padding-right:0}}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const confirmation=form.dataset.adminConfirm;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();event.stopPropagation();return;}const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value);if(missingActor)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
     "document.addEventListener('DOMContentLoaded',()=>{setupMonsterActions();setupTaskActions();setupPartialNavigation();setupAdminSpa();setupAdminLayout();setupAdminHeader();setupAdminContent();});"
     "})();";
 
@@ -906,7 +932,8 @@ static bool vm_mock_admin_load_login_config(const char *accountId,
 
 static bool vm_mock_admin_verify_login_credentials(const char *accountId,
                                                    const char *password,
-                                                   const char **messageOut)
+                                                   const char **messageOut,
+                                                   bool *credentialFailureOut)
 {
     vm_mock_admin_login_config config;
     char accountHex[127];
@@ -915,10 +942,14 @@ static bool vm_mock_admin_verify_login_credentials(const char *accountId,
 
     if (messageOut)
         *messageOut = "后台登录配置不可用，请检查 MySQL";
+    if (credentialFailureOut)
+        *credentialFailureOut = false;
     if (!vm_mock_admin_account_id_is_valid(accountId))
     {
         if (messageOut)
             *messageOut = "后台账号格式无效";
+        if (credentialFailureOut)
+            *credentialFailureOut = true;
         return false;
     }
     if (!vm_mock_admin_load_login_config(accountId, &config))
@@ -931,12 +962,18 @@ static bool vm_mock_admin_verify_login_credentials(const char *accountId,
     {
         if (messageOut)
             *messageOut = "后台账号或密码错误";
+        if (credentialFailureOut)
+            *credentialFailureOut = true;
         return false;
     }
     if (config.locked)
     {
         if (messageOut)
             *messageOut = "该后台账号已锁定，请先在 MySQL 中解锁";
+        /* A locked account must not become a way to evade the shared source
+         * IP threshold by repeatedly submitting additional login attempts. */
+        if (credentialFailureOut)
+            *credentialFailureOut = true;
         printf("[warn][admin] login_rejected account=%s reason=locked failed_attempts=%u\n",
                accountId, config.failedAttempts);
         memset(config.password, 0, sizeof(config.password));
@@ -967,6 +1004,8 @@ static bool vm_mock_admin_verify_login_credentials(const char *accountId,
                accountId);
         return true;
     }
+    if (credentialFailureOut)
+        *credentialFailureOut = true;
     snprintf(sql, sizeof(sql),
              "UPDATE server_admin_users "
              "SET locked=IF(failed_attempts+1>=5,1,locked),"
@@ -1025,6 +1064,324 @@ static bool vm_mock_web_cookie_value(const char *request, size_t headerLen,
         cursor = value + valueLen;
     }
     return false;
+}
+
+enum
+{
+    VM_MOCK_ADMIN_TRUSTED_PROXY_SOURCE_MAX = 64
+};
+
+typedef struct
+{
+    char sourceAddress[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+    bool trustXRealIp;
+    bool trustXForwardedFor;
+    bool enabled;
+} vm_mock_admin_trusted_proxy_source;
+
+typedef struct
+{
+    vm_mock_admin_trusted_proxy_source
+        rows[VM_MOCK_ADMIN_TRUSTED_PROXY_SOURCE_MAX];
+    u32 count;
+    bool invalid;
+} vm_mock_admin_trusted_proxy_source_list;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    bool trustXRealIp;
+    bool trustXForwardedFor;
+    bool enabled;
+} vm_mock_admin_trusted_proxy_source_state;
+
+static bool g_vm_mock_admin_trusted_proxy_source_schema_prepared = false;
+
+static bool vm_mock_admin_trusted_proxy_source_schema_ensure(void)
+{
+    if (g_vm_mock_admin_trusted_proxy_source_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_trusted_proxy_sources ("
+            "source_ip VARCHAR(15) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "trust_x_real_ip TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "trust_x_forwarded_for TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(source_ip)"
+            ") ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "INSERT IGNORE INTO server_trusted_proxy_sources"
+            "(source_ip,trust_x_real_ip,trust_x_forwarded_for,enabled) "
+            "VALUES('127.0.0.1',1,1,1)"))
+    {
+        printf("[error][admin] trusted_proxy_source_schema_prepare_failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_mock_admin_trusted_proxy_source_schema_prepared = true;
+    return true;
+}
+
+static bool vm_mock_admin_trusted_proxy_source_state_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_admin_trusted_proxy_source_state *state =
+        (vm_mock_admin_trusted_proxy_source_state *)contextValue;
+    u32 realIp = 0;
+    u32 forwardedFor = 0;
+    u32 enabled = 0;
+
+    if (state == NULL || state->found || columnCount != 3 || values == NULL ||
+        lengths == NULL || !vm_mock_mysql_parse_u32(values[0], lengths[0], &realIp) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &forwardedFor) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &enabled) ||
+        realIp > 1 || forwardedFor > 1 || enabled > 1)
+    {
+        if (state != NULL)
+            state->invalid = true;
+        return true;
+    }
+    state->found = true;
+    state->trustXRealIp = realIp != 0;
+    state->trustXForwardedFor = forwardedFor != 0;
+    state->enabled = enabled != 0;
+    return true;
+}
+
+static bool vm_mock_admin_trusted_proxy_source_lookup(
+    const char *peerAddress, vm_mock_admin_trusted_proxy_source_state *state)
+{
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char sql[384];
+
+    if (state == NULL)
+        return false;
+    memset(state, 0, sizeof(*state));
+    if (!vm_mock_service_login_ip_is_valid(peerAddress) ||
+        !vm_mock_admin_trusted_proxy_source_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)peerAddress, strlen(peerAddress),
+                            addressHex, sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(sql, sizeof(sql),
+             "SELECT trust_x_real_ip,trust_x_forwarded_for,enabled "
+             "FROM server_trusted_proxy_sources "
+             "WHERE source_ip=CAST(X'%s' AS CHAR)",
+             addressHex);
+    return vm_mysql_query(sql, vm_mock_admin_trusted_proxy_source_state_row,
+                          state) &&
+           !state->invalid;
+}
+
+static bool vm_mock_admin_trusted_proxy_source_list_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_admin_trusted_proxy_source_list *list =
+        (vm_mock_admin_trusted_proxy_source_list *)contextValue;
+    vm_mock_admin_trusted_proxy_source *row = NULL;
+    u32 realIp = 0;
+    u32 forwardedFor = 0;
+    u32 enabled = 0;
+
+    if (list == NULL || list->count >= VM_MOCK_ADMIN_TRUSTED_PROXY_SOURCE_MAX ||
+        columnCount != 4 || values == NULL || lengths == NULL ||
+        values[0] == NULL || lengths[0] == 0 ||
+        lengths[0] >= VM_MOCK_SERVICE_LOGIN_IP_CAP ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &realIp) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &forwardedFor) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &enabled) ||
+        realIp > 1 || forwardedFor > 1 || enabled > 1)
+    {
+        if (list != NULL)
+            list->invalid = true;
+        return true;
+    }
+    row = &list->rows[list->count];
+    memcpy(row->sourceAddress, values[0], lengths[0]);
+    row->sourceAddress[lengths[0]] = 0;
+    if (!vm_mock_service_login_ip_is_valid(row->sourceAddress))
+    {
+        list->invalid = true;
+        return true;
+    }
+    row->trustXRealIp = realIp != 0;
+    row->trustXForwardedFor = forwardedFor != 0;
+    row->enabled = enabled != 0;
+    ++list->count;
+    return true;
+}
+
+static bool vm_mock_admin_trusted_proxy_source_load_list(
+    vm_mock_admin_trusted_proxy_source_list *list)
+{
+    if (list == NULL || !vm_mock_admin_trusted_proxy_source_schema_ensure())
+        return false;
+    memset(list, 0, sizeof(*list));
+    return vm_mysql_query(
+               "SELECT source_ip,trust_x_real_ip,trust_x_forwarded_for,enabled "
+               "FROM server_trusted_proxy_sources ORDER BY source_ip",
+               vm_mock_admin_trusted_proxy_source_list_row, list) &&
+           !list->invalid;
+}
+
+static bool vm_mock_admin_trusted_proxy_source_save(
+    const char *sourceAddress, bool trustXRealIp, bool trustXForwardedFor,
+    bool enabled)
+{
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char sql[640];
+
+    if (!vm_mock_service_login_ip_is_valid(sourceAddress) ||
+        (!trustXRealIp && !trustXForwardedFor) ||
+        !vm_mock_admin_trusted_proxy_source_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)sourceAddress, strlen(sourceAddress),
+                            addressHex, sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO server_trusted_proxy_sources"
+             "(source_ip,trust_x_real_ip,trust_x_forwarded_for,enabled) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u) "
+             "ON DUPLICATE KEY UPDATE trust_x_real_ip=VALUES(trust_x_real_ip),"
+             "trust_x_forwarded_for=VALUES(trust_x_forwarded_for),"
+             "enabled=VALUES(enabled)",
+             addressHex, trustXRealIp ? 1u : 0u,
+             trustXForwardedFor ? 1u : 0u, enabled ? 1u : 0u);
+    return vm_mysql_exec(sql);
+}
+
+static bool vm_mock_admin_trusted_proxy_source_delete(const char *sourceAddress)
+{
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char sql[320];
+
+    if (!vm_mock_service_login_ip_is_valid(sourceAddress) ||
+        strcmp(sourceAddress, "127.0.0.1") == 0 ||
+        !vm_mock_admin_trusted_proxy_source_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)sourceAddress, strlen(sourceAddress),
+                            addressHex, sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(sql, sizeof(sql),
+             "DELETE FROM server_trusted_proxy_sources "
+             "WHERE source_ip=CAST(X'%s' AS CHAR)", addressHex);
+    return vm_mysql_exec(sql);
+}
+
+/* Environment variables remain a deployment fallback for a proxy configured
+ * before the management table is available.  A database entry, including a
+ * disabled entry, always takes precedence over this fallback. */
+static bool vm_mock_admin_is_environment_trusted_proxy_ipv4(
+    const char *peerAddress)
+{
+    const char *configured = getenv("CBE_MOCK_TRUSTED_PROXY_IPV4");
+    const char *cursor = configured;
+
+    if (!vm_mock_service_login_ip_is_valid(peerAddress))
+        return false;
+    if (strcmp(peerAddress, "127.0.0.1") == 0)
+        return true;
+    while (cursor != NULL && cursor[0] != 0)
+    {
+        const char *separator = strchr(cursor, ',');
+        const char *end = separator;
+        const char *start = cursor;
+        char candidate[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+        size_t length = 0;
+
+        while (*start == ' ' || *start == '\t')
+            ++start;
+        if (end == NULL)
+            end = start + strlen(start);
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t'))
+            --end;
+        length = (size_t)(end - start);
+        if (length > 0 && length < sizeof(candidate))
+        {
+            memcpy(candidate, start, length);
+            candidate[length] = 0;
+            if (vm_mock_service_login_ip_is_valid(candidate) &&
+                strcmp(candidate, peerAddress) == 0)
+            {
+                return true;
+            }
+        }
+        cursor = separator != NULL ? separator + 1 : NULL;
+    }
+    return false;
+}
+
+/* A configured proxy can independently authorize X-Real-IP and
+ * X-Forwarded-For.  X-Real-IP has precedence.  X-Forwarded-For is accepted
+ * only as one canonical IPv4 value; a chain is intentionally rejected rather
+ * than guessed at.  An untrusted peer always retains its TCP address. */
+static bool vm_mock_admin_resolve_login_source_from_trusted_headers(
+    const char *peerAddress, const char *request, size_t headerLen,
+    bool trustXRealIp, bool trustXForwardedFor, char *out, size_t outCap)
+{
+    char realAddress[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+
+    if (out == NULL || outCap == 0)
+        return false;
+    out[0] = 0;
+    if (vm_mock_service_login_ip_is_valid(peerAddress))
+        snprintf(out, outCap, "%s", peerAddress);
+    if (trustXRealIp &&
+        vm_mock_admin_header_value(request, headerLen, "X-Real-IP",
+                                  realAddress, sizeof(realAddress)) &&
+        vm_mock_service_login_ip_is_valid(realAddress))
+    {
+        snprintf(out, outCap, "%s", realAddress);
+        return true;
+    }
+    if (trustXForwardedFor &&
+        vm_mock_admin_header_value(request, headerLen, "X-Forwarded-For",
+                                  realAddress, sizeof(realAddress)) &&
+        strchr(realAddress, ',') == NULL &&
+        vm_mock_service_login_ip_is_valid(realAddress))
+    {
+        snprintf(out, outCap, "%s", realAddress);
+        return true;
+    }
+    return false;
+}
+
+static bool vm_mock_admin_resolve_login_source(const char *peerAddress,
+                                               const char *request,
+                                               size_t headerLen, char *out,
+                                               size_t outCap)
+{
+    vm_mock_admin_trusted_proxy_source_state proxy;
+    bool trustXRealIp = false;
+    bool trustXForwardedFor = false;
+
+    if (vm_mock_admin_trusted_proxy_source_lookup(peerAddress, &proxy) &&
+        proxy.found)
+    {
+        if (!proxy.enabled)
+            return vm_mock_admin_resolve_login_source_from_trusted_headers(
+                peerAddress, request, headerLen, false, false, out, outCap);
+        trustXRealIp = proxy.trustXRealIp;
+        trustXForwardedFor = proxy.trustXForwardedFor;
+    }
+    else if (vm_mock_admin_is_environment_trusted_proxy_ipv4(peerAddress))
+    {
+        /* Compatibility path for CBE_MOCK_TRUSTED_PROXY_IPV4.  New
+         * deployments should configure both header permissions in the
+         * management page instead. */
+        trustXRealIp = true;
+    }
+    return vm_mock_admin_resolve_login_source_from_trusted_headers(
+        peerAddress, request, headerLen, trustXRealIp, trustXForwardedFor,
+        out, outCap);
 }
 
 static void vm_mock_admin_make_session_token(const char *accountId,
@@ -1342,12 +1699,73 @@ fail:
     return false;
 }
 
+static bool vm_mock_admin_operation_log_record(
+    const char *actionCode, const char *accountId, u32 roleId, u32 itemId,
+    u32 itemCount, u32 changeAmount, const char *detail,
+    const char *operatorAccountId);
+
+static void vm_mock_admin_operation_audit_clear(void)
+{
+    memset(&g_vm_mock_admin_operation_audit_context, 0,
+           sizeof(g_vm_mock_admin_operation_audit_context));
+}
+
+static void vm_mock_admin_operation_audit_begin(const char *operatorAccountId,
+                                                const char *actionCode,
+                                                const char *targetAccountId)
+{
+    vm_mock_admin_operation_audit_context *context =
+        &g_vm_mock_admin_operation_audit_context;
+
+    vm_mock_admin_operation_audit_clear();
+    if (!vm_mock_admin_account_id_is_valid(operatorAccountId) ||
+        actionCode == NULL || actionCode[0] == 0 || strlen(actionCode) > 32)
+    {
+        return;
+    }
+    context->active = true;
+    snprintf(context->operatorAccountId, sizeof(context->operatorAccountId),
+             "%s", operatorAccountId);
+    snprintf(context->actionCode, sizeof(context->actionCode), "%s", actionCode);
+    snprintf(context->targetAccountId, sizeof(context->targetAccountId), "%s",
+             targetAccountId && targetAccountId[0] ? targetAccountId :
+                                                     "admin-config");
+    snprintf(context->detail, sizeof(context->detail),
+             "后台编辑操作 %s 已完成", actionCode);
+}
+
+static bool vm_mock_admin_operation_audit_location_is_success(
+    const char *location)
+{
+    return location != NULL && strstr(location, "status=ok") != NULL;
+}
+
+static void vm_mock_admin_operation_audit_record_success_if_needed(void)
+{
+    vm_mock_admin_operation_audit_context *context =
+        &g_vm_mock_admin_operation_audit_context;
+
+    if (!context->active || context->recorded)
+        return;
+    context->recorded = true;
+    if (!vm_mock_admin_operation_log_record(
+            "admin-edit", context->targetAccountId, 0, 0, 0, 0,
+            context->detail, context->operatorAccountId))
+    {
+        printf("[error][mock-admin] operation_audit_insert_failed action=%s operator=%s error=%s\n",
+               context->actionCode, context->operatorAccountId,
+               vm_mysql_last_error());
+    }
+}
+
 static void vm_mock_admin_send_location(vm_mock_service_socket client,
                                         const char *location,
                                         const char *cookieHeader)
 {
     char extraHeaders[4096];
 
+    if (vm_mock_admin_operation_audit_location_is_success(location))
+        vm_mock_admin_operation_audit_record_success_if_needed();
     snprintf(extraHeaders, sizeof(extraHeaders), "%sLocation: %s\r\n",
              cookieHeader ? cookieHeader : "",
              location && location[0] ? location : "/");
@@ -5896,6 +6314,15 @@ static const char *vm_mock_admin_role_job_label(u8 job)
     }
 }
 
+static const char *vm_mock_admin_equipment_slot_label(u32 slot)
+{
+    static const char *const labels[VM_NET_MOCK_EQUIP_SLOT_COUNT] = {
+        "武器", "头盔", "衣甲", "披风", "腰带", "护腿", "鞋靴", "戒指"
+    };
+
+    return slot < VM_NET_MOCK_EQUIP_SLOT_COUNT ? labels[slot] : "未知装备位";
+}
+
 static const char *vm_mock_admin_item_category_name(bool equipment, u8 category)
 {
     if (equipment)
@@ -6534,39 +6961,145 @@ static void vm_mock_admin_render_monster_drop_picker_modal(
         "<div class=\"item-picker-list\" id=\"monster-drop-picker-list\"></div><p class=\"item-picker-empty\" id=\"monster-drop-picker-empty\" hidden>当前筛选没有可添加物品</p></section></div>");
 }
 
-static void vm_mock_admin_render_item_grant_form(
+/* Role actions deliberately keep the existing POST contracts.  The account
+ * screen only changes how an administrator reaches them: one entry per role
+ * opens this business-oriented dialog, while the action handler still owns
+ * validation, persistence and operator audit logging. */
+static void vm_mock_admin_render_role_operation_modal(
     vm_mock_admin_text *page, const char *account,
-    const u32 *roleIds, char roleNames[][128], u32 roleCount)
+    const vm_net_mock_role_state *role, const char *roleNameUtf8)
 {
-    if (page == NULL || account == NULL || account[0] == 0 ||
-        roleIds == NULL || roleNames == NULL || roleCount == 0)
+    char pickerId[64];
+
+    if (page == NULL || account == NULL || account[0] == 0 || role == NULL ||
+        roleNameUtf8 == NULL)
     {
         return;
     }
+    snprintf(pickerId, sizeof(pickerId), "role-grant-item-%u", role->roleId);
     vm_mock_admin_text_appendf(
         page,
-        "<div class=\"item-grant\"><h2>给予物品</h2>"
-        "<form class=\"grant-form\" method=\"post\" action=\"/action\">"
-        "<input type=\"hidden\" name=\"action\" value=\"grant-item\">"
-        "<input type=\"hidden\" name=\"account\" value=\"");
+        "<div class=\"role-operation-modal\" id=\"role-operation-modal-%u\" data-role-operation-modal role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"role-operation-title-%u\" hidden>"
+        "<section class=\"role-operation-panel\" tabindex=\"-1\"><header class=\"role-operation-head\"><div><h3 id=\"role-operation-title-%u\">角色操作</h3><p>",
+        role->roleId, role->roleId, role->roleId);
+    vm_mock_admin_text_append_html(page, roleNameUtf8);
+    vm_mock_admin_text_appendf(
+        page,
+        " · ID %u</p></div><button class=\"role-operation-close\" type=\"button\" data-role-operation-close aria-label=\"关闭角色操作\">×</button></header>"
+        "<div class=\"role-operation-layout\"><nav class=\"role-operation-nav\" aria-label=\"角色业务功能\">"
+        "<button class=\"on\" type=\"button\" data-role-operation-tab=\"profile\" aria-current=\"page\">基本资料</button>"
+        "<button type=\"button\" data-role-operation-tab=\"progression\">成长等级</button>"
+        "<button type=\"button\" data-role-operation-tab=\"money\">普通钱币</button>"
+        "<button type=\"button\" data-role-operation-tab=\"equipment\">穿戴装备</button>"
+        "<button type=\"button\" data-role-operation-tab=\"items\">物品与装备</button>"
+        "<button type=\"button\" data-role-operation-tab=\"position\">角色位置</button>"
+        "</nav><div class=\"role-operation-content\">"
+        "<section class=\"role-operation-pane\" data-role-operation-pane=\"profile\"><h4>修改角色名称</h4><p class=\"muted\">名称按游戏客户端的 GBK 字节槽校验。</p>"
+        "<form class=\"stack\" method=\"post\" action=\"/action\" data-admin-confirm=\"确定修改这个角色的名称？\">"
+        "<input type=\"hidden\" name=\"action\" value=\"set-role-name\"><input type=\"hidden\" name=\"account\" value=\"");
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><label><span>角色名称</span><input name=\"role_name\" value=\"",
+        role->roleId);
+    vm_mock_admin_text_append_html(page, roleNameUtf8);
+    vm_mock_admin_text_appendf(
+        page,
+        "\" minlength=\"2\" maxlength=\"15\" required></label><div class=\"role-operation-actions\"><button type=\"submit\">保存名称</button></div></form></section>"
+        "<section class=\"role-operation-pane\" data-role-operation-pane=\"progression\" hidden><h4>设定角色等级</h4><p class=\"muted\">在线账号会先强制离线；经验将定位到等级起点，HP/MP 上限按新等级重算。</p>"
+        "<form class=\"stack\" method=\"post\" action=\"/action\" data-admin-confirm=\"将等级设为指定值，并把经验重置到该等级起点？在线账号会先被强制断开。\">"
+        "<input type=\"hidden\" name=\"action\" value=\"set-role-level\"><input type=\"hidden\" name=\"account\" value=\"");
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><label><span>目标等级</span><input type=\"number\" name=\"level\" min=\"1\" max=\"%u\" value=\"%u\" required></label><div class=\"role-operation-actions\"><button type=\"submit\">设定等级</button></div></form></section>"
+        "<section class=\"role-operation-pane\" data-role-operation-pane=\"money\" hidden><h4>增加普通钱币</h4><p class=\"muted\">数值以铜为单位；该操作只增加钱币，不会扣减当前余额。</p>"
+        "<form class=\"stack\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"add-money\"><input type=\"hidden\" name=\"account\" value=\"",
+        role->roleId, VM_NET_MOCK_ROLE_LEVEL_CAP, role->level);
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><label><span>增加铜钱</span><input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"输入增加数量\" required></label><div class=\"role-operation-actions\"><button type=\"submit\">增加钱币</button></div></form></section>"
+        "<section class=\"role-operation-pane\" data-role-operation-pane=\"equipment\" hidden><h4>当前穿戴装备</h4><p class=\"muted\">可直接设定强化等级（+0 至 +%u）。在线账号会先强制离线；不消耗强化材料或铜钱。</p><div class=\"role-equipment-list\">",
+        role->roleId, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    {
+        bool hasEquippedItem = false;
+
+        for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+        {
+            const vm_net_mock_equipped_item_state *equipped =
+                &role->equippedItems[slot];
+            const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+            char itemNameUtf8[128];
+
+            if (equipped->itemId == 0)
+                continue;
+            hasEquippedItem = true;
+            memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+            catalogItem = vm_net_mock_find_shop_catalog_item(equipped->itemId);
+            if (catalogItem != NULL)
+            {
+                vm_net_mock_gbk_label_to_utf8(catalogItem->name, itemNameUtf8,
+                                              sizeof(itemNameUtf8));
+            }
+            vm_mock_admin_text_appendf(
+                page,
+                "<article class=\"role-equipment-row\"><div class=\"role-equipment-summary\"><span class=\"role-equipment-slot\">%s</span><strong>",
+                vm_mock_admin_equipment_slot_label(slot));
+            if (itemNameUtf8[0] != 0)
+                vm_mock_admin_text_append_html(page, itemNameUtf8);
+            else
+                vm_mock_admin_text_appendf(page, "未知装备 #%u", equipped->itemId);
+            vm_mock_admin_text_appendf(
+                page,
+                "</strong><small>ID %u · 强化 +%u",
+                equipped->itemId, equipped->enhanceLevel);
+            if (equipped->durabilityMax != 0)
+            {
+                vm_mock_admin_text_appendf(
+                    page, " · 耐久 %u/%u", equipped->durability,
+                    equipped->durabilityMax);
+            }
+            vm_mock_admin_text_appendf(
+                page,
+                "</small></div><form class=\"role-equipment-form\" method=\"post\" action=\"/action\" data-admin-confirm=\"确定直接设置这件穿戴装备的强化等级？在线账号会先被强制断开；不消耗强化材料或铜钱。\"><input type=\"hidden\" name=\"action\" value=\"set-equipped-enhance-level\"><input type=\"hidden\" name=\"account\" value=\"");
+            vm_mock_admin_text_append_html(page, account);
+            vm_mock_admin_text_appendf(
+                page,
+                "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><input type=\"hidden\" name=\"equipment_slot\" value=\"%u\"><label><span>强化等级</span><input type=\"number\" name=\"enhance_level\" min=\"0\" max=\"%u\" value=\"%u\" required></label><button type=\"submit\">保存强化</button></form></article>",
+                role->roleId, slot, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL,
+                equipped->enhanceLevel);
+        }
+        if (!hasEquippedItem)
+        {
+            vm_mock_admin_text_appendf(
+                page,
+                "<p class=\"role-equipment-empty\">该角色当前没有已穿戴装备。</p>");
+        }
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</div><p class=\"muted role-equipment-note\">强化的阶段词条属于装备实例，调整等级不会重掷词条；低于阶段门槛时词条不会参与角色属性。</p></section>"
+        "<section class=\"role-operation-pane\" data-role-operation-pane=\"items\" hidden><h4>给予物品或装备</h4><p class=\"muted\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p>"
+        "<form class=\"stack\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"grant-item\"><input type=\"hidden\" name=\"account\" value=\"");
     vm_mock_admin_text_append_html(page, account);
     vm_mock_admin_text_appendf(page,
-        "\"><label><span>角色</span><select name=\"role\" required>");
-    for (u32 i = 0; i < roleCount; ++i)
-    {
-        vm_mock_admin_text_appendf(page, "<option value=\"%u\">", roleIds[i]);
-        vm_mock_admin_text_append_html(page, roleNames[i]);
-        vm_mock_admin_text_appendf(page, "（ID %u）</option>", roleIds[i]);
-    }
-    vm_mock_admin_text_appendf(page, "</select></label>");
-    vm_mock_admin_render_item_picker_field(page, "grant-item", "item",
-                                           "物品", 0, true);
+        "\"><input type=\"hidden\" name=\"role\" value=\"%u\">",
+        role->roleId);
+    vm_mock_admin_render_item_picker_field(page, pickerId, "item",
+                                           "物品或装备", 0, true);
     vm_mock_admin_text_appendf(
         page,
-        "<label><span>数量</span><input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required></label>"
-        "<button type=\"submit\">给予物品</button></form>"
-        "<p class=\"muted grant-note\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p></div>");
-    vm_mock_admin_render_item_picker_modal(page, false);
+        "<label><span>数量</span><input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required></label><div class=\"role-operation-actions\"><button type=\"submit\">给予物品</button></div></form></section>"
+        "<section class=\"role-operation-pane\" data-role-operation-pane=\"position\" hidden><h4>重置角色位置</h4><p class=\"muted\">选择服务端资源目录中的精确 SCE 场景后，服务端会解析并保存安全落点；无法验证时不会改写位置，也不会回退到出生点。</p>"
+        "<form class=\"stack\" method=\"post\" action=\"/action\" data-admin-confirm=\"将角色重置到所选场景的服务端安全落点？若该角色在线，会先强制断开其游戏连接。\">"
+        "<input type=\"hidden\" name=\"action\" value=\"reset-role-selected-scene\"><input type=\"hidden\" name=\"account\" value=\"");
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><label><span>目标场景</span><input name=\"reset_scene\" list=\"role-reset-scene-catalog\" placeholder=\"选择或输入目标场景\" required></label><div class=\"role-operation-actions\"><button class=\"reset-position\" type=\"submit\">重置到指定场景</button></div></form></section>"
+        "</div></div></section></div>",
+        role->roleId);
 }
 
 static bool vm_mock_admin_shop_category_filter(const char *filter,
@@ -7379,6 +7912,7 @@ static bool vm_mock_admin_scene_from_form(const char *body,
                                           size_t runtimeSceneCap);
 #include "web_admin_chests.inc.c"
 #include "web_admin_global_rewards.inc.c"
+#include "web_admin_designations.inc.c"
 
 static void vm_mock_admin_render_servers_page(char *response,
                                               size_t responseCap,
@@ -7412,7 +7946,7 @@ static void vm_mock_admin_render_servers_page(char *response,
         "<title>江湖OL 服务器列表管理</title><style>"
         "*{box-sizing:border-box}html,body{min-height:100%%}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1240px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 12px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.off{background:#fef3f2;color:#b42318}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.server-list{display:grid;gap:12px}.server{border:1px solid #e4e7ec;border-radius:9px;padding:13px}.server-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.server-head h3{font-size:16px;margin:0}.state{font-size:12px;font-weight:650}.state.on{color:#027a48}.state.off{color:#b42318}.fields{display:grid;grid-template-columns:110px minmax(160px,1.3fr) minmax(130px,1fr) 130px 110px 110px auto;gap:9px;align-items:end}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.actions{display:flex;gap:8px;align-items:end}.create-fields{display:grid;grid-template-columns:120px minmax(170px,1.3fr) minmax(130px,1fr) 140px 110px 110px auto;gap:10px;align-items:end}.hint{margin:11px 0 0;color:#667085;font-size:12px;line-height:1.65}@media(max-width:940px){.fields,.create-fields{grid-template-columns:1fr 1fr}.actions{align-items:stretch}}@media(max-width:620px){.wrap{padding:16px 10px}.fields,.create-fields{grid-template-columns:1fr}.actions{display:grid;grid-template-columns:1fr 1fr}}</style>"
         "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">标题服务器列表 · 保存后影响下一次登录</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab on\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab on\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=security\">安全设置</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
         "<section class=\"card\"><div class=\"summary\"><span class=\"badge\">已配置 %u / %u</span><span class=\"badge\">已启用 %u</span><span class=\"badge off\">已停用 %u</span></div>",
         rowCount, VM_NET_MOCK_LOGIN_SERVER_MAX, enabledCount,
         rowCount >= enabledCount ? rowCount - enabledCount : 0);
@@ -7475,6 +8009,101 @@ static void vm_mock_admin_render_servers_page(char *response,
     {
         snprintf(response, responseCap,
                  "<!doctype html><meta charset=\"utf-8\"><p>服务器列表管理页面超过大小限制。</p>");
+    }
+}
+
+static void vm_mock_admin_render_proxy_security_page(char *response,
+                                                     size_t responseCap,
+                                                     const char *query)
+{
+    vm_mock_admin_text page;
+    vm_mock_admin_trusted_proxy_source_list sources;
+    char status[16];
+    char message[256];
+    bool listOk = false;
+
+    memset(&sources, 0, sizeof(sources));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message,
+                                   sizeof(message));
+    listOk = vm_mock_admin_trusted_proxy_source_load_list(&sources);
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(
+        &page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 反向代理安全设置</title><style>"
+        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1160px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 10px}.sub,.hint,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.source-list{display:grid;gap:12px}.source{border:1px solid #e4e7ec;border-radius:9px;padding:13px}.source-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.source-head h3{font-size:16px;margin:0}.state{font-size:12px;font-weight:650}.state.on{color:#027a48}.state.off{color:#b42318}.fields,.create-fields{display:grid;grid-template-columns:minmax(145px,.9fr) minmax(180px,1.15fr) minmax(220px,1.45fr) 110px auto;gap:9px;align-items:end}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.checks{display:flex;gap:13px;min-height:39px;align-items:center;flex-wrap:wrap}.checks label{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.checks input{width:auto;margin:0}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.actions{display:flex;gap:8px;align-items:end}.protected{font-size:12px;color:#667085;padding:8px 0}.code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f8fafc;border:1px solid #e4e7ec;border-radius:6px;padding:2px 5px}@media(max-width:820px){.fields,.create-fields{grid-template-columns:1fr 1fr}}@media(max-width:560px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}.fields,.create-fields{grid-template-columns:1fr}.actions{display:grid;grid-template-columns:1fr 1fr}}</style>"
+        "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">反向代理安全设置 · 仅列出的来源可提供真实客户端 IP 请求头</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=global-rewards\">全服奖励管理</a><a class=\"tab\" href=\"/?tab=operations\">操作日志</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab on\" href=\"/?tab=security\">安全设置</a></nav>"
+        "<section class=\"card\"><h2>规则</h2><p class=\"hint\">服务端只在 TCP 对端 IP 与本页启用项完全匹配时，才读取所勾选的请求头。优先取 <span class=\"code\">X-Real-IP</span>；如未取到合法 IPv4，才取已勾选的 <span class=\"code\">X-Forwarded-For</span>。后者只能是单个 IPv4，含逗号的转发链会被拒绝。请让 nginx 覆盖这两个头，不要透传客户端提交的同名头。</p></section>");
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "<section class=\"card\"><h2>可信代理来源</h2>");
+    if (!listOk)
+    {
+        vm_mock_admin_text_appendf(
+            &page, "<p class=\"muted\">无法读取可信代理设置：%s</p>",
+            vm_mysql_last_error());
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"source-list\">");
+        for (u32 i = 0; i < sources.count; ++i)
+        {
+            const vm_mock_admin_trusted_proxy_source *source = &sources.rows[i];
+            bool loopback = strcmp(source->sourceAddress, "127.0.0.1") == 0;
+
+            vm_mock_admin_text_appendf(
+                &page,
+                "<article class=\"source\"><div class=\"source-head\"><h3>代理来源 ");
+            vm_mock_admin_text_append_html(&page, source->sourceAddress);
+            vm_mock_admin_text_appendf(
+                &page, "</h3><span class=\"state %s\">%s</span></div>"
+                "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-trusted-proxy-source\"><div class=\"fields\">"
+                "<label class=\"field\"><span>TCP 来源 IPv4</span><input name=\"source_ip\" value=\"",
+                source->enabled ? "on" : "off",
+                source->enabled ? "已启用" : "已停用");
+            vm_mock_admin_text_append_html(&page, source->sourceAddress);
+            vm_mock_admin_text_appendf(
+                &page,
+                "\" readonly></label><div class=\"field\"><span>可采信的头</span><div class=\"checks\"><label><input type=\"checkbox\" name=\"trust_x_real_ip\" value=\"1\"%s> X-Real-IP</label><label><input type=\"checkbox\" name=\"trust_x_forwarded_for\" value=\"1\"%s> X-Forwarded-For</label></div></div><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\"%s>启用</option><option value=\"0\"%s>停用</option></select></label><div class=\"actions\"><button type=\"submit\">保存</button></div></div></form>",
+                source->trustXRealIp ? " checked" : "",
+                source->trustXForwardedFor ? " checked" : "",
+                source->enabled ? " selected" : "",
+                source->enabled ? "" : " selected");
+            if (loopback)
+            {
+                vm_mock_admin_text_appendf(
+                    &page, "<p class=\"protected\">本机 nginx 默认项不可删除；如不再使用可停用两个头。</p>");
+            }
+            else
+            {
+                vm_mock_admin_text_appendf(
+                    &page,
+                    "<form class=\"actions\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"delete-trusted-proxy-source\"><input type=\"hidden\" name=\"source_ip\" value=\"");
+                vm_mock_admin_text_append_html(&page, source->sourceAddress);
+                vm_mock_admin_text_appendf(
+                    &page, "\"><button class=\"danger\" type=\"submit\">删除来源</button></form>");
+            }
+            vm_mock_admin_text_appendf(&page, "</article>");
+        }
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "</section><section class=\"card\"><h2>新增可信代理来源</h2><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-trusted-proxy-source\"><div class=\"create-fields\"><label class=\"field\"><span>TCP 来源 IPv4</span><input name=\"source_ip\" inputmode=\"numeric\" maxlength=\"15\" placeholder=\"10.20.30.40\" required></label><div class=\"field\"><span>可采信的头</span><div class=\"checks\"><label><input type=\"checkbox\" name=\"trust_x_real_ip\" value=\"1\" checked> X-Real-IP</label><label><input type=\"checkbox\" name=\"trust_x_forwarded_for\" value=\"1\" checked> X-Forwarded-For</label></div></div><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\">启用</option><option value=\"0\">停用</option></select></label><div class=\"actions\"><button type=\"submit\">新增来源</button></div></div></form><p class=\"hint\">此处填写 nginx、负载均衡器或 CDN 到本服务端的实际 TCP 来源 IPv4，不是用户的公网 IP。保存立即生效；不必重启服务。</p></section></main></body></html>");
+    if (page.truncated)
+    {
+        snprintf(response, responseCap,
+                 "<!doctype html><meta charset=\"utf-8\"><p>反向代理安全设置页面超过大小限制。</p>");
     }
 }
 
@@ -7833,12 +8462,14 @@ typedef struct
 
 static const vm_mock_admin_operation_log_action
     g_vm_mock_admin_operation_log_actions[] = {
+    {"admin-edit", "后台配置编辑"},
     {"create-account", "创建账号"},
     {"set-password", "修改密码"},
     {"set-role-name", "修改角色名称"},
     {"add-money", "增加普通钱币"},
     {"add-wcoin", "增加 W 币"},
     {"set-role-level", "设置角色等级"},
+    {"set-equipped-enhance-level", "设置穿戴装备强化等级"},
     {"grant-item", "发放物品/装备"},
     {"reset-role-selected-scene", "重置角色位置"},
     {"ban-risk-account", "封禁风险账号"},
@@ -7979,6 +8610,15 @@ static bool vm_mock_admin_operation_log_record(
                operatorAccountId ? operatorAccountId : "", roleId,
                vm_mysql_last_error());
         return false;
+    }
+    if (g_vm_mock_admin_operation_audit_context.active &&
+        operatorAccountId != NULL &&
+        strcmp(g_vm_mock_admin_operation_audit_context.operatorAccountId,
+               operatorAccountId) == 0 &&
+        (strcmp(g_vm_mock_admin_operation_audit_context.actionCode,
+                actionCode) == 0 || strcmp(actionCode, "admin-edit") == 0))
+    {
+        g_vm_mock_admin_operation_audit_context.recorded = true;
     }
     return true;
 }
@@ -8273,7 +8913,7 @@ static void vm_mock_admin_render_operation_log_page(char *response,
         "<title>江湖OL 后台操作日志</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 10px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap}.filter>label{display:grid;gap:4px;color:#475467;font-size:12px}.filter input[type=text]{min-width:250px;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;font:inherit}.type-filter{display:grid;gap:6px;flex:1 1 100%%;margin:0;padding:8px 10px;border:1px solid #d0d5dd;border-radius:7px}.type-filter legend{padding:0 4px;color:#475467;font-size:12px}.type-options{display:flex;flex-wrap:wrap;gap:6px 12px}.type-options label{display:inline-flex;align-items:center;gap:5px;color:#344054;font-size:13px;white-space:nowrap}.type-options input{margin:0}.filter button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;font:inherit;cursor:pointer}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%%;min-width:960px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.tag{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px;font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}.filter input[type=text]{min-width:0;width:100%%}}</style>"
         "<script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">操作日志 · 记录后台账号管理、操作者账号和游戏内已提交行为</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=global-rewards\">全服奖励管理</a><a class=\"tab on\" href=\"/?tab=operations\">操作日志</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=global-rewards\">全服奖励管理</a><a class=\"tab on\" href=\"/?tab=operations\">操作日志</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=security\">安全设置</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
         "<section class=\"card\"><h2>查询操作日志</h2><form class=\"filter\" method=\"get\"><input type=\"hidden\" name=\"tab\" value=\"operations\"><label><span>目标账号（留空显示全部）</span><input type=\"text\" name=\"account\" maxlength=\"63\" value=\"");
     vm_mock_admin_text_append_html(&page, accountFilter);
     vm_mock_admin_text_appendf(
@@ -9123,9 +9763,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     const char *roleError = NULL;
     vm_mock_service_account_state *accountState = NULL;
     vm_mock_admin_scene_file resetSceneFiles[VM_MOCK_ADMIN_SCENE_FILE_MAX];
-    u32 managedRoleIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
-    char managedRoleNames[VM_NET_MOCK_ROLE_DB_MAX_ROLES][128];
-    u32 managedRoleCount = 0;
+    bool roleOperationsAvailable = false;
     u32 resetSceneCount = 0;
     u32 accountTotal = 0;
     vm_mock_admin_account_page initialAccounts;
@@ -9138,14 +9776,17 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
     memset(resetSceneFiles, 0, sizeof(resetSceneFiles));
-    memset(managedRoleIds, 0, sizeof(managedRoleIds));
-    memset(managedRoleNames, 0, sizeof(managedRoleNames));
     (void)vm_mock_admin_form_value(query, "tab", tab, sizeof(tab));
     (void)vm_mock_admin_form_value(query, "content_kind", contentKind,
                                    sizeof(contentKind));
     if (strcmp(tab, "global-rewards") == 0)
     {
         vm_mock_admin_render_global_rewards_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "designations") == 0)
+    {
+        vm_mock_admin_render_designations_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "operations") == 0)
@@ -9205,6 +9846,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_servers_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "security") == 0)
+    {
+        vm_mock_admin_render_proxy_security_page(response, responseCap, query);
+        return;
+    }
     if (strcmp(tab, "risk") == 0)
     {
         vm_mock_admin_render_risk_page(response, responseCap, query);
@@ -9240,10 +9886,10 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.account-wallet{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap}.account-wallet .inline{margin:0 0 0 auto}.account-wallet .inline input{min-width:160px}@media(max-width:620px){.account-wallet .inline{width:100%%;margin:0}.account-wallet .inline input{min-width:0}}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.role-rename{align-items:center;margin-top:7px}.role-rename input{width:112px;min-width:112px}.role-rename button{padding:6px 9px;font-size:12px}.level-set{align-items:center;margin:7px 0 0}.level-set input{width:76px;min-width:76px}.level-set button{padding:6px 9px;font-size:12px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.scene-reset-input{min-width:230px!important}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.stack label{display:grid;gap:4px}.stack label>span{font-size:12px;color:#667085}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.role-action-trigger{min-width:78px}.role-operation-modal{position:fixed;inset:0;z-index:1100;display:grid;place-items:center;padding:28px;background:#10182899;backdrop-filter:blur(2px)}.role-operation-panel{width:min(1060px,100%%);max-height:calc(100vh - 56px);overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.role-operation-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid #eaecf0}.role-operation-head h3{margin:0;font-size:20px}.role-operation-head p{margin:3px 0 0;color:#667085}.role-operation-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.role-operation-close:hover{background:#e4e7ec;color:#1d2939}.role-operation-layout{display:grid;grid-template-columns:208px minmax(0,1fr);min-height:480px;max-height:calc(100vh - 168px)}.role-operation-nav{display:grid;align-content:start;gap:7px;padding:18px;border-right:1px solid #eaecf0;background:#f8fafc}.role-operation-nav button{border:1px solid transparent;background:transparent;color:#475467;text-align:left}.role-operation-nav button:hover{background:#eef4ff;color:#175cd3}.role-operation-nav button.on,.role-operation-nav button[aria-current=page]{border-color:#b2ccff;background:#dbeafe;color:#1849a9}.role-operation-content{min-width:0;overflow:auto;padding:26px;overscroll-behavior:contain}.role-operation-pane{max-width:650px}.role-operation-pane h4{margin:0 0 6px;font-size:17px}.role-operation-pane>.muted{margin:0 0 18px}.role-operation-pane .item-field{display:grid;gap:4px}.role-operation-pane .item-field>span{font-size:12px;color:#667085}.role-operation-actions{display:flex;justify-content:flex-end;margin-top:8px}.role-operation-pane .item-picker-trigger{min-height:42px}.role-operation-pane input{min-height:40px}.role-equipment-list{display:grid;gap:10px}.role-equipment-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(210px,.75fr);gap:14px;align-items:center;padding:13px;border:1px solid #e4e7ec;border-radius:10px;background:#fff}.role-equipment-summary{display:grid;gap:3px;min-width:0}.role-equipment-summary strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.role-equipment-summary small{color:#667085}.role-equipment-slot{justify-self:start;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.role-equipment-form{display:grid;grid-template-columns:minmax(104px,1fr) auto;gap:8px;align-items:end}.role-equipment-form label{display:grid;gap:4px}.role-equipment-form label>span{font-size:12px;color:#667085}.role-equipment-empty{margin:0;padding:20px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.role-equipment-note{margin:12px 0 0!important;font-size:12px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
-        "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
+        "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.item-modal,.role-operation-modal{padding:10px}.item-picker-panel,.role-operation-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}.role-operation-head{padding:16px}.role-operation-layout{grid-template-columns:1fr;min-height:0;max-height:calc(100vh - 118px)}.role-operation-nav{grid-template-columns:repeat(6,minmax(118px,1fr));overflow:auto;padding:10px;border-right:0;border-bottom:1px solid #eaecf0}.role-operation-nav button{text-align:center}.role-operation-content{padding:18px}.role-operation-actions{justify-content:stretch}.role-operation-actions button{width:100%%}.role-equipment-row,.role-equipment-form{grid-template-columns:1fr}.role-equipment-form button{width:100%%}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
@@ -9257,6 +9903,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
+        "<a class=\"tab\" href=\"/?tab=security\">安全设置</a>"
         "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><form class=\"account-search\" data-account-search-form role=\"search\"><input data-account-search maxlength=\"63\" placeholder=\"搜索账号名\" aria-label=\"搜索账号名\" value=\"",
         accountTotal);
@@ -9326,77 +9973,30 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                           roleNameUtf8, sizeof(roleNameUtf8));
             vm_net_mock_gbk_label_to_utf8(role->scene,
                                           sceneUtf8, sizeof(sceneUtf8));
-            if (managedRoleCount < VM_NET_MOCK_ROLE_DB_MAX_ROLES)
-            {
-                managedRoleIds[managedRoleCount] = role->roleId;
-                snprintf(managedRoleNames[managedRoleCount],
-                         sizeof(managedRoleNames[managedRoleCount]), "%s",
-                         roleNameUtf8);
-                ++managedRoleCount;
-            }
+            roleOperationsAvailable = true;
             vm_mock_admin_text_appendf(&page, "<tr><td><strong>");
             vm_mock_admin_text_append_html(&page, roleNameUtf8);
             vm_mock_admin_text_appendf(&page,
-                                       "</strong><br><span class=\"muted\">ID %u · %s</span>"
-                                       "<form class=\"inline role-rename\" method=\"post\" action=\"/action\" "
-                                       "onsubmit=\"return confirm('确定修改这个角色的名称？');\">"
-                                       "<input type=\"hidden\" name=\"action\" value=\"set-role-name\">"
-                                       "<input type=\"hidden\" name=\"account\" value=\"",
+                                       "</strong><br><span class=\"muted\">ID %u · %s</span></td>",
                                        role->roleId,
                                        vm_mock_admin_role_job_label(role->job));
-            vm_mock_admin_text_append_html(&page, selectedAccount);
-            vm_mock_admin_text_appendf(&page,
-                                       "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
-                                       "<input name=\"role_name\" value=\"",
-                                       role->roleId);
-            vm_mock_admin_text_append_html(&page, roleNameUtf8);
-            vm_mock_admin_text_appendf(&page,
-                                       "\" minlength=\"2\" maxlength=\"15\" aria-label=\"角色名称\" required>"
-                                       "<button type=\"submit\">改名</button></form></td>");
             vm_mock_admin_text_appendf(&page, "<td><div>Lv.%u%s</div>", role->level,
                                        active ? " <span class=\"badge\">当前角色</span>" : "");
             vm_mock_admin_text_appendf(
                 &page,
-                "<form class=\"inline level-set\" method=\"post\" action=\"/action\" "
-                "onsubmit=\"return confirm('将等级设为指定值，并把经验重置到该等级起点？在线账号会先被强制断开。');\">"
-                "<input type=\"hidden\" name=\"action\" value=\"set-role-level\">"
-                "<input type=\"hidden\" name=\"account\" value=\"");
-            vm_mock_admin_text_append_html(&page, selectedAccount);
-            vm_mock_admin_text_appendf(
-                &page,
-                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
-                "<input type=\"number\" name=\"level\" min=\"1\" max=\"%u\" value=\"%u\" aria-label=\"角色等级\" required>"
-                "<button type=\"submit\">设定等级</button></form>"
-                "<span class=\"level-note\">在线账号会先强制离线；经验将定位到该等级起点，HP/MP 上限按新等级重算。</span></td>",
-                role->roleId, VM_NET_MOCK_ROLE_LEVEL_CAP, role->level);
+                "<span class=\"level-note\">通过“操作”可调整等级；在线账号会先强制离线。</span></td>");
             vm_mock_admin_text_appendf(&page, "<td class=\"position\">");
             vm_mock_admin_text_append_html(&page, sceneUtf8);
             vm_mock_admin_text_appendf(&page,
                                        "<br><span class=\"muted\">(%u, %u)</span></td>",
                                        role->x, role->y);
             vm_mock_admin_text_appendf(&page,
-                                       "<td class=\"money\">%u 金 %u 银 %u 铜<br><span class=\"muted\">总计 %u 铜</span></td><td>",
-                                       gold, silver, copper, role->money);
-            vm_mock_admin_text_appendf(&page,
-                "<form class=\"inline\" method=\"post\" action=\"/action\">"
-                "<input type=\"hidden\" name=\"action\" value=\"add-money\">"
-                "<input type=\"hidden\" name=\"account\" value=\"");
-            vm_mock_admin_text_append_html(&page, selectedAccount);
-            vm_mock_admin_text_appendf(&page,
-                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
-                "<input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加铜钱\" required>"
-                "<button type=\"submit\">加钱</button></form>", role->roleId);
-            vm_mock_admin_text_appendf(&page,
-                "<form class=\"inline\" method=\"post\" action=\"/action\" "
-                "onsubmit=\"return confirm('将角色重置到所选场景的服务端安全落点？若该角色在线，会先强制断开其游戏连接。');\">"
-                "<input type=\"hidden\" name=\"action\" value=\"reset-role-selected-scene\">"
-                "<input type=\"hidden\" name=\"account\" value=\"");
-            vm_mock_admin_text_append_html(&page, selectedAccount);
-            vm_mock_admin_text_appendf(&page,
-                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
-                "<input class=\"scene-reset-input\" name=\"reset_scene\" list=\"role-reset-scene-catalog\" placeholder=\"选择或输入目标场景\" aria-label=\"目标重置场景\" required>"
-                "<button class=\"reset-position\" type=\"submit\">重置到指定场景</button></form></td></tr>",
-                role->roleId);
+                                       "<td class=\"money\">%u 金 %u 银 %u 铜<br><span class=\"muted\">总计 %u 铜</span></td><td><button class=\"role-action-trigger\" type=\"button\" data-role-operation-open=\"role-operation-modal-%u\" aria-haspopup=\"dialog\" aria-controls=\"role-operation-modal-%u\">操作</button>",
+                                       gold, silver, copper, role->money,
+                                       role->roleId, role->roleId);
+            vm_mock_admin_render_role_operation_modal(
+                &page, selectedAccount, role, roleNameUtf8);
+            vm_mock_admin_text_appendf(&page, "</td></tr>");
         }
         if (g_vm_net_mock_role_db.roleCount == 0)
             vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">该账号尚未创建角色</td></tr>");
@@ -9412,9 +10012,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     vm_mock_admin_text_appendf(&page, "</tbody></table></div>");
     vm_mock_admin_render_role_reset_scene_catalog(
         &page, resetSceneFiles, resetSceneCount);
-    vm_mock_admin_render_item_grant_form(
-        &page, selectedAccount, managedRoleIds, managedRoleNames,
-        managedRoleCount);
+    if (roleOperationsAvailable)
+        vm_mock_admin_render_item_picker_modal(&page, false);
     vm_mock_admin_text_appendf(&page, "</div><div class=\"forms\">"
                                "<div class=\"card\"><h2>创建账号</h2><form class=\"stack\" method=\"post\" action=\"/action\">"
                                "<input type=\"hidden\" name=\"action\" value=\"create-account\">"
@@ -9507,6 +10106,8 @@ static void vm_mock_admin_redirect(vm_mock_service_socket client,
     snprintf(location, sizeof(location),
              VM_MOCK_ADMIN_ROOT_PATH "?account=%s&status=%s&message=%s",
              accountEncoded, statusEncoded, messageEncoded);
+    if (status != NULL && strcmp(status, "ok") == 0)
+        vm_mock_admin_operation_audit_record_success_if_needed();
     snprintf(extraHeaders, sizeof(extraHeaders), "Location: %s\r\n", location);
     (void)vm_mock_admin_send_response(client, "303 See Other", "text/plain; charset=utf-8",
                                       extraHeaders, "正在返回后台页面。\n");
@@ -10002,6 +10603,24 @@ static void vm_mock_admin_redirect_servers(vm_mock_service_socket client,
              VM_MOCK_ADMIN_ROOT_PATH
              "?tab=servers&status=%s&message=%s",
              statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_proxy_security(
+    vm_mock_service_socket client, const char *status, const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=security&status=%s&message=%s", statusEncoded,
+             messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
 
@@ -11862,6 +12481,88 @@ static void vm_mock_admin_handle_chest_action(vm_mock_service_socket client,
                                   "宝箱奖池已保存并立即生效");
 }
 
+static bool vm_mock_admin_form_optional_checkbox(const char *body,
+                                                 const char *field,
+                                                 bool *checkedOut)
+{
+    char value[8];
+
+    if (checkedOut != NULL)
+        *checkedOut = false;
+    memset(value, 0, sizeof(value));
+    if (!vm_mock_admin_form_value(body, field, value, sizeof(value)))
+        return true;
+    if (strcmp(value, "1") != 0)
+        return false;
+    if (checkedOut != NULL)
+        *checkedOut = true;
+    return true;
+}
+
+static void vm_mock_admin_handle_trusted_proxy_source_action(
+    vm_mock_service_socket client, const char *action, const char *body)
+{
+    char sourceAddress[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+    char enabledText[8];
+    bool trustXRealIp = false;
+    bool trustXForwardedFor = false;
+    bool enabled = false;
+
+    memset(sourceAddress, 0, sizeof(sourceAddress));
+    memset(enabledText, 0, sizeof(enabledText));
+    if (!vm_mock_admin_form_value(body, "source_ip", sourceAddress,
+                                  sizeof(sourceAddress)) ||
+        !vm_mock_service_login_ip_is_valid(sourceAddress))
+    {
+        vm_mock_admin_redirect_proxy_security(client, "error",
+                                              "代理 TCP 来源 IPv4 无效");
+        return;
+    }
+    if (strcmp(action, "delete-trusted-proxy-source") == 0)
+    {
+        if (strcmp(sourceAddress, "127.0.0.1") == 0)
+        {
+            vm_mock_admin_redirect_proxy_security(
+                client, "error", "本机默认来源不可删除；可保存为停用状态");
+            return;
+        }
+        if (!vm_mock_admin_trusted_proxy_source_delete(sourceAddress))
+        {
+            vm_mock_admin_redirect_proxy_security(
+                client, "error", "删除可信代理来源失败，请检查 MySQL");
+            return;
+        }
+        vm_mock_admin_redirect_proxy_security(client, "ok", "可信代理来源已删除");
+        return;
+    }
+    if (strcmp(action, "save-trusted-proxy-source") != 0 ||
+        !vm_mock_admin_form_optional_checkbox(body, "trust_x_real_ip",
+                                              &trustXRealIp) ||
+        !vm_mock_admin_form_optional_checkbox(body, "trust_x_forwarded_for",
+                                              &trustXForwardedFor) ||
+        !vm_mock_admin_form_value(body, "enabled", enabledText,
+                                  sizeof(enabledText)) ||
+        (strcmp(enabledText, "0") != 0 && strcmp(enabledText, "1") != 0) ||
+        (!trustXRealIp && !trustXForwardedFor))
+    {
+        vm_mock_admin_redirect_proxy_security(
+            client, "error",
+            "请至少选择一个可信请求头，并设置有效状态");
+        return;
+    }
+    enabled = strcmp(enabledText, "1") == 0;
+    if (!vm_mock_admin_trusted_proxy_source_save(
+            sourceAddress, trustXRealIp, trustXForwardedFor, enabled))
+    {
+        vm_mock_admin_redirect_proxy_security(
+            client, "error", "保存可信代理来源失败，请检查 MySQL");
+        return;
+    }
+    vm_mock_admin_redirect_proxy_security(
+        client, "ok", enabled ? "可信代理来源已保存并立即生效" :
+                                 "可信代理来源已停用");
+}
+
 static void vm_mock_admin_handle_login_server_action(
     vm_mock_service_socket client, const char *action, const char *body)
 {
@@ -12376,17 +13077,23 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
     char itemText[32];
     char amountText[32];
     char levelText[32];
+    char equipmentSlotText[32];
+    char enhanceLevelText[32];
     char roleNameUtf8[128];
     char roleNameGbk[32];
     char resetSceneUtf8[192];
     char resetRuntimeScene[64];
     char operationDetail[256];
+    char auditTarget[64];
     const char *error = NULL;
     u32 itemId = 0;
     u32 amount = 0;
     u32 level = 0;
+    u32 equipmentSlot = 0;
+    u32 enhanceLevel = 0;
     u32 roleId = 0;
     u16 itemSeq = 0;
+    u16 previousEnhanceLevel = 0;
     bool ok = false;
 
     memset(action, 0, sizeof(action));
@@ -12396,11 +13103,14 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
     memset(itemText, 0, sizeof(itemText));
     memset(amountText, 0, sizeof(amountText));
     memset(levelText, 0, sizeof(levelText));
+    memset(equipmentSlotText, 0, sizeof(equipmentSlotText));
+    memset(enhanceLevelText, 0, sizeof(enhanceLevelText));
     memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
     memset(roleNameGbk, 0, sizeof(roleNameGbk));
     memset(resetSceneUtf8, 0, sizeof(resetSceneUtf8));
     memset(resetRuntimeScene, 0, sizeof(resetRuntimeScene));
     memset(operationDetail, 0, sizeof(operationDetail));
+    memset(auditTarget, 0, sizeof(auditTarget));
     if (!vm_mock_admin_account_id_is_valid(operatorAccountId))
     {
         vm_mock_admin_redirect(client, "", "error", "后台会话身份无效，请重新登录");
@@ -12411,6 +13121,10 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
         return;
     }
+    (void)vm_mock_admin_form_value(body, "account", auditTarget,
+                                   sizeof(auditTarget));
+    vm_mock_admin_operation_audit_begin(operatorAccountId, action,
+                                        auditTarget);
     if (strcmp(action, "save-dsh-row") == 0)
     {
         vm_mock_admin_handle_dsh_row_action(client, body);
@@ -12420,6 +13134,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
         strcmp(action, "revoke-global-reward") == 0)
     {
         vm_mock_admin_handle_global_reward_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-designation") == 0)
+    {
+        vm_mock_admin_handle_designation_action(client, action, body);
         return;
     }
     if (strcmp(action, "save-sce-portal-target") == 0)
@@ -12498,6 +13217,12 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
         strcmp(action, "delete-login-server") == 0)
     {
         vm_mock_admin_handle_login_server_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-trusted-proxy-source") == 0 ||
+        strcmp(action, "delete-trusted-proxy-source") == 0)
+    {
+        vm_mock_admin_handle_trusted_proxy_source_action(client, action, body);
         return;
     }
     if (strcmp(action, "ban-risk-account") == 0)
@@ -12741,6 +13466,63 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "角色等级已更新，经验已重置为该等级起点"
                                   : (error ? error : "角色等级设置失败"));
+        return;
+    }
+    if (strcmp(action, "set-equipped-enhance-level") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "equipment_slot",
+                                      equipmentSlotText,
+                                      sizeof(equipmentSlotText)) ||
+            !vm_mock_admin_form_value(body, "enhance_level", enhanceLevelText,
+                                      sizeof(enhanceLevelText)) ||
+            !vm_net_mock_parse_u32_strict(equipmentSlotText,
+                                           &equipmentSlot) ||
+            equipmentSlot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+            !vm_net_mock_parse_u32_strict(enhanceLevelText, &enhanceLevel) ||
+            enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
+        {
+            vm_mock_admin_redirect(
+                client, account, "error",
+                "角色、装备位或强化等级参数无效（强化范围为 +0 至 +16）");
+            return;
+        }
+        ok = vm_mock_service_account_set_equipped_enhance_level(
+            account, role, equipmentSlot, enhanceLevel, &itemId,
+            &previousEnhanceLevel, &error);
+        if (ok && previousEnhanceLevel != enhanceLevel)
+        {
+            const vm_net_mock_shop_catalog_item *catalogItem =
+                vm_net_mock_find_shop_catalog_item(itemId);
+            char itemNameUtf8[128];
+
+            memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+            if (catalogItem != NULL)
+            {
+                vm_net_mock_gbk_label_to_utf8(catalogItem->name,
+                                              itemNameUtf8,
+                                              sizeof(itemNameUtf8));
+            }
+            (void)vm_net_mock_parse_u32_strict(role, &roleId);
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "%s %s（ID %u）强化由 +%u 调整为 +%u",
+                     vm_mock_admin_equipment_slot_label(equipmentSlot),
+                     itemNameUtf8[0] ? itemNameUtf8 : "未命名装备", itemId,
+                     previousEnhanceLevel, enhanceLevel);
+            if (!vm_mock_admin_operation_log_record(
+                    "set-equipped-enhance-level", account, roleId, itemId,
+                    enhanceLevel, 0, operationDetail, operatorAccountId))
+            {
+                vm_mock_admin_redirect(
+                    client, account, "error",
+                    "装备强化等级已更新，但操作日志写入失败，请检查数据库");
+                return;
+            }
+        }
+        vm_mock_admin_redirect(
+            client, account, ok ? "ok" : "error",
+            ok ? (error ? error : "穿戴装备强化等级已更新")
+               : (error ? error : "穿戴装备强化等级设置失败"));
         return;
     }
     if (strcmp(action, "grant-item") == 0)
@@ -14376,6 +15158,30 @@ static void vm_mock_admin_handle_content_file_upload(
                                             message);
 }
 
+/* The synchronous browser return remains GET-only.  The provider's
+ * asynchronous notify contract accepts both its legacy query form and the
+ * normal application/x-www-form-urlencoded POST body. */
+static bool vm_mock_admin_payment_callback_payload_for_request(
+    const char *method, bool synchronous, const char *query, const char *body,
+    const char **payloadOut, const char **sourceOut)
+{
+    if (payloadOut != NULL)
+        *payloadOut = query ? query : "";
+    if (sourceOut != NULL)
+        *sourceOut = synchronous ? "return-get" : "notify-get";
+    if (method != NULL && strcmp(method, "GET") == 0)
+        return true;
+    if (!synchronous && method != NULL && strcmp(method, "POST") == 0)
+    {
+        if (payloadOut != NULL)
+            *payloadOut = body ? body : "";
+        if (sourceOut != NULL)
+            *sourceOut = "notify-post";
+        return true;
+    }
+    return false;
+}
+
 /* The request dispatcher only sees a complete, NUL-terminated request.  Its
  * caller owns the allocated buffer so all existing response branches can
  * return normally without leaking a large form body. */
@@ -14395,6 +15201,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
      * Origin at the browser-facing address.  Authentication and route-level
      * method checks below are the access-control boundary, so do not reject
      * otherwise valid admin requests based on those proxy-facing headers. */
+    vm_mock_admin_operation_audit_clear();
     body = request + headerLen;
     body[contentLength] = 0;
     memset(method, 0, sizeof(method));
@@ -14426,17 +15233,23 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         strcmp(target, "/payment/cbhub/return") == 0)
     {
         bool synchronous = strcmp(target, "/payment/cbhub/return") == 0;
+        const char *callbackPayload = query;
+        const char *callbackSource = synchronous ? "return-get" : "notify-get";
         char payId[64];
         vm_mock_payment_settle_result settleResult;
 
-        if (strcmp(method, "GET") != 0)
+        if (!vm_mock_admin_payment_callback_payload_for_request(
+                method, synchronous, query, body, &callbackPayload,
+                &callbackSource))
         {
             vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
-                                        "Allow: GET\r\n", "fail");
+                                        synchronous ? "Allow: GET\r\n" :
+                                                      "Allow: GET, POST\r\n",
+                                        "fail");
             return 0;
         }
         settleResult = vm_mock_payment_process_callback_query(
-            query, synchronous ? "return" : "notify", payId);
+            callbackPayload, callbackSource, payId, NULL);
         if (!synchronous)
         {
             vm_mock_admin_send_response(
@@ -14618,6 +15431,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         const char *message = NULL;
         bool registering = strcmp(target, "/user/register") == 0;
         bool ok = false;
+        bool credentialFailure = false;
 
         if (strcmp(method, "POST") != 0)
         {
@@ -14632,6 +15446,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
             !vm_mock_admin_form_value(body, "password", password, sizeof(password)))
         {
             message = "账号或密码参数不完整";
+            credentialFailure = !registering;
         }
         else if (registering)
         {
@@ -14655,6 +15470,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
             bool banned = false;
 
             ok = vm_mock_service_account_verify_credentials(account, password);
+            credentialFailure = !ok;
             if (ok && !vm_mock_service_account_access_ban_check(
                           account, &banned, NULL, 0))
             {
@@ -14680,6 +15496,11 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                             NULL, NULL, "登录会话暂不可用。\n");
                 return 0;
             }
+            if (!registering)
+            {
+                vm_mock_service_login_ip_note_success(
+                    vm_mock_service_login_ip_current_source());
+            }
             snprintf(cookieHeader, sizeof(cookieHeader),
                      "Set-Cookie: cbe_user=%s; Path=/; HttpOnly; SameSite=Strict\r\n",
                      session->token);
@@ -14687,6 +15508,11 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                    registering ? "register" : "login", account);
             vm_mock_admin_send_location(client, "/", cookieHeader);
             return 1;
+        }
+        if (!registering && credentialFailure)
+        {
+            (void)vm_mock_service_login_ip_note_failure(
+                vm_mock_service_login_ip_current_source(), "user-web", NULL);
         }
         printf("[warn][user-web] %s account=%s result=rejected\n",
                registering ? "register" : "login",
@@ -15007,6 +15833,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         char password[65];
         const char *loginMessage = NULL;
         bool loginOk = false;
+        bool credentialFailure = false;
 
         memset(accountId, 0, sizeof(accountId));
         memset(password, 0, sizeof(password));
@@ -15018,7 +15845,13 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         {
             loginOk = vm_mock_admin_verify_login_credentials(accountId,
                                                               password,
-                                                              &loginMessage);
+                                                              &loginMessage,
+                                                              &credentialFailure);
+        }
+        else if (strcmp(method, "POST") == 0)
+        {
+            credentialFailure = true;
+            loginMessage = "后台账号或密码错误";
         }
         memset(password, 0, sizeof(password));
         if (loginOk)
@@ -15037,10 +15870,17 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
             snprintf(cookieHeader, sizeof(cookieHeader),
                      "Set-Cookie: cbe_admin=%s; Path=" VM_MOCK_ADMIN_BASE_PATH "; HttpOnly; SameSite=Strict\r\n",
                      adminSession->token);
+            vm_mock_service_login_ip_note_success(
+                vm_mock_service_login_ip_current_source());
             vm_mock_admin_send_location(client, VM_MOCK_ADMIN_ROOT_PATH,
                                         cookieHeader);
             memset(accountId, 0, sizeof(accountId));
             return 1;
+        }
+        if (credentialFailure)
+        {
+            (void)vm_mock_service_login_ip_note_failure(
+                vm_mock_service_login_ip_current_source(), "admin-web", NULL);
         }
         memset(accountId, 0, sizeof(accountId));
         if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0)
@@ -15246,6 +16086,11 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                         "Allow: POST\r\n", "只允许 POST。\n");
             return 0;
         }
+        vm_mock_admin_operation_audit_begin(
+            adminSession->accountId,
+            strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/gif-upload") == 0 ?
+                "upload-gif" : "upload-dsh",
+            "admin-config");
         vm_mock_admin_handle_content_file_upload(
             client, strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/gif-upload") == 0,
             request, headerLen, (const u8 *)body, contentLength);
@@ -15274,6 +16119,8 @@ static bool vm_mock_admin_request_total_length(size_t headerLen,
 static int vm_mock_admin_handle_client(vm_mock_service_socket client)
 {
     char headers[VM_MOCK_ADMIN_HEADER_MAX + 1];
+    char peerAddress[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+    char sourceAddress[VM_MOCK_SERVICE_LOGIN_IP_CAP];
     char *headerEnd = NULL;
     char *request = NULL;
     size_t received = 0;
@@ -15313,6 +16160,22 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         return 0;
     }
     headerLen = (size_t)(headerEnd - headers) + 4u;
+    memset(peerAddress, 0, sizeof(peerAddress));
+    memset(sourceAddress, 0, sizeof(sourceAddress));
+    snprintf(peerAddress, sizeof(peerAddress), "%s",
+             vm_mock_service_login_ip_current_source());
+    (void)vm_mock_admin_resolve_login_source(peerAddress, headers, headerLen,
+                                             sourceAddress,
+                                             sizeof(sourceAddress));
+    vm_mock_service_login_ip_set_source(sourceAddress);
+    if (vm_mock_service_login_ip_is_blocked(
+            vm_mock_service_login_ip_current_source()))
+    {
+        /* The effective source can only be known after nginx's bounded HTTP
+         * headers arrive.  From this point do not read a body, route, or send
+         * an HTTP response for a blocked client. */
+        return 0;
+    }
     if (!vm_mock_admin_parse_content_length(headers, headerLen, &contentLength) ||
         !vm_mock_admin_request_total_length(headerLen, contentLength, &totalLen))
     {

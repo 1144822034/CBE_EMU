@@ -1304,37 +1304,51 @@ invalid_no_rollback:
 }
 
 static vm_mock_payment_settle_result vm_mock_payment_process_callback_query(
-    const char *query, const char *source, char payIdOut[64])
+    const char *query, const char *source, char payIdOut[64],
+    const char **reasonOut)
 {
     vm_mock_payment_config config;
     vm_mock_payment_callback callback;
     char signInput[512];
     char expected[33];
     vm_mock_payment_settle_result result = VM_MOCK_PAYMENT_SETTLE_INVALID;
+    const char *reason = "payment-config-unavailable";
 
     if (payIdOut)
         payIdOut[0] = 0;
+    if (reasonOut)
+        *reasonOut = reason;
     memset(&config, 0, sizeof(config));
     memset(&callback, 0, sizeof(callback));
     memset(signInput, 0, sizeof(signInput));
-    if (!vm_mock_payment_load_config(&config) ||
-        !vm_mock_payment_parse_callback(query, &callback))
+    if (!vm_mock_payment_load_config(&config))
+        goto done;
+    reason = "callback-fields-invalid";
+    if (!vm_mock_payment_parse_callback(query, &callback))
         goto done;
     snprintf(signInput, sizeof(signInput), "%s%s%s%s%s%s",
              callback.payId, callback.param, callback.typeText,
              callback.priceText, callback.reallyPriceText, config.secretKey);
     vm_md5_hex(signInput, strlen(signInput), expected);
+    reason = "signature-rejected";
     if (!vm_mock_payment_constant_sign_equal(expected, callback.sign))
         goto done;
+    reason = "order-rejected-or-credit-failed";
     result = vm_mock_payment_settle_verified(&callback);
     if (result != VM_MOCK_PAYMENT_SETTLE_INVALID && payIdOut)
         snprintf(payIdOut, 64, "%s", callback.payId);
+    if (result == VM_MOCK_PAYMENT_SETTLE_CREDITED)
+        reason = "credited";
+    else if (result == VM_MOCK_PAYMENT_SETTLE_PENDING)
+        reason = "paid-pending";
 
 done:
-    printf("[%s][payment] callback source=%s pay_id=%s result=%u\n",
+    if (reasonOut)
+        *reasonOut = reason;
+    printf("[%s][payment] callback source=%s pay_id=%s result=%u reason=%s\n",
            result == VM_MOCK_PAYMENT_SETTLE_INVALID ? "warn" : "info",
            source ? source : "-", callback.payId[0] ? callback.payId : "-",
-           (u32)result);
+           (u32)result, reason);
     memset(config.secretKey, 0, sizeof(config.secretKey));
     memset(signInput, 0, sizeof(signInput));
     return result;
@@ -1409,7 +1423,7 @@ static bool vm_mock_payment_refresh_order(const char *accountId,
             *strchr(callbackQuery, '#') = 0;
         (void)vm_mock_payment_process_callback_query(callbackQuery,
                                                      "check-order-signed-data",
-                                                     NULL);
+                                                     NULL, NULL);
     }
     memset(config.secretKey, 0, sizeof(config.secretKey));
     return true;

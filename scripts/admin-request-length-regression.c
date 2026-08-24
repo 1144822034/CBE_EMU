@@ -91,6 +91,31 @@ int main(int argc, char **argv)
         "GET /healthz HTTP/1.1\r\n"
         "Host: 127.0.0.1:19091\r\n"
         "Origin: https://admin.example.test\r\n\r\n";
+    char trustedProxyLoginRequest[] =
+        "POST /user/login HTTP/1.1\r\n"
+        "Host: account.example.test\r\n"
+        "X-Real-IP: 203.0.113.7\r\n"
+        "X-Forwarded-For: 203.0.113.7\r\n"
+        "Content-Length: 0\r\n\r\n";
+    char untrustedProxyLoginRequest[] =
+        "POST /user/login HTTP/1.1\r\n"
+        "Host: account.example.test\r\n"
+        "X-Real-IP: 203.0.113.7\r\n"
+        "X-Forwarded-For: 203.0.113.7\r\n"
+        "Content-Length: 0\r\n\r\n";
+    char forwardedForLoginRequest[] =
+        "POST /user/login HTTP/1.1\r\n"
+        "Host: account.example.test\r\n"
+        "X-Forwarded-For: 203.0.113.8\r\n"
+        "Content-Length: 0\r\n\r\n";
+    char forwardedForChainRequest[] =
+        "POST /user/login HTTP/1.1\r\n"
+        "Host: account.example.test\r\n"
+        "X-Forwarded-For: 203.0.113.8, 198.51.100.10\r\n"
+        "Content-Length: 0\r\n\r\n";
+    const char paymentCallbackForm[] =
+        "payId=JH202608240001&param=P202608240001&type=1&price=1.00&"
+        "reallyPrice=1.00&sign=0123456789abcdef0123456789abcdef";
     char proxyResponse[1024];
     vm_mock_service_socket proxyServer = VM_MOCK_SERVICE_INVALID_SOCKET;
     vm_mock_service_socket proxyClient = VM_MOCK_SERVICE_INVALID_SOCKET;
@@ -103,8 +128,14 @@ int main(int argc, char **argv)
     char renderedPortalFields[16384];
     char renderedMonsterDropBatch[24576];
     char renderedAdminLogin[16384];
+    char renderedDesignations[65536];
+    char renderedRoleOperations[16384];
     char adminCookieRequest[256];
     char endpointHost[64];
+    char resolvedLoginSource[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+    const char *callbackPayload = NULL;
+    const char *callbackSource = NULL;
+    vm_mock_payment_callback paymentCallback;
     u16 endpointPort = 0;
     size_t serviceFormLen = 0;
     char operationFilterSql[768];
@@ -113,9 +144,12 @@ int main(int argc, char **argv)
     vm_mock_admin_text renderedPage;
     vm_mock_admin_text renderedPortalPage;
     vm_mock_admin_text renderedMonsterDropBatchPage;
+    vm_mock_admin_text renderedRoleOperationsPage;
     vm_mock_admin_operation_log_page operatorLogPage;
     vm_mock_admin_scene_file sceneFixtures[2];
     vm_mock_admin_scene_portal portalFixture;
+    char rewardRecipients[VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX]
+                         [VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_ACCOUNT_CAP];
     vm_net_mock_npc_service_option
         serviceOptions[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
     vm_net_mock_monster_admin_row dropFilterFixture;
@@ -123,6 +157,7 @@ int main(int argc, char **argv)
     vm_net_mock_monster_drop_batch_result dropBatchResult;
     bool dropBatchChanged[3];
     const char *dropBatchError = NULL;
+    const char *rewardRecipientError = NULL;
     const char *operatorLogValues[] = {
         "7", "operator.alice", "add-wcoin", "audit-target", "0", "0",
         "0", "100", "E5A29EE58AA02057E5B88120313030",
@@ -131,7 +166,16 @@ int main(int argc, char **argv)
     size_t operatorLogLengths[10];
     vm_mock_admin_session *firstAdminSession = NULL;
     vm_mock_admin_session *secondAdminSession = NULL;
+    vm_mock_service_login_ip_block_cache *loginIpBlockCache =
+        &g_vmMockServiceLoginIpBlockCache;
+    const vm_net_mock_designation_entry *baseDesignation = NULL;
+    const vm_net_mock_designation_entry *specialDesignation = NULL;
+    vm_net_mock_designation_config *baseDesignationConfig = NULL;
+    vm_net_mock_designation_config *specialDesignationConfig = NULL;
+    vm_net_mock_designation_admin_row designationDirectoryFixture;
+    vm_net_mock_role_state roleOperationFixture;
     u32 dropBatchItemId = 0;
+    u32 rewardRecipientCount = 0;
     u32 serviceOptionCount = 0;
 
     if (!vm_mock_admin_open_loopback_pair(&proxyServer, &proxyClient) ||
@@ -153,6 +197,283 @@ int main(int argc, char **argv)
         fprintf(stderr, "admin operator account validation is incomplete\n");
         return 1;
     }
+    memset(&roleOperationFixture, 0, sizeof(roleOperationFixture));
+    roleOperationFixture.roleId = 37;
+    roleOperationFixture.level = 88;
+    roleOperationFixture.equippedItems[0].itemId = 1001;
+    roleOperationFixture.equippedItems[0].enhanceLevel = 9;
+    roleOperationFixture.equippedItems[0].durability = 48;
+    roleOperationFixture.equippedItems[0].durabilityMax = 50;
+    memset(renderedRoleOperations, 0, sizeof(renderedRoleOperations));
+    vm_mock_admin_text_init(&renderedRoleOperationsPage,
+                            renderedRoleOperations,
+                            sizeof(renderedRoleOperations));
+    vm_mock_admin_render_role_operation_modal(
+        &renderedRoleOperationsPage, "role.ops", &roleOperationFixture,
+        "操作测试角色");
+    if (renderedRoleOperationsPage.truncated ||
+        strstr(renderedRoleOperations,
+               "data-role-operation-tab=\"profile\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-role-operation-pane=\"items\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-role-operation-pane=\"equipment\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"action\" value=\"set-role-name\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"action\" value=\"set-role-level\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"action\" value=\"add-money\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"action\" value=\"grant-item\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"action\" value=\"reset-role-selected-scene\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"action\" value=\"set-equipped-enhance-level\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"equipment_slot\" value=\"0\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"enhance_level\" min=\"0\" max=\"16\" value=\"9\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"role\" value=\"37\"") == NULL)
+    {
+        fprintf(stderr,
+                "role operation modal does not preserve every role action\n");
+        return 1;
+    }
+    if (!vm_mock_service_login_ip_is_valid("203.0.113.7") ||
+        !vm_mock_service_login_ip_is_valid("255.255.255.255") ||
+        vm_mock_service_login_ip_is_valid("203.0.113.256") ||
+        vm_mock_service_login_ip_is_valid("203.0.113") ||
+        VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT != 15)
+    {
+        fprintf(stderr, "login IP validation or failure limit is invalid\n");
+        return 1;
+    }
+    memset(resolvedLoginSource, 0, sizeof(resolvedLoginSource));
+    if (!vm_mock_admin_resolve_login_source_from_trusted_headers(
+            "127.0.0.1", trustedProxyLoginRequest,
+            sizeof(trustedProxyLoginRequest) - 1u, true, false,
+            resolvedLoginSource, sizeof(resolvedLoginSource)) ||
+        strcmp(resolvedLoginSource, "203.0.113.7") != 0)
+    {
+        fprintf(stderr, "trusted proxy real IP was not selected\n");
+        return 1;
+    }
+    memset(resolvedLoginSource, 0, sizeof(resolvedLoginSource));
+    if (vm_mock_admin_resolve_login_source_from_trusted_headers(
+            "198.51.100.9", untrustedProxyLoginRequest,
+            sizeof(untrustedProxyLoginRequest) - 1u, false, false,
+            resolvedLoginSource, sizeof(resolvedLoginSource)) ||
+        strcmp(resolvedLoginSource, "198.51.100.9") != 0)
+    {
+        fprintf(stderr, "untrusted peer spoofed the real IP header\n");
+        return 1;
+    }
+    memset(&paymentCallback, 0, sizeof(paymentCallback));
+    if (!vm_mock_payment_parse_callback(paymentCallbackForm,
+                                        &paymentCallback) ||
+        paymentCallback.payType != 1 || paymentCallback.priceCents != 100 ||
+        paymentCallback.reallyPriceCents != 100 ||
+        !vm_mock_admin_payment_callback_payload_for_request(
+            "POST", false, "", paymentCallbackForm, &callbackPayload,
+            &callbackSource) ||
+        callbackPayload == NULL ||
+        strcmp(callbackPayload, paymentCallbackForm) != 0 ||
+        callbackSource == NULL || strcmp(callbackSource, "notify-post") != 0 ||
+        vm_mock_admin_payment_callback_payload_for_request(
+            "POST", true, "", paymentCallbackForm, &callbackPayload,
+            &callbackSource))
+    {
+        fprintf(stderr, "async payment POST callback contract is invalid\n");
+        return 1;
+    }
+    memset(resolvedLoginSource, 0, sizeof(resolvedLoginSource));
+    if (!vm_mock_admin_resolve_login_source_from_trusted_headers(
+            "10.20.30.40", forwardedForLoginRequest,
+            sizeof(forwardedForLoginRequest) - 1u, false, true,
+            resolvedLoginSource, sizeof(resolvedLoginSource)) ||
+        strcmp(resolvedLoginSource, "203.0.113.8") != 0)
+    {
+        fprintf(stderr, "trusted proxy forwarded-for IP was not selected\n");
+        return 1;
+    }
+    memset(resolvedLoginSource, 0, sizeof(resolvedLoginSource));
+    if (vm_mock_admin_resolve_login_source_from_trusted_headers(
+            "10.20.30.40", forwardedForChainRequest,
+            sizeof(forwardedForChainRequest) - 1u, false, true,
+            resolvedLoginSource, sizeof(resolvedLoginSource)) ||
+        strcmp(resolvedLoginSource, "10.20.30.40") != 0)
+    {
+        fprintf(stderr, "forwarded-for chain was accepted as a source IP\n");
+        return 1;
+    }
+    vm_mock_service_login_ip_set_source("203.0.113.7");
+    if (strcmp(vm_mock_service_login_ip_current_source(), "203.0.113.7") != 0)
+    {
+        fprintf(stderr, "login IP worker source is not retained\n");
+        return 1;
+    }
+    vm_mock_service_login_ip_set_source(NULL);
+    if (vm_mock_service_login_ip_current_source()[0] != 0)
+    {
+        fprintf(stderr, "login IP worker source is not cleared\n");
+        return 1;
+    }
+    pthread_mutex_lock(&loginIpBlockCache->mutex);
+    loginIpBlockCache->loaded = true;
+    loginIpBlockCache->available = true;
+    loginIpBlockCache->overflow = false;
+    loginIpBlockCache->count = 0;
+    vm_mock_service_login_ip_block_cache_add(loginIpBlockCache, "203.0.113.7");
+    vm_mock_service_login_ip_block_cache_add(loginIpBlockCache, "203.0.113.7");
+    if (loginIpBlockCache->count != 1 ||
+        !vm_mock_service_login_ip_block_cache_contains(loginIpBlockCache,
+                                                        "203.0.113.7"))
+    {
+        pthread_mutex_unlock(&loginIpBlockCache->mutex);
+        fprintf(stderr, "login IP block cache does not deduplicate entries\n");
+        return 1;
+    }
+    pthread_mutex_unlock(&loginIpBlockCache->mutex);
+    if (!vm_mock_service_login_ip_is_blocked("203.0.113.7") ||
+        vm_mock_service_login_ip_is_blocked("203.0.113.8"))
+    {
+        fprintf(stderr, "login IP block cache does not enforce silent-close gate\n");
+        return 1;
+    }
+    pthread_mutex_lock(&loginIpBlockCache->mutex);
+    loginIpBlockCache->loaded = false;
+    loginIpBlockCache->available = false;
+    loginIpBlockCache->overflow = false;
+    loginIpBlockCache->count = 0;
+    pthread_mutex_unlock(&loginIpBlockCache->mutex);
+    if (!vm_mock_admin_global_reward_parse_recipients(
+            "alpha_1, beta_2\ngamma_3 alpha_1", rewardRecipients,
+            VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX,
+            &rewardRecipientCount, &rewardRecipientError) ||
+        rewardRecipientError != NULL || rewardRecipientCount != 3 ||
+        strcmp(rewardRecipients[0], "alpha_1") != 0 ||
+        strcmp(rewardRecipients[1], "beta_2") != 0 ||
+        strcmp(rewardRecipients[2], "gamma_3") != 0 ||
+        !vm_mock_admin_global_reward_parse_recipients(
+            "", rewardRecipients,
+            VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX,
+            &rewardRecipientCount, &rewardRecipientError) ||
+        rewardRecipientError != NULL || rewardRecipientCount != 0 ||
+        vm_mock_admin_global_reward_parse_recipients(
+            "bad!account", rewardRecipients,
+            VM_MOCK_ADMIN_GLOBAL_REWARD_RECIPIENT_MAX,
+            &rewardRecipientCount, &rewardRecipientError) ||
+        rewardRecipientError == NULL ||
+        !vm_mock_admin_global_reward_form_has_field(
+            "title=test&recipient_accounts=alpha_1", "recipient_accounts") ||
+        vm_mock_admin_global_reward_form_has_field(
+            "title=test", "recipient_accounts"))
+    {
+        fprintf(stderr, "global reward recipient parsing is incomplete\n");
+        return 1;
+    }
+    vm_net_mock_designation_config_reset_to_defaults();
+    baseDesignation = vm_net_mock_designation_by_id(0);
+    specialDesignation = vm_net_mock_designation_by_id(32);
+    baseDesignationConfig = vm_net_mock_designation_config_by_id(0);
+    specialDesignationConfig = vm_net_mock_designation_config_by_id(32);
+    if (baseDesignation == NULL || specialDesignation == NULL ||
+        baseDesignationConfig == NULL || specialDesignationConfig == NULL ||
+        strcmp(specialDesignation->name,
+               "\xD7\xCA\xC9\xEE\xC0\xCF\xD3\xD1") != 0 ||
+        specialDesignation->overheadResource[0] != 0 ||
+        !baseDesignationConfig->enabled ||
+        baseDesignationConfig->conditionKind !=
+            VM_NET_MOCK_DESIGNATION_CONDITION_MONEY ||
+        baseDesignationConfig->conditionValue != 0 ||
+        specialDesignationConfig->enabled ||
+        specialDesignationConfig->conditionKind !=
+            VM_NET_MOCK_DESIGNATION_CONDITION_LEVEL ||
+        specialDesignationConfig->conditionValue != 1)
+    {
+        fprintf(stderr, "designation defaults or special-title resource policy failed\n");
+        return 1;
+    }
+    memset(&designationDirectoryFixture, 0,
+           sizeof(designationDirectoryFixture));
+    designationDirectoryFixture.designationId = 0;
+    if (strcmp(vm_mock_admin_designation_directory(
+                   &designationDirectoryFixture),
+               "money") != 0 ||
+        strcmp(vm_mock_admin_designation_directory_label("money"),
+               "金钱称号") != 0)
+    {
+        fprintf(stderr, "wealth designation directory is missing\n");
+        return 1;
+    }
+    designationDirectoryFixture.designationId = 16;
+    if (strcmp(vm_mock_admin_designation_directory(
+                   &designationDirectoryFixture),
+               "level") != 0 ||
+        strcmp(vm_mock_admin_designation_directory_label("level"),
+               "等级称号") != 0)
+    {
+        fprintf(stderr, "level designation directory is missing\n");
+        return 1;
+    }
+    designationDirectoryFixture.special = true;
+    if (strcmp(vm_mock_admin_designation_directory(
+                   &designationDirectoryFixture),
+               "special") != 0 ||
+        strcmp(vm_mock_admin_designation_directory_label("special"),
+               "特殊称号") != 0)
+    {
+        fprintf(stderr, "special designation directory is missing\n");
+        return 1;
+    }
+    /* The title page's data source is normally MySQL-backed.  Keep the page
+     * rendering assertion local and deterministic by using the already reset
+     * in-memory defaults as a loaded fixture. */
+    g_vm_net_mock_designation_config_db_loaded = true;
+    g_vm_net_mock_designation_config_db_valid = true;
+    memset(renderedDesignations, 0, sizeof(renderedDesignations));
+    vm_mock_admin_render_designations_page(renderedDesignations,
+                                           sizeof(renderedDesignations), "");
+    if (strstr(renderedDesignations,
+               "data-designation-filter=\"money\"") == NULL ||
+        strstr(renderedDesignations,
+               "data-designation-filter=\"level\"") == NULL ||
+        strstr(renderedDesignations,
+               "data-designation-filter=\"special\"") == NULL ||
+        strstr(renderedDesignations,
+               "data-designation-category=\"money\"") == NULL ||
+        strstr(renderedDesignations,
+               "data-designation-category=\"level\"") == NULL ||
+        strstr(renderedDesignations,
+               "data-designation-category=\"special\"") == NULL ||
+        strstr(renderedDesignations,
+               "src=\"/gif-preview.bmp?gif=riches_name0.gif\"") == NULL ||
+        strstr(renderedDesignations, "暂无专属徽章预览") == NULL ||
+        strstr(renderedDesignations, "客户端徽章资源") != NULL)
+    {
+        fprintf(stderr, "designation directory or badge preview rendering failed\n");
+        return 1;
+    }
+    vm_mock_admin_operation_audit_begin("operator.alice", "save-npc",
+                                        "admin-config");
+    if (!g_vm_mock_admin_operation_audit_context.active ||
+        strcmp(g_vm_mock_admin_operation_audit_context.operatorAccountId,
+               "operator.alice") != 0 ||
+        strcmp(g_vm_mock_admin_operation_audit_context.actionCode,
+               "save-npc") != 0 ||
+        strcmp(g_vm_mock_admin_operation_audit_context.targetAccountId,
+               "admin-config") != 0 ||
+        !vm_mock_admin_operation_audit_location_is_success(
+            "/admin-418yz6/?tab=content&status=ok") ||
+        vm_mock_admin_operation_audit_location_is_success(
+            "/admin-418yz6/?tab=content&status=error"))
+    {
+        fprintf(stderr, "admin edit audit context does not preserve operator or outcome\n");
+        return 1;
+    }
+    vm_mock_admin_operation_audit_clear();
     memset(g_vm_mock_admin_sessions, 0, sizeof(g_vm_mock_admin_sessions));
     firstAdminSession = vm_mock_admin_issue_session("operator.alice");
     secondAdminSession = vm_mock_admin_issue_session("operator.bob");
@@ -561,7 +882,28 @@ int main(int argc, char **argv)
                 "admin toasts do not preserve persistent page controls\n");
         return 1;
     }
+    if (strstr(g_vm_mock_admin_script,
+               "const setupRoleOperationModal") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-role-operation-open") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-role-operation-tab") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-admin-confirm") == NULL ||
+        strstr(g_vm_mock_admin_script, "setupRoleOperationModal();") == NULL)
+    {
+        fprintf(stderr,
+                "role operation modal is not owned by the shared admin script\n");
+        return 1;
+    }
     if (strstr(g_vm_mock_admin_script, "const setupGlobalRewards") == NULL ||
+        strstr(g_vm_mock_admin_script, "const setupDesignationTab") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "const setupDesignationDirectory") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "data-designation-filter") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "data-designation-category") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "setupDesignationDirectory();") == NULL ||
+        strstr(g_vm_mock_admin_script, "tab=designations") == NULL ||
         strstr(g_vm_mock_admin_script, "data-global-reward-form") == NULL ||
         strstr(g_vm_mock_admin_script, "data-global-reward-add") == NULL ||
         strstr(g_vm_mock_admin_script, "row.hidden=false") == NULL ||
@@ -572,8 +914,13 @@ int main(int argc, char **argv)
         return 1;
     }
     if (strstr(g_vm_mock_admin_script, "操作日志") == NULL ||
+        strcmp(vm_mock_admin_operation_log_action_label("admin-edit"),
+               "后台配置编辑") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("set-role-level"),
                "设置角色等级") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label(
+                   "set-equipped-enhance-level"),
+               "设置穿戴装备强化等级") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("add-money"),
                "增加普通钱币") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("grant-item"),

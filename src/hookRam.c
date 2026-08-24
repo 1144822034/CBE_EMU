@@ -48,6 +48,13 @@ extern u32 g_vmEquipmentEnhanceRulesWatchWriteCount;
  * the bad state. */
 static u32 g_vmMapControllerWatchWriteCount;
 
+/* SceneTickUpdatePositions(0x010163A4) dispatches raw input through this
+ * three-word callback group.  The startup test-map regression reaches the
+ * dispatcher with the first and third slots clear, so retain the first guest
+ * writes that establish or clear them.  This hook only observes Unicorn's
+ * write notification and never changes guest registers, memory, or flow. */
+static u32 g_vmSceneInputDelegateWatchWriteCount;
+
 static void vm_trace_map_controller_writer_context(uc_engine *uc, u32 pc,
                                                    u32 cursorRef)
 {
@@ -193,6 +200,40 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         u32 start = (u32)address;
         u32 end = start + size;
         u32 watchStart = Global_R9 + 0x9540u;
+        u32 delegateStart = Global_R9 + 0x5D24u;
+
+        if (start < delegateStart + 12u && end > delegateStart &&
+            g_vmSceneInputDelegateWatchWriteCount < 48u)
+        {
+            static const char *const delegateNames[3] = {
+                "control_delegate", "input_callback", "touch_delegate"
+            };
+            u32 pc = 0;
+            u32 lr = 0;
+            u32 slot = (start - delegateStart) / sizeof(u32);
+            u32 prior = 0;
+            FILE *trace = NULL;
+
+            if (slot >= 3u)
+                slot = 2u;
+            (void)uc_mem_read(uc, delegateStart + slot * sizeof(u32),
+                              &prior, sizeof(prior));
+            (void)uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            ++g_vmSceneInputDelegateWatchWriteCount;
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_input_delegate_write count=%u field=%s "
+                        "pc=%08x lr=%08x addr=%08x size=%u value=%llx "
+                        "prior=%08x r9=%08x\n",
+                        g_vmSceneInputDelegateWatchWriteCount,
+                        delegateNames[slot], pc, lr, start, size, value,
+                        prior, Global_R9);
+                fclose(trace);
+            }
+        }
 
         if (start < watchStart + sizeof(u32) && end > watchStart &&
             g_vmMapControllerWatchWriteCount < 32u)

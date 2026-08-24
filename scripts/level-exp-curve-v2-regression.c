@@ -1,8 +1,8 @@
 /*
- * Pure regression for the V3 cumulative EXP curve.
+ * Pure regression for the V4 cumulative EXP curve.
  *
  * This test starts neither server nor client and opens no database.  It locks
- * down the player-visible thresholds, normal/boss PVE reward ratios, offline
+ * down the player-visible thresholds, uniform monster PVE rewards, offline
  * practice proportion, cap behavior, and both legacy migration sources.
  */
 
@@ -28,8 +28,8 @@ int main(void)
         u32 level;
         u32 startExp;
     } anchors[] = {
-        {2, 2829}, {10, 43612}, {20, 174620}, {40, 2241165},
-        {49, 6776163}, {50, 7659893}, {60, 26054136}, {70, 100001769}
+        {2, 6750}, {10, 87000}, {20, 467000}, {40, 9797000},
+        {49, 44537000}, {50, 50072000}, {60, 222072000}, {70, 717747000}
     };
     vm_net_mock_role_state role;
     vm_net_mock_monster_entry entry;
@@ -55,9 +55,9 @@ int main(void)
             return 1;
         }
     }
-    if (expect_u32("curve cap", vm_net_mock_role_exp_cap(), 100001769) ||
+    if (expect_u32("curve cap", vm_net_mock_role_exp_cap(), 717747000) ||
         expect_u32("level-70 interval",
-                   vm_net_mock_role_exp_interval_for_level(70), 11507132))
+                   vm_net_mock_role_exp_interval_for_level(70), 62235000))
     {
         return 1;
     }
@@ -75,14 +75,20 @@ int main(void)
         }
     }
 
-    if (expect_u32("normal level-10 reward",
-                   vm_net_mock_normal_monster_exp_for_level(10), 4) ||
+    if (expect_u32("normal level-4 reward",
+                   vm_net_mock_normal_monster_exp_for_level(4), 3) ||
+        expect_u32("normal level-5 reward",
+                   vm_net_mock_normal_monster_exp_for_level(5), 5) ||
+        expect_u32("normal level-10 reward",
+                   vm_net_mock_normal_monster_exp_for_level(10), 8) ||
         expect_u32("normal level-40 reward",
-                   vm_net_mock_normal_monster_exp_for_level(40), 118) ||
+                   vm_net_mock_normal_monster_exp_for_level(40), 90) ||
         expect_u32("normal level-60 reward",
-                   vm_net_mock_normal_monster_exp_for_level(60), 1356) ||
+                   vm_net_mock_normal_monster_exp_for_level(60), 450) ||
         expect_u32("normal level-70 reward",
-                   vm_net_mock_normal_monster_exp_for_level(70), 4603))
+                   vm_net_mock_normal_monster_exp_for_level(70), 675) ||
+        expect_u32("normal level-70 money",
+                   vm_net_mock_normal_monster_gold_for_level(70), 168))
     {
         return 1;
     }
@@ -98,8 +104,10 @@ int main(void)
     normal = vm_net_mock_monster_base_stats_for_entry(&entry);
     entry.family = VM_NET_MOCK_MONSTER_BOSS;
     boss = vm_net_mock_monster_base_stats_for_entry(&entry);
-    if (expect_u32("default normal reward", normal.exp, 4603) ||
-        expect_u32("default boss reward", boss.exp, 23015))
+    if (expect_u32("default normal reward", normal.exp, 675) ||
+        expect_u32("default boss reward", boss.exp, 675) ||
+        expect_u32("default normal money", normal.gold, 168) ||
+        expect_u32("default boss money", boss.gold, 168))
     {
         return 1;
     }
@@ -115,7 +123,7 @@ int main(void)
     newInterval = vm_net_mock_role_exp_interval_for_level(49);
     expectedExp = newStart + (u32)(((uint64_t)sourceProgress * newInterval) /
                                     sourceInterval);
-    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, false, false, &oldLevel,
+    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, false, false, false, &oldLevel,
                                                 &sourceCapped) ||
         oldLevel != 49 || sourceCapped || role.level != 49 ||
         role.exp != expectedExp)
@@ -125,7 +133,7 @@ int main(void)
     }
 
     /* A V9 V2-curve account retains the same level and 37% interval progress
-     * when the one-hundred-million V3 curve becomes live. */
+     * when the banded V4 curve becomes live. */
     memset(&role, 0, sizeof(role));
     sourceStart = g_vm_net_mock_role_level_start_exp_v2[49];
     sourceInterval = g_vm_net_mock_role_level_start_exp_v2[50] - sourceStart;
@@ -135,12 +143,31 @@ int main(void)
     newInterval = vm_net_mock_role_exp_interval_for_level(49);
     expectedExp = newStart + (u32)(((uint64_t)sourceProgress * newInterval) /
                                     sourceInterval);
-    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, false, true, &oldLevel,
+    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, false, true, false, &oldLevel,
                                                 &sourceCapped) ||
         oldLevel != 49 || sourceCapped || role.level != 49 ||
         role.exp != expectedExp)
     {
         fputs("V2 EXP migration did not preserve level progress\n", stderr);
+        return 1;
+    }
+
+    /* The deployed V10 curve is the direct source of this release. */
+    memset(&role, 0, sizeof(role));
+    sourceStart = g_vm_net_mock_role_level_start_exp_v3[49];
+    sourceInterval = g_vm_net_mock_role_level_start_exp_v3[50] - sourceStart;
+    sourceProgress = (u32)(((uint64_t)sourceInterval * 37ull) / 100ull);
+    role.exp = sourceStart + sourceProgress;
+    newStart = vm_net_mock_role_level_start_exp(49);
+    newInterval = vm_net_mock_role_exp_interval_for_level(49);
+    expectedExp = newStart + (u32)(((uint64_t)sourceProgress * newInterval) /
+                                    sourceInterval);
+    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, false, false, true, &oldLevel,
+                                                &sourceCapped) ||
+        oldLevel != 49 || sourceCapped || role.level != 49 ||
+        role.exp != expectedExp)
+    {
+        fputs("V3 EXP migration did not preserve level progress\n", stderr);
         return 1;
     }
 
@@ -154,7 +181,7 @@ int main(void)
     newInterval = vm_net_mock_role_exp_interval_for_level(40);
     expectedExp = newStart + (u32)(((uint64_t)sourceProgress * newInterval) /
                                     sourceInterval);
-    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, true, false, &oldLevel,
+    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, true, false, false, &oldLevel,
                                                 &sourceCapped) ||
         oldLevel != 40 || sourceCapped || role.level != 40 ||
         role.exp != expectedExp)
@@ -165,7 +192,7 @@ int main(void)
 
     memset(&role, 0, sizeof(role));
     role.exp = g_vm_net_mock_role_level_start_exp_v1[70];
-    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, false, false, &oldLevel,
+    if (!vm_net_mock_role_migrate_exp_curve_v3(&role, false, false, false, &oldLevel,
                                                 &sourceCapped) ||
         oldLevel != 70 || !sourceCapped ||
         role.level != VM_NET_MOCK_ROLE_LEVEL_CAP ||
@@ -187,14 +214,32 @@ int main(void)
         return 1;
     }
 
+    {
+        u32 requiredFights = 0;
+
+        for (u32 level = 1; level < VM_NET_MOCK_ROLE_LEVEL_CAP; ++level)
+        {
+            u32 interval = vm_net_mock_role_exp_interval_for_level(level);
+            u32 reward = vm_net_mock_normal_monster_exp_for_level(level) * 10u;
+
+            requiredFights += (interval + reward - 1u) / reward;
+        }
+        if (expect_u32("1-70 10x normal kills", requiredFights, 216000) ||
+            expect_u32("daily monster reward quota",
+                       VM_NET_MOCK_MONSTER_REWARD_DAILY_UNIT_CAP, 7200))
+        {
+            return 1;
+        }
+    }
+
     normalRate = vm_net_mock_practise_exp_per_minute(
         vm_net_mock_role_level_start_exp(60), false);
     goldRate = vm_net_mock_practise_exp_per_minute(
         vm_net_mock_role_level_start_exp(60), true);
-    if (expect_u32("normal practice level-60 rate", normalRate, 142) ||
-        expect_u32("gold practice level-60 rate", goldRate, 284) ||
+    if (expect_u32("normal practice level-60 rate", normalRate, 1538) ||
+        expect_u32("gold practice level-60 rate", goldRate, 3076) ||
         expect_u32("normal practice level-60 daily output", normalRate * 480u,
-                   68160))
+                   738240))
     {
         return 1;
     }
@@ -205,12 +250,12 @@ int main(void)
         task.level = 20;
         task.rewardExp = 42000;
         if (expect_u32("level-20 task reward cap",
-                       vm_net_mock_task_effective_reward_exp(&task), 2043))
+                       vm_net_mock_task_effective_reward_exp(&task), 8064))
         {
             return 1;
         }
     }
 
-    puts("level-exp-curve-v3 regression passed: thresholds, rewards, migration, cap, and practice rate");
+    puts("level-exp-curve-v4 regression passed: thresholds, rewards, migration, cap, and practice rate");
     return 0;
 }

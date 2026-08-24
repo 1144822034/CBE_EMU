@@ -128,6 +128,66 @@ SET password_value = '新密码', failed_attempts = 0, locked = 0
 WHERE account_id = 'operator.alice';
 ```
 
+已有数据库启用游戏与网页共用的来源 IP 登录封锁时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_login_ip_blocks.sql
+```
+
+游戏客户端、玩家账号中心和后台管理登录共用 `server_login_ip_blocks`：同一来源 IPv4
+连续凭据错误 15 次会被永久封锁；第 15 次错误仍会按原登录入口返回失败结果，之后游戏服务会在
+读取协议帧前关闭连接；网页服务会先读取受限长度的请求头以识别受信任代理传递的真实 IP，随后
+不读取正文、不处理路由且不发送 HTTP 响应。一次成功的凭据登录会清除
+未封锁 IP 的连续失败计数；已经封锁的 IP 不会被登录自动解锁。需要人工恢复时，在可信的
+管理终端执行：
+
+```sql
+DELETE FROM server_login_ip_blocks WHERE ip_address = '203.0.113.7';
+```
+
+服务启动时会把已封锁 IP 载入内存，因此手工删除后需重启服务使该 IP 立即恢复访问。
+
+网页入口经 nginx 反向代理时，nginx 必须覆盖客户端可控的转发头：
+
+```nginx
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+执行以下迁移后，可在后台“安全设置”新增 nginx、负载均衡器或 CDN 的实际 TCP 来源 IPv4，
+分别勾选可采信的 `X-Real-IP` 和 `X-Forwarded-For`，保存立即生效：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_trusted_proxy_sources.sql
+```
+
+初始仅包含同机 nginx 的 `127.0.0.1`。服务端优先使用 `X-Real-IP`；`X-Forwarded-For` 仅在
+已勾选且为单个 IPv4 时使用，带逗号的转发链会被拒绝。未启用或未列入后台白名单的连接提供
+的转发头都会被忽略。`CBE_MOCK_TRUSTED_PROXY_IPV4` 仅保留为旧部署在无数据库条目前的
+兼容兜底，新的部署应使用后台配置。游戏 TCP 不使用 HTTP 请求头，仍按 TCP 对端地址封锁。
+
+已有数据库启用后台“称号管理”时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_role_designations.sql
+```
+
+脚本只新增 `server_role_designations`。服务首次打开称号页或处理称号请求时，会以
+`INSERT IGNORE` 写入现有金钱/等级称号及四个特殊称号（资深老友、圣诞骑士、武林传奇、
+勇者王）的默认条件；不会改变角色已装备的称号。特殊称号默认停用。圣诞骑士固定要求
+全套圣诞装、武林传奇固定要求全套武林装；二者只可启用或停用，不能改成金钱或等级门槛。
+另两个特殊称号仍使用后台配置的金钱/等级条件，直到补充其独立的游戏规则。
+
+升级已有称号配置后还应执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_role_designation_equipment_sets.sql
+```
+
+该脚本只将圣诞骑士（ID 33）和武林传奇（ID 34）过去临时使用的等级条件改为固定套装条件；
+不会改动角色当前装备或其他称号配置。服务端在读取称号配置时也会重复校正这两条规则，避免
+遗漏迁移的旧部署继续按等级错误解锁。
+
 已有数据库增加 W 币充值功能时执行：
 
 ```powershell
@@ -138,6 +198,14 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_wcoin
 只保存在 `server_payment_config.secret_key`，不要写入网页、日志或提交到源码。
 `callback_base_url` 应填写外网能够访问账号中心的地址；留空时会使用支付后台配置
 的回调地址，并由订单状态查询返回的签名数据提供兜底确认。
+
+异步通知地址为 `/payment/cbhub/notify`。它兼容 `GET` 查询参数和监控 App 常用的
+`POST application/x-www-form-urlencoded` 请求体；同步返回地址 `/payment/cbhub/return`
+仍只接受 `GET`。异步通知必须带齐 `payId`、`param`、`type`、`price`、`reallyPrice`、`sign`，
+其中签名为 `MD5(payId + param + type + price + reallyPrice + 通讯密钥)`，没有分隔符且金额文本
+必须保持参与签名时的原样（例如 `1.00` 不能改写为 `1`）。回调只能确认本服务先前创建的订单；
+成功响应正文固定为 `success`，其他校验失败返回 `error_sign`。服务日志会记录不含密钥的
+失败原因，如 `callback-fields-invalid`、`signature-rejected` 或 `order-rejected-or-credit-failed`。
 
 已有数据库增加用户中心“角色迁移”功能时执行：
 
@@ -339,7 +407,10 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `accounts`：账号与登录密码。
 - `server_admin_config`：旧版单一后台密码的兼容迁移来源；升级后不再用于登录验证。
 - `server_admin_users`：独立后台操作员账号、密码、连续失败次数和锁定状态；与玩家账号表隔离。
+- `server_login_ip_blocks`：游戏、账号中心和后台管理共用的来源 IP 连续登录失败计数与封锁状态。
+- `server_trusted_proxy_sources`：网页反向代理的可信 TCP 来源、可采信的真实 IP 请求头及启用状态。
 - `server_admin_operation_logs`：后台对账号和角色执行成功操作、以及游戏内成功 W 币消费的追加式审计记录，包含操作人（后台账号或游戏内）、时间、目标账号/角色、金额或物品信息及说明。
+- `server_role_designations`：称号启用状态与达成门槛；名称、稳定 ID 和客户端徽章资源仍由服务端已验证目录固定。
 - `server_payment_config`：支付接口地址、通讯密钥、公开回调地址和 W 币兑换比例。
 - `wcoin_recharge_orders`：充值订单、支付确认及幂等入账状态。
 - `server_data_migrations`：记录一次性数据语义迁移，防止重复换算。
