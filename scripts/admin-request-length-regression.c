@@ -102,6 +102,8 @@ int main(int argc, char **argv)
     char renderedNpcFields[32768];
     char renderedPortalFields[16384];
     char renderedMonsterDropBatch[24576];
+    char renderedAdminLogin[16384];
+    char adminCookieRequest[256];
     char endpointHost[64];
     u16 endpointPort = 0;
     size_t serviceFormLen = 0;
@@ -111,6 +113,7 @@ int main(int argc, char **argv)
     vm_mock_admin_text renderedPage;
     vm_mock_admin_text renderedPortalPage;
     vm_mock_admin_text renderedMonsterDropBatchPage;
+    vm_mock_admin_operation_log_page operatorLogPage;
     vm_mock_admin_scene_file sceneFixtures[2];
     vm_mock_admin_scene_portal portalFixture;
     vm_net_mock_npc_service_option
@@ -120,6 +123,14 @@ int main(int argc, char **argv)
     vm_net_mock_monster_drop_batch_result dropBatchResult;
     bool dropBatchChanged[3];
     const char *dropBatchError = NULL;
+    const char *operatorLogValues[] = {
+        "7", "operator.alice", "add-wcoin", "audit-target", "0", "0",
+        "0", "100", "E5A29EE58AA02057E5B88120313030",
+        "2026-08-24 12:34:56.789"
+    };
+    size_t operatorLogLengths[10];
+    vm_mock_admin_session *firstAdminSession = NULL;
+    vm_mock_admin_session *secondAdminSession = NULL;
     u32 dropBatchItemId = 0;
     u32 serviceOptionCount = 0;
 
@@ -130,6 +141,72 @@ int main(int argc, char **argv)
         fprintf(stderr, "proxy Host/Origin request was rejected\n");
         vm_mock_service_socket_close(proxyServer);
         vm_mock_service_socket_close(proxyClient);
+        return 1;
+    }
+
+    if (!vm_mock_admin_account_id_is_valid("operator.alice") ||
+        !vm_mock_admin_account_id_is_valid("ops-02@example") ||
+        vm_mock_admin_account_id_is_valid("") ||
+        vm_mock_admin_account_id_is_valid("operator alice") ||
+        vm_mock_admin_account_id_is_valid("operator/../../root"))
+    {
+        fprintf(stderr, "admin operator account validation is incomplete\n");
+        return 1;
+    }
+    memset(g_vm_mock_admin_sessions, 0, sizeof(g_vm_mock_admin_sessions));
+    firstAdminSession = vm_mock_admin_issue_session("operator.alice");
+    secondAdminSession = vm_mock_admin_issue_session("operator.bob");
+    if (firstAdminSession == NULL || secondAdminSession == NULL ||
+        strcmp(firstAdminSession->token, secondAdminSession->token) == 0)
+    {
+        fprintf(stderr, "admin operator sessions are not independently issued\n");
+        return 1;
+    }
+    snprintf(adminCookieRequest, sizeof(adminCookieRequest),
+             "GET /admin-418yz6/ HTTP/1.1\r\nCookie: cbe_admin=%s\r\n\r\n",
+             firstAdminSession->token);
+    if (vm_mock_admin_request_session(adminCookieRequest,
+                                      strlen(adminCookieRequest)) !=
+        firstAdminSession)
+    {
+        fprintf(stderr, "admin session did not retain its operator identity\n");
+        return 1;
+    }
+    vm_mock_admin_clear_request_session(adminCookieRequest,
+                                        strlen(adminCookieRequest));
+    if (firstAdminSession->active || !secondAdminSession->active)
+    {
+        fprintf(stderr, "admin logout cleared another operator session\n");
+        return 1;
+    }
+    memset(renderedAdminLogin, 0, sizeof(renderedAdminLogin));
+    vm_mock_admin_render_login(renderedAdminLogin, sizeof(renderedAdminLogin),
+                               NULL);
+    if (strstr(renderedAdminLogin, "name=\"account\"") == NULL ||
+        strstr(renderedAdminLogin, "data-admin-login-account") == NULL ||
+        strstr(renderedAdminLogin, "记住账号和密码") == NULL ||
+        strstr(g_vm_mock_admin_login_script,
+               "cbe-admin-login-password-v1") == NULL ||
+        strstr(g_vm_mock_admin_login_script,
+               "cbe-admin-login-account-v1") == NULL ||
+        strstr(g_vm_mock_admin_login_script,
+               "localStorage.removeItem(passwordKey)") == NULL)
+    {
+        fprintf(stderr, "admin login does not preserve opt-in local credentials\n");
+        return 1;
+    }
+    memset(&operatorLogPage, 0, sizeof(operatorLogPage));
+    for (u32 i = 0; i < 10; ++i)
+        operatorLogLengths[i] = strlen(operatorLogValues[i]);
+    if (!vm_mock_admin_operation_log_row_callback(
+            &operatorLogPage, 10, operatorLogValues, operatorLogLengths) ||
+        operatorLogPage.invalid || operatorLogPage.count != 1 ||
+        strcmp(operatorLogPage.rows[0].operatorAccountId,
+               "operator.alice") != 0 ||
+        strcmp(operatorLogPage.rows[0].accountId, "audit-target") != 0 ||
+        strcmp(operatorLogPage.rows[0].detail, "增加 W币 100") != 0)
+    {
+        fprintf(stderr, "operation-log operator identity row decoding failed\n");
         return 1;
     }
     proxyResponseLen = recv(proxyClient, proxyResponse,
@@ -475,11 +552,13 @@ int main(int argc, char **argv)
     }
     if (strstr(g_vm_mock_admin_script, "const setupAdminToasts") == NULL ||
         strstr(g_vm_mock_admin_script, "#admin-toast-host") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "data-admin-persistent-notice") == NULL ||
         strstr(g_vm_mock_admin_script, "MutationObserver") == NULL ||
         strstr(g_vm_mock_admin_script, "setTimeout(dismiss,5000)") == NULL)
     {
         fprintf(stderr,
-                "queued five-second admin toast notifications are missing\n");
+                "admin toasts do not preserve persistent page controls\n");
         return 1;
     }
     if (strstr(g_vm_mock_admin_script, "const setupGlobalRewards") == NULL ||

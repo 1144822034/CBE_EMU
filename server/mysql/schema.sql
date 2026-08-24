@@ -27,6 +27,24 @@ INSERT IGNORE INTO `server_admin_config`
 VALUES
   (1, '123456', 0, 0);
 
+-- 独立于玩家 accounts 的后台操作员身份。旧版单一后台密码会迁入默认 admin
+-- 账号，便于已有部署平滑升级；之后可在此表新增多个后台账号。
+CREATE TABLE IF NOT EXISTS `server_admin_users` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `password_value` VARBINARY(64) NOT NULL,
+  `failed_attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `locked` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`)
+) ENGINE=InnoDB;
+
+INSERT IGNORE INTO `server_admin_users`
+  (`account_id`, `password_value`, `failed_attempts`, `locked`)
+SELECT 'admin', `password_value`, `failed_attempts`, `locked`
+FROM `server_admin_config`
+WHERE `config_id` = 1;
+
 CREATE TABLE IF NOT EXISTS `server_payment_config` (
   `config_id` TINYINT UNSIGNED NOT NULL,
   `api_base_url` VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -216,6 +234,7 @@ CREATE TABLE IF NOT EXISTS `account_role_count_write_audit` (
 -- 目标身份与审计证据。
 CREATE TABLE IF NOT EXISTS `server_admin_operation_logs` (
   `log_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `operator_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
   `action_code` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `target_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `target_role_id` INT UNSIGNED NOT NULL DEFAULT 0,

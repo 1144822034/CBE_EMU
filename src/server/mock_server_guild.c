@@ -2550,7 +2550,7 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
         if (!vm_mock_admin_operation_log_record(
                 "player-trade", sessions[side]->accountId, roles[side].roleId,
                 0, trade->offers[side].itemCount, trade->offers[side].money,
-                operationDetail))
+                operationDetail, NULL))
         {
             printf("[error][mock-service] operation_log_player_trade_failed "
                    "account=%s role=%u peer=%s/%u error=%s\n",

@@ -30,7 +30,10 @@ enum
      * page with a synthetic "too large" error. */
     VM_MOCK_ADMIN_RESPONSE_MAX = 2 * 1024 * 1024,
     VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS = 100,
-    VM_MOCK_USER_SESSION_MAX = 64
+    VM_MOCK_USER_SESSION_MAX = 64,
+    /* Back-office operators must not share a browser token: each account
+     * receives its own independently revocable session. */
+    VM_MOCK_ADMIN_SESSION_MAX = 64
 };
 
 #define VM_MOCK_ADMIN_BASE_PATH "/admin-418yz6"
@@ -626,12 +629,10 @@ typedef struct
     uint64_t size;
 } vm_mock_admin_scene_file;
 
-static char g_vm_mock_admin_session_token[40];
-
-/* This script deliberately has no network I/O.  It only remembers a password
- * in the current browser profile when the administrator explicitly opts in. */
+/* This script deliberately has no network I/O.  On explicit opt-in it keeps
+ * the operator name and password in this browser profile only. */
 static const char g_vm_mock_admin_login_script[] =
-    "(()=>{const key='cbe-admin-login-password-v1',form=document.querySelector('[data-admin-login-form]'),password=document.querySelector('[data-admin-login-password]'),remember=document.querySelector('[data-admin-login-remember]');if(!form||!password||!remember)return;try{const saved=localStorage.getItem(key);if(saved!==null&&saved!==''){password.value=saved;remember.checked=true;}}catch(error){}form.addEventListener('submit',()=>{try{if(remember.checked&&password.value)localStorage.setItem(key,password.value);else localStorage.removeItem(key);}catch(error){}});remember.addEventListener('change',()=>{if(!remember.checked)try{localStorage.removeItem(key);}catch(error){}});})();";
+    "(()=>{const accountKey='cbe-admin-login-account-v1',passwordKey='cbe-admin-login-password-v1',form=document.querySelector('[data-admin-login-form]'),account=document.querySelector('[data-admin-login-account]'),password=document.querySelector('[data-admin-login-password]'),remember=document.querySelector('[data-admin-login-remember]');if(!form||!account||!password||!remember)return;try{const savedAccount=localStorage.getItem(accountKey),savedPassword=localStorage.getItem(passwordKey);if(savedAccount!==null&&savedAccount!=='')account.value=savedAccount;if(savedPassword!==null&&savedPassword!=='')password.value=savedPassword;remember.checked=!!((savedAccount&&savedAccount!=='')||(savedPassword&&savedPassword!==''));}catch(error){}form.addEventListener('submit',()=>{try{if(remember.checked){if(account.value)localStorage.setItem(accountKey,account.value);else localStorage.removeItem(accountKey);if(password.value)localStorage.setItem(passwordKey,password.value);else localStorage.removeItem(passwordKey);}else{localStorage.removeItem(accountKey);localStorage.removeItem(passwordKey);}}catch(error){}});remember.addEventListener('change',()=>{if(!remember.checked)try{localStorage.removeItem(accountKey);localStorage.removeItem(passwordKey);}catch(error){}});})();";
 
 typedef struct
 {
@@ -640,6 +641,14 @@ typedef struct
     char accountId[64];
     u32 lastUsedTick;
 } vm_mock_user_session;
+
+typedef struct
+{
+    bool active;
+    char token[40];
+    char accountId[64];
+    u32 lastUsedTick;
+} vm_mock_admin_session;
 
 typedef struct
 {
@@ -652,6 +661,8 @@ typedef struct
 
 static vm_mock_user_session g_vm_mock_user_sessions[VM_MOCK_USER_SESSION_MAX];
 static u32 g_vm_mock_user_session_serial = 0;
+static vm_mock_admin_session g_vm_mock_admin_sessions[VM_MOCK_ADMIN_SESSION_MAX];
+static u32 g_vm_mock_admin_session_serial = 0;
 
 #include "web_payment.inc.c"
 
@@ -779,7 +790,7 @@ static const char g_vm_mock_admin_script[] =
     "const setupContentUpdatePicker=()=>{const search=document.querySelector('[data-content-update-search]'),select=document.querySelector('[data-content-update-select]'),selectFiltered=document.querySelector('[data-content-update-select-filtered]'),clear=document.querySelector('[data-content-update-clear-selection]');if(!search||!select||search.dataset.bound==='1')return;search.dataset.bound='1';const apply=()=>{const q=search.value.trim().toLowerCase();for(const option of select.options)option.hidden=!!q&&!option.textContent.toLowerCase().includes(q);};search.addEventListener('input',apply);selectFiltered?.addEventListener('click',()=>{for(const option of select.options)if(!option.hidden)option.selected=true;});clear?.addEventListener('click',()=>{for(const option of select.options)option.selected=false;});apply();};"
     "const setupContentResourceSearch=()=>{for(const input of document.querySelectorAll('[data-content-resource-search]')){if(input.dataset.contentResourceSearchBound==='1')continue;const list=document.querySelector(input.getAttribute('data-content-resource-search')||'[data-content-resource-list]'),count=input.parentElement?.querySelector('[data-content-resource-search-count]');if(!list)continue;input.dataset.contentResourceSearchBound='1';const apply=()=>{const q=input.value.trim().toLowerCase();let shown=0,total=0;for(const item of list.querySelectorAll('[data-content-resource-item]')){const name=item.querySelector('span')?.textContent.toLowerCase()||'';const visible=!q||name.includes(q);item.hidden=!visible;total++;if(visible)shown++;}if(count)count.textContent=`显示 ${shown} / ${total} 项`;};input.addEventListener('input',apply);apply();}};"
     "const setupContentNavigation=()=>{const nav=document.querySelector('#admin-spa-tabs');if(!nav)return;nav.querySelector('[data-admin-tab=actors]')?.remove();if(new URL(window.location.href).searchParams.get('tab')!=='actors')return;for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab==='content';link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
-    "const setupAdminToasts=()=>{const state=window.__cbeAdminToastState||(window.__cbeAdminToastState={queue:[],showing:false,observer:null});const host=()=>{let node=document.querySelector('#admin-toast-host');if(node)return node;const style=document.createElement('style');style.id='admin-toast-style';style.textContent='#admin-toast-host{position:fixed;z-index:10050;top:18px;right:18px;display:grid;justify-items:end;pointer-events:none} .admin-toast{width:min(380px,calc(100vw - 36px));display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:10px;align-items:start;padding:13px 12px 13px 15px;border:1px solid #b9d8ff;border-radius:10px;background:#fff;color:#18436f;box-shadow:0 14px 32px #10182833;opacity:0;transform:translateX(calc(100%% + 24px));transition:opacity .22s ease,transform .22s ease;pointer-events:auto} .admin-toast.show{opacity:1;transform:translateX(0)} .admin-toast.error{border-color:#f5b7b1;background:#fff7f6;color:#8f1d1d} .admin-toast.success{border-color:#9be3ba;background:#f3fff7;color:#05603a} .admin-toast-close{width:28px;height:28px;margin:-3px -3px 0 0;padding:0;border:0;border-radius:6px;background:transparent;color:currentColor;font:22px/1 sans-serif;cursor:pointer}@media(max-width:560px){#admin-toast-host{top:10px;right:10px}.admin-toast{width:min(380px,calc(100vw - 20px))}}';document.head.append(style);node=document.createElement('div');node.id='admin-toast-host';node.setAttribute('aria-live','polite');node.setAttribute('aria-atomic','true');document.body.append(node);return node;};const next=()=>{if(state.showing||!state.queue.length)return;state.showing=true;const entry=state.queue.shift(),node=document.createElement('section'),close=document.createElement('button'),dismiss=()=>{if(node.dataset.closing==='1')return;node.dataset.closing='1';node.classList.remove('show');setTimeout(()=>{node.remove();state.showing=false;next();},240);};node.className='admin-toast '+(entry.error?'error':'success');node.setAttribute('role',entry.error?'alert':'status');node.textContent=entry.text;close.type='button';close.className='admin-toast-close';close.setAttribute('aria-label','关闭提示');close.textContent='×';close.addEventListener('click',dismiss);node.append(close);host().append(node);requestAnimationFrame(()=>node.classList.add('show'));setTimeout(dismiss,5000);};const queue=node=>{if(!(node instanceof Element)||node.dataset.adminToastQueued==='1'||!node.matches('.notice.ok,.notice.error'))return;const text=node.textContent.trim();node.dataset.adminToastQueued='1';if(!text)return;state.queue.push({text,error:node.classList.contains('error')});node.remove();next();};const scan=root=>{if(root instanceof Element)queue(root);if(root.querySelectorAll)for(const node of root.querySelectorAll('.notice.ok,.notice.error'))queue(node);};scan(document);if(state.observer)return;state.observer=new MutationObserver(records=>{for(const record of records)for(const node of record.addedNodes)scan(node);});state.observer.observe(document.body,{childList:true,subtree:true});};"
+    "const setupAdminToasts=()=>{const state=window.__cbeAdminToastState||(window.__cbeAdminToastState={queue:[],showing:false,observer:null});const host=()=>{let node=document.querySelector('#admin-toast-host');if(node)return node;const style=document.createElement('style');style.id='admin-toast-style';style.textContent='#admin-toast-host{position:fixed;z-index:10050;top:18px;right:18px;display:grid;justify-items:end;pointer-events:none} .admin-toast{width:min(380px,calc(100vw - 36px));display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:10px;align-items:start;padding:13px 12px 13px 15px;border:1px solid #b9d8ff;border-radius:10px;background:#fff;color:#18436f;box-shadow:0 14px 32px #10182833;opacity:0;transform:translateX(calc(100%% + 24px));transition:opacity .22s ease,transform .22s ease;pointer-events:auto} .admin-toast.show{opacity:1;transform:translateX(0)} .admin-toast.error{border-color:#f5b7b1;background:#fff7f6;color:#8f1d1d} .admin-toast.success{border-color:#9be3ba;background:#f3fff7;color:#05603a} .admin-toast-close{width:28px;height:28px;margin:-3px -3px 0 0;padding:0;border:0;border-radius:6px;background:transparent;color:currentColor;font:22px/1 sans-serif;cursor:pointer}@media(max-width:560px){#admin-toast-host{top:10px;right:10px}.admin-toast{width:min(380px,calc(100vw - 20px))}}';document.head.append(style);node=document.createElement('div');node.id='admin-toast-host';node.setAttribute('aria-live','polite');node.setAttribute('aria-atomic','true');document.body.append(node);return node;};const next=()=>{if(state.showing||!state.queue.length)return;state.showing=true;const entry=state.queue.shift(),node=document.createElement('section'),close=document.createElement('button'),dismiss=()=>{if(node.dataset.closing==='1')return;node.dataset.closing='1';node.classList.remove('show');setTimeout(()=>{node.remove();state.showing=false;next();},240);};node.className='admin-toast '+(entry.error?'error':'success');node.setAttribute('role',entry.error?'alert':'status');node.textContent=entry.text;close.type='button';close.className='admin-toast-close';close.setAttribute('aria-label','关闭提示');close.textContent='×';close.addEventListener('click',dismiss);node.append(close);host().append(node);requestAnimationFrame(()=>node.classList.add('show'));setTimeout(dismiss,5000);};const queue=node=>{if(!(node instanceof Element)||node.dataset.adminToastQueued==='1'||node.hasAttribute('data-admin-persistent-notice')||!node.matches('.notice.ok,.notice.error'))return;const text=node.textContent.trim();node.dataset.adminToastQueued='1';if(!text)return;state.queue.push({text,error:node.classList.contains('error')});node.remove();next();};const scan=root=>{if(root instanceof Element)queue(root);if(root.querySelectorAll)for(const node of root.querySelectorAll('.notice.ok,.notice.error'))queue(node);};scan(document);if(state.observer)return;state.observer=new MutationObserver(records=>{for(const record of records)for(const node of record.addedNodes)scan(node);});state.observer.observe(document.body,{childList:true,subtree:true});};"
     "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
     "const setupGlobalRewardsTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const accounts=nav.querySelector('[data-admin-tab=accounts],a[href*=\\\"tab=accounts\\\"]'),add=(key,label)=>{if(!accounts||[...nav.querySelectorAll('[data-admin-tab],a[href]')].some(link=>link.dataset.adminTab===key||link.getAttribute('href')?.includes('tab='+key)))return;const link=document.createElement('a');link.className='tab admin-spa-tab';link.dataset.adminTab=key;link.href='?tab='+key;link.textContent=label;accounts.after(link);};add('operations','操作日志');add('global-rewards','全服奖励管理');const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
     "const setupAdminContent=()=>{setupGlobalRewardsTab();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
@@ -789,57 +800,52 @@ static const char g_vm_mock_admin_script[] =
     "document.addEventListener('DOMContentLoaded',()=>{setupMonsterActions();setupTaskActions();setupPartialNavigation();setupAdminSpa();setupAdminLayout();setupAdminHeader();setupAdminContent();});"
     "})();";
 
-static void vm_mock_admin_ensure_session_token(void)
+static bool vm_mock_admin_account_id_is_valid(const char *accountId)
 {
-    u32 value = 0;
-    u32 words[4];
+    size_t length = accountId ? strlen(accountId) : 0;
 
-    if (g_vm_mock_admin_session_token[0] != 0)
-        return;
-    value = (u32)time(NULL) ^ (u32)getpid() ^
-            (u32)(uintptr_t)&g_vm_mock_admin_session_token ^ scheduler_get_tick_ms();
-    if (value == 0)
-        value = 0x6a09e667u;
-    for (u32 i = 0; i < 4; ++i)
+    if (length == 0 || length > 63)
+        return false;
+    for (size_t i = 0; i < length; ++i)
     {
-        value ^= value << 13;
-        value ^= value >> 17;
-        value ^= value << 5;
-        value += 0x9e3779b9u + i * 0x85ebca6bu;
-        words[i] = value;
+        unsigned char ch = (unsigned char)accountId[i];
+
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' ||
+              ch == '-' || ch == '@'))
+        {
+            return false;
+        }
     }
-    snprintf(g_vm_mock_admin_session_token,
-             sizeof(g_vm_mock_admin_session_token),
-             "%08x%08x%08x%08x",
-             words[0], words[1], words[2], words[3]);
+    return true;
 }
 
-static bool vm_mock_admin_request_is_authenticated(const char *request,
-                                                    size_t headerLen)
+/* Keep the old shared-password row as a one-time compatibility source.  It
+ * is intentionally not consulted after the admin account table has a row,
+ * so changing the old value cannot silently change any operator credential. */
+static bool vm_mock_admin_user_schema_ensure(void)
 {
-    char cookie[1024];
-    const char key[] = "cbe_admin=";
-    const char *cursor = NULL;
-
-    vm_mock_admin_ensure_session_token();
-    if (!vm_mock_admin_header_value(request, headerLen, "Cookie",
-                                    cookie, sizeof(cookie)))
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_admin_users ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "password_value VARBINARY(64) NOT NULL,"
+            "failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "locked TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id)"
+            ") ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "INSERT IGNORE INTO server_admin_users"
+            "(account_id,password_value,failed_attempts,locked) "
+            "SELECT 'admin',password_value,failed_attempts,locked "
+            "FROM server_admin_config WHERE config_id=1"))
     {
+        printf("[error][admin] account_schema_prepare_failed error=%s\n",
+               vm_mysql_last_error());
         return false;
     }
-    cursor = cookie;
-    while ((cursor = strstr(cursor, key)) != NULL)
-    {
-        const char *value = cursor + sizeof(key) - 1;
-        size_t valueLen = strcspn(value, "; ");
-        if (valueLen == strlen(g_vm_mock_admin_session_token) &&
-            memcmp(value, g_vm_mock_admin_session_token, valueLen) == 0)
-        {
-            return true;
-        }
-        cursor = value + valueLen;
-    }
-    return false;
+    return true;
 }
 
 static bool vm_mock_admin_login_config_row(void *contextValue,
@@ -874,51 +880,80 @@ static bool vm_mock_admin_login_config_row(void *contextValue,
     return true;
 }
 
-static bool vm_mock_admin_load_login_config(vm_mock_admin_login_config *config)
+static bool vm_mock_admin_load_login_config(const char *accountId,
+                                            vm_mock_admin_login_config *config)
 {
+    char accountHex[127];
+    char sql[384];
+
     if (config == NULL)
         return false;
     memset(config, 0, sizeof(*config));
-    if (!vm_mysql_query(
-            "SELECT HEX(password_value),failed_attempts,locked "
-            "FROM server_admin_config WHERE config_id=1",
-            vm_mock_admin_login_config_row, config) ||
-        config->invalid || !config->found || config->password[0] == 0)
+    if (!vm_mock_admin_account_id_is_valid(accountId) ||
+        !vm_mock_admin_user_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)accountId, strlen(accountId),
+                            accountHex, sizeof(accountHex)) == 0)
     {
         return false;
     }
-    return true;
+    snprintf(sql, sizeof(sql),
+             "SELECT HEX(password_value),failed_attempts,locked "
+             "FROM server_admin_users WHERE account_id=CAST(X'%s' AS CHAR)",
+             accountHex);
+    return vm_mysql_query(sql, vm_mock_admin_login_config_row, config) &&
+           !config->invalid;
 }
 
-static bool vm_mock_admin_verify_login_password(const char *password,
-                                                const char **messageOut)
+static bool vm_mock_admin_verify_login_credentials(const char *accountId,
+                                                   const char *password,
+                                                   const char **messageOut)
 {
     vm_mock_admin_login_config config;
+    char accountHex[127];
+    char sql[448];
     bool matches = false;
 
     if (messageOut)
         *messageOut = "后台登录配置不可用，请检查 MySQL";
-    if (!vm_mock_admin_load_login_config(&config))
+    if (!vm_mock_admin_account_id_is_valid(accountId))
+    {
+        if (messageOut)
+            *messageOut = "后台账号格式无效";
+        return false;
+    }
+    if (!vm_mock_admin_load_login_config(accountId, &config))
     {
         printf("[error][admin] login_config_load_failed error=%s\n",
                vm_mysql_last_error());
         return false;
     }
+    if (!config.found || config.password[0] == 0)
+    {
+        if (messageOut)
+            *messageOut = "后台账号或密码错误";
+        return false;
+    }
     if (config.locked)
     {
         if (messageOut)
-            *messageOut = "后台已锁定，请先在 MySQL 中解锁";
-        printf("[warn][admin] login_rejected reason=locked failed_attempts=%u\n",
-               config.failedAttempts);
+            *messageOut = "该后台账号已锁定，请先在 MySQL 中解锁";
+        printf("[warn][admin] login_rejected account=%s reason=locked failed_attempts=%u\n",
+               accountId, config.failedAttempts);
+        memset(config.password, 0, sizeof(config.password));
         return false;
     }
     matches = password != NULL && strcmp(config.password, password) == 0;
     memset(config.password, 0, sizeof(config.password));
+    if (vm_mysql_hex_encode((const u8 *)accountId, strlen(accountId),
+                            accountHex, sizeof(accountHex)) == 0)
+        return false;
     if (matches)
     {
-        if (!vm_mysql_exec(
-                "UPDATE server_admin_config SET failed_attempts=0 "
-                "WHERE config_id=1 AND locked=0"))
+        snprintf(sql, sizeof(sql),
+                 "UPDATE server_admin_users SET failed_attempts=0 "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND locked=0",
+                 accountHex);
+        if (!vm_mysql_exec(sql))
         {
             if (messageOut)
                 *messageOut = "后台登录状态无法保存，请检查 MySQL";
@@ -928,14 +963,17 @@ static bool vm_mock_admin_verify_login_password(const char *password,
         }
         if (messageOut)
             *messageOut = "ok";
-        printf("[info][admin] login_success failed_attempts_reset=1\n");
+        printf("[info][admin] login_success account=%s failed_attempts_reset=1\n",
+               accountId);
         return true;
     }
-    if (!vm_mysql_exec(
-            "UPDATE server_admin_config "
-            "SET locked=IF(failed_attempts+1>=5,1,locked),"
-            "failed_attempts=LEAST(failed_attempts+1,5) "
-            "WHERE config_id=1 AND locked=0"))
+    snprintf(sql, sizeof(sql),
+             "UPDATE server_admin_users "
+             "SET locked=IF(failed_attempts+1>=5,1,locked),"
+             "failed_attempts=LEAST(failed_attempts+1,5) "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND locked=0",
+             accountHex);
+    if (!vm_mysql_exec(sql))
     {
         if (messageOut)
             *messageOut = "后台登录状态无法保存，请检查 MySQL";
@@ -943,7 +981,7 @@ static bool vm_mock_admin_verify_login_password(const char *password,
                vm_mysql_last_error());
         return false;
     }
-    if (!vm_mock_admin_load_login_config(&config))
+    if (!vm_mock_admin_load_login_config(accountId, &config) || !config.found)
     {
         if (messageOut)
             *messageOut = "后台登录配置不可用，请检查 MySQL";
@@ -951,9 +989,9 @@ static bool vm_mock_admin_verify_login_password(const char *password,
     }
     if (messageOut)
         *messageOut = config.locked ?
-            "密码连续错误 5 次，后台已锁定" : "管理密码错误";
-    printf("[warn][admin] login_failure failed_attempts=%u locked=%u\n",
-           config.failedAttempts, config.locked ? 1u : 0u);
+            "密码连续错误 5 次，该后台账号已锁定" : "后台账号或密码错误";
+    printf("[warn][admin] login_failure account=%s failed_attempts=%u locked=%u\n",
+           accountId, config.failedAttempts, config.locked ? 1u : 0u);
     memset(config.password, 0, sizeof(config.password));
     return false;
 }
@@ -987,6 +1025,96 @@ static bool vm_mock_web_cookie_value(const char *request, size_t headerLen,
         cursor = value + valueLen;
     }
     return false;
+}
+
+static void vm_mock_admin_make_session_token(const char *accountId,
+                                             char *out, size_t outCap)
+{
+    u32 value = (u32)time(NULL) ^ (u32)getpid() ^ scheduler_get_tick_ms() ^
+                ++g_vm_mock_admin_session_serial ^
+                (u32)(uintptr_t)&g_vm_mock_admin_sessions;
+    u32 words[4];
+
+    for (const unsigned char *p = (const unsigned char *)(accountId ? accountId : "");
+         *p != 0; ++p)
+        value = (value ^ *p) * 16777619u;
+    if (value == 0)
+        value = 0x3c6ef372u;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        value ^= value << 13;
+        value ^= value >> 17;
+        value ^= value << 5;
+        value += 0x9e3779b9u + i * 0x85ebca6bu;
+        words[i] = value;
+    }
+    snprintf(out, outCap, "%08x%08x%08x%08x",
+             words[0], words[1], words[2], words[3]);
+}
+
+static vm_mock_admin_session *vm_mock_admin_request_session(
+    const char *request, size_t headerLen)
+{
+    char token[40];
+
+    memset(token, 0, sizeof(token));
+    if (!vm_mock_web_cookie_value(request, headerLen, "cbe_admin",
+                                  token, sizeof(token)))
+    {
+        return NULL;
+    }
+    for (u32 i = 0; i < VM_MOCK_ADMIN_SESSION_MAX; ++i)
+    {
+        vm_mock_admin_session *session = &g_vm_mock_admin_sessions[i];
+
+        if (session->active && strcmp(session->token, token) == 0)
+        {
+            session->lastUsedTick = scheduler_get_tick_ms();
+            return session;
+        }
+    }
+    return NULL;
+}
+
+static vm_mock_admin_session *vm_mock_admin_issue_session(
+    const char *accountId)
+{
+    vm_mock_admin_session *selected = NULL;
+
+    if (!vm_mock_admin_account_id_is_valid(accountId))
+        return NULL;
+    for (u32 i = 0; i < VM_MOCK_ADMIN_SESSION_MAX; ++i)
+    {
+        if (!g_vm_mock_admin_sessions[i].active)
+        {
+            selected = &g_vm_mock_admin_sessions[i];
+            break;
+        }
+        if (selected == NULL ||
+            g_vm_mock_admin_sessions[i].lastUsedTick < selected->lastUsedTick)
+        {
+            selected = &g_vm_mock_admin_sessions[i];
+        }
+    }
+    if (selected == NULL)
+        return NULL;
+    memset(selected, 0, sizeof(*selected));
+    selected->active = true;
+    snprintf(selected->accountId, sizeof(selected->accountId), "%s", accountId);
+    vm_mock_admin_make_session_token(accountId, selected->token,
+                                     sizeof(selected->token));
+    selected->lastUsedTick = scheduler_get_tick_ms();
+    return selected;
+}
+
+static void vm_mock_admin_clear_request_session(const char *request,
+                                                size_t headerLen)
+{
+    vm_mock_admin_session *session =
+        vm_mock_admin_request_session(request, headerLen);
+
+    if (session != NULL)
+        memset(session, 0, sizeof(*session));
 }
 
 static void vm_mock_user_make_session_token(const char *accountId,
@@ -1244,7 +1372,7 @@ static void vm_mock_admin_render_login(char *response, size_t responseCap,
         "h1{font-size:22px;margin:0 0 6px}.sub{color:#667085;margin:0 0 20px}.error{padding:9px 11px;margin-bottom:12px;border-radius:6px;background:#fef3f2;color:#b42318}"
         "form{display:grid;gap:11px}input{width:100%;border:1px solid #d0d5dd;border-radius:7px;padding:10px 11px;font-size:15px}.remember{display:flex;align-items:center;gap:8px;color:#475467;cursor:pointer}.remember input{width:auto;padding:0}.local-note{margin:0;color:#667085;font-size:12px}button{border:0;border-radius:7px;padding:10px 12px;background:#175cd3;color:#fff;cursor:pointer}"
         "</style><script src=\"/login.js\" defer></script></head><body><main class=\"card\"><h1>江湖OL 后台管理</h1>"
-        "<p class=\"sub\">请输入管理密码后继续</p>");
+        "<p class=\"sub\">请输入后台账号和密码后继续</p>");
     if (error != NULL && error[0] != 0)
     {
         vm_mock_admin_text_appendf(&page, "<div class=\"error\">");
@@ -1253,9 +1381,10 @@ static void vm_mock_admin_render_login(char *response, size_t responseCap,
     }
     vm_mock_admin_text_appendf(&page,
         "<form method=\"post\" action=\"/login\" data-admin-login-form>"
-        "<input type=\"password\" name=\"password\" autocomplete=\"current-password\" placeholder=\"管理密码\" data-admin-login-password autofocus required>"
-        "<label class=\"remember\"><input type=\"checkbox\" data-admin-login-remember>记住密码（仅本浏览器）</label>"
-        "<p class=\"local-note\">密码仅保存在此浏览器的本地存储，不会写入服务器、数据库或 Cookie；取消勾选会清除。</p>"
+        "<input type=\"text\" name=\"account\" maxlength=\"63\" autocomplete=\"username\" placeholder=\"后台账号\" data-admin-login-account autofocus required>"
+        "<input type=\"password\" name=\"password\" maxlength=\"64\" autocomplete=\"current-password\" placeholder=\"后台密码\" data-admin-login-password required>"
+        "<label class=\"remember\"><input type=\"checkbox\" data-admin-login-remember>记住账号和密码（仅本浏览器）</label>"
+        "<p class=\"local-note\">账号和密码仅保存在当前浏览器的本地存储，不会写入服务器日志或 Cookie；取消勾选会清除。</p>"
         "<button type=\"submit\">登录</button></form></main></body></html>");
 }
 
@@ -7462,6 +7591,32 @@ static bool vm_mock_admin_risk_audit_row_callback(
     return true;
 }
 
+static bool vm_mock_admin_risk_audit_build_query(char *sql, size_t sqlCap,
+                                                 u32 offset, u32 limit)
+{
+    int written = 0;
+
+    if (sql == NULL || sqlCap == 0)
+        return false;
+    written = snprintf(sql, sqlCap,
+             "SELECT a.audit_id,a.account_id,a.role_id,"
+             "HEX(COALESCE(r.role_name,X'')),a.interval_ms,HEX(a.source),"
+             "HEX(a.scene_name),a.enemy_id,"
+             /* This is a C printf format string, so preserve MySQL's percent
+              * directives with %% here.  A bare %s would consume a nonexistent
+              * variadic argument and can crash the service while opening risk. */
+             "DATE_FORMAT(a.created_at,'%%Y-%%m-%%d %%H:%%i:%%s.%%f'),"
+             "IF(b.account_id IS NULL,0,1) "
+             "FROM account_role_rapid_battle_entry_audit a "
+             "LEFT JOIN account_roles r ON r.account_id=a.account_id "
+             "AND r.role_id=a.role_id "
+             "LEFT JOIN account_access_bans b ON b.account_id=a.account_id "
+             "WHERE a.interval_ms<=3000 "
+             "ORDER BY a.audit_id DESC LIMIT %u,%u",
+             offset, limit);
+    return written >= 0 && (size_t)written < sqlCap;
+}
+
 static bool vm_mock_admin_risk_audit_query(u32 offset, u32 limit,
                                            vm_mock_admin_risk_audit_page *page)
 {
@@ -7473,19 +7628,8 @@ static bool vm_mock_admin_risk_audit_query(u32 offset, u32 limit,
         return false;
     }
     memset(page, 0, sizeof(*page));
-    snprintf(sql, sizeof(sql),
-             "SELECT a.audit_id,a.account_id,a.role_id,"
-             "HEX(COALESCE(r.role_name,X'')),a.interval_ms,HEX(a.source),"
-             "HEX(a.scene_name),a.enemy_id,"
-             "DATE_FORMAT(a.created_at,'%Y-%m-%d %H:%i:%s.%f'),"
-             "IF(b.account_id IS NULL,0,1) "
-             "FROM account_role_rapid_battle_entry_audit a "
-             "LEFT JOIN account_roles r ON r.account_id=a.account_id "
-             "AND r.role_id=a.role_id "
-             "LEFT JOIN account_access_bans b ON b.account_id=a.account_id "
-             "WHERE a.interval_ms<=3000 "
-             "ORDER BY a.audit_id DESC LIMIT %u,%u",
-             offset, limit);
+    if (!vm_mock_admin_risk_audit_build_query(sql, sizeof(sql), offset, limit))
+        return false;
     return vm_mysql_query(sql, vm_mock_admin_risk_audit_row_callback, page) &&
            !page->invalid;
 }
@@ -7663,6 +7807,7 @@ static void vm_mock_admin_render_risk_page(char *response,
 typedef struct
 {
     uint64_t logId;
+    char operatorAccountId[64];
     char actionCode[33];
     char accountId[64];
     u32 roleId;
@@ -7713,13 +7858,38 @@ enum
 
 static bool g_vm_mock_admin_operation_log_schema_prepared = false;
 
+static bool vm_mock_admin_operation_log_schema_has_operator(bool *hasOut)
+{
+    vm_mock_admin_count count;
+
+    if (hasOut != NULL)
+        *hasOut = false;
+    memset(&count, 0, sizeof(count));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME='server_admin_operation_logs' "
+            "AND COLUMN_NAME='operator_account_id'",
+            vm_mock_admin_count_row, &count) ||
+        count.invalid || !count.found)
+    {
+        return false;
+    }
+    if (hasOut != NULL)
+        *hasOut = count.value != 0;
+    return true;
+}
+
 static bool vm_mock_admin_operation_log_schema_ensure(void)
 {
+    bool hasOperator = false;
+
     if (g_vm_mock_admin_operation_log_schema_prepared)
         return true;
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_admin_operation_logs ("
             "log_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+            "operator_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',"
             "action_code VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
             "target_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
             "target_role_id INT UNSIGNED NOT NULL DEFAULT 0,"
@@ -7737,29 +7907,60 @@ static bool vm_mock_admin_operation_log_schema_ensure(void)
                vm_mysql_last_error());
         return false;
     }
+    if (!vm_mock_admin_operation_log_schema_has_operator(&hasOperator))
+    {
+        printf("[error][mock-admin] operation_log_operator_probe_failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    if (!hasOperator &&
+        !vm_mysql_exec(
+            "ALTER TABLE server_admin_operation_logs "
+            "ADD COLUMN operator_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin "
+            "NOT NULL DEFAULT '' AFTER log_id"))
+    {
+        /* Concurrent first access can race at the ALTER.  Accept only the
+         * precise outcome where the winning request has already added it. */
+        if (!vm_mock_admin_operation_log_schema_has_operator(&hasOperator) ||
+            !hasOperator)
+        {
+            printf("[error][mock-admin] operation_log_operator_upgrade_failed error=%s\n",
+                   vm_mysql_last_error());
+            return false;
+        }
+    }
     g_vm_mock_admin_operation_log_schema_prepared = true;
     return true;
 }
 
 static bool vm_mock_admin_operation_log_record(
     const char *actionCode, const char *accountId, u32 roleId, u32 itemId,
-    u32 itemCount, u32 changeAmount, const char *detail)
+    u32 itemCount, u32 changeAmount, const char *detail,
+    const char *operatorAccountId)
 {
     char actionHex[65];
     char accountHex[127];
+    char operatorHex[127];
     char detailHex[511];
-    char sql[1280];
+    char sql[1536];
     size_t actionLen = actionCode ? strlen(actionCode) : 0;
     size_t accountLen = accountId ? strlen(accountId) : 0;
+    size_t operatorLen = operatorAccountId ? strlen(operatorAccountId) : 0;
     size_t detailLen = detail ? strlen(detail) : 0;
 
+    memset(operatorHex, 0, sizeof(operatorHex));
     if (actionLen == 0 || actionLen > 32 || accountLen == 0 ||
-        accountLen > 63 || detailLen == 0 || detailLen > 255 ||
+        accountLen > 63 || operatorLen > 63 ||
+        (operatorLen != 0 && !vm_mock_admin_account_id_is_valid(operatorAccountId)) ||
+        detailLen == 0 || detailLen > 255 ||
         !vm_mock_admin_operation_log_schema_ensure() ||
         vm_mysql_hex_encode((const u8 *)actionCode, actionLen, actionHex,
                             sizeof(actionHex)) == 0 ||
         vm_mysql_hex_encode((const u8 *)accountId, accountLen, accountHex,
                             sizeof(accountHex)) == 0 ||
+        (operatorLen != 0 &&
+         vm_mysql_hex_encode((const u8 *)operatorAccountId, operatorLen,
+                             operatorHex, sizeof(operatorHex)) == 0) ||
         vm_mysql_hex_encode((const u8 *)detail, detailLen, detailHex,
                             sizeof(detailHex)) == 0)
     {
@@ -7767,14 +7968,16 @@ static bool vm_mock_admin_operation_log_record(
     }
     snprintf(sql, sizeof(sql),
              "INSERT INTO server_admin_operation_logs"
-             "(action_code,target_account_id,target_role_id,item_id,item_count,change_amount,detail) "
-             "VALUES(CAST(X'%s' AS CHAR),CAST(X'%s' AS CHAR),%u,%u,%u,%u,X'%s')",
-             actionHex, accountHex, roleId, itemId, itemCount, changeAmount,
-             detailHex);
+             "(operator_account_id,action_code,target_account_id,target_role_id,item_id,item_count,change_amount,detail) "
+             "VALUES(CAST(X'%s' AS CHAR),CAST(X'%s' AS CHAR),CAST(X'%s' AS CHAR),%u,%u,%u,%u,X'%s')",
+             operatorHex, actionHex, accountHex, roleId, itemId, itemCount,
+             changeAmount, detailHex);
     if (!vm_mysql_exec(sql))
     {
-        printf("[error][mock-admin] operation_log_insert_failed action=%s account=%s role=%u error=%s\n",
-               actionCode, accountId, roleId, vm_mysql_last_error());
+        printf("[error][mock-admin] operation_log_insert_failed action=%s account=%s operator=%s role=%u error=%s\n",
+               actionCode, accountId,
+               operatorAccountId ? operatorAccountId : "", roleId,
+               vm_mysql_last_error());
         return false;
     }
     return true;
@@ -7789,7 +7992,7 @@ static bool vm_mock_admin_operation_log_row_callback(
     vm_mock_admin_operation_log_row *row = NULL;
 
     if (page == NULL || page->count >= VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE ||
-        columnCount != 9 || values == NULL || lengths == NULL)
+        columnCount != 10 || values == NULL || lengths == NULL)
     {
         if (page != NULL)
             page->invalid = true;
@@ -7797,18 +8000,21 @@ static bool vm_mock_admin_operation_log_row_callback(
     }
     row = &page->rows[page->count];
     if (!vm_mock_mysql_parse_u64(values[0], lengths[0], &row->logId) ||
-        !vm_mock_mysql_copy_text(row->actionCode, sizeof(row->actionCode),
+        !vm_mock_mysql_copy_text(row->operatorAccountId,
+                                 sizeof(row->operatorAccountId),
                                  values[1], lengths[1]) ||
-        !vm_mock_mysql_copy_text(row->accountId, sizeof(row->accountId),
+        !vm_mock_mysql_copy_text(row->actionCode, sizeof(row->actionCode),
                                  values[2], lengths[2]) ||
-        !vm_mock_mysql_parse_u32(values[3], lengths[3], &row->roleId) ||
-        !vm_mock_mysql_parse_u32(values[4], lengths[4], &row->itemId) ||
-        !vm_mock_mysql_parse_u32(values[5], lengths[5], &row->itemCount) ||
-        !vm_mock_mysql_parse_u32(values[6], lengths[6], &row->changeAmount) ||
+        !vm_mock_mysql_copy_text(row->accountId, sizeof(row->accountId),
+                                 values[3], lengths[3]) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &row->roleId) ||
+        !vm_mock_mysql_parse_u32(values[5], lengths[5], &row->itemId) ||
+        !vm_mock_mysql_parse_u32(values[6], lengths[6], &row->itemCount) ||
+        !vm_mock_mysql_parse_u32(values[7], lengths[7], &row->changeAmount) ||
         !vm_mock_admin_risk_decode_hex(row->detail, sizeof(row->detail),
-                                       values[7], lengths[7]) ||
+                                       values[8], lengths[8]) ||
         !vm_mock_mysql_copy_text(row->createdAt, sizeof(row->createdAt),
-                                 values[8], lengths[8]))
+                                 values[9], lengths[9]))
     {
         page->invalid = true;
         return true;
@@ -7947,8 +8153,8 @@ static bool vm_mock_admin_operation_log_query(
     }
     memset(page, 0, sizeof(*page));
     snprintf(sql, sizeof(sql),
-             "SELECT log_id,action_code,target_account_id,target_role_id,item_id,"
-             "item_count,change_amount,HEX(detail),"
+             "SELECT log_id,operator_account_id,action_code,target_account_id,"
+             "target_role_id,item_id,item_count,change_amount,HEX(detail),"
              "DATE_FORMAT(created_at,'%%Y-%%m-%%d %%H:%%i:%%s.%%f') "
              "FROM server_admin_operation_logs %s ORDER BY log_id DESC "
              "LIMIT %u,%u",
@@ -7998,6 +8204,15 @@ static const char *vm_mock_admin_operation_log_action_label(
         }
     }
     return actionCode;
+}
+
+static bool vm_mock_admin_operation_log_is_game_action(const char *actionCode)
+{
+    return actionCode != NULL &&
+           (strcmp(actionCode, "player-trade") == 0 ||
+            strcmp(actionCode, "discard-equipment") == 0 ||
+            strcmp(actionCode, "recycle-equipment") == 0 ||
+            strncmp(actionCode, "spend-wcoin-", 12) == 0);
 }
 
 static void vm_mock_admin_render_operation_log_page(char *response,
@@ -8057,7 +8272,7 @@ static void vm_mock_admin_render_operation_log_page(char *response,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 后台操作日志</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 10px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap}.filter>label{display:grid;gap:4px;color:#475467;font-size:12px}.filter input[type=text]{min-width:250px;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;font:inherit}.type-filter{display:grid;gap:6px;flex:1 1 100%%;margin:0;padding:8px 10px;border:1px solid #d0d5dd;border-radius:7px}.type-filter legend{padding:0 4px;color:#475467;font-size:12px}.type-options{display:flex;flex-wrap:wrap;gap:6px 12px}.type-options label{display:inline-flex;align-items:center;gap:5px;color:#344054;font-size:13px;white-space:nowrap}.type-options input{margin:0}.filter button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;font:inherit;cursor:pointer}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%%;min-width:960px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.tag{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px;font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}.filter input[type=text]{min-width:0;width:100%%}}</style>"
-        "<script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">操作日志 · 记录后台账号管理和游戏内 W 币消费</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">操作日志 · 记录后台账号管理、操作者账号和游戏内已提交行为</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=global-rewards\">全服奖励管理</a><a class=\"tab on\" href=\"/?tab=operations\">操作日志</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
         "<section class=\"card\"><h2>查询操作日志</h2><form class=\"filter\" method=\"get\"><input type=\"hidden\" name=\"tab\" value=\"operations\"><label><span>目标账号（留空显示全部）</span><input type=\"text\" name=\"account\" maxlength=\"63\" value=\"");
     vm_mock_admin_text_append_html(&page, accountFilter);
@@ -8076,7 +8291,7 @@ static void vm_mock_admin_render_operation_log_page(char *response,
     }
     vm_mock_admin_text_appendf(
         &page,
-        "</div></fieldset><button type=\"submit\">查询</button></form><p class=\"sub\">可同时勾选多个类型；日志记录后台成功操作及游戏内已提交的 W 币消费，不记录密码内容。</p></section><section class=\"card\"><h2>操作记录</h2>");
+        "</div></fieldset><button type=\"submit\">查询</button></form><p class=\"sub\">可同时勾选多个类型；后台成功操作会记录操作者账号，游戏内已提交行为显示为“游戏内”，不记录密码内容。</p></section><section class=\"card\"><h2>操作记录</h2>");
     if (!queryOk)
     {
         vm_mock_admin_text_appendf(
@@ -8094,18 +8309,24 @@ static void vm_mock_admin_render_operation_log_page(char *response,
     {
         vm_mock_admin_text_appendf(
             &page,
-            "<div class=\"table-wrap\"><table><thead><tr><th>时间</th><th>操作</th><th>账号</th><th>角色</th><th>变动</th><th>说明</th></tr></thead><tbody>");
+            "<div class=\"table-wrap\"><table><thead><tr><th>时间</th><th>操作</th><th>操作人</th><th>账号</th><th>角色</th><th>变动</th><th>说明</th></tr></thead><tbody>");
         for (u32 i = 0; i < logPage.count; ++i)
         {
             const vm_mock_admin_operation_log_row *row = &logPage.rows[i];
             const char *label =
                 vm_mock_admin_operation_log_action_label(row->actionCode);
+            const char *operatorLabel = row->operatorAccountId[0] ?
+                row->operatorAccountId :
+                (vm_mock_admin_operation_log_is_game_action(row->actionCode) ?
+                     "游戏内" : "历史未记录");
 
             vm_mock_admin_text_appendf(&page,
                 "<tr><td class=\"mono\">%s</td><td><span class=\"tag\">",
                 row->createdAt);
             vm_mock_admin_text_append_html(&page, label);
             vm_mock_admin_text_appendf(&page, "</span></td><td class=\"mono\">");
+            vm_mock_admin_text_append_html(&page, operatorLabel);
+            vm_mock_admin_text_appendf(&page, "</td><td class=\"mono\">");
             vm_mock_admin_text_append_html(&page, row->accountId);
             vm_mock_admin_text_appendf(&page, "</td><td class=\"mono\">");
             if (row->roleId != 0)
@@ -9016,7 +9237,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".sub{color:#667085;margin:4px 0 20px}.grid{display:grid;grid-template-columns:240px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:18px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
         ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
         ".account-search{display:flex;gap:7px;margin:0 0 8px}.account-search input{min-width:0}.account-search button{padding-inline:10px}.account-list-status{min-height:19px;margin:0 0 8px;color:#667085;font-size:12px}.account-list-status.error{color:#b42318}.accounts{display:flex;flex:1;min-height:0;flex-direction:column;gap:6px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.account{display:flex;justify-content:space-between;padding:9px 10px;border-radius:7px;color:#344054;text-decoration:none;scroll-margin-block:12px}.account:hover,.account.on{background:#eef4ff;color:#175cd3}.account-empty{padding:10px 2px}"
-        ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
+        ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.account-wallet{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap}.account-wallet .inline{margin:0 0 0 auto}.account-wallet .inline input{min-width:160px}@media(max-width:620px){.account-wallet .inline{width:100%%;margin:0}.account-wallet .inline input{min-width:0}}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
         ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.role-rename{align-items:center;margin-top:7px}.role-rename input{width:112px;min-width:112px}.role-rename button{padding:6px 9px;font-size:12px}.level-set{align-items:center;margin:7px 0 0}.level-set input{width:76px;min-width:76px}.level-set button{padding:6px 9px;font-size:12px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.scene-reset-input{min-width:230px!important}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
@@ -9069,7 +9290,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         if (vm_mock_service_account_wallet_read(selectedAccount, false, &accountWcoin))
         {
             vm_mock_admin_text_appendf(&page,
-                "<div class=\"notice ok\"><strong>账号 W 币：%u</strong>"
+                "<div class=\"notice ok account-wallet\" data-admin-persistent-notice><strong>账号 W 币：%u</strong>"
                 "<span class=\"muted\">W 币归账号所有，全部角色共用。</span>"
                 "<form class=\"inline\" method=\"post\" action=\"/action\">"
                 "<input type=\"hidden\" name=\"action\" value=\"add-wcoin\">"
@@ -12144,7 +12365,9 @@ done:
     free(raw);
 }
 
-static void vm_mock_admin_handle_action(vm_mock_service_socket client, const char *body)
+static void vm_mock_admin_handle_action(vm_mock_service_socket client,
+                                        const char *body,
+                                        const char *operatorAccountId)
 {
     char action[32];
     char account[64];
@@ -12178,6 +12401,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     memset(resetSceneUtf8, 0, sizeof(resetSceneUtf8));
     memset(resetRuntimeScene, 0, sizeof(resetRuntimeScene));
     memset(operationDetail, 0, sizeof(operationDetail));
+    if (!vm_mock_admin_account_id_is_valid(operatorAccountId))
+    {
+        vm_mock_admin_redirect(client, "", "error", "后台会话身份无效，请重新登录");
+        return;
+    }
     if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
     {
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
@@ -12307,7 +12535,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
                      disconnected, userSessions);
             if (!vm_mock_admin_operation_log_record(
                     "ban-risk-account", account, 0, 0, 0, 0,
-                    operationDetail))
+                    operationDetail, operatorAccountId))
             {
                 vm_mock_admin_redirect_risk(
                     client, pageNumber, "error",
@@ -12339,7 +12567,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         else
             ok = vm_mock_service_account_create_record(account, password, &error);
         if (ok && !vm_mock_admin_operation_log_record(
-                      "create-account", account, 0, 0, 0, 0, "创建账号"))
+                      "create-account", account, 0, 0, 0, 0, "创建账号",
+                      operatorAccountId))
         {
             vm_mock_admin_redirect(client, account, "error",
                                    "账号创建成功，但操作日志写入失败，请检查数据库");
@@ -12357,7 +12586,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
             ok = vm_mock_service_account_set_password(account, password, &error);
         if (ok && !vm_mock_admin_operation_log_record(
                       "set-password", account, 0, 0, 0, 0,
-                      "修改账号密码（不记录密码内容）"))
+                      "修改账号密码（不记录密码内容）", operatorAccountId))
         {
             vm_mock_admin_redirect(client, account, "error",
                                    "密码修改成功，但操作日志写入失败，请检查数据库");
@@ -12388,7 +12617,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
                      "角色名称修改为 %s", roleNameUtf8);
             if (!vm_mock_admin_operation_log_record(
                     "set-role-name", account, roleId, 0, 0, 0,
-                    operationDetail))
+                    operationDetail, operatorAccountId))
             {
                 vm_mock_admin_redirect(client, account, "error",
                                        "角色名称已更新，但操作日志写入失败，请检查数据库");
@@ -12434,7 +12663,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
                          "增加 W 币 %u", amount);
             }
             if (!vm_mock_admin_operation_log_record(
-                    action, account, roleId, 0, 0, amount, operationDetail))
+                    action, account, roleId, 0, 0, amount, operationDetail,
+                    operatorAccountId))
             {
                 vm_mock_admin_redirect(client, account, "error",
                                        "余额已增加，但操作日志写入失败，请检查数据库");
@@ -12468,7 +12698,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
                      "重置到场景 %s 的安全落点", resetSceneUtf8);
             if (!vm_mock_admin_operation_log_record(
                     "reset-role-selected-scene", account, roleId, 0, 0, 0,
-                    operationDetail))
+                    operationDetail, operatorAccountId))
             {
                 vm_mock_admin_redirect(client, account, "error",
                                        "角色位置已重置，但操作日志写入失败，请检查数据库");
@@ -12501,7 +12731,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
                      "角色等级设为 %u", level);
             if (!vm_mock_admin_operation_log_record(
                     "set-role-level", account, roleId, 0, 0, level,
-                    operationDetail))
+                    operationDetail, operatorAccountId))
             {
                 vm_mock_admin_redirect(client, account, "error",
                                        "角色等级已更新，但操作日志写入失败，请检查数据库");
@@ -12548,7 +12778,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
                      amount, itemSeq);
             if (!vm_mock_admin_operation_log_record(
                     "grant-item", account, roleId, itemId, amount, 0,
-                    operationDetail))
+                    operationDetail, operatorAccountId))
             {
                 vm_mock_admin_redirect(client, account, "error",
                                        "物品已给予，但操作日志写入失败，请检查数据库");
@@ -14160,6 +14390,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
     char *query = NULL;
     char *body = NULL;
     char *response = NULL;
+    vm_mock_admin_session *adminSession = NULL;
     /* A TLS-terminating reverse proxy legitimately rewrites Host and leaves
      * Origin at the browser-facing address.  Authentication and route-level
      * method checks below are the access-control boundary, so do not reject
@@ -14772,28 +15003,46 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
     }
     if (strcmp(target, VM_MOCK_ADMIN_LOGIN_PATH) == 0)
     {
+        char accountId[64];
         char password[65];
         const char *loginMessage = NULL;
         bool loginOk = false;
 
+        memset(accountId, 0, sizeof(accountId));
         memset(password, 0, sizeof(password));
         if (strcmp(method, "POST") == 0 &&
+            vm_mock_admin_form_value(body, "account", accountId,
+                                     sizeof(accountId)) &&
             vm_mock_admin_form_value(body, "password", password,
                                      sizeof(password)))
-            loginOk = vm_mock_admin_verify_login_password(password,
-                                                          &loginMessage);
+        {
+            loginOk = vm_mock_admin_verify_login_credentials(accountId,
+                                                              password,
+                                                              &loginMessage);
+        }
         memset(password, 0, sizeof(password));
         if (loginOk)
         {
+            adminSession = vm_mock_admin_issue_session(accountId);
+            if (adminSession == NULL)
+            {
+                loginOk = false;
+                loginMessage = "后台会话创建失败，请重试";
+            }
+        }
+        if (loginOk)
+        {
             char cookieHeader[256];
-            vm_mock_admin_ensure_session_token();
+
             snprintf(cookieHeader, sizeof(cookieHeader),
                      "Set-Cookie: cbe_admin=%s; Path=" VM_MOCK_ADMIN_BASE_PATH "; HttpOnly; SameSite=Strict\r\n",
-                     g_vm_mock_admin_session_token);
+                     adminSession->token);
             vm_mock_admin_send_location(client, VM_MOCK_ADMIN_ROOT_PATH,
                                         cookieHeader);
+            memset(accountId, 0, sizeof(accountId));
             return 1;
         }
+        memset(accountId, 0, sizeof(accountId));
         if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0)
         {
             vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
@@ -14811,7 +15060,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         vm_mock_admin_render_login(
             response, VM_MOCK_ADMIN_RESPONSE_MAX,
             strcmp(method, "POST") == 0 ?
-                (loginMessage ? loginMessage : "管理密码错误") : NULL);
+                (loginMessage ? loginMessage : "后台账号或密码错误") : NULL);
         if (!vm_mock_admin_prefix_page_routes(response,
                                               VM_MOCK_ADMIN_RESPONSE_MAX))
         {
@@ -14833,6 +15082,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                         "Allow: POST\r\n", "退出只允许 POST。\n");
             return 0;
         }
+        vm_mock_admin_clear_request_session(request, headerLen);
         vm_mock_admin_send_location(
             client, VM_MOCK_ADMIN_LOGIN_PATH,
             "Set-Cookie: cbe_admin=; Path=" VM_MOCK_ADMIN_BASE_PATH "; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
@@ -14846,7 +15096,8 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                     NULL, g_vm_mock_admin_login_script);
         return 1;
     }
-    if (!vm_mock_admin_request_is_authenticated(request, headerLen))
+    adminSession = vm_mock_admin_request_session(request, headerLen);
+    if (adminSession == NULL)
     {
         vm_mock_admin_send_location(client, VM_MOCK_ADMIN_LOGIN_PATH, NULL);
         return 0;
@@ -14983,7 +15234,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                         "Allow: POST\r\n", "只允许 POST。\n");
             return 0;
         }
-        vm_mock_admin_handle_action(client, body);
+        vm_mock_admin_handle_action(client, body, adminSession->accountId);
         return 1;
     }
     if (strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/gif-upload") == 0 ||

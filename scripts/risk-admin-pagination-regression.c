@@ -112,6 +112,7 @@ int main(void)
     char *page2 = NULL;
     char *junk = NULL;
     char *clamp = NULL;
+    char riskQuery[768];
     u32 page = 0;
     u32 pageCount = 0;
     u32 total = 0;
@@ -121,6 +122,19 @@ int main(void)
     u32 page1Rows = 0;
     u32 page2Rows = 0;
     bool failed = false;
+
+    if (!vm_mock_admin_risk_audit_build_query(
+            riskQuery, sizeof(riskQuery),
+            VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE,
+            VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE) ||
+        strstr(riskQuery,
+               "DATE_FORMAT(a.created_at,'%Y-%m-%d %H:%i:%s.%f')") == NULL ||
+        strstr(riskQuery, "LIMIT 50,50") == NULL ||
+        strstr(riskQuery, "%%Y") != NULL)
+    {
+        fputs("risk audit SQL escaped-percent contract violated\n", stderr);
+        return 1;
+    }
 
     page1 = render_page("tab=risk");
     if (page1 == NULL)
