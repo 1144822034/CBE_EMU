@@ -674,6 +674,51 @@ static int vm_resource_is_bare_client_asset(const char *name)
              _stricmp(extension, ".gif") == 0);
 }
 
+/* A downloaded SCE is also addressed through the DataPackage virtual table by
+ * its bare leaf name.  These names are commonly GBK, so unlike Actor/GIF
+ * leaves they cannot use the ASCII-only name check above.  Returning a
+ * package-local SCE payload here would silently run the pre-update scene even
+ * after WT18/7 installed the client copy. */
+static int vm_resource_is_bare_client_scene_resource(const char *name)
+{
+    const char *extension;
+
+    if (name == NULL || name[0] == 0 || vm_path_has_separator(name))
+        return 0;
+    extension = strrchr(name, '.');
+    return extension != NULL && _stricmp(extension, ".sce") == 0;
+}
+
+/* A scene package can also contain bare bootstrap layers such as empty.sce.
+ * Unlike Actor/GIF leaves, those package payloads are valid resources.  Give a
+ * bare SCE to the client cache only after WT18/7 has installed that exact
+ * client-owned file; otherwise the DataPackage virtual table must retain its
+ * normal package lookup. */
+static int vm_resource_is_bare_client_cached_scene_resource(const char *name)
+{
+    char clientPath[256];
+
+    if (!vm_resource_is_bare_client_scene_resource(name) ||
+        snprintf(clientPath, sizeof(clientPath), "JHOnlineData/%s", name) >=
+            (int)sizeof(clientPath))
+    {
+        return 0;
+    }
+    return vm_resource_host_file_exists(clientPath);
+}
+
+static int vm_resource_is_bare_client_cached_resource(const char *name)
+{
+    return vm_resource_is_bare_client_asset(name) ||
+           vm_resource_is_bare_client_cached_scene_resource(name);
+}
+
+static int vm_resource_is_bare_client_resolvable_resource(const char *name)
+{
+    return vm_resource_is_bare_client_asset(name) ||
+           vm_resource_is_bare_client_scene_resource(name);
+}
+
 /* Temporary, bounded evidence for scene Actor resolution.  Limit generic
  * entries to the SCE parser range so startup UI Actor/GIF traffic cannot
  * consume the trace budget before a scene body Actor is examined.  The exact
@@ -684,6 +729,7 @@ static void vm_actor_resource_trace(const char *phase, const char *name,
 {
     static u32 traceCount = 0;
     static u32 testBodyTraceCount = 0;
+    static u32 sceneTraceCount = 0;
     char normalized[256];
     const char *baseName = NULL;
     FILE *trace = NULL;
@@ -693,11 +739,17 @@ static void vm_actor_resource_trace(const char *phase, const char *name,
         return;
     vm_file_normalize_host_path(name, normalized, sizeof(normalized));
     baseName = vm_path_basename(normalized[0] ? normalized : name);
-    if (!vm_resource_is_bare_client_asset(baseName))
+    if (!vm_resource_is_bare_client_cached_resource(baseName))
         return;
     if (MTK != NULL)
         (void)uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
-    if (_stricmp(baseName, "e_tiger.actor") == 0)
+    if (vm_resource_is_bare_client_scene_resource(baseName))
+    {
+        if (sceneTraceCount >= 32u)
+            return;
+        ++sceneTraceCount;
+    }
+    else if (_stricmp(baseName, "e_tiger.actor") == 0)
     {
         if (testBodyTraceCount >= 32u)
             return;
@@ -727,29 +779,32 @@ static int vm_resource_cache_resolve_client_path(const char *name,
     if (name == NULL || pathOut == NULL || pathOutSize == 0)
         return 0;
     pathOut[0] = 0;
+    if (vm_resource_is_bare_client_resolvable_resource(name))
+    {
+        if (snprintf(pathOut, pathOutSize, "JHOnlineData/%s", name) >=
+            (int)pathOutSize)
+        {
+            pathOut[0] = 0;
+            return 0;
+        }
+        if (!vm_resource_host_file_exists(pathOut) &&
+            !vm_file_try_download_named_resource(pathOut))
+        {
+            vm_actor_resource_trace("resolve-download-failed", name, 0, -1, 0);
+            pathOut[0] = 0;
+            return 0;
+        }
+        int resolved = vm_resource_host_file_exists(pathOut);
+        vm_actor_resource_trace(resolved ? "resolve-ready" : "resolve-missing",
+                                name, 0, -1, (u32)resolved);
+        return resolved;
+    }
     if (vm_resource_host_file_exists(name))
     {
         vm_actor_resource_trace("resolve-direct", name, 0, -1, 1);
         return snprintf(pathOut, pathOutSize, "%s", name) < (int)pathOutSize;
     }
-    if (!vm_resource_is_bare_client_asset(name) ||
-        snprintf(pathOut, pathOutSize, "JHOnlineData/%s", name) >=
-            (int)pathOutSize)
-    {
-        pathOut[0] = 0;
-        return 0;
-    }
-    if (!vm_resource_host_file_exists(pathOut) &&
-        !vm_file_try_download_named_resource(pathOut))
-    {
-        vm_actor_resource_trace("resolve-download-failed", name, 0, -1, 0);
-        pathOut[0] = 0;
-        return 0;
-    }
-    int resolved = vm_resource_host_file_exists(pathOut);
-    vm_actor_resource_trace(resolved ? "resolve-ready" : "resolve-missing",
-                            name, 0, -1, (u32)resolved);
-    return resolved;
+    return 0;
 }
 
 static u32 vm_resource_cache_lookup_id(const char *name)
@@ -2914,12 +2969,10 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
     if (namePtr)
         vm_read_path_string(namePtr, resourceName, sizeof(resourceName));
 
-    /* Scene kind-3 records refer to external Actor/GIF leaves through the
-     * package virtual table, bypassing DF_GetResourceIDByFileName().  A
-     * package entry supplies only that name; returning its ID when the local
-     * cache lacks bytes leaves the battle unit without a visual context.
-     * Resolve the real client-owned resource before the package lookup. */
-    if (vm_resource_is_bare_client_asset(resourceName))
+    /* Scene resources and kind-3 Actor/GIF leaves bypass
+     * DF_GetResourceIDByFileName().  A package entry supplies only a name;
+     * resolve the real client-owned resource before that package lookup. */
+    if (vm_resource_is_bare_client_cached_resource(resourceName))
     {
         result = (int)vm_resource_cache_lookup_id(resourceName);
         vm_actor_resource_trace("package-get-file-id", resourceName, a1,
@@ -3100,7 +3153,7 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
              * Actor/GIF package row is only a name reference; returning its
              * package payload would leave the scene unit without the client
              * visual resource. */
-            if (vm_resource_is_bare_client_asset(resourceName))
+            if (vm_resource_is_bare_client_cached_resource(resourceName))
             {
                 u32 cached = vm_resource_cache_load_by_name(resourceName);
                 vm_actor_resource_trace("package-get-file-by-id",
@@ -3151,9 +3204,10 @@ int vm_DF_DataPackage_GetFile(int a1, int namePtr)
     if (namePtr)
         vm_read_path_string((u32)namePtr, resourceName, sizeof(resourceName));
 
-    /* This virtual entry is used directly by the scene Actor parser.  Do not
-     * let a name-only package record substitute for an absent client asset. */
-    if (vm_resource_is_bare_client_asset(resourceName))
+    /* This virtual entry is used directly by the scene loader and Actor
+     * parser.  Do not let a name-only package record substitute for an absent
+     * client asset or an installed scene update. */
+    if (vm_resource_is_bare_client_cached_resource(resourceName))
     {
         u32 cached = vm_resource_cache_load_by_name(resourceName);
         vm_actor_resource_trace("package-get-file", resourceName, a1, -1,
@@ -3242,7 +3296,7 @@ u32 vm_DF_GetResourceIDByFileName(int a1)
      * bytes.  Resolve the client cache before asking the package for an ID;
      * otherwise the name reference wins and the missing-file WT18/7 path is
      * never reached. */
-    if (vm_resource_is_bare_client_asset(name))
+    if (vm_resource_is_bare_client_cached_resource(name))
     {
         result = (int)vm_resource_cache_lookup_id(name);
         vm_actor_resource_trace("resource-id-by-name", name, 0, result,
@@ -3276,7 +3330,7 @@ int vm_DF_GetResourceByFileName(int a1)
      * must not suppress the client-cache miss path.  Resolve a missing local
      * Actor before consulting that package so the existing WT18/7 resource
      * transport supplies bytes while the scene node is still being created. */
-    if (vm_resource_is_bare_client_asset(name))
+    if (vm_resource_is_bare_client_cached_resource(name))
     {
         char clientPath[256];
 

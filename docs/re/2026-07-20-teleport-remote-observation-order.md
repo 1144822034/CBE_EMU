@@ -110,3 +110,23 @@ mock_teleport_stone_current_scene_complete ... response=27-family+30/2-no-posinf
   `0x0100575E`、地址访问断言或地图层宿主错误；
 - 完整 `make -j2`：通过，`bin/main.exe` 已重建；
 - 服务已用新二进制重新监听 `127.0.0.1:19090/19091`。
+
+## 2026-08-25：丹霞山首次资源下载后的加载条未闭合
+
+本次 player-3 真实传送到 `03丹霞山_01.sce` 的服务端顺序是：独立 `30/1` 入图、
+客户端请求并完成 `WT18/7(e_tiger.actor)`、随后 `WT2/3` 得到
+`27-family + 30/2(no-posinfo)`。最后一个 `30/2` 仍是进度条必须收到的合法收尾对象。
+
+客户端屏幕日志记录了首个偏离：该 `30/2` 回调内的原生同活动场景请求到达宿主
+screen manager，却被为“资源更新回调重复重入”设计的同 serial guard 拒绝：
+
+```text
+screen_manager_decision ... target_serial=1 ... duplicate_guard=1 accept=0
+```
+
+因此问题不是资源缺失、坐标或把 `30/2` 删除；是 guard 把完成回调中唯一需要执行的
+原生收尾请求也当作了重复。修复将 guard 缩窄为：仅在当前已解析的 `WT30/2` guest
+callback 内放行一次同活动 screen 请求，随后立即恢复同 serial 抑制。该范围由队列中
+真实 packet observation 驱动，不写 CBE 内存、寄存器、PC/LR，不伪造输入或网络包。
+`screen_manager_decision` 新增 `completion_ack_reenter=1`，作为下一次手工验证该唯一路径
+已被放行的证据。

@@ -8,7 +8,7 @@
  *
  * Usage:
  *   php scripts/automation-shop-return-hangup-fixture.php create <database>
- *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|hangup-vitals|hangup-vitals-flask|teleport-stone-c00|equipment-enhance]
+ *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|hangup-vitals|hangup-vitals-flask|teleport-stone-c00|equipment-enhance|linan-scene-battle]
  *   php scripts/automation-shop-return-hangup-fixture.php client-login <nvram-file>
  *   php scripts/automation-shop-return-hangup-fixture.php cleanup <database>
  */
@@ -175,6 +175,15 @@ if ($profile === 'hangup-peach') {
     $mp = 100;
     $backpackItemCount = 1;
     $nextBackpackSeq = 10;
+} elseif ($profile === 'linan-scene-battle') {
+    /* c04临安府_01.sce, GBK.  The copied isolated resource overlay contains
+     * the deployed battle actor; this role position is the recorded manual
+     * collision fixture, not a fabricated client-side coordinate. */
+    $scene = hex2bin('633034C1D9B0B2B8AE5F30312E736365');
+    $posX = 108;
+    $posY = 104;
+    $hp = 120;
+    $mp = 100;
 } else {
     throw new InvalidArgumentException('unknown isolated automation fixture profile');
 }

@@ -1,5 +1,5 @@
 /*
- * Regression for the risk-admin audit pager.
+ * Regression for the risk-admin role/IP directories.
  *
  * The risk page is the only admin tab whose row source is a MySQL table, so
  * this test renders the real page against the local development database
@@ -95,9 +95,39 @@ static char *render_page(const char *query)
     return page;
 }
 
+static bool risk_ip_clear_cache_contract_ok(void)
+{
+    vm_mock_service_login_ip_block_cache cache;
+    bool cleared = true;
+
+    memset(&cache, 0, sizeof(cache));
+    snprintf(cache.entries[0].address, sizeof(cache.entries[0].address),
+             "198.51.100.31");
+    snprintf(cache.entries[1].address, sizeof(cache.entries[1].address),
+             "198.51.100.32");
+    cache.count = 2;
+    if (!vm_mock_service_login_ip_block_cache_remove(&cache,
+                                                     "198.51.100.31") ||
+        cache.count != 1 ||
+        strcmp(cache.entries[0].address, "198.51.100.32") != 0 ||
+        cache.entries[1].address[0] != 0)
+    {
+        return false;
+    }
+    if (vm_mock_service_login_ip_block_cache_remove(&cache,
+                                                    "198.51.100.99") ||
+        cache.count != 1 ||
+        vm_mock_service_login_ip_clear_block("not-an-ip", &cleared) ||
+        cleared)
+    {
+        return false;
+    }
+    return true;
+}
+
 static bool page_ok(char *page, u32 *pageOut, u32 *pageCountOut, u32 *totalOut)
 {
-    if (page == NULL || strstr(page, "风险角色管理页面超过大小限制") != NULL ||
+    if (page == NULL || strstr(page, "风险管理页面超过大小限制") != NULL ||
         strstr(page, "无法读取风险审计") != NULL ||
         strlen(page) >= VM_MOCK_ADMIN_RESPONSE_MAX)
     {
@@ -110,9 +140,11 @@ int main(void)
 {
     char *page1 = NULL;
     char *page2 = NULL;
+    char *ipPage = NULL;
     char *junk = NULL;
     char *clamp = NULL;
     char riskQuery[768];
+    char ipQuery[512];
     u32 page = 0;
     u32 pageCount = 0;
     u32 total = 0;
@@ -135,6 +167,23 @@ int main(void)
         fputs("risk audit SQL escaped-percent contract violated\n", stderr);
         return 1;
     }
+    if (!vm_mock_admin_risk_ip_build_query(
+            ipQuery, sizeof(ipQuery), VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE,
+            VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE) ||
+        strstr(ipQuery, "FROM server_login_ip_blocks WHERE blocked=1") == NULL ||
+        strstr(ipQuery, "LIMIT 50,50") == NULL ||
+        strstr(ipQuery, "%%Y") != NULL)
+    {
+        fputs("risk IP SQL escaped-percent contract violated\n", stderr);
+        return 1;
+    }
+    if (!risk_ip_clear_cache_contract_ok() ||
+        strcmp(vm_mock_admin_operation_log_action_label("clear-risk-ip"),
+               "清除风险 IP 封锁") != 0)
+    {
+        fputs("risk IP clear cache or audit contract violated\n", stderr);
+        return 1;
+    }
 
     page1 = render_page("tab=risk");
     if (page1 == NULL)
@@ -149,10 +198,35 @@ int main(void)
         free(page1);
         return 0;
     }
-    if (strstr(page1, "风险审计列表") == NULL ||
-        strstr(page1, "风险角色管理页面超过大小限制") != NULL)
+    if (strstr(page1, "风险角色审计列表") == NULL ||
+        strstr(page1, "风险管理") == NULL ||
+        strstr(page1,
+               "href=\"/?tab=risk&amp;risk_kind=roles\">风险角色</a>") == NULL ||
+        strstr(page1,
+               "href=\"/?tab=risk&amp;risk_kind=ips\">风险 IP</a>") == NULL ||
+        strstr(page1, "风险管理页面超过大小限制") != NULL)
     {
         fputs("risk page render failed before the pager could be checked\n", stderr);
+        failed = true;
+        goto done;
+    }
+    ipPage = render_page("tab=risk&risk_kind=ips");
+    if (ipPage == NULL || strstr(ipPage, "无法读取已封锁 IP") != NULL ||
+        strstr(ipPage, "风险 IP 列表") == NULL ||
+        strstr(ipPage, "清除会删除该 IP 的封锁及失败计数") == NULL ||
+        strstr(ipPage,
+               "class=\"on\" href=\"/?tab=risk&amp;risk_kind=ips\">风险 IP</a>") == NULL ||
+        strstr(ipPage, "风险管理页面超过大小限制") != NULL)
+    {
+        fputs("risk IP directory render failed\n", stderr);
+        failed = true;
+        goto done;
+    }
+    if (strstr(ipPage, "name=\"action\" value=\"clear-risk-ip\"") != NULL &&
+        (strstr(ipPage, "name=\"risk_ip\"") == NULL ||
+         strstr(ipPage, "清除封锁") == NULL))
+    {
+        fputs("risk IP clear form is incomplete\n", stderr);
         failed = true;
         goto done;
     }
@@ -168,8 +242,8 @@ int main(void)
             strstr(junk, "第 ") != NULL ||
             strstr(clamp, "暂无三秒内连续进入战斗的审计记录") == NULL ||
             strstr(clamp, "第 ") != NULL ||
-            strstr(junk, "风险角色管理页面超过大小限制") != NULL ||
-            strstr(clamp, "风险角色管理页面超过大小限制") != NULL)
+            strstr(junk, "风险管理页面超过大小限制") != NULL ||
+            strstr(clamp, "风险管理页面超过大小限制") != NULL)
         {
             fputs("empty trail handled page parameters incorrectly\n", stderr);
             free(page1);
@@ -178,6 +252,7 @@ int main(void)
             return 1;
         }
         free(page1);
+        free(ipPage);
         free(junk);
         free(clamp);
         printf("risk admin pagination regression passed (empty table): no rows rendered, no pager\n");
@@ -207,7 +282,8 @@ int main(void)
         goto done;
     }
     if (pageCount > 1 &&
-        strstr(page1, "href=\"/?tab=risk&amp;page=2\">下一页</a>") == NULL)
+        strstr(page1,
+               "href=\"/?tab=risk&amp;risk_kind=roles&amp;page=2\">下一页</a>") == NULL)
     {
         fputs("page 1 is missing the next-page link\n", stderr);
         failed = true;
@@ -280,6 +356,7 @@ int main(void)
 done:
     free(page1);
     free(page2);
+    free(ipPage);
     free(junk);
     free(clamp);
     if (failed)

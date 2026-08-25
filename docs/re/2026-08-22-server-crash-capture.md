@@ -30,6 +30,12 @@ Windows `.log` 包含异常码、异常地址、宿主寄存器、调用栈地�
 协议边界；`.dmp` 可用 WinDbg/GDB 结合同一构建的调试符号查看完整线程和栈。Linux
 版 `.log` 包含 signal、地址和 `backtrace` 地址。
 
+Linux 服务额外忽略 `SIGPIPE`，并让服务端 socket 发送使用 `MSG_NOSIGNAL`：已经断开
+的游戏、后台、支付或 MySQL 对端会使发送函数返回失败，由现有调用方记录并关闭该连接，
+而不会直接终止整个服务。`SIGTERM`、`SIGINT`、`SIGHUP` 与 `SIGQUIT` 也会在重新触发
+默认退出前写出同样的终止报告。`SIGKILL` 和内核 OOM kill 无法由进程捕获；遇到这两类
+停止必须一并保留 systemd journal 与内核日志。
+
 ## 协议关联边界
 
 每个处理中的请求会在以下只读阶段更新“最近协议上下文”：

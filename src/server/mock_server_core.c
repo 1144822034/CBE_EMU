@@ -1614,7 +1614,12 @@ enum
      * each entry. Reserve its terminating NUL and reject longer leaf names. */
     VM_NET_MOCK_CONTENT_UPDATE_NAME_CAP = 100,
     VM_NET_MOCK_CONTENT_UPDATE_PAYLOAD_MAX =
-        VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX * VM_NET_MOCK_CONTENT_UPDATE_NAME_CAP
+        VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX * VM_NET_MOCK_CONTENT_UPDATE_NAME_CAP,
+    /* The WT18/9 `code` target is a client-side protocol version, not the
+     * signed-byte checksum of the WT18/8 manifest.  The stock client keeps
+     * it as codeVersion=1 in mmorpg_updateversioncbm while it persists the
+     * actual manifest checksum in a separate word. */
+    VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION = 1
 };
 
 typedef struct
@@ -1639,8 +1644,9 @@ typedef struct
 {
     bool enabled;
     u32 id;
-    /* The CBE compares this against the signed-byte checksum accumulated
-     * while receiving the WT 18/8 manifest. */
+    /* Signed-byte checksum accumulated while receiving the WT18/8 manifest.
+     * It belongs in WT18/8.crc and in the published database record, not in
+     * WT18/9.code/codeVersion. */
     u32 code;
     char names[VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX]
               [VM_NET_MOCK_CONTENT_UPDATE_NAME_CAP];
@@ -1738,7 +1744,8 @@ static void vm_net_mock_content_client_note_version(
     memset(state->pending, 0, sizeof(state->pending));
     memset(state->installGeneration, 0, sizeof(state->installGeneration));
     state->releaseId = haveContentUpdate ? g_vm_net_mock_content_update.id : 0;
-    state->releaseCode = haveContentUpdate ? g_vm_net_mock_content_update.code : 0;
+    state->releaseCode = haveContentUpdate ?
+        VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION : 0;
     state->negotiated = true;
     if (haveContentUpdate && !clientContentCurrent)
     {
@@ -1773,7 +1780,7 @@ static bool vm_net_mock_content_client_resource_pending(u32 clientId,
 
     if (state == NULL || !state->negotiated || index < 0 ||
         state->releaseId != g_vm_net_mock_content_update.id ||
-        state->releaseCode != g_vm_net_mock_content_update.code)
+        state->releaseCode != VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION)
     {
         return false;
     }
@@ -1790,7 +1797,7 @@ static u32 vm_net_mock_content_client_resource_install_generation(
 
     if (state == NULL || !state->negotiated || index < 0 ||
         state->releaseId != g_vm_net_mock_content_update.id ||
-        state->releaseCode != g_vm_net_mock_content_update.code)
+        state->releaseCode != VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION)
     {
         return 0;
     }
@@ -1806,7 +1813,7 @@ static void vm_net_mock_content_client_mark_resource_installed(
 
     if (state == NULL || !state->negotiated || index < 0 ||
         state->releaseId != g_vm_net_mock_content_update.id ||
-        state->releaseCode != g_vm_net_mock_content_update.code)
+        state->releaseCode != VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION)
     {
         return;
     }
@@ -1840,7 +1847,7 @@ static bool vm_net_mock_content_client_mark_resource_runtime_ready(
 
     if (state == NULL || !state->negotiated || index < 0 ||
         state->releaseId != g_vm_net_mock_content_update.id ||
-        state->releaseCode != g_vm_net_mock_content_update.code)
+        state->releaseCode != VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION)
     {
         return false;
     }
@@ -5176,10 +5183,13 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
     haveContentUpdate = g_vm_net_mock_content_update.enabled &&
                         g_vm_net_mock_content_update.id != 0 &&
                         g_vm_net_mock_content_update.nameCount != 0;
-    /* WT 18/9 carries the pair persisted after the client has successfully
-     * processed a content manifest.  type=1 unconditionally enters the
-     * update/resume state machine, so the server (not the client) must return
-     * type=0 when that installed pair is exactly the active release. */
+    /* WT18/9 carries the published id plus the protocol codeVersion stored
+     * in mmorpg_updateversioncbm.  The manifest checksum is separately
+     * persisted and verified through WT18/8.crc; treating that checksum as
+     * codeVersion causes every restart to invalidate an already-installed
+     * scene resource.  type=1 unconditionally enters the update/resume state
+     * machine, so the server (not the client) must return type=0 when this
+     * pair is exactly the active target. */
     if (haveContentUpdate && requestKind == 0x12 && requestSubtype == 9 &&
         vm_net_mock_get_object_u32_field(request, requestLen, "version",
                                          &clientContentVersion) &&
@@ -5188,7 +5198,7 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
     {
         clientContentCurrent =
             clientContentVersion == g_vm_net_mock_content_update.id &&
-            clientContentCode == g_vm_net_mock_content_update.code;
+            clientContentCode == VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION;
     }
 
     u32 objectStart = 0;
@@ -5208,9 +5218,9 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x12, 9, &objectStart))
             return 0;
         /* type=1 enters startup_screen_select_phase_and_continue(), which
-         * requests WT 18/8.  id must match the following 18/8.version and
-         * code must match its final signed-byte checksum.  The client reports
-         * the last completed pair above, but does not turn type=1 into a
+         * requests WT18/8.  id must match the following 18/8.version.  Its
+         * signed-byte checksum is WT18/8.crc; code is the separately stored
+         * protocol codeVersion.  The client does not turn type=1 into a
          * no-op itself. */
         if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type",
                                        haveContentUpdate && !clientContentCurrent ?
@@ -5224,7 +5234,7 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
         if (!vm_net_mock_put_object_u32(
                 out, outCap, &pos, "code",
                 haveContentUpdate && !clientContentCurrent ?
-                    g_vm_net_mock_content_update.code : 0))
+                    VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION : 0))
             return 0;
         vm_net_mock_finish_wt_object(out, objectStart, pos);
         objectCount = 2;
@@ -5237,7 +5247,7 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
             g_vm_mock_service_active_client_id, haveContentUpdate,
             clientContentCurrent);
     }
-    printf("[info][network] mock_update_version request=%u/%u result=0x%02x identity=%08x source=%s configured=%u/%u/%u/%u content=%u/%u/%u client_content=%u/%u action=%s\n",
+    printf("[info][network] mock_update_version request=%u/%u result=0x%02x identity=%08x source=%s configured=%u/%u/%u/%u content=id:%u protocol_code:%u manifest_crc:%u files:%u client_content=%u/%u action=%s\n",
            requestKind, requestSubtype, result, identityHash,
            usedClientVersions ? "client-cbm-versions" : "delivery-ledger",
            g_vm_net_mock_update_slots[0].enabled ?
@@ -5249,6 +5259,7 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
            g_vm_net_mock_update_slots[3].enabled ?
                g_vm_net_mock_update_slots[3].version : 0,
            haveContentUpdate ? g_vm_net_mock_content_update.id : 0,
+           haveContentUpdate ? VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION : 0,
            haveContentUpdate ? g_vm_net_mock_content_update.code : 0,
            haveContentUpdate ? g_vm_net_mock_content_update.nameCount : 0,
            clientContentVersion, clientContentCode,
@@ -5654,7 +5665,12 @@ enum
     VM_NET_MOCK_ROLE_DB_ENHANCEMENT_AFFIX_VERSION = 8,
     VM_NET_MOCK_ROLE_DB_EXP_CURVE_V2_VERSION = 9,
     VM_NET_MOCK_ROLE_DB_EXP_CURVE_V3_VERSION = 10,
-    VM_NET_MOCK_ROLE_DB_VERSION = 11,
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V4_VERSION = 11,
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V5_VERSION = 12,
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V6_VERSION = 13,
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V7_VERSION = 14,
+    VM_NET_MOCK_ROLE_DB_EXP_CURVE_V8_VERSION = 15,
+    VM_NET_MOCK_ROLE_DB_VERSION = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,

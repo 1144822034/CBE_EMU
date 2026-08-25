@@ -975,6 +975,91 @@ static u32 vm_net_mock_build_current_scene_repeat_scene_change_response(const u8
     return pos;
 }
 
+/*
+ * Temporary, test-only forensic aid for the startup SCE direct-enter probe.
+ *
+ * The startup 16/2 path must be compared against the request immediately
+ * emitted by the client afterwards.  Keep this read-only and opt-in: it
+ * records the bounded WT object sequence and wire bytes, then leaves response
+ * routing and all client-visible state untouched.  Remove it once the startup
+ * follow-up contract is fully documented.
+ */
+static void vm_net_mock_trace_startup_sce_direct_followup_request(
+    const u8 *request, u32 requestLen, const vm_net_mock_scene_change_target *target)
+{
+    const char *enabled = getenv("CBE_TRACE_STARTUP_SCE_FOLLOWUP");
+    vm_net_mock_request_object object;
+    char objects[192];
+    char hex[769];
+    u32 offset = 4;
+    u32 objectCount = 0;
+    u32 used = 0;
+    u32 hexUsed = 0;
+    u8 wtKind = 0;
+    u8 wtSubtype = 0;
+    bool truncated = false;
+
+    if (enabled == NULL || strcmp(enabled, "1") != 0 || request == NULL ||
+        requestLen < 5 || request[0] != 'W' || request[1] != 'T')
+    {
+        return;
+    }
+
+    objects[0] = 0;
+    hex[0] = 0;
+    (void)vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
+                                                  &wtKind, &wtSubtype);
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        int wrote;
+
+        if (objectCount < 8)
+        {
+            wrote = snprintf(objects + used, sizeof(objects) - used,
+                             "%s%u/%u/%u:%u", objectCount ? "," : "",
+                             object.major, object.kind, object.subtype,
+                             object.payloadLen);
+            if (wrote < 0 || (u32)wrote >= sizeof(objects) - used)
+            {
+                truncated = true;
+                break;
+            }
+            used += (u32)wrote;
+        }
+        else
+        {
+            truncated = true;
+        }
+        ++objectCount;
+    }
+    if (offset != requestLen)
+        truncated = true;
+    for (u32 i = 0; i < requestLen && i < 256 && hexUsed + 3 < sizeof(hex); ++i)
+    {
+        int wrote = snprintf(hex + hexUsed, sizeof(hex) - hexUsed, "%02X%s",
+                             request[i], (i + 1u == requestLen || i + 1u == 256u) ? "" : " ");
+        if (wrote < 0 || (u32)wrote >= sizeof(hex) - hexUsed)
+        {
+            truncated = true;
+            break;
+        }
+        hexUsed += (u32)wrote;
+    }
+    if (requestLen > 256)
+        truncated = true;
+
+    printf("[debug][network] startup_sce_direct_followup_request wt=%u/%u len=%u objects=%u first=%s target=%s pos=(%u,%u) exit=%u fields=maptype:%u,mapID:%u,exitID:%u,scene:%u,posinfo:%u truncated=%u bytes=%s\n",
+           wtKind, wtSubtype, requestLen, objectCount, objects[0] ? objects : "-",
+           target ? target->scene : "-", target ? target->x : 0,
+           target ? target->y : 0, target ? target->exitId : 0,
+           vm_net_mock_request_contains(request, requestLen, "maptype") ? 1u : 0u,
+           vm_net_mock_request_contains(request, requestLen, "mapID") ? 1u : 0u,
+           vm_net_mock_request_contains(request, requestLen, "exitID") ? 1u : 0u,
+           vm_net_mock_request_contains(request, requestLen, "scene") ? 1u : 0u,
+           vm_net_mock_request_contains(request, requestLen, "posinfo") ? 1u : 0u,
+           truncated ? 1u : 0u, hex);
+}
+
 static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     bool needSkill = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
@@ -998,6 +1083,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     if (outCap < pos)
         return 0;
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
+    vm_net_mock_trace_startup_sce_direct_followup_request(request, requestLen, &target);
     resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
                                                                missingResource,
                                                                sizeof(missingResource));
@@ -5337,8 +5423,7 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
         moveinfoFieldKind = "entry";
     }
     timingFieldMs = scheduler_get_tick_ms();
-    scene = (role != NULL && vm_net_mock_scene_name_is_safe(role->scene)) ?
-            role->scene : vm_net_mock_current_scene_name();
+    scene = vm_net_mock_current_scene_name();
     /*
      * A 30/1 scene transition has already moved the durable role target, but
      * the previous scene can still flush its ten-frame 2/1 queue.  That

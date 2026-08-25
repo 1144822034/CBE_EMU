@@ -1800,3 +1800,888 @@ change `WT16/2`, `WT30/1`, battle packets, rendering, Actor-array release, clien
 registers, PC/LR, or CBE/CBM instructions. Next evidence needed: one real instance exit
 or disconnect/relogin trace with the exact request/response pair, plus a narrow audit of
 all active-session scene consumers before any persistence-boundary implementation.
+
+### 9.46 Dynamic instance session ownership implementation (2026-08-25)
+
+The owner-boundary hypothesis in 9.45 was implemented after the current source and
+latest runtime record were rechecked. The newest available `bin/server_out.txt` still
+ends at a real `WT4/1` while role `10093` starts ActorInfo in `测试地图.sce`; it contains
+neither `transient_instance_begin` nor `position_owner=session-transient`. That record
+is consequently evidence of the pre-fix polluted durable row, not evidence against the
+new implementation.
+
+The service now stores a dynamic NPC instance only in the active
+`vm_mock_service_client_session`:
+
+```text
+WT30/1 instance enter
+  -> remember pending scene target
+  -> transient_instance_begin(session, instance scene, pos)
+  -> current scene / spawn / presence / ready state use the session target
+  -> WT2/1, WT6/1, moveinfo and battle continue to resolve the active instance
+
+ActorInfo / next role selection
+  -> vm_net_mock_scene_key_name()
+  -> durable account_roles.scene/pos only
+```
+
+`vm_net_mock_build_instance_enter_response()` no longer calls
+`vm_net_mock_save_player_pos_state()` for `npc-instance-enter`. Normal in-instance
+moveinfo saves and the acknowledged `2/1` movement timeline update only the matching
+session target. A subsequent explicit, already parser-backed scene transfer to a
+different target clears that session target before its ordinary durable role save; an
+offline session also clears it. The active session's nearby-presence and scene-ready
+views use the same target, avoiding a split in which `WT2/1` or `WT6/1` names the
+durable world scene while battle names the instance.
+
+This does not invent an instance return packet. The previously identified
+`HandleSceneExitConfirm` / `SendSceneExitEvent` request shape, response and destination
+remain unobserved. Existing settings recovery still has its separately documented
+direct-enter contract and is not accepted as evidence of a native instance exit. In
+particular, no default world scene, host scene shutdown, client memory/register write,
+response-byte rewrite or DrawMapTileLayer guard was added.
+
+The aggregation unit now declares the two session-ownership movement bridges before
+the earlier role fragment is included. This is required because the service is one
+translation unit assembled from ordered fragments; without it the role timeline path
+would compile against an undeclared function rather than the exact session owner.
+
+`scripts/instance-guide-direct-entry-regression.c` now creates an isolated active role
+and session against shipped `b_29梦境空间.sce`. It asserts all of the following through
+the actual `30/1` builder and service helpers:
+
+1. Instance entry records a transient session scene while preserving the durable
+   ActorInfo anchor and coordinates.
+2. Generic move persistence and the `2/1` timeline update move only that transient
+   target.
+3. Offline teardown clears it; both `vm_net_mock_current_scene_name()` and
+   `vm_net_mock_scene_key_name()` again resolve the original durable anchor.
+
+Verification on current source:
+
+- `make -j2`: passed; rebuilt `bin/main.exe` and `bin/jh-online-server.exe`.
+- `instance-guide-direct-entry-regression`: rebuilt from source and passed, including
+  runtime `transient_instance_begin` evidence.
+- `scene-battle-monster-field18-regression`: rebuilt from source and passed.
+- `scene-transition-entry-contract-regression`: rebuilt from source and passed.
+
+End-to-end status remains `unresolved` pending a new manual run. The existing role row
+that already names `测试地图.sce` cannot be migrated automatically: no trace supplies an
+authoritative prior world scene. Before validation, use the existing administrator
+operation that writes an exact SCE spawn to select a world anchor explicitly chosen by
+the user, then start the freshly rebuilt `bin/main.exe` from a fully exited old session.
+The first required evidence is ActorInfo from that durable world anchor followed by one
+`mock_npc_instance_enter ... position_owner=session-transient` and
+`transient_instance_begin`; the collision path must then reach its real
+`WT4/1 -> WT2/2 + WT4/5` without a second same-shell `WT16/2` re-entry or the
+`0x0100DA4E` / `0x01004EA8` failure. Preserve the corresponding server, network,
+resource, capacity and fault logs if any earlier deviation occurs.
+
+### 9.47 Manual reproduction negative evidence: legacy row still active (2026-08-25)
+
+The manual run with client `f9d2191f` is not an end-to-end execution of the session
+ownership change. Its raw `bin/server_out.txt` sequence is:
+
+```text
+role select (role=10093)
+-> WT18/7(测试地图.sce) + WT18/7(e_ghostfireR.actor)
+-> scene-ready(scene=测试地图.sce, pos=(176,156))
+-> settings WT16/2 -> WT16/2(result=1, same 测试地图.sce, posinfo, exitid=1)
+-> client WT16/3 -> WT6/1
+-> WT4/1(id=1001,index=6,pos=(120,144))
+-> WT2/2 + WT4/5
+```
+
+It contains no `transient_instance_begin`, no
+`mock_npc_instance_enter ... position_owner=session-transient`, and no `WT30/1` dynamic
+instance entry. The durable role row is therefore still the legacy `测试地图.sce` target;
+the session helper cannot and must not infer a different world anchor for it.
+
+The capacity/fault logs fix the first failure before battle: the first init allocates
+`array_ptr=050673a8, guest_count=2`; the settings direct-enter then produces a second
+`scene-init-reset-count` with that same nonzero pointer/count and no
+`FreeBattleActorArray`. The reused two background rows lead first to
+`parse_actor_motion_descriptor(0x0100DA4E)` writing through the null node
+(`address=0x13b`), followed by the known `DrawMapTileLayer(0x01004EA8)` null visual
+context fault. `WT4/1` is real, but it is after that invalid lifecycle state and is not
+the repair location.
+
+Before the next manual run, select role `10093` in the existing administrator role
+operations page, open **重置角色位置**, select a user-approved ordinary world `*.sce`
+resource, and submit **重置到指定场景**. The action is
+`reset-role-selected-scene`; its server contract validates the exact resource and safe
+landing and rejects an invalid value without silently choosing another map. Fully exit
+the current client afterwards and start the rebuilt `bin/main.exe`. Do not press
+**脱离卡死** during this validation: its observed same-scene `WT16/2` is precisely the
+legacy direct-enter that recreates the failure and does not prove native instance exit.
+
+### 9.48 Dynamic instance SCE install: the second `30/1` is the first invalid lifecycle event (2026-08-25)
+
+The newest manual run is a real execution of the session-owned dynamic instance path, rather than
+the legacy durable-row case in 9.47. The operator first reset role `10093` to the ordinary world
+anchor `c04..._01.sce@(201,140)`. Its service record then proves the exact live ownership chain:
+
+```text
+mock_npc_dialog actor=20092 scene=c04..._01.sce
+mock_scene_target_remember serial=4 scene=测试地图.sce pos=(120,120)
+transient_instance_begin ... durable_anchor=c04..._01.sce@(257,300)
+mock_npc_instance_enter ... response=30/1 resp=51 position_owner=session-transient
+```
+
+This eliminates persistent ActorInfo pollution as the cause of this run. IDA also confirms that
+`JianghuOL.CBE:parse_scene_response_entry(0x010396D6)` consumes `scene` plus tagged `posinfo`,
+then calls the shared scene-target method and its follow-up slot; `30/2(result=1,posinfo)` uses the
+same two calls in `parse_scene_posinfo_field(0x01039770)`. There is no parser evidence for a
+post-install second position-bearing `30/1`.
+
+The actor capacity log separates the two entries unambiguously:
+
+1. The serial-4 `30/1` reaches `scene_runtime_init_and_sync(0x01012FE6)` for `测试地图.sce`
+   with `array_ptr=0`. Its nested `b_01桃花岛.sce` descriptor allocates a new two-row background
+   array (`seq=85..93`, base `05055008`) and both child descriptors complete normally.
+2. The client then downloads the target SCE and effect through final `WT18/7`. The following
+   service branch emitted `mock_instance_sce_install_reenter`, remembered serial 5, and returned a
+   second `30/1` in the first post-install `WT6/1`.
+3. The second runtime initialization begins at `seq=94` with the same live
+   `array_ptr=05055008, guest_count=2`; no `battle-array-free-*` event precedes it. Replaying the
+   two `b_01桃花岛.sce` children exhausts those rows. The second node reaches
+   `parse_actor_motion_descriptor(0x0100DA4E)` at `seq=106` with `R1=0`, causing the write at
+   address `0x13b`; `DrawMapTileLayer(0x01004EA8)` is only the later null visual-context symptom.
+
+The earlier serial-4 response is therefore required to create the destination shell and start its
+resource requests. The first violated contract is the serial-5 re-entry, not battle, collision,
+Actor field17/field18, the final `WT18/7` itself, or the initial direct instance `30/1`.
+
+The service now removes the unproven `reenterAfterSceInstall` target state and both early returns
+that constructed `mock_instance_sce_install_reenter`. After final SCE dependencies are ready, the
+existing pending-target completion paths in `mock_server_interaction_login.c` seed the already
+created shell and emit exactly one `30/2` without `posinfo`; later `WT6/1` or composite task-subset
+requests remain post-enter acknowledgements with no `30/*` scene object. This is the same ownership
+boundary already used for positioned portal completion. It changes no CBE/CBM code, client memory,
+register, PC/LR, renderer, or Actor-array allocation.
+
+`scripts/scene-transition-entry-contract-regression.c` was corrected from the disproven
+"SCE install must re-enter once" assertion. Its dynamic instance fixture now verifies:
+
+```text
+one initial 30/1
+-> target SCE + Actor + effect final WT18/7
+-> first composite runtime follow-up: no 30/1, one 30/2 without posinfo
+-> later runtime follow-up: no 30/1 or 30/2
+```
+
+Validation on the revised source:
+
+- `make -j2`: passed; rebuilt `bin/main.exe` and `bin/jh-online-server.exe`.
+- Rebuilt and ran `obj/server/scene-transition-entry-contract-regression.exe`: passed; runtime
+  output includes `mock_scene_task_subset_completion ... response=30/2-no-posinfo` for the
+  invalidated direct-instance target.
+- Rebuilt and ran `obj/server/instance-guide-direct-entry-regression.exe`: passed; preserves the
+  session-only target and durable ActorInfo anchor.
+- Rebuilt and ran `obj/server/scene-battle-monster-field18-regression.exe`: passed.
+
+End-to-end status remains pending one new manual run. Fully exit the old client/server processes,
+start the rebuilt binaries, reset the test role to the known ordinary world anchor if needed, and
+enter the dynamic test-map guide. Required evidence is one `mock_npc_instance_enter` / serial-4
+`30/1`, final `WT18/7` installations, then a `WT6/1` completion containing `30/2-no-posinfo` and
+no `mock_instance_sce_install_reenter` or serial-5 `30/1`. Only after that should the test monster
+collision be accepted when it reaches real `WT4/1 -> WT2/2 + WT4/5` without
+`0x0100DA4E` or `0x01004EA8`.
+
+### 9.49 副本 pending 阶段“脱离卡死”错误回到持久锚点；重登语义待定（2026-08-25）
+
+Status: investigating; no protocol behavior changed in this section.
+
+最新运行的副本入口已经建立了会话归属，而并未污染角色持久位置：
+
+```text
+mock_scene_target_remember serial=2 scene=测试地图.sce pos=(120,120)
+transient_instance_begin ... durable_anchor=c04临安府_01.sce@(257,300)
+mock_npc_instance_enter ... response=30/1 position_owner=session-transient
+...
+mock_scene_resource_positioned_enter_deferred scene=测试地图.sce missing=e_monkey.actor
+...
+mock_unstuck_target scene=c04临安府_01.sce scene_source=role-db ...
+transient_instance_end ... next_scene=c04临安府_01.sce reason=settings-unstuck-16-2-target
+```
+
+因此本次可见的首次偏离不是副本 `30/1`、资源响应或角色数据库写入，而是
+`vm_net_mock_get_current_scene_unstuck_target()`：它无条件优先 `role->scene/pos`，即使
+同一已认证 session 持有未完成的 `transientInstanceScene`。这与
+`vm_net_mock_current_scene_name()` 已优先 session transient target 的所有权规则不一致。
+`vm_net_mock_save_player_pos_state()` 随后把这个旧世界目标作为“离开副本”，清除 transient
+state；故场景回到进入副本前的锚点。
+
+本轮对已安装二进制的只读 Thumb 复核补充了 parser 边界：
+
+- `mmGameMstarWqvga.cbm:0x11CE` 仅在 `16/3.result == 2` 时进入对应转场分支；
+  `0xBCC` 读取转场对象后调用主 CBE 的 scene-entry API，清除菜单等待状态。
+- `江湖OL.CBE:0x010396D6` 读取 `scene` 和 tagged `posinfo` 后调用共享场景目标路径；
+  `0x01039770` 的完成分支也使用该类场景调用。
+- `JianghuOL.CBE:0x0101791E` 与 `0x01018ED6` 确有单独的 scene-exit event 构造路径；
+  当前日志没有捕获其真实请求/响应或权威目的地，不能将其臆造成重登录/回副本协议。
+
+必须区分两个问题，不能用一个持久化改动混合处理：
+
+1. **副本尚未 visible-ready 时的脱离卡死**：候选修复仅是让既有 `12/3 -> 16/3` 或紧凑
+   `16/2` target builder 优先选取同 session 的 pending transient target，并继续只更新
+   session 位置。这个候选必须先在现有输入队列场景中证明只产生一个客户端场景初始化；
+   已经 visible-ready 的同场景 direct-enter 仍受 9.41--9.43 的 Actor-array 生命周期禁令约束。
+2. **断线后重登录**：当前 `vm_mock_service_session_mark_offline()` 明确清除 transient state，
+   ActorInfo 也只序列化 durable `account_roles` anchor。这是 9.46 为避免同场景 double-init
+   而建立的行为。要实现“重登录后继续副本”需要独立、可恢复的 instance resume record 和
+   已观察的 login/resume packet contract；直接把副本写回 `account_roles.scene` 已被 9.45 的
+   两次初始化与 `0x0100DA4E` 故障反证，不能恢复。
+
+Negative evidence: 不能以将 `16/2`/`16/3` 一概改为副本 target、写回 durable role scene、
+伪造成功或直接释放客户端 Actor array 来修复。前两者分别会造成同场景重入或重登录
+double-init，后两者均绕过客户端契约。
+
+下一步最小验证：为 pending-only target chooser 增加隔离回归，覆盖
+`30/1(instance) -> resources pending -> settings request` 的目标选择、无角色表写入和一次性
+scene target；随后通过现有自动化采集真实 client 的 `16/3/WT6/1` 后续请求与 screen lifecycle。
+重登录续副本在取得原生 resume/exit 证据前保持 unresolved。
+
+### 9.50 首个违反的契约：以服务端未收到的 field17 下载阻塞已完成的场景 shell（2026-08-25）
+
+9.49 的 `16/2` 选点解释了为何按下 **脱离卡死** 后回到持久锚点，但不是用户遇到卡死的首因。
+同一份原始服务端日志把更早的偏离固定为：副本的第一份 `30/1` 已创建目标 shell，目标
+`测试地图.sce` 和 field18 特效 `e_ghostfireR.actor` 都已从最终 `WT18/7` 返回；随后客户端发出
+第一个 `WT6/1`，服务端却仍以 field17 本体 `e_monkey.actor` 的 *per-connection pending* 位阻止
+唯一允许的无 `posinfo` `30/2` 完成包：
+
+```text
+mock_update_chunk_complete client=674584af file=测试地图.sce ... final-WT18/7
+mock_update_chunk_complete client=674584af file=e_ghostfireR.actor ... final-WT18/7
+mock_scene_enter_defer phase=scene-resource-positioned-enter ... missing=e_monkey.actor
+mock_scene_resource_positioned_enter_deferred ... completion=none
+scene_lifecycle_moveinfo_ack ... ready=0 pending=1 visible_scene=c04临安府_01.sce move_scene=测试地图.sce
+```
+
+该客户端没有为 `e_monkey.actor` 再发 `WT18/7`；先前连接 `16175dd2` 已有该文件的最终安装记录，
+而本连接重新收到 `WT18/8` manifest 后只请求本地真正缺失的 SCE 和特效。这符合客户端资源队列的
+按需请求行为：manifest 是失效/可下载目录，不是客户端会逐项回执的下载承诺。服务端不能读取或假定
+客户端可写缓存，却可以把已到达 `scene_runtime_init_and_sync` 的 `WT6/1` 当作 SCE runtime 已建立的
+协议边界。
+
+此前 `vm_net_mock_scene_client_content_ready()` 将 SCE、field17 和 field18 都作为 `30/2` 的前置条件；
+但 `vm_net_mock_scene_client_note_runtime_ready()` 同一时刻只把 SCE 和 field18 记为 runtime-ready，并有
+明确注释说明 `WT6/1` **不能**证明 field17 本体已安装。两条规则合在一起制造环：服务端等 field17
+的 `WT18/7` 才给 `30/2`，客户端在已有本地本体时不请求它；而缺失本体则必须留给其后的
+DreamFactory 查找路径触发真实 `WT18/7`，不能靠服务端伪造 cache hit。
+
+修复边界因此是窄的：首次 scene-shell completion 只等待 SCE 和 field18（两者已有 `WT6/1` runtime
+证据），field17 保持 pending，既不标记为已安装、也不提前投递 battle `4/5`。若客户端实际缺少
+field17，现有裸 `*.actor` cache-miss 路径必须自行发出 `WT18/7`，其最终响应才清除该 pending 位；若
+客户端已有它，则允许既有 shell 以一次 `30/2` 进入，而不会因不存在的回执永久停在 pending。该修改
+不触碰 `16/2`、`16/3`、角色位置、CBE/CBM、客户端内存或 Actor-array 生命周期。
+
+回归必须覆盖精确的重连缓存形状：`30/1(instance) -> final WT18/7(SCE, field18) -> WT6/1 -> exactly one
+30/2(no-posinfo)`，并断言 field17 仍是 pending 且响应不含 `4/5`；其后若模拟真实 field17 `WT18/7`，
+后续 `WT6/1` 不得再次产生 `30/1` 或 `30/2`。重登录续副本仍需单独的、已观测 resume 契约，未在本修复
+中伪造。
+
+实施与验证（2026-08-25）：
+
+- `vm_net_mock_scene_client_content_ready()` 已改为仅以 target SCE 与 field18 pending 位阻止场景完成；
+  field17 不再作为 `30/2` 门槛，且没有被记为 runtime-ready。
+- `scripts/scene-transition-entry-contract-regression.c` 的 direct-instance fixture 现在只完成 SCE 和
+  field18，断言首个 `WT6/1` 恰有一次 `30/2(no-posinfo)`、field17 仍 pending 且响应没有 `4/5`；
+  再完成 field17 后的 follow-up 断言没有新的 `30/1` 或 `30/2`。
+- `make -j2` 通过；重新编译并运行
+  `obj/server/scene-transition-entry-contract-regression.exe` 通过；重新编译并运行
+  `obj/server/instance-guide-direct-entry-regression.exe` 通过。两项均是进程内隔离回归，不启动监听器、
+  不连接/写入账号数据库，也不修改客户端状态。
+
+当前环境未设置 `CBE_AUTOMATION_MYSQL_PASSWORD`，因而没有启动隔离端到端客户端场景，亦未触碰用户
+正在使用的服务或数据库。下次以新构建从普通世界进入副本时，验收边界是：`30/1` 后只需 SCE 和 field18
+的最终 `WT18/7`，第一个目标 `WT6/1` 必须记录一次
+`mock_scene_task_subset_completion ... response=30/2-no-posinfo`，不再出现
+`missing=e_monkey.actor` 的 completion defer；若本体实际缺失，随后必须由客户端发出其自己的
+`WT18/7(e_monkey.actor)`，而不是让服务端伪造命中。断线后**已完成副本的续接**仍为 unresolved：目前
+没有原生 login/resume 包可安全替代 ActorInfo bootstrap，不能把副本写进 durable role scene。
+
+### 9.51 已完成副本的“脱离卡死”错误选择 durable anchor（2026-08-25）
+
+在 field17 completion 环已解除后的 player-3 新运行中，副本已实际完成到可见状态；这排除了 9.49
+最初的“仅 pending 阶段”候选。原始 `bin/server_out.txt` 的同一 client `601cf252` 顺序是：
+
+```text
+transient_instance_begin ... scene=测试地图.sce durable_anchor=c04临安府_01.sce@(256,304)
+mock_npc_instance_enter ... response=30/1 position_owner=session-transient
+final WT18/7(测试地图.sce) + final WT18/7(e_ghostfireR.actor)
+scene_ready ... scene=测试地图.sce pos=(120,120) reason=scene-target-complete
+mock_scene_resource_positioned_portal_complete ... response=resources+30/2-no-posinfo
+WT2/1 movement ... pos=(92,92)
+settings compact WT16/2 {type}
+mock_unstuck_target scene=c04临安府_01.sce scene_source=role-db ...
+transient_instance_end ... next_scene=c04临安府_01.sce reason=settings-unstuck-16-2-target
+```
+
+所以首次违反的契约是 `vm_net_mock_get_current_scene_unstuck_target()` 的 source selector，而不是
+`30/1`、`30/2`、资源安装、客户端 scene parser 或角色表本身：它在 active session 已有
+`transientInstanceActive + sceneVisibleReady` 的精确副本场景时，仍无条件优先 durable
+`role->scene/pos`。随后既有 `vm_net_mock_save_player_pos_state()` 正确地将“不同场景”解释为离开副本，
+从而清除 transient state 并写回临安；错误发生在其输入 target，而非保存函数。
+
+修复仅让 compact settings `WT16/2 {type}` 和已有 `12/3` recovery 共用的 target selector，在以下全部
+条件成立时选择 `session->transientInstanceScene`：transient active、visible-ready、非 pending、visible
+scene 与 transient scene exact match、以及非零可见坐标。它继续使用原有
+`WT16/2(result=1, scene, posinfo, exitid)` 和客户端自己的 `16/3 -> WT6/1` 后续；既不改变 detector/
+dispatch，也不将副本写入 durable ActorInfo。这个边界依赖 9.40 已记录的用户触发 recovery 先由客户端
+销毁旧 shell、再进入 mmGame direct-enter 的生命周期，和启动/资源安装期间禁止同 shell 重入的 9.41--9.43
+不同。pending 副本、普通世界、无可见 session 或 scene 不匹配仍按原 durable-anchor 路径处理。
+
+`scripts/instance-guide-direct-entry-regression.c` 现通过实际 compact `WT16/2 {type}` builder 构造一个
+可见的 session-owned instance，并断言 response 的 `16/2(result=1).scene` 仍是副本、transient 未结束、
+位置仍归 session，且 durable role scene/pos 保持原世界 anchor。该回归不启动监听器、不连接数据库，且不
+写入客户端状态。重新登录后的副本续接仍是独立 unresolved 项：offline teardown 仍清除 transient，而当前
+没有已观测的 native resume contract，不能用本次 settings recovery 的语义替代它。
+
+### 9.52 9.51 同副本 recovery 假设被 player-3 崩溃反证（2026-08-25）
+
+9.51 的 target selector 实现确实消除了“回临安”的表面现象，却错误地把 compact settings
+`WT16/2 {type}` 当作可以安全重新进入一个已 visible-ready 的 transient instance。最新 player-3
+`8b2b63e6` 原始序列固定了新的首次偏离：
+
+```text
+scene_ready 测试地图.sce@(120,120) -> resources+30/2(no-posinfo)
+WT2/1 move -> (120,88)
+WT16/2 {type}
+-> mock_unstuck_target 测试地图.sce scene_source=session-transient-visible
+-> WT16/2(result=1, 测试地图.sce, posinfo, exitid=1)
+-> second scene_runtime_init_and_sync(0x01012FE6)
+```
+
+`actor-scene-node-capacity.log` 的第一轮副本 nested `b_01桃花岛.sce` 分配了
+`battle-background=050163a8,count=2`。第二轮 `scene-init-reset-count` 仍报告完全相同的
+`array_ptr=050163a8,guest_count=2`，且前后没有 `FreeBattleActorArray`；尽管 screen log 记录了
+destroy/init，后者只把计数写零而未释放背景表。第二轮 descriptor walk 继续占用该表，第一处非法访问
+为 `JianghuOL.CBE:0x0100DA4E`（`R1=0`, 对地址 `0x13b` 的节点字段写），用户随后看到的
+`mmGameMstarWqvga.cbm:0x05017784`、地址 `0x8` 是次级故障。
+
+因此 9.51 中“已 visible-ready 的 settings recovery 可以同场景重入”的结论已撤回。当前修复把该精确
+条件记录为 `mock_unstuck_transient_same_scene_unsafe`，并回到唯一已有运行时证据的 durable-world
+anchor 作为不同场景恢复目标；这避免把 session transient 写入 ActorInfo，但**不**声称它能实现副本续接。
+`instance-guide-direct-entry-regression` 已相应改为断言真实 compact builder 的 response scene 是 durable
+anchor，transient 会按实际离开场景规则结束，且不可能再返回相同副本 key。
+
+副本内不崩溃地“脱离卡死后仍留在副本”、以及重新登录继续副本仍为 `unresolved`。两者都需要已观察的
+native scene-exit / instance-resume request、response、parser 和生命周期证据；不能用 `16/2`、`16/3`、
+`30/1` 的同场景重入、客户端内存释放或角色表写副本来替代。
+
+### 9.53 已完成副本的 settings `16/2` 以原生 result=4 结束、不重入场景（2026-08-25）
+
+9.52 排除了 `result=1` 的同副本 direct-enter，但随后对已导出的
+`mmGameMstarWqvga.cbm:sub_11CE(0x11CE)` 作了逐分支复核，得到了一个不同、且不触发
+scene-entry API 的客户端原生结果：对于 `WT16/2`，它先清除菜单等待标记，然后按 `result` 分支处理：
+
+```text
+result=1 / 非 2、4  -> sub_BCC(scene,posinfo,exitid) -> main scene-entry API
+result=2             -> native recharge/input callback
+result=4 + hint      -> 显示 hint，清除等待标记，不调用 sub_BCC
+```
+
+因此只针对同时满足 `transientInstanceActive`、visible-ready、非 pending、visible scene 与
+transient scene 精确相同且拥有非零 visible 坐标的紧凑 settings 请求，服务端现在返回：
+
+```text
+WT16/2 { result=4, hint="副本内无法使用脱离卡死" }
+```
+
+这不是伪造的成功或坐标移动：当前没有已观察的 `16/2` in-place relocation payload。它只让客户端走
+已确认的失败/提示分支，保留现有副本 shell、session transient scene 与坐标，且不写
+`account_roles`、不投递 `30/1` / `16/3`、不触及客户端内存或 Actor-array 生命周期。普通世界、
+pending 副本及其他 settings 路径仍使用原有 target builder。
+
+`scripts/instance-guide-direct-entry-regression.c` 通过实际 `WT16/2 {type}` builder 断言：响应是唯一的
+`16/2(result=4,hint)`、不含 `scene`，transient scene 仍为副本且坐标保持 `(84,88)`，durable ActorInfo
+anchor 保持不变。该场景证明的是“副本内点击后不回临安且不重入崩溃”，不是未取证的副本内解卡坐标移动。
+重登录继续副本仍需要独立的 instance-resume 记录与登录启动时序证据，仍为 `unresolved`。
+
+### 9.54 action13 守关挑战遗漏任务大厅等待确认（2026-08-25）
+
+用户在测试地图点击“挑战守关怪”后看到无法消失的进度条。原始运行链已经排除网络未送达：
+`bin/server_out.txt` 记录 `mock_npc_instance_challenge_native ... request=4/1(action13)`，并返回 185-byte
+`WT2/2 + WT4/5`；同一客户端的 `scene-battle-collision.log` 记录 action13 原始上行为
+`WT4/1{id=1001,index=3,posx=0,posy=0}`，其后紧接着是长度 `0xB9` 的 normal data-event response-dispatch。
+因此进度条并非超时，也不是零 `posx/posy`：`SendNPCInteractReq(0x01037ED4)` 经过 live scene-node 扫描后
+按客户端既有契约固定写入这两个零值。
+
+首次违反发生在该响应的顶层对象序列。IDA 中 `JianghuOL.CBE:DispatchItemEvent(0x01039C28)` 在且仅在
+`object.kind == 26` 时执行 `r9+0x5530=0` 与 `r9+0x552C=0`，这正是任务大厅请求等待态的清除；
+`mmBattle:HandleBattleStartMsg(0x66CC)` 仍由 `WT4/5` 正确消费 live scene index 和 SCE 坐标。旧响应只有
+`WT2/2 + WT4/5`，所以战斗包已交付但没有任何对象经过 `DispatchItemEvent` 的 kind-26 清理分支。
+
+修复仅在 `instanceChallengeDirectSceneMonster` 的 action13 builder 中，将已完成的原生 battle packet
+保留在原字节序后，前缀无 payload 的 `WT26/0`。新序列严格为
+`WT26/0 + WT2/2 + WT4/5`；非场景副本的 `WT4/10` 分支、普通碰撞 `WT4/1` 和未就绪的
+`WT2/10 + WT25/11` 均不变。`WT26/0` 是已存在的 task-hall acknowledgement 形式，客户端只用它关闭
+等待态，不伪造战斗结果、场景、坐标或客户端状态。
+
+新增 `scripts/direct-scene-challenge-progress-regression.c` 在纯进程内构造原生 `WT2/2 + WT4/5`，断言包装后
+object count 为 3、首对象为零 payload `WT26/0`，且后两个对象的完整字节和顺序不变。该回归不启动监听器、
+不连接数据库、不写资源、不运行或修改客户端；其验证的是服务端协议封套，最终体验仍需由新二进制的 action13
+人工复测确认。
+
+实现复核还固定了 framing 边界：外层 WT packet header 为 5 bytes，而每个 server response object header 为
+6 bytes。battle packet 因而必须暂存于 `out + 6`；empty `WT26/0` 正好覆盖该暂存 packet 的 5-byte header，
+其 `WT2/2` 首对象从 outer response offset 11 开始。此前按 5-byte reservation 处理会覆盖首个 battle object；
+新的回归以 `vm_net_mock_next_response_object()`（而非 request 的 5-byte object parser）验证该差异，并逐字节比较
+保留的 battle object bytes。
+
+本轮验证：`make -j2` passed；新建并运行的
+`obj/server/direct-scene-challenge-progress-regression.exe` passed，输出
+`WT26/0 + WT2/2 + WT4/5`；相邻的既有
+`obj/server/scene-battle-monster-field18-regression.exe` passed。人工验收仍需完全退出旧进程后启动本轮
+`bin/main.exe`，点击测试地图的守关挑战。首要证据是服务端
+`mock_npc_instance_challenge_native ... response=26/0+2/2+4/5-scene`，并且 task-hall progress indicator 消失且
+客户端由 `WT4/5` 进入 battle。若该链再次失败，应保留该次 `server_out.txt`、network trace 和 screen lifecycle，
+从第一个缺失的 request/response 或 dispatcher 分支重新取证；不得在 UI、DrawMapTileLayer 或 CBE 状态层添加超时兜底。
+
+### 9.55 action13 acknowledgement 和 scene battle 必须是独立 data event（2026-08-25）
+
+9.54 的首次人工复测确认 `WT26/0` 确实关闭了进度条，但随后没有进入可操作战斗，画面保持卡住。
+同次 `bin/server_out.txt` 固定了上行和 wire response：真实 `WT4/1(action13)` 得到单个 191-byte
+`WT26/0 + WT2/2 + WT4/5`，之后没有新的上行请求。因而这不是服务器未返回 battle object，也不是
+`WT4/5` 缺少字段。
+
+客户端 parser 解释了为何同一 outer WT packet 不是足够的生命周期边界：
+`event_packet_parse_WT(0x0103467A)` 先一次性解开全部 object；
+`net_business_response_dispatch(0x01012E4C)` 逐 object 调用当前 business callback；其中
+`DispatchItemEvent(0x01039C28)` 的 `26/0` 分支只负责完成 task-hall request transaction。已经验证的
+蓬莱铸剑谷 action13 链也不是把 battle 放进这一确认 response，而是
+`26/0 + 30/9 -> client 30/10 -> later 4/10`（见 `2026-08-08-forge-valley-monkey-challenge-task.md`）。
+本次“进度层消失但战斗未推进”是 direct scene `4/5` 不能与该确认共用同一 data-event 的运行时反证。
+
+修复位于 `src/network-client.c` 的
+`vm_client_extract_action13_battle_followup()`，只匹配完整且精确的三对象 response：
+
+```text
+outer WT: 1/26/0 {} + 1/2/2 {...} + 1/4/5 {...}
+  -> event 7: 1/26/0 {}
+  -> event 7: 1/2/2 {...} + 1/4/5 {...}
+```
+
+该 transport boundary 复用现有 remote item-use follow-up 机制和 `scheduler_queue_net_event()`；它不改服务端
+wire bytes、battle fields、CBE memory、PC/LR、寄存器或 CBE/CBM instruction。第一个 event 让客户端自然完成
+task-hall callback，排队的第二个 event 才由既有 scene/battle parser 消费。任何其他 object count、非空
+`26/0`、不同 kind/subtype 或顺序都不会命中，仍按原始单 event 交付。
+
+新增 `scripts/direct-scene-challenge-progress-client-regression.c`，以 CBE-client aggregation unit 的实际 static
+splitter 断言 primary 为 11-byte `WT26/0`，follow-up 为 17-byte `WT2/2 + WT4/5`，并逐字节比较 acknowledgement
+和 battle object。它不启动 VM、socket、服务、输入自动化或资源写入。本轮验证：`make -j2` passed；
+`obj/server/direct-scene-challenge-progress-regression.exe` passed；
+`obj/client/direct-scene-challenge-progress-client-regression.exe` exited 0；
+`obj/server/scene-battle-monster-field18-regression.exe` passed。
+
+下一次人工复测必须完全退出旧 `bin/main.exe` 后重启新二进制。其首条 client evidence 应是
+`remote_action13_challenge_split primary=26/0 followup=2/2+4/5 delivery=event7-then-event7`，然后看到 battle
+screen 初始化、可操作 UI 及客户端发出的首个 battle action request。若仍卡住，保留这条 split log、随后的
+`queue_data`、screen lifecycle、`scene-battle-collision.log` 和原始 `server_out.txt`，从首个未达的 event-7
+callback 或 battle request 重新取证；不得通过 UI timeout、screen forcing 或 CBE 状态写入掩盖问题。
+
+### 9.56 action13 follow-up 原先仍在同一 scheduler tick 分发（2026-08-25）
+
+9.55 之后的人工复测仍显示画面卡住，但新的 client console 已固定两个重要事实：
+`remote_action13_challenge_split primary=26/0 followup=2/2+4/5 delivery=event7-then-event7`，以及随后的
+`queue_data ... event=7 resp=11`。后者只对应 11-byte `WT26/0` primary；旧 client 没有打印 follow-up 入队行，
+因此它本身不能证明第二包丢失。服务端的真实 action13 request 和 191-byte
+`WT26/0 + WT2/2 + WT4/5` wire response 仍不变，也没有后续 battle request。
+
+首次可证明的偏离位于宿主 scheduler，而不是 `WT4/5` parser。`vm_client_async_drain_completions()` 先后调用
+`scheduler_queue_net_event()` 两次；`scheduler_queue_net_event()` 对 event 7 设置 `delayTicks=0`；随后同一次
+`scheduler_dispatch_net_tasks()` 从 slot 0 线性扫描到 slot 1 并立即调用这两个 callback。更关键的是，primary
+callback 返回后 `scheduler_flush_post_vm_business_send_ready()` 还可递归再次 dispatch；单纯给 follow-up 增加
+`delayTicks=1` 仍会被内层和外层扫描各消耗一次，不能建立 frame boundary。故 9.55 所谓的两个 event 只是两个
+队列项，不是客户端可观察的两个到达时刻；这与“进度条自然消失但 battle 不推进”的复现一致。
+
+修复在 scheduler task 的宿主字段 `notBeforeTick`：action13 splitter 命中时仍原样产生 11-byte primary 和 17-byte
+follow-up，后者先由现有 `scheduler_queue_net_event(7, ...)` 入队，再由
+`scheduler_defer_net_event_to_next_tick()` 标记为 `g_schedulerTick + 1` 才可调用。该条件在每次 scheduler dispatch
+（包括递归 flush）之前检查，因此不依赖固定毫秒延时或 UI timeout。它不改变服务端 bytes、CBE/CBM memory、寄存器、
+PC/LR、callback 参数或客户端 screen/battle 状态；仅重现两个独立远端 data frame 不会在同一宿主 tick 同步回调的
+transport contract。
+
+运行时取证新增两条仅观测日志：入队时
+`action13_battle_followup_queue event=7 resp=17 queue_tick=N eligible_tick=N+1 deferred=1`，真正进入既有
+callback 前 `deferred_data_event_dispatch event=7 resp=17 tick=N+1 eligible_tick=N+1`。若 `deferred=0`，首次偏离是
+guest buffer 分配或 task 入队，不能再归咎于 battle parser；若第二条已出现仍卡住，下一目标是
+`mmBattleMstarWqvga.cbm:HandleBattleStartMsg(0x66CC)` 的 `WT4/5` callback 分支及其首个后续上行，而不是再次调整
+event 时序。
+
+`scripts/direct-scene-challenge-progress-client-regression.c` 现同时断言 bytes 不变、follow-up 被标为 next tick，且
+在 queue tick 的 scheduler dispatch 不消耗它、下一 tick 才变为可分发。已重新执行 `make -j2`，随后运行
+`obj/client/direct-scene-challenge-progress-client-regression.exe`、
+`obj/server/direct-scene-challenge-progress-regression.exe` 和
+`obj/server/scene-battle-monster-field18-regression.exe` 均通过。人工验收仍需完整重启新 `bin/main.exe`：先确认以上两条
+日志的 `N -> N+1`，再确认 battle screen 和首个真实 battle action request。
+
+### 9.57 直接场景 action13 必须复用原生确认生命周期（2026-08-25）
+
+9.56 的 scheduler 解释已被人工复测反证：即使 transport 已记录
+`remote_action13_challenge_split` 且将 `WT26/0` 与 `WT2/2+WT4/5` 分成两个 event-7，画面仍停在
+确认后的场景 screen，服务端也没有收到任何 battle action request。该实验只证明将旧 immediate packet
+拆到后一个 host tick 仍不能补上客户端尚未建立的 battle-entry 状态，不能再作为修复方向。
+
+本轮重新串起运行包和 IDA 路径后，最早违反的契约在服务端直接场景 action13 handler：
+
+```text
+WT4/1 { id=1001, index=3, posx=0, posy=0 }
+  -> 旧：WT26/0 + WT2/2 + WT4/5
+  -> 正确生命周期：WT26/0 + WT30/9
+       -> client WT30/10 { agree }
+       -> WT30/10 { result=0 }
+       -> next scene poll -> WT2/2 + WT4/5
+```
+
+`posx/posy=0` 仍是 `SendNPCInteractReq(0x01037ED4)` 的既有 action13 编码，不是错误字段；首次
+`WT4/1` 的 live scene index 是后续 subtype-5 battleinfo 所需的客户端节点身份，必须在服务端会话中保留。
+
+IDA 证据：
+
+| binary | function/address | finding |
+| --- | --- | --- |
+| `JianghuOL.CBE` | `DispatchItemEvent(0x01039C28)` | 仅 kind `26` 分支会清除 task-hall pending (`r9+0x552c/+0x5530`)；因此确认 reply 必须带 `26/0`。 |
+| `JianghuOL.CBE` | `HandleResConfirmCb(0x01039566)` | `30/9` 的 native confirmation callback 发送严格单对象 `WT30/10{agree}`。 |
+| `mmBattleMstarWqvga.cbm` | `HandleBattleStartMsg(0x66CC)` | subtype `5` 读取 battleinfo 的 index/x/y，在当前 25-slot scene table 中匹配 occupied kind-2 node，再建立 scene battle state。 |
+
+铸剑谷已验证的挑战路径也正是 `26/0 + 30/9 -> 30/10 -> later 4/10`，其现有
+`vm_net_mock_build_instance_challenge_confirm_response()` 已证明 battle data 必须从 confirmation reply 独立到
+后续 scene poll，避免 business dispatcher 在 task-hall callback 内 gate 掉 battle-module callback。
+
+本轮可实现的最小改动是只替换 `instanceChallengeDirectSceneMonster` 的成功分支：验证 action13
+`id/index` 与当前 SCE spawn 后，保存该 live index 及 SCE x/y，返回已有 native `26/0+30/9` prompt；已有
+`30/10` handler 继续确认，已有 scene-poll builder 再根据该 origin 输出既有 `2/2+4/5` payload。普通碰撞、
+隔离副本 `4/10`、资源加载和 CBE/CBM 均不改。实现后用一个纯进程回归覆盖整个对象顺序和 session ownership，
+再执行原始人工路径，验收 client 自己发出的 `30/10` 与后续 battle request。
+
+```text
+phase: direct scene action13 confirmation bridge
+status: implemented
+
+request:
+  wt_kind: 4
+  wt_subtype: 1
+  objects: 1/4/1 {id,index,posx,posy}
+  key_fields: id=authorized enemy, index=live scene-node index, posx=0,posy=0
+
+response:
+  wt_kind: 26 then 30, later 2 then 4
+  wt_subtype: 0 then 9, later 2 then 5
+  objects: 26/0 + 30/9; 30/10{result=0}; independent 2/2 + 4/5
+
+ida_evidence:
+  binary: JianghuOL.CBE + mmBattleMstarWqvga.cbm
+  function: 0x01039C28, 0x01039566, mmBattle:0x66CC
+  dispatch_case: kind-26 acknowledgement, confirmation callback, subtype-5 scene battle
+
+runtime_evidence:
+  trace_lines: action13 `WT4/1`; old `26/0+2/2+4/5`; no following battle action request
+  handled_source: mock_npc_instance_challenge_native
+  queued_event: normal data event 7
+  client_effect: old sequence clears progress yet leaves scene frozen
+
+negative_evidence:
+  missing_or_bad_field: post-ack immediate 4/5, including next-tick delivery
+  observed_failure: no 30/10 confirmation and no battle-action request
+```
+
+实现只修改服务端会话和 packet owner：
+
+- `vm_mock_service_client_session` 新增 `instanceChallengeSceneIndex`，从已验证的 action13
+  `WT4/1.index` 保存到 `30/9 -> 30/10 -> scene poll` 完成或失效为止；该值不会从 SCE ordinal
+  或 NPC catalog 重写。
+- `mock_npc_instance_challenge_native` 的 direct scene 分支不再构造 immediate
+  `26/0+2/2+4/5`，而是保存该 index 与 `vm_net_mock_select_sce_combat_spawn()` 的 SCE 坐标，调用
+  已有 confirmation prompt builder，返回 `26/0+30/9`。
+- 确认后的现有 `vm_net_mock_build_pending_instance_challenge_battle_response()` 会重新核对当前
+  visible scene 的 SCE target，并用保存的 client index 和重新解析的 x/y 生成既有 `2/2+4/5`。
+  isolated-instance 仍走原有 `4/10`；普通场景碰撞、资源和 client transport 未改。
+
+`scripts/direct-scene-challenge-progress-regression.c` 已从旧的 packet-wrapper 测试改为隔离的
+完整 server contract fixture。它使用已观察到的 `00蓬莱仙岛_02.sce` 小猴子 counted SCE row，先创建
+visible session，再让真正的 selector 返回 runtime index `5@(120,120)`；之后执行实际 handler 和
+builders，断言：
+
+```text
+WT4/1(index=5) -> exactly 26/0 + 30/9
+30/10{agree}  -> 30/10{result=0}, direct scene identity retained
+scene poll    -> exactly 2/2 + 4/5, then identity cleared
+```
+
+该 fixture 的首次运行曾因为没有 session-visible scene 而被生产 selector 正确拒绝；夹具随后只补齐
+与真实 `30/2` 后一致的 `sceneVisibleReady/sceneVisibleScene`，没有绕过 selector、SCE parser 或 battle
+builder。最终运行的 server log 显示 `mock_direct_scene_challenge_prompt ... index=5`、
+`mock_npc_instance_challenge_confirm ... battle_delivery=next-scene-poll` 及
+`instance_challenge_battle_deliver ... response=2/2+4/5-scene`。
+
+验证结果：`make -j2` passed；重新编译并运行
+`obj/server/direct-scene-challenge-progress-regression.exe` passed；
+`obj/client/direct-scene-challenge-progress-client-regression.exe` exited 0；
+`obj/server/scene-battle-monster-field18-regression.exe` passed。旧 action13 splitter 不被此新首包匹配，
+故保留它不影响此生命周期；它的清理需要独立的端到端证据，不能因为本轮协议修复而盲目回退。
+
+人工验收仍待进行：完全退出旧 `bin/main.exe` 后启动新二进制，点击测试地图守关挑战。服务端必须依次出现
+`response=26/0+30/9-scene-confirm`、真实 `request=30/10{agree}`、
+`battle_delivery=next-scene-poll` 和 `response=2/2+4/5-scene`；客户端随后应自行发出首个 battle action
+request。若仍停住，保留 `server_out.txt`、`net_trace.log`、`scene-battle-collision.log` 和 screen lifecycle，
+以第一个缺失的阶段继续取证，不在渲染地址或 client state 上加兜底。
+
+### 9.58 已撤回：二次确认后的两对象场景开战已到达 BattleScreen（2026-08-25）
+
+本段最初只证明 confirmation 已提交且 server 已下发 battle start；后续的精确 callback 取证已否定“已到达 BattleScreen”的结论。保留下面的旧链路作为反例字节证据。
+
+```text
+WT4/1(index=3)
+  -> WT26/0 + WT30/9
+  -> client WT30/10 { agree }
+  -> WT30/10 { result=0 }
+  -> scene poll -> WT2/2 + WT4/5 (185 bytes)
+```
+
+`bin/server_out.txt` 的同一次运行按顺序记录了 `mock_direct_scene_challenge_prompt`、
+`mock_npc_instance_challenge_confirm ... request=30/10{agree}` 和
+`instance_challenge_battle_deliver ... response=2/2+4/5-scene`。客户端的
+`scene-battle-collision.log` 同时显示 BattleScreen `01053450` 已进入持续的
+`runtime_ready=1, assets_ready=1` normal tick；所以既不是资源未就绪，也不是旧的
+`DrawMapTileLayer` 空视觉上下文崩溃。
+
+此前的只读 `hangup` battle-start 取证器只接受含 `4/11` 的三或四对象开战 envelope，故没有把这个
+精确的两对象 `2/2 + 4/5` scheduler event 绑定到 callback。`src/network-client.c` 现把该**精确**形状
+加入观察集合，仍不改 wire bytes、网络队列、callback、客户内存或输入。它将使下次复现记录：
+
+- `mock_hangup_response_queue ... objects=2 parsed=2`；
+- `mmBattle` 的 `0x66CC` callback 中的 target slot、scene-node kind/active 和坐标；
+- callback 返回后的 `BattleScene_MainLoop`、character-list/loading gate 与 draw-main 分支。
+
+该日志将首次区分 "未进入 0x66CC"、"节点匹配后但 Battle UI loading gate 未完成" 与
+"正常主绘制后没有 action request"。尚未据此改变服务端行为；`4/11` 只在已有场景挂机契约中有证据，不能作为
+这个普通场景 challenge 的猜测性补包。
+
+`scripts/direct-scene-challenge-progress-client-regression.c` 增加相同的两对象识别断言；它仍是纯进程内的
+transport/observation 测试，不启动 VM、socket 或用户客户端。修改后须执行 `make -j2`、该 client regression
+与现有 server challenge regression；下一次人工复现以新增的 callback/render 日志确定第一处偏离。
+
+本轮验证已完成：`make -j2` passed；从 `bin` 工作目录执行的
+`../obj/client/direct-scene-challenge-progress-client-regression.exe` passed，证明精确两对象包会附着只读
+callback/render observation；`obj/server/direct-scene-challenge-progress-regression.exe` passed，仍验证
+`WT4/1 -> 26/0+30/9 -> 30/10 -> 2/2+4/5`；
+`obj/server/scene-battle-monster-field18-regression.exe` passed。client regression 必须从 `bin` 启动以解析
+项目 SDL runtime；从仓库根目录运行的无输出 exit `1` 是 DLL 相对路径环境失败，不是该断言失败。
+
+### 9.59 已撤回：action13 直送场景开战不能装载 mmBattle（2026-08-25）
+
+最新人工复现的同一条 185-byte `WT2/2 + WT4/5` 事件首次偏离于 callback owner，而不是渲染、资源或输入。`hangup-protocol.log` 的 sequence `242` 表明：
+
+```text
+business_cb = 050183df = mmGameMstarWqvga.cbm:sub_418C
+manager = 0
+parser entries = 2[2,4,0,0]
+mmBattle code_base = 00000000, ready = 0
+```
+
+IDA 的 `mmGameMstarWqvga.cbm:sub_418C` 只处理 outer `17/1`；它不拥有 `WT4/*`。因此 `WT2/2 + WT4/5` 虽被通用 wrapper 解包，却没有进入 `mmBattleMstarWqvga.cbm:sub_17AC`，也没有执行 scene-node consumer `sub_66CC`，后续不会产生战斗请求。此前把持续 scene tick 当作 BattleScreen 已就绪是错误推论。
+
+对照的历史直接场景战斗 event 已记录 `business_cb=mmBattle`、`sub_17AC` 依序读取 `2/2` 和 `4/5`，再进入 `sub_66CC`。这证明场景节点 `1001` 不应通过 non-scene `4/10` 模板替代，也不需要猜测性补充 `4/11`。
+
+后续人工复现已否定本节原先的“修复位置”结论：即使不走 `30/9`、直接在 action13 的
+`WT4/1` event 上返回相同的 185-byte `WT2/2 + WT4/5`，callback owner 仍为上述
+`mmGame:sub_418C`，且 `mmBattle code_base=0, ready=0`。所以“响应未被 splitter 分拆”
+不等于“mmBattle 已取得处理权”；当前 action13 路由没有已证实的 module-load contract。
+
+因此不得为直通包猜测性补 `4/11`、关闭进度条或改变 client state。原先的
+`direct-scene-challenge-progress-*` 回归仅验证报文与队列形状，不能再当作业务成功证明，
+其断言待真正契约明确后更新。
+
+测试地图小猴子应恢复到铸剑谷已经验证的职责边界：NPC 仅发放/提交挑战任务；战斗由当前
+SCE 已加载 kind-3 小猴子节点在真实碰撞时发出 `WT4/1`。在变更 handler 前，必须先把
+actor `30033` 的服务配置、任务条件和该节点的 battle ID 串成同一契约，并通过该碰撞链
+观察到 `mmBattle` module transition、`sub_17AC`、`sub_66CC` 和后续真实战斗请求。
+
+### 9.60 测试地图小猴子任务的缺失内容配置（2026-08-25）
+
+针对当前 `jh_online` 的只读查询将现象收敛为内容配置未完成，而不是协议实现缺口：
+
+```text
+server_dynamic_npcs(actor=30033, scene=测试地图.sce): enabled=1, npc_kind=6
+server_dynamic_npc_tasks(actor=30033): no row
+server_npc_services(actor=30033): 0(normal), 6(instance guide), 10(instance challenge)
+server_dynamic_npc_instances(actor=30033): challenge_enemy_id=1001
+
+server_scene_battle_monsters(scene=测试地图.sce, monster=1001):
+  enabled=1, quantity=5, pos=(120,160), actor=e_monkey.actor,
+  effect=e_ghostfireR.actor
+server_tasks(task=100001): enabled=1, requirement1=type2/id1001/count1
+server_dynamic_npc_tasks(task=100001): no row
+server_task_scene_battle_targets: no rows
+account_role_tasks(role=10093, task=100001): no row
+```
+
+故当前 NPC 对话必然显示 action13 的“挑战守关怪”，并复现 9.59 的停滞；它尚未提供
+任务 `100001`，所以目前的人工点击不能验收“小猴子挑战任务”。`100001` 与 `1001` 已是
+同一目标 ID，不能新建第二个默认任务或重用合成任务 `900001`。
+
+需要由正常后台内容编辑操作一次性完成下列配置，不能由启动代码、测试脚本或客户端内存
+写入偷偷播种：
+
+1. 在任务 `100001` 的条件 1 保持 `type=2, id=1001, count=1`，并将该条件的场景目标设为
+   `测试地图.sce`。
+2. 将该任务绑定到 `测试地图.sce` 的动态 NPC `30033`，用于接取及提交。
+3. 从同一 NPC 移除服务 6（副本传送）与服务 10（守关怪挑战），清除其 instance
+   challenge target；任务绑定独立于服务菜单，保留 normal 对话即可。
+
+重新进入测试地图后，验收链必须从任务 action=4 开始，而非 action13：接取 `100001` 后
+物理触碰任一已加载 `1001` 小猴子，客户端自行上行 `WT4/1`，服务端以既有
+`builtin-challenge-interaction` 返回 `WT2/2 + WT4/5`。历史碰撞路径已显示它先加载
+`mmBattleMstarWqvga.cbm` 并由 `050306ed` 接管，随后 `sub_17AC -> sub_66CC` 消费
+场景节点。战斗胜利后必须记录 `mock_task_battle_progress task=100001 ... scene=测试地图.sce`
+和 state=2，回到 `30033` 提交。若首个上行仍是 `WT4/1(action13)` 或日志仍出现
+`mock_npc_instance_challenge_native`，说明第 2/3 项没有生效，不应继续排查进度条。
+
+### 9.61 已接取测试地图小猴子任务后仍未触发碰撞的 SCE 缓存分叉（2026-08-25）
+
+本轮用户已按任务 action=4 成功接取 `100001`，不是 9.59 的 action13 路径。原始
+`bin/server_out.txt` 按顺序记录了：
+
+```text
+task_catalog ... scene_target_rows=1
+mock_task action=accept task=100001 role=10093 request=6/11 response=6/11 result=0
+mock_moveinfo_source ... scene=测试地图.sce
+```
+
+接取后没有任何 `WT4/1` 上行，故服务端的 `builtin-challenge-interaction` 尚未取得处理权。
+客户端碰撞观察同时给出第一处更早的资源不一致：角色距 `1001` 节点最小距离平方为
+`25`，但节点解析日志仍是 `resource=e_tiger.actor`；服务端同次 SCE selector 却从已部署
+overlay 读到 `actor_resource=e_monkey.actor`。
+
+文件字节排除了“WT18/7 没有安装”的解释：
+
+```text
+bin/JHOnlineData/测试地图.sce                         896 bytes, contains e_monkey.actor
+web/fs/JHOnlineData/.cbe-overlays/jh_online/测试地图.sce 896 bytes, contains e_monkey.actor
+web/fs/JHOnlineData/测试地图.sce                       old package source, no e_monkey actor row
+```
+
+因此“服务端已发出 SCE、客户端缓存也有新 SCE、运行时却解析旧节点”只可能发生在
+DreamFactory 读取 owner：此前的直接 `DataPackage_GetFileID/GetFile/GetFileByID` 修复只把
+ASCII 裸 `*.actor`/`*.gif` 定向到 `JHOnlineData`。带 GBK 名称的裸 `*.sce` 未命中该
+predicate，仍可返回 package-local scene payload，绕过刚安装的客户端 SCE。这个问题发生在
+碰撞、任务、`mmBattle` module load 和网络 request 之前，不能以伪造 `WT4/1` 或改战斗 gate
+处理。
+
+修复位于 `src/vmFunc.c` 的同一资源所有权层：新增
+`vm_resource_is_bare_client_scene_resource()`，仅接受无路径分隔符且扩展名为 `.sce` 的裸 leaf，
+允许 GBK 名称。该类型与既有 Actor/GIF 一并走 `JHOnlineData/<leaf>`：
+
+```text
+DataPackage_GetFileID(bare .sce) -> client cache ID or normal cache-miss failure
+DataPackage_GetFile(bare .sce)   -> installed client scene bytes
+DataPackage_GetFileByID(package ID for bare .sce) -> client scene bytes, never package placeholder
+```
+
+非裸路径、`.dsh`、`.map` 与其他 package data 均未改变；修复不写 CBE memory、寄存器、PC/LR、
+指令或网络 response。受限的 `actor-resource-cache.log` 取证也覆盖 bare SCE，最多 32 条，
+用于下次运行确认虚表实际选择了客户端缓存。
+
+`scripts/scene-battle-actor-cache-regression.c` 现在从 `bin/JHOnlineData/*.sce` 选择一个现有
+客户端缓存 SCE，避免把某个 GBK 文件名硬编码进测试源；它构造最小 package row，并验证按名称
+查询、按 ID 查询和 package-local ID 读取都不返回 placeholder。`make -j2` 已完成客户端重新编译；
+`obj/client/scene-battle-actor-cache-regression.exe` 通过；
+`obj/server/scene-battle-monster-field18-regression.exe` 通过。
+
+仍需用户以新 `bin/main.exe` 从重新进入测试地图开始复测。第一条正向证据必须是
+`actor-resource-cache.log` 中 `测试地图.sce` 的 cache resolve/load，随后
+`scene_battle_node ... resource=e_monkey.actor`。只有此后真实物理触碰仍未产生 `WT4/1`，才应继续
+调查 `Global_R9+23768` 的碰撞 callback 安装；若产生 `WT4/1`，则验收既有
+`builtin-challenge-interaction -> WT2/2 + WT4/5 -> mmBattle:sub_17AC -> sub_66CC` 链。
+
+### 9.62 Bare SCE cache ownership must exclude package bootstrap layers (2026-08-25)
+
+The first restart after 9.61 failed during startup, before login or any scene-battle
+request. The current `player-3` resource trace fixes the first erroneous state:
+
+```text
+resource-by-name-enter name=empty.sce
+-> resolve-download-failed JHOnlineData/empty.sce
+-> package-get-file result=0
+-> JianghuOL.CBE:LoadSceneDataFromStream(0x01006204)
+-> 0x01006232: ldrb r0,[r0] with R0=0
+```
+
+The local Thumb disassembly confirms that `0x01006232` is the first `SCE2` magic-byte
+read after the resource virtual call. Existing loader evidence identifies `empty.sce` as
+a DataPackage-owned bootstrap scene layer; it is not a WT18/7 client asset. The 9.61
+predicate was therefore too broad: treating every separator-free `.sce` as cache-owned
+short-circuited the original DataPackage lookup and returned its cache miss directly.
+
+The resource owner rule is now split deliberately:
+
+```text
+bare .actor/.gif                  -> client cache (including normal WT18/7 miss)
+bare .sce with JHOnlineData bytes -> client cache, so an installed overlay wins
+bare .sce without cache bytes     -> original DataPackage lookup
+```
+
+This retains the test-map update guarantee because `JHOnlineData/测试地图.sce` is already
+installed before its direct virtual reads. It also preserves the package payload for
+`empty.sce` and any equivalent bootstrap layers. No CBE memory, registers, PC/LR,
+instructions, network response bytes, or renderer behavior is changed.
+
+`scene-battle-actor-cache-regression` now builds an `empty.sce` package row and asserts
+that `GetFileID`, `GetFileByID`, and `GetFile` preserve its package payload while a
+real cached SCE continues to bypass a package placeholder. Verification after this
+correction:
+
+- `make -j2`: rebuilt `bin/main.exe` successfully.
+- Recompiled and ran `../obj/client/scene-battle-actor-cache-regression.exe` from
+  `bin`: passed.
+- `obj/server/scene-battle-monster-field18-regression.exe`: passed.
+- `git diff --check` for the touched files: passed (existing CRLF notices only).
+
+A fresh startup must complete past the title UI before resuming the task collision
+acceptance; any new crash must be investigated from its first resource trace, not
+guarded at the fault PC.
+
+### 9.63 Test-map task target is installed; residual instance services still own the NPC dialog (2026-08-25)
+
+The later "touch fireball but no battle" report was checked against the live
+`jh_online` configuration with read-only queries.  It supersedes the stale
+"target row missing" part of 9.60:
+
+```text
+server_dynamic_npc_tasks(30033) = task_id 100001, repeatable 0
+server_task_scene_battle_targets(100001, slot 1) = 测试地图.sce
+account_role_tasks(10093, 100001) = task_state 1, progress1 0, progress2 0
+```
+
+Thus the task objective is active and is correctly scoped to the loaded SCE.
+The remaining contradictory content state is on the same NPC:
+
+```text
+server_npc_services(测试地图.sce, 30033) = 0(normal), 6(instance guide), 10(instance challenge)
+server_dynamic_npc_instances(测试地图.sce, 30033) =
+  c04蓬莱仙岛_01.sce@(140,180), challenge_enemy_id=1001
+```
+
+The corresponding runtime dialogue still reported `service_mask=00000440` and
+`direct_challenge=1`.  Services 6/10 therefore continue to expose the
+already-disproved action13 route, rather than leaving this NPC as the task
+giver/receiver for the physical kind-3 monkey collision route.  No new
+`WT4/1` was observed from the reported touch attempt; the last collision log
+also showed the client remaining in the previously created battle screen.
+
+The required correction is a normal authenticated admin `save-npc` operation,
+not direct SQL or startup seeding: retain `task_id=100001` and the ordinary
+dialogue service, clear services 6 and 10, and submit.  The existing
+`vm_net_mock_dynamic_npc_admin_save()` transaction will consequently delete
+`server_dynamic_npc_instances` and replace the service list.  This operation
+could not be performed during this investigation because the local admin
+account has a non-default password and no user service/admin session was
+running; credentials must not be bypassed.
+
+After that save, re-enter the test map and accept the task if necessary.  The
+first acceptance evidence remains client-originated collision `WT4/1`, then
+`builtin-challenge-interaction -> WT2/2 + WT4/5`; an action13 dialogue or a
+remaining `mock_npc_instance_challenge_native` trace proves that the content
+save did not take effect.

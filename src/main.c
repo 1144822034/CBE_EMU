@@ -582,7 +582,12 @@ typedef struct
     u8 fired;
     u8 downloadSnapshotValid;
     u8 downloadSnapshotState;
+    u8 deferredToNextTick;
     u16 delayTicks;
+    /* A remote frame may be received while a preceding frame from the same
+     * transaction is still queued. This is a host scheduler boundary, not
+     * guest state: do not dispatch before this scheduler tick. */
+    u32 notBeforeTick;
     u32 eventType;
     u32 r0;
     u32 r1;
@@ -615,6 +620,10 @@ static vm_net_task g_netTasks[VM_SCHED_MAX_NET_TASKS];
 static vm_net_channel g_netChannels[VM_SCHED_MAX_NET_TASKS];
 static int g_netTaskDispatchDepth = 0;
 static int g_netTaskDispatchSlot = -1;
+/* Provenance for the currently executing WT30/2 callback.  It belongs to the
+ * host scheduler only and never mirrors or changes guest state. */
+static bool g_sceneSameReenterCompletionAckActive = false;
+static bool g_sceneSameReenterCompletionAckConsumed = false;
 static vm_timer_task g_timerTasks[VM_SCHED_MAX_TIMERS];
 static u32 g_schedulerStartTicks = 0;
 static u32 g_nextNetConnectId = 1;
@@ -2234,6 +2243,8 @@ static void scheduler_clear_pending_async_tasks(void)
     memset(g_netChannels, 0, sizeof(g_netChannels));
     g_netTaskDispatchDepth = 0;
     g_netTaskDispatchSlot = -1;
+    g_sceneSameReenterCompletionAckActive = false;
+    g_sceneSameReenterCompletionAckConsumed = false;
     g_netBusinessSendReadyDeferred = 0;
     g_netBusinessSendReadyRerun = 0;
     g_netBusinessSendReadyPostVm = 0;
@@ -2896,7 +2907,9 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
         {
             g_netTasks[i].active = 1;
             g_netTasks[i].fired = 0;
+            g_netTasks[i].deferredToNextTick = 0;
             g_netTasks[i].delayTicks = eventType == 7 ? 0 : 6;
+            g_netTasks[i].notBeforeTick = g_schedulerTick;
             g_netTasks[i].eventType = eventType;
             g_netTasks[i].r0 = r0;
             g_netTasks[i].r1 = r1;
@@ -2944,6 +2957,28 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
         vm_shop_return_forensics_log("net-queue-full", eventType, r0,
                                       callback, context);
     }
+}
+
+/* Preserve a real transport boundary when one remote completion contains two
+ * independent data frames. Recursive scheduler flushes may run before the
+ * current tick returns, so delayTicks alone cannot represent this boundary. */
+static bool scheduler_defer_net_event_to_next_tick(u32 eventType, u32 r0,
+                                                    u32 callback, u32 context)
+{
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        vm_net_task *task = &g_netTasks[i];
+        if (!task->active || task->fired || task->eventType != eventType ||
+            task->r0 != r0 || task->callback != callback ||
+            task->context != context)
+        {
+            continue;
+        }
+        task->notBeforeTick = g_schedulerTick + 1u;
+        task->deferredToNextTick = 1;
+        return true;
+    }
+    return false;
 }
 
 static bool scheduler_attach_net_remote_observation(
@@ -4841,6 +4876,8 @@ static uc_err scheduler_dispatch_net_tasks(void)
         vm_net_task *task = &g_netTasks[i];
         if (!task->active)
             continue;
+        if (task->notBeforeTick > g_schedulerTick)
+            continue;
         if (task->delayTicks > 0)
         {
             task->delayTicks--;
@@ -4857,10 +4894,27 @@ static uc_err scheduler_dispatch_net_tasks(void)
             vm_net_remote_observation taskRemoteObservation =
                 task->remoteObservation;
             u32 remoteSceneTargetClearSerial = 0;
+            bool priorCompletionAckActive =
+                g_sceneSameReenterCompletionAckActive;
+            bool priorCompletionAckConsumed =
+                g_sceneSameReenterCompletionAckConsumed;
+            if (task->deferredToNextTick)
+            {
+                printf("[info][network] deferred_data_event_dispatch "
+                       "event=%u resp=%u tick=%u eligible_tick=%u "
+                       "cb=%08x ctx=%08x\n",
+                       taskEvent, taskR1, g_schedulerTick,
+                       task->notBeforeTick, taskCallback, taskContext);
+            }
             task->fired = 1;
             task->active = 0;
             g_netTaskDispatchDepth++;
             g_netTaskDispatchSlot = (int)i;
+            if (taskRemoteObservation.sceneCompleteAfterCallback)
+            {
+                g_sceneSameReenterCompletionAckActive = true;
+                g_sceneSameReenterCompletionAckConsumed = false;
+            }
             if (g_autotestEnabled && (taskEvent == 5u || taskEvent == 7u ||
                                       taskEvent == 9u))
             {
@@ -4902,6 +4956,11 @@ static uc_err scheduler_dispatch_net_tasks(void)
             vm_autotest_trace_update_guest_callback("callback-end", taskR0,
                                                      taskR1);
             vm_hangup_protocol_parser_trace_end(&taskRemoteObservation);
+            if (taskRemoteObservation.sceneCompleteAfterCallback)
+            {
+                g_sceneSameReenterCompletionAckActive = priorCompletionAckActive;
+                g_sceneSameReenterCompletionAckConsumed = priorCompletionAckConsumed;
+            }
             if (g_netDebugReadWindow)
             {
                 printf("[info][network] net_done slot=%u event=%u cb=%08x err=%u remaining_read=%u/%u\n",
@@ -5267,7 +5326,7 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
 #ifdef CBE_CLIENT_ONLY
         requestOk = vm_client_remote_request(
             request, requestLen, response, sizeof(response), &responseLen,
-            &eventType, NULL, NULL, 0, NULL);
+            &eventType, NULL, NULL, 0, NULL, NULL);
 #else
         requestOk = vm_net_mock_remote_request(
                         request, requestLen, response, sizeof(response),
@@ -5489,6 +5548,29 @@ static void vm_scene_same_reenter_remember_target(const vm_net_mock_scene_change
     g_sceneSameReenterGuard.exitId = target->exitId;
     g_sceneSameReenterGuard.serial = g_vm_net_mock_last_scene_change_target_serial;
     g_sceneSameReenterGuard.valid = 1;
+}
+
+static void vm_scene_same_reenter_begin_completion_ack(void)
+{
+    g_sceneSameReenterCompletionAckActive = true;
+    g_sceneSameReenterCompletionAckConsumed = false;
+}
+
+static void vm_scene_same_reenter_end_completion_ack(void)
+{
+    g_sceneSameReenterCompletionAckActive = false;
+    g_sceneSameReenterCompletionAckConsumed = false;
+}
+
+static bool vm_scene_same_reenter_consume_completion_ack(void)
+{
+    if (!g_sceneSameReenterCompletionAckActive ||
+        g_sceneSameReenterCompletionAckConsumed)
+    {
+        return false;
+    }
+    g_sceneSameReenterCompletionAckConsumed = true;
+    return true;
 }
 
 static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screenPtr)
@@ -8742,7 +8824,8 @@ static void vm_trace_screen_lifecycle_order(const char *phase, u32 screen,
 static void vm_trace_screen_manager_decision(
     u32 idx, u32 guestLr, u32 requestedScreen, u32 oldActiveScreen,
     u32 param, u32 flags, bool sameActiveRequest,
-    bool updateReenterConsumed, bool duplicateGuardMatched,
+    bool updateReenterConsumed, bool completionAckReenterConsumed,
+    bool duplicateGuardMatched,
     bool acceptChange, const vm_net_mock_scene_change_target *target)
 {
     static u32 traceCount = 0;
@@ -8762,13 +8845,15 @@ static void vm_trace_screen_manager_decision(
     fprintf(trace,
             "screen_manager_decision seq=%u idx=%u caller=%08x guest_lr=%08x "
             "requested=%08x active=%08x param=%08x flags=%u same_active=%u "
-            "update_reenter_consumed=%u duplicate_guard=%u accept=%u "
+            "update_reenter_consumed=%u completion_ack_reenter=%u "
+            "duplicate_guard=%u accept=%u "
             "result_exit_mode=%u target_valid=%u target_serial=%u "
             "target_scene=%s target_pos=(%u,%u) target_exit=%u "
             "net_depth=%d net_slot=%d\n",
             traceCount, idx, lastAddress, guestLr, requestedScreen,
             oldActiveScreen, param, flags, sameActiveRequest ? 1u : 0u,
             updateReenterConsumed ? 1u : 0u,
+            completionAckReenterConsumed ? 1u : 0u,
             duplicateGuardMatched ? 1u : 0u, acceptChange ? 1u : 0u,
             acceptChange && requestedScreen != 0 ? VM_SCREEN_EXIT_DESTROY
                                                   : g_screenExitMode,
@@ -12161,6 +12246,8 @@ static void vm_reset_runtime_state_for_restart(void)
     g_nextNetConnectId = 1;
     g_netTaskDispatchDepth = 0;
     g_netTaskDispatchSlot = -1;
+    g_sceneSameReenterCompletionAckActive = false;
+    g_sceneSameReenterCompletionAckConsumed = false;
     g_netMockResponseLen = 0;
     g_netMockResponseOffset = 0;
     g_netMockResponseVmPtr = 0;
@@ -13089,9 +13176,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
     static u32 logicTargetCalls[7];
     static u32 sceneModuleCodeBase = 0;
     /* The input callback base is independently proven by the sub_604 and
-     * sub_8A8 instruction fingerprints.  Keep it separate from the scene
-     * logic entry's tentative -0x604 derivation: the two callbacks can live
-     * at different module-local offsets. */
+     * sub_8A8 instruction fingerprints.  The active scene tick is at
+     * module+0x566, rather than at the fingerprint's +0x604 address. */
     static u32 inputDispatchModuleBase = 0;
     static u32 sceneControlObject = 0;
     static u32 sceneControlCallback = 0;
@@ -13261,6 +13347,50 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         activeLogic = tracedLogicEntry;
     }
 
+    /* A normal wilderness scene can reach its module+0x566 tick before (or
+     * without) a fresh api+52 input-registration observation.  The separate
+     * module+0x604 and +0x8A8 fingerprints validate that inferred code image.
+     * This derives trace addresses from executable bytes only; it never
+     * publishes an address back into guest state. */
+    if (activeLogic >= 0x566u)
+    {
+        static const u8 logicFingerprint[8] = {
+            0x10u, 0xB5u, 0x84u, 0x4Cu, 0x01u, 0x21u, 0x4Cu, 0x44u};
+        static const u8 actionFingerprint[8] = {
+            0xFEu, 0xB5u, 0x02u, 0x1Cu, 0xEBu, 0x48u, 0x0Cu, 0x1Cu};
+        u32 inferredBase = activeLogic - 0x566u;
+        u8 observedLogic[sizeof(logicFingerprint)] = {0};
+        u8 observedAction[sizeof(actionFingerprint)] = {0};
+
+        if (uc_mem_read(MTK, inferredBase + 0x604u, observedLogic,
+                        sizeof(observedLogic)) == UC_ERR_OK &&
+            uc_mem_read(MTK, inferredBase + 0x8A8u, observedAction,
+                        sizeof(observedAction)) == UC_ERR_OK &&
+            memcmp(observedLogic, logicFingerprint,
+                   sizeof(logicFingerprint)) == 0 &&
+            memcmp(observedAction, actionFingerprint,
+                   sizeof(actionFingerprint)) == 0 &&
+            inputDispatchModuleBase != inferredBase)
+        {
+            inputDispatchModuleBase = inferredBase;
+            g_vmTraceMmGameInputCodeBase = inferredBase;
+            actionDispatchTraceCount = 0;
+            actionRouteTraceCount = 0;
+            actionCallbackTraceCount = 0;
+            trace = fopen("logs/scene-battle-collision.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "scene_battle_scheduler phase=module-base-inferred "
+                        "source=active-logic logic=%08x module_base=%08x "
+                        "fingerprint=tick_566+sub_604+sub_8A8 scene=%s\n",
+                        activeLogic, inputDispatchModuleBase,
+                        g_lastSceLoadName);
+                fclose(trace);
+            }
+        }
+    }
+
     if (pc == 0x010183A0u)
     {
         static const u8 logicFingerprint[8] = {
@@ -13277,6 +13407,9 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         caller = lr & ~1u;
         if (caller >= 0xAC8u)
         {
+            /* The private action callback tail-calls TriggerAutoBattle, so
+             * its LR is the return from mmGame sub_8A8's BL sub_68E at
+             * module+0xAC8, not a direct callsite beside the CBE function. */
             inferredBase = caller - 0xAC8u;
             if (uc_mem_read(MTK, inferredBase + 0x604u, observedLogic,
                             sizeof(observedLogic)) == UC_ERR_OK &&
@@ -13289,6 +13422,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                 sceneModuleCodeBase != inferredBase)
             {
                 sceneModuleCodeBase = inferredBase;
+                inputDispatchModuleBase = inferredBase;
+                g_vmTraceMmGameInputCodeBase = inferredBase;
                 actionDispatchTraceCount = 0;
                 actionRouteTraceCount = 0;
                 actionCallbackTraceCount = 0;
@@ -13655,13 +13790,18 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         mainSceneStateSetterTraceCount < 24u)
     {
         u32 lr = 0;
+        u32 sp = 0;
         u32 nextState = 0;
         u32 moduleR9 = 0;
+        u32 stackWords[12] = {0};
         u16 priorState = 0;
 
         (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
         (void)uc_reg_read(MTK, UC_ARM_REG_R0, &nextState);
         (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+        if (sp != 0)
+            (void)uc_mem_read(MTK, sp, stackWords, sizeof(stackWords));
         if (moduleR9 != 0)
         {
             (void)uc_mem_read(MTK, moduleR9 + 23682u, &priorState,
@@ -13673,9 +13813,15 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         {
             fprintf(trace,
                     "scene_battle_control_state phase=setter-entry call=%u "
-                    "pc=%08x lr=%08x prior=%u next=%u scene=%s\n",
+                    "pc=%08x lr=%08x prior=%u next=%u sp=%08x "
+                    "stack=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,"
+                    "%08x,%08x,%08x,%08x scene=%s\n",
                     mainSceneStateSetterTraceCount, pc, lr,
-                    (unsigned)priorState, nextState, g_lastSceLoadName);
+                    (unsigned)priorState, nextState, sp,
+                    stackWords[0], stackWords[1], stackWords[2], stackWords[3],
+                    stackWords[4], stackWords[5], stackWords[6], stackWords[7],
+                    stackWords[8], stackWords[9], stackWords[10], stackWords[11],
+                    g_lastSceLoadName);
             fclose(trace);
         }
         return;
@@ -13871,8 +14017,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         {
             tracedLogicEntry = activeLogic;
             tracedModuleR9 = moduleR9;
-            u32 nextSceneModuleCodeBase = activeLogic >= 0x604u
-                                              ? activeLogic - 0x604u
+            u32 nextSceneModuleCodeBase = activeLogic >= 0x566u
+                                              ? activeLogic - 0x566u
                                               : 0;
             if (sceneModuleCodeBase != nextSceneModuleCodeBase)
             {
@@ -20654,6 +20800,7 @@ static bool hook_vm_manager_screen_func(u32 address)
         bool acceptChange = true;
         bool sameActiveRequest = false;
         bool updateReenterConsumed = false;
+        bool completionAckReenterConsumed = false;
         bool duplicateGuardMatched = false;
         u32 moduleBase = 0;
         u32 guestLr = 0;
@@ -20686,6 +20833,16 @@ static bool hook_vm_manager_screen_func(u32 address)
                  * once before returning.  Refresh the serial-bound guard for
                  * the one accepted resource-completion re-entry so any later
                  * call in the same callback is suppressed. */
+                vm_scene_same_reenter_remember_target(activeTarget);
+            }
+            else if (vm_scene_same_reenter_consume_completion_ack())
+            {
+                /* WT30/2 completes the existing target.  The first native
+                 * same-screen request made in that callback is the loading
+                 * widget's normal close lifecycle, not a new scene entry.
+                 * Preserve the serial guard so a second request in the same
+                 * callback remains suppressed. */
+                completionAckReenterConsumed = true;
                 vm_scene_same_reenter_remember_target(activeTarget);
             }
             else if (vm_scene_same_reenter_matches_target(activeTarget))
@@ -20734,7 +20891,8 @@ static bool hook_vm_manager_screen_func(u32 address)
         }
         vm_trace_screen_manager_decision(
             idx, guestLr, tmp1, oldActiveScreen, tmp2, tmp3,
-            sameActiveRequest, updateReenterConsumed, duplicateGuardMatched,
+            sameActiveRequest, updateReenterConsumed,
+            completionAckReenterConsumed, duplicateGuardMatched,
             acceptChange, activeTarget);
         vm_set_call_result(0);
     }

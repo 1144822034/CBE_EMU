@@ -456,6 +456,11 @@ typedef struct
     u8 requirementCount2;
     u32 requirementId1;
     u32 requirementId2;
+    /* An optional scene key makes a type-2 objective refer to the native
+     * SCE battle node in one exact scene instead of every monster template
+     * sharing the same numeric id.  Empty retains task.dsh compatibility. */
+    char requirementScene1[64];
+    char requirementScene2[64];
     u32 prerequisiteTaskId;
     u32 givenItemId;
     u32 givenItemCount;
@@ -643,6 +648,92 @@ static bool vm_net_mock_task_reward_items_are_valid(
     return true;
 }
 
+static bool vm_net_mock_task_scene_battle_target_is_well_formed(
+    u8 requirementType, u32 requirementId, const char *scene)
+{
+    if (scene == NULL)
+        return false;
+    if (scene[0] == 0)
+        return true;
+    return requirementType == 2 && requirementId != 0 &&
+           requirementId <= 0xffffu && strlen(scene) < 64 &&
+           vm_net_mock_scene_name_is_safe(scene);
+}
+
+static bool vm_net_mock_task_scene_battle_targets_are_well_formed(
+    const vm_net_mock_task_definition *task)
+{
+    return task != NULL &&
+           vm_net_mock_task_scene_battle_target_is_well_formed(
+               task->requirementType1, task->requirementId1,
+               task->requirementScene1) &&
+           vm_net_mock_task_scene_battle_target_is_well_formed(
+               task->requirementType2, task->requirementId2,
+               task->requirementScene2);
+}
+
+static bool vm_net_mock_task_scene_battle_targets_are_configured(
+    const vm_net_mock_task_definition *task)
+{
+    if (!vm_net_mock_task_scene_battle_targets_are_well_formed(task))
+        return false;
+    return (task->requirementScene1[0] == 0 ||
+            vm_net_mock_scene_battle_monster_configured_target_exists(
+                task->requirementScene1, task->requirementId1)) &&
+           (task->requirementScene2[0] == 0 ||
+            vm_net_mock_scene_battle_monster_configured_target_exists(
+                task->requirementScene2, task->requirementId2));
+}
+
+static bool vm_net_mock_task_scene_battle_targets_are_ready(
+    const vm_net_mock_task_definition *task)
+{
+    if (!vm_net_mock_task_scene_battle_targets_are_well_formed(task))
+        return false;
+    return (task->requirementScene1[0] == 0 ||
+            vm_net_mock_scene_battle_monster_target_ready(
+                task->requirementScene1, task->requirementId1)) &&
+           (task->requirementScene2[0] == 0 ||
+            vm_net_mock_scene_battle_monster_target_ready(
+                task->requirementScene2, task->requirementId2));
+}
+
+/* This is deliberately a pure comparison: battle settlement already carries
+ * the real client-selected scene context, so it must not infer another scene
+ * or start a new database lookup while processing the result. */
+static bool vm_net_mock_task_battle_requirement_matches(
+    const vm_net_mock_task_definition *task, u8 requirementSlot, u32 enemyId,
+    const char *currentScene)
+{
+    u8 requirementType = 0;
+    u32 requirementId = 0;
+    const char *targetScene = NULL;
+
+    if (task == NULL || enemyId == 0 ||
+        (requirementSlot != 1 && requirementSlot != 2))
+    {
+        return false;
+    }
+    if (requirementSlot == 1)
+    {
+        requirementType = task->requirementType1;
+        requirementId = task->requirementId1;
+        targetScene = task->requirementScene1;
+    }
+    else
+    {
+        requirementType = task->requirementType2;
+        requirementId = task->requirementId2;
+        targetScene = task->requirementScene2;
+    }
+    if (requirementType != 2 || requirementId != enemyId)
+        return false;
+    if (targetScene == NULL || targetScene[0] == 0)
+        return true;
+    return currentScene != NULL && vm_net_mock_scene_name_is_safe(currentScene) &&
+           strcmp(targetScene, currentScene) == 0;
+}
+
 static bool vm_net_mock_task_definition_is_valid(
     const vm_net_mock_task_definition *task)
 {
@@ -659,6 +750,7 @@ static bool vm_net_mock_task_definition_is_valid(
            strlen(task->activeDialog) < sizeof(task->activeDialog) &&
            strlen(task->completedDialog) < sizeof(task->completedDialog) &&
            task->requirementType1 <= 2 && task->requirementType2 <= 2 &&
+           vm_net_mock_task_scene_battle_targets_are_well_formed(task) &&
            vm_net_mock_task_reward_items_are_valid(task) &&
            task->prerequisiteTaskId != task->taskId;
 }
@@ -827,13 +919,72 @@ static bool vm_net_mock_task_reward_catalog_db_row(
     return true;
 }
 
+typedef struct
+{
+    u32 loaded;
+    u32 skipped;
+} vm_net_mock_task_scene_battle_target_db_context;
+
+static bool vm_net_mock_task_scene_battle_target_db_row(
+    void *contextValue, unsigned int columnCount,
+    const char *const *values, const size_t *lengths)
+{
+    vm_net_mock_task_scene_battle_target_db_context *context =
+        (vm_net_mock_task_scene_battle_target_db_context *)contextValue;
+    vm_net_mock_task_definition *task = NULL;
+    char scene[64];
+    u32 taskId = 0;
+    u32 requirementSlot = 0;
+    int index = -1;
+
+    memset(scene, 0, sizeof(scene));
+    if (context == NULL || columnCount != 3 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &taskId) || taskId == 0 ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &requirementSlot) ||
+        (requirementSlot != 1 && requirementSlot != 2) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[2], lengths[2], scene,
+                                            sizeof(scene)))
+    {
+        if (context != NULL)
+            ++context->skipped;
+        return true;
+    }
+    index = vm_net_mock_task_catalog_raw_index(taskId);
+    if (index < 0)
+    {
+        ++context->skipped;
+        return true;
+    }
+    task = &g_vm_net_mock_task_catalog[index];
+    if ((requirementSlot == 1 &&
+         !vm_net_mock_task_scene_battle_target_is_well_formed(
+             task->requirementType1, task->requirementId1, scene)) ||
+        (requirementSlot == 2 &&
+         !vm_net_mock_task_scene_battle_target_is_well_formed(
+             task->requirementType2, task->requirementId2, scene)))
+    {
+        ++context->skipped;
+        return true;
+    }
+    if (requirementSlot == 1)
+        snprintf(task->requirementScene1, sizeof(task->requirementScene1),
+                 "%s", scene);
+    else
+        snprintf(task->requirementScene2, sizeof(task->requirementScene2),
+                 "%s", scene);
+    ++context->loaded;
+    return true;
+}
+
 static bool vm_net_mock_task_catalog_apply_db(void)
 {
     vm_net_mock_task_catalog_db_context context;
     vm_net_mock_task_reward_catalog_db_context rewardContext;
+    vm_net_mock_task_scene_battle_target_db_context sceneTargetContext;
 
     memset(&context, 0, sizeof(context));
     memset(&rewardContext, 0, sizeof(rewardContext));
+    memset(&sceneTargetContext, 0, sizeof(sceneTargetContext));
     /* vm_net_mock_task_reward_catalog_db_row validates each reward through
      * vm_net_mock_find_shop_catalog_item().  That lookup lazily loads the
      * shop's MySQL overrides on a cold service.  A row callback executes
@@ -860,6 +1011,12 @@ static bool vm_net_mock_task_catalog_apply_db(void)
             "item_id INT UNSIGNED NOT NULL,item_count INT UNSIGNED NOT NULL,"
             "item_type TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "PRIMARY KEY(task_id,reward_order),KEY idx_server_task_reward_items_item(item_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_task_scene_battle_targets ("
+            "task_id INT UNSIGNED NOT NULL,requirement_slot TINYINT UNSIGNED NOT NULL,"
+            "scene VARBINARY(63) NOT NULL,"
+            "PRIMARY KEY(task_id,requirement_slot),"
+            "KEY idx_server_task_scene_battle_targets_scene(scene)) ENGINE=InnoDB") ||
         !vm_mysql_query(
             "SELECT task_id,enabled,level,difficulty,classification,"
             "requirement_type1,requirement_count1,requirement_id1,requirement_type2,requirement_count2,requirement_id2,"
@@ -870,15 +1027,20 @@ static bool vm_net_mock_task_catalog_apply_db(void)
         !vm_mysql_query(
             "SELECT task_id,reward_order,item_id,item_count,item_type "
             "FROM server_task_reward_items ORDER BY task_id,reward_order",
-            vm_net_mock_task_reward_catalog_db_row, &rewardContext))
+            vm_net_mock_task_reward_catalog_db_row, &rewardContext) ||
+        !vm_mysql_query(
+            "SELECT task_id,requirement_slot,HEX(scene) "
+            "FROM server_task_scene_battle_targets ORDER BY task_id,requirement_slot",
+            vm_net_mock_task_scene_battle_target_db_row, &sceneTargetContext))
     {
         printf("[error][mock-admin] task_catalog_db_load failed error=%s\n",
                vm_mysql_last_error());
         return false;
     }
-    printf("[info][mock-admin] task_catalog_db_load rows=%u overridden=%u custom=%u skipped=%u reward_rows=%u reward_tasks=%u reward_skipped=%u\n",
+    printf("[info][mock-admin] task_catalog_db_load rows=%u overridden=%u custom=%u skipped=%u reward_rows=%u reward_tasks=%u reward_skipped=%u scene_target_rows=%u scene_target_skipped=%u\n",
            context.loaded, context.overridden, context.custom, context.skipped,
-           rewardContext.loaded, rewardContext.taskCount, rewardContext.skipped);
+           rewardContext.loaded, rewardContext.taskCount, rewardContext.skipped,
+           sceneTargetContext.loaded, sceneTargetContext.skipped);
     return true;
 }
 
@@ -1153,6 +1315,8 @@ static bool vm_net_mock_task_admin_save(
     char offerHex[sizeof(task->offerDialog) * 2 + 1];
     char activeHex[sizeof(task->activeDialog) * 2 + 1];
     char completedHex[sizeof(task->completedDialog) * 2 + 1];
+    char requirementScene1Hex[sizeof(task->requirementScene1) * 2 + 1];
+    char requirementScene2Hex[sizeof(task->requirementScene2) * 2 + 1];
     char query[8192];
     u32 activeCount = 0;
     bool transactionStarted = false;
@@ -1167,6 +1331,12 @@ static bool vm_net_mock_task_admin_save(
     if (!vm_net_mock_load_task_catalog() ||
         !vm_net_mock_task_definition_is_valid(task))
     {
+        return false;
+    }
+    if (!vm_net_mock_task_scene_battle_targets_are_configured(task))
+    {
+        if (errorOut)
+            *errorOut = "scene battle task target is not configured";
         return false;
     }
     if (!task->enabled &&
@@ -1187,6 +1357,8 @@ static bool vm_net_mock_task_admin_save(
     memset(offerHex, 0, sizeof(offerHex));
     memset(activeHex, 0, sizeof(activeHex));
     memset(completedHex, 0, sizeof(completedHex));
+    memset(requirementScene1Hex, 0, sizeof(requirementScene1Hex));
+    memset(requirementScene2Hex, 0, sizeof(requirementScene2Hex));
 #define VM_TASK_ENCODE_TEXT(field, output)                                      \
     do                                                                          \
     {                                                                           \
@@ -1207,6 +1379,8 @@ static bool vm_net_mock_task_admin_save(
     VM_TASK_ENCODE_TEXT(task->offerDialog, offerHex);
     VM_TASK_ENCODE_TEXT(task->activeDialog, activeHex);
     VM_TASK_ENCODE_TEXT(task->completedDialog, completedHex);
+    VM_TASK_ENCODE_TEXT(task->requirementScene1, requirementScene1Hex);
+    VM_TASK_ENCODE_TEXT(task->requirementScene2, requirementScene2Hex);
 #undef VM_TASK_ENCODE_TEXT
     snprintf(
         query, sizeof(query),
@@ -1241,6 +1415,29 @@ static bool vm_net_mock_task_admin_save(
     transactionStarted = true;
     if (!vm_mysql_exec(query))
         goto failed;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_task_scene_battle_targets WHERE task_id=%u",
+             task->taskId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    if (task->requirementScene1[0] != 0)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_task_scene_battle_targets(task_id,requirement_slot,scene) "
+                 "VALUES(%u,1,X'%s')",
+                 task->taskId, requirementScene1Hex);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    if (task->requirementScene2[0] != 0)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_task_scene_battle_targets(task_id,requirement_slot,scene) "
+                 "VALUES(%u,2,X'%s')",
+                 task->taskId, requirementScene2Hex);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
     snprintf(query, sizeof(query),
              "DELETE FROM server_task_reward_items WHERE task_id=%u",
              task->taskId);
@@ -1328,6 +1525,11 @@ static bool vm_net_mock_task_admin_delete_override(u32 taskId,
     }
     snprintf(query, sizeof(query),
              "DELETE FROM server_task_reward_items WHERE task_id=%u", taskId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_task_scene_battle_targets WHERE task_id=%u",
+             taskId);
     if (!vm_mysql_exec(query))
         goto failed;
     snprintf(query, sizeof(query), "DELETE FROM server_tasks WHERE task_id=%u",
@@ -2274,11 +2476,14 @@ static bool vm_net_mock_task_definition_available(
     {
         return false;
     }
-    if (task->prerequisiteTaskId == 0)
-        return true;
-    prerequisite = vm_net_mock_task_state_list_find(states, stateCount,
-                                                    task->prerequisiteTaskId);
-    return prerequisite != NULL && prerequisite->state == 3;
+    if (task->prerequisiteTaskId != 0)
+    {
+        prerequisite = vm_net_mock_task_state_list_find(
+            states, stateCount, task->prerequisiteTaskId);
+        if (prerequisite == NULL || prerequisite->state != 3)
+            return false;
+    }
+    return vm_net_mock_task_scene_battle_targets_are_ready(task);
 }
 
 /* Keep the acceptance predicate authoritative, but expose its first failed
@@ -2369,6 +2574,14 @@ static const char *vm_net_mock_task_definition_unavailable_reason(
                      "\xC7\xEB\xCF\xC8\xCD\xEA\xB3\xC9\xC7\xB0\xD6\xC3\xC8\xCE\xCE\xF1\xA1\xA3"); /* 请先完成前置任务。 */
             return out;
         }
+    }
+    if (!vm_net_mock_task_scene_battle_targets_are_ready(task))
+    {
+        if (reasonCodeOut != NULL)
+            *reasonCodeOut = "scene-battle-target-unready";
+        snprintf(out, outCap,
+                 "Scene battle target is not deployed or is not ready.");
+        return out;
     }
     return NULL;
 }
@@ -3234,6 +3447,7 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
                                                    u32 dropCount)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *currentScene = vm_net_mock_current_scene_name();
     vm_net_mock_task_state_list_row states[VM_NET_MOCK_TASK_CATALOG_MAX];
     u32 stateCount = 0;
 
@@ -3268,7 +3482,8 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
         if (task == NULL || states[i].state != 1)
             continue;
         if (enemyId != 0 && enemyCount != 0 &&
-            task->requirementType1 == 2 && task->requirementId1 == enemyId)
+            vm_net_mock_task_battle_requirement_matches(
+                task, 1, enemyId, currentScene))
         {
             progress1 = vm_net_mock_min_u32(progress1 + enemyCount,
                                             task->requirementCount1);
@@ -3291,7 +3506,8 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
             }
         }
         if (enemyId != 0 && enemyCount != 0 &&
-            task->requirementType2 == 2 && task->requirementId2 == enemyId)
+            vm_net_mock_task_battle_requirement_matches(
+                task, 2, enemyId, currentScene))
         {
             progress2 = vm_net_mock_min_u32(progress2 + enemyCount,
                                             task->requirementCount2);
@@ -3333,8 +3549,9 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
                 vm_mock_service_session_arm_task_prompt_refresh(
                     vm_net_mock_current_scene_name());
             }
-            printf("[info][network] mock_task_battle_progress task=%u role=%u enemy=%u enemies=%u drop=%u drop_count=%u progress=%u/%u,%u/%u state=%u progress_notice=%u\n",
-                   task->taskId, role->roleId, enemyId, enemyCount,
+            printf("[info][network] mock_task_battle_progress task=%u role=%u scene=%s enemy=%u enemies=%u drop=%u drop_count=%u progress=%u/%u,%u/%u state=%u progress_notice=%u\n",
+                   task->taskId, role->roleId, currentScene ? currentScene : "-",
+                   enemyId, enemyCount,
                    dropItemId, dropCount,
                    progress1, task->requirementCount1,
                    progress2, task->requirementCount2, nextState,
@@ -3909,6 +4126,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         session->instanceChallengeDirectSceneMonster = false;
         session->instanceChallengeActorId = 0;
         session->instanceChallengeEnemyId = 0;
+        session->instanceChallengeSceneIndex = 0;
         session->instanceChallengeX = 0;
         session->instanceChallengeY = 0;
         session->instanceChallengeTick = 0;
@@ -4518,6 +4736,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         session->instanceChallengeDirectSceneMonster = true;
         session->instanceChallengeActorId = matchedSeed->actorId;
         session->instanceChallengeEnemyId = matchedSeed->challengeEnemyId;
+        session->instanceChallengeSceneIndex = 0;
         session->instanceChallengeX = matchedSeed->instanceX != 0
                                           ? matchedSeed->instanceX
                                           : matchedSeed->x;
@@ -5240,15 +5459,6 @@ static u32 vm_net_mock_build_instance_enter_response(
     target.y = seed->instanceY;
     target.mapType = 2;
     target.hasSceEntry = true;
-    /* The target can be absent from the client cache. If its actual SCE
-     * finishes WT18/7, the next WT6/1 must use one native 30/1 re-entry
-     * before the existing 30/2(no-posinfo) completion. The follow-up handler
-     * also matches the completed filename, so this flag alone cannot trigger
-     * a re-entry for a cached target or an unrelated resource. */
-    target.reenterAfterSceInstall = true;
-    target.sceInstallGenerationAtEnter =
-        vm_net_mock_content_client_resource_install_generation(
-            g_vm_mock_service_active_client_id, target.scene);
     pos = vm_net_mock_build_scene_channel_enter_combo_for_target(
         &target, out, outCap);
     if (pos == 0)
@@ -5275,9 +5485,16 @@ static u32 vm_net_mock_build_instance_enter_response(
     g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
     g_vm_net_mock_teleport_stone_direct_enter_pending = false;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
-    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
-                                      "npc-instance-enter");
-    printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) spawn_enemy=%u source=SCE2-kind3 response=30/1 resp=%u evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+    if (!vm_mock_service_active_transient_instance_begin(
+            target.scene, target.x, target.y, "npc-instance-enter"))
+    {
+        /* A real network entry is always bound to a selected role session.
+         * Keep standalone builder fixtures non-persistent, but do not invent
+         * a durable fallback when that test-only context is absent. */
+        printf("[warn][network] mock_npc_instance_enter_session_unbound actor=%u scene=%s action=no-durable-position-save\n",
+               seed->actorId, target.scene);
+    }
+    printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) spawn_enemy=%u source=SCE2-kind3 response=30/1 resp=%u position_owner=session-transient evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
            seed->actorId, target.scene, target.x, target.y,
            seed->instanceSpawnEnemyId, pos);
     return pos;
@@ -5324,6 +5541,48 @@ static u32 vm_net_mock_build_instance_challenge_battle_response(
                responseLen);
     }
     return responseLen;
+}
+
+/* A direct action13 target is already a live current-scene kind-2 node.  The
+ * client contributes that node's index in 4/1; the server re-resolves the
+ * SCE row only for its authoritative coordinates, then lets the established
+ * 2/2 + 4/5 builder populate battleinfo. */
+static u32 vm_net_mock_build_direct_scene_challenge_battle_response(
+    u32 enemyId, u32 sceneIndex, u16 sceneX, u16 sceneY, u8 *out,
+    u32 outCap)
+{
+    u8 synthetic[192];
+    u32 requestPos = 9;
+    u32 objectStart = 4;
+
+    if (enemyId == 0 || sceneIndex == 0 || sceneIndex >= 25 || sceneX == 0 ||
+        sceneY == 0 || out == NULL || outCap < 10)
+    {
+        return 0;
+    }
+    memset(synthetic, 0, sizeof(synthetic));
+    synthetic[0] = 'W';
+    synthetic[1] = 'T';
+    synthetic[objectStart] = 1;
+    synthetic[objectStart + 1] = 4;
+    synthetic[objectStart + 2] = 1;
+    if (!vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "id", enemyId) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "index", sceneIndex) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "posx", sceneX) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "posy", sceneY))
+    {
+        return 0;
+    }
+    synthetic[2] = (u8)(requestPos >> 8);
+    synthetic[3] = (u8)requestPos;
+    synthetic[objectStart + 3] = (u8)((requestPos - objectStart) >> 8);
+    synthetic[objectStart + 4] = (u8)(requestPos - objectStart);
+    return vm_net_mock_build_challenge_interaction_response_ex(
+        synthetic, requestPos, out, outCap, false, true);
 }
 
 static u32 vm_net_mock_build_instance_challenge_prompt_response(
@@ -5392,6 +5651,8 @@ static u32 vm_net_mock_build_instance_challenge_prompt_response(
     session->instanceChallengeActorId = !leaderBlocked ? seed->actorId : 0;
     session->instanceChallengeEnemyId =
         !leaderBlocked ? seed->challengeEnemyId : 0;
+    if (leaderBlocked || !session->instanceChallengeDirectSceneMonster)
+        session->instanceChallengeSceneIndex = 0;
     session->instanceChallengeX = !leaderBlocked ? challengeX : 0;
     session->instanceChallengeY = !leaderBlocked ? challengeY : 0;
     session->instanceChallengeTick = !leaderBlocked ? g_schedulerTick : 0;
@@ -5403,11 +5664,45 @@ static u32 vm_net_mock_build_instance_challenge_prompt_response(
     else
     {
         session->instanceChallengeScene[0] = 0;
+        session->instanceChallengeDirectPending = false;
+        session->instanceChallengeDirectSceneMonster = false;
     }
     printf("[info][network] mock_npc_instance_challenge_prompt client=%08x actor=%u enemy=%u scene=%s pos=(%u,%u) blocked=%u response=26/0+30/9 resp=%u evidence=JianghuOL.CBE:0x01039C28+0x010395AA\n",
            session->clientId, seed->actorId, seed->challengeEnemyId, scene,
            challengeX, challengeY, leaderBlocked ? 1u : 0u, pos);
     return pos;
+}
+
+static u32 vm_net_mock_build_direct_scene_challenge_prompt_response(
+    vm_mock_service_client_session *session, u8 *out, u32 outCap)
+{
+    vm_net_mock_scene_npcinfo_seed seed;
+    u32 responseLen = 0;
+
+    if (session == NULL || !session->instanceChallengeDirectSceneMonster ||
+        session->instanceChallengeActorId == 0 ||
+        session->instanceChallengeEnemyId == 0 ||
+        session->instanceChallengeSceneIndex == 0 ||
+        session->instanceChallengeSceneIndex >= 25 ||
+        session->instanceChallengeX == 0 || session->instanceChallengeY == 0)
+    {
+        return 0;
+    }
+    memset(&seed, 0, sizeof(seed));
+    seed.actorId = session->instanceChallengeActorId;
+    seed.challengeEnemyId = session->instanceChallengeEnemyId;
+    seed.instanceX = session->instanceChallengeX;
+    seed.instanceY = session->instanceChallengeY;
+    responseLen = vm_net_mock_build_instance_challenge_prompt_response(
+        &seed, out, outCap);
+    if (responseLen != 0)
+    {
+        printf("[info][network] mock_direct_scene_challenge_prompt client=%08x actor=%u enemy=%u index=%u scene=%s response=26/0+30/9 resp=%u evidence=JianghuOL.CBE:0x01039C28+0x01039566\n",
+               session->clientId, seed.actorId, seed.challengeEnemyId,
+               session->instanceChallengeSceneIndex,
+               session->instanceChallengeScene, responseLen);
+    }
+    return responseLen;
 }
 
 static bool vm_net_mock_is_instance_challenge_confirm_request(
@@ -5464,6 +5759,9 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
                scene ? scene : "-", session->instanceChallengeScene);
         session->instanceChallengePending = false;
         session->instanceChallengeBattlePending = false;
+        session->instanceChallengeDirectPending = false;
+        session->instanceChallengeDirectSceneMonster = false;
+        session->instanceChallengeSceneIndex = 0;
         return 0;
     }
 
@@ -5491,6 +5789,10 @@ static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
 {
     u32 responseLen = 0;
     u32 ageTicks = 0;
+    u32 configuredSceneIndex = 0;
+    u32 sceneX = 0;
+    u32 sceneY = 0;
+    bool directSceneMonster = false;
 
     if (out == NULL || session == NULL ||
         !session->instanceChallengeBattlePending)
@@ -5509,8 +5811,11 @@ static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
                session->instanceChallengeEnemyId, ageTicks,
                session->sceneVisibleScene, session->instanceChallengeScene);
         session->instanceChallengeBattlePending = false;
+        session->instanceChallengeDirectPending = false;
+        session->instanceChallengeDirectSceneMonster = false;
         session->instanceChallengeActorId = 0;
         session->instanceChallengeEnemyId = 0;
+        session->instanceChallengeSceneIndex = 0;
         session->instanceChallengeX = 0;
         session->instanceChallengeY = 0;
         session->instanceChallengeTick = 0;
@@ -5518,22 +5823,67 @@ static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
         return 0;
     }
 
-    responseLen = vm_net_mock_build_instance_challenge_battle_response(
-        session->instanceChallengeActorId,
-        session->instanceChallengeEnemyId,
-        session->instanceChallengeX,
-        session->instanceChallengeY,
-        out, outCap);
+    directSceneMonster = session->instanceChallengeDirectSceneMonster;
+    if (directSceneMonster)
+    {
+        if (session->instanceChallengeSceneIndex == 0 ||
+            session->instanceChallengeSceneIndex >= 25 ||
+            !vm_net_mock_select_sce_combat_spawn(
+                session->sceneVisibleScene, session->instanceChallengeEnemyId,
+                &configuredSceneIndex, &sceneX, &sceneY) ||
+            sceneX == 0 || sceneX > UINT16_MAX || sceneY == 0 ||
+            sceneY > UINT16_MAX)
+        {
+            printf("[warn][mock-service] direct_scene_challenge_battle_drop client=%08x actor=%u enemy=%u index=%u scene=%s reason=spawn-unresolved-on-confirmed-poll\n",
+                   session->clientId, session->instanceChallengeActorId,
+                   session->instanceChallengeEnemyId,
+                   session->instanceChallengeSceneIndex,
+                   session->sceneVisibleScene);
+            session->instanceChallengeBattlePending = false;
+            session->instanceChallengeDirectSceneMonster = false;
+            session->instanceChallengeActorId = 0;
+            session->instanceChallengeEnemyId = 0;
+            session->instanceChallengeSceneIndex = 0;
+            session->instanceChallengeX = 0;
+            session->instanceChallengeY = 0;
+            session->instanceChallengeTick = 0;
+            session->instanceChallengeScene[0] = 0;
+            return 0;
+        }
+        responseLen = vm_net_mock_build_direct_scene_challenge_battle_response(
+            session->instanceChallengeEnemyId,
+            session->instanceChallengeSceneIndex, (u16)sceneX, (u16)sceneY,
+            out, outCap);
+    }
+    else
+    {
+        responseLen = vm_net_mock_build_instance_challenge_battle_response(
+            session->instanceChallengeActorId,
+            session->instanceChallengeEnemyId,
+            session->instanceChallengeX,
+            session->instanceChallengeY,
+            out, outCap);
+    }
     if (responseLen == 0)
         return 0;
 
-    printf("[info][mock-service] instance_challenge_battle_deliver client=%08x actor=%u enemy=%u age_ticks=%u scene=%s response=4/10 resp=%u evidence=JianghuOL.CBE:0x01012F8E(isolated-module-callback)+mmBattle:0x67AC(non-scene-start)\n",
+    printf("[info][mock-service] instance_challenge_battle_deliver client=%08x actor=%u enemy=%u index=%u config_index=%u age_ticks=%u scene=%s response=%s resp=%u evidence=%s\n",
            session->clientId, session->instanceChallengeActorId,
-           session->instanceChallengeEnemyId, ageTicks,
-           session->sceneVisibleScene, responseLen);
+           session->instanceChallengeEnemyId,
+           directSceneMonster ? session->instanceChallengeSceneIndex : 0,
+           directSceneMonster ? configuredSceneIndex : 0, ageTicks,
+           session->sceneVisibleScene,
+           directSceneMonster ? "2/2+4/5-scene" : "4/10",
+           responseLen,
+           directSceneMonster
+               ? "JianghuOL.CBE:0x01012F8E+mmBattle:0x66CC(scene-node)"
+               : "JianghuOL.CBE:0x01012F8E+mmBattle:0x67AC(non-scene-start)");
     session->instanceChallengeBattlePending = false;
+    session->instanceChallengeDirectPending = false;
+    session->instanceChallengeDirectSceneMonster = false;
     session->instanceChallengeActorId = 0;
     session->instanceChallengeEnemyId = 0;
+    session->instanceChallengeSceneIndex = 0;
     session->instanceChallengeX = 0;
     session->instanceChallengeY = 0;
     session->instanceChallengeTick = 0;
@@ -5856,8 +6206,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     "\xbf\xaa\xca\xbc\xb8\xb1\xb1\xbe\xd5\xbd\xb6\xb7"; /* 开始副本战斗 */
                 /* task_hall_activate_selected_entry action 13 is the native
                  * scene challenge path.  It emits 4/1 {id,index,posx,posy};
-                 * using the monster id here lets the client prepare the battle
-                 * request/module before it receives the non-scene 4/10 start. */
+                 * using the monster id here lets the client select its live
+                 * scene node before the same event receives its 4/5 start. */
                 optionValues[optionCount] = instanceSeed->challengeEnemyId;
                 ++optionCount;
             }
@@ -7116,6 +7466,7 @@ npc_service_serialize:
         session->instanceChallengeBattlePending = false;
         session->instanceChallengeActorId = instanceSeed->actorId;
         session->instanceChallengeEnemyId = instanceSeed->challengeEnemyId;
+        session->instanceChallengeSceneIndex = 0;
         session->instanceChallengeX = instanceSeed->instanceX != 0
                                           ? instanceSeed->instanceX
                                           : instanceSeed->x;

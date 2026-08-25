@@ -283,9 +283,19 @@ static void vm_mock_service_socket_close(vm_mock_service_socket sock)
 static int vm_mock_service_send_all(vm_mock_service_socket sock, const u8 *data, u32 len)
 {
     u32 sent = 0;
+    int sendFlags = 0;
+
+#ifndef _WIN32
+#ifdef MSG_NOSIGNAL
+    /* Keep this socket path safe even if it is ever reused by a host that
+     * does not install the service-wide SIGPIPE disposition. */
+    sendFlags |= MSG_NOSIGNAL;
+#endif
+#endif
     while (sent < len)
     {
-        int rc = send(sock, (const char *)(data + sent), (int)(len - sent), 0);
+        int rc = send(sock, (const char *)(data + sent), (int)(len - sent),
+                      sendFlags);
         if (rc <= 0)
             return 0;
         sent += (u32)rc;
@@ -579,6 +589,28 @@ static void vm_mock_service_login_ip_block_cache_add(
     ++cache->count;
 }
 
+static bool vm_mock_service_login_ip_block_cache_remove(
+    vm_mock_service_login_ip_block_cache *cache, const char *address)
+{
+    if (cache == NULL || !vm_mock_service_login_ip_is_valid(address))
+        return false;
+    for (u32 i = 0; i < cache->count; ++i)
+    {
+        if (strcmp(cache->entries[i].address, address) != 0)
+            continue;
+        if (i + 1 < cache->count)
+        {
+            memmove(&cache->entries[i], &cache->entries[i + 1],
+                    (cache->count - i - 1) * sizeof(cache->entries[0]));
+        }
+        --cache->count;
+        memset(&cache->entries[cache->count], 0,
+               sizeof(cache->entries[cache->count]));
+        return true;
+    }
+    return false;
+}
+
 static bool vm_mock_service_login_ip_block_cache_ensure_locked(
     vm_mock_service_login_ip_block_cache *cache)
 {
@@ -667,6 +699,60 @@ static bool vm_mock_service_login_ip_is_blocked(const char *address)
     }
     pthread_mutex_unlock(&cache->mutex);
     return blocked;
+}
+
+/* A back-office risk-IP removal must update the database and this process's
+ * fast-path cache under the same mutex.  Deleting the record also resets the
+ * failed-attempt counter, so a later failure starts a fresh 15-attempt window.
+ */
+static bool vm_mock_service_login_ip_clear_block(const char *address,
+                                                 bool *clearedOut)
+{
+    vm_mock_service_login_ip_block_cache *cache =
+        &g_vmMockServiceLoginIpBlockCache;
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char query[256];
+    bool blocked = false;
+    bool ok = false;
+
+    if (clearedOut != NULL)
+        *clearedOut = false;
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&cache->mutex);
+    if (!vm_mock_service_login_ip_block_cache_ensure_locked(cache) ||
+        !vm_mock_service_login_ip_lookup_blocked_locked(address, &blocked))
+    {
+        goto done;
+    }
+    if (!blocked)
+    {
+        ok = true;
+        goto done;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_login_ip_blocks "
+             "WHERE ip_address=CAST(X'%s' AS CHAR) AND blocked=1",
+             addressHex);
+    if (!vm_mysql_exec(query))
+        goto done;
+    (void)vm_mock_service_login_ip_block_cache_remove(cache, address);
+    if (clearedOut != NULL)
+        *clearedOut = true;
+    ok = true;
+
+done:
+    if (!ok)
+    {
+        printf("[error][login-ip-lock] admin_clear_failed ip=%s error=%s\n",
+               address, vm_mysql_last_error());
+    }
+    pthread_mutex_unlock(&cache->mutex);
+    return ok;
 }
 
 static bool vm_mock_service_login_ip_note_failure(const char *address,

@@ -63,11 +63,15 @@ int main(void)
 {
     const u32 clientId = 0x55667788u;
     static const char scene[] = "00fixture.sce";
-    static const char actor[] = "fixture.actor";
-    static const char effect[] = "fixture-effect.actor";
+    static const char actor[] = "e_huayao.actor";
+    static const char actorImage[] = "e_huayao.gif";
+    static const char actorShadow[] = "yingzi.gif";
+    static const char effect[] = "e_ghostfireR.actor";
+    static const char effectImage[] = "e_ghostfiresR.gif";
     static const char module[] = "mmGameMstarWqvga.cbm";
     vm_net_mock_scene_battle_monster_admin_row rows[3];
     const char *publishNames[8];
+    char publishImageNameStorage[8][64];
     u32 publishNameCount = 0;
     u8 request[512];
     u8 response[2048];
@@ -88,6 +92,15 @@ int main(void)
     u32 expectedLen = 0;
     u32 expectedCode = 0;
 
+    /* The deployment collector validates the same authoritative Actor/GIF
+     * dependency closure as the web admin.  Point this process-only fixture
+     * at the checked-in resource root; it does not start a listener or touch
+     * MySQL/a client cache. */
+    if (!vm_net_mock_set_resource_dir("web/fs/JHOnlineData"))
+    {
+        fputs("could not initialise fixture resource root\n", stderr);
+        return 1;
+    }
     memset(rows, 0, sizeof(rows));
     rows[0].enabled = true;
     snprintf(rows[0].actorResource, sizeof(rows[0].actorResource), "%s", actor);
@@ -96,14 +109,23 @@ int main(void)
     snprintf(rows[1].actorResource, sizeof(rows[1].actorResource), "%s", actor);
     snprintf(rows[1].effectResource, sizeof(rows[1].effectResource), "%s", effect);
     rows[2].enabled = false;
+    memset(publishImageNameStorage, 0, sizeof(publishImageNameStorage));
     publishNameCount = vm_net_mock_scene_battle_monster_collect_publish_names(
         scene, rows, 3, publishNames,
-        sizeof(publishNames) / sizeof(publishNames[0]));
-    if (publishNameCount != 3 || strcmp(publishNames[0], scene) != 0 ||
+        sizeof(publishNames) / sizeof(publishNames[0]),
+        publishImageNameStorage,
+        sizeof(publishImageNameStorage) / sizeof(publishImageNameStorage[0]));
+    if (publishNameCount != 6 || strcmp(publishNames[0], scene) != 0 ||
         strcmp(publishNames[1], actor) != 0 ||
-        strcmp(publishNames[2], effect) != 0)
+        strcmp(publishNames[2], actorImage) != 0 ||
+        strcmp(publishNames[3], actorShadow) != 0 ||
+        strcmp(publishNames[4], effect) != 0 ||
+        strcmp(publishNames[5], effectImage) != 0)
     {
-        fputs("scene battle monster dependency manifest dedupe failed\n", stderr);
+        fprintf(stderr, "scene battle monster Actor/GIF dependency manifest failed count=%u", publishNameCount);
+        for (u32 i = 0; i < publishNameCount; ++i)
+            fprintf(stderr, " [%s]", publishNames[i]);
+        fputc('\n', stderr);
         return 1;
     }
 
@@ -152,7 +174,7 @@ int main(void)
         !vm_net_mock_get_object_u32_field(response, responseLen, "id", &id) ||
         !vm_net_mock_get_object_u32_field(response, responseLen, "code", &code) ||
         type != 1 || id != g_vm_net_mock_content_update.id ||
-        code != expectedCode ||
+        code != VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION ||
         !vm_net_mock_content_client_resource_pending(clientId, scene) ||
         !vm_net_mock_content_client_resource_pending(clientId, actor))
     {
@@ -160,11 +182,14 @@ int main(void)
         return 1;
     }
 
-    /* A finished client reports the id/code pair it persisted after WT 18/8.
+    /* A finished client reports the id/protocol-code pair it persisted after
+     * WT18/8.  The WT18/8 signed-byte checksum is stored separately in the
+     * update state file and must not be compared to codeVersion.
      * type=1 is an update command, not a harmless hint, so the server must
      * acknowledge an exact match with type=0 and no target metadata. */
     requestLen = make_request(request, sizeof(request), 9,
-                              g_vm_net_mock_content_update.id, expectedCode);
+                              g_vm_net_mock_content_update.id,
+                              VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION);
     responseLen = vm_net_mock_build_version_response(request, requestLen,
                                                       response, sizeof(response));
     if (responseLen == 0 ||
@@ -181,7 +206,7 @@ int main(void)
 
     requestLen = make_request(request, sizeof(request), 9,
                               g_vm_net_mock_content_update.id,
-                              expectedCode + 1u);
+                              VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION + 1u);
     responseLen = vm_net_mock_build_version_response(request, requestLen,
                                                       response, sizeof(response));
     if (responseLen == 0 ||
@@ -189,7 +214,7 @@ int main(void)
         !vm_net_mock_get_object_u32_field(response, responseLen, "id", &id) ||
         !vm_net_mock_get_object_u32_field(response, responseLen, "code", &code) ||
         type != 1 || id != g_vm_net_mock_content_update.id ||
-        code != expectedCode)
+        code != VM_NET_MOCK_CONTENT_UPDATE_PROTOCOL_CODE_VERSION)
     {
         fputs("WT 18/9 changed-content target contract failed\n", stderr);
         return 1;

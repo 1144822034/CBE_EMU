@@ -184,6 +184,8 @@ static void reset_scene_observation_state(void)
     g_vm_client_completed_scene_target_serial = 0;
     g_vm_client_update_completed_reenter_pending = false;
     g_vm_client_update_completed_name[0] = 0;
+    vm_scene_same_reenter_clear();
+    vm_scene_same_reenter_end_completion_ack();
     g_schedulerTick = 100;
 }
 
@@ -242,6 +244,24 @@ int main(void)
     if (g_vm_net_mock_last_scene_change_target_valid)
     {
         fputs("WT30/2 target was not cleared after its own callback\n", stderr);
+        return 1;
+    }
+
+    /* A completion callback may execute one native same-screen lifecycle
+     * request.  A second request in that same callback remains suppressed. */
+    vm_scene_same_reenter_begin_completion_ack();
+    if (!vm_scene_same_reenter_consume_completion_ack() ||
+        vm_scene_same_reenter_consume_completion_ack())
+    {
+        fputs("WT30/2 completion re-entry was not bounded to one request\n",
+              stderr);
+        return 1;
+    }
+    vm_scene_same_reenter_end_completion_ack();
+    if (vm_scene_same_reenter_consume_completion_ack())
+    {
+        fputs("WT30/2 completion re-entry remained armed after callback\n",
+              stderr);
         return 1;
     }
 

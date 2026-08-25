@@ -1443,6 +1443,20 @@ static u32 vm_net_mock_battle_reward_gold_for_enemy(u32 enemyId)
     return stats.gold;
 }
 
+/* Cap the one-monster base reward before any experience-card or insight
+ * modifier.  Keeping this as a small pure rule makes the recipient-level
+ * contract explicit and prevents a caller from accidentally applying a card
+ * before the cap. */
+static u32 vm_net_mock_battle_base_exp_cap_for_role_level(
+    u32 roleLevel, vm_net_mock_monster_family family)
+{
+    u32 normalCap = vm_net_mock_normal_monster_exp_for_level(roleLevel);
+
+    return family == VM_NET_MOCK_MONSTER_BOSS ?
+               vm_net_mock_mul_capped_u32(normalCap, 5u) :
+               normalCap;
+}
+
 static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                                                 u16 *dropSeqOut,
                                                 u32 *dropCountOut,
@@ -1519,10 +1533,21 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     vm_net_mock_task_progress_after_battle(
         g_vm_net_mock_battle_enemy_id_current, enemyCount, 0, 0);
 
-    normalExpCap = vm_net_mock_normal_monster_exp_for_level(
-        role != NULL ? vm_net_mock_role_level_from_exp(role->exp) : 1u);
-    normalGoldCap = vm_net_mock_normal_monster_gold_for_level(
-        role != NULL ? vm_net_mock_role_level_from_exp(role->exp) : 1u);
+    {
+        u32 roleLevel =
+            role != NULL ? vm_net_mock_role_level_from_exp(role->exp) : 1u;
+
+        /* A reward's level ceiling belongs to the recipient's current level,
+         * not to the monster selected by the scene.  It prevents a high-level
+         * target from bypassing the progression band while still allowing an
+         * equal-level boss to be worth five normal kills.  Multipliers from
+         * experience cards (and 战斗心得) remain downstream of this base cap. */
+        normalExpCap = vm_net_mock_battle_base_exp_cap_for_role_level(
+            roleLevel,
+            vm_net_mock_monster_family_for_enemy(
+                g_vm_net_mock_battle_enemy_id_current));
+        normalGoldCap = vm_net_mock_normal_monster_gold_for_level(roleLevel);
+    }
     perEnemyExp = vm_net_mock_env_u32_if_set(
         "CBE_BATTLE_REWARD_EXP",
         vm_net_mock_battle_reward_exp_for_enemy(
@@ -1531,10 +1556,6 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         "CBE_BATTLE_REWARD_GOLD",
         vm_net_mock_battle_reward_gold_for_enemy(
             g_vm_net_mock_battle_enemy_id_current));
-    /* Bosses are manual-only encounters.  Their combat and drop identity
-     * remains distinct, but reward progression intentionally follows the
-     * same role-level cap, card effect, and one-monster daily unit as every
-     * ordinary kill. */
     if (perEnemyExp > normalExpCap)
         perEnemyExp = normalExpCap;
     if (perEnemyGold > normalGoldCap)
@@ -1570,8 +1591,9 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                    g_vm_net_mock_battle_enemy_id_current, role->roleId,
                    rewardUnits, usedRewardUnits,
                    VM_NET_MOCK_MONSTER_REWARD_DAILY_UNIT_CAP,
-                   dailyRewardGranted ? "unexpected" : "reward-suppressed");
-            rewardExp = 0;
+                   dailyRewardGranted ? "unexpected" : "money-suppressed");
+            /* The player-facing change restores monster EXP without a daily
+             * cap. Keep the separately requested money budget intact. */
             baseRewardGold = 0;
         }
     }
@@ -2178,10 +2200,21 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     return role->hp;
 }
 
+static const char *vm_mock_service_active_transient_instance_scene(void);
+static bool vm_mock_service_active_transient_instance_position(u16 *xOut, u16 *yOut);
+static bool vm_mock_service_active_transient_instance_begin(const char *scene,
+                                                            u16 x, u16 y,
+                                                            const char *reason);
+static bool vm_mock_service_active_transient_instance_update_position(
+    const char *scene, u16 x, u16 y, const char *reason);
+static void vm_mock_service_active_transient_instance_clear_if_departing(
+    const char *scene, const char *reason);
+
 static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, const char *reason)
 {
     char runtimeScene[64];
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *transientScene = NULL;
     if (x == 0 || y == 0)
         return;
 
@@ -2190,7 +2223,10 @@ static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, c
      * substituting a runtime/default scene here changes the next 16/2 target. */
     if (!vm_net_mock_scene_name_is_persistable(scene))
     {
-        if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
+        transientScene = vm_mock_service_active_transient_instance_scene();
+        if (transientScene != NULL)
+            scene = transientScene;
+        else if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
             scene = runtimeScene;
         else if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
             scene = role->scene;
@@ -2203,6 +2239,12 @@ static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, c
                scene ? scene : "-", reason ? reason : "position");
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+    if (vm_mock_service_active_transient_instance_update_position(scene, x, y,
+                                                                   reason))
+    {
+        return;
+    }
+    vm_mock_service_active_transient_instance_clear_if_departing(scene, reason);
     vm_net_mock_role_set_position(scene, x, y, reason);
 }
 
@@ -2223,6 +2265,7 @@ static const char *vm_net_mock_current_scene_name(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     const char *overrideName = vm_net_mock_env_str("CBE_SCENE_KEY", "");
+    const char *transientScene = vm_mock_service_active_transient_instance_scene();
     static char runtimeScene[64];
 
     /*
@@ -2242,6 +2285,8 @@ static const char *vm_net_mock_current_scene_name(void)
      * returning the bootstrap scene would silently turn a data error into a
      * cross-map move. Downstream scene handlers require an exact *.sce key
      * and reject that unresolved value. */
+    if (transientScene != NULL)
+        return transientScene;
     if (role != NULL && vm_net_mock_scene_name_is_download_key(role->scene))
         return role->scene;
     if (overrideName != NULL && vm_net_mock_scene_name_is_persistable(overrideName))
@@ -2253,8 +2298,12 @@ static const char *vm_net_mock_current_scene_name(void)
 
 static u16 vm_net_mock_scene_spawn_x(void)
 {
+    u16 transientX = 0;
+
     if (getenv("CBE_SCENE_POS_X") != NULL)
         return (u16)vm_net_mock_env_u32("CBE_SCENE_POS_X", VM_NET_MOCK_ROLE_INITIAL_X);
+    if (vm_mock_service_active_transient_instance_position(&transientX, NULL))
+        return transientX;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     if (role != NULL && role->x != 0)
         return role->x;
@@ -2263,8 +2312,12 @@ static u16 vm_net_mock_scene_spawn_x(void)
 
 static u16 vm_net_mock_scene_spawn_y(void)
 {
+    u16 transientY = 0;
+
     if (getenv("CBE_SCENE_POS_Y") != NULL)
         return (u16)vm_net_mock_env_u32("CBE_SCENE_POS_Y", VM_NET_MOCK_ROLE_INITIAL_Y);
+    if (vm_mock_service_active_transient_instance_position(NULL, &transientY))
+        return transientY;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     if (role != NULL && role->y != 0)
         return role->y;
@@ -2377,16 +2430,6 @@ typedef struct
      * completion. Cached scenes then continue immediately with WT6/1, while
      * missing scenes use the same open loader to request WT18/7. */
     bool sceneResourceProbeAcknowledged;
-    /* A direct NPC-instance 30/1 can install its target SCE after the first
-     * scene shell exists. The first post-install WT6/1 must re-enter that
-     * shell once so mmGame restores its input/action registration before the
-     * ordinary no-posinfo completion closes the transition. */
-    bool reenterAfterSceInstall;
-    bool reenterAfterSceInstallSent;
-    /* Per-client final-WT18/7 generation at the time the direct instance
-     * target was armed. A later actor/effect callback must not be mistaken
-     * for a target-SCE installation. */
-    u32 sceInstallGenerationAtEnter;
 } vm_net_mock_scene_change_target;
 
 typedef struct
@@ -2856,6 +2899,14 @@ typedef struct vm_mock_service_client_session
     u16 sceneVisibleX;
     u16 sceneVisibleY;
     u32 sceneVisibleTick;
+    /* A dynamic NPC instance is a session destination reached by WT30/1.
+     * It may service scene traffic while connected, but it must never replace
+     * the role row used by the next ActorInfo bootstrap. */
+    bool transientInstanceActive;
+    char transientInstanceScene[64];
+    u16 transientInstanceX;
+    u16 transientInstanceY;
+    u32 transientInstanceStartedTick;
     bool shopSceneNpcReseedPending;
     /* 1 = real shop scene return (30/2 may be required), 2 = fresh mmGame
      * bootstrap only (replay 27/11 without re-entering the scene). */
@@ -2935,10 +2986,14 @@ typedef struct vm_mock_service_client_session
     bool instanceChallengeDirectPending;
     /* action13 can either address a current-scene kind-3 monster (4/5) or
      * begin an isolated instance encounter (4/10).  Retain that origin until
-     * the immediate 4/1 request is verified. */
+     * the confirmation-owned battle delivery has completed. */
     bool instanceChallengeDirectSceneMonster;
     u32 instanceChallengeActorId;
     u32 instanceChallengeEnemyId;
+    /* The action13 packet carries the client-selected current-scene node, but
+     * no coordinate.  Preserve that identity through 30/9 -> 30/10 so the
+     * later 4/5 can address the same live node table. */
+    u32 instanceChallengeSceneIndex;
     u16 instanceChallengeX;
     u16 instanceChallengeY;
     u32 instanceChallengeTick;
@@ -3449,6 +3504,117 @@ static vm_mock_service_client_session *vm_mock_service_get_active_client_session
     if (g_vm_mock_service_active_client_id == 0)
         return NULL;
     return vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
+}
+
+static const char *vm_mock_service_active_transient_instance_scene(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->transientInstanceActive ||
+        !vm_net_mock_scene_name_is_safe(session->transientInstanceScene) ||
+        session->transientInstanceX == 0 || session->transientInstanceY == 0)
+    {
+        return NULL;
+    }
+    return session->transientInstanceScene;
+}
+
+static bool vm_mock_service_active_transient_instance_position(u16 *xOut, u16 *yOut)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->transientInstanceActive ||
+        !vm_net_mock_scene_name_is_safe(session->transientInstanceScene) ||
+        session->transientInstanceX == 0 || session->transientInstanceY == 0)
+    {
+        return false;
+    }
+    if (xOut != NULL)
+        *xOut = session->transientInstanceX;
+    if (yOut != NULL)
+        *yOut = session->transientInstanceY;
+    return true;
+}
+
+static bool vm_mock_service_active_transient_instance_begin(const char *scene,
+                                                            u16 x, u16 y,
+                                                            const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (session == NULL || role == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0 ||
+        !vm_net_mock_scene_name_is_persistable(role->scene) ||
+        role->x == 0 || role->y == 0)
+    {
+        return false;
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+    session->transientInstanceActive = true;
+    snprintf(session->transientInstanceScene,
+             sizeof(session->transientInstanceScene), "%s", scene);
+    session->transientInstanceX = x;
+    session->transientInstanceY = y;
+    session->transientInstanceStartedTick = g_schedulerTick;
+    printf("[info][mock-service] transient_instance_begin client=%08x role=%u scene=%s pos=(%u,%u) durable_anchor=%s@(%u,%u) reason=%s\n",
+           session->clientId, role->roleId, session->transientInstanceScene,
+           session->transientInstanceX, session->transientInstanceY,
+           role->scene, role->x, role->y, reason ? reason : "instance-enter");
+    return true;
+}
+
+static bool vm_mock_service_active_transient_instance_update_position(
+    const char *scene, u16 x, u16 y, const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->transientInstanceActive ||
+        !vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0 ||
+        !vm_net_mock_scene_names_equal_exact(session->transientInstanceScene,
+                                             scene))
+    {
+        return false;
+    }
+    session->transientInstanceX = x;
+    session->transientInstanceY = y;
+    if (session->sceneVisibleReady && !session->sceneVisiblePending &&
+        vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene, scene))
+    {
+        session->sceneVisibleX = x;
+        session->sceneVisibleY = y;
+        session->sceneVisibleTick = g_schedulerTick;
+    }
+    (void)reason;
+    return true;
+}
+
+static void vm_mock_service_active_transient_instance_clear_if_departing(
+    const char *scene, const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->transientInstanceActive ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        vm_net_mock_scene_names_equal_exact(session->transientInstanceScene,
+                                            scene))
+    {
+        return;
+    }
+    printf("[info][mock-service] transient_instance_end client=%08x scene=%s pos=(%u,%u) next_scene=%s reason=%s\n",
+           session->clientId, session->transientInstanceScene,
+           session->transientInstanceX, session->transientInstanceY, scene,
+           reason ? reason : "scene-change");
+    session->transientInstanceActive = false;
+    session->transientInstanceScene[0] = 0;
+    session->transientInstanceX = 0;
+    session->transientInstanceY = 0;
+    session->transientInstanceStartedTick = 0;
 }
 
 static void vm_mock_service_session_arm_task_prompt_refresh(const char *scene)
@@ -5341,6 +5507,11 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sceneVisibleY = 0;
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
+    session->transientInstanceActive = false;
+    session->transientInstanceScene[0] = 0;
+    session->transientInstanceX = 0;
+    session->transientInstanceY = 0;
+    session->transientInstanceStartedTick = 0;
     session->shopSceneNpcReseedPending = false;
     session->shopSceneNpcReseedMode = 0;
     session->shopSceneNpcReseedScene[0] = 0;
@@ -5381,6 +5552,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->instanceChallengeDirectSceneMonster = false;
     session->instanceChallengeActorId = 0;
     session->instanceChallengeEnemyId = 0;
+    session->instanceChallengeSceneIndex = 0;
     session->instanceChallengeX = 0;
     session->instanceChallengeY = 0;
     session->instanceChallengeTick = 0;
@@ -5774,10 +5946,23 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     if (role == NULL)
         return;
     designation = vm_net_mock_role_designation(role);
-    roleScene = vm_net_mock_scene_name_is_safe(role->scene) ? role->scene : vm_net_mock_current_scene_name();
-    scene = roleScene;
-    x = role->x;
-    y = role->y;
+    if (session->transientInstanceActive &&
+        vm_net_mock_scene_name_is_safe(session->transientInstanceScene) &&
+        session->transientInstanceX != 0 && session->transientInstanceY != 0)
+    {
+        roleScene = session->transientInstanceScene;
+        scene = session->transientInstanceScene;
+        x = session->transientInstanceX;
+        y = session->transientInstanceY;
+    }
+    else
+    {
+        roleScene = vm_net_mock_scene_name_is_safe(role->scene) ?
+                        role->scene : vm_net_mock_current_scene_name();
+        scene = roleScene;
+        x = role->x;
+        y = role->y;
+    }
     vm_net_mock_role_default_vitals(role, &hp, &hpMax, &mp, &mpMax);
     /*
      * Nearby-player visibility is per client session. A single global
@@ -5875,9 +6060,20 @@ static bool vm_mock_service_mark_active_session_scene_ready_from_role(const char
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     const char *roleScene = NULL;
 
-    if (session == NULL || role == NULL || role->x == 0 || role->y == 0)
+    if (session == NULL || role == NULL)
         return false;
-    roleScene = vm_net_mock_scene_name_is_safe(role->scene) ? role->scene : sceneHint;
+    if (session->transientInstanceActive &&
+        vm_net_mock_scene_name_is_safe(session->transientInstanceScene) &&
+        session->transientInstanceX != 0 && session->transientInstanceY != 0)
+    {
+        roleScene = session->transientInstanceScene;
+    }
+    else
+    {
+        if (role->x == 0 || role->y == 0)
+            return false;
+        roleScene = vm_net_mock_scene_name_is_safe(role->scene) ? role->scene : sceneHint;
+    }
     if (!vm_net_mock_scene_name_is_safe(roleScene) ||
         (vm_net_mock_scene_name_is_safe(sceneHint) &&
          !vm_net_mock_scene_names_equal_exact(roleScene, sceneHint)))
@@ -5893,8 +6089,10 @@ static bool vm_mock_service_mark_active_session_scene_ready_from_role(const char
     vm_mock_service_capture_session_presence(session->clientId);
     vm_mock_service_session_mark_scene_ready(session,
                                              roleScene,
-                                             role->x,
-                                             role->y,
+                                             session->transientInstanceActive ?
+                                                 session->transientInstanceX : role->x,
+                                             session->transientInstanceActive ?
+                                                 session->transientInstanceY : role->y,
                                              reason);
     return session->sceneVisibleReady;
 }

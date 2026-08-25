@@ -25,10 +25,12 @@
    名称删除 JHOnlineData 中对应的缓存文件。此阶段不是 SCE 字节传输。
 6. 后续正常资源加载发现文件缺失，沿既有 WT 18/7 路径请求同名资源并安装。
 
-客户端把已完成版本作为 WT 18/9 请求的 `version/codeVersion` 上报。收到 `type=1`
-就会走上述更新/续传分支，因此服务端必须在上报 pair 与当前 release 的 `id/code` 完全
-一致时返回 `type=0`。需要更新时，WT 18/9 的 id 必须等于 WT 18/8 的 version，code
-必须等于所有 18/8 data 分片的最终有符号字节累加和。
+客户端把已完成发布 ID 与协议 `codeVersion` 作为 WT 18/9 请求的 `version/codeVersion`
+上报。客户端更新记录将 WT 18/8 的有符号字节累加和存于独立字段；它不是
+`codeVersion`。收到 `type=1` 就会走上述更新/续传分支，因此服务端必须在上报 pair 与
+当前 release 的 `id/protocol-code` 完全一致时返回 `type=0`。需要更新时，WT 18/9 的 id
+必须等于 WT 18/8 的 version，code 为原生 protocol-code `1`；所有 18/8 data 分片的最终
+有符号字节累加和只写入并校验 `WT 18/8.crc`。
 
 ## 服务端契约
 
@@ -44,7 +46,7 @@
 1. 服务端资源根目录保留同名的权威非 CBM 资源，客户端缺失时会以正常 WT 18/7 请求它。
 2. 将该资源纳入累积的内容失效清单；仅当资源首次纳入或发布字节发生变化时，递增
    release_id，并重新计算校验和。
-3. 客户端下次完整启动时，18/9 返回 type=1 和该 release 的 id/code。
+3. 客户端下次完整启动时，18/9 返回 type=1 和该 release 的 id/protocol-code（当前为 1）。
 4. 客户端以 18/8 接收文件名清单，删除缓存，随后通过 18/7 重取资源。
 
 清单是累积的，因为客户端只持久保存一个 id/code 对，可能跳过中间多个发布；同一
@@ -72,8 +74,8 @@ MySQL 事务提交后写入标记。之后不会再读取或写入该 CSV；旧�
 scripts/content-update-manifest-regression.c 不连接数据库、不启动服务端，也不
 修改资源目录。它以 release id 77 和文件 00fixture.sce 构造请求，断言：
 
-1. 新客户端的 18/9 响应为 type=1、id=77、code 为清单的有符号字节校验和；携带
-   相同 version/codeVersion 的客户端则收到 type=0。
+1. 新客户端的 18/9 响应为 type=1、id=77、code=1；携带相同
+   version/codeVersion 的客户端则收到 type=0。清单的有符号字节校验和在 18/8.crc 断言。
 2. 18/8 响应的 totalsize、totalnum=1、version=77、crc 和 data 全部匹配。
 3. data 的字节格式严格为 u8 长度再接文件名。
 

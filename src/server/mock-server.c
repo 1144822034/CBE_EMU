@@ -29,6 +29,14 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
 static bool vm_net_mock_role_equipment_slot_is_usable(
     const vm_net_mock_role_state *role, u32 slot);
 
+/* A dynamic NPC instance is active only for its owning client session.  Role
+ * movement is parsed before the session fragment is included, so declare the
+ * narrow ownership bridge at the aggregation boundary. */
+static bool vm_mock_service_active_transient_instance_update_position(
+    const char *scene, u16 x, u16 y, const char *reason);
+static void vm_mock_service_active_transient_instance_clear_if_departing(
+    const char *scene, const char *reason);
+
 /* Arena rooms are transient online activity state, like team membership.  The
  * session module calls this during offline teardown while the role identity
  * is still available; the implementation lives with the arena protocol. */
@@ -57,8 +65,15 @@ static u32 vm_net_mock_monster_admin_list(
  * kind-3 record can reach a clean client cache.  The web
  * administration implementation owns the existing resource inspector; this
  * declaration keeps scene-content assembly in the scene module. */
+enum {
+    VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX = 16
+};
 static bool vm_net_mock_ensure_actor_resource_available(
     const char *actorResource, const char **errorOut);
+static bool vm_net_mock_actor_resource_collect_images(
+    const char *actorResource,
+    char imageNames[VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX][64],
+    u32 *imageCountOut);
 /* Runtime Actor motion descriptors are not serialized in the editor .actor
  * manifest.  Keep the capacity hook narrow until a runtime allocation trace
  * proves a stable file-to-child-node mapping. */
