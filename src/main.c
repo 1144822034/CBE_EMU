@@ -504,6 +504,10 @@ static u32 g_poolModuleR9Count = 0;
  * It is set only after the live sub_604/sub_8A8 pair matches the installed
  * module's instruction fingerprints. */
 static u32 g_vmTraceMmGameInputCodeBase = 0;
+/* Latest nonzero client write to Global_R9+0x5D28, retained only as a
+ * read-only instruction-trace anchor.  hookRam.c never feeds it back into
+ * guest memory or dispatch. */
+u32 g_vmSceneInputCallbackLastObserved = 0;
 typedef struct
 {
     u16 appId;
@@ -715,8 +719,8 @@ static u8 g_mockServiceOnly = 1;
 static u8 g_mockServiceOnly = 0;
 #endif
 static u8 g_mockServiceWarnedUnavailable = 0;
-#ifdef CBE_PLATFORM_ANDROID
-static char g_mockServiceHost[64] = "8.210.207.26";
+#if defined(CBE_PLATFORM_ANDROID) || defined(CBE_REMOTE_HANGUP_TEST)
+static char g_mockServiceHost[64] = "121.40.139.236";
 #else
 static char g_mockServiceHost[64] = "127.0.0.1";
 #endif
@@ -13187,6 +13191,13 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
     static u32 actionCallbackTraceCount = 0;
     static u32 inputRegistryTarget = 0;
     static u32 inputDispatchCallback = 0;
+    /* A battle transition can replace vmAddedScreen before the registered
+     * action callback tail-calls TriggerAutoBattle.  Keep a tiny, proven-only
+     * history so the instruction hook can still observe that callback after
+     * the screen-local trace state is reset. */
+    static u32 retainedInputDispatchCallbacks[4] = {0};
+    static u32 retainedInputDispatchBases[4] = {0};
+    static u32 retainedInputDispatchNext = 0;
     static u32 mainInputDispatcher = 0;
     static u32 mainRenderDispatcher = 0;
     static u32 mainSceneStateSetter = 0;
@@ -13239,6 +13250,10 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
     u32 activeLogic = 0;
     u32 activeLogicLocal = UINT32_MAX;
     int activeLogicAppIndex = -1;
+    u32 retainedInputDispatchBase = 0;
+    bool retainedInputDispatchEntry = false;
+    u32 observedInputDispatchCallback = 0;
+    bool observedInputDispatchEntry = false;
     static u32 activeLogicScreen = 0;
     static int traceEnabled = -1;
     static u32 configuredTargetActorId = 1000u;
@@ -13391,55 +13406,23 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         }
     }
 
-    if (pc == 0x010183A0u)
+    for (u32 retainedIndex = 0;
+         retainedIndex < mySizeOf(retainedInputDispatchCallbacks);
+         ++retainedIndex)
     {
-        static const u8 logicFingerprint[8] = {
-            0x10u, 0xB5u, 0x84u, 0x4Cu, 0x01u, 0x21u, 0x4Cu, 0x44u};
-        static const u8 actionFingerprint[8] = {
-            0xFEu, 0xB5u, 0x02u, 0x1Cu, 0xEBu, 0x48u, 0x0Cu, 0x1Cu};
-        u32 lr = 0;
-        u32 caller = 0;
-        u32 inferredBase = 0;
-        u8 observedLogic[sizeof(logicFingerprint)] = {0};
-        u8 observedAction[sizeof(actionFingerprint)] = {0};
-
-        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-        caller = lr & ~1u;
-        if (caller >= 0xAC8u)
+        if (retainedInputDispatchCallbacks[retainedIndex] != 0 &&
+            pc == (retainedInputDispatchCallbacks[retainedIndex] & ~1u))
         {
-            /* The private action callback tail-calls TriggerAutoBattle, so
-             * its LR is the return from mmGame sub_8A8's BL sub_68E at
-             * module+0xAC8, not a direct callsite beside the CBE function. */
-            inferredBase = caller - 0xAC8u;
-            if (uc_mem_read(MTK, inferredBase + 0x604u, observedLogic,
-                            sizeof(observedLogic)) == UC_ERR_OK &&
-                uc_mem_read(MTK, inferredBase + 0x8A8u, observedAction,
-                            sizeof(observedAction)) == UC_ERR_OK &&
-                memcmp(observedLogic, logicFingerprint,
-                       sizeof(logicFingerprint)) == 0 &&
-                memcmp(observedAction, actionFingerprint,
-                       sizeof(actionFingerprint)) == 0 &&
-                sceneModuleCodeBase != inferredBase)
-            {
-                sceneModuleCodeBase = inferredBase;
-                inputDispatchModuleBase = inferredBase;
-                g_vmTraceMmGameInputCodeBase = inferredBase;
-                actionDispatchTraceCount = 0;
-                actionRouteTraceCount = 0;
-                actionCallbackTraceCount = 0;
-                trace = fopen("logs/scene-battle-collision.log", "ab");
-                if (trace != NULL)
-                {
-                    fprintf(trace,
-                            "scene_battle_scheduler phase=module-base-inferred "
-                            "source=trigger-lr lr=%08x module_base=%08x "
-                            "fingerprint=sub_604+sub_8A8 scene=%s\n",
-                            lr, sceneModuleCodeBase, g_lastSceLoadName);
-                    fclose(trace);
-                }
-            }
+            retainedInputDispatchEntry = true;
+            retainedInputDispatchBase =
+                retainedInputDispatchBases[retainedIndex];
+            break;
         }
     }
+    observedInputDispatchCallback = g_vmSceneInputCallbackLastObserved;
+    observedInputDispatchEntry = observedInputDispatchCallback != 0 &&
+                                  pc ==
+                                      (observedInputDispatchCallback & ~1u);
 
     if (pc != 0x0100F5B4u && pc != 0x010183A0u &&
         pc != 0x010184D2u && pc != 0x010184D4u &&
@@ -13450,6 +13433,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         pc != (mainInputDispatcher & ~1u) &&
         pc != (mainRenderDispatcher & ~1u) &&
         pc != (mainSceneStateSetter & ~1u) &&
+        !retainedInputDispatchEntry &&
+        !observedInputDispatchEntry &&
         pc != inputDispatchModuleBase + 0x8A8u &&
         pc != inputDispatchModuleBase + 0xAC4u &&
         pc != inputDispatchModuleBase + 0x68Eu &&
@@ -13529,6 +13514,34 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                 inputDispatchModuleBase = registeredModuleBase;
                 g_vmTraceMmGameInputCodeBase = registeredModuleBase;
                 inputDispatchCallback = callback;
+                {
+                    bool retained = false;
+
+                    for (u32 retainedIndex = 0;
+                         retainedIndex <
+                         mySizeOf(retainedInputDispatchCallbacks);
+                         ++retainedIndex)
+                    {
+                        if (retainedInputDispatchCallbacks[retainedIndex] ==
+                            (callback & ~1u))
+                        {
+                            retainedInputDispatchBases[retainedIndex] =
+                                registeredModuleBase;
+                            retained = true;
+                            break;
+                        }
+                    }
+                    if (!retained)
+                    {
+                        u32 retainedIndex = retainedInputDispatchNext++ %
+                                            mySizeOf(retainedInputDispatchCallbacks);
+
+                        retainedInputDispatchCallbacks[retainedIndex] =
+                            callback & ~1u;
+                        retainedInputDispatchBases[retainedIndex] =
+                            registeredModuleBase;
+                    }
+                }
                 actionDispatchTraceCount = 0;
                 actionRouteTraceCount = 0;
                 actionCallbackTraceCount = 0;
@@ -13559,14 +13572,18 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         return;
     }
 
-    if (inputDispatchModuleBase != 0 &&
-        (pc == inputDispatchModuleBase + 0x8A8u ||
-         pc == inputDispatchModuleBase + 0xAC4u ||
-         pc == inputDispatchModuleBase + 0x68Eu))
+    if (observedInputDispatchEntry || retainedInputDispatchEntry ||
+        (inputDispatchModuleBase != 0 &&
+         (pc == inputDispatchModuleBase + 0x8A8u ||
+          pc == inputDispatchModuleBase + 0xAC4u ||
+          pc == inputDispatchModuleBase + 0x68Eu)))
     {
         const char *phase = NULL;
         u32 *phaseCount = NULL;
         u32 phaseLimit = 0;
+        u32 actionModuleBase = retainedInputDispatchEntry
+                                   ? retainedInputDispatchBase
+                                   : inputDispatchModuleBase;
         u32 lr = 0;
         u32 regs[5] = {0, 0, 0, 0, 0};
         u32 moduleR9 = 0;
@@ -13575,7 +13592,19 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         u32 privateObject = 0;
         u32 privateCallback = 0;
 
-        if (pc == inputDispatchModuleBase + 0x8A8u)
+        if (observedInputDispatchEntry)
+        {
+            phase = "input-dispatch-slot-write";
+            phaseCount = &actionDispatchTraceCount;
+            phaseLimit = 24u;
+        }
+        else if (retainedInputDispatchEntry)
+        {
+            phase = "input-dispatch-retained";
+            phaseCount = &actionDispatchTraceCount;
+            phaseLimit = 24u;
+        }
+        else if (pc == inputDispatchModuleBase + 0x8A8u)
         {
             phase = "input-dispatch";
             phaseCount = &actionDispatchTraceCount;
@@ -13632,7 +13661,7 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                     "main_callback=%08x private_object=%08x "
                     "private_callback=%08x private_context=%08x scene=%s\n",
                     phase, *phaseCount, pc, lr, regs[0], regs[1], regs[2],
-                    regs[3], regs[4], activeLogic, inputDispatchModuleBase,
+                    regs[3], regs[4], activeLogic, actionModuleBase,
                     moduleR9, mainApi, mainCallback, privateObject,
                     privateCallback,
                     moduleR9 != 0 ? moduleR9 + 0x2D44u : 0,
@@ -14187,6 +14216,15 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         u16 callerAppId = 0;
         const char *callerModule = "unknown";
         int callerAppIndex = -1;
+        u32 liveInputCallback = 0;
+        u32 callbackModuleBase = 0;
+        u32 callbackLocal = UINT32_MAX;
+        static const u8 logicFingerprint[8] = {
+            0x10u, 0xB5u, 0x84u, 0x4Cu, 0x01u, 0x21u, 0x4Cu, 0x44u};
+        static const u8 actionFingerprint[8] = {
+            0xFEu, 0xB5u, 0x02u, 0x1Cu, 0xEBu, 0x48u, 0x0Cu, 0x1Cu};
+        u8 observedLogic[sizeof(logicFingerprint)] = {0};
+        u8 observedAction[sizeof(actionFingerprint)] = {0};
 
         (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
         (void)uc_reg_read(MTK, UC_ARM_REG_R0, &args[0]);
@@ -14194,6 +14232,55 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
         (void)uc_reg_read(MTK, UC_ARM_REG_R2, &args[2]);
         (void)uc_reg_read(MTK, UC_ARM_REG_R3, &args[3]);
         caller = lr & ~1u;
+        (void)uc_mem_read(MTK, Global_R9 + 0x5D28u,
+                          &liveInputCallback, sizeof(liveInputCallback));
+        if (liveInputCallback >= 0x8A8u)
+        {
+            callbackModuleBase = (liveInputCallback & ~1u) - 0x8A8u;
+            if (uc_mem_read(MTK, callbackModuleBase + 0x604u,
+                            observedLogic, sizeof(observedLogic)) == UC_ERR_OK &&
+                uc_mem_read(MTK, callbackModuleBase + 0x8A8u,
+                            observedAction, sizeof(observedAction)) == UC_ERR_OK &&
+                memcmp(observedLogic, logicFingerprint,
+                       sizeof(logicFingerprint)) == 0 &&
+                memcmp(observedAction, actionFingerprint,
+                       sizeof(actionFingerprint)) == 0)
+            {
+                bool retained = false;
+
+                callbackLocal = (liveInputCallback & ~1u) - callbackModuleBase;
+                inputDispatchModuleBase = callbackModuleBase;
+                inputDispatchCallback = liveInputCallback;
+                g_vmTraceMmGameInputCodeBase = callbackModuleBase;
+                for (u32 retainedIndex = 0;
+                     retainedIndex < mySizeOf(retainedInputDispatchCallbacks);
+                     ++retainedIndex)
+                {
+                    if (retainedInputDispatchCallbacks[retainedIndex] ==
+                        (liveInputCallback & ~1u))
+                    {
+                        retainedInputDispatchBases[retainedIndex] =
+                            callbackModuleBase;
+                        retained = true;
+                        break;
+                    }
+                }
+                if (!retained)
+                {
+                    u32 retainedIndex = retainedInputDispatchNext++ %
+                                        mySizeOf(retainedInputDispatchCallbacks);
+
+                    retainedInputDispatchCallbacks[retainedIndex] =
+                        liveInputCallback & ~1u;
+                    retainedInputDispatchBases[retainedIndex] =
+                        callbackModuleBase;
+                }
+            }
+            else
+            {
+                callbackModuleBase = 0;
+            }
+        }
         if (caller >= Program_ROM_Address &&
             caller < Program_ROM_Address + Program_ROM_Mapped_Size)
         {
@@ -14223,7 +14310,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                     "%08x,%08x,%08x,%08x scene=%s screen=%08x "
                     "screen_this=%08x screen_module=%08x active_logic=%08x "
                     "logic_base=%08x caller_logic_local=%08x node_base=%08x "
-                    "player_node=%08x\n",
+                    "player_node=%08x input_callback=%08x "
+                    "input_callback_base=%08x input_callback_local=%08x\n",
                     triggerEntrySequence, pc, lr, caller, callerModule,
                     (unsigned)callerAppId, callerBase, callerLocal,
                     args[0], args[1], args[2], args[3], g_lastSceLoadName,
@@ -14233,7 +14321,8 @@ static void vm_trace_scene_battle_collision_pc(u32 pc)
                     sceneModuleCodeBase != 0 && caller >= sceneModuleCodeBase
                         ? caller - sceneModuleCodeBase
                         : UINT32_MAX,
-                    nodeBase, playerNode);
+                    nodeBase, playerNode, liveInputCallback, callbackModuleBase,
+                    callbackLocal);
             fclose(trace);
         }
     }

@@ -14,6 +14,7 @@ extern u32 g_vmInputWatchUserBufLen;
 extern u32 g_vmInputWatchCallback;
 extern u32 g_vmInputWatchCallR9;
 extern u32 g_vmInputWatchWriteCount;
+extern u32 g_vmSceneInputCallbackLastObserved;
 extern u32 g_hangupBattleStateWatchAddress;
 extern u32 g_hangupBattleStateWatchGeneration;
 extern u32 g_hangupBattleStateWatchWriteCount;
@@ -275,6 +276,8 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 
             if (slot >= 3u)
                 slot = 2u;
+            if (slot == 1u && value != 0)
+                g_vmSceneInputCallbackLastObserved = (u32)value;
             (void)uc_mem_read(uc, delegateStart + slot * sizeof(u32),
                               &prior, sizeof(prior));
             (void)uc_reg_read(uc, UC_ARM_REG_PC, &pc);

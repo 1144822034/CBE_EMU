@@ -24,7 +24,7 @@ static bool same_spawn(const vm_net_mock_sce_combat_spawn *left,
                        const vm_net_mock_sce_combat_spawn *right)
 {
     return left->actorId == right->actorId && left->x == right->x &&
-           left->y == right->y &&
+           left->y == right->y && left->visualHint == right->visualHint &&
            strcmp(left->displayName, right->displayName) == 0 &&
            strcmp(left->actorResource, right->actorResource) == 0 &&
            strcmp(left->effectResource, right->effectResource) == 0;
@@ -232,19 +232,53 @@ int main(void)
     snprintf(row.effectResource, sizeof(row.effectResource),
              "e_ghostfireR.actor");
 
-    if (!vm_net_mock_set_resource_dir("web/fs/JHOnlineData") ||
-        !vm_net_mock_scene_battle_monster_body_resource_is_supported(
-            row.actorResource) ||
-        vm_net_mock_scene_battle_monster_body_resource_is_supported(
-            row.effectResource) ||
-        !vm_net_mock_scene_battle_monster_append_record(
-            record, sizeof(record), &pos, &row) ||
-        !vm_net_mock_parse_sce_combat_spawn_at(record, pos, 0, &spawn, &end) ||
-        end != pos || spawn.actorId != row.monsterId ||
-        strcmp(spawn.effectResource, row.effectResource) != 0)
     {
-        fputs("complete SCE2 kind-3 envelope failed\n", stderr);
-        return 1;
+        u16 monkeyHint = 0;
+        u16 tigerHint = 0;
+
+        if (!vm_net_mock_set_resource_dir("web/fs/JHOnlineData") ||
+            !vm_net_mock_scene_battle_monster_body_resource_is_supported(
+                row.actorResource) ||
+            !vm_net_mock_scene_battle_monster_body_resource_is_supported(
+                "e_tiger.actor") ||
+            !vm_net_mock_scene_battle_monster_body_visual_hint(
+                row.actorResource, &monkeyHint) ||
+            monkeyHint != 5 ||
+            !vm_net_mock_scene_battle_monster_body_visual_hint(
+                "e_tiger.actor", &tigerHint) ||
+            tigerHint != 17 ||
+            vm_net_mock_scene_battle_monster_body_resource_is_supported(
+                "e_huayao.actor") ||
+            vm_net_mock_scene_battle_monster_body_resource_is_supported(
+                row.effectResource) ||
+            !vm_net_mock_scene_battle_monster_append_record(
+                record, sizeof(record), &pos, &row) ||
+            !vm_net_mock_parse_sce_combat_spawn_at(record, pos, 0, &spawn,
+                                                    &end) ||
+            end != pos || spawn.actorId != row.monsterId ||
+            strcmp(spawn.effectResource, row.effectResource) != 0)
+        {
+            fputs("complete SCE2 kind-3 envelope failed\n", stderr);
+            return 1;
+        }
+    }
+
+    {
+        vm_net_mock_scene_battle_monster_admin_row tigerRow = row;
+        u32 tigerRecordLen = 0;
+
+        snprintf(tigerRow.actorResource, sizeof(tigerRow.actorResource),
+                 "e_tiger.actor");
+        tigerRow.visualHint = 5; /* stale UI value must not alter field 16 */
+        if (!vm_net_mock_scene_battle_monster_append_record(
+                record, sizeof(record), &tigerRecordLen, &tigerRow) ||
+            !vm_net_mock_parse_sce_combat_spawn_at(
+                record, tigerRecordLen, 0, &spawn, &end) ||
+            end != tigerRecordLen || spawn.visualHint != 17)
+        {
+            fputs("native field16 actor profile was not preserved\n", stderr);
+            return 1;
+        }
     }
 
     {

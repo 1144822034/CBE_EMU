@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <time.h>
 #ifndef _WIN32
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #endif
 #include "../mysql-client.h"
@@ -127,6 +128,8 @@ static u8 g_vm_net_mock_team_battle_resolve_monsters_current = 0;
 #define VM_MOCK_SERVICE_REQUEST_FLAG_CLIENT_DISCONNECT 0x4u
 #define VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS 5000
 #define VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA 0x1u
+#define VM_MOCK_SERVICE_TIMING_WARN_WAIT_MS 100
+#define VM_MOCK_SERVICE_TIMING_WARN_HOLD_MS 250
 
 #ifdef _WIN32
 typedef SOCKET vm_mock_service_socket;

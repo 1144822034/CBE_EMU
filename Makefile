@@ -63,7 +63,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check content-update-manifest-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
+.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
 
 all: build
 build: client server
@@ -80,6 +80,11 @@ $(SERVER_OBJDIR)/direct-scene-challenge-progress-regression.exe: scripts/direct-
 content-update-manifest-regression: $(SERVER_OBJDIR)/content-update-manifest-regression.exe
 
 $(SERVER_OBJDIR)/content-update-manifest-regression.exe: scripts/content-update-manifest-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+scene-battle-monster-field18-regression: $(SERVER_OBJDIR)/scene-battle-monster-field18-regression.exe
+
+$(SERVER_OBJDIR)/scene-battle-monster-field18-regression.exe: scripts/scene-battle-monster-field18-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 direct-scene-challenge-progress-client-regression: $(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe
