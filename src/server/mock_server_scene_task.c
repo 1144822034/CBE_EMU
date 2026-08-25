@@ -247,6 +247,7 @@ typedef struct
     u32 actorId;
     u16 x;
     u16 y;
+    u16 visualHint;
     char displayName[32];
     char actorResource[64];
     char effectResource[64];
@@ -448,6 +449,7 @@ static bool vm_net_mock_parse_sce_combat_spawn_at(
     {
         return false;
     }
+    spawn.visualHint = value;
 
     *spawnOut = spawn;
     if (endOut)
@@ -1884,17 +1886,32 @@ static bool vm_net_mock_scene_battle_monster_effect_resource_is_supported(
             strcmp(resource, "e_ghostfiresG.actor") == 0);
 }
 
-/* The four field-18 resources are child effects, not monster bodies.  They
- * can render a fireball while leaving the scene node without the motion and
- * collision contract that produces a native 4/1 battle request. */
-static bool vm_net_mock_scene_battle_monster_body_resource_is_supported(
-    const char *resource)
+/* A field-17 body is not an arbitrary Actor descriptor.  The CBE only loads
+ * it as a battle-capable scene node for resources it has already used in a
+ * shipped kind-3 record.  Keep that compatibility set separate from the
+ * general Actor editor catalogue: an unrelated Actor can be structurally
+ * valid yet leave only its field-18 fireball visible at runtime. */
+enum { VM_NET_MOCK_SCENE_BATTLE_MONSTER_NATIVE_BODY_MAX = 512 };
+
+typedef struct
 {
-    return resource != NULL &&
-           vm_net_mock_str_ends_with(resource, ".actor") &&
-           !vm_net_mock_scene_battle_monster_effect_resource_is_supported(
-               resource);
-}
+    char resource[64];
+    u16 visualHint;
+    bool visualHintAmbiguous;
+    char firstScene[64];
+} vm_net_mock_scene_battle_monster_native_body;
+
+static vm_net_mock_scene_battle_monster_native_body
+    g_vm_net_mock_scene_battle_monster_native_bodies[
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_NATIVE_BODY_MAX];
+static u32 g_vm_net_mock_scene_battle_monster_native_body_count = 0;
+static bool g_vm_net_mock_scene_battle_monster_native_bodies_loaded = false;
+static bool g_vm_net_mock_scene_battle_monster_native_bodies_loading = false;
+
+static bool vm_net_mock_scene_battle_monster_body_resource_is_supported(
+    const char *resource);
+static bool vm_net_mock_scene_battle_monster_body_visual_hint(
+    const char *resource, u16 *hintOut);
 
 /* One draft expands into independent native kind-3 nodes.  The configured
  * coordinate is the center node; the remaining four use a stable cross so
@@ -2214,7 +2231,7 @@ static bool vm_net_mock_scene_battle_monster_list_row(
             values[7], lengths[7], row->effectResource,
             sizeof(row->effectResource)) ||
         !vm_mock_mysql_parse_u32(values[8], lengths[8], &value) ||
-        (value != 5 && value != 6))
+        value == 0 || value > 0xffffu)
     {
         context->invalid = true;
         return true;
@@ -2360,6 +2377,7 @@ static bool vm_net_mock_scene_battle_monster_row_validate(
     const char *scene, const vm_net_mock_scene_battle_monster_admin_row *row)
 {
     vm_net_mock_scene_battle_monster_admin_row expanded;
+    u16 nativeVisualHint = 0;
 
     if (scene == NULL || row == NULL ||
         !vm_net_mock_scene_name_is_safe(scene) ||
@@ -2370,12 +2388,13 @@ static bool vm_net_mock_scene_battle_monster_row_validate(
         strlen(row->effectResource) >= 64 ||
         !vm_net_mock_scene_battle_monster_body_resource_is_supported(
             row->actorResource) ||
+        !vm_net_mock_scene_battle_monster_body_visual_hint(
+            row->actorResource, &nativeVisualHint) ||
         !vm_net_mock_str_ends_with(row->effectResource, ".actor") ||
         !vm_net_mock_scene_battle_monster_effect_resource_is_supported(
             row->effectResource) ||
         row->quantity == 0 ||
         row->quantity > VM_NET_MOCK_SCENE_BATTLE_MONSTER_QUANTITY_MAX ||
-        (row->visualHint != 5 && row->visualHint != 6) ||
         !vm_net_mock_open_server_data_resource(row->actorResource, ".actor",
                                                 NULL, NULL, 0) ||
         !vm_net_mock_open_server_data_resource(row->effectResource, ".actor",
@@ -2440,7 +2459,7 @@ static bool vm_net_mock_scene_battle_monster_admin_save(
             row->actorResource))
     {
         if (errorOut)
-            *errorOut = "本体 Actor 不能使用退场火团特效；请选择 e_monkey.actor 等实体 Actor";
+            *errorOut = "本体 Actor 不能使用退场火团特效；请选择原生场景战斗本体 Actor";
         return false;
     }
     if (!vm_net_mock_scene_battle_monster_schema_ensure() ||
@@ -2761,6 +2780,189 @@ static bool vm_net_mock_scene_battle_monster_decode_raw_sce(
     return true;
 }
 
+static bool vm_net_mock_scene_battle_monster_native_body_add(
+    const vm_net_mock_sce_combat_spawn *spawn, const char *scene)
+{
+    vm_net_mock_scene_battle_monster_native_body *entry = NULL;
+
+    if (spawn == NULL || scene == NULL || spawn->visualHint == 0 ||
+        !vm_net_mock_str_ends_with(spawn->actorResource, ".actor") ||
+        vm_net_mock_scene_battle_monster_effect_resource_is_supported(
+            spawn->actorResource))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_scene_battle_monster_native_body_count;
+         ++i)
+    {
+        if (strcmp(g_vm_net_mock_scene_battle_monster_native_bodies[i]
+                       .resource,
+                   spawn->actorResource) == 0)
+        {
+            if (g_vm_net_mock_scene_battle_monster_native_bodies[i]
+                    .visualHint != spawn->visualHint)
+            {
+                g_vm_net_mock_scene_battle_monster_native_bodies[i]
+                    .visualHintAmbiguous = true;
+            }
+            return true;
+        }
+    }
+    if (g_vm_net_mock_scene_battle_monster_native_body_count >=
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_NATIVE_BODY_MAX)
+    {
+        return false;
+    }
+    entry = &g_vm_net_mock_scene_battle_monster_native_bodies[
+        g_vm_net_mock_scene_battle_monster_native_body_count++];
+    snprintf(entry->resource, sizeof(entry->resource), "%s",
+             spawn->actorResource);
+    entry->visualHint = spawn->visualHint;
+    snprintf(entry->firstScene, sizeof(entry->firstScene), "%s", scene);
+    return true;
+}
+
+/* Read only the immutable configured resource root here.  The ordinary scene
+ * loader deliberately prefers the per-database deployment overlay, which
+ * would otherwise make an invalid generated row look like shipped evidence. */
+static void vm_net_mock_scene_battle_monster_native_bodies_ensure_loaded(void)
+{
+    vm_net_mock_monster_catalog_scene_file
+        scenes[VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX];
+    u32 sceneCount = 0;
+    u32 parsedSpawnCount = 0;
+    u32 skippedEffectCount = 0;
+    u32 rejectedResourceCount = 0;
+
+    if (g_vm_net_mock_scene_battle_monster_native_bodies_loaded ||
+        g_vm_net_mock_scene_battle_monster_native_bodies_loading)
+    {
+        return;
+    }
+    g_vm_net_mock_scene_battle_monster_native_bodies_loading = true;
+    sceneCount = vm_net_mock_monster_catalog_collect_scene_files(
+        scenes, VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX);
+    for (u32 sceneIndex = 0; sceneIndex < sceneCount; ++sceneIndex)
+    {
+        u8 raw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+        u8 payload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+        u32 rawLen = 0;
+        u32 payloadLen = 0;
+
+        if (!vm_net_mock_scene_battle_monster_read_base_raw(
+                scenes[sceneIndex].name, raw, sizeof(raw), &rawLen) ||
+            !vm_net_mock_scene_battle_monster_decode_raw_sce(
+                raw, rawLen, payload, sizeof(payload), &payloadLen))
+        {
+            continue;
+        }
+        for (u32 combatOrdinal = 0; combatOrdinal < 256u; ++combatOrdinal)
+        {
+            vm_net_mock_sce_combat_spawn spawn;
+
+            if (!vm_net_mock_scene_battle_monster_counted_spawn_at(
+                    payload, payloadLen, combatOrdinal, &spawn, NULL))
+            {
+                break;
+            }
+            ++parsedSpawnCount;
+            /* Some shipped kind-3 records are fireball-only visual markers.
+             * They prove that the parser accepts the envelope, not that the
+             * field-17 descriptor is a collision-capable monster body. */
+            if (vm_net_mock_scene_battle_monster_effect_resource_is_supported(
+                    spawn.actorResource))
+            {
+                ++skippedEffectCount;
+                continue;
+            }
+            if (!vm_net_mock_scene_battle_monster_native_body_add(
+                    &spawn, scenes[sceneIndex].name))
+            {
+                ++rejectedResourceCount;
+            }
+        }
+    }
+    {
+        u32 ambiguousHintCount = 0;
+
+        for (u32 i = 0;
+             i < g_vm_net_mock_scene_battle_monster_native_body_count; ++i)
+        {
+            if (g_vm_net_mock_scene_battle_monster_native_bodies[i]
+                    .visualHintAmbiguous)
+            {
+                ++ambiguousHintCount;
+            }
+        }
+        g_vm_net_mock_scene_battle_monster_native_bodies_loaded =
+        g_vm_net_mock_scene_battle_monster_native_body_count != 0 &&
+        rejectedResourceCount == 0;
+        g_vm_net_mock_scene_battle_monster_native_bodies_loading = false;
+        printf("[info][network] mock_scene_battle_native_body_catalog scenes=%u "
+               "spawns=%u bodies=%u ambiguous_hint=%u skipped_effect=%u "
+               "rejected=%u source=base-SCE2-kind3\n",
+               sceneCount, parsedSpawnCount,
+               g_vm_net_mock_scene_battle_monster_native_body_count,
+               ambiguousHintCount, skippedEffectCount, rejectedResourceCount);
+    }
+}
+
+static bool vm_net_mock_scene_battle_monster_body_resource_is_supported(
+    const char *resource)
+{
+    if (resource == NULL || !vm_net_mock_str_ends_with(resource, ".actor") ||
+        vm_net_mock_scene_battle_monster_effect_resource_is_supported(resource))
+    {
+        return false;
+    }
+    vm_net_mock_scene_battle_monster_native_bodies_ensure_loaded();
+    if (!g_vm_net_mock_scene_battle_monster_native_bodies_loaded)
+        return false;
+    for (u32 i = 0; i < g_vm_net_mock_scene_battle_monster_native_body_count;
+         ++i)
+    {
+        if (strcmp(g_vm_net_mock_scene_battle_monster_native_bodies[i]
+                       .resource,
+                   resource) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* field 16 is a native node-class selector, not a player-facing strength
+ * toggle.  The current Linan e_tiger deployment used 5 while the shipped
+ * e_tiger record uses 17; that produced a visible generic node but never
+ * entered TriggerAutoBattle.  Preserve the body Actor's immutable native
+ * value, independently of the administrator's monster ID. */
+static bool vm_net_mock_scene_battle_monster_body_visual_hint(
+    const char *resource, u16 *hintOut)
+{
+    if (hintOut != NULL)
+        *hintOut = 0;
+    if (resource == NULL || hintOut == NULL)
+        return false;
+    vm_net_mock_scene_battle_monster_native_bodies_ensure_loaded();
+    if (!g_vm_net_mock_scene_battle_monster_native_bodies_loaded)
+        return false;
+    for (u32 i = 0; i < g_vm_net_mock_scene_battle_monster_native_body_count;
+         ++i)
+    {
+        const vm_net_mock_scene_battle_monster_native_body *entry =
+            &g_vm_net_mock_scene_battle_monster_native_bodies[i];
+
+        if (strcmp(entry->resource, resource) != 0)
+            continue;
+        if (entry->visualHintAmbiguous || entry->visualHint == 0)
+            return false;
+        *hintOut = entry->visualHint;
+        return true;
+    }
+    return false;
+}
+
+
 static bool vm_net_mock_scene_battle_monster_load_base_raw(
     const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut,
     const char **sourceOut)
@@ -2858,10 +3060,12 @@ static bool vm_net_mock_scene_battle_monster_append_record(
     size_t nameLen = 0;
     size_t actorLen = 0;
     size_t effectLen = 0;
+    u16 nativeVisualHint = 0;
 
     if (payload == NULL || pos == NULL || row == NULL ||
         row->monsterId == 0 || row->x == 0 || row->y == 0 ||
-        (row->visualHint != 5 && row->visualHint != 6))
+        !vm_net_mock_scene_battle_monster_body_visual_hint(
+            row->actorResource, &nativeVisualHint))
     {
         return false;
     }
@@ -2900,7 +3104,7 @@ static bool vm_net_mock_scene_battle_monster_append_record(
     *pos += (u32)nameLen;
     if (!vm_net_mock_put_le16(payload, payloadCap, pos, 1) ||
         !vm_net_mock_put_le16(payload, payloadCap, pos, 0x10) ||
-        !vm_net_mock_put_le16(payload, payloadCap, pos, row->visualHint) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, nativeVisualHint) ||
         !vm_net_mock_put_le16(payload, payloadCap, pos, 3) ||
         !vm_net_mock_put_le16(payload, payloadCap, pos, 0x11) ||
         *pos >= payloadCap)

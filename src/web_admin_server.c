@@ -9663,6 +9663,7 @@ static void vm_mock_admin_render_scene_battle_monster_actor_select(
 {
     bool currentFound = false;
     bool currentIsEffect = false;
+    bool currentIsNativeBody = false;
     u32 selectableCount = 0;
 
     if (page == NULL || fieldName == NULL || fieldName[0] == 0)
@@ -9670,13 +9671,20 @@ static void vm_mock_admin_render_scene_battle_monster_actor_select(
     currentIsEffect =
         vm_net_mock_scene_battle_monster_effect_resource_is_supported(
             selectedActor);
+    currentIsNativeBody =
+        vm_net_mock_scene_battle_monster_body_resource_is_supported(
+            selectedActor);
     vm_mock_admin_text_appendf(page,
         "<div class=\"actor-picker-field\"><select class=\"actor-resource-select\" name=\"%s\" required hidden>",
         fieldName);
     for (u32 i = 0; actorFiles != NULL && i < actorCount; ++i)
     {
-        if (vm_net_mock_scene_battle_monster_effect_resource_is_supported(
-                actorFiles[i].name))
+        u16 nativeVisualHint = 0;
+
+        if (!vm_net_mock_scene_battle_monster_body_resource_is_supported(
+                actorFiles[i].name) ||
+            !vm_net_mock_scene_battle_monster_body_visual_hint(
+                actorFiles[i].name, &nativeVisualHint))
             continue;
         if (selectedActor != NULL &&
             strcmp(actorFiles[i].name, selectedActor) == 0)
@@ -9698,14 +9706,20 @@ static void vm_mock_admin_render_scene_battle_monster_actor_select(
             page,
             currentIsEffect
                 ? "<option value=\"\" selected disabled>当前资源是退场火团特效，不能作为本体，请重新选择</option>"
-                : "<option value=\"\" selected disabled>当前 Actor 资源不存在，请重新选择</option>");
+                : (currentIsNativeBody
+                       ? "<option value=\"\" selected disabled>当前 Actor 的原生 field16 配置不唯一，不能自动部署，请重新选择</option>"
+                       : "<option value=\"\" selected disabled>当前 Actor 不在原生 kind-3 战斗节点中，不能作为战斗怪本体，请重新选择</option>"));
     }
     for (u32 i = 0; actorFiles != NULL && i < actorCount; ++i)
     {
         char actorUtf8[192];
 
-        if (vm_net_mock_scene_battle_monster_effect_resource_is_supported(
-                actorFiles[i].name))
+        u16 nativeVisualHint = 0;
+
+        if (!vm_net_mock_scene_battle_monster_body_resource_is_supported(
+                actorFiles[i].name) ||
+            !vm_net_mock_scene_battle_monster_body_visual_hint(
+                actorFiles[i].name, &nativeVisualHint))
             continue;
 
         memset(actorUtf8, 0, sizeof(actorUtf8));
@@ -9728,8 +9742,9 @@ static void vm_mock_admin_render_scene_battle_monster_actor_select(
         "</select><button class=\"actor-picker-trigger\" type=\"button\" data-actor-picker-open aria-haspopup=\"dialog\" aria-controls=\"actor-picker-modal\"><span data-actor-picker-label>请选择 Actor 资源</span><small>搜索与预览</small></button></div>");
 }
 
-/* A body Actor may come from the server-visible resources, but the four
- * field18-only fireball effects are removed from this catalogue. */
+/* The picker exposes only body resources observed in immutable shipped SCE2
+ * kind-3 records.  General Actor availability alone cannot prove that the
+ * client will create a collision-capable battle node for it. */
 static void vm_mock_admin_render_scene_battle_actor_picker_modal(
     vm_mock_admin_text *page, const vm_mock_admin_scene_file *actorFiles,
     u32 actorCount)
@@ -9742,9 +9757,12 @@ static void vm_mock_admin_render_scene_battle_actor_picker_modal(
     for (u32 i = 0; actorFiles != NULL && i < actorCount; ++i)
     {
         char actorUtf8[192];
+        u16 nativeVisualHint = 0;
 
-        if (vm_net_mock_scene_battle_monster_effect_resource_is_supported(
-                actorFiles[i].name))
+        if (!vm_net_mock_scene_battle_monster_body_resource_is_supported(
+                actorFiles[i].name) ||
+            !vm_net_mock_scene_battle_monster_body_visual_hint(
+                actorFiles[i].name, &nativeVisualHint))
             continue;
 
         memset(actorUtf8, 0, sizeof(actorUtf8));
@@ -9760,7 +9778,7 @@ static void vm_mock_admin_render_scene_battle_actor_picker_modal(
     }
     vm_mock_admin_text_appendf(
         page,
-        "</select><div id=\"actor-picker-modal\" class=\"actor-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"actor-picker-title\" hidden><div class=\"actor-picker-panel\"><div class=\"actor-picker-head\"><div><h3 id=\"actor-picker-title\">选择场景战斗怪本体 Actor</h3><p>退场火团特效已排除；小猴子请选择 e_monkey.actor。</p></div><button id=\"actor-picker-close\" class=\"actor-picker-close\" type=\"button\" aria-label=\"关闭\">×</button></div><div class=\"actor-picker-tools\"><label><span>搜索资源名称</span><input id=\"actor-picker-search\" type=\"search\" placeholder=\"例如 monkey、monster\" autocomplete=\"off\"></label></div><div class=\"actor-result-bar\"><span id=\"actor-result-count\"></span><span id=\"actor-picker-error\" class=\"actor-picker-error\"></span></div><div id=\"actor-picker-list\" class=\"actor-picker-list\"></div><p id=\"actor-picker-empty\" class=\"actor-picker-empty\" hidden>没有符合条件的 Actor 资源。</p></div></div>");
+        "</select><div id=\"actor-picker-modal\" class=\"actor-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"actor-picker-title\" hidden><div class=\"actor-picker-panel\"><div class=\"actor-picker-head\"><div><h3 id=\"actor-picker-title\">选择场景战斗怪本体 Actor</h3><p>只显示原生 SCE2 kind-3 战斗节点中 field16 配置唯一的本体资源。</p></div><button id=\"actor-picker-close\" class=\"actor-picker-close\" type=\"button\" aria-label=\"关闭\">×</button></div><div class=\"actor-picker-tools\"><label><span>搜索资源名称</span><input id=\"actor-picker-search\" type=\"search\" placeholder=\"例如 monkey、tiger\" autocomplete=\"off\"></label></div><div class=\"actor-result-bar\"><span id=\"actor-result-count\"></span><span id=\"actor-picker-error\" class=\"actor-picker-error\"></span></div><div id=\"actor-picker-list\" class=\"actor-picker-list\"></div><p id=\"actor-picker-empty\" class=\"actor-picker-empty\" hidden>没有符合条件的原生战斗 Actor 资源。</p></div></div>");
     if (selectableCount == 0)
     {
         printf("[warn][mock-admin] scene_battle_actor_picker_catalog_empty source=server-resource-root\n");
@@ -9932,7 +9950,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         return;
     }
     vm_mock_admin_text_appendf(&page,
-        "<div class=\"callout\"><strong>保存仅更新草稿。</strong>部署会从首次捕获的服务端基础 SCE 重建完整的 kind-3 战斗记录（含 field18 效果 Actor），并校验 Actor 依赖、记录解析和客户端最多 24 个非本地场景节点的限制。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
+        "<div class=\"callout\"><strong>保存仅更新草稿。</strong>本体 Actor 只能选择原生 SCE2 kind-3 战斗节点已使用过的资源；部署会从首次捕获的服务端基础 SCE 重建完整记录（含 field18 效果 Actor），并校验 Actor 依赖、记录解析和客户端最多 24 个非本地场景节点的限制。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
         "<form class=\"deploy\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"deploy-scene-battle-monsters\"><input type=\"hidden\" name=\"scene\" value=\"");
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
@@ -9979,7 +9997,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
             "</label><label class=\"field battle-monster-wide\"><span>显示名称</span><input name=\"display_name\" maxlength=\"29\" value=\"");
         vm_mock_admin_text_append_html(&page, nameUtf8);
         vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field battle-monster-wide\"><span>Actor 资源</span>");
-        vm_mock_admin_render_scene_battle_monster_actor_select(
+    vm_mock_admin_render_scene_battle_monster_actor_select(
             &page, actorFiles, actorCount, "actor_resource",
             rows[i].actorResource);
         vm_mock_admin_text_appendf(&page,
@@ -9999,7 +10017,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
             rows[i].entryId);
     }
     vm_mock_admin_text_appendf(&page,
-        "</div><p class=\"foot\">怪物 ID 决定怪物属性、掉落和任务击败条件；数量会以所填坐标为中心展开为最多 5 个独立节点。本体 Actor 负责碰撞与战斗，退场火团只能填写在 field18。普通 NPC（含任务发布者）不属于此配置层。</p>");
+        "</div><p class=\"foot\">怪物 ID 决定怪物属性、掉落和任务击败条件；数量会以所填坐标为中心展开为最多 5 个独立节点。本体 Actor 必须来自原生 kind-3 战斗节点，负责碰撞与战斗；退场火团只能填写在 field18。普通 NPC（含任务发布者）不属于此配置层。</p>");
     vm_mock_admin_render_scene_battle_actor_picker_modal(
         &page, actorFiles, actorCount);
     vm_mock_admin_render_monster_picker_modal(&page);
@@ -13164,6 +13182,7 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
     u32 posY = 0;
     u32 quantity = 0;
     u32 visualHint = 0;
+    u16 nativeVisualHint = 0;
 
     memset(&row, 0, sizeof(row));
     memset(sceneUtf8, 0, sizeof(sceneUtf8));
@@ -13255,7 +13274,15 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
     row.x = (u16)posX;
     row.y = (u16)posY;
     row.quantity = (u16)quantity;
-    row.visualHint = (u16)visualHint;
+    if (!vm_net_mock_scene_battle_monster_body_visual_hint(
+            row.actorResource, &nativeVisualHint))
+    {
+        vm_mock_admin_redirect_scene_battle_monsters(
+            client, sceneUtf8, "error",
+            "该本体 Actor 没有唯一的原生 field16 视觉配置，不能用于场景战斗怪");
+        return;
+    }
+    row.visualHint = nativeVisualHint;
     row.enabled = strcmp(enabledText, "1") == 0;
     if (!vm_net_mock_scene_battle_monster_admin_save(runtimeScene, &row,
                                                       &error))

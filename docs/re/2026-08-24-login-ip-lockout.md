@@ -1,0 +1,43 @@
+# 登录来源 IP 封锁
+
+状态：已实现，待部署时执行 `server/mysql/migrate_login_ip_blocks.sql`。
+
+## 契约
+
+游戏客户端登录、玩家账号中心 `/user/login` 和后台 `/admin-418yz6/login` 使用同一个来源
+IPv4 计数。缺少账号/密码、账号格式无效、账号不存在、密码不匹配，以及已被后台账号锁定
+后仍继续提交的登录，都会递增；账号本身已封禁、会话/数据库暂不可用以及注册失败不算密码
+错误。
+
+成功的凭据登录会删除该来源尚未封锁的失败记录，因而重置连续计数。第 15 次凭据错误会将
+`server_login_ip_blocks.blocked` 持久化为 `1`。该次仍走原有失败页面或游戏登录失败包；从下一
+个连接开始会被静默关闭：游戏连接在读取协议帧前按 TCP peer IPv4 检查；网页连接需先读取受限
+长度的 HTTP 请求头，以从受信任 nginx 的 `X-Real-IP` 还原来源，随后在读取正文、路由、处理
+或响应前关闭 socket。
+
+封锁是跨游戏与网页入口共享且跨服务重启保留的。游戏来源始终取 TCP 对端 IPv4。网页来源默认
+也取 TCP 对端；后台“安全设置”可把 nginx、负载均衡器或 CDN 到服务端的实际 TCP 来源 IPv4
+加入 `server_trusted_proxy_sources`，并分别授权 `X-Real-IP`、`X-Forwarded-For`。服务端优先
+使用前者；后者仅接受单个 IPv4，含逗号的转发链会被拒绝。不受信任或停用的来源携带任何
+真实 IP 请求头都不会生效，不能伪造来源绕过封锁。
+
+同机 nginx 的网页反向代理须覆盖而非保留客户端传入的两个头：
+
+```nginx
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+首次部署会自动创建并加入同机 nginx 的 `127.0.0.1`；已有数据库可执行
+`server/mysql/migrate_trusted_proxy_sources.sql`。保存后台配置后立即生效且记录操作账号。
+`CBE_MOCK_TRUSTED_PROXY_IPV4` 仅作为旧部署在没有数据库条目时的兼容兜底。
+
+## 持久化和恢复
+
+`server_login_ip_blocks` 以 ASCII IP 地址为主键，保存失败数、封锁标记、封锁时间和更新时间。
+服务首次访问时防御性创建该表，并把所有被封锁地址载入只读内存名单，避免在每一个游戏请求
+上查询数据库。达到缓存上限时，未命中的地址回退到单 IP 查询，封锁契约仍由 MySQL 权威数据
+保证。
+
+人工解除封锁需从可信管理终端删除对应行；服务重启后重新加载名单。不会通过网页暴露解除
+封锁接口，以免被已封锁来源借此重新获得响应。

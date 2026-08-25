@@ -1,0 +1,989 @@
+src\server\mock_server_arena.c:751:/* 2/13 is the parser-confirmed independent role-energy update.  It does not
+src\server\mock_server_arena.c:809:    if (role == NULL || session == NULL || role->roleId == 0 ||
+src\server\mock_server_arena.c:820:            g_vm_net_mock_arena_rooms[i].members[0].roleId == role->roleId)
+src\server\mock_server_arena.c:860:    room->members[0].roleId = role->roleId;
+src\server\mock_server_arena.c:864:             session->onlineRoleName[0] ? session->onlineRoleName : role->name);
+src\server\mock_server_arena.c:880:        if (room->members[i].roleId == role->roleId)
+src\server\mock_server_arena.c:885:    room->members[room->memberCount].roleId = role->roleId;
+src\server\mock_server_arena.c:890:             session->onlineRoleName[0] ? session->onlineRoleName : role->name);
+src\server\mock_server_arena.c:1061:        memberIndex = vm_net_mock_arena_member_index(room, role->roleId);
+src\server\mock_server_arena.c:1104:            room->challengeRoleId = role->roleId;
+src\server\mock_server_arena.c:1131:                candidate->challengeRoleId == role->roleId &&
+src\server\mock_server_arena.c:1134:                session->arenaChallengeSourceRoleId == role->roleId)
+src\server\mock_server_arena.c:1141:                candidate->challengeRoleId != role->roleId &&
+src\server\mock_server_arena.c:1142:                candidate->challengeOpponentRoleId == role->roleId &&
+src\server\mock_server_arena.c:1176:                        room, role->roleId);
+src\server\mock_server_arena.c:1232:           action ? action : "-", role->roleId, roomId, type, agree, award, turns,
+src\server\mock_server_battle.c:40:    u32 roleIdDefault = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_battle.c:1281:    g_mockBattleRoleMpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_battle.c:1282:    g_mockBattleRoleMpCurrent = vm_net_mock_min_u32(role->mp, g_mockBattleRoleMpMax);
+src\server\mock_server_battle.c:1302:            g_mockBattleRoleMpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_battle.c:1306:        role->mp = g_mockBattleRoleMpCurrent;
+src\server\mock_server_battle.c:1352:    if (role->mp != mpAfter)
+src\server\mock_server_battle.c:1375:        role->hp = vm_net_mock_min_u32(g_mockBattleRoleHpCurrent, role->hpMax);
+src\server\mock_server_battle.c:1377:        role->mp = vm_net_mock_min_u32(g_mockBattleRoleMpCurrent, role->mpMax);
+src\server\mock_server_battle.c:1653:           role ? role->roleId : 0, requested, mpBefore, mpCost, reason,
+src\server\mock_server_battle.c:1658:                     role ? role->roleId : 0, requested, mpBefore, mpCost,
+src\server\mock_server_battle.c:1943:            g_mockBattleRoleHpCurrent = role->hp;
+src\server\mock_server_battle.c:1945:            g_mockBattleRoleHpMax = role->hpMax ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
+src\server\mock_server_battle.c:1963:                u32 mpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_battle.c:1991:        u32 mpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_battle.c:2018:            if (role->hpMax > g_mockBattleRoleHpMax)
+src\server\mock_server_battle.c:2019:                g_mockBattleRoleHpMax = role->hpMax;
+src\server\mock_server_battle.c:2022:                g_mockBattleRoleHpCurrent = role->hp;
+src\server\mock_server_battle.c:2023:                g_mockBattleRoleMpMax = role->mpMax;
+src\server\mock_server_battle.c:2024:                g_mockBattleRoleMpCurrent = role->mp;
+src\server\mock_server_battle.c:2031:        role->hp = vm_net_mock_min_u32(g_mockBattleRoleHpCurrent,
+src\server\mock_server_battle.c:2032:                                       role->hpMax ? role->hpMax : g_mockBattleRoleHpMax);
+src\server\mock_server_battle.c:2064:                                 : role->roleId;
+src\server\mock_server_battle.c:2146:                role->hp = g_mockBattleRoleHpCurrent;
+src\server\mock_server_battle.c:2776:            skillTeamRoleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_battle.c:2793:                                                  role ? role->roleId :
+src\server\mock_server_battle.c:3579:            skillTeamRoleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_battle.c:3596:                                                  role ? role->roleId :
+src\server\mock_server_battle.c:4080: * rows (00 04, role-id, hp, mp), so every service-side reader must use the
+src\server\mock_server_battle.c:5118:    roleHpMax = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpMax : role->hpMax;
+src\server\mock_server_battle.c:5119:    roleMpMax = g_mockBattleRoleMpMax != 0 ? g_mockBattleRoleMpMax : role->mpMax;
+src\server\mock_server_battle.c:5126:                                      g_mockBattleRoleMpCurrent : role->mp,
+src\server\mock_server_battle.c:5184:        role->hp = roleHp;
+src\server\mock_server_battle.c:5185:        role->mp = roleMp;
+src\server\mock_server_battle.c:5301:        session->onlineRoleId != role->roleId)
+src\server\mock_server_battle.c:5315:        vitalsChanged = session->onlineHp != role->hp ||
+src\server\mock_server_battle.c:5316:                        session->onlineHpMax != role->hpMax ||
+src\server\mock_server_battle.c:5317:                        session->onlineMp != role->mp ||
+src\server\mock_server_battle.c:5318:                        session->onlineMpMax != role->mpMax;
+src\server\mock_server_battle.c:5319:        team->battleMemberHp[member] = role->hp;
+src\server\mock_server_battle.c:5320:        team->battleMemberHpMax[member] = role->hpMax;
+src\server\mock_server_battle.c:5321:        team->battleMemberMp[member] = role->mp;
+src\server\mock_server_battle.c:5322:        team->battleMemberMpMax[member] = role->mpMax;
+src\server\mock_server_battle.c:5323:        session->onlineHp = role->hp;
+src\server\mock_server_battle.c:5324:        session->onlineHpMax = role->hpMax;
+src\server\mock_server_battle.c:5325:        session->onlineMp = role->mp;
+src\server\mock_server_battle.c:5326:        session->onlineMpMax = role->mpMax;
+src\server\mock_server_battle.c:5332:               role->roleId,
+src\server\mock_server_battle.c:5334:               role->hp,
+src\server\mock_server_battle.c:5335:               role->hpMax,
+src\server\mock_server_battle.c:5336:               role->mp,
+src\server\mock_server_battle.c:5337:               role->mpMax,
+src\server\mock_server_battle.c:5616:                 (role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
+src\server\mock_server_battle.c:5617:    u32 roleMp = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_battle.c:5619:    u32 totalExp = role ? role->exp : 0;
+src\server\mock_server_battle.c:5623:    u32 statusGold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_battle.c:5624:    u32 statusLevel = role ? role->level : 1;
+src\server\mock_server_battle.c:5677:        hpMax = role->hpMax ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
+src\server\mock_server_battle.c:5678:        mpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_battle.c:5681:                     : vm_net_mock_min_u32(role->hp, hpMax);
+src\server\mock_server_battle.c:5684:                     : vm_net_mock_min_u32(role->mp, mpMax);
+src\server\mock_server_battle.c:5711:        g_mockBattleRoleHpMax = role->hpMax;
+src\server\mock_server_battle.c:5713:        g_mockBattleRoleMpMax = role->mpMax;
+src\server\mock_server_battle.c:5716:        statusExp = role->exp;
+src\server\mock_server_battle.c:5733:               role ? role->roleId : 0, vm_mysql_last_error());
+src\server\mock_server_battle.c:5762:           role ? role->hpMax : 0,
+src\server\mock_server_battle.c:5764:           role ? role->mpMax : 0,
+src\server\mock_server_battle.c:5774:           role ? role->roleId : 0,
+src\server\mock_server_battle.c:5788:                      role ? role->hpMax : 0,
+src\server\mock_server_battle.c:5790:                      role ? role->mpMax : 0,
+src\server\mock_server_battle.c:5801:                     role ? role->roleId : 0,
+src\server\mock_server_battle.c:6174:    u32 totalExp = role ? role->exp : 0;
+src\server\mock_server_battle.c:6178:    u32 gold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_battle.c:6179:    u32 level = role ? role->level : 1;
+src\server\mock_server_battle.c:6215:    u32 hpRecovery = role ? role->hp : 0;
+src\server\mock_server_battle.c:6229:           hpRecovery, role->roleId, pos);
+src\server\mock_server_battle.c:6231:                     hpRecovery, role->roleId);
+src\server\mock_server_battle.c:6365:                   "side=%u reason=live-role-unavailable\n",
+src\server\mock_server_battle.c:7870:    backpackCapacity = role->backpackCapacity;
+src\server\mock_server_battle.c:8300:                                 role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+src\server\mock_server_battle.c:8418:                                           (role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+src\server\mock_server_battle.c:8808:    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
+src\server\mock_server_battle.c:8819:                                 role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+src\server\mock_server_battle.c:9029:            role != NULL && role->sex <= 1 ? (u8)(role->sex + 1) : 1);
+src\server\mock_server_battle.c:9032:            role != NULL && role->job >= 1 && role->job <= 3 ? (u8)(role->job - 1) : 0);
+src\server\mock_server_battle.c:9113:                                           (role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID);
+src\server\mock_server_catalog.c:6:    count = role->backpackItemCount;
+src\server\mock_server_catalog.c:9:    if (count > role->backpackCapacity)
+src\server\mock_server_catalog.c:10:        count = role->backpackCapacity;
+src\server\mock_server_catalog.c:16: * the role-list parser, even if a former mall request still left its
+src\server\mock_server_catalog.c:71:                &role->backpackItems[i]))
+src\server\mock_server_catalog.c:1007:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[index];
+src\server\mock_server_catalog.c:1101:        if (!fullSnapshot && role->roleId != scopedRoleId)
+src\server\mock_server_catalog.c:1106:            const vm_net_mock_backpack_item_state *item = &role->backpackItems[itemIndex];
+src\server\mock_server_catalog.c:1113:                     accountHex, role->roleId, item->seq, titleHex,
+src\server\mock_server_catalog.c:1185:             accountHex, role->roleId, itemSeq);
+src\server\mock_server_catalog.c:1195:     * transactional role-save path used by new grants, then read back. */
+src\server\mock_server_catalog.c:1278:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[itemIndex];
+src\server\mock_server_catalog.c:1295:                   role ? role->roleId : 0, item ? item->seq : 0,
+src\server\mock_server_catalog.c:1302:                   role->roleId, item->seq,
+src\server\mock_server_catalog.c:1401:            state->equipmentItemIds[slot] = role->equippedItems[slot].itemId;
+src\server\mock_server_catalog.c:1402:            state->durability[slot] = role->equippedItems[slot].durability;
+src\server\mock_server_catalog.c:1403:            state->durabilityMax[slot] = role->equippedItems[slot].durabilityMax;
+src\server\mock_server_catalog.c:1429:            g_vm_net_mock_role_service_states[i].roleId == role->roleId &&
+src\server\mock_server_catalog.c:1453:    state->roleId = role->roleId;
+src\server\mock_server_catalog.c:1462:                 accountHex, role->roleId);
+src\server\mock_server_catalog.c:1465:                   role->roleId, vm_mysql_last_error());
+src\server\mock_server_catalog.c:1475:        rawJob = vm_net_mock_role_job_to_skill_raw_job(role->job);
+src\server\mock_server_catalog.c:1485:                   role->roleId, role->job, skill->skillId);
+src\server\mock_server_catalog.c:1489:    printf("[info][network] mock_role_service_load account=%s role=%u skills=%u durability_source=role-instance invalid=%u\n",
+src\server\mock_server_catalog.c:1490:           accountId, role->roleId, state->learnedSkillCount,
+src\server\mock_server_catalog.c:1510:               role ? role->roleId : 0, skillId, vm_mysql_last_error());
+src\server\mock_server_catalog.c:1537:                   role ? role->roleId : 0, skillId, vm_mysql_last_error());
+src\server\mock_server_catalog.c:1590:    if (state == NULL || role == NULL || role->money < cost)
+src\server\mock_server_catalog.c:1595:    role->money -= cost;
+src\server\mock_server_catalog.c:1604:        role->equippedItems[slot].durability =
+src\server\mock_server_catalog.c:1605:            role->equippedItems[slot].durabilityMax;
+src\server\mock_server_catalog.c:1627:            role->equippedItems[slot].durability == 0)
+src\server\mock_server_catalog.c:1631:        --role->equippedItems[slot].durability;
+src\server\mock_server_catalog.c:1632:        state->durability[slot] = role->equippedItems[slot].durability;
+src\server\mock_server_catalog.c:1662:               role->roleId, g_mockBattleOperateSessionSerial, vm_mysql_last_error());
+src\server\mock_server_catalog.c:1666:           role->roleId, g_mockBattleOperateSessionSerial, wornCount);
+src\server\mock_server_catalog.c:1683:                       role->roleId, g_mockBattleOperateSessionSerial,
+src\server\mock_server_catalog.c:1690:                   role->roleId, g_mockBattleOperateSessionSerial,
+src\server\mock_server_catalog.c:1691:                   repairCost, role->money);
+src\server\mock_server_catalog.c:1706:    u8 roleJob = role ? role->job : 1;
+src\server\mock_server_catalog.c:1949:        vm_net_mock_role_backpack_count(role) < role->backpackCapacity)
+src\server\mock_server_catalog.c:1960: * backpack row.  The caller owns the one role-state persistence transaction
+src\server\mock_server_catalog.c:1994:    role->money = 0xffffffffu - role->money < saleTotal
+src\server\mock_server_catalog.c:1996:                      : role->money + saleTotal;
+src\server\mock_server_catalog.c:2820: * itemCtrl+0x584 table.  The title role-list subtype-4 parser reads `num`,
+src\server\mock_server_catalog.c:3600:                           role ? role->backpackCapacity :
+src\server\mock_server_catalog.c:3899:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_catalog.c:4044:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_catalog.c:4822:            const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_catalog.c:4972:        u32 itemId = role->equippedItems[slot].itemId;
+src\server\mock_server_catalog.c:4983:        const vm_net_mock_equipped_item_state *item = &role->equippedItems[slot];
+src\server\mock_server_catalog.c:5032:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_catalog.c:5045:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_catalog.c:5154:            &role->backpackItems[i];
+src\server\mock_server_catalog.c:5240:            &role->backpackItems[i];
+src\server\mock_server_catalog.c:5260:    memset(role->backpackItems, 0, sizeof(role->backpackItems));
+src\server\mock_server_catalog.c:5262:        memcpy(role->backpackItems, rebuilt,
+src\server\mock_server_catalog.c:5264:    role->backpackItemCount = (u8)rebuiltCount;
+src\server\mock_server_catalog.c:5290:        const vm_net_mock_backpack_item_state *row = &role->backpackItems[i];
+src\server\mock_server_catalog.c:5338:    current = role->backpackCapacity;
+src\server\mock_server_catalog.c:5360:    newCapacity = (u32)role->backpackCapacity +
+src\server\mock_server_catalog.c:5364:    role->backpackCapacity = (u8)newCapacity;
+src\server\mock_server_catalog.c:5388:    if (role == NULL || role->backpackCapacity != VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS)
+src\server\mock_server_catalog.c:5390:    itemCount = role->backpackItemCount;
+src\server\mock_server_catalog.c:5393:    role->backpackCapacity = vm_net_mock_role_round_backpack_capacity_for_count(itemCount);
+src\server\mock_server_catalog.c:5408:        role->hp = vm_net_mock_min_u32(vm_net_mock_add_capped_u32(role->hp, capped), role->hpMax);
+src\server\mock_server_catalog.c:5414:        role->mp = vm_net_mock_min_u32(vm_net_mock_add_capped_u32(role->mp, capped), role->mpMax);
+src\server\mock_server_catalog.c:5870:           role ? role->roleId : 0, itemSeq, success ? 1u : 0u,
+src\server\mock_server_catalog.c:5929:           role ? role->roleId : 0, itemSeq, success ? 1u : 0u,
+src\server\mock_server_catalog.c:5964:        currentLevel = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_catalog.c:5979:            beforeExp = role->exp;
+src\server\mock_server_catalog.c:5984:                if (role->exp > beforeExp &&
+src\server\mock_server_catalog.c:6007:        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "exp", role->exp) ||
+src\server\mock_server_catalog.c:6008:            !vm_net_mock_put_object_u32(out, outCap, &pos, "level", role->level) ||
+src\server\mock_server_catalog.c:6010:                                        vm_net_mock_role_last_level_exp(role->exp)) ||
+src\server\mock_server_catalog.c:6012:                                        vm_net_mock_role_next_level_start_exp(role->exp)) ||
+src\server\mock_server_catalog.c:6014:                                        vm_net_mock_role_exp_percent(role->exp)))
+src\server\mock_server_catalog.c:6022:           role ? role->roleId : 0, itemSeq, book.level, book.experience,
+src\server\mock_server_catalog.c:6103:               subtype, requestedSeq, role ? role->roleId : 0, pos);
+src\server\mock_server_catalog.c:6183:        const vm_net_mock_backpack_item_state *row = &role->backpackItems[i];
+src\server\mock_server_catalog.c:6299:               (role ? role->roleId * 0xc2b2ae35u : 0u);
+src\server\mock_server_catalog.c:6664:            role->name[0] ? role->name : "Player",
+src\server\mock_server_catalog.c:6675:               chest->chestItemId, reward->itemId, role->roleId);
+src\server\mock_server_catalog.c:6737:    oldCapacity = role->backpackCapacity;
+src\server\mock_server_catalog.c:6794:        missingHp = role->hpMax > role->hp ? role->hpMax - role->hp : 0;
+src\server\mock_server_catalog.c:6795:        missingMp = role->mpMax > role->mp ? role->mpMax - role->mp : 0;
+src\server\mock_server_catalog.c:6806:            role->hp = vm_net_mock_min_u32(
+src\server\mock_server_catalog.c:6807:                vm_net_mock_add_capped_u32(role->hp, hpApplied), role->hpMax);
+src\server\mock_server_catalog.c:6808:            role->mp = vm_net_mock_min_u32(
+src\server\mock_server_catalog.c:6809:                vm_net_mock_add_capped_u32(role->mp, mpApplied), role->mpMax);
+src\server\mock_server_catalog.c:6878:    newCapacity = role->backpackCapacity;
+src\server\mock_server_catalog.c:7132:                                role->roleId, itemId, discardCount, 0,
+src\server\mock_server_catalog.c:7140:                                   role->roleId, itemId, (u32)seq,
+src\server\mock_server_catalog.c:7208:        role ? role->backpackCapacity : VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY);
+src\server\mock_server_catalog.c:7229:           role ? role->roleId : 0,
+src\server\mock_server_catalog.c:7235:                     role ? role->roleId : 0,
+src\server\mock_server_catalog.c:7317:           role ? role->roleId : 0,
+src\server\mock_server_catalog.c:7322:                     role ? role->roleId : 0,
+src\server\mock_server_catalog.c:7378:           role ? role->roleId : 0, rowCount, infoLen);
+src\server\mock_server_catalog.c:7380:                     role ? role->roleId : 0, rowCount, infoLen);
+src\server\mock_server_catalog.c:7431:           role->roleId, rowCount, itemInfoLen);
+src\server\mock_server_catalog.c:7433:                     role->roleId, rowCount, itemInfoLen);
+src\server\mock_server_catalog.c:7475:           role->roleId, equipmentRows);
+src\server\mock_server_catalog.c:7477:                     role->roleId, equipmentRows);
+src\server\mock_server_catalog.c:7488:    if (g_netMockBackpackGridReseedPendingRoleId == role->roleId)
+src\server\mock_server_catalog.c:7498:               role->roleId);
+src\server\mock_server_catalog.c:7500:                         role->roleId);
+src\server\mock_server_catalog.c:7502:    if (g_netMockBackpackGridSeededRoleId != role->roleId)
+src\server\mock_server_catalog.c:7533:        g_netMockBackpackGridSeededRoleId = role->roleId;
+src\server\mock_server_core.c:852:     * Do not answer this with title role-list actorinfo: mmTitle sub_3544()
+src\server\mock_server_core.c:853:     * treats actorinfo on subtype 4 as the role-list payload, which belongs
+src\server\mock_server_core.c:854:     * behind the later explicit 1/1/16 role-list request.
+src\server\mock_server_dispatch.c:402:            printf("[info][network] mock_shop_buy_backpack_sync shape=17/1+7/42 response=role-backpack pending=0\n");
+src\server\mock_server_dispatch.c:413:                printf("[info][network] mock_shop_buy_backpack_sync shape=7/42 response=role-backpack pending=0\n");
+src\server\mock_server_dispatch.c:425:                printf("[info][network] mock_shop_buy_backpack_sync shape=17/1 response=role-backpack pending=0\n");
+src\server\mock_server_dispatch.c:439:     * backpack form, which then falls through to the role-backpack builder.
+src\server\mock_server_dispatch.c:465:        vm_net_log_handled_packet("builtin-role-designation23", request, requestLen, hookedLen);
+src\server\mock_server_dispatch.c:491:        vm_net_log_handled_packet("builtin-role-action23", request, requestLen, hookedLen);
+src\server\mock_server_dispatch.c:1296:                vm_net_log_handled_packet("builtin-title-role-create", request, requestLen, hookedLen);
+src\server\mock_server_dispatch.c:1305:                vm_net_log_handled_packet("builtin-title-role-delete", request, requestLen, hookedLen);
+src\server\mock_server_dispatch.c:1314:                vm_net_log_handled_packet("builtin-title-role-select", request, requestLen, hookedLen);
+src\server\mock_server_dispatch.c:1332:                vm_net_log_handled_packet("builtin-role-list", request, requestLen, hookedLen);
+src\server\mock_server_equipment_npc.c:41:        if (role->backpackItems[i].seq == backpackSeq)
+src\server\mock_server_equipment_npc.c:43:            backpackItem = &role->backpackItems[i];
+src\server\mock_server_equipment_npc.c:62:    if (role->level == 0)
+src\server\mock_server_equipment_npc.c:63:        role->level = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_equipment_npc.c:64:    if (role->level < newEquip->levelRequired)
+src\server\mock_server_equipment_npc.c:79:    oldInstance = role->equippedItems[slot];
+src\server\mock_server_equipment_npc.c:108:    role->equippedItems[slot] = newInstance;
+src\server\mock_server_equipment_npc.c:176:        itemId = role->equippedItems[slot].itemId;
+src\server\mock_server_equipment_npc.c:197:            if (role->equippedItems[i].itemId == requestedItemId)
+src\server\mock_server_equipment_npc.c:208:                role->equippedItems[equip->slot].itemId != 0)
+src\server\mock_server_equipment_npc.c:211:                itemId = role->equippedItems[slot].itemId;
+src\server\mock_server_equipment_npc.c:224:    instance = role->equippedItems[slot];
+src\server\mock_server_equipment_npc.c:232:    memset(&role->equippedItems[slot], 0, sizeof(role->equippedItems[slot]));
+src\server\mock_server_equipment_npc.c:726:        if (role->money < moneyCost)
+src\server\mock_server_equipment_npc.c:775:                role->money -= moneyCost;
+src\server\mock_server_equipment_npc.c:794:                        role->roleId ^ equipment->itemId ^
+src\server\mock_server_equipment_npc.c:1122:    if (role->money < state->moneyCost)
+src\server\mock_server_equipment_npc.c:1156:    role->money -= state->moneyCost;
+src\server\mock_server_equipment_npc.c:1161:        role->roleId ^ destination->itemId ^
+src\server\mock_server_equipment_npc.c:1523:        role != NULL ? vm_net_mock_role_level_from_exp(role->exp) : 1u);
+src\server\mock_server_equipment_npc.c:1525:        role != NULL ? vm_net_mock_role_level_from_exp(role->exp) : 1u);
+src\server\mock_server_equipment_npc.c:1536:     * same role-level cap, card effect, and one-monster daily unit as every
+src\server\mock_server_equipment_npc.c:1570:                   g_vm_net_mock_battle_enemy_id_current, role->roleId,
+src\server\mock_server_equipment_npc.c:1581:               g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
+src\server\mock_server_equipment_npc.c:1665:                role->roleId, configured->itemId, &dropIsTaskMaterial,
+src\server\mock_server_equipment_npc.c:1682:               g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
+src\server\mock_server_equipment_npc.c:1716:                       role->roleId, configured->itemId, grantedCount);
+src\server\mock_server_equipment_npc.c:1723:                       role->roleId, configured->itemId, grantedCount, saleTotal,
+src\server\mock_server_equipment_npc.c:1728:                   role->roleId, configured->itemId, grantedCount,
+src\server\mock_server_equipment_npc.c:1731:                             role->roleId, configured->itemId, grantedCount,
+src\server\mock_server_equipment_npc.c:1781:    if (hp > role->hpMax)
+src\server\mock_server_equipment_npc.c:1782:        hp = role->hpMax;
+src\server\mock_server_equipment_npc.c:1783:    if (mp > role->mpMax)
+src\server\mock_server_equipment_npc.c:1784:        mp = role->mpMax;
+src\server\mock_server_equipment_npc.c:1785:    role->hp = hp;
+src\server\mock_server_equipment_npc.c:1786:    role->mp = mp;
+src\server\mock_server_equipment_npc.c:1788:    role->money = (0xffffffffu - role->money < rewardGold) ? 0xffffffffu : role->money + rewardGold;
+src\server\mock_server_equipment_npc.c:1793:        *lastExpOut = vm_net_mock_role_last_level_exp(role->exp);
+src\server\mock_server_equipment_npc.c:1795:        *curExpOut = vm_net_mock_role_next_level_start_exp(role->exp);
+src\server\mock_server_equipment_npc.c:1797:        *percentExpOut = vm_net_mock_role_exp_percent(role->exp);
+src\server\mock_server_equipment_npc.c:1799:        *levelOut = role->level;
+src\server\mock_server_equipment_npc.c:1801:        *goldOut = role->money;
+src\server\mock_server_equipment_npc.c:1803:        *hpOut = role->hp;
+src\server\mock_server_equipment_npc.c:1805:        *mpOut = role->mp;
+src\server\mock_server_equipment_npc.c:1828:    mpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_equipment_npc.c:1853:                 (role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
+src\server\mock_server_equipment_npc.c:1854:    u32 roleMp = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_equipment_npc.c:1909:                     role->exp,
+src\server\mock_server_equipment_npc.c:1929:        u32 hpMax = role->hpMax ? role->hpMax : g_mockBattleRoleHpMax;
+src\server\mock_server_equipment_npc.c:1930:        role->hp = vm_net_mock_min_u32(g_mockBattleRoleHpCurrent, hpMax);
+src\server\mock_server_equipment_npc.c:1934:        u32 mpMax = role->mpMax ? role->mpMax : g_mockBattleRoleMpMax;
+src\server\mock_server_equipment_npc.c:1935:        role->mp = vm_net_mock_min_u32(g_mockBattleRoleMpCurrent, mpMax);
+src\server\mock_server_equipment_npc.c:1974:    if (role->hp != 0)
+src\server\mock_server_equipment_npc.c:1989:    role->hp = role->hpMax;
+src\server\mock_server_equipment_npc.c:1990:    g_mockBattleRoleHpCurrent = role->hp;
+src\server\mock_server_equipment_npc.c:1991:    g_mockBattleRoleHpMax = role->hpMax;
+src\server\mock_server_equipment_npc.c:1992:    g_mockBattleRoleMpCurrent = role->mp;
+src\server\mock_server_equipment_npc.c:1993:    g_mockBattleRoleMpMax = role->mpMax;
+src\server\mock_server_equipment_npc.c:2059:    if (role == NULL || role->hp != 0)
+src\server\mock_server_equipment_npc.c:2064:    if (vm_net_mock_scene_name_is_safe(role->scene))
+src\server\mock_server_equipment_npc.c:2065:        snprintf(sourceScene, sizeof(sourceScene), "%s", role->scene);
+src\server\mock_server_equipment_npc.c:2102:        printf("[error][network] mock_death_respawn_nearest_town_unresolved source_scene=- action=initial-scene reason=invalid-role-scene\n");
+src\server\mock_server_equipment_npc.c:2106:    expBefore = role->exp;
+src\server\mock_server_equipment_npc.c:2126:    role->exp = expBefore - expPenalty;
+src\server\mock_server_equipment_npc.c:2127:    role->level = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_equipment_npc.c:2128:    moneyPenalty = vm_net_mock_percent_ceil_u32(role->money,
+src\server\mock_server_equipment_npc.c:2130:    role->money -= moneyPenalty;
+src\server\mock_server_equipment_npc.c:2133:    reviveHp = vm_net_mock_percent_ceil_u32(role->hpMax,
+src\server\mock_server_equipment_npc.c:2135:    reviveMp = vm_net_mock_percent_ceil_u32(role->mpMax,
+src\server\mock_server_equipment_npc.c:2137:    if (reviveHp == 0 && role->hpMax != 0)
+src\server\mock_server_equipment_npc.c:2139:    if (reviveMp == 0 && role->mpMax != 0)
+src\server\mock_server_equipment_npc.c:2141:    role->hp = vm_net_mock_min_u32(reviveHp, role->hpMax);
+src\server\mock_server_equipment_npc.c:2142:    role->mp = vm_net_mock_min_u32(reviveMp, role->mpMax);
+src\server\mock_server_equipment_npc.c:2144:    snprintf(role->scene, sizeof(role->scene), "%s", respawnScene);
+src\server\mock_server_equipment_npc.c:2145:    role->x = respawnX;
+src\server\mock_server_equipment_npc.c:2146:    role->y = respawnY;
+src\server\mock_server_equipment_npc.c:2150:    g_mockBattleRoleHpCurrent = role->hp;
+src\server\mock_server_equipment_npc.c:2151:    g_mockBattleRoleHpMax = role->hpMax;
+src\server\mock_server_equipment_npc.c:2152:    g_mockBattleRoleMpCurrent = role->mp;
+src\server\mock_server_equipment_npc.c:2153:    g_mockBattleRoleMpMax = role->mpMax;
+src\server\mock_server_equipment_npc.c:2156:           reason ? reason : "battle-death", levelBefore, role->level,
+src\server\mock_server_equipment_npc.c:2157:           expBefore, role->exp, levelExpRequired, expPenalty, moneyPenalty, role->scene,
+src\server\mock_server_equipment_npc.c:2159:           respawnDistance, role->x, role->y);
+src\server\mock_server_equipment_npc.c:2161:                     reason ? reason : "battle-death", levelBefore, role->level,
+src\server\mock_server_equipment_npc.c:2162:                     expBefore, role->exp, levelExpRequired, expPenalty, moneyPenalty, role->scene,
+src\server\mock_server_equipment_npc.c:2164:                     respawnDistance, role->x, role->y);
+src\server\mock_server_equipment_npc.c:2171:        *reviveMpOut = role->mp;
+src\server\mock_server_equipment_npc.c:2173:        snprintf(sceneOut, sceneOutCap, "%s", role->scene);
+src\server\mock_server_equipment_npc.c:2175:        *xOut = role->x;
+src\server\mock_server_equipment_npc.c:2177:        *yOut = role->y;
+src\server\mock_server_equipment_npc.c:2178:    return role->hp;
+src\server\mock_server_equipment_npc.c:2195:        else if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
+src\server\mock_server_equipment_npc.c:2196:            scene = role->scene;
+src\server\mock_server_equipment_npc.c:2245:    if (role != NULL && vm_net_mock_scene_name_is_download_key(role->scene))
+src\server\mock_server_equipment_npc.c:2246:        return role->scene;
+src\server\mock_server_equipment_npc.c:2259:    if (role != NULL && role->x != 0)
+src\server\mock_server_equipment_npc.c:2260:        return role->x;
+src\server\mock_server_equipment_npc.c:2269:    if (role != NULL && role->y != 0)
+src\server\mock_server_equipment_npc.c:2270:        return role->y;
+src\server\mock_server_equipment_npc.c:2303:    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
+src\server\mock_server_equipment_npc.c:2304:        return role->scene;
+src\server\mock_server_equipment_npc.c:2431: * A title role-select starts the first scene screen from the subtype-6
+src\server\mock_server_equipment_npc.c:2437:/* A role-select can create its first scene shell before a stale target SCE
+src\server\mock_server_equipment_npc.c:2949:     * rather than recomputing a role-dependent catalog. */
+src\server\mock_server_equipment_npc.c:3932:            vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_equipment_npc.c:3943:    if (itemCount >= role->backpackCapacity ||
+src\server\mock_server_equipment_npc.c:3948:    vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
+src\server\mock_server_equipment_npc.c:3952:            role, NULL, 0, role->nextBackpackSeq, &item->seq))
+src\server\mock_server_equipment_npc.c:3966:    role->backpackItemCount = (u8)(itemCount + 1);
+src\server\mock_server_equipment_npc.c:3967:    role->nextBackpackSeq = (u16)(item->seq + 1);
+src\server\mock_server_equipment_npc.c:5295:        strcmp(reason, "user-role-transfer-import-source") == 0;
+src\server\mock_server_equipment_npc.c:5525:             * transition has released all role-owned state. */
+src\server\mock_server_equipment_npc.c:5558:                session, reason ? reason : "admin-role-position-reset");
+src\server\mock_server_equipment_npc.c:5777:    roleScene = vm_net_mock_scene_name_is_safe(role->scene) ? role->scene : vm_net_mock_current_scene_name();
+src\server\mock_server_equipment_npc.c:5779:    x = role->x;
+src\server\mock_server_equipment_npc.c:5780:    y = role->y;
+src\server\mock_server_equipment_npc.c:5802:    vitalsChanged = hadPresence && session->onlineRoleId == role->roleId &&
+src\server\mock_server_equipment_npc.c:5808:    session->onlineRoleId = role->roleId;
+src\server\mock_server_equipment_npc.c:5810:             role->name[0] ? role->name : vm_net_mock_default_role_name());
+src\server\mock_server_equipment_npc.c:5815:    session->onlineJob = role->job;
+src\server\mock_server_equipment_npc.c:5816:    session->onlineSex = role->sex;
+src\server\mock_server_equipment_npc.c:5817:    session->onlineLevel = (u16)(role->level ? role->level : 1);
+src\server\mock_server_equipment_npc.c:5822:            session->onlineEquippedItemIds[slot] = role->equippedItems[slot].itemId;
+src\server\mock_server_equipment_npc.c:5824:                role->equippedItems[slot].enhanceLevel;
+src\server\mock_server_equipment_npc.c:5826:                role->equippedItems[slot].enhanceAffixes;
+src\server\mock_server_equipment_npc.c:5878:    if (session == NULL || role == NULL || role->x == 0 || role->y == 0)
+src\server\mock_server_equipment_npc.c:5880:    roleScene = vm_net_mock_scene_name_is_safe(role->scene) ? role->scene : sceneHint;
+src\server\mock_server_equipment_npc.c:5896:                                             role->x,
+src\server\mock_server_equipment_npc.c:5897:                                             role->y,
+src\server\mock_server_equipment_npc.c:6168: * narrower, role-specific disconnect path below and must not use this helper. */
+src\server\mock_server_equipment_npc.c:6236:    targetRoleId = role->roleId;
+src\server\mock_server_equipment_npc.c:6245:        accountId, targetRoleId, "admin-role-position-reset");
+src\server\mock_server_equipment_npc.c:6251:    if (role == NULL || role->roleId != targetRoleId)
+src\server\mock_server_equipment_npc.c:6258:    snprintf(sourceScene, sizeof(sourceScene), "%s", role->scene);
+src\server\mock_server_equipment_npc.c:6278:    snprintf(role->scene, sizeof(role->scene), "%s", targetScene);
+src\server\mock_server_equipment_npc.c:6279:    role->x = targetX;
+src\server\mock_server_equipment_npc.c:6280:    role->y = targetY;
+src\server\mock_server_equipment_npc.c:6283:     * using the active-role-only position fast path. */
+src\server\mock_server_equipment_npc.c:6393:    before = role->money;
+src\server\mock_server_equipment_npc.c:6395:    role->money = after;
+src\server\mock_server_equipment_npc.c:6402:        role->money = before;
+src\server\mock_server_equipment_npc.c:6412:           role->name[0] ? role->name : "-",
+src\server\mock_server_equipment_npc.c:6413:           role->roleId,
+src\server\mock_server_equipment_npc.c:6476:    roleId = role->roleId;
+src\server\mock_server_equipment_npc.c:6488:    if (strcmp(role->name, newName) == 0)
+src\server\mock_server_equipment_npc.c:6496:    snprintf(previousName, sizeof(previousName), "%s", role->name);
+src\server\mock_server_equipment_npc.c:6531:    snprintf(role->name, sizeof(role->name), "%s", newName);
+src\server\mock_server_equipment_npc.c:6569:    role->level = requestedLevel;
+src\server\mock_server_equipment_npc.c:6570:    role->exp = targetExp;
+src\server\mock_server_equipment_npc.c:6579: * account snapshot; changing only role->level would be normalized back from
+src\server\mock_server_equipment_npc.c:6608:        accountId, "admin-set-role-level");
+src\server\mock_server_equipment_npc.c:6631:    targetExp = role->exp;
+src\server\mock_server_equipment_npc.c:6632:    if (!vm_net_mock_role_db_save_relational("admin-set-role-level", NULL,
+src\server\mock_server_equipment_npc.c:6648:           accountId, role->roleId, before.level, before.exp, role->level,
+src\server\mock_server_equipment_npc.c:6649:           role->exp, role->hp, role->hpMax, role->mp, role->mpMax,
+src\server\mock_server_equipment_npc.c:6708:    equipped = &role->equippedItems[requestedSlot];
+src\server\mock_server_equipment_npc.c:6736:        role->roleId ^ equipped->itemId ^
+src\server\mock_server_equipment_npc.c:6757:           accountId, role->roleId, requestedSlot, equipped->itemId,
+src\server\mock_server_equipment_npc.c:6829:           role->name[0] ? role->name : "-",
+src\server\mock_server_equipment_npc.c:6830:           role->roleId,
+src\server\mock_server_guild.c:619:     * narrow scope; this is also the row emitted by the legacy 10/32 role-list
+src\server\mock_server_guild.c:965:     * role-resource table as 2 * work + sex.  It has three zero-based jobs
+src\server\mock_server_guild.c:2251:        offer->money > role->money ||
+src\server\mock_server_guild.c:3173:        vm_net_mock_guild_find_role_membership(role->roleId, &guild, &memberRank) &&
+src\server\mock_server_guild.c:3188:           role ? role->roleId : 0, guild.guildId, memberRank, result, pos);
+src\server\mock_server_guild.c:3226:            vm_net_mock_guild_find_role_membership(role->roleId, &membership, NULL))
+src\server\mock_server_guild.c:3451:        vm_net_mock_guild_find_role_membership(role->roleId, &membership, NULL) &&
+src\server\mock_server_guild.c:3514:           requestSubtype, role ? role->roleId : 0, guild.guildId, index, pageSize,
+src\server\mock_server_guild.c:3519:                     role ? role->roleId : 0, guild.guildId, rowCount);
+src\server\mock_server_guild.c:3553:        vm_net_mock_guild_find_role_membership(role->roleId,
+src\server\mock_server_guild.c:3617:           role ? role->roleId : 0, membership.guildId, requesterRank,
+src\server\mock_server_guild.c:3744:    if (role == NULL || requestedRoleId == 0 || requestedRoleId != role->roleId ||
+src\server\mock_server_guild.c:3745:        !vm_net_mock_guild_find_role_membership(role->roleId, &guild, &memberRank) ||
+src\server\mock_server_guild.c:3773:             accountHex, role->roleId);
+src\server\mock_server_guild.c:3782:                 guild.guildId, accountHex, role->roleId);
+src\server\mock_server_guild.c:3796:                 guild.guildId, accountHex, role->roleId, memberRank);
+src\server\mock_server_guild.c:3802:                 guild.guildId, accountHex, role->roleId);
+src\server\mock_server_guild.c:3818:           guild.guildId, role ? role->roleId : 0, memberRank,
+src\server\mock_server_guild.c:3839:        role == NULL || requestedRoleId != role->roleId)
+src\server\mock_server_guild.c:3855:           role ? role->roleId : 0, requestedRoleId, guildId, memberRank,
+src\server\mock_server_guild.c:4006:                    vm_net_mock_guild_find_role_membership(role->roleId, &membership, NULL);
+src\server\mock_server_guild.c:4029:           role ? role->roleId : 0, alreadyJoined ? 1u : 0u,
+src\server\mock_server_guild.c:4057:        vm_net_mock_guild_find_role_membership(role->roleId, &membership, NULL))
+src\server\mock_server_guild.c:4095:           role ? role->roleId : 0, name, exists ? 1u : 0u, result, pos);
+src\server\mock_server_guild.c:4116:    char roleNameHex[sizeof(role->name) * 2 + 1];
+src\server\mock_server_guild.c:4135:    if (vm_net_mock_guild_find_role_membership(role->roleId, &membership, NULL))
+src\server\mock_server_guild.c:4150:    roleNameLen = vm_mock_mysql_bounded_strlen(role->name, sizeof(role->name));
+src\server\mock_server_guild.c:4152:        roleNameLen >= sizeof(role->name) ||
+src\server\mock_server_guild.c:4154:        vm_mysql_hex_encode(role->name, roleNameLen,
+src\server\mock_server_guild.c:4165:             nameHex, accountHex, role->roleId, roleNameHex);
+src\server\mock_server_guild.c:4178:             guildId, accountHex, role->roleId, roleNameHex);
+src\server\mock_server_guild.c:4184:             accountHex, role->roleId);
+src\server\mock_server_guild.c:4196:           role ? role->roleId : 0, name ? name : "-", vm_mysql_last_error());
+src\server\mock_server_guild.c:4239:          !vm_net_mock_put_object_u32(out, outCap, &pos, "money", role ? role->money : 0) ||
+src\server\mock_server_guild.c:4250:           role ? role->roleId : 0, guildId, name, result, pos);
+src\server\mock_server_guild.c:4276:    if (vm_net_mock_guild_find_role_membership(role->roleId, &membership, NULL))
+src\server\mock_server_guild.c:4278:    if (role->level < guild.minimumLevel)
+src\server\mock_server_guild.c:4293:    roleNameLen = vm_mock_mysql_bounded_strlen(role->name, sizeof(role->name));
+src\server\mock_server_guild.c:4294:    if (roleNameLen == 0 || roleNameLen >= sizeof(role->name) ||
+src\server\mock_server_guild.c:4295:        vm_mysql_hex_encode(role->name, roleNameLen,
+src\server\mock_server_guild.c:4308:             guildId, accountHex, role->roleId, roleNameHex,
+src\server\mock_server_guild.c:4309:             role->level, role->job, role->sex);
+src\server\mock_server_guild.c:4313:               guildId, role->roleId, vm_mysql_last_error());
+src\server\mock_server_guild.c:4345:           guildId, role ? role->roleId : 0, result,
+src\server\mock_server_guild.c:4381:        vm_net_mock_guild_find_role_membership(role->roleId, &guild, &memberRank) &&
+src\server\mock_server_guild.c:4446:           role ? role->roleId : 0, guild.guildId, memberRank,
+src\server\mock_server_guild.c:4649:           role ? role->roleId : 0, guildId, requesterRank,
+src\server\mock_server_guild.c:4684:        vm_net_mock_guild_find_role_membership(role->roleId, &guild, &rank) &&
+src\server\mock_server_guild.c:4711:                               guild.guildId, role->roleId, vm_mysql_last_error());
+src\server\mock_server_guild.c:4748:           role ? role->roleId : 0, guild.guildId, rank, result,
+src\server\mock_server_guild.c:4972:           action.subtype, role ? role->roleId : 0, guildId, requesterRank,
+src\server\mock_server_interaction_login.c:689:        !vm_net_mock_scene_name_is_persistable(role->scene) ||
+src\server\mock_server_interaction_login.c:690:        !vm_net_mock_scene_names_equal_exact(role->scene, scene) ||
+src\server\mock_server_interaction_login.c:691:        role->x == 0 || role->y == 0)
+src\server\mock_server_interaction_login.c:696:    *xOut = role->x;
+src\server\mock_server_interaction_login.c:697:    *yOut = role->y;
+src\server\mock_server_interaction_login.c:851:        !vm_net_mock_scene_names_equal_exact(role->scene, scene) ||
+src\server\mock_server_interaction_login.c:852:        role->x == 0 || role->y == 0)
+src\server\mock_server_interaction_login.c:1134:               "reason=missing-exact-persisted-role-position contract=30/2-posinfo\n",
+src\server\mock_server_interaction_login.c:1336:         * actor and HUD state from the role-select subtype-6 actorinfo.  A
+src\server\mock_server_interaction_login.c:1664:               "reason=missing-exact-persisted-role-position contract=30/2-posinfo\n",
+src\server\mock_server_interaction_login.c:2098:           role ? role->roleId : 0, openGold, success ? 1u : 0u, pos);
+src\server\mock_server_interaction_login.c:2149:                   role ? role->roleId : 0,
+src\server\mock_server_interaction_login.c:2150:                   role ? role->hp : 0);
+src\server\mock_server_interaction_login.c:2154:        reviveHp = role->hp;
+src\server\mock_server_interaction_login.c:2155:        reviveMp = role->mp;
+src\server\mock_server_interaction_login.c:2169:                   role->roleId, reviveHp, reviveMp);
+src\server\mock_server_interaction_login.c:2181:               role->scene,
+src\server\mock_server_interaction_login.c:2182:               role->x,
+src\server\mock_server_interaction_login.c:2183:               role->y,
+src\server\mock_server_interaction_login.c:2190:                         role->scene,
+src\server\mock_server_interaction_login.c:2191:                         role->x,
+src\server\mock_server_interaction_login.c:2192:                         role->y);
+src\server\mock_server_interaction_login.c:2740:        if (moneyGrant == 0 || role->money > 0xffffffffu - moneyGrant)
+src\server\mock_server_interaction_login.c:2742:        role->money += moneyGrant;
+src\server\mock_server_interaction_login.c:2842:        capacityBefore = role->backpackCapacity;
+src\server\mock_server_interaction_login.c:2843:        capacityAfter = role->backpackCapacity;
+src\server\mock_server_interaction_login.c:2872:                    capacityAfter = role->backpackCapacity;
+src\server\mock_server_interaction_login.c:2879:                    capacityAfter = role->backpackCapacity;
+src\server\mock_server_interaction_login.c:2947:        role != NULL && role->hp == 0;
+src\server\mock_server_interaction_login.c:2964:                role->roleId, itemId, count, cost, operationDetail, NULL))
+src\server\mock_server_interaction_login.c:2967:                   g_vm_mock_service_active_account_id, role->roleId, itemId,
+src\server\mock_server_interaction_login.c:3223:    u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_interaction_login.c:3225:    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
+src\server\mock_server_interaction_login.c:3229:    u32 roleLevel = vm_net_mock_env_u32("CBE_ROLE_LEVEL", role ? role->level : 1);
+src\server\mock_server_interaction_login.c:3230:    u32 roleExp = role ? role->exp : 0;
+src\server\mock_server_interaction_login.c:3231:    u32 actorJob = vm_net_mock_env_u8("CBE_ACTOR_JOB", role ? role->job : 1);
+src\server\mock_server_interaction_login.c:3232:    u32 actorSex = vm_net_mock_env_u8("CBE_ACTOR_SEX", role ? role->sex : 0);
+src\server\mock_server_interaction_login.c:3248:                                           role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY);
+src\server\mock_server_interaction_login.c:3252:                           role ? role->backpackCapacity :
+src\server\mock_server_interaction_login.c:3367:    actorGridX = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_X", role ? role->x : vm_net_mock_scene_spawn_x());
+src\server\mock_server_interaction_login.c:3368:    actorGridY = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_Y", role ? role->y : vm_net_mock_scene_spawn_y());
+src\server\mock_server_interaction_login.c:3507:    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
+src\server\mock_server_interaction_login.c:3508:    u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_interaction_login.c:3509:    u32 roleLevel = vm_net_mock_env_u32("CBE_ROLE_LEVEL", role ? role->level : 1);
+src\server\mock_server_interaction_login.c:3533:     * mmTitleMstarWqvga.cbm sub_3544() reads compact role-list bytes as:
+src\server\mock_server_interaction_login.c:3541:     * payload is a compact role-list entry table instead of the large player blob.
+src\server\mock_server_interaction_login.c:3548:        u8 actorJobIndex = role->job > 0 ? (u8)(role->job - 1) : 0;
+src\server\mock_server_interaction_login.c:3549:        u8 actorSex = (u8)(role->sex + 1);
+src\server\mock_server_interaction_login.c:3550:        u16 roleLevel = (u16)role->level;
+src\server\mock_server_interaction_login.c:3557:        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, role->roleId))
+src\server\mock_server_interaction_login.c:3563:        if (!vm_net_mock_seq_put_string(out, outCap, &pos, role->name))
+src\server\mock_server_interaction_login.c:3583:     * These fields therefore belong to the title role-list response, not to
+src\server\mock_server_interaction_login.c:4022:    u32 totalExp = role ? role->exp : 0;
+src\server\mock_server_interaction_login.c:4234:     * role-selection state.
+src\server\mock_server_interaction_login.c:4353:     * role_list_screen_render() can emit the 1/1/16 role-list request as soon
+src\server\mock_server_interaction_login.c:4463:    activeActorId = role ? role->roleId : 0;
+src\server\mock_server_interaction_login.c:4478:            printf("[info][network] mock_login_offline_exp role=%u exp=%u minutes=%u tokens=%u source=role-select\n",
+src\server\mock_server_interaction_login.c:4479:                   role->roleId, offlineExp, offlineMinutes, offlineItems);
+src\server\mock_server_interaction_login.c:4520:         * The subtype-6 role-select payload has already created the first
+src\server\mock_server_interaction_login.c:4526:        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(role->scene);
+src\server\mock_server_interaction_login.c:4527:        printf("[info][network] mock_backpack_grid_reseed role=%u reason=title-role-select next=group-type1-30/21 evidence=JianghuOL.CBE:0x01039952\n",
+src\server\mock_server_interaction_login.c:4528:               role->roleId);
+src\server\mock_server_interaction_login.c:4551:                     role ? (u32)strlen(role->name) : 0,
+src\server\mock_server_interaction_login.c:4785:         * not the later role-list success phase: answer it with serverinfo /
+src\server\mock_server_interaction_login.c:4901:    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_mailbox.c:470:    g_vm_net_mock_mail_claim_transaction.roleId = role->roleId;
+src\server\mock_server_ranking.c:374:                                            role ? role->roleId : 0, &myOrder))
+src\server\mock_server_ranking.c:378:               rankingType, pageIndex, role ? role->roleId : 0, vm_mysql_last_error());
+src\server\mock_server_role.c:310:#define VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "role-count-authority-v3"
+src\server\mock_server_role.c:314:/* False only during the one boot where legacy role-bound W coin must still be
+src\server\mock_server_role.c:442:     * role-shaped actor/shop packets, but this relation is the single durable
+src\server\mock_server_role.c:1286:            vm_autotest_note("mock_account_db_legacy_load_failed error=empty-accounts-with-role-data\n");
+src\server\mock_server_role.c:1837:                vm_autotest_note("mock_friend_db_remove_rejected owner=%s/%u target_role=%u reason=ambiguous-role-id\n",
+src\server\mock_server_role.c:2514:    oldExp = role->exp;
+src\server\mock_server_role.c:2534:        role->exp = vm_net_mock_role_exp_cap();
+src\server\mock_server_role.c:2535:        role->level = VM_NET_MOCK_ROLE_LEVEL_CAP;
+src\server\mock_server_role.c:2538:        return oldExp != role->exp || role->level != oldLevel;
+src\server\mock_server_role.c:2585:    role->exp = newExp;
+src\server\mock_server_role.c:2586:    role->level = oldLevel;
+src\server\mock_server_role.c:2587:    return oldExp != newExp || role->level != oldLevel;
+src\server\mock_server_role.c:2608: * legible while the client packet and role-storage formats stay unchanged. */
+src\server\mock_server_role.c:3179:    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_role.c:3180:    u32 level = role ? role->level : 1;
+src\server\mock_server_role.c:3217:    const vm_net_mock_designation_entry *entry = vm_net_mock_designation_by_id(role ? role->designationId : 0);
+src\server\mock_server_role.c:3241:        vm_net_mock_guild_find_role_membership(role->roleId, &guild, NULL) &&
+src\server\mock_server_role.c:3295:    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_role.c:3358:    equipped = &role->equippedItems[slot];
+src\server\mock_server_role.c:3366:    level = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_role.c:3413:        equippedItemId = role->equippedItems[slot].itemId;
+src\server\mock_server_role.c:3451:            &role->equippedItems[slot];
+src\server\mock_server_role.c:3485:    u32 level = role ? role->level : 1;
+src\server\mock_server_role.c:3486:    u32 job = role ? role->job : 1;
+src\server\mock_server_role.c:3493:        level = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_role.c:3530:     * still-unrecovered role-derived part separate, but carry each confirmed
+src\server\mock_server_role.c:3670:    refillHp = (role->hpMax == 0);
+src\server\mock_server_role.c:3671:    refillMp = (role->mpMax == 0);
+src\server\mock_server_role.c:3672:    role->hpMax = stats.maxHp ? stats.maxHp : VM_NET_MOCK_ROLE_DEFAULT_HP;
+src\server\mock_server_role.c:3673:    role->mpMax = stats.maxMp ? stats.maxMp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_role.c:3675:        role->hp = role->hpMax;
+src\server\mock_server_role.c:3677:        role->mp = role->mpMax;
+src\server\mock_server_role.c:3678:    if (role->hp > role->hpMax)
+src\server\mock_server_role.c:3679:        role->hp = role->hpMax;
+src\server\mock_server_role.c:3680:    if (role->mp > role->mpMax)
+src\server\mock_server_role.c:3681:        role->mp = role->mpMax;
+src\server\mock_server_role.c:3694:    oldLevel = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_role.c:3695:    if (role->exp >= expCap)
+src\server\mock_server_role.c:3697:        role->exp = expCap;
+src\server\mock_server_role.c:3698:        role->level = VM_NET_MOCK_ROLE_LEVEL_CAP;
+src\server\mock_server_role.c:3702:    acceptedExp = expCap - role->exp;
+src\server\mock_server_role.c:3705:    role->exp += acceptedExp;
+src\server\mock_server_role.c:3706:    newLevel = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_role.c:3707:    role->level = newLevel;
+src\server\mock_server_role.c:3711:        role->hp = role->hpMax;
+src\server\mock_server_role.c:3712:        role->mp = role->mpMax;
+src\server\mock_server_role.c:3743:        hp = role->hp;
+src\server\mock_server_role.c:3744:        mp = role->mp;
+src\server\mock_server_role.c:4167:    /* V6 is the V11 role-band reward profile. */
+src\server\mock_server_role.c:4853:         * V11 therefore gives every monster family the same role-band base
+src\server\mock_server_role.c:7547:               role ? role->roleId : 0, playerStats.job, skill->skillId,
+src\server\mock_server_role.c:7631:    memset(role->equippedItems, 0, sizeof(role->equippedItems));
+src\server\mock_server_role.c:7632:    itemId = vm_net_mock_role_default_weapon_for_job(role->job);
+src\server\mock_server_role.c:7633:    role->equippedItems[0].itemId = itemId;
+src\server\mock_server_role.c:7634:    role->equippedItems[0].durabilityMax =
+src\server\mock_server_role.c:7636:    role->equippedItems[0].durability = role->equippedItems[0].durabilityMax;
+src\server\mock_server_role.c:7643:    memset(role->backpackItems, 0, sizeof(role->backpackItems));
+src\server\mock_server_role.c:7644:    role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+src\server\mock_server_role.c:7645:    role->backpackItemCount = 0;
+src\server\mock_server_role.c:7646:    role->nextBackpackSeq = VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST;
+src\server\mock_server_role.c:7651:    return role != NULL && strcmp(role->name, vm_net_mock_default_role_name()) == 0;
+src\server\mock_server_role.c:7659:    if (role->roleId != 0)
+src\server\mock_server_role.c:7660:        roleId = role->roleId;
+src\server\mock_server_role.c:7661:    snprintf(role->name, sizeof(role->name), "Role%u", roleId);
+src\server\mock_server_role.c:7669:    role->roleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_role.c:7670:    snprintf(role->name, sizeof(role->name), "%s", vm_net_mock_default_role_name());
+src\server\mock_server_role.c:7671:    role->job = 1;
+src\server\mock_server_role.c:7672:    role->sex = 0;
+src\server\mock_server_role.c:7673:    role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+src\server\mock_server_role.c:7674:    role->level = 1;
+src\server\mock_server_role.c:7675:    role->exp = 0;
+src\server\mock_server_role.c:7676:    role->hp = VM_NET_MOCK_ROLE_DEFAULT_HP;
+src\server\mock_server_role.c:7677:    role->hpMax = VM_NET_MOCK_ROLE_DEFAULT_HP;
+src\server\mock_server_role.c:7678:    role->mp = VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_role.c:7679:    role->mpMax = VM_NET_MOCK_ROLE_DEFAULT_MP;
+src\server\mock_server_role.c:7680:    role->money = VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_role.c:7681:    role->wcoin = 0;
+src\server\mock_server_role.c:7682:    snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
+src\server\mock_server_role.c:7683:    role->x = VM_NET_MOCK_ROLE_INITIAL_X;
+src\server\mock_server_role.c:7684:    role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+src\server\mock_server_role.c:7685:    if (!vm_net_mock_scene_is_penglai01(role->scene))
+src\server\mock_server_role.c:7687:        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
+src\server\mock_server_role.c:7688:                                                              &role->x,
+src\server\mock_server_role.c:7689:                                                              &role->y,
+src\server\mock_server_role.c:7692:    role->designationId = 0;
+src\server\mock_server_role.c:7920:        vm_net_mock_equipped_item_state *item = &role->equippedItems[slot];
+src\server\mock_server_role.c:7936:                   role->roleId, slot, item->itemId);
+src\server\mock_server_role.c:7943:            role->roleId ^ item->itemId ^ ((slot + 1u) * 0x9e3779b9u));
+src\server\mock_server_role.c:7993:    itemCount = role->backpackItemCount;
+src\server\mock_server_role.c:7998:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:8025:    rawCount = role->backpackItemCount;
+src\server\mock_server_role.c:8038:        if (!vm_net_mock_backpack_sequence_present(role->backpackItems, rawCount,
+src\server\mock_server_role.c:8068:    if (role->backpackCapacity == 0)
+src\server\mock_server_role.c:8069:        role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+src\server\mock_server_role.c:8070:    else if (role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+src\server\mock_server_role.c:8071:        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+src\server\mock_server_role.c:8072:    if (role->backpackItemCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+src\server\mock_server_role.c:8073:        role->backpackItemCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+src\server\mock_server_role.c:8074:    if (role->backpackItemCount > role->backpackCapacity)
+src\server\mock_server_role.c:8075:        role->backpackItemCount = role->backpackCapacity;
+src\server\mock_server_role.c:8080:    for (u32 i = 0; i < role->backpackItemCount; ++i)
+src\server\mock_server_role.c:8082:        if (role->backpackItems[i].seq > maxSeq)
+src\server\mock_server_role.c:8083:            maxSeq = role->backpackItems[i].seq;
+src\server\mock_server_role.c:8086:    for (u32 i = 0; i < role->backpackItemCount; ++i)
+src\server\mock_server_role.c:8088:        vm_net_mock_backpack_item_state item = role->backpackItems[i];
+src\server\mock_server_role.c:8104:                       role->roleId, item.itemId);
+src\server\mock_server_role.c:8132:                role->roleId ^ item.itemId ^ ((u32)item.seq * 0x9e3779b9u));
+src\server\mock_server_role.c:8134:                (compactCount + instanceCount > role->backpackCapacity ||
+src\server\mock_server_role.c:8137:                if (compactCount < role->backpackCapacity &&
+src\server\mock_server_role.c:8143:                       role->roleId, item.itemId, item.seq, item.count,
+src\server\mock_server_role.c:8144:                       role->backpackCapacity);
+src\server\mock_server_role.c:8152:                (compactCount + instanceCount > role->backpackCapacity ||
+src\server\mock_server_role.c:8160:                if (compactCount < role->backpackCapacity &&
+src\server\mock_server_role.c:8166:                       role->roleId, item.seq, item.count, role->backpackCapacity);
+src\server\mock_server_role.c:8188:                (compactCount + instanceCount > role->backpackCapacity ||
+src\server\mock_server_role.c:8191:                if (compactCount < role->backpackCapacity &&
+src\server\mock_server_role.c:8197:                       role->roleId, item.itemId, item.seq, item.count,
+src\server\mock_server_role.c:8198:                       stackLimit, role->backpackCapacity);
+src\server\mock_server_role.c:8212:                           role->roleId, item.itemId);
+src\server\mock_server_role.c:8230:            if (compactCount >= role->backpackCapacity ||
+src\server\mock_server_role.c:8236:                       role->roleId, item.itemId, item.seq, item.count,
+src\server\mock_server_role.c:8237:                       role->backpackCapacity);
+src\server\mock_server_role.c:8244:    memset(role->backpackItems, 0, sizeof(role->backpackItems));
+src\server\mock_server_role.c:8246:        memcpy(role->backpackItems, compact, sizeof(compact[0]) * compactCount);
+src\server\mock_server_role.c:8247:    role->backpackItemCount = (u8)compactCount;
+src\server\mock_server_role.c:8249:            role, NULL, 0, (u32)maxSeq + 1, &role->nextBackpackSeq))
+src\server\mock_server_role.c:8252:               role->roleId);
+src\server\mock_server_role.c:8253:        role->nextBackpackSeq = 0;
+src\server\mock_server_role.c:8262:    if (role->roleId == 0)
+src\server\mock_server_role.c:8263:        role->roleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_role.c:8264:    role->name[sizeof(role->name) - 1] = 0;
+src\server\mock_server_role.c:8265:    if (role->name[0] == 0)
+src\server\mock_server_role.c:8266:        snprintf(role->name, sizeof(role->name), "%s", vm_net_mock_default_role_name());
+src\server\mock_server_role.c:8267:    if (role->job == 0 || role->job > 3)
+src\server\mock_server_role.c:8268:        role->job = 1;
+src\server\mock_server_role.c:8269:    if (role->sex > 1)
+src\server\mock_server_role.c:8270:        role->sex = 0;
+src\server\mock_server_role.c:8271:    if (role->backpackCapacity == 0)
+src\server\mock_server_role.c:8272:        role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+src\server\mock_server_role.c:8273:    else if (role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+src\server\mock_server_role.c:8274:        role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+src\server\mock_server_role.c:8275:    if (role->exp > vm_net_mock_role_exp_cap())
+src\server\mock_server_role.c:8276:        role->exp = vm_net_mock_role_exp_cap();
+src\server\mock_server_role.c:8277:    role->level = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_role.c:8278:    if (!vm_net_mock_designation_is_unlocked(role, vm_net_mock_designation_by_id(role->designationId)))
+src\server\mock_server_role.c:8279:        role->designationId = vm_net_mock_role_best_designation(role)->id;
+src\server\mock_server_role.c:8282:    role->scene[sizeof(role->scene) - 1] = 0;
+src\server\mock_server_role.c:8283:    if (!vm_net_mock_scene_name_is_persistable(role->scene))
+src\server\mock_server_role.c:8290:               role->roleId, role->scene[0] ? role->scene : "-");
+src\server\mock_server_role.c:8292:    if (role->x == 0 || role->y == 0)
+src\server\mock_server_role.c:8294:        role->x = VM_NET_MOCK_ROLE_INITIAL_X;
+src\server\mock_server_role.c:8295:        role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+src\server\mock_server_role.c:8296:        if (!vm_net_mock_scene_is_penglai01(role->scene))
+src\server\mock_server_role.c:8298:            (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
+src\server\mock_server_role.c:8299:                                                                  &role->x,
+src\server\mock_server_role.c:8300:                                                                  &role->y,
+src\server\mock_server_role.c:8304:    vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
+src\server\mock_server_role.c:8324:        role->name[sizeof(role->name) - 1] = 0;
+src\server\mock_server_role.c:8348:    char exactScene[sizeof(role->scene)];
+src\server\mock_server_role.c:8350:    if (role == NULL || vm_net_mock_scene_name_is_persistable(role->scene))
+src\server\mock_server_role.c:8353:    if (!vm_net_mock_scene_key_resolve_exact_smap(role->scene, exactScene,
+src\server\mock_server_role.c:8357:               role->roleId, role->scene[0] ? role->scene : "-");
+src\server\mock_server_role.c:8361:           role->roleId, role->scene, exactScene);
+src\server\mock_server_role.c:8362:    snprintf(role->scene, sizeof(role->scene), "%s", exactScene);
+src\server\mock_server_role.c:8457:    if (role == NULL || role->roleId == 0 ||
+src\server\mock_server_role.c:8465:               role ? role->roleId : 0, source ? source : "-", safe_scene);
+src\server\mock_server_role.c:8485:             account_hex, role->roleId);
+src\server\mock_server_role.c:8509:             account_hex, role->roleId, (unsigned long long)now_context.value);
+src\server\mock_server_role.c:8521:                 account_hex, role->roleId,
+src\server\mock_server_role.c:8537:               role->roleId,
+src\server\mock_server_role.c:8550:           role ? role->roleId : 0, mysql_error);
+src\server\mock_server_role.c:8699:    if (role == NULL || role->roleId == 0 || effect_kind == 0 ||
+src\server\mock_server_role.c:8710:             account_hex, role->roleId, effect_kind);
+src\server\mock_server_role.c:8726:                 account_hex, role->roleId, effect_kind, now);
+src\server\mock_server_role.c:8735:               role->roleId, effect_kind, context.effect.itemId,
+src\server\mock_server_role.c:9532:    if (!vm_mysql_hex_decode(values[2], lengths[2], role->name,
+src\server\mock_server_role.c:9533:                             sizeof(role->name) - 1, &name_len) ||
+src\server\mock_server_role.c:9534:        !vm_mysql_hex_decode(values[14], lengths[14], role->scene,
+src\server\mock_server_role.c:9535:                             sizeof(role->scene) - 1, &scene_len))
+src\server\mock_server_role.c:9541:    role->name[name_len] = 0;
+src\server\mock_server_role.c:9542:    role->scene[scene_len] = 0;
+src\server\mock_server_role.c:9543:    role->roleId = number[1];
+src\server\mock_server_role.c:9544:    role->job = (u8)number[2];
+src\server\mock_server_role.c:9545:    role->sex = (u8)number[3];
+src\server\mock_server_role.c:9546:    role->backpackCapacity = (u8)number[4];
+src\server\mock_server_role.c:9547:    role->level = number[5];
+src\server\mock_server_role.c:9548:    role->exp = number[6];
+src\server\mock_server_role.c:9549:    role->hp = number[7];
+src\server\mock_server_role.c:9550:    role->hpMax = number[8];
+src\server\mock_server_role.c:9551:    role->mp = number[9];
+src\server\mock_server_role.c:9552:    role->mpMax = number[10];
+src\server\mock_server_role.c:9553:    role->money = number[11];
+src\server\mock_server_role.c:9554:    role->wcoin = number[12];
+src\server\mock_server_role.c:9555:    role->x = (u16)number[13];
+src\server\mock_server_role.c:9556:    role->y = (u16)number[14];
+src\server\mock_server_role.c:9557:    role->backpackItemCount = (u8)number[15];
+src\server\mock_server_role.c:9558:    role->designationId = (u8)number[16];
+src\server\mock_server_role.c:9559:    role->nextBackpackSeq = (u16)number[17];
+src\server\mock_server_role.c:9616:    role->equippedItems[slot_index].itemId = item_id;
+src\server\mock_server_role.c:9617:    role->equippedItems[slot_index].enhanceLevel = (u16)enhance_level;
+src\server\mock_server_role.c:9619:        &role->equippedItems[slot_index].enhanceAffixes,
+src\server\mock_server_role.c:9621:    role->equippedItems[slot_index].durability = (u16)durability;
+src\server\mock_server_role.c:9622:    role->equippedItems[slot_index].durabilityMax = (u16)durability_max;
+src\server\mock_server_role.c:9670:    role->backpackItems[slot_index].itemId = item_id;
+src\server\mock_server_role.c:9671:    role->backpackItems[slot_index].seq = (u16)item_seq;
+src\server\mock_server_role.c:9672:    role->backpackItems[slot_index].enhanceLevel = (u16)enhance_level;
+src\server\mock_server_role.c:9674:        &role->backpackItems[slot_index].enhanceAffixes,
+src\server\mock_server_role.c:9676:    role->backpackItems[slot_index].durability = (u16)durability;
+src\server\mock_server_role.c:9677:    role->backpackItems[slot_index].durabilityMax = (u16)durability_max;
+src\server\mock_server_role.c:9678:    role->backpackItems[slot_index].count = item_count;
+src\server\mock_server_role.c:9952:        /* The client has only role-shaped W-coin fields.  Hydrate every
+src\server\mock_server_role.c:10343:        (reason == NULL || strcmp(reason, "role-delete") != 0))
+src\server\mock_server_role.c:10351:                if (role->equippedItems[slot].itemId != 0 &&
+src\server\mock_server_role.c:10352:                    role->equippedItems[slot].enhanceLevel != 0)
+src\server\mock_server_role.c:10356:                        role->equippedItems[slot].enhanceLevel;
+src\server\mock_server_role.c:10361:                if (role->backpackItems[slot].itemId != 0 &&
+src\server\mock_server_role.c:10362:                    role->backpackItems[slot].enhanceLevel != 0)
+src\server\mock_server_role.c:10366:                        role->backpackItems[slot].enhanceLevel;
+src\server\mock_server_role.c:10425:     * an item, position, or role-select save overwrite role_count again. */
+src\server\mock_server_role.c:10493:     * role's guild every time role-select/position/battle state was persisted.
+src\server\mock_server_role.c:10516:                snprintf(mysql_error, sizeof(mysql_error), "role-id delete query too large");
+src\server\mock_server_role.c:10523:            snprintf(mysql_error, sizeof(mysql_error), "role-id delete query too large");
+src\server\mock_server_role.c:10583:        if (!full_snapshot && role->roleId != scoped_role_id)
+src\server\mock_server_role.c:10585:        char name_hex[sizeof(role->name) * 2 + 1];
+src\server\mock_server_role.c:10586:        char scene_hex[sizeof(role->scene) * 2 + 1];
+src\server\mock_server_role.c:10587:        size_t name_len = vm_mock_mysql_bounded_strlen(role->name, sizeof(role->name));
+src\server\mock_server_role.c:10588:        size_t scene_len = vm_mock_mysql_bounded_strlen(role->scene, sizeof(role->scene));
+src\server\mock_server_role.c:10589:        if (name_len >= sizeof(role->name) || scene_len >= sizeof(role->scene) ||
+src\server\mock_server_role.c:10590:            (name_len && vm_mysql_hex_encode(role->name, name_len, name_hex, sizeof(name_hex)) == 0) ||
+src\server\mock_server_role.c:10591:            (scene_len && vm_mysql_hex_encode(role->scene, scene_len, scene_hex, sizeof(scene_hex)) == 0))
+src\server\mock_server_role.c:10610:                 account_hex, role->roleId, i, name_hex, role->job, role->sex,
+src\server\mock_server_role.c:10611:                 role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
+src\server\mock_server_role.c:10615:                 role->mp, role->mpMax, role->money,
+src\server\mock_server_role.c:10616:                 g_vm_mock_account_wcoin_wallet_migrated ? 0u : role->wcoin,
+src\server\mock_server_role.c:10618:                 role->x, role->y, role->backpackItemCount, role->designationId,
+src\server\mock_server_role.c:10619:                 role->nextBackpackSeq);
+src\server\mock_server_role.c:10656:        if (!full_snapshot && role->roleId != scoped_role_id)
+src\server\mock_server_role.c:10660:            const vm_net_mock_equipped_item_state *item = &role->equippedItems[slot];
+src\server\mock_server_role.c:10665:                                   bulk_rows ? "," : "", account_hex, role->roleId,
+src\server\mock_server_role.c:10695:        if (!full_snapshot && role->roleId != scoped_role_id)
+src\server\mock_server_role.c:10699:            const vm_net_mock_backpack_item_state *item = &role->backpackItems[slot];
+src\server\mock_server_role.c:10704:                                   bulk_rows ? "," : "", account_hex, role->roleId,
+src\server\mock_server_role.c:10783:        /* The expected timestamp keeps a stale role-select from consuming an
+src\server\mock_server_role.c:11181:    if (role == NULL || role->roleId == 0 || infoOut == NULL ||
+src\server\mock_server_role.c:11184:        !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
+src\server\mock_server_role.c:11192:    if (!vm_net_mock_practise_read_locked(accountHex, role->roleId, &state) ||
+src\server\mock_server_role.c:11212:                 "AND role_id=%u FOR UPDATE", accountHex, role->roleId);
+src\server\mock_server_role.c:11284:                     accountHex, role->roleId);
+src\server\mock_server_role.c:11296:    if (!vm_net_mock_practise_update_locked(accountHex, role->roleId, &state) ||
+src\server\mock_server_role.c:11304:        role->exp = newExp;
+src\server\mock_server_role.c:11305:        role->level = vm_net_mock_role_level_from_exp(newExp);
+src\server\mock_server_role.c:11309:           role->roleId, state.goldEnabled, infoOut->todayPastHours,
+src\server\mock_server_role.c:11323:           role ? role->roleId : 0, mysqlError[0] ? mysqlError : "unknown");
+src\server\mock_server_role.c:11333:    if (role == NULL || role->roleId == 0 ||
+src\server\mock_server_role.c:11336:        !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
+src\server\mock_server_role.c:11343:             goldEnabled ? 1u : 0u, accountHex, role->roleId);
+src\server\mock_server_role.c:11349:               role->roleId, vm_mysql_last_error());
+src\server\mock_server_role.c:11353:           role->roleId, goldEnabled ? 1u : 0u);
+src\server\mock_server_role.c:11401:    if (role == NULL || role->roleId == 0 || itemSeq == 0 ||
+src\server\mock_server_role.c:11404:        !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
+src\server\mock_server_role.c:11422:    if (!vm_net_mock_practise_read_locked(accountHex, role->roleId, &state) ||
+src\server\mock_server_role.c:11433:             accountHex, role->roleId, itemSeq);
+src\server\mock_server_role.c:11445:                 accountHex, role->roleId, itemSeq);
+src\server\mock_server_role.c:11453:                 accountHex, role->roleId, itemSeq, databaseItemCount.value);
+src\server\mock_server_role.c:11458:    if (!vm_net_mock_practise_update_locked(accountHex, role->roleId, &state))
+src\server\mock_server_role.c:11463:             projected.backpackItemCount, accountHex, role->roleId);
+src\server\mock_server_role.c:11471:           role->roleId, itemSeq, remaining, state.availableMinutes);
+src\server\mock_server_role.c:11481:           role ? role->roleId : 0, itemSeq,
+src\server\mock_server_role.c:11613:    if (role == NULL || role->roleId == 0 ||
+src\server\mock_server_role.c:11615:        !vm_net_mock_offline_exp_load(accountHex, role->roleId, &state) ||
+src\server\mock_server_role.c:11640:        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:11679:            vm_net_mock_backpack_item_state *item = &role->backpackItems[itemIndex];
+src\server\mock_server_role.c:11719:                          vm_net_mock_practise_exp_per_minute(role->exp,
+src\server\mock_server_role.c:11745:           role->roleId, elapsedMinutes, usableMinutes, consumedTokens,
+src\server\mock_server_role.c:11840:    if (role == NULL || role->roleId == 0 || currentOut == NULL ||
+src\server\mock_server_role.c:11849:             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX,
+src\server\mock_server_role.c:11858:             accountHex, role->roleId);
+src\server\mock_server_role.c:11890:    if (role == NULL || role->roleId == 0 || amount == 0 ||
+src\server\mock_server_role.c:11903:             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX,
+src\server\mock_server_role.c:11912:             accountHex, role->roleId);
+src\server\mock_server_role.c:11927:               role->roleId, amount, state.current, state.maximum);
+src\server\mock_server_role.c:11934:             state.current, accountHex, role->roleId);
+src\server\mock_server_role.c:11944:           role->roleId, amount, state.current, state.maximum);
+src\server\mock_server_role.c:11954:           role ? role->roleId : 0, amount,
+src\server\mock_server_role.c:11979:    if (role == NULL || role->roleId == 0 || itemSeq == 0 ||
+src\server\mock_server_role.c:12003:             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX,
+src\server\mock_server_role.c:12012:             accountHex, role->roleId);
+src\server\mock_server_role.c:12027:               role->roleId, itemSeq, state.current, state.maximum);
+src\server\mock_server_role.c:12044:                 accountHex, role->roleId, itemSeq);
+src\server\mock_server_role.c:12058:                 accountHex, role->roleId, itemSeq);
+src\server\mock_server_role.c:12066:                 accountHex, role->roleId, itemSeq, expectedItemCount);
+src\server\mock_server_role.c:12073:             state.current, accountHex, role->roleId);
+src\server\mock_server_role.c:12079:             projected.backpackItemCount, accountHex, role->roleId);
+src\server\mock_server_role.c:12089:           role->roleId, itemSeq, restored, state.current, state.maximum,
+src\server\mock_server_role.c:12100:           role ? role->roleId : 0, itemSeq,
+src\server\mock_server_role.c:12116:               role ? role->roleId : 0, vm_mysql_last_error());
+src\server\mock_server_role.c:12141:               role ? role->roleId : 0, vm_mysql_last_error());
+src\server\mock_server_role.c:12147:/* Monster rewards use a role-scoped, China-local calendar day.  The counter
+src\server\mock_server_role.c:12225:    if (role == NULL || role->roleId == 0 || units == 0 ||
+src\server\mock_server_role.c:12239:             accountHex, role->roleId);
+src\server\mock_server_role.c:12246:             accountHex, role->roleId);
+src\server\mock_server_role.c:12273:             state.epochDay, state.usedUnits, accountHex, role->roleId);
+src\server\mock_server_role.c:12289:           role ? role->roleId : 0, units, vm_mysql_last_error());
+src\server\mock_server_role.c:12330:                   role->roleId, effectKinds[i], vm_mysql_last_error());
+src\server\mock_server_role.c:12397:                   role->roleId, effect->kind, active.itemId, active.expiresUnix,
+src\server\mock_server_role.c:12419:                       role->roleId, effect->kind, active.expiresUnix, itemId,
+src\server\mock_server_role.c:12425:                   role->roleId, effect->kind, active.itemId, itemId,
+src\server\mock_server_role.c:12877:        printf("[info][mock-service] backpack_normalize_persist roles=%u account=%s source=role-load-relational\n",
+src\server\mock_server_role.c:13067:     * returning only the old role-shaped cache would temporarily reintroduce
+src\server\mock_server_role.c:13077:    return role ? role->wcoin : 0;
+src\server\mock_server_role.c:13158:                if (!vm_net_mock_role_db_save("role-select"))
+src\server\mock_server_role.c:13186:    if (role == NULL || role->job == 0 || role->job > 3)
+src\server\mock_server_role.c:13188:    return role->job;
+src\server\mock_server_role.c:13194:    if (role == NULL || role->sex > 1)
+src\server\mock_server_role.c:13196:    return role->sex;
+src\server\mock_server_role.c:13282:    role->roleId = actorId;
+src\server\mock_server_role.c:13284:        vm_net_mock_copy_role_name(role->name, sizeof(role->name), request->name);
+src\server\mock_server_role.c:13287:    role->job = vm_net_mock_role_db_job_from_title_value(request->rawJob, request->rawJobIsIndex);
+src\server\mock_server_role.c:13288:    role->sex = vm_net_mock_role_db_sex_from_title_value(request->rawSex);
+src\server\mock_server_role.c:13291:    role->hp = role->hpMax;
+src\server\mock_server_role.c:13292:    role->mp = role->mpMax;
+src\server\mock_server_role.c:13296:    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true,
+src\server\mock_server_role.c:13367:    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true,
+src\server\mock_server_role.c:13392:               role->roleId, scene, reason ? reason : "position");
+src\server\mock_server_role.c:13400:    if (role->x == x && role->y == y &&
+src\server\mock_server_role.c:13401:        vm_net_mock_scene_name_is_persistable(role->scene) &&
+src\server\mock_server_role.c:13402:        vm_net_mock_scene_names_equal_exact(role->scene, scene))
+src\server\mock_server_role.c:13405:               role->roleId, scene, x, y, reason ? reason : "position");
+src\server\mock_server_role.c:13409:    snprintf(role->scene, sizeof(role->scene), "%s", scene);
+src\server\mock_server_role.c:13410:    role->x = x;
+src\server\mock_server_role.c:13411:    role->y = y;
+src\server\mock_server_role.c:13431:    char sceneHex[sizeof(role->scene) * 2 + 1];
+src\server\mock_server_role.c:13435:    if (role == NULL || role->roleId == 0 ||
+src\server\mock_server_role.c:13436:        !vm_net_mock_scene_name_is_persistable(role->scene) ||
+src\server\mock_server_role.c:13437:        role->x == 0 || role->y == 0 ||
+src\server\mock_server_role.c:13442:    sceneLen = vm_mock_mysql_bounded_strlen(role->scene, sizeof(role->scene));
+src\server\mock_server_role.c:13443:    if (sceneLen == 0 || sceneLen >= sizeof(role->scene) ||
+src\server\mock_server_role.c:13444:        vm_mysql_hex_encode(role->scene, sceneLen, sceneHex, sizeof(sceneHex)) == 0)
+src\server\mock_server_role.c:13451:             sceneHex, role->x, role->y, accountHex, role->roleId);
+src\server\mock_server_role.c:13457:               role->roleId, role->scene, role->x, role->y,
+src\server\mock_server_role.c:13483:    snprintf(role->scene, sizeof(role->scene), "%s", scene);
+src\server\mock_server_role.c:13484:    role->x = x;
+src\server\mock_server_role.c:13485:    role->y = y;
+src\server\mock_server_role.c:13516:    if (itemCount >= role->backpackCapacity ||
+src\server\mock_server_role.c:13521:    item = &role->backpackItems[itemCount];
+src\server\mock_server_role.c:13525:            role, NULL, 0, role->nextBackpackSeq, &item->seq))
+src\server\mock_server_role.c:13534:        role->roleId ^ item->itemId ^ ((u32)item->seq * 0x9e3779b9u));
+src\server\mock_server_role.c:13539:    role->backpackItemCount = (u8)(itemCount + 1);
+src\server\mock_server_role.c:13540:    role->nextBackpackSeq = (u16)(item->seq + 1);
+src\server\mock_server_role.c:13616:               role->roleId, level, invalidCount, backpackCount,
+src\server\mock_server_role.c:13644:                   role->roleId, level, slot, equipped->itemId);
+src\server\mock_server_role.c:13654:           role->roleId, level, invalidCount);
+src\server\mock_server_role.c:13684:        u32 freeSlots = role->backpackCapacity > itemCount
+src\server\mock_server_role.c:13685:                            ? (u32)role->backpackCapacity - itemCount
+src\server\mock_server_role.c:13699:            vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount + unit];
+src\server\mock_server_role.c:13703:                    role, NULL, 0, role->nextBackpackSeq, &item->seq))
+src\server\mock_server_role.c:13711:            role->nextBackpackSeq = (u16)(item->seq + 1);
+src\server\mock_server_role.c:13712:            role->backpackItemCount = (u8)(itemCount + unit + 1);
+src\server\mock_server_role.c:13714:        role->backpackItemCount = (u8)(itemCount + count);
+src\server\mock_server_role.c:13723:        u8 freeSlots = role->backpackCapacity > itemCount
+src\server\mock_server_role.c:13724:                           ? (u8)(role->backpackCapacity - itemCount) : 0;
+src\server\mock_server_role.c:13766:                vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:13783:            if (newRows > role->backpackCapacity - itemCount ||
+src\server\mock_server_role.c:13792:                    &role->backpackItems[itemCount];
+src\server\mock_server_role.c:13798:                        role, NULL, 0, role->nextBackpackSeq, &item->seq))
+src\server\mock_server_role.c:13806:                role->nextBackpackSeq = (u16)(item->seq + 1);
+src\server\mock_server_role.c:13808:                role->backpackItemCount = itemCount;
+src\server\mock_server_role.c:13823:        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:13837:    if (itemCount >= role->backpackCapacity || itemCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+src\server\mock_server_role.c:13840:    vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
+src\server\mock_server_role.c:13844:            role, NULL, 0, role->nextBackpackSeq, &item->seq))
+src\server\mock_server_role.c:13850:    role->backpackItemCount = (u8)(itemCount + 1);
+src\server\mock_server_role.c:13851:    role->nextBackpackSeq = (u16)(item->seq + 1);
+src\server\mock_server_role.c:13905:            vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:13914:            vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:13935:        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:13949:        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+src\server\mock_server_role.c:14059:    if (role->level == 0)
+src\server\mock_server_role.c:14060:        role->level = vm_net_mock_role_level_from_exp(role->exp);
+src\server\mock_server_role.c:14061:    if (role->level < equip->levelRequired)
+src\server\mock_server_role.c:14075:    oldInstance = role->equippedItems[slot];
+src\server\mock_server_role.c:14080:        if (!selectedFreesSlot && itemCount >= role->backpackCapacity)
+src\server\mock_server_role.c:14095:    role->equippedItems[slot] = selectedInstance;
+src\server\mock_server_scene_sync.c:2265:    if (task == NULL || role == NULL || role->level < task->level)
+src\server\mock_server_scene_sync.c:2316:            *reasonCodeOut = "role-missing";
+src\server\mock_server_scene_sync.c:2321:    if (role->level < task->level)
+src\server\mock_server_scene_sync.c:2412:        if (candidate->taskId == taskId && candidate->roleId == role->roleId &&
+src\server\mock_server_scene_sync.c:2424:    slot->roleId = role->roleId;
+src\server\mock_server_scene_sync.c:2452:        if (context->taskId != taskId || context->roleId != role->roleId ||
+src\server\mock_server_scene_sync.c:2489:        if (context->taskId != taskId || context->roleId != role->roleId ||
+src\server\mock_server_scene_sync.c:2616:        (void)vm_net_mock_task_state_list_load(role->roleId, false, states,
+src\server\mock_server_scene_sync.c:2862:    if (itemCount < role->backpackCapacity &&
+src\server\mock_server_scene_sync.c:3015:    if (!vm_net_mock_task_state_store(role->roleId, task->taskId, 3))
+src\server\mock_server_scene_sync.c:3044:            (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
+src\server\mock_server_scene_sync.c:3057:            (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
+src\server\mock_server_scene_sync.c:3065:    role->money = (0xffffffffu - role->money < task->rewardMoney)
+src\server\mock_server_scene_sync.c:3067:                      : role->money + task->rewardMoney;
+src\server\mock_server_scene_sync.c:3072:        (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
+src\server\mock_server_scene_sync.c:3078:           task->taskId, role->roleId, rewardExp, task->rewardExp,
+src\server\mock_server_scene_sync.c:3138:                   task->taskId, role->roleId, i, configured->itemId,
+src\server\mock_server_scene_sync.c:3158:                   task->taskId, role->roleId, i, configured->itemId,
+src\server\mock_server_scene_sync.c:3248:        !vm_net_mock_task_state_list_load(role->roleId, true, states,
+src\server\mock_server_scene_sync.c:3323:        if (vm_net_mock_task_progress_store(role->roleId, task->taskId,
+src\server\mock_server_scene_sync.c:3337:                   task->taskId, role->roleId, enemyId, enemyCount,
+src\server\mock_server_scene_sync.c:3715:    session->npcServiceContext.roleId = role->roleId;
+src\server\mock_server_scene_sync.c:3739:        session->npcServiceContext.roleId != role->roleId || scene == NULL ||
+src\server\mock_server_scene_sync.c:3782:    transaction->roleId = role->roleId;
+src\server\mock_server_scene_sync.c:3816:            transaction.roleId == role->roleId &&
+src\server\mock_server_scene_sync.c:4802:                &role->backpackItems[i], NULL))
+src\server\mock_server_scene_sync.c:4826:        vm_net_mock_backpack_item_state *backpackItem = &role->backpackItems[i];
+src\server\mock_server_scene_sync.c:5556:    u8 rawJob = role ? vm_net_mock_role_job_to_skill_raw_job(role->job) : 0xffu;
+src\server\mock_server_scene_sync.c:5565:    return !learned && skill->levelRequired <= role->level;
+src\server\mock_server_scene_sync.c:5807:        else if (role->level < instanceSeed->instanceMinLevel)
+src\server\mock_server_scene_sync.c:6087:            else if (role->money < unitPrice)
+src\server\mock_server_scene_sync.c:6100:                role->money -= unitPrice;
+src\server\mock_server_scene_sync.c:6106:                    role->money += unitPrice;
+src\server\mock_server_scene_sync.c:6391:                    const u32 moneyBefore = role->money;
+src\server\mock_server_scene_sync.c:6403:                        role->money = vm_net_mock_add_capped_u32(role->money,
+src\server\mock_server_scene_sync.c:6435:                                         moneyBefore, role->money);
+src\server\mock_server_scene_sync.c:6438:                                        role->roleId, soldItemId, 1, price,
+src\server\mock_server_scene_sync.c:6445:                                           auditAccountId, role->roleId,
+src\server\mock_server_scene_sync.c:6570:        else if (role->money < repairCost)
+src\server\mock_server_scene_sync.c:6590:        u8 rawJob = vm_net_mock_role_job_to_skill_raw_job(role->job);
+src\server\mock_server_scene_sync.c:6656:                else if (skill->levelRequired > role->level)
+src\server\mock_server_scene_sync.c:6660:                             "\xb5\xb1\xc7\xb0\xb5\xc8\xbc\xb6", role->level,
+src\server\mock_server_scene_sync.c:6671:                else if (role->money < skill->learnPrice)
+src\server\mock_server_scene_sync.c:6737:                        role->money -= skill->learnPrice;
+src\server\mock_server_scene_sync.c:6745:                                       role->roleId, skill->skillId);
+src\server\mock_server_scene_sync.c:6785:                else if (role->money < skill->learnPrice)
+src\server\mock_server_scene_sync.c:6851:                        role->money -= skill->learnPrice;
+src\server\mock_server_scene_sync.c:6859:                                       role->roleId, skill->skillId);
+src\server\mock_server_scene_sync.c:6897:                else if (skill->levelRequired > role->level)
+src\server\mock_server_scene_sync.c:6920:                         role->level,
+src\server\mock_server_scene_sync.c:7007:                             "\xb5\xb1\xc7\xb0", role->level,
+src\server\mock_server_scene_sync.c:7132:           action, serviceValue, value, restoredListPage, role->roleId,
+src\server\mock_server_scene_sync.c:7133:           role->job, role->level,
+src\server\mock_server_scene_sync.c:7134:           result, optionCount, role->money, skillEligibleCount,
+src\server\mock_server_scene_sync.c:8272:        vm_net_mock_task_state_load(role->roleId, taskId, &taskState) &&
+src\server\mock_server_scene_sync.c:8314:               taskId, role ? role->roleId : 0, target.scene,
+src\server\mock_server_scene_sync.c:8379:           role ? role->roleId : 0, activeTask ? 1u : 0u,
+src\server\mock_server_scene_task.c:7539:        vm_net_mock_scene_name_is_safe(role->scene) &&
+src\server\mock_server_scene_task.c:7540:        vm_net_mock_try_scene_change_source_portal(allowTargetExitMatch ? "role-pending" : "role",
+src\server\mock_server_scene_task.c:7541:                                                   role->scene,
+src\server\mock_server_scene_task.c:7558:        if ((role == NULL || !vm_net_mock_scene_names_equal_exact(role->scene, sourceScene)) &&
+src\server\mock_server_scene_task.c:7578:               (role != NULL && role->scene[0] != 0) ? role->scene : "",
+src\server\mock_server_scene_task.c:7848:        !vm_net_mock_scene_names_equal_exact(role->scene, scene))
+src\server\mock_server_scene_task.c:9742:           role ? role->roleId : 0,
+src\server\mock_server_scene_task.c:9747:                     destinationCount, role ? role->roleId : 0,
+src\server\mock_server_scene_task.c:9863:        !vm_net_mock_scene_names_equal_exact(role->scene, target.scene) ||
+src\server\mock_server_scene_task.c:9990:    const char *sceneSource = "role-db";
+src\server\mock_server_scene_task.c:9991:    const char *fromSource = "role-pos";
+src\server\mock_server_scene_task.c:9999:    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
+src\server\mock_server_scene_task.c:10001:        scene = role->scene;
+src\server\mock_server_scene_task.c:10002:        fromX = role->x;
+src\server\mock_server_scene_task.c:10003:        fromY = role->y;
+src\server\mock_server_scene_task.c:10359:        role == NULL || !vm_net_mock_scene_name_is_safe(role->scene) ||
+src\server\mock_server_scene_task.c:10360:        !vm_net_mock_find_sce_named_portal_at_pos(role->scene, role->x, role->y,
+src\server\mock_server_scene_task.c:10369:               role->scene, role->x, role->y, targetEntryId, portal.targetScene);
+src\server\mock_server_scene_task.c:10402:                   role->roleId, portal.backgroundScene, targetEntryId, wcoinCost,
+src\server\mock_server_scene_task.c:10411:                   role->roleId, portal.backgroundScene, targetEntryId, wcoinCost,
+src\server\mock_server_scene_task.c:10430:                    role->roleId, 0, 0, wcoinCost, operationDetail, NULL))
+src\server\mock_server_scene_task.c:10433:                       g_vm_mock_service_active_account_id, role->roleId,
+src\server\mock_server_scene_task.c:10455:           role->roleId, role->scene, role->x, role->y,
+src\server\mock_server_scene_task.c:10460:                     role->scene, targetEntryId, target.scene, ruleFound ? 1u : 0u,
+src\server\mock_server_scene_task.c:11415: * team HUD select the six zero-based role-resource slots with
+src\server\mock_server_scene_task.c:11758:    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_scene_task.c:11996:    u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
+src\server\mock_server_scene_task.c:11998:    u32 roleMoney = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+src\server\mock_server_scene_task.c:11999:    u32 roleLevel = role ? role->level : 1;
+src\server\mock_server_scene_task.c:12023:    if (role != NULL && role->designationId != activeDesignation->id)
+src\server\mock_server_scene_task.c:12025:        role->designationId = activeDesignation->id;
+src\server\mock_server_scene_task.c:12026:        vm_net_mock_role_db_save("role-designation-condition-refresh");
+src\server\mock_server_scene_task.c:12065:            role->designationId = selectedDesignation->id;
+src\server\mock_server_scene_task.c:12066:            vm_net_mock_role_db_save("role-designation-select");
+src\server\mock_server_social.c:31:           role ? role->roleId : 0, guildId, requesterRank,
+src\server\mock_server_social.c:395:    u8 roleJob = role ? role->job : 1;
+src\server\mock_server_social.c:417:                     role ? role->roleId : 0,
+src\server\mock_server_social.c:421:                     role ? role->level : 1,
+src\server\mock_server_social.c:484:               role ? role->roleId : 0, bookCount, booksInfoLen);
+src\server\mock_server_social.c:3328:    const char *name = role && role->name[0] ? role->name : vm_net_mock_default_role_name();
+src\server\mock_server_social.c:5340:    scene = (role != NULL && vm_net_mock_scene_name_is_safe(role->scene)) ?
+src\server\mock_server_social.c:5341:            role->scene : vm_net_mock_current_scene_name();
+src\server\mock_server_social.c:5405:            else if (role != NULL && role->x != 0 && role->y != 0)
+src\server\mock_server_social.c:5407:                gridX = role->x;
+src\server\mock_server_social.c:5408:                gridY = role->y;
+src\server\mock_server_social.c:5695:    const char *roleName = role ? role->name : vm_net_mock_default_role_name();
+src\server\mock_server_social.c:5697:    u32 roleIdDefault = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
