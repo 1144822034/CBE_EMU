@@ -619,6 +619,70 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
     return true;
 }
 
+/* SendNPCInteractReq(action13) uses the task-hall acknowledgement as a
+ * complete UI transaction.  DispatchItemEvent clears that transaction for
+ * 26/0, but a scene battle must enter through the following normal data event.
+ * Keep the server's bytes intact while delivering the two parser-backed
+ * transactions through the existing event-7 queue. */
+static bool vm_client_extract_action13_battle_followup(
+    u8 *response, u32 *responseLen, u8 *followup, u32 followupCap,
+    u32 *followupLen)
+{
+    u32 starts[3];
+    u32 lengths[3];
+    u32 offset = 5;
+    u32 objectCount = 0;
+    u32 primaryLen = 5;
+    u32 followLen = 5;
+    vm_client_wt_object objects[3];
+
+    if (followupLen != NULL)
+        *followupLen = 0;
+    if (response == NULL || responseLen == NULL || *responseLen < 23 ||
+        response[0] != 'W' || response[1] != 'T' || response[4] != 3 ||
+        followup == NULL || followupCap < 5)
+    {
+        return false;
+    }
+    while (offset < *responseLen && objectCount < 3)
+    {
+        starts[objectCount] = offset;
+        if (!vm_client_next_wt_object(response, *responseLen, &offset,
+                                      &objects[objectCount]))
+        {
+            return false;
+        }
+        lengths[objectCount] = offset - starts[objectCount];
+        ++objectCount;
+    }
+    if (offset != *responseLen || objectCount != 3 ||
+        objects[0].major != 1 || objects[0].kind != 26 ||
+        objects[0].subtype != 0 || objects[0].payloadLen != 0 ||
+        objects[1].major != 1 || objects[1].kind != 2 ||
+        objects[1].subtype != 2 || objects[2].major != 1 ||
+        objects[2].kind != 4 || objects[2].subtype != 5)
+    {
+        return false;
+    }
+
+    primaryLen += lengths[0];
+    followLen += lengths[1] + lengths[2];
+    if (followLen > followupCap)
+        return false;
+    memmove(response + 5, response + starts[0], lengths[0]);
+    memcpy(followup + 5, response + starts[1], lengths[1]);
+    memcpy(followup + 5 + lengths[1], response + starts[2], lengths[2]);
+    vm_client_finish_wt_packet(response, primaryLen, 1);
+    vm_client_finish_wt_packet(followup, followLen, 2);
+    *responseLen = primaryLen;
+    if (followupLen != NULL)
+        *followupLen = followLen;
+    printf("[info][network] remote_action13_challenge_split primary=26/0 "
+           "followup=2/2+4/5 delivery=event7-then-event7 "
+           "evidence=JianghuOL.CBE:0x01039C28+mmBattle:0x66CC\n");
+    return true;
+}
+
 static void vm_client_write_le32(u8 *dst, u32 value)
 {
     dst[0] = (u8)value;
@@ -782,7 +846,8 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
                                      u32 *responseLen, u32 *eventType,
                                      bool *closeAfterData,
                                      u8 *followup, u32 followupCap,
-                                     u32 *followupLen)
+                                     u32 *followupLen,
+                                     bool *followupNextSchedulerTick)
 {
     u8 header[VM_CLIENT_FRAME_SIZE];
     u8 meta[16];
@@ -798,6 +863,8 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
         *closeAfterData = false;
     if (followupLen != NULL)
         *followupLen = 0;
+    if (followupNextSchedulerTick != NULL)
+        *followupNextSchedulerTick = false;
     if (request == NULL || requestLen == 0 || response == NULL || metaLen == 0)
         return false;
 
@@ -812,10 +879,17 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
                                  responseLen, eventType, closeAfterData);
     vm_client_close_socket(sock);
     if (ok && eventType != NULL && *eventType == 7 && responseLen != NULL &&
-        followup != NULL && followupLen != NULL)
-        (void)vm_client_extract_item_followup(response, responseLen,
-                                              followup, followupCap, followupLen,
-                                              NULL);
+        followup != NULL && followupLen != NULL &&
+        !vm_client_extract_item_followup(response, responseLen, followup,
+                                         followupCap, followupLen, NULL))
+    {
+        if (vm_client_extract_action13_battle_followup(
+                response, responseLen, followup, followupCap, followupLen) &&
+            followupNextSchedulerTick != NULL)
+        {
+            *followupNextSchedulerTick = true;
+        }
+    }
     return ok;
 }
 
@@ -905,6 +979,7 @@ typedef struct vm_client_completion
     vm_client_job_kind kind;
     bool success;
     bool closeAfterData;
+    bool followupNextSchedulerTick;
     bool requestIsUpdateChunk;
     u32 updateChunkStart;
     char updateChunkName[64];
@@ -1000,6 +1075,7 @@ static void *vm_client_worker_main(void *unused)
         u32 eventType = 7;
         u32 followupLen = 0;
         bool closeAfterData = false;
+        bool followupNextSchedulerTick = false;
         bool success;
 
         pthread_mutex_lock(&g_vmClientAsync.mutex);
@@ -1061,7 +1137,8 @@ static void *vm_client_worker_main(void *unused)
                                                &responseLen, &eventType,
                                                &closeAfterData,
                                                followupScratch, VM_CLIENT_FOLLOWUP_MAX,
-                                               &followupLen);
+                                               &followupLen,
+                                               &followupNextSchedulerTick);
         }
         completion->workerDoneMs = SDL_GetTicks();
         completion->success = success;
@@ -1069,6 +1146,7 @@ static void *vm_client_worker_main(void *unused)
         completion->eventType = eventType;
         completion->responseLen = responseLen;
         completion->followupLen = followupLen;
+        completion->followupNextSchedulerTick = followupNextSchedulerTick;
         if (success && responseLen != 0)
         {
             completion->response = (u8 *)malloc(responseLen);
@@ -1270,7 +1348,8 @@ static void vm_client_capture_remote_scene_observation(
  * The post-shop hangup investigation needs the guest callback boundary, not
  * merely the TCP completion.  Recognise only the battle-start object prefix
  * emitted by the old direct builder (2/10, 2/2, 4/5, 4/11), the corrected
- * scene-poll start (2/2, 4/5, 4/11), or a standalone PVP 4/10 start.  The
+ * scene-poll start (2/2, 4/5, 4/11), the two-object scene start (2/2, 4/5)
+ * used after an action13 confirmation, or a standalone PVP 4/10 start.  The
  * PVP form is included solely to prove whether the existing mmBattle module
  * consumes the packet after an arena/spar confirmation.  This is observation
  * only; transport scheduling and response bytes remain untouched.
@@ -1292,6 +1371,8 @@ static void vm_client_capture_hangup_battle_start_response(
     static const u8 directSubtypes[4] = {10, 2, 5, 11};
     static const u8 pollKinds[3] = {2, 4, 4};
     static const u8 pollSubtypes[3] = {2, 5, 11};
+    static const u8 sceneKinds[2] = {2, 4};
+    static const u8 sceneSubtypes[2] = {2, 5};
     static const u8 pvpKinds[1] = {4};
     static const u8 pvpSubtypes[1] = {10};
 
@@ -1327,9 +1408,18 @@ static void vm_client_capture_hangup_battle_start_response(
     else if (packet[offset] == 1 && packet[offset + 1] == 2 &&
              packet[offset + 2] == 2)
     {
-        expectedKinds = pollKinds;
-        expectedSubtypes = pollSubtypes;
-        expectedCount = 3;
+        if (objectCount == 2)
+        {
+            expectedKinds = sceneKinds;
+            expectedSubtypes = sceneSubtypes;
+            expectedCount = 2;
+        }
+        else
+        {
+            expectedKinds = pollKinds;
+            expectedSubtypes = pollSubtypes;
+            expectedCount = 3;
+        }
     }
     else if (packet[offset] == 1 && packet[offset + 1] == 4 &&
              packet[offset + 2] == 10)
@@ -1510,6 +1600,23 @@ static void vm_net_mock_async_drain_completions(void)
                 scheduler_queue_net_event(7, followupPtr, completion->followupLen,
                                           completion->followupLen,
                                           channel->callback, channel->context);
+                if (completion->followupNextSchedulerTick)
+                {
+                    bool deferred = scheduler_defer_net_event_to_next_tick(
+                        7, followupPtr, channel->callback, channel->context);
+                    printf("[info][network] action13_battle_followup_queue "
+                           "event=7 resp=%u queue_tick=%u eligible_tick=%u "
+                           "deferred=%u cb=%08x ctx=%08x\n",
+                           completion->followupLen, g_schedulerTick,
+                           g_schedulerTick + 1u, deferred ? 1u : 0u,
+                           channel->callback, channel->context);
+                }
+            }
+            else if (completion->followupNextSchedulerTick)
+            {
+                printf("[info][network] action13_battle_followup_queue "
+                       "event=7 resp=%u queue_tick=%u deferred=0 reason=vm-buffer\n",
+                       completion->followupLen, g_schedulerTick);
             }
         }
         if (completion->closeAfterData)

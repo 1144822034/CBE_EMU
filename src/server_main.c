@@ -296,8 +296,27 @@ static void vm_server_install_crash_reporter(void)
 #ifdef SIGBUS
                                 SIGBUS,
 #endif
+                                SIGTERM, SIGINT,
+#ifdef SIGHUP
+                                SIGHUP,
+#endif
+#ifdef SIGQUIT
+                                SIGQUIT,
+#endif
     };
     struct sigaction action;
+    struct sigaction ignorePipe;
+
+    /* A disconnected peer is a normal outcome for the service's short-lived
+     * request sockets.  On Linux, an unguarded send() otherwise terminates
+     * the whole process with SIGPIPE before callers
+     * can record response_send_failed.  Ignore it process-wide so the game,
+     * admin, payment, and MySQL send paths receive EPIPE instead. */
+    memset(&ignorePipe, 0, sizeof(ignorePipe));
+    ignorePipe.sa_handler = SIG_IGN;
+    sigemptyset(&ignorePipe.sa_mask);
+    (void)sigaction(SIGPIPE, &ignorePipe, NULL);
+
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = vm_server_posix_crash_signal_handler;
     action.sa_flags = SA_SIGINFO | SA_RESETHAND;
@@ -305,7 +324,11 @@ static void vm_server_install_crash_reporter(void)
     for (u32 i = 0; i < sizeof(crashSignals) / sizeof(crashSignals[0]); ++i)
         sigaction(crashSignals[i], &action, NULL);
 #endif
+#ifndef _WIN32
+    printf("[info][mock-service] crash_capture enabled dir=%s sigpipe=ignored\n",
+#else
     printf("[info][mock-service] crash_capture enabled dir=%s\n",
+#endif
            getenv("CBE_MOCK_CRASH_DIR") && getenv("CBE_MOCK_CRASH_DIR")[0]
                ? getenv("CBE_MOCK_CRASH_DIR")
                : "logs/crashes");

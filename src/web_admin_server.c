@@ -45,6 +45,10 @@ enum
 #define VM_MOCK_ADMIN_ACCOUNT_LIST_PATH VM_MOCK_ADMIN_BASE_PATH "/accounts"
 #define VM_MOCK_ADMIN_MONSTER_BOSS_EXPORT_PATH \
     VM_MOCK_ADMIN_BASE_PATH "/monster-boss-drops.xlsx"
+#define VM_MOCK_ADMIN_ROLE_OPERATION_MODAL_Z_INDEX 1100
+#define VM_MOCK_ADMIN_ITEM_PICKER_MODAL_Z_INDEX 1200
+#define VM_MOCK_ADMIN_STRINGIFY_INNER(value) #value
+#define VM_MOCK_ADMIN_STRINGIFY(value) VM_MOCK_ADMIN_STRINGIFY_INNER(value)
 
 typedef struct
 {
@@ -620,6 +624,7 @@ enum
      * one render at a fixed row budget and page the audit_id DESC order with
      * an explicit offset so every historical record stays reachable. */
     VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE = 50,
+    VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE = VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE,
     VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE = 50
 };
 
@@ -720,9 +725,10 @@ static const char g_vm_mock_admin_script[] =
     "const rebuildLevels=()=>{if(!equipmentFilters)return;const previous=level.value;level.replaceChildren();const all=document.createElement('option');all.value='all';all.textContent='全部等级';level.append(all);if(!pickerSupportsEquipment()){levelField.hidden=true;level.value='all';return;}levelField.hidden=false;const wanted=category.value,wantedQuality=quality.value,levels=[...new Set(choices.filter(choice=>choice.dataset.equip==='1'&&(wanted==='all'||choice.dataset.category===wanted)&&(wantedQuality==='all'||choice.dataset.quality===wantedQuality)).map(choice=>choice.dataset.level))].sort((a,b)=>Number(a)-Number(b));for(const value of levels){const option=document.createElement('option');option.value=value;option.textContent=`需求等级 ${value}`;level.append(option);}level.value=[...level.options].some(option=>option.value===previous)?previous:'all';};"
     "const rebuildEquipmentFilters=()=>{if(!equipmentFilters)return;const supports=pickerSupportsEquipment();qualityField.hidden=!supports;levelField.hidden=!supports;if(!supports){quality.value='all';level.value='all';return;}const previous=quality.value;quality.replaceChildren();const all=document.createElement('option');all.value='all';all.textContent='全部品质';quality.append(all);const wanted=category.value,qualities=[...new Set(choices.filter(choice=>choice.dataset.equip==='1'&&(wanted==='all'||choice.dataset.category===wanted)).map(choice=>choice.dataset.quality))].sort((a,b)=>Number(a)-Number(b));for(const value of qualities){const option=document.createElement('option');option.value=value;option.textContent=`品质 ${value}`;quality.append(option);}quality.value=[...quality.options].some(option=>option.value===previous)?previous:'all';rebuildLevels();};"
     "const apply=()=>{const wanted=category.value,keyword=search.value.trim().toLowerCase(),supports=equipmentFilters&&pickerSupportsEquipment();if(equipmentFilters){qualityField.hidden=!supports;levelField.hidden=!supports;if(!supports){quality.value='all';level.value='all';}}const wantedQuality=equipmentFilters?quality.value:'all',wantedLevel=equipmentFilters?level.value:'all',hasEquipmentFilter=supports&&(wantedQuality!=='all'||wantedLevel!=='all');let shown=0;for(const choice of choices){const equipmentMatches=!hasEquipmentFilter||(choice.dataset.equip==='1'&&(wantedQuality==='all'||choice.dataset.quality===wantedQuality)&&(wantedLevel==='all'||choice.dataset.level===wantedLevel)),visible=(wanted==='all'||choice.dataset.category===wanted)&&equipmentMatches&&(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;if(visible)shown++;}count.textContent=`找到 ${shown} 件物品`;empty.hidden=shown!==0;};"
+    "const roleOperationOpen=()=>!!document.querySelector('[data-role-operation-modal]:not([hidden])');"
     "const show=id=>{if(!inputById.has(id))return;activeId=id;modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';apply();search.focus();};"
-    "function hide(){modal.hidden=true;document.body.classList.remove('modal-open');const trigger=document.querySelector(`[data-item-picker-open=\"${activeId}\"]`);if(trigger)trigger.focus();}"
-    "for(const trigger of document.querySelectorAll('[data-item-picker-open]'))trigger.addEventListener('click',()=>show(trigger.dataset.itemPickerOpen));close.addEventListener('click',hide);clear.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value='0';input.dispatchEvent(new Event('change',{bubbles:true}));update(input);hide();});modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});category.addEventListener('change',()=>{rebuildEquipmentFilters();apply();});if(equipmentFilters){quality.addEventListener('change',()=>{rebuildLevels();apply();});level.addEventListener('change',apply);}search.addEventListener('input',apply);for(const form of document.querySelectorAll('form'))form.addEventListener('submit',event=>{const required=[...form.querySelectorAll('[data-item-picker-required]')].find(input=>!input.value||input.value==='0');if(!required)return;event.preventDefault();error.textContent='请先选择物品';show(required.id);});rebuildEquipmentFilters();apply();};"
+    "function hide(){modal.hidden=true;if(!roleOperationOpen())document.body.classList.remove('modal-open');const trigger=document.querySelector(`[data-item-picker-open=\"${activeId}\"]`);if(trigger)trigger.focus();}"
+    "for(const trigger of document.querySelectorAll('[data-item-picker-open]'))trigger.addEventListener('click',()=>show(trigger.dataset.itemPickerOpen));close.addEventListener('click',hide);clear.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value='0';input.dispatchEvent(new Event('change',{bubbles:true}));update(input);hide();});modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden){event.preventDefault();hide();}});category.addEventListener('change',()=>{rebuildEquipmentFilters();apply();});if(equipmentFilters){quality.addEventListener('change',()=>{rebuildLevels();apply();});level.addEventListener('change',apply);}search.addEventListener('input',apply);for(const form of document.querySelectorAll('form'))form.addEventListener('submit',event=>{const required=[...form.querySelectorAll('[data-item-picker-required]')].find(input=>!input.value||input.value==='0');if(!required)return;event.preventDefault();error.textContent='请先选择物品';show(required.id);});rebuildEquipmentFilters();apply();};"
     "const setupNpcStock=()=>{"
     "const source=document.querySelector('#npc-stock-picker-options'),modal=document.querySelector('#npc-stock-picker-modal'),close=document.querySelector('#npc-stock-picker-close'),clear=document.querySelector('#npc-stock-picker-clear'),category=document.querySelector('#npc-stock-category'),quality=document.querySelector('#npc-stock-quality'),qualityField=document.querySelector('[data-npc-stock-quality-field]'),search=document.querySelector('#npc-stock-search'),list=document.querySelector('#npc-stock-picker-list'),count=document.querySelector('#npc-stock-result-count'),selectedCount=document.querySelector('#npc-stock-selection-count'),empty=document.querySelector('#npc-stock-picker-empty'),selectCategory=document.querySelector('#npc-stock-select-category'),unselectCategory=document.querySelector('#npc-stock-unselect-category'),confirm=document.querySelector('#npc-stock-picker-confirm'),managers=[...document.querySelectorAll('[data-npc-stock-manager]')];"
     "if(!source||!modal||!close||!clear||!category||!quality||!qualityField||!search||!list||!count||!selectedCount||!empty||!selectCategory||!unselectCategory||!confirm||!managers.length)return;"
@@ -767,7 +773,7 @@ static const char g_vm_mock_admin_script[] =
     "const setupMonsterSearch=()=>{const input=document.querySelector('#monster-search'),list=document.querySelector('#monster-list');if(!input||!list||input.dataset.monsterSearchBound==='1')return;input.dataset.monsterSearchBound='1';const apply=()=>{const keyword=input.value.trim().toLowerCase();for(const row of list.querySelectorAll('.monster')){const key=(row.dataset.key||'').toLowerCase(),host=row.closest('[data-monster-row]')||row;host.hidden=!!keyword&&!key.includes(keyword);}};input.addEventListener('input',apply);apply();};"
     "const setupMonsterBatchReset=()=>{const manager=document.querySelector('[data-monster-batch-manager]'),list=document.querySelector('#monster-list');if(!manager||!list||manager.dataset.monsterBatchBound==='1')return;manager.dataset.monsterBatchBound='1';const ids=[...manager.querySelectorAll('[data-monster-batch-ids]')],combat=manager.querySelector('[data-monster-batch-reset]'),sceneLevel=manager.querySelector('[data-monster-batch-level-reset]'),visible=manager.querySelector('[data-monster-batch-select-visible]'),clear=manager.querySelector('[data-monster-batch-clear]'),items=()=>[...list.querySelectorAll('[data-monster-batch-item]')],sync=()=>{const selected=items().filter(item=>item.checked).map(item=>item.value),value=selected.join(',');for(const input of ids)input.value=value;if(combat){combat.disabled=!selected.length;combat.textContent=`批量重置属性与奖励（${selected.length}）`;}if(sceneLevel){sceneLevel.disabled=!selected.length;sceneLevel.textContent=`按场景等级重置（${selected.length}）`;}};list.addEventListener('change',event=>{if(event.target.matches('[data-monster-batch-item]'))sync();});list.addEventListener('cbe-monster-list-updated',sync);visible?.addEventListener('click',()=>{for(const item of items()){const row=item.closest('[data-monster-row]');if(row&&!row.hidden)item.checked=true;}sync();});clear?.addEventListener('click',()=>{for(const item of items())item.checked=false;sync();});sync();};"
     "const setupMonsterActions=()=>{if(document.documentElement.dataset.monsterActionsBound==='1')return;document.documentElement.dataset.monsterActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-monster-action]')||event.defaultPrevented)return;const confirmation=form.dataset.confirmMessage;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();return;}event.preventDefault();if(form.dataset.submitting==='1')return;if(form.matches('[data-monster-drop-batch-form]')){const modal=document.querySelector('#monster-drop-batch-modal');if(modal){modal.hidden=true;document.body.classList.remove('modal-open');}}const list=document.querySelector('#monster-list'),detail=document.querySelector('[data-admin-detail]'),actionUrl=form.getAttribute('action')||window.location.href;if(!list||!detail)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(actionUrl,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('#monster-list'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail){if(new URL(url,window.location.href).pathname.endsWith('/login')){window.location.assign(url);return;}throw new Error('missing monster fragment');}const top=list.scrollTop;detail.innerHTML=nextDetail.innerHTML;list.innerHTML=nextList.innerHTML;list.scrollTop=top;document.querySelector('#monster-search')?.dispatchEvent(new Event('input'));list.dispatchEvent(new Event('cbe-monster-list-updated'));document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-monster-action-status]');if(status)status.innerHTML='<div class=\"notice error\">怪物操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
-    "const setupTaskActions=()=>{if(document.documentElement.dataset.taskActionsBound==='1')return;document.documentElement.dataset.taskActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-task-action]')||event.defaultPrevented)return;event.preventDefault();if(form.dataset.submitting==='1')return;const catalog=document.querySelector('[data-task-catalog]'),detail=document.querySelector('[data-admin-detail]'),list=catalog?.querySelector('[data-admin-list]'),actionUrl=form.getAttribute('action')||window.location.href;if(!catalog||!detail||!list)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(actionUrl,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error('HTTP '+response.status);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextCatalog=next.querySelector('[data-task-catalog]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextCatalog||!nextDetail)throw new Error('missing task fragment');const top=list.scrollTop;catalog.innerHTML=nextCatalog.innerHTML;detail.innerHTML=nextDetail.innerHTML;catalog.querySelector('[data-admin-list]')?.scrollTo(0,top);document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-task-action-status]');if(status)status.innerHTML='<div class=\"notice error\">任务操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
+    "const setupTaskActions=()=>{if(document.documentElement.dataset.taskActionsBound==='1')return;document.documentElement.dataset.taskActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-task-action]')||event.defaultPrevented)return;event.preventDefault();if(form.dataset.submitting==='1')return;const catalog=document.querySelector('[data-task-catalog]'),detail=document.querySelector('[data-admin-detail]'),list=catalog?.querySelector('[data-admin-list]'),actionUrl=form.getAttribute('action')||window.location.href;if(!catalog||!detail||!list)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(actionUrl,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error('HTTP '+response.status);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextCatalog=next.querySelector('[data-task-catalog]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextCatalog||!nextDetail)throw new Error('missing task fragment');const top=list.scrollTop;catalog.innerHTML=nextCatalog.innerHTML;detail.innerHTML=nextDetail.innerHTML;catalog.querySelector('[data-admin-list]')?.scrollTo(0,top);document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupMonsterPicker();setupTaskRequirementTargets();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-task-action-status]');if(status)status.innerHTML='<div class=\"notice error\">任务操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
     "const setupActorPicker=()=>{"
     "const state=window.__cbeActorPickerState||(window.__cbeActorPickerState={bound:false});"
     "const source=document.querySelector('#actor-picker-options'),modal=document.querySelector('#actor-picker-modal'),close=document.querySelector('#actor-picker-close'),search=document.querySelector('#actor-picker-search'),list=document.querySelector('#actor-picker-list'),count=document.querySelector('#actor-result-count'),empty=document.querySelector('#actor-picker-empty'),error=document.querySelector('#actor-picker-error'),selects=[...document.querySelectorAll('select.actor-resource-select')];"
@@ -786,15 +792,34 @@ static const char g_vm_mock_admin_script[] =
     "const state=window.__cbeScenePickerState||(window.__cbeScenePickerState={bound:false});"
     "const modal=document.querySelector('#scene-picker-modal'),close=document.querySelector('#scene-picker-close'),search=document.querySelector('#scene-picker-search'),list=document.querySelector('#scene-picker-list'),count=document.querySelector('#scene-picker-result-count'),empty=document.querySelector('#scene-picker-empty'),selects=[...document.querySelectorAll('select.scene-resource-select')];"
     "if(!modal||!close||!search||!list||!count||!empty||!selects.length)return;"
+    "const roleOperationOpen=()=>!!document.querySelector('[data-role-operation-modal]:not([hidden])');"
     "state.modal=modal;state.close=close;state.search=search;state.list=list;state.count=count;state.empty=empty;state.selects=selects;state.update=select=>{if(!select)return;const field=select.closest('.scene-picker-field'),trigger=field&&field.querySelector('[data-scene-picker-open]'),label=trigger&&trigger.querySelector('[data-scene-picker-label]'),selected=select.options[select.selectedIndex];if(label)label.textContent=selected&&selected.textContent?selected.textContent:(select.dataset.scenePickerEmpty||'请选择目标场景');};"
     "for(const select of selects){if(select.dataset.scenePickerBound!=='1'){select.dataset.scenePickerBound='1';select.addEventListener('change',()=>state.update(select));}state.update(select);}"
     "state.render=()=>{if(!state.active)return;state.list.replaceChildren();state.choices=[];for(const option of state.active.options){if(!option.value||option.disabled)continue;const button=document.createElement('button'),title=document.createElement('strong'),meta=document.createElement('span');button.type='button';button.className='item-choice';button.dataset.search=option.textContent.toLowerCase();button.classList.toggle('selected',option.value===state.active.value);title.textContent=option.textContent;meta.textContent=option.value===state.active.value?'当前选择':'SCE 场景';button.append(title,meta);button.addEventListener('click',()=>{if(!state.active)return;state.active.value=option.value;state.active.dispatchEvent(new Event('change',{bubbles:true}));state.hide();});state.choices.push(button);state.list.append(button);}};"
     "state.apply=()=>{state.render();const keyword=state.search.value.trim().toLowerCase();let shown=0;for(const choice of state.choices){const visible=!keyword||choice.dataset.search.includes(keyword);choice.hidden=!visible;if(visible)shown++;}state.count.textContent=`找到 ${shown} 个场景`;state.empty.hidden=shown!==0;};"
     "state.show=select=>{if(!select||!select.isConnected||select.disabled)return;state.active=select;state.search.value='';state.modal.hidden=false;document.body.classList.add('modal-open');state.apply();state.search.focus();};"
-    "state.hide=()=>{if(!state.modal)return;state.modal.hidden=true;document.body.classList.remove('modal-open');const field=state.active&&state.active.closest('.scene-picker-field'),trigger=field&&field.querySelector('[data-scene-picker-open]');if(trigger)trigger.focus();};"
+    "state.hide=()=>{if(!state.modal)return;state.modal.hidden=true;if(!roleOperationOpen())document.body.classList.remove('modal-open');const field=state.active&&state.active.closest('.scene-picker-field'),trigger=field&&field.querySelector('[data-scene-picker-open]');if(trigger)trigger.focus();};"
     "if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const trigger=event.target.closest('[data-scene-picker-open]');if(!trigger)return;const field=trigger.closest('.scene-picker-field'),select=field&&field.querySelector('select.scene-resource-select');if(!select||select.disabled)return;event.preventDefault();state.show(select);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.modal&&!state.modal.hidden)state.hide();});}"
     "if(modal.dataset.scenePickerBound!=='1'){modal.dataset.scenePickerBound='1';close.addEventListener('click',()=>state.hide());modal.addEventListener('click',event=>{if(event.target===modal)state.hide();});search.addEventListener('input',()=>state.apply());}"
     "};"
+    "const setupMonsterPicker=()=>{"
+    "const state=window.__cbeMonsterPickerState||(window.__cbeMonsterPickerState={bound:false});"
+    "const source=document.querySelector('#monster-picker-options'),modal=document.querySelector('#monster-picker-modal'),close=document.querySelector('#monster-picker-close'),search=document.querySelector('#monster-picker-search'),list=document.querySelector('#monster-picker-list'),count=document.querySelector('#monster-picker-result-count'),empty=document.querySelector('#monster-picker-empty'),error=document.querySelector('#monster-picker-error'),selects=[...document.querySelectorAll('select.monster-resource-select')];"
+    "if(!source||!modal||!close||!search||!list||!count||!empty||!error||!selects.length)return;"
+    "const roleOperationOpen=()=>!!document.querySelector('[data-role-operation-modal]:not([hidden])');"
+    "state.source=source;state.modal=modal;state.close=close;state.search=search;state.list=list;state.count=count;state.empty=empty;state.error=error;state.selects=selects;state.options=[...source.options].filter(option=>option.value);state.optionByValue=new Map(state.options.map(option=>[option.value,option]));"
+    "state.update=select=>{if(!select)return;const field=select.closest('.monster-picker-field'),trigger=field&&field.querySelector('[data-monster-picker-open]'),label=trigger&&trigger.querySelector('[data-monster-picker-label]'),selected=select.options[select.selectedIndex],option=state.optionByValue.get(select.value);if(label)label.textContent=option?option.textContent:(selected&&selected.textContent?selected.textContent:(select.dataset.monsterPickerAllowNone==='1'?'不额外刷新':'请选择怪物'));};"
+    "state.setValue=(select,value)=>{if(!select)return;let local=[...select.options].find(option=>option.value===value),option=state.optionByValue.get(value);if(!local){local=document.createElement('option');local.value=value;local.textContent=option?option.textContent:`#${value}`;select.append(local);}select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));};"
+    "for(const select of selects){if(select.dataset.monsterPickerBound!=='1'){select.dataset.monsterPickerBound='1';select.addEventListener('change',()=>state.update(select));}state.update(select);}"
+    "state.render=()=>{if(!state.active)return;state.list.replaceChildren();state.choices=[];const addChoice=(value,titleText,metaText)=>{const button=document.createElement('button'),title=document.createElement('strong'),meta=document.createElement('span');button.type='button';button.className='item-choice monster-choice';button.dataset.search=(titleText+' '+metaText).toLowerCase();button.classList.toggle('selected',value===state.active.value);title.textContent=titleText;meta.textContent=metaText;button.append(title,meta);button.addEventListener('click',()=>{if(!state.active)return;state.setValue(state.active,value);state.error.textContent='';state.hide();});state.choices.push(button);state.list.append(button);};if(state.active.dataset.monsterPickerAllowNone==='1')addChoice('0','不额外刷新','进入副本后不新增场景战斗怪');for(const option of state.options)addChoice(option.value,option.textContent,option.value===state.active.value?'当前选择':'怪物目录');};"
+    "state.apply=()=>{state.render();const keyword=state.search.value.trim().toLowerCase();let shown=0;for(const choice of state.choices){const visible=!keyword||choice.dataset.search.includes(keyword);choice.hidden=!visible;if(visible)shown++;}state.count.textContent=`找到 ${shown} 个怪物`;state.empty.hidden=shown!==0;};"
+    "state.show=select=>{if(!select||!select.isConnected||select.disabled)return;state.active=select;state.search.value='';state.modal.hidden=false;document.body.classList.add('modal-open');state.error.textContent='';state.apply();state.search.focus();};"
+    "state.hide=()=>{if(!state.modal)return;state.modal.hidden=true;if(!roleOperationOpen())document.body.classList.remove('modal-open');const field=state.active&&state.active.closest('.monster-picker-field'),trigger=field&&field.querySelector('[data-monster-picker-open]');if(trigger)trigger.focus();};"
+    "if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const trigger=event.target.closest('[data-monster-picker-open]');if(!trigger)return;const field=trigger.closest('.monster-picker-field'),select=field&&field.querySelector('select.monster-resource-select');if(!select||select.disabled)return;event.preventDefault();state.show(select);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.modal&&!state.modal.hidden)state.hide();});document.addEventListener('submit',event=>{const form=event.target,missing=form&&[...form.querySelectorAll('select.monster-resource-select[required]')].find(select=>!select.value);if(!missing)return;event.preventDefault();state.error.textContent='请先选择一个怪物';state.show(missing);});}"
+    "if(modal.dataset.monsterPickerBound!=='1'){modal.dataset.monsterPickerBound='1';close.addEventListener('click',()=>state.hide());modal.addEventListener('click',event=>{if(event.target===modal)state.hide();});search.addEventListener('input',()=>state.apply());}"
+    "};"
+    "const setupTaskRequirementTargets=()=>{const box=document.querySelector('#task-requirement-list'),add=document.querySelector('[data-task-requirement-add]');if(!box||!add||box.dataset.taskRequirementListBound==='1')return;const rows=[...box.querySelectorAll('[data-task-requirement-row]')];if(!rows.length)return;box.dataset.taskRequirementListBound='1';const fields=row=>{const target=row.querySelector('[data-task-requirement-target]'),slot=target?.dataset.taskRequirementTarget,type=slot&&row.closest('form')?.querySelector(`[data-task-requirement-type=\"${slot}\"]`),numeric=target?.querySelector('[data-task-requirement-numeric]'),itemPicker=target?.querySelector('[data-task-requirement-item-picker]'),monster=target?.querySelector('[data-task-requirement-monster]'),monsterSelect=monster?.querySelector('select.monster-resource-select');return{target,type,numeric,itemPicker,monster,monsterSelect,count:row.querySelector('[data-task-requirement-count]'),scene:row.querySelector('[data-task-requirement-scene]')};};const syncItemPicker=row=>{const input=fields(row).numeric;if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const applyMode=row=>{const field=fields(row);if(!field.type||!field.numeric||!field.itemPicker||!field.monster||!field.monsterSelect)return;const isMonster=field.type.value==='2';field.numeric.disabled=isMonster;field.numeric.hidden=true;field.itemPicker.hidden=field.type.value!=='1';field.monster.hidden=!isMonster;field.monsterSelect.disabled=!isMonster;};const visible=()=>rows.filter(row=>!row.hidden);const update=()=>{const active=visible(),empty=box.querySelector('[data-task-requirement-empty]');active.forEach((row,index)=>{const label=row.querySelector('[data-task-requirement-index]');if(label)label.textContent=`任务目标 ${index+1}`;});if(empty)empty.hidden=active.length!==0;add.disabled=!rows.some(row=>row.hidden);add.textContent=`＋ 新增任务目标（${active.length}/${rows.length}）`;};const clear=row=>{const field=fields(row);if(field.type)field.type.value='0';if(field.numeric)field.numeric.value='0';if(field.monsterSelect)field.monsterSelect.value='';if(field.count)field.count.value='0';if(field.scene)field.scene.value='';applyMode(row);row.hidden=true;syncItemPicker(row);};const showNext=()=>{const row=rows.find(current=>current.hidden);if(!row)return;const field=fields(row);row.hidden=false;if(field.type)field.type.value='1';if(field.numeric)field.numeric.value='0';if(field.monsterSelect)field.monsterSelect.value='';if(field.count)field.count.value='1';if(field.scene)field.scene.value='';applyMode(row);syncItemPicker(row);update();field.type?.focus();};add.addEventListener('click',showNext);for(const row of rows){const field=fields(row);if(!field.type)continue;field.type.addEventListener('change',()=>{if(field.type.value==='0'){clear(row);update();return;}applyMode(row);syncItemPicker(row);});row.querySelector('[data-task-requirement-remove]')?.addEventListener('click',()=>{clear(row);update();});applyMode(row);}update();};"
+    "const setupTaskRequirementMonsterPicker=()=>{if(document.documentElement.dataset.taskRequirementMonsterPickerBound==='1')return;document.documentElement.dataset.taskRequirementMonsterPickerBound='1';document.addEventListener('click',event=>{const trigger=event.target.closest('[data-task-requirement-target] [data-monster-picker-open]');if(!trigger)return;const target=trigger.closest('[data-task-requirement-target]'),select=target?.querySelector('select.monster-resource-select'),state=window.__cbeMonsterPickerState;if(!select||select.disabled||!state||typeof state.show!=='function')return;event.preventDefault();event.stopPropagation();state.show(select);});};setupTaskRequirementMonsterPicker();"
     "const setupNpcServices=()=>{setupScenePicker();for(const form of document.querySelectorAll('.npc form')){"
     "const toggles=[...form.querySelectorAll('input[data-npc-service-toggle]')];if(!toggles.length)continue;const card=form.closest('.npc')||form;"
     "const apply=()=>{for(const toggle of toggles){const kind=toggle.dataset.npcServiceToggle,show=toggle.checked;for(const fields of card.querySelectorAll(`[data-npc-service-config=\"${kind}\"]`))fields.hidden=!show;}const teleportToggle=form.querySelector('input[data-npc-service-toggle=\"6\"]'),challengeToggle=form.querySelector('input[data-npc-service-toggle=\"10\"]'),setFields=(selector,show)=>{for(const fields of card.querySelectorAll(selector)){fields.hidden=!show;for(const control of fields.querySelectorAll('input,select,button'))control.disabled=!show;}};setFields('[data-npc-instance-teleport-fields]',!!(teleportToggle&&teleportToggle.checked));setFields('[data-npc-instance-spawn-fields]',!!(teleportToggle&&teleportToggle.checked));setFields('[data-npc-instance-challenge-fields]',!!(challengeToggle&&challengeToggle.checked));setFields('[data-npc-instance-level-fields]',!!((teleportToggle&&teleportToggle.checked)||(challengeToggle&&challengeToggle.checked)));};"
@@ -818,11 +843,13 @@ static const char g_vm_mock_admin_script[] =
     "const setupGlobalRewardsTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const accounts=nav.querySelector('[data-admin-tab=accounts],a[href*=\\\"tab=accounts\\\"]'),add=(key,label)=>{if(!accounts||[...nav.querySelectorAll('[data-admin-tab],a[href]')].some(link=>link.dataset.adminTab===key||link.getAttribute('href')?.includes('tab='+key)))return;const link=document.createElement('a');link.className='tab admin-spa-tab';link.dataset.adminTab=key;link.href='?tab='+key;link.textContent=label;accounts.after(link);};add('operations','操作日志');add('global-rewards','全服奖励管理');const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
     "const setupDesignationTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const global=nav.querySelector('[data-admin-tab=global-rewards],a[href*=\\\"tab=global-rewards\\\"]');if(global)global.textContent='奖励邮件管理';let title=nav.querySelector('[data-admin-tab=designations],a[href*=\\\"tab=designations\\\"]');if(!title){title=document.createElement('a');title.className='tab admin-spa-tab';title.dataset.adminTab='designations';title.href='?tab=designations';title.textContent='称号管理';if(global)global.after(title);else nav.append(title);}const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
     "const setupDesignationDirectory=()=>{for(const root of document.querySelectorAll('[data-designation-directory]')){if(root.dataset.designationDirectoryBound==='1')continue;root.dataset.designationDirectoryBound='1';const buttons=[...root.querySelectorAll('[data-designation-filter]')],cards=[...root.querySelectorAll('[data-designation-category]')],choose=category=>{if(!category)return;root.dataset.activeCategory=category;for(const card of cards)card.hidden=card.dataset.designationCategory!==category;for(const button of buttons){const on=button.dataset.designationFilter===category;button.classList.toggle('on',on);button.setAttribute('aria-pressed',on?'true':'false');}};for(const button of buttons)button.addEventListener('click',()=>choose(button.dataset.designationFilter));choose(root.dataset.activeCategory||buttons[0]?.dataset.designationFilter);}};"
-    "const setupRoleOperationModal=()=>{const state=window.__cbeRoleOperationState||(window.__cbeRoleOperationState={bound:false,active:null,opener:null});const activate=(modal,key)=>{if(!modal||!key)return;for(const pane of modal.querySelectorAll('[data-role-operation-pane]'))pane.hidden=pane.dataset.roleOperationPane!==key;for(const button of modal.querySelectorAll('[data-role-operation-tab]')){const on=button.dataset.roleOperationTab===key;button.classList.toggle('on',on);if(on)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}};const close=modal=>{if(!modal)return;modal.hidden=true;if(state.active===modal)state.active=null;document.body.classList.remove('modal-open');const opener=state.opener;state.opener=null;if(opener&&document.contains(opener))opener.focus();};if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const opener=event.target.closest('[data-role-operation-open]');if(opener){const modal=document.getElementById(opener.dataset.roleOperationOpen);if(!modal)return;for(const other of document.querySelectorAll('[data-role-operation-modal]'))other.hidden=true;state.active=modal;state.opener=opener;modal.hidden=false;document.body.classList.add('modal-open');const focusTarget=modal.querySelector('[data-role-operation-tab].on')||modal.querySelector('[data-role-operation-tab]');focusTarget?.focus();event.preventDefault();return;}const tab=event.target.closest('[data-role-operation-tab]');if(tab){activate(tab.closest('[data-role-operation-modal]'),tab.dataset.roleOperationTab);tab.focus();return;}const closeButton=event.target.closest('[data-role-operation-close]');if(closeButton){close(closeButton.closest('[data-role-operation-modal]'));return;}const modal=event.target.closest('[data-role-operation-modal]');if(modal&&event.target===modal)close(modal);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.active&&!state.active.hidden){event.preventDefault();close(state.active);}});}for(const modal of document.querySelectorAll('[data-role-operation-modal]'))activate(modal,modal.querySelector('[data-role-operation-tab]')?.dataset.roleOperationTab);};"
-    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupDesignationTab();setupDesignationDirectory();setupRoleOperationModal();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
+    "const setupRoleOperationModal=()=>{const state=window.__cbeRoleOperationState||(window.__cbeRoleOperationState={bound:false,active:null,opener:null});const activate=(modal,key)=>{if(!modal||!key)return;for(const pane of modal.querySelectorAll('[data-role-operation-pane]'))pane.hidden=pane.dataset.roleOperationPane!==key;for(const button of modal.querySelectorAll('[data-role-operation-tab]')){const on=button.dataset.roleOperationTab===key;button.classList.toggle('on',on);if(on)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}};const close=modal=>{if(!modal)return;modal.hidden=true;if(state.active===modal)state.active=null;document.body.classList.remove('modal-open');const opener=state.opener;state.opener=null;if(opener&&document.contains(opener))opener.focus();};if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const opener=event.target.closest('[data-role-operation-open]');if(opener){const modal=document.getElementById(opener.dataset.roleOperationOpen);if(!modal)return;for(const other of document.querySelectorAll('[data-role-operation-modal]'))other.hidden=true;state.active=modal;state.opener=opener;modal.hidden=false;document.body.classList.add('modal-open');const focusTarget=modal.querySelector('[data-role-operation-tab].on')||modal.querySelector('[data-role-operation-tab]');focusTarget?.focus();event.preventDefault();return;}const tab=event.target.closest('[data-role-operation-tab]');if(tab){activate(tab.closest('[data-role-operation-modal]'),tab.dataset.roleOperationTab);tab.focus();return;}const closeButton=event.target.closest('[data-role-operation-close]');if(closeButton){close(closeButton.closest('[data-role-operation-modal]'));return;}const modal=event.target.closest('[data-role-operation-modal]');if(modal&&event.target===modal)close(modal);});document.addEventListener('keydown',event=>{const itemPicker=document.querySelector('#item-picker-modal'),scenePicker=document.querySelector('#scene-picker-modal');if(event.key==='Escape'&&((itemPicker&&!itemPicker.hidden)||(scenePicker&&!scenePicker.hidden)))return;if(event.key==='Escape'&&state.active&&!state.active.hidden){event.preventDefault();close(state.active);}});}for(const modal of document.querySelectorAll('[data-role-operation-modal]'))activate(modal,modal.querySelector('[data-role-operation-tab]')?.dataset.roleOperationTab);};"
+    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupDesignationTab();setupDesignationDirectory();setupRoleOperationModal();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupMonsterPicker();setupTaskRequirementTargets();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
     "const setupAdminLayout=()=>{if(document.querySelector('#admin-spa-layout-style'))return;const style=document.createElement('style');style.id='admin-spa-layout-style';style.textContent='#admin-spa-shell{width:min(1680px,calc(100vw - 48px))!important;max-width:none!important;height:100vh!important;min-height:0!important;overflow:hidden!important;margin:0 auto!important}#admin-spa-content{display:flex!important;align-self:stretch!important;height:100%!important;flex-direction:column!important;min-height:0!important;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable;padding-bottom:2px}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:1 1 auto;min-height:0}#admin-spa-content [data-admin-list]{flex:1 1 auto;min-height:0;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}#admin-spa-content[aria-busy=true]>*{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{width:100%!important;height:auto!important;min-height:100vh!important;overflow:visible!important}#admin-spa-content{align-self:auto!important;height:auto!important;overflow:visible!important;scrollbar-gutter:auto;padding-bottom:0}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:none}#admin-spa-content [data-admin-list]{flex:none;scrollbar-gutter:auto}}';document.head.append(style);};"
     "const setupAdminHeader=()=>{const main=document.querySelector('#admin-spa-shell'),header=main&&[...main.children].find(node=>node.matches&&node.matches('header'));if(!header||header.dataset.adminSpaHeader==='1')return;header.dataset.adminSpaHeader='1';const logout=header.querySelector('form[action$=\"/logout\"]'),intro=document.createElement('div'),style=document.createElement('style');intro.innerHTML='<h1>江湖 OL 后台管理</h1><p class=\"sub\">账号、游戏内容与运营配置统一管理</p>';header.replaceChildren(intro);if(logout)header.append(logout);style.id='admin-spa-header-style';style.textContent='#admin-spa-shell>header[data-admin-spa-header]{display:flex!important;align-items:center;justify-content:space-between;gap:16px;margin:0 0 12px;padding:4px 2px}#admin-spa-shell>header[data-admin-spa-header] h1{margin:0;color:#183d6e;font-size:22px}#admin-spa-shell>header[data-admin-spa-header] .sub{margin:5px 0 0;color:#63738a}';document.head.append(style);};"
-    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险角色管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{display:grid!important;grid-template-columns:216px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);column-gap:16px;align-items:start;min-height:100vh}#admin-spa-shell>header{grid-column:1/-1;grid-row:1}#admin-spa-tabs{display:flex!important;grid-column:1;grid-row:2;position:sticky;top:16px;align-self:start;flex-direction:column;align-items:stretch;gap:6px;flex-wrap:nowrap;margin:0;padding:10px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:flex-start;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding-right:2px}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{display:block!important;min-height:100vh}#admin-spa-tabs{position:static;flex-direction:row;align-items:center;flex-wrap:wrap;margin:0 0 16px}#admin-spa-tabs .admin-spa-tab{justify-content:center}#admin-spa-content{overflow:visible;padding-right:0}}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const confirmation=form.dataset.adminConfirm;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();event.stopPropagation();return;}const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value);if(missingActor)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
+    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{display:grid!important;grid-template-columns:216px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);column-gap:16px;align-items:start;min-height:100vh}#admin-spa-shell>header{grid-column:1/-1;grid-row:1}#admin-spa-tabs{display:flex!important;grid-column:1;grid-row:2;position:sticky;top:16px;align-self:start;flex-direction:column;align-items:stretch;gap:6px;flex-wrap:nowrap;margin:0;padding:10px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:flex-start;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding-right:2px}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{display:block!important;min-height:100vh}#admin-spa-tabs{position:static;flex-direction:row;align-items:center;flex-wrap:wrap;margin:0 0 16px}#admin-spa-tabs .admin-spa-tab{justify-content:center}#admin-spa-content{overflow:visible;padding-right:0}}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const confirmation=form.dataset.adminConfirm;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();event.stopPropagation();return;}const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value),missingMonster=[...form.querySelectorAll('select.monster-resource-select[required]')].some(select=>!select.value);if(missingActor||missingMonster)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
+    "const setupAdminTopbar=()=>{const main=document.querySelector('#admin-spa-shell'),header=main&&[...main.children].find(node=>node.matches&&node.matches('header[data-admin-spa-header]'));if(!main||!header)return;let topbar=document.querySelector('#admin-spa-topbar');if(!topbar){topbar=document.createElement('div');topbar.id='admin-spa-topbar';main.before(topbar);}topbar.append(header);if(document.querySelector('#admin-spa-topbar-style'))return;const style=document.createElement('style');style.id='admin-spa-topbar-style';style.textContent='#admin-spa-topbar{width:min(1680px,calc(100vw - 48px));max-width:none;margin:0 auto;padding:4px 2px 12px}#admin-spa-topbar>header[data-admin-spa-header]{display:flex!important;align-items:center;justify-content:space-between;gap:16px;margin:0;padding:4px 2px}#admin-spa-topbar>header[data-admin-spa-header] h1{margin:0;color:#183d6e;font-size:22px;white-space:nowrap}#admin-spa-topbar>header[data-admin-spa-header] .sub{margin:5px 0 0;color:#63738a}#admin-spa-shell{height:calc(100vh - 78px)!important;min-height:0!important;padding:0!important;grid-template-rows:minmax(0,1fr)!important}#admin-spa-tabs,#admin-spa-content{grid-row:1!important}@media(max-width:820px){#admin-spa-topbar{width:100%;padding:8px 10px 12px}#admin-spa-topbar>header[data-admin-spa-header]{padding:0}#admin-spa-shell{height:auto!important;min-height:0!important}}';document.head.append(style);};"
+    "document.addEventListener('DOMContentLoaded',()=>queueMicrotask(setupAdminTopbar));"
     "document.addEventListener('DOMContentLoaded',()=>{setupMonsterActions();setupTaskActions();setupPartialNavigation();setupAdminSpa();setupAdminLayout();setupAdminHeader();setupAdminContent();});"
     "})();";
 
@@ -2675,8 +2702,8 @@ static void vm_mock_admin_render_instance_scene_select(
         "</select><button class=\"item-picker-trigger scene-picker-trigger\" type=\"button\" data-scene-picker-open aria-haspopup=\"dialog\" aria-controls=\"scene-picker-modal\"><span data-scene-picker-label>请选择副本目标场景</span><small>搜索场景</small></button></div>");
 }
 
-/* A single dialog is shared by every actual SCE <select> on the content
- * page.  Each trigger keeps its authoritative select in the form, so server
+/* A single dialog is shared by every actual SCE <select> on administrative
+ * pages. Each trigger keeps its authoritative select in the form, so server
  * validation and pending form submissions retain their existing contract. */
 static void vm_mock_admin_render_scene_picker_modal(vm_mock_admin_text *page)
 {
@@ -2687,10 +2714,17 @@ static void vm_mock_admin_render_scene_picker_modal(vm_mock_admin_text *page)
         "<div class=\"item-modal scene-picker-modal\" id=\"scene-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"scene-picker-title\" hidden><section class=\"item-picker-panel\"><div class=\"item-picker-head\"><div><h3 id=\"scene-picker-title\">选择 SCE 场景</h3><p>按场景文件名搜索；选择后会更新当前表单的目标场景。</p></div><button class=\"item-picker-close\" id=\"scene-picker-close\" type=\"button\" aria-label=\"关闭场景选择\">×</button></div><div class=\"item-picker-tools\"><label><span>搜索场景</span><input id=\"scene-picker-search\" type=\"search\" placeholder=\"输入场景名称或文件名\" autocomplete=\"off\"></label></div><div class=\"item-result-bar\"><span id=\"scene-picker-result-count\"></span></div><div class=\"item-picker-list\" id=\"scene-picker-list\"></div><p class=\"item-picker-empty\" id=\"scene-picker-empty\" hidden>没有符合条件的 SCE 场景。</p></section></div>");
 }
 
-/* Role recovery accepts only an exact server-owned SCE key.  A datalist keeps
- * the account page compact and searchable while still showing the authoritative
- * resource catalog once, rather than multiplying a full select list per role. */
-static void vm_mock_admin_render_role_reset_scene_catalog(
+/* The dialog and its catalog are rendered once per page.  Individual forms
+ * retain only their selected value, so NPC-heavy scenes do not duplicate the
+ * whole monster catalog for every instance/challenge field. */
+static void vm_mock_admin_render_monster_picker_field(
+    vm_mock_admin_text *page, const char *fieldName, u32 monsterId,
+    bool required, bool allowNone, bool disabled);
+
+/* Role recovery accepts only an exact server-owned SCE key.  Keep that
+ * authoritative value in a hidden select and let the shared scene picker
+ * provide the searchable UI above the role-operation modal. */
+static void vm_mock_admin_render_role_reset_scene_picker_field(
     vm_mock_admin_text *page,
     const vm_mock_admin_scene_file *sceneFiles,
     u32 sceneCount)
@@ -2698,7 +2732,8 @@ static void vm_mock_admin_render_role_reset_scene_catalog(
     if (page == NULL)
         return;
     vm_mock_admin_text_appendf(
-        page, "<datalist id=\"role-reset-scene-catalog\">");
+        page,
+        "<div class=\"scene-picker-field\"><select class=\"scene-resource-select\" name=\"reset_scene\" required hidden><option value=\"\">请选择目标场景</option>");
     for (u32 i = 0; i < sceneCount; ++i)
     {
         char runtimeScene[64];
@@ -2716,8 +2751,12 @@ static void vm_mock_admin_render_role_reset_scene_catalog(
         vm_mock_admin_text_appendf(page, "<option value=\"");
         vm_mock_admin_text_append_html(page, sceneUtf8);
         vm_mock_admin_text_appendf(page, "\">");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
     }
-    vm_mock_admin_text_appendf(page, "</datalist>");
+    vm_mock_admin_text_appendf(
+        page,
+        "</select><button class=\"item-picker-trigger scene-picker-trigger\" type=\"button\" data-scene-picker-open aria-haspopup=\"dialog\" aria-controls=\"scene-picker-modal\"><span data-scene-picker-label>请选择目标场景</span><small>搜索场景</small></button></div>");
 }
 
 static void vm_mock_admin_render_instance_fields(
@@ -2746,12 +2785,22 @@ static void vm_mock_admin_render_instance_fields(
         "</label><label class=\"field\"><span>落点 X</span><input type=\"number\" name=\"instance_x\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<label class=\"field\"><span>落点 Y</span><input type=\"number\" name=\"instance_y\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<p class=\"instance-help\">落点 X/Y 都填 0 会自动解析目标 SCE 的安全入口。</p></div>"
-        "<div class=\"instance-fields\" data-npc-instance-spawn-fields hidden><label class=\"field\"><span>进入后刷新怪物 ID</span><input type=\"number\" name=\"instance_spawn_enemy_id\" min=\"0\" max=\"65535\" value=\"%u\"></label><p class=\"instance-help\">必须是目标场景已启用并已部署到 SCE2 kind-3 的场景战斗怪；填 0 表示不额外刷新。</p></div>"
-        "<div class=\"instance-fields\" data-npc-service-config=\"10\" data-npc-instance-challenge-fields hidden><label class=\"field\"><span>守关怪 ID</span><input type=\"number\" name=\"challenge_enemy_id\" min=\"1\" max=\"65535\" value=\"%u\"></label>"
-        "<p class=\"instance-help\">挑战对象必须是当前场景中已启用的场景战斗怪；选择后客户端会直接发起战斗，不显示二次确认。</p></div>"
+        "<div class=\"instance-fields\" data-npc-instance-spawn-fields hidden><label class=\"field\"><span>进入后刷新怪物</span>",
+        x, y);
+    vm_mock_admin_render_monster_picker_field(
+        page, "instance_spawn_enemy_id", spawnEnemyId, false, true, false);
+    vm_mock_admin_text_appendf(
+        page,
+        "</label><p class=\"instance-help\">必须是目标场景已启用并已部署到 SCE2 kind-3 的场景战斗怪；可选择“不额外刷新”。</p></div>"
+        "<div class=\"instance-fields\" data-npc-service-config=\"10\" data-npc-instance-challenge-fields hidden><label class=\"field\"><span>守关怪</span>");
+    vm_mock_admin_render_monster_picker_field(
+        page, "challenge_enemy_id", enemyId, true, false, false);
+    vm_mock_admin_text_appendf(
+        page,
+        "</label><p class=\"instance-help\">挑战对象必须是当前场景中已启用的场景战斗怪；选择后客户端会直接发起战斗，不显示二次确认。</p></div>"
         "<div class=\"instance-fields\" data-npc-instance-level-fields hidden><label class=\"field\"><span>副本功能最低等级</span><input type=\"number\" name=\"instance_min_level\" min=\"1\" max=\"255\" value=\"%u\"></label>"
         "<p class=\"instance-help\">该等级限制同时用于已启用的副本传送和守关怪挑战。</p></div>",
-        x, y, spawnEnemyId, enemyId, minimumLevel);
+        minimumLevel);
 }
 
 static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
@@ -4557,6 +4606,41 @@ static bool vm_net_mock_ensure_actor_resource_available(
     return true;
 }
 
+/* Scene-battle SCE deployment uses this same validator to turn an Actor
+ * reference into its complete leaf-resource closure.  Keep the parser in the
+ * admin/resource layer: it validates the precise compressed Actor payload and
+ * its GIF files, while the scene layer only owns publication order. */
+static bool vm_net_mock_actor_resource_collect_images(
+    const char *actorResource,
+    char imageNames[VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX][64],
+    u32 *imageCountOut)
+{
+    char inspectedNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64];
+    u32 imageCount = 0;
+
+    if (imageCountOut)
+        *imageCountOut = 0;
+    if (actorResource == NULL || imageNames == NULL || imageCountOut == NULL ||
+        VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX <
+            VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+    {
+        return false;
+    }
+    memset(inspectedNames, 0, sizeof(inspectedNames));
+    memset(imageNames, 0,
+           sizeof(imageNames[0]) * VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX);
+    if (!vm_mock_admin_actor_resource_inspect(actorResource, inspectedNames,
+                                              &imageCount) ||
+        imageCount == 0 ||
+        imageCount > VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX)
+    {
+        return false;
+    }
+    memcpy(imageNames, inspectedNames, sizeof(imageNames[0]) * imageCount);
+    *imageCountOut = imageCount;
+    return true;
+}
+
 static bool vm_mock_admin_build_actor_preview_svg(const char *actorResource,
                                                   u8 **svgOut,
                                                   u32 *svgLenOut)
@@ -5056,6 +5140,7 @@ static void vm_mock_admin_render_item_picker_field(
     const char *label, u32 itemId, bool required);
 static void vm_mock_admin_render_item_picker_modal(
     vm_mock_admin_text *page, bool includeEquipmentFilters);
+static void vm_mock_admin_render_monster_picker_modal(vm_mock_admin_text *page);
 static void vm_mock_admin_render_npc_inventory(
     vm_mock_admin_text *page, const char *sceneUtf8, const char *runtimeScene,
     u32 actorId, u16 serviceKind, const char *pickerPrefix);
@@ -5837,7 +5922,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>"
         "<div class=\"grid\"><aside class=\"card\"><h2>文件格式</h2><nav class=\"format-tabs\"><a class=\"format on\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=actor\">Actor 资源</a></nav><h2>SCE 场景（%u）</h2><label style=\"display:grid;gap:4px;margin:0 0 10px\"><span class=\"foot\">按名称搜索</span><input type=\"search\" data-content-resource-search placeholder=\"输入场景名称\" autocomplete=\"off\"><small class=\"foot\" data-content-resource-search-count></small></label><div class=\"scene-list\" data-admin-list data-content-resource-list>",
         sceneCount);
     for (u32 i = 0; i < sceneCount; ++i)
@@ -6277,6 +6362,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "</div>");
     vm_mock_admin_render_actor_picker_modal(&page, actorFiles, actorCount);
     vm_mock_admin_render_scene_picker_modal(&page);
+    vm_mock_admin_render_monster_picker_modal(&page);
     vm_mock_admin_render_item_picker_modal(&page, false);
     vm_mock_admin_render_npc_stock_picker_modal(&page);
     }
@@ -6825,9 +6911,9 @@ static void vm_mock_admin_render_npc_inventories(
         page, false, configuredServices);
 }
 
-/* Requirement IDs are polymorphic (item or monster).  Keep their numeric
- * field editable for monster requirements, but attach the same item chooser
- * when the administrator is configuring a collect-item requirement. */
+/* Requirement IDs are polymorphic.  Collect-item requirements keep the
+ * catalog button below; kill-monster requirements use the shared monster
+ * dialog rendered by the task page. */
 static void vm_mock_admin_render_item_picker_button(
     vm_mock_admin_text *page, const char *targetId, const char *label)
 {
@@ -6842,6 +6928,70 @@ static void vm_mock_admin_render_item_picker_button(
         page,
         "</span><small data-item-picker-label=\"%s\">从物品目录选择</small></button>",
         targetId);
+}
+
+static void vm_mock_admin_render_task_requirement_select(
+    vm_mock_admin_text *page, const char *name, u8 current, u8 slot);
+
+static void vm_mock_admin_render_task_requirement_target_field(
+    vm_mock_admin_text *page, u8 slot, u8 requirementType,
+    u32 requirementId)
+{
+    char targetId[48];
+    char fieldName[48];
+
+    if (page == NULL || slot == 0 || slot > 2)
+        return;
+    snprintf(targetId, sizeof(targetId), "task-requirement-%u", slot);
+    snprintf(fieldName, sizeof(fieldName), "requirement_id%u", slot);
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"field\" data-task-requirement-target=\"%u\"><span>目标对象</span><input id=\"%s\" type=\"number\" name=\"%s\" min=\"0\" max=\"4294967295\" value=\"%u\" data-item-picker-input data-task-requirement-numeric%s hidden>",
+        slot, targetId, fieldName, requirementId,
+        requirementType == 2 ? " disabled" : "");
+    vm_mock_admin_text_appendf(
+        page, "<span data-task-requirement-item-picker%s>",
+        requirementType == 1 ? "" : " hidden");
+    vm_mock_admin_render_item_picker_button(page, targetId, "从物品目录选择");
+    vm_mock_admin_text_appendf(
+        page, "</span><div data-task-requirement-monster%s>",
+        requirementType == 2 ? "" : " hidden");
+    vm_mock_admin_render_monster_picker_field(
+        page, fieldName, requirementType == 2 ? requirementId : 0, false,
+        false, requirementType != 2);
+    vm_mock_admin_text_appendf(page, "</div></div>");
+}
+
+static void vm_mock_admin_render_task_requirement_row(
+    vm_mock_admin_text *page, u8 slot, u8 requirementType,
+    u32 requirementId, u8 requirementCount, const char *sceneUtf8)
+{
+    char typeName[48];
+    char countName[48];
+    char sceneName[48];
+
+    if (page == NULL || slot == 0 || slot > 2)
+        return;
+    snprintf(typeName, sizeof(typeName), "requirement_type%u", slot);
+    snprintf(countName, sizeof(countName), "requirement_count%u", slot);
+    snprintf(sceneName, sizeof(sceneName), "requirement_scene%u", slot);
+    vm_mock_admin_text_appendf(
+        page,
+        "<article class=\"task-target-row\" data-task-requirement-row=\"%u\"%s><div class=\"task-target-head\"><strong data-task-requirement-index>任务目标 %u</strong><button class=\"secondary task-target-remove\" type=\"button\" data-task-requirement-remove>移除</button></div><div class=\"task-target-fields\"><label class=\"field\"><span>目标类型</span>",
+        slot, requirementType == 0 ? " hidden" : "", slot);
+    vm_mock_admin_render_task_requirement_select(
+        page, typeName, requirementType, slot);
+    vm_mock_admin_text_appendf(page, "</label>");
+    vm_mock_admin_render_task_requirement_target_field(
+        page, slot, requirementType, requirementId);
+    vm_mock_admin_text_appendf(
+        page,
+        "<label class=\"field\"><span>数量</span><input type=\"number\" name=\"%s\" min=\"0\" max=\"255\" value=\"%u\" data-task-requirement-count></label><label class=\"field task-target-scene\"><span>限定场景（可选）</span><input name=\"%s\" maxlength=\"63\" value=\"",
+        countName, requirementCount, sceneName);
+    vm_mock_admin_text_append_html(page, sceneUtf8 ? sceneUtf8 : "");
+    vm_mock_admin_text_appendf(
+        page,
+        "\" placeholder=\"scene.sce（留空表示任意场景）\" data-task-requirement-scene></label></div></article>");
 }
 
 static void vm_mock_admin_render_item_picker_modal(
@@ -6967,7 +7117,8 @@ static void vm_mock_admin_render_monster_drop_picker_modal(
  * validation, persistence and operator audit logging. */
 static void vm_mock_admin_render_role_operation_modal(
     vm_mock_admin_text *page, const char *account,
-    const vm_net_mock_role_state *role, const char *roleNameUtf8)
+    const vm_net_mock_role_state *role, const char *roleNameUtf8,
+    const vm_mock_admin_scene_file *sceneFiles, u32 sceneCount)
 {
     char pickerId[64];
 
@@ -7097,9 +7248,14 @@ static void vm_mock_admin_render_role_operation_modal(
     vm_mock_admin_text_append_html(page, account);
     vm_mock_admin_text_appendf(
         page,
-        "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><label><span>目标场景</span><input name=\"reset_scene\" list=\"role-reset-scene-catalog\" placeholder=\"选择或输入目标场景\" required></label><div class=\"role-operation-actions\"><button class=\"reset-position\" type=\"submit\">重置到指定场景</button></div></form></section>"
-        "</div></div></section></div>",
+        "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><label><span>目标场景</span>",
         role->roleId);
+    vm_mock_admin_render_role_reset_scene_picker_field(page, sceneFiles,
+                                                        sceneCount);
+    vm_mock_admin_text_appendf(
+        page,
+        "</label><div class=\"role-operation-actions\"><button class=\"reset-position\" type=\"submit\">重置到指定场景</button></div></form></section>"
+        "</div></div></section></div>");
 }
 
 static bool vm_mock_admin_shop_category_filter(const char *filter,
@@ -7341,7 +7497,7 @@ static void vm_mock_admin_render_shop_page(char *response,
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>"
         "<section class=\"card shop-card\">");
     if (status[0] != 0 && message[0] != 0)
     {
@@ -7565,7 +7721,7 @@ static void vm_mock_admin_render_update_page(char *response,
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>");
+        "<a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>");
     vm_mock_admin_text_appendf(&page,
         "<div class=\"update-grid\"><aside class=\"card update-menu\"><h2>更新选项</h2>"
         "<div class=\"update-menu-list\" data-admin-list>"
@@ -7685,10 +7841,12 @@ static void vm_mock_admin_render_update_page(char *response,
 }
 
 static void vm_mock_admin_render_task_requirement_select(
-    vm_mock_admin_text *page, const char *name, u8 current)
+    vm_mock_admin_text *page, const char *name, u8 current, u8 slot)
 {
     static const char *labels[] = {"无", "收集物品", "击败怪物"};
-    vm_mock_admin_text_appendf(page, "<select name=\"%s\">", name);
+    vm_mock_admin_text_appendf(
+        page, "<select name=\"%s\" data-task-requirement-type=\"%u\">",
+        name, slot);
     for (u32 value = 0; value <= 2; ++value)
     {
         vm_mock_admin_text_appendf(
@@ -7760,6 +7918,8 @@ static void vm_mock_admin_render_task_page(char *response,
     char receiverUtf8[64];
     char goalUtf8[384];
     char rewardUtf8[128];
+    char requirementScene1Utf8[192];
+    char requirementScene2Utf8[192];
     char offerUtf8[768];
     char activeUtf8[768];
     char completedUtf8[768];
@@ -7779,6 +7939,8 @@ static void vm_mock_admin_render_task_page(char *response,
     memset(receiverUtf8, 0, sizeof(receiverUtf8));
     memset(goalUtf8, 0, sizeof(goalUtf8));
     memset(rewardUtf8, 0, sizeof(rewardUtf8));
+    memset(requirementScene1Utf8, 0, sizeof(requirementScene1Utf8));
+    memset(requirementScene2Utf8, 0, sizeof(requirementScene2Utf8));
     memset(offerUtf8, 0, sizeof(offerUtf8));
     memset(activeUtf8, 0, sizeof(activeUtf8));
     memset(completedUtf8, 0, sizeof(completedUtf8));
@@ -7817,6 +7979,12 @@ static void vm_mock_admin_render_task_page(char *response,
         vm_net_mock_gbk_label_to_utf8(edit.receiver, receiverUtf8, sizeof(receiverUtf8));
         vm_net_mock_gbk_label_to_utf8(edit.goal, goalUtf8, sizeof(goalUtf8));
         vm_net_mock_gbk_label_to_utf8(edit.rewardText, rewardUtf8, sizeof(rewardUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.requirementScene1,
+                                      requirementScene1Utf8,
+                                      sizeof(requirementScene1Utf8));
+        vm_net_mock_gbk_label_to_utf8(edit.requirementScene2,
+                                      requirementScene2Utf8,
+                                      sizeof(requirementScene2Utf8));
         vm_net_mock_gbk_label_to_utf8(edit.offerDialog, offerUtf8, sizeof(offerUtf8));
         vm_net_mock_gbk_label_to_utf8(edit.activeDialog, activeUtf8, sizeof(activeUtf8));
         vm_net_mock_gbk_label_to_utf8(edit.completedDialog, completedUtf8, sizeof(completedUtf8));
@@ -7836,9 +8004,9 @@ static void vm_mock_admin_render_task_page(char *response,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>江湖OL 任务管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub,.hint{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff}.logout{background:#fff!important;color:#667085!important;border:1px solid #d0d5dd!important}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px}.task-catalog{display:flex;flex-direction:column;min-height:0;overflow:hidden}.task-catalog-head{flex:none}.task-catalog-head .button{display:block;margin-bottom:14px}.task-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.task{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.task:hover,.task.on{background:#eef4ff;color:#175cd3}.task.off{opacity:.55}.editor{overflow:auto}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}textarea{min-height:68px;resize:vertical}.wide{grid-column:1/-1}.group{margin-top:14px;padding:12px;border:1px solid #e4e7ec;border-radius:8px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none}.danger{background:#b42318}.secondary{background:#475467}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}"
-        ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.task-reward-list{display:grid;gap:9px}.task-reward-row{display:grid;grid-template-columns:minmax(220px,1.7fr) 120px 100px auto;gap:10px;align-items:end;padding:10px;border:1px solid #eaecf0;border-radius:7px;background:#f9fafb}.task-reward-actions{justify-content:flex-start;margin-top:10px}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields,.task-reward-row{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\">"
+        ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.task-target-list{display:grid;gap:10px}.task-target-row{padding:12px;border:1px solid #d0d5dd;border-radius:8px;background:#f8fafc}.task-target-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.task-target-head strong{color:#344054}.task-target-head button{padding:6px 10px;font-size:12px}.task-target-fields{display:grid;grid-template-columns:150px minmax(220px,1.5fr) 105px minmax(210px,1.1fr);gap:10px;align-items:end}.task-target-empty{margin:0;padding:18px;border:1px dashed #d0d5dd;border-radius:8px;color:#667085;text-align:center}.task-target-actions{justify-content:flex-start;margin-top:10px}.task-reward-list{display:grid;gap:9px}.task-reward-row{display:grid;grid-template-columns:minmax(220px,1.7fr) 120px 100px auto;gap:10px;align-items:end;padding:10px;border:1px solid #eaecf0;border-radius:7px;background:#f9fafb}.task-reward-actions{justify-content:flex-start;margin-top:10px}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields,.task-target-fields,.task-reward-row{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\">"
         "<div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">任务定义、奖励与 NPC 对话</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><style>@media(max-width:900px){.task-catalog{max-height:300px}.task-list{max-height:none}}</style>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav><style>@media(max-width:900px){.task-catalog{max-height:300px}.task-list{max-height:none}}</style>"
         "<div class=\"grid\"><aside class=\"card task-catalog\" data-task-catalog><div class=\"task-catalog-head\"><a class=\"button%s\" data-admin-select%s href=\"/?tab=tasks&amp;new=1\">＋ 新增任务</a><h2>任务目录（%u）</h2></div><div class=\"task-list\" data-admin-list>",
         createNew ? " on" : "",
         createNew ? " aria-current=\"page\"" : "",
@@ -7882,8 +8050,20 @@ static void vm_mock_admin_render_task_page(char *response,
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>要求等级</span><input type=\"number\" name=\"level\" min=\"0\" max=\"255\" value=\"%u\" required></label><label class=\"field\"><span>前置任务 ID</span><input type=\"number\" name=\"prerequisite_task_id\" min=\"0\" max=\"4294967295\" value=\"%u\"></label>", edit.level, edit.prerequisiteTaskId);
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>难度</span><input type=\"number\" name=\"difficulty\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field\"><span>分类</span><input type=\"number\" name=\"classification\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.difficulty, edit.classification);
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>任务名称（最多31字节）</span><input name=\"name\" maxlength=\"31\" value=\""); vm_mock_admin_text_append_html(&page, nameUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>发布者（最多15字节）</span><input name=\"giver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, giverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>交付者（最多15字节）</span><input name=\"receiver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, receiverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label>");
-    vm_mock_admin_text_appendf(&page, "</div><div class=\"group\"><h2>任务目标</h2><div class=\"fields\"><label class=\"field\"><span>条件一类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type1", edit.requirementType1); vm_mock_admin_text_appendf(&page, "</label><div class=\"field\"><span>条件一目标 ID</span><input id=\"task-requirement-1\" type=\"number\" name=\"requirement_id1\" min=\"0\" max=\"4294967295\" value=\"%u\" data-item-picker-input>", edit.requirementId1); vm_mock_admin_render_item_picker_button(&page, "task-requirement-1", "收集物品时点击选择"); vm_mock_admin_text_appendf(&page, "</div><label class=\"field\"><span>条件一数量</span><input type=\"number\" name=\"requirement_count1\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.requirementCount1);
-    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>条件二类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type2", edit.requirementType2); vm_mock_admin_text_appendf(&page, "</label><div class=\"field\"><span>条件二目标 ID</span><input id=\"task-requirement-2\" type=\"number\" name=\"requirement_id2\" min=\"0\" max=\"4294967295\" value=\"%u\" data-item-picker-input>", edit.requirementId2); vm_mock_admin_render_item_picker_button(&page, "task-requirement-2", "收集物品时点击选择"); vm_mock_admin_text_appendf(&page, "</div><label class=\"field\"><span>条件二数量</span><input type=\"number\" name=\"requirement_count2\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field wide\"><span>目标说明（最多95字节）</span><textarea name=\"goal\" maxlength=\"95\">", edit.requirementCount2); vm_mock_admin_text_append_html(&page, goalUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div>");
+    vm_mock_admin_text_appendf(
+        &page,
+        "</div><div class=\"group\"><h2>任务目标</h2><p class=\"hint\">默认无目标。新增后可配置收集物品或击败怪物；击败怪物可额外限定 SCE 场景。当前客户端协议最多支持 2 个目标。</p><div class=\"task-target-list\" id=\"task-requirement-list\">");
+    vm_mock_admin_render_task_requirement_row(
+        &page, 1, edit.requirementType1, edit.requirementId1,
+        edit.requirementCount1, requirementScene1Utf8);
+    vm_mock_admin_render_task_requirement_row(
+        &page, 2, edit.requirementType2, edit.requirementId2,
+        edit.requirementCount2, requirementScene2Utf8);
+    vm_mock_admin_text_appendf(
+        &page,
+        "<p class=\"task-target-empty\" data-task-requirement-empty hidden>暂未配置任务目标。</p></div><div class=\"actions task-target-actions\"><button class=\"secondary\" type=\"button\" id=\"task-requirement-add\" data-task-requirement-add>＋ 新增任务目标</button></div><label class=\"field\" style=\"margin-top:12px\"><span>目标说明（最多95字节）</span><textarea name=\"goal\" maxlength=\"95\">");
+    vm_mock_admin_text_append_html(&page, goalUtf8);
+    vm_mock_admin_text_appendf(&page, "</textarea></label></div>");
     vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>给予物品与奖励</h2><div class=\"fields\">");
     vm_mock_admin_render_item_picker_field(&page, "task-given-item", "given_item_id", "接取给予物品", edit.givenItemId, false);
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>给予数量</span><input type=\"number\" name=\"given_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励经验</span><input type=\"number\" name=\"reward_exp\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励铜钱</span><input type=\"number\" name=\"reward_money\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励说明（最多31字节）</span><input name=\"reward_text\" maxlength=\"31\" value=\"", edit.givenItemCount, edit.rewardExp, edit.rewardMoney);
@@ -7891,8 +8071,9 @@ static void vm_mock_admin_render_task_page(char *response,
     vm_mock_admin_text_appendf(&page, "\"></label></div><h2 style=\"margin-top:16px\">奖励物品</h2><p class=\"hint\">可配置最多 %u 项不同物品；提交任务时会按客户端原生 awardinfo 多行流一次性入包。装备、神仙壶和逍遥壶每项数量必须为 1。</p>", VM_NET_MOCK_TASK_REWARD_ITEM_MAX);
     vm_mock_admin_render_task_reward_rows(&page, &edit);
     vm_mock_admin_text_appendf(&page, "</div>");
-    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>NPC 对话</h2><p class=\"hint\">NPC 绑定该任务后按未接、进行中、可提交三种状态显示；留空时使用服务端安全默认文案。</p><div class=\"fields\"><label class=\"field wide\"><span>可接取时</span><textarea name=\"offer_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, offerUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>进行中</span><textarea name=\"active_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, activeUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>可提交时</span><textarea name=\"completed_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, completedUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div><p class=\"hint\">条件类型 1 为收集物品、2 为击败怪物；只有“收集物品”条件应使用目录选择器。两项都为 0 时，接取后再次与交付 NPC 对话即可完成。名称长度按客户端 GBK 字节槽校验。</p><div class=\"actions\"><button type=\"submit\">保存任务</button></div></form>");
+    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>NPC 对话</h2><p class=\"hint\">NPC 绑定该任务后按未接、进行中、可提交三种状态显示；留空时使用服务端安全默认文案。</p><div class=\"fields\"><label class=\"field wide\"><span>可接取时</span><textarea name=\"offer_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, offerUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>进行中</span><textarea name=\"active_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, activeUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>可提交时</span><textarea name=\"completed_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, completedUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div><p class=\"hint\">条件类型 1 为收集物品，类型 2 为击败怪物；两者均使用对应的可搜索目录选择器。场景战斗目标仅可绑定类型 2，且怪物 ID 必须与该 SCE 场景战斗怪一致。两项都为 0 时，接取后再次与交付 NPC 对话即可完成。名称长度按客户端 GBK 字节槽校验。</p><div class=\"actions\"><button type=\"submit\">保存任务</button></div></form>");
     vm_mock_admin_render_item_picker_modal(&page, false);
+    vm_mock_admin_render_monster_picker_modal(&page);
     if (!createNew && edit.overridden)
     {
         vm_mock_admin_text_appendf(&page, "<form class=\"actions\" method=\"post\" action=\"/action\" data-task-action><input type=\"hidden\" name=\"action\" value=\"delete-task-override\"><input type=\"hidden\" name=\"task_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">%s</button></form>", edit.taskId, edit.builtin ? "恢复 task.dsh 默认" : "删除自定义任务");
@@ -7903,6 +8084,87 @@ static void vm_mock_admin_render_task_page(char *response,
 }
 
 #include "web_admin_monsters.inc.c"
+
+static void vm_mock_admin_render_monster_picker_field(
+    vm_mock_admin_text *page, const char *fieldName, u32 monsterId,
+    bool required, bool allowNone, bool disabled)
+{
+    if (page == NULL || fieldName == NULL || fieldName[0] == 0)
+        return;
+
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"monster-picker-field\"><select class=\"monster-resource-select\" name=\"");
+    vm_mock_admin_text_append_html(page, fieldName);
+    vm_mock_admin_text_appendf(
+        page, "\"%s%s%s hidden>", required ? " required" : "",
+        allowNone ? " data-monster-picker-allow-none=\"1\"" : "",
+        disabled ? " disabled" : "");
+    if (allowNone)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"0\"%s>不额外刷新</option>",
+            monsterId == 0 ? " selected" : "");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(page,
+                                   "<option value=\"\">请选择怪物</option>");
+    }
+    if (monsterId != 0)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\" selected>#%u</option>",
+            monsterId, monsterId);
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select><button class=\"item-picker-trigger monster-picker-trigger\" type=\"button\" data-monster-picker-open aria-haspopup=\"dialog\" aria-controls=\"monster-picker-modal\"><span data-monster-picker-label>");
+    if (monsterId != 0)
+        vm_mock_admin_text_appendf(page, "已选怪物 #%u", monsterId);
+    else if (allowNone)
+        vm_mock_admin_text_appendf(page, "不额外刷新");
+    else
+        vm_mock_admin_text_appendf(page, "请选择怪物");
+    vm_mock_admin_text_appendf(
+        page, "</span><small>搜索怪物</small></button></div>");
+}
+
+static void vm_mock_admin_render_monster_picker_modal(vm_mock_admin_text *page)
+{
+    vm_net_mock_monster_admin_row
+        monsters[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    u32 monsterCount = 0;
+
+    if (page == NULL)
+        return;
+    memset(monsters, 0, sizeof(monsters));
+    monsterCount = vm_net_mock_monster_admin_list(
+        monsters, VM_NET_MOCK_MONSTER_CATALOG_MAX);
+    if (monsterCount > VM_NET_MOCK_MONSTER_CATALOG_MAX)
+        monsterCount = VM_NET_MOCK_MONSTER_CATALOG_MAX;
+
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"item-modal actor-modal monster-picker-modal\" id=\"monster-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"monster-picker-title\" hidden><section class=\"item-picker-panel actor-picker-panel monster-picker-panel\"><div class=\"item-picker-head actor-picker-head\"><div><h3 id=\"monster-picker-title\">选择怪物</h3><p>可按怪物 ID、名称、等级或类型搜索；选择后会更新当前表单。</p></div><button class=\"item-picker-close actor-picker-close\" id=\"monster-picker-close\" type=\"button\" aria-label=\"关闭怪物选择\">×</button></div><div class=\"item-picker-tools actor-picker-tools\"><label><span>搜索怪物</span><input id=\"monster-picker-search\" type=\"search\" placeholder=\"输入怪物 ID、名称、等级或类型\" autocomplete=\"off\"></label></div><div class=\"item-result-bar actor-result-bar\"><span id=\"monster-picker-result-count\"></span></div><p class=\"item-picker-error\" id=\"monster-picker-error\"></p><div class=\"item-picker-list actor-picker-list monster-picker-list\" id=\"monster-picker-list\"></div><p class=\"item-picker-empty actor-picker-empty\" id=\"monster-picker-empty\" hidden>没有符合条件的怪物。</p><select id=\"monster-picker-options\" hidden>");
+    for (u32 i = 0; i < monsterCount; ++i)
+    {
+        char nameUtf8[128];
+
+        memset(nameUtf8, 0, sizeof(nameUtf8));
+        vm_net_mock_gbk_label_to_utf8(monsters[i].displayName, nameUtf8,
+                                      sizeof(nameUtf8));
+        vm_mock_admin_text_appendf(page, "<option value=\"%u\">#%u · ",
+                                   monsters[i].enemyId, monsters[i].enemyId);
+        vm_mock_admin_text_append_html(
+            page, nameUtf8[0] != 0 ? nameUtf8 : "未命名怪物");
+        vm_mock_admin_text_appendf(
+            page, " · Lv.%u · %s</option>", monsters[i].level,
+            vm_mock_admin_monster_family_name(monsters[i].family));
+    }
+    vm_mock_admin_text_appendf(page, "</select></section></div>");
+}
+
 static bool vm_mock_admin_form_u32(const char *body, const char *field,
                                    u32 maximum, u32 *valueOut);
 static bool vm_mock_admin_scene_from_form(const char *body,
@@ -7946,7 +8208,7 @@ static void vm_mock_admin_render_servers_page(char *response,
         "<title>江湖OL 服务器列表管理</title><style>"
         "*{box-sizing:border-box}html,body{min-height:100%%}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1240px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 12px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.off{background:#fef3f2;color:#b42318}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.server-list{display:grid;gap:12px}.server{border:1px solid #e4e7ec;border-radius:9px;padding:13px}.server-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.server-head h3{font-size:16px;margin:0}.state{font-size:12px;font-weight:650}.state.on{color:#027a48}.state.off{color:#b42318}.fields{display:grid;grid-template-columns:110px minmax(160px,1.3fr) minmax(130px,1fr) 130px 110px 110px auto;gap:9px;align-items:end}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.actions{display:flex;gap:8px;align-items:end}.create-fields{display:grid;grid-template-columns:120px minmax(170px,1.3fr) minmax(130px,1fr) 140px 110px 110px auto;gap:10px;align-items:end}.hint{margin:11px 0 0;color:#667085;font-size:12px;line-height:1.65}@media(max-width:940px){.fields,.create-fields{grid-template-columns:1fr 1fr}.actions{align-items:stretch}}@media(max-width:620px){.wrap{padding:16px 10px}.fields,.create-fields{grid-template-columns:1fr}.actions{display:grid;grid-template-columns:1fr 1fr}}</style>"
         "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">标题服务器列表 · 保存后影响下一次登录</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab on\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=security\">安全设置</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab on\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=security\">安全设置</a><a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>"
         "<section class=\"card\"><div class=\"summary\"><span class=\"badge\">已配置 %u / %u</span><span class=\"badge\">已启用 %u</span><span class=\"badge off\">已停用 %u</span></div>",
         rowCount, VM_NET_MOCK_LOGIN_SERVER_MAX, enabledCount,
         rowCount >= enabledCount ? rowCount - enabledCount : 0);
@@ -8285,44 +8547,170 @@ static bool vm_mock_admin_risk_audit_query_count(u32 *countOut)
     return true;
 }
 
+typedef enum
+{
+    VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES = 0,
+    VM_MOCK_ADMIN_RISK_DIRECTORY_IPS = 1
+} vm_mock_admin_risk_directory;
+
+typedef struct
+{
+    char address[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+    u32 failedAttempts;
+    char blockedAt[32];
+    char updatedAt[32];
+} vm_mock_admin_risk_ip_row;
+
+typedef struct
+{
+    vm_mock_admin_risk_ip_row rows[VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE];
+    u32 count;
+    bool invalid;
+} vm_mock_admin_risk_ip_page;
+
+static bool vm_mock_admin_risk_ip_row_callback(
+    void *contextValue, unsigned int columnCount,
+    const char *const *values, const size_t *lengths)
+{
+    vm_mock_admin_risk_ip_page *page =
+        (vm_mock_admin_risk_ip_page *)contextValue;
+    vm_mock_admin_risk_ip_row *row = NULL;
+
+    if (page == NULL || page->count >= VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE ||
+        columnCount != 4 || values == NULL || lengths == NULL)
+    {
+        if (page != NULL)
+            page->invalid = true;
+        return true;
+    }
+    row = &page->rows[page->count];
+    if (!vm_mock_mysql_copy_text(row->address, sizeof(row->address), values[0],
+                                 lengths[0]) ||
+        !vm_mock_service_login_ip_is_valid(row->address) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &row->failedAttempts) ||
+        !vm_mock_mysql_copy_text(row->blockedAt, sizeof(row->blockedAt),
+                                 values[2], lengths[2]) ||
+        !vm_mock_mysql_copy_text(row->updatedAt, sizeof(row->updatedAt),
+                                 values[3], lengths[3]))
+    {
+        page->invalid = true;
+        return true;
+    }
+    ++page->count;
+    return true;
+}
+
+static bool vm_mock_admin_risk_ip_build_query(char *sql, size_t sqlCap,
+                                              u32 offset, u32 limit)
+{
+    int written = 0;
+
+    if (sql == NULL || sqlCap == 0)
+        return false;
+    written = snprintf(
+        sql, sqlCap,
+        "SELECT ip_address,failed_attempts,"
+             "COALESCE(DATE_FORMAT(blocked_at,'%%Y-%%m-%%d %%H:%%i:%%s'),''),"
+        "DATE_FORMAT(updated_at,'%%Y-%%m-%%d %%H:%%i:%%s') "
+        "FROM server_login_ip_blocks WHERE blocked=1 "
+        "ORDER BY blocked_at DESC,ip_address ASC LIMIT %u,%u",
+        offset, limit);
+    return written >= 0 && (size_t)written < sqlCap;
+}
+
+static bool vm_mock_admin_risk_ip_query(u32 offset, u32 limit,
+                                        vm_mock_admin_risk_ip_page *page)
+{
+    char sql[512];
+
+    if (page == NULL || !vm_mock_service_login_ip_schema_ensure() ||
+        !vm_mock_admin_risk_ip_build_query(sql, sizeof(sql), offset, limit))
+    {
+        return false;
+    }
+    memset(page, 0, sizeof(*page));
+    return vm_mysql_query(sql, vm_mock_admin_risk_ip_row_callback, page) &&
+           !page->invalid;
+}
+
+static bool vm_mock_admin_risk_ip_query_count(u32 *countOut)
+{
+    static const char sql[] =
+        "SELECT COUNT(*) FROM server_login_ip_blocks WHERE blocked=1";
+    vm_mock_admin_count count;
+
+    if (countOut != NULL)
+        *countOut = 0;
+    if (!vm_mock_service_login_ip_schema_ensure())
+        return false;
+    memset(&count, 0, sizeof(count));
+    if (!vm_mysql_query(sql, vm_mock_admin_count_row, &count) ||
+        count.invalid || !count.found)
+    {
+        return false;
+    }
+    if (countOut != NULL)
+        *countOut = count.value;
+    return true;
+}
+
 static void vm_mock_admin_render_risk_page(char *response,
                                            size_t responseCap,
                                            const char *query)
 {
     vm_mock_admin_text page;
     vm_mock_admin_risk_audit_page auditPage;
+    vm_mock_admin_risk_ip_page ipPage;
     char status[16];
     char message[256];
     char pageText[16];
+    char directoryText[16];
     u32 totalCount = 0;
     u32 pageNumber = 1;
     u32 pageCount = 1;
     u32 offset = 0;
+    u32 pageSize = VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE;
+    vm_mock_admin_risk_directory directory =
+        VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES;
     bool queryOk = false;
 
     memset(&auditPage, 0, sizeof(auditPage));
+    memset(&ipPage, 0, sizeof(ipPage));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
     memset(pageText, 0, sizeof(pageText));
+    memset(directoryText, 0, sizeof(directoryText));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
     (void)vm_mock_admin_form_value(query, "page", pageText, sizeof(pageText));
+    (void)vm_mock_admin_form_value(query, "risk_kind", directoryText,
+                                   sizeof(directoryText));
+    if (strcmp(directoryText, "ips") == 0)
+    {
+        directory = VM_MOCK_ADMIN_RISK_DIRECTORY_IPS;
+        pageSize = VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE;
+    }
     if (pageText[0] != 0 &&
         (!vm_net_mock_parse_u32_strict(pageText, &pageNumber) || pageNumber == 0))
     {
         pageNumber = 1;
     }
-    queryOk = vm_mock_admin_risk_audit_query_count(&totalCount);
+    queryOk = directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS
+                  ? vm_mock_admin_risk_ip_query_count(&totalCount)
+                  : vm_mock_admin_risk_audit_query_count(&totalCount);
     if (queryOk)
     {
         if (totalCount != 0)
-            pageCount = (totalCount + VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE - 1) /
-                        VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE;
+            pageCount = (totalCount + pageSize - 1) / pageSize;
         if (pageNumber > pageCount)
             pageNumber = pageCount;
-        offset = (pageNumber - 1) * VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE;
-        queryOk = vm_mock_admin_risk_audit_query(
-            offset, VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE, &auditPage);
+        offset = (pageNumber - 1) * pageSize;
+        queryOk = directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS
+                      ? vm_mock_admin_risk_ip_query(
+                            offset, VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE, &ipPage)
+                      : vm_mock_admin_risk_audit_query(
+                            offset, VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE,
+                            &auditPage);
     }
 
     vm_mock_admin_text_init(&page, response, responseCap);
@@ -8330,11 +8718,25 @@ static void vm_mock_admin_render_risk_page(char *response,
         &page,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<title>江湖OL 风险角色管理</title><style>"
-        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.rule{margin:0;color:#475467}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#fff1f3;color:#c01048;font-size:12px;font-weight:650}.state{font-size:12px;font-weight:650}.state.banned{color:#b42318}.state.open{color:#b54708}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:1050px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.role{font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}button{border:0;border-radius:6px;padding:8px 11px;background:#b42318;color:#fff;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{background:#d0d5dd;color:#667085;cursor:not-allowed}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}}</style>"
-        "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">风险角色管理 · 三秒内连续进入战斗审计</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab on\" href=\"/?tab=risk\">风险角色管理</a></nav>"
-        "<section class=\"card\"><h2>审计条件 <span class=\"badge\">相邻进入战斗 ≤ 3000 ms</span></h2><p class=\"rule\">记录来自挑战和挂机两条真实战斗入口。封号是账号级永久访问限制：保存后立即注销该账号所有游戏会话与用户中心会话；之后的登录认证将被拒绝。</p></section>");
+        "<title>江湖OL 风险管理</title><style>"
+        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.risk-directory{display:flex;gap:8px;margin:0 0 16px}.risk-directory a{padding:9px 14px;border:1px solid #d0d5dd;border-radius:8px;color:#475467;background:#fff;text-decoration:none;font-weight:650}.risk-directory a.on{border-color:#175cd3;background:#eef4ff;color:#175cd3}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.rule{margin:0;color:#475467}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#fff1f3;color:#c01048;font-size:12px;font-weight:650}.state{font-size:12px;font-weight:650}.state.banned{color:#b42318}.state.open{color:#b54708}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%%;min-width:820px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.role{font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}button{border:0;border-radius:6px;padding:8px 11px;background:#b42318;color:#fff;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{background:#d0d5dd;color:#667085;cursor:not-allowed}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}}</style>"
+        "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">风险管理 · 风险角色审计与已封锁来源 IP</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab on\" href=\"/?tab=risk\">风险管理</a></nav>"
+        "<nav class=\"risk-directory\" aria-label=\"风险目录\"><a class=\"%s\" href=\"/?tab=risk&amp;risk_kind=roles\">风险角色</a><a class=\"%s\" href=\"/?tab=risk&amp;risk_kind=ips\">风险 IP</a></nav>",
+        directory == VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES ? "on" : "",
+        directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS ? "on" : "");
+    if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>审计条件 <span class=\"badge\">相邻进入战斗 ≤ 3000 ms</span></h2><p class=\"rule\">记录来自挑战和挂机两条真实战斗入口。封号是账号级永久访问限制：保存后立即注销该账号所有游戏会话与用户中心会话；之后的登录认证将被拒绝。</p></section>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>封锁条件 <span class=\"badge\">连续凭据失败 15 次</span></h2><p class=\"rule\">IP 封锁跨游戏登录、用户中心和后台登录共享且持久化。清除会删除该 IP 的封锁及失败计数，并立即同步当前服务进程的封锁缓存；该 IP 之后的凭据失败将从第 1 次重新计数。</p></section>");
+    }
     if (status[0] != 0 && message[0] != 0)
     {
         vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
@@ -8342,8 +8744,10 @@ static void vm_mock_admin_render_risk_page(char *response,
         vm_mock_admin_text_append_html(&page, message);
         vm_mock_admin_text_appendf(&page, "</div>");
     }
+    if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES)
+    {
     vm_mock_admin_text_appendf(&page,
-        "<section class=\"card\"><h2>风险审计列表</h2>");
+        "<section class=\"card\"><h2>风险角色审计列表</h2>");
     if (!queryOk)
     {
         vm_mock_admin_text_appendf(&page,
@@ -8413,19 +8817,83 @@ static void vm_mock_admin_render_risk_page(char *response,
             pageNumber, pageCount, totalCount);
         if (pageNumber > 1)
             vm_mock_admin_text_appendf(
-                &page, "<a href=\"/?tab=risk&amp;page=%u\">上一页</a>",
+                &page, "<a href=\"/?tab=risk&amp;risk_kind=roles&amp;page=%u\">上一页</a>",
                 pageNumber - 1);
         if (pageNumber < pageCount)
             vm_mock_admin_text_appendf(
-                &page, "<a href=\"/?tab=risk&amp;page=%u\">下一页</a>",
+                &page, "<a href=\"/?tab=risk&amp;risk_kind=roles&amp;page=%u\">下一页</a>",
                 pageNumber + 1);
         vm_mock_admin_text_appendf(&page,
             "</div></div></section></main></body></html>");
     }
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>风险 IP 列表 <span class=\"badge\">已封锁</span></h2>");
+        if (!queryOk)
+        {
+            vm_mock_admin_text_appendf(
+                &page,
+                "<p class=\"muted\">无法读取已封锁 IP：%s</p></section></main></body></html>",
+                vm_mysql_last_error());
+        }
+        else if (ipPage.count == 0)
+        {
+            vm_mock_admin_text_appendf(
+                &page,
+                "<p class=\"muted\">暂无已封锁的来源 IP。</p></section></main></body></html>");
+        }
+        else
+        {
+            vm_mock_admin_text_appendf(
+                &page,
+                "<div class=\"table-wrap\"><table><thead><tr><th>来源 IP</th><th>失败次数</th><th>封锁时间</th><th>最近更新</th><th>状态</th><th>操作</th></tr></thead><tbody>");
+            for (u32 i = 0; i < ipPage.count; ++i)
+            {
+                const vm_mock_admin_risk_ip_row *row = &ipPage.rows[i];
+
+                vm_mock_admin_text_appendf(&page,
+                    "<tr><td class=\"mono\">");
+                vm_mock_admin_text_append_html(&page, row->address);
+                vm_mock_admin_text_appendf(&page,
+                    "</td><td class=\"mono\">%u / %u</td><td class=\"mono\">",
+                    row->failedAttempts, VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT);
+                vm_mock_admin_text_append_html(
+                    &page, row->blockedAt[0] ? row->blockedAt : "—");
+                vm_mock_admin_text_appendf(&page, "</td><td class=\"mono\">");
+                vm_mock_admin_text_append_html(&page, row->updatedAt);
+                vm_mock_admin_text_appendf(&page,
+                    "</td><td><span class=\"state banned\">已封锁</span></td><td><form method=\"post\" action=\"/action\" onsubmit=\"return confirm('确认清除该 IP 的封锁和失败计数？该 IP 可立即再次尝试登录。');\"><input type=\"hidden\" name=\"action\" value=\"clear-risk-ip\"><input type=\"hidden\" name=\"risk_ip\" value=\"");
+                vm_mock_admin_text_append_html(&page, row->address);
+                vm_mock_admin_text_appendf(
+                    &page,
+                    "\"><input type=\"hidden\" name=\"page\" value=\"%u\"><button type=\"submit\">清除封锁</button></form></td></tr>",
+                    pageNumber);
+            }
+            vm_mock_admin_text_appendf(
+                &page,
+                "</tbody></table></div><div class=\"pages\"><span>第 %u / %u 页 · 共 %u 条</span><div class=\"page-links\">",
+                pageNumber, pageCount, totalCount);
+            if (pageNumber > 1)
+                vm_mock_admin_text_appendf(
+                    &page,
+                    "<a href=\"/?tab=risk&amp;risk_kind=ips&amp;page=%u\">上一页</a>",
+                    pageNumber - 1);
+            if (pageNumber < pageCount)
+                vm_mock_admin_text_appendf(
+                    &page,
+                    "<a href=\"/?tab=risk&amp;risk_kind=ips&amp;page=%u\">下一页</a>",
+                    pageNumber + 1);
+            vm_mock_admin_text_appendf(
+                &page, "</div></div></section></main></body></html>");
+        }
+    }
     if (page.truncated)
     {
         snprintf(response, responseCap,
-                 "<!doctype html><meta charset=\"utf-8\"><p>风险角色管理页面超过大小限制。</p>");
+                 "<!doctype html><meta charset=\"utf-8\"><p>风险管理页面超过大小限制。</p>");
     }
 }
 
@@ -8473,6 +8941,7 @@ static const vm_mock_admin_operation_log_action
     {"grant-item", "发放物品/装备"},
     {"reset-role-selected-scene", "重置角色位置"},
     {"ban-risk-account", "封禁风险账号"},
+    {"clear-risk-ip", "清除风险 IP 封锁"},
     {"player-trade", "玩家交易"},
     {"discard-equipment", "丢弃装备"},
     {"recycle-equipment", "装备回收"},
@@ -8913,7 +9382,7 @@ static void vm_mock_admin_render_operation_log_page(char *response,
         "<title>江湖OL 后台操作日志</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 10px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.filter{display:flex;align-items:end;gap:8px;flex-wrap:wrap}.filter>label{display:grid;gap:4px;color:#475467;font-size:12px}.filter input[type=text]{min-width:250px;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;font:inherit}.type-filter{display:grid;gap:6px;flex:1 1 100%%;margin:0;padding:8px 10px;border:1px solid #d0d5dd;border-radius:7px}.type-filter legend{padding:0 4px;color:#475467;font-size:12px}.type-options{display:flex;flex-wrap:wrap;gap:6px 12px}.type-options label{display:inline-flex;align-items:center;gap:5px;color:#344054;font-size:13px;white-space:nowrap}.type-options input{margin:0}.filter button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;font:inherit;cursor:pointer}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%%;min-width:960px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.tag{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px;font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}.filter input[type=text]{min-width:0;width:100%%}}</style>"
         "<script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">操作日志 · 记录后台账号管理、操作者账号和游戏内已提交行为</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=global-rewards\">全服奖励管理</a><a class=\"tab on\" href=\"/?tab=operations\">操作日志</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=security\">安全设置</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=global-rewards\">全服奖励管理</a><a class=\"tab on\" href=\"/?tab=operations\">操作日志</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=security\">安全设置</a><a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>"
         "<section class=\"card\"><h2>查询操作日志</h2><form class=\"filter\" method=\"get\"><input type=\"hidden\" name=\"tab\" value=\"operations\"><label><span>目标账号（留空显示全部）</span><input type=\"text\" name=\"account\" maxlength=\"63\" value=\"");
     vm_mock_admin_text_append_html(&page, accountFilter);
     vm_mock_admin_text_appendf(
@@ -9418,13 +9887,13 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 场景战斗怪管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex:none}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 10px}.sub,.hint,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 14px;overflow:auto;flex:none}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec;white-space:nowrap}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{border:1px solid #d0d5dd;background:#fff;color:#475467;border-radius:6px;padding:8px 12px}.grid{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.scenes{display:flex;min-height:0;flex-direction:column}.scene-list{display:flex;flex:1;min-height:0;overflow:auto;flex-direction:column;gap:4px;padding-right:4px}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.size{font-size:12px;color:#98a2b3;white-space:nowrap}.editor{overflow:auto;padding-right:4px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:13px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}.summary{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.badge.warn{background:#fffaeb;color:#b54708}.callout{padding:12px;border:1px solid #b2ddff;border-radius:8px;background:#eff8ff;color:#1849a9;margin-bottom:14px}.deploy{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:0 0 14px;padding:12px;border:1px solid #d0d5dd;border-radius:8px;background:#f8fafc}.fields{display:grid;grid-template-columns:90px minmax(125px,1fr) minmax(170px,1.3fr) 82px 74px 74px 74px 90px auto;gap:9px;align-items:end}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.secondary{background:#475467}.danger{background:#b42318}.monster-list{display:grid;gap:11px}.monster{padding:13px;border:1px solid #e4e7ec;border-radius:9px}.monster.off{opacity:.62;background:#f9fafb}.monster-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.monster-head h3{font-size:15px;margin:0}.actions{display:flex;gap:8px;align-items:end}.new{border-color:#b2ddff;background:#fbfdff}.foot{font-size:12px;margin:13px 0 0;color:#667085}@media(max-width:920px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:16px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.scenes{max-height:250px}.editor{overflow:visible}.fields{grid-template-columns:1fr 1fr}.actions{align-items:stretch}}@media(max-width:560px){.fields{grid-template-columns:1fr}.deploy{align-items:stretch;flex-direction:column}.actions{display:grid;grid-template-columns:1fr}}</style></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">场景战斗怪 · 以客户端原生 SCE2 kind-3 战斗节点部署</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab on\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
-        "<style>.actor-picker-field{display:grid;gap:4px}.actor-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.actor-picker-trigger small{color:#667085;font-weight:400}.actor-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.actor-picker-panel{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.actor-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.actor-picker-head h3{font-size:19px;margin:0}.actor-picker-head p{margin:2px 0 0;color:#667085}.actor-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.actor-picker-tools{padding:14px 20px 10px}.actor-picker-tools label{display:grid;gap:4px}.actor-picker-tools label>span{font-size:12px;color:#667085}.actor-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.actor-picker-error{color:#b42318;font-weight:600}.actor-picker-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;min-height:160px;overflow:auto;padding:0 20px 20px}.actor-choice{display:grid;grid-template-rows:92px auto;gap:7px;padding:10px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.actor-choice:hover{border-color:#84adff;background:#f5f8ff}.actor-choice img{display:block;width:100%%;height:88px;object-fit:contain;image-rendering:pixelated;background:#f9fafb;border-radius:5px}.actor-choice strong{font-size:12px;overflow-wrap:anywhere}.actor-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden!important}</style>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab on\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>"
+        "<style>.actor-picker-field{display:grid;gap:4px}.actor-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.actor-picker-trigger small{color:#667085;font-weight:400}.actor-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.actor-picker-panel{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.actor-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.actor-picker-head h3{font-size:19px;margin:0}.actor-picker-head p{margin:2px 0 0;color:#667085}.actor-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.actor-picker-tools{padding:14px 20px 10px}.actor-picker-tools label{display:grid;gap:4px}.actor-picker-tools label>span{font-size:12px;color:#667085}.actor-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.actor-picker-error{color:#b42318;font-weight:600}.actor-picker-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;min-height:160px;overflow:auto;padding:0 20px 20px}.actor-choice{display:grid;grid-template-rows:92px auto;gap:7px;padding:10px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.actor-choice:hover{border-color:#84adff;background:#f5f8ff}.actor-choice img{display:block;width:100%%;height:88px;object-fit:contain;image-rendering:pixelated;background:#f9fafb;border-radius:5px}.actor-choice strong{font-size:12px;overflow-wrap:anywhere}.actor-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.monster-picker-list{grid-template-columns:repeat(2,minmax(0,1fr));min-height:140px}.monster-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.monster-choice:hover,.monster-choice.selected{border-color:#84adff;background:#f5f8ff}.monster-choice strong{font-size:14px}.monster-choice span{color:#667085;font-size:12px}[hidden]{display:none!important}.modal-open{overflow:hidden!important}</style>"
         "<div class=\"grid\"><aside class=\"card scenes\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
         sceneCount);
     vm_mock_admin_text_appendf(
         &page,
-        "<style>@media(min-width:921px){.fields{grid-template-columns:90px minmax(125px,1fr) minmax(170px,1.3fr) 82px 74px 74px 74px 90px 82px auto}}</style>");
+        "<style>.battle-monster-fields{grid-template-columns:repeat(6,minmax(0,1fr))}.battle-monster-wide{grid-column:span 2}.battle-monster-fields .actions{grid-column:1/-1;justify-content:flex-end}@media(max-width:920px){.battle-monster-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.battle-monster-wide{grid-column:span 1}}@media(max-width:560px){.battle-monster-fields{grid-template-columns:1fr}.battle-monster-fields .actions{grid-column:auto}}</style>");
     for (u32 i = 0; i < sceneCount; ++i)
     {
         char sceneUtf8[192];
@@ -9472,7 +9941,12 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         selectedSceneUtf8);
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
-        "\"><div class=\"fields\"><label class=\"field\"><span>怪物 ID</span><input name=\"monster_id\" type=\"number\" min=\"1\" max=\"65535\" required></label><label class=\"field\"><span>显示名称（GBK ≤29字节）</span><input name=\"display_name\" maxlength=\"29\" required></label><label class=\"field\"><span>Actor 资源</span>");
+        "\"><div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>怪物</span>");
+    vm_mock_admin_render_monster_picker_field(
+        &page, "monster_id", 0, true, false, false);
+    vm_mock_admin_text_appendf(
+        &page,
+        "</label><label class=\"field battle-monster-wide\"><span>显示名称（GBK ≤29字节）</span><input name=\"display_name\" maxlength=\"29\" required></label><label class=\"field battle-monster-wide\"><span>Actor 资源</span>");
     vm_mock_admin_render_scene_battle_monster_actor_select(
         &page, actorFiles, actorCount, "actor_resource", NULL);
     vm_mock_admin_text_appendf(&page,
@@ -9480,7 +9954,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
     vm_mock_admin_render_scene_battle_monster_effect_select(
         &page, "effect_resource", "e_ghostfireR.actor");
     vm_mock_admin_text_appendf(&page,
-        "</label><label class=\"field\"><span>X</span><input name=\"pos_x\" type=\"number\" min=\"17\" max=\"65519\" required></label><label class=\"field\"><span>Y</span><input name=\"pos_y\" type=\"number\" min=\"17\" max=\"65519\" required></label><label class=\"field\"><span>数量</span><input name=\"quantity\" type=\"number\" min=\"1\" max=\"5\" value=\"1\" required></label><label class=\"field\"><span>视觉提示</span><select name=\"visual_hint\"><option value=\"5\">5 · 普通</option><option value=\"6\">6 · 强敌</option></select></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\">启用</option><option value=\"0\">停用</option></select></label><div class=\"actions\"><button type=\"submit\">保存草稿</button></div></div></form></article>");
+        "</label><label class=\"field\"><span>X</span><input name=\"pos_x\" type=\"number\" min=\"17\" max=\"65519\" required></label><label class=\"field\"><span>Y</span><input name=\"pos_y\" type=\"number\" min=\"17\" max=\"65519\" required></label><label class=\"field\"><span>数量</span><input name=\"quantity\" type=\"number\" min=\"1\" max=\"5\" value=\"1\" required></label><label class=\"field\"><span>视觉提示</span><select name=\"visual_hint\"><option value=\"5\">5 · 普通</option><option value=\"6\">6 · 强敌</option></select></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\">启用</option><option value=\"0\">停用</option></select></label><div class=\"actions battle-monster-actions\"><button type=\"submit\">保存草稿</button></div></div></form></article>");
     for (u32 i = 0; i < rowCount; ++i)
     {
         char nameUtf8[128];
@@ -9497,10 +9971,14 @@ static void vm_mock_admin_render_scene_battle_monster_page(
             rows[i].enabled ? "启用" : "停用", rows[i].entryId);
         vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
         vm_mock_admin_text_appendf(&page,
-            "\"><div class=\"fields\"><label class=\"field\"><span>怪物 ID</span><input name=\"monster_id\" type=\"number\" min=\"1\" max=\"65535\" value=\"%u\" required></label><label class=\"field\"><span>显示名称</span><input name=\"display_name\" maxlength=\"29\" value=\"",
-            rows[i].monsterId);
+        "\"><div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>怪物</span>");
+        vm_mock_admin_render_monster_picker_field(
+            &page, "monster_id", rows[i].monsterId, true, false, false);
+        vm_mock_admin_text_appendf(
+            &page,
+            "</label><label class=\"field battle-monster-wide\"><span>显示名称</span><input name=\"display_name\" maxlength=\"29\" value=\"");
         vm_mock_admin_text_append_html(&page, nameUtf8);
-        vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>Actor 资源</span>");
+        vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field battle-monster-wide\"><span>Actor 资源</span>");
         vm_mock_admin_render_scene_battle_monster_actor_select(
             &page, actorFiles, actorCount, "actor_resource",
             rows[i].actorResource);
@@ -9524,6 +10002,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         "</div><p class=\"foot\">怪物 ID 决定怪物属性、掉落和任务击败条件；数量会以所填坐标为中心展开为最多 5 个独立节点。本体 Actor 负责碰撞与战斗，退场火团只能填写在 field18。普通 NPC（含任务发布者）不属于此配置层。</p>");
     vm_mock_admin_render_scene_battle_actor_picker_modal(
         &page, actorFiles, actorCount);
+    vm_mock_admin_render_monster_picker_modal(&page);
     vm_mock_admin_text_appendf(
         &page,
         "</section></div></main><script src=\"/admin.js\"></script></body></html>");
@@ -9664,7 +10143,7 @@ static void vm_mock_admin_render_actor_resource_page(char *response,
         "<title>江湖OL 游戏内容管理 · Actor 资源</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1440px;margin:0 auto;padding:28px 18px 46px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0}h3{font-size:15px;margin:0}.sub,.muted{color:#667085;margin:4px 0 20px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{border:1px solid #d0d5dd;background:#fff;color:#475467}.layout{display:grid;grid-template-columns:285px minmax(0,1fr);gap:16px;align-items:start}.card{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;box-shadow:0 1px 2px #1018280d}.actor-list{display:grid;gap:5px;max-height:calc(100vh - 225px);overflow:auto;padding-right:3px}.actor-link{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:7px;color:#344054;text-decoration:none}.actor-link:hover,.actor-link.on{background:#eef4ff;color:#175cd3}.actor-link small{color:#98a2b3}.new-link{display:block;margin:12px 0;padding:9px 10px;border-radius:7px;background:#175cd3;color:#fff;text-align:center;text-decoration:none;font-weight:650}.new-link:hover{background:#1849a9}.notice{padding:10px 12px;border-radius:8px;margin:0 0 14px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}.actor-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:14px}.preview{width:156px;min-width:156px;height:156px;display:grid;place-items:center;border:1px solid #e4e7ec;border-radius:10px;background:linear-gradient(135deg,#f8fafc,#eef4ff);overflow:hidden}.preview img{max-width:148px;max-height:148px;image-rendering:pixelated}.editor{display:grid;gap:13px}.top-fields{display:grid;grid-template-columns:minmax(230px,1fr) auto;gap:10px;align-items:end}.top-fields label,.editor>label{display:grid;gap:5px;color:#344054;font-weight:600}.top-fields label>span,.editor>label>span{font-size:12px;color:#667085;font-weight:500}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:7px;padding:9px 10px;background:#fff;color:#1f2937;font:13px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}textarea{resize:vertical;min-height:76px}button{border:0;border-radius:7px;padding:9px 13px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}button:hover{background:#1849a9}.template{display:flex;gap:8px;align-items:end;padding:12px;border:1px solid #e4e7ec;border-radius:9px;background:#f8fafc}.template label{display:grid;gap:4px;flex:1;color:#475467}.template label span{font-size:12px}.contract{margin:0;padding:10px 12px;border-left:3px solid #175cd3;border-radius:4px;background:#eef4ff;color:#344054}.stats{display:flex;gap:8px;flex-wrap:wrap}.badge{border-radius:999px;background:#eef4ff;color:#175cd3;padding:3px 8px;font-size:12px}.empty{padding:28px;border:1px dashed #d0d5dd;border-radius:9px;color:#667085;text-align:center}@media(max-width:900px){.layout{grid-template-columns:1fr}.actor-list{max-height:250px}.preview{width:116px;min-width:116px;height:116px}.preview img{max-width:108px;max-height:108px}}@media(max-width:580px){.wrap{padding:18px 10px}.top-fields{grid-template-columns:1fr}.actor-head{align-items:flex-start}.preview{display:none}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">游戏内容管理 · 编辑服务端权威 .actor 结构；保存后会用原生内容更新让客户端重新下载。</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><div class=\"layout\"><aside class=\"card\"><h2>文件格式</h2><nav style=\"display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 16px\"><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a><a style=\"padding:7px 9px;border:1px solid #175cd3;border-radius:7px;color:#fff;background:#175cd3;text-decoration:none\" href=\"/?tab=content&amp;content_kind=actor\">Actor 资源</a></nav><h2>已有 Actor（%u）</h2><div class=\"actor-list\" data-admin-list><a class=\"new-link%s\" data-admin-select%s href=\"/?tab=content&amp;content_kind=actor&amp;new=1\">新建 Actor 资源</a>",
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav><div class=\"layout\"><aside class=\"card\"><h2>文件格式</h2><nav style=\"display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 16px\"><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a style=\"padding:7px 9px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a><a style=\"padding:7px 9px;border:1px solid #175cd3;border-radius:7px;color:#fff;background:#175cd3;text-decoration:none\" href=\"/?tab=content&amp;content_kind=actor\">Actor 资源</a></nav><h2>已有 Actor（%u）</h2><div class=\"actor-list\" data-admin-list><a class=\"new-link%s\" data-admin-select%s href=\"/?tab=content&amp;content_kind=actor&amp;new=1\">新建 Actor 资源</a>",
         fileCount, newMode ? " on" : "",
         newMode ? " aria-current=\"page\"" : "");
     for (u32 i = 0; i < fileCount; ++i)
@@ -9886,9 +10365,9 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.account-wallet{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap}.account-wallet .inline{margin:0 0 0 auto}.account-wallet .inline input{min-width:160px}@media(max-width:620px){.account-wallet .inline{width:100%%;margin:0}.account-wallet .inline input{min-width:0}}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.stack label{display:grid;gap:4px}.stack label>span{font-size:12px;color:#667085}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.role-action-trigger{min-width:78px}.role-operation-modal{position:fixed;inset:0;z-index:1100;display:grid;place-items:center;padding:28px;background:#10182899;backdrop-filter:blur(2px)}.role-operation-panel{width:min(1060px,100%%);max-height:calc(100vh - 56px);overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.role-operation-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid #eaecf0}.role-operation-head h3{margin:0;font-size:20px}.role-operation-head p{margin:3px 0 0;color:#667085}.role-operation-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.role-operation-close:hover{background:#e4e7ec;color:#1d2939}.role-operation-layout{display:grid;grid-template-columns:208px minmax(0,1fr);min-height:480px;max-height:calc(100vh - 168px)}.role-operation-nav{display:grid;align-content:start;gap:7px;padding:18px;border-right:1px solid #eaecf0;background:#f8fafc}.role-operation-nav button{border:1px solid transparent;background:transparent;color:#475467;text-align:left}.role-operation-nav button:hover{background:#eef4ff;color:#175cd3}.role-operation-nav button.on,.role-operation-nav button[aria-current=page]{border-color:#b2ccff;background:#dbeafe;color:#1849a9}.role-operation-content{min-width:0;overflow:auto;padding:26px;overscroll-behavior:contain}.role-operation-pane{max-width:650px}.role-operation-pane h4{margin:0 0 6px;font-size:17px}.role-operation-pane>.muted{margin:0 0 18px}.role-operation-pane .item-field{display:grid;gap:4px}.role-operation-pane .item-field>span{font-size:12px;color:#667085}.role-operation-actions{display:flex;justify-content:flex-end;margin-top:8px}.role-operation-pane .item-picker-trigger{min-height:42px}.role-operation-pane input{min-height:40px}.role-equipment-list{display:grid;gap:10px}.role-equipment-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(210px,.75fr);gap:14px;align-items:center;padding:13px;border:1px solid #e4e7ec;border-radius:10px;background:#fff}.role-equipment-summary{display:grid;gap:3px;min-width:0}.role-equipment-summary strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.role-equipment-summary small{color:#667085}.role-equipment-slot{justify-self:start;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.role-equipment-form{display:grid;grid-template-columns:minmax(104px,1fr) auto;gap:8px;align-items:end}.role-equipment-form label{display:grid;gap:4px}.role-equipment-form label>span{font-size:12px;color:#667085}.role-equipment-empty{margin:0;padding:20px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.role-equipment-note{margin:12px 0 0!important;font-size:12px}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.stack label{display:grid;gap:4px}.stack label>span{font-size:12px;color:#667085}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.role-action-trigger{min-width:78px}.role-operation-modal{position:fixed;inset:0;z-index:" VM_MOCK_ADMIN_STRINGIFY(VM_MOCK_ADMIN_ROLE_OPERATION_MODAL_Z_INDEX) ";display:grid;place-items:center;padding:28px;background:#10182899;backdrop-filter:blur(2px)}.role-operation-panel{width:min(1060px,100%%);max-height:calc(100vh - 56px);overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.role-operation-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid #eaecf0}.role-operation-head h3{margin:0;font-size:20px}.role-operation-head p{margin:3px 0 0;color:#667085}.role-operation-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.role-operation-close:hover{background:#e4e7ec;color:#1d2939}.role-operation-layout{display:grid;grid-template-columns:208px minmax(0,1fr);min-height:480px;max-height:calc(100vh - 168px)}.role-operation-nav{display:grid;align-content:start;gap:7px;padding:18px;border-right:1px solid #eaecf0;background:#f8fafc}.role-operation-nav button{border:1px solid transparent;background:transparent;color:#475467;text-align:left}.role-operation-nav button:hover{background:#eef4ff;color:#175cd3}.role-operation-nav button.on,.role-operation-nav button[aria-current=page]{border-color:#b2ccff;background:#dbeafe;color:#1849a9}.role-operation-content{min-width:0;overflow:auto;padding:26px;overscroll-behavior:contain}.role-operation-pane{max-width:650px}.role-operation-pane h4{margin:0 0 6px;font-size:17px}.role-operation-pane>.muted{margin:0 0 18px}.role-operation-pane .item-field{display:grid;gap:4px}.role-operation-pane .item-field>span{font-size:12px;color:#667085}.role-operation-actions{display:flex;justify-content:flex-end;margin-top:8px}.role-operation-pane .item-picker-trigger{min-height:42px}.role-operation-pane input{min-height:40px}.role-equipment-list{display:grid;gap:10px}.role-equipment-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(210px,.75fr);gap:14px;align-items:center;padding:13px;border:1px solid #e4e7ec;border-radius:10px;background:#fff}.role-equipment-summary{display:grid;gap:3px;min-width:0}.role-equipment-summary strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.role-equipment-summary small{color:#667085}.role-equipment-slot{justify-self:start;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.role-equipment-form{display:grid;grid-template-columns:minmax(104px,1fr) auto;gap:8px;align-items:end}.role-equipment-form label{display:grid;gap:4px}.role-equipment-form label>span{font-size:12px;color:#667085}.role-equipment-empty{margin:0;padding:20px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.role-equipment-note{margin:12px 0 0!important;font-size:12px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
-        "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
+        "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:" VM_MOCK_ADMIN_STRINGIFY(VM_MOCK_ADMIN_ITEM_PICKER_MODAL_Z_INDEX) ";display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.item-modal,.role-operation-modal{padding:10px}.item-picker-panel,.role-operation-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}.role-operation-head{padding:16px}.role-operation-layout{grid-template-columns:1fr;min-height:0;max-height:calc(100vh - 118px)}.role-operation-nav{grid-template-columns:repeat(6,minmax(118px,1fr));overflow:auto;padding:10px;border-right:0;border-bottom:1px solid #eaecf0}.role-operation-nav button{text-align:center}.role-operation-content{padding:18px}.role-operation-actions{justify-content:stretch}.role-operation-actions button{width:100%%}.role-equipment-row,.role-equipment-form{grid-template-columns:1fr}.role-equipment-form button{width:100%%}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
@@ -9904,7 +10383,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
         "<a class=\"tab\" href=\"/?tab=security\">安全设置</a>"
-        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><div class=\"grid\">"
+        "<a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><form class=\"account-search\" data-account-search-form role=\"search\"><input data-account-search maxlength=\"63\" placeholder=\"搜索账号名\" aria-label=\"搜索账号名\" value=\"",
         accountTotal);
     vm_mock_admin_text_append_html(&page, accountSearch);
@@ -9995,7 +10474,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                        gold, silver, copper, role->money,
                                        role->roleId, role->roleId);
             vm_mock_admin_render_role_operation_modal(
-                &page, selectedAccount, role, roleNameUtf8);
+                &page, selectedAccount, role, roleNameUtf8, resetSceneFiles,
+                resetSceneCount);
             vm_mock_admin_text_appendf(&page, "</td></tr>");
         }
         if (g_vm_net_mock_role_db.roleCount == 0)
@@ -10010,10 +10490,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_text_appendf(&page, "</td></tr>");
     }
     vm_mock_admin_text_appendf(&page, "</tbody></table></div>");
-    vm_mock_admin_render_role_reset_scene_catalog(
-        &page, resetSceneFiles, resetSceneCount);
     if (roleOperationsAvailable)
+    {
+        vm_mock_admin_render_scene_picker_modal(&page);
         vm_mock_admin_render_item_picker_modal(&page, false);
+    }
     vm_mock_admin_text_appendf(&page, "</div><div class=\"forms\">"
                                "<div class=\"card\"><h2>创建账号</h2><form class=\"stack\" method=\"post\" action=\"/action\">"
                                "<input type=\"hidden\" name=\"action\" value=\"create-account\">"
@@ -10624,14 +11105,16 @@ static void vm_mock_admin_redirect_proxy_security(
     vm_mock_admin_send_location(client, location, NULL);
 }
 
-static void vm_mock_admin_redirect_risk(vm_mock_service_socket client,
-                                        u32 page,
-                                        const char *status,
-                                        const char *message)
+static void vm_mock_admin_redirect_risk_directory(
+    vm_mock_service_socket client, const char *directory, u32 page,
+    const char *status, const char *message)
 {
     char statusEncoded[64];
     char messageEncoded[768];
     char location[1100];
+    const char *riskKind = directory != NULL && strcmp(directory, "ips") == 0
+                               ? "ips"
+                               : "roles";
 
     vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
                              sizeof(statusEncoded));
@@ -10639,9 +11122,27 @@ static void vm_mock_admin_redirect_risk(vm_mock_service_socket client,
                              sizeof(messageEncoded));
     snprintf(location, sizeof(location),
              VM_MOCK_ADMIN_ROOT_PATH
-             "?tab=risk&page=%u&status=%s&message=%s",
-             page ? page : 1, statusEncoded, messageEncoded);
+             "?tab=risk&risk_kind=%s&page=%u&status=%s&message=%s",
+             riskKind, page ? page : 1, statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_risk(vm_mock_service_socket client,
+                                        u32 page,
+                                        const char *status,
+                                        const char *message)
+{
+    vm_mock_admin_redirect_risk_directory(client, "roles", page, status,
+                                          message);
+}
+
+static void vm_mock_admin_redirect_risk_ip(vm_mock_service_socket client,
+                                           u32 page,
+                                           const char *status,
+                                           const char *message)
+{
+    vm_mock_admin_redirect_risk_directory(client, "ips", page, status,
+                                          message);
 }
 
 static void vm_mock_admin_redirect_actors(vm_mock_service_socket client,
@@ -10821,6 +11322,8 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
     char receiverUtf8[64];
     char goalUtf8[384];
     char rewardUtf8[128];
+    char requirementScene1Utf8[192];
+    char requirementScene2Utf8[192];
     char offerUtf8[768];
     char activeUtf8[768];
     char completedUtf8[768];
@@ -10835,6 +11338,8 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
     memset(receiverUtf8, 0, sizeof(receiverUtf8));
     memset(goalUtf8, 0, sizeof(goalUtf8));
     memset(rewardUtf8, 0, sizeof(rewardUtf8));
+    memset(requirementScene1Utf8, 0, sizeof(requirementScene1Utf8));
+    memset(requirementScene2Utf8, 0, sizeof(requirementScene2Utf8));
     memset(offerUtf8, 0, sizeof(offerUtf8));
     memset(activeUtf8, 0, sizeof(activeUtf8));
     memset(completedUtf8, 0, sizeof(completedUtf8));
@@ -10871,6 +11376,10 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
         !vm_mock_admin_form_value(body, "receiver", receiverUtf8, sizeof(receiverUtf8)) ||
         !vm_mock_admin_form_value(body, "goal", goalUtf8, sizeof(goalUtf8)) ||
         !vm_mock_admin_form_value(body, "reward_text", rewardUtf8, sizeof(rewardUtf8)) ||
+        !vm_mock_admin_form_value(body, "requirement_scene1", requirementScene1Utf8,
+                                  sizeof(requirementScene1Utf8)) ||
+        !vm_mock_admin_form_value(body, "requirement_scene2", requirementScene2Utf8,
+                                  sizeof(requirementScene2Utf8)) ||
         !vm_mock_admin_form_value(body, "offer_dialog", offerUtf8, sizeof(offerUtf8)) ||
         !vm_mock_admin_form_value(body, "active_dialog", activeUtf8, sizeof(activeUtf8)) ||
         !vm_mock_admin_form_value(body, "completed_dialog", completedUtf8, sizeof(completedUtf8)))
@@ -10973,6 +11482,12 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
                                              sizeof(task.goal), true) ||
         !vm_mock_admin_utf8_to_gbk_task_text(rewardUtf8, task.rewardText,
                                              sizeof(task.rewardText), true) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(requirementScene1Utf8,
+                                             task.requirementScene1,
+                                             sizeof(task.requirementScene1), true) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(requirementScene2Utf8,
+                                             task.requirementScene2,
+                                             sizeof(task.requirementScene2), true) ||
         !vm_mock_admin_utf8_to_gbk_task_text(offerUtf8, task.offerDialog,
                                              sizeof(task.offerDialog), true) ||
         !vm_mock_admin_utf8_to_gbk_task_text(activeUtf8, task.activeDialog,
@@ -13223,6 +13738,66 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
         strcmp(action, "delete-trusted-proxy-source") == 0)
     {
         vm_mock_admin_handle_trusted_proxy_source_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "clear-risk-ip") == 0)
+    {
+        char riskIp[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+        char pageText[16];
+        char ipAuditTarget[64];
+        char message[192];
+        u32 pageNumber = 1;
+        bool cleared = false;
+
+        memset(riskIp, 0, sizeof(riskIp));
+        memset(pageText, 0, sizeof(pageText));
+        memset(ipAuditTarget, 0, sizeof(ipAuditTarget));
+        memset(message, 0, sizeof(message));
+        (void)vm_mock_admin_form_value(body, "page", pageText,
+                                       sizeof(pageText));
+        if (pageText[0] != 0 &&
+            (!vm_net_mock_parse_u32_strict(pageText, &pageNumber) ||
+             pageNumber == 0))
+        {
+            pageNumber = 1;
+        }
+        if (!vm_mock_admin_form_value(body, "risk_ip", riskIp,
+                                      sizeof(riskIp)) ||
+            !vm_mock_service_login_ip_is_valid(riskIp))
+        {
+            vm_mock_admin_redirect_risk_ip(client, pageNumber, "error",
+                                           "来源 IP 参数无效");
+            return;
+        }
+        if (!vm_mock_service_login_ip_clear_block(riskIp, &cleared))
+        {
+            vm_mock_admin_redirect_risk_ip(
+                client, pageNumber, "error",
+                "清除来源 IP 封锁失败，请检查数据库连接");
+            return;
+        }
+        if (!cleared)
+        {
+            vm_mock_admin_redirect_risk_ip(client, pageNumber, "error",
+                                           "该来源 IP 当前未处于封锁状态");
+            return;
+        }
+        snprintf(ipAuditTarget, sizeof(ipAuditTarget), "ip:%s", riskIp);
+        snprintf(operationDetail, sizeof(operationDetail),
+                 "清除风险 IP 封锁和失败计数：%s", riskIp);
+        if (!vm_mock_admin_operation_log_record(
+                "clear-risk-ip", ipAuditTarget, 0, 0, 0, 0,
+                operationDetail, operatorAccountId))
+        {
+            vm_mock_admin_redirect_risk_ip(
+                client, pageNumber, "error",
+                "风险 IP 已清除，但操作日志写入失败，请检查数据库");
+            return;
+        }
+        snprintf(message, sizeof(message),
+                 "已清除来源 IP %s 的封锁及失败计数；后续凭据失败将从第 1 次开始统计",
+                 riskIp);
+        vm_mock_admin_redirect_risk_ip(client, pageNumber, "ok", message);
         return;
     }
     if (strcmp(action, "ban-risk-account") == 0)

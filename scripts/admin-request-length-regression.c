@@ -210,7 +210,7 @@ int main(int argc, char **argv)
                             sizeof(renderedRoleOperations));
     vm_mock_admin_render_role_operation_modal(
         &renderedRoleOperationsPage, "role.ops", &roleOperationFixture,
-        "操作测试角色");
+        "操作测试角色", NULL, 0);
     if (renderedRoleOperationsPage.truncated ||
         strstr(renderedRoleOperations,
                "data-role-operation-tab=\"profile\"") == NULL ||
@@ -218,6 +218,8 @@ int main(int argc, char **argv)
                "data-role-operation-pane=\"items\"") == NULL ||
         strstr(renderedRoleOperations,
                "data-role-operation-pane=\"equipment\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-item-picker-open=\"role-grant-item-37\"") == NULL ||
         strstr(renderedRoleOperations,
                "name=\"action\" value=\"set-role-name\"") == NULL ||
         strstr(renderedRoleOperations,
@@ -886,11 +888,21 @@ int main(int argc, char **argv)
                "const setupRoleOperationModal") == NULL ||
         strstr(g_vm_mock_admin_script, "data-role-operation-open") == NULL ||
         strstr(g_vm_mock_admin_script, "data-role-operation-tab") == NULL ||
+        strstr(g_vm_mock_admin_script, "const roleOperationOpen") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "itemPicker&&!itemPicker.hidden") == NULL ||
         strstr(g_vm_mock_admin_script, "data-admin-confirm") == NULL ||
         strstr(g_vm_mock_admin_script, "setupRoleOperationModal();") == NULL)
     {
         fprintf(stderr,
                 "role operation modal is not owned by the shared admin script\n");
+        return 1;
+    }
+    if (VM_MOCK_ADMIN_ITEM_PICKER_MODAL_Z_INDEX <=
+        VM_MOCK_ADMIN_ROLE_OPERATION_MODAL_Z_INDEX)
+    {
+        fprintf(stderr,
+                "item picker must render above the role operation modal\n");
         return 1;
     }
     if (strstr(g_vm_mock_admin_script, "const setupGlobalRewards") == NULL ||

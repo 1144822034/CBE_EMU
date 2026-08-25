@@ -17,50 +17,6 @@ static u32 vm_net_mock_build_direct_scene_challenge_unready_response(
     return pos;
 }
 
-/* SendNPCInteractReq(action13) has the matching node index but deliberately
- * writes posx/posy as zero.  mmBattle subtype 5 needs the real SCE spawn x/y.
- * The index itself is client authority: CBE 0x01037ED4 obtains it by scanning
- * the active scene table for the requested actor ID.  Do not replace it with
- * a server-derived ordinal, because 27/11 NPC timing changes the table order
- * without changing the static SCE position. */
-static u32 vm_net_mock_build_direct_scene_challenge_battle_response(
-    const u8 *request, u32 requestLen, u32 enemyId, u32 sceneIndex,
-    u32 sceneX, u32 sceneY, u8 *out, u32 outCap)
-{
-    u8 synthetic[192];
-    u32 requestPos = 9;
-    u32 objectStart = 4;
-
-    if (request == NULL || requestLen == 0 || enemyId == 0 ||
-        sceneIndex == 0 || sceneIndex >= 25 || sceneX == 0 || sceneY == 0)
-    {
-        return 0;
-    }
-    memset(synthetic, 0, sizeof(synthetic));
-    synthetic[0] = 'W';
-    synthetic[1] = 'T';
-    synthetic[objectStart] = 1;
-    synthetic[objectStart + 1] = 4;
-    synthetic[objectStart + 2] = 1;
-    if (!vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
-                                    "id", enemyId) ||
-        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
-                                    "index", sceneIndex) ||
-        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
-                                    "posx", sceneX) ||
-        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
-                                    "posy", sceneY))
-    {
-        return 0;
-    }
-    synthetic[2] = (u8)(requestPos >> 8);
-    synthetic[3] = (u8)requestPos;
-    synthetic[objectStart + 3] = (u8)((requestPos - objectStart) >> 8);
-    synthetic[objectStart + 4] = (u8)(requestPos - objectStart);
-    return vm_net_mock_build_challenge_interaction_response_ex(
-        synthetic, requestPos, out, outCap, false, true);
-}
-
 static u32 vm_net_mock_build_challenge_interaction_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -94,36 +50,59 @@ static u32 vm_net_mock_build_challenge_interaction_response(
                                                  &requestedSceneIndex);
 
             valid = valid && requestCarriesSceneIndex &&
-                    requestedSceneIndex != 0 &&
+                    requestedSceneIndex != 0 && requestedSceneIndex < 25 &&
                     vm_net_mock_select_sce_combat_spawn(
                         scene, requestedEnemyId, &configuredSceneIndex,
-                        &expectedSceneX, &expectedSceneY);
+                        &expectedSceneX, &expectedSceneY) &&
+                    expectedSceneX != 0 && expectedSceneX <= UINT16_MAX &&
+                    expectedSceneY != 0 && expectedSceneY <= UINT16_MAX;
         }
 
-        session->instanceChallengeDirectPending = false;
-        session->instanceChallengeDirectSceneMonster = false;
         if (valid)
         {
-            u32 responseLen = directSceneMonster
-                                  ? vm_net_mock_build_direct_scene_challenge_battle_response(
-                                        request, requestLen, requestedEnemyId,
-                                        requestedSceneIndex, expectedSceneX,
-                                        expectedSceneY, out, outCap)
-                                  : vm_net_mock_build_challenge_interaction_response_ex(
-                                        request, requestLen, out, outCap,
-                                        true, false);
+            u32 responseLen = 0;
+
+            if (directSceneMonster)
+            {
+                /* action13 deliberately serializes zero coordinates.  Bind
+                 * its live node index to the SCE coordinates before replying
+                 * with the native scene-node start. A 30/9 confirmation here
+                 * returns control to mmGame; its later 2/2 + 4/5 poll is then
+                 * consumed by that module instead of mmBattle. */
+                session->instanceChallengeSceneIndex = requestedSceneIndex;
+                session->instanceChallengeX = (u16)expectedSceneX;
+                session->instanceChallengeY = (u16)expectedSceneY;
+                responseLen =
+                    vm_net_mock_build_direct_scene_challenge_battle_response(
+                        requestedEnemyId, requestedSceneIndex,
+                        (u16)expectedSceneX, (u16)expectedSceneY, out,
+                        outCap);
+            }
+            else
+            {
+                responseLen = vm_net_mock_build_challenge_interaction_response_ex(
+                    request, requestLen, out, outCap, true, false);
+                session->instanceChallengeDirectPending = false;
+                session->instanceChallengeDirectSceneMonster = false;
+            }
             printf("[info][network] mock_npc_instance_challenge_native client=%08x actor=%u enemy=%u age_ticks=%u scene=%s request=4/1(action13) req_index=%u config_index=%u response=%s resp=%u evidence=JianghuOL.CBE:0x01037ED4+mmBattle:0x66CC/0x67AC\n",
                    session->clientId, session->instanceChallengeActorId,
                    requestedEnemyId, ageTicks, scene, requestedSceneIndex,
                    configuredSceneIndex,
-                   directSceneMonster ? "2/2+4/5-scene" : "4/10-direct",
+                   directSceneMonster ? "2/2+4/5-scene-direct" : "4/10-direct",
                    responseLen);
-            session->instanceChallengeActorId = 0;
-            session->instanceChallengeEnemyId = 0;
-            session->instanceChallengeX = 0;
-            session->instanceChallengeY = 0;
-            session->instanceChallengeTick = 0;
-            session->instanceChallengeScene[0] = 0;
+            if (responseLen != 0)
+            {
+                session->instanceChallengeDirectPending = false;
+                session->instanceChallengeDirectSceneMonster = false;
+                session->instanceChallengeActorId = 0;
+                session->instanceChallengeEnemyId = 0;
+                session->instanceChallengeSceneIndex = 0;
+                session->instanceChallengeX = 0;
+                session->instanceChallengeY = 0;
+                session->instanceChallengeTick = 0;
+                session->instanceChallengeScene[0] = 0;
+            }
             return responseLen;
         }
         if (directSceneMonster)
@@ -135,8 +114,11 @@ static u32 vm_net_mock_build_challenge_interaction_response(
                    session->instanceChallengeEnemyId, requestedEnemyId,
                    requestedSceneIndex, configuredSceneIndex, ageTicks,
                    scene ? scene : "-", responseLen);
+            session->instanceChallengeDirectPending = false;
+            session->instanceChallengeDirectSceneMonster = false;
             session->instanceChallengeActorId = 0;
             session->instanceChallengeEnemyId = 0;
+            session->instanceChallengeSceneIndex = 0;
             session->instanceChallengeX = 0;
             session->instanceChallengeY = 0;
             session->instanceChallengeTick = 0;
@@ -147,6 +129,9 @@ static u32 vm_net_mock_build_challenge_interaction_response(
                session->clientId, session->instanceChallengeActorId,
                session->instanceChallengeEnemyId, requestedEnemyId, ageTicks,
                scene ? scene : "-", session->instanceChallengeScene);
+        session->instanceChallengeDirectPending = false;
+        session->instanceChallengeDirectSceneMonster = false;
+        session->instanceChallengeSceneIndex = 0;
     }
     return vm_net_mock_build_challenge_interaction_response_ex(
         request, requestLen, out, outCap, false, false);
@@ -783,54 +768,6 @@ static int vm_net_mock_append_scene_ready_chat_objects(u8 *out,
     return appended;
 }
 
-/* `scene_runtime_init_and_sync` can expose its first post-enter boundary as
- * either standalone WT6/1 or the composite WT25/5+6/* subset. A direct NPC
- * instance may need one native 30/1 only when its exact target SCE completed
- * a final WT18/7 after that target was armed. The per-file installation
- * generation deliberately survives later Actor/effect chunks, unlike the
- * old single "last completed file" marker. */
-static bool vm_net_mock_try_build_instance_sce_install_reenter(
-    const vm_net_mock_scene_change_target *source,
-    u8 *out, u32 outCap, u32 *responseLenOut)
-{
-    vm_net_mock_scene_change_target target;
-    u32 installGeneration = 0;
-    u32 responseLen = 0;
-
-    if (responseLenOut != NULL)
-        *responseLenOut = 0;
-    if (source == NULL || !source->sceneEnterPosinfoSent ||
-        !source->reenterAfterSceInstall ||
-        source->reenterAfterSceInstallSent)
-    {
-        return false;
-    }
-    installGeneration = vm_net_mock_content_client_resource_install_generation(
-        g_vm_mock_service_active_client_id, source->scene);
-    if (installGeneration == 0 ||
-        installGeneration == source->sceInstallGenerationAtEnter)
-    {
-        return false;
-    }
-
-    target = *source;
-    responseLen = vm_net_mock_build_scene_channel_enter_combo_for_target(
-        &target, out, outCap);
-    if (responseLen == 0)
-        return true;
-    target.reenterAfterSceInstallSent = true;
-    vm_net_mock_remember_scene_change_target(&target);
-    printf("[info][network] mock_instance_sce_install_reenter scene=%s pos=(%u,%u) install_generation=%u->%u response=30/1 next=runtime-sync completion=30/2-no-posinfo evidence=WT18/7+JianghuOL.CBE:0x010396D6\n",
-           target.scene, target.x, target.y,
-           target.sceInstallGenerationAtEnter, installGeneration);
-    vm_autotest_note("mock_instance_sce_install_reenter scene=%s pos=(%u,%u) install_generation=%u->%u response=30/1-once next=runtime-sync evidence=WT18/7->0x010396D6\n",
-                     target.scene, target.x, target.y,
-                     target.sceInstallGenerationAtEnter, installGeneration);
-    if (responseLenOut != NULL)
-        *responseLenOut = responseLen;
-    return true;
-}
-
 /* Role-select has already created its first scene shell from actorinfo. Once
  * that exact SCE has completed WT18/7, its manifest Actor/effect entries can
  * be recorded as cache hits for the runtime request. This only reconciles
@@ -898,7 +835,6 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 timingTailMs = 0;
     u32 timingReadyMs = 0;
     u32 readyNearbyRoleCount = 0;
-    u32 instanceSceInstallReenterLen = 0;
     if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
         return 0;
 
@@ -911,12 +847,6 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     {
         (void)vm_net_mock_scene_client_note_runtime_ready(
             g_vm_net_mock_last_scene_change_target.scene);
-        if (vm_net_mock_try_build_instance_sce_install_reenter(
-                &g_vm_net_mock_last_scene_change_target, out, outCap,
-                &instanceSceInstallReenterLen))
-        {
-            return instanceSceInstallReenterLen;
-        }
     }
     completeTeleportResourceEnter =
         g_vm_net_mock_teleport_stone_direct_enter_pending &&
@@ -1530,7 +1460,6 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     u32 nearbyRoleCount = 0;
     u32 nearbyOtherInfoLen = 0;
     u8 nearbyMoveinfoCount = 0;
-    u32 instanceSceInstallReenterLen = 0;
     char missingResource[64];
     if (outCap < pos || !vm_net_mock_is_scene_task_subset_followup_request(request, requestLen))
         return 0;
@@ -1568,11 +1497,6 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                 g_vm_mock_service_active_client_id, target.scene))
         {
             (void)vm_net_mock_scene_client_note_runtime_ready(target.scene);
-        }
-        if (vm_net_mock_try_build_instance_sce_install_reenter(
-                &target, out, outCap, &instanceSceInstallReenterLen))
-        {
-            return instanceSceInstallReenterLen;
         }
         if (!vm_net_mock_prepare_scene_enter_resources(&target,
                                                        missingResource,
@@ -1756,7 +1680,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
             objectCount += 1;
             g_vm_net_mock_last_scene_change_target.sceneCompletionSent = true;
             printf("[info][network] mock_scene_task_subset_completion "
-                   "scene=%s response=30/2-no-posinfo reason=all-WT18/7-dependencies-ready\n",
+                   "scene=%s response=30/2-no-posinfo reason=scene-shell-runtime-prerequisites-ready\n",
                    target->scene);
         }
         vm_net_mock_mark_completed_scene_change_target(target);

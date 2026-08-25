@@ -624,12 +624,11 @@ cleanup:
     return result;
 }
 
-/* A direct NPC instance is different from a normal 30/1 target only when the
- * target SCE was actually delivered through WT18/7. The first runtime-sync
- * request after that install must re-enter once through 30/1, then the
- * client's natural second runtime request owns the existing NPC/30/2
- * completion. */
-static int assert_instance_sce_install_reenter_order(const char *targetScene)
+/* A direct NPC instance enters its destination shell with the first 30/1.
+ * When the SCE later completes WT18/7, the first runtime follow-up must seed
+ * that existing shell and close it through 30/2 without posinfo. A second
+ * 30/1 would reinitialize its live background Actor array. */
+static int assert_instance_sce_install_completion_order(const char *targetScene)
 {
     const u32 clientId = 0x40506070u;
     vm_net_mock_scene_npcinfo_seed seed;
@@ -639,7 +638,6 @@ static int assert_instance_sce_install_reenter_order(const char *targetScene)
     vm_net_mock_sce_combat_spawn spawn;
     u32 taskSubsetLen = 0;
     u32 responseLen = 0;
-    u32 initialTargetSerial = 0;
     u32 sceneLen = 0;
     u32 sceneStart = 0;
     bool haveSpawn = false;
@@ -719,16 +717,12 @@ static int assert_instance_sce_install_reenter_order(const char *targetScene)
     if (responseLen == 0 ||
         response[4] != 1 ||
         !response_has_object(response, responseLen, 0x1e, 1) ||
-        !g_vm_net_mock_last_scene_change_target_valid ||
-        !g_vm_net_mock_last_scene_change_target.reenterAfterSceInstall ||
-        g_vm_net_mock_last_scene_change_target.reenterAfterSceInstallSent ||
-        g_vm_net_mock_last_scene_change_target.sceInstallGenerationAtEnter != 0)
+        !g_vm_net_mock_last_scene_change_target_valid)
     {
-        fputs("instance 30/1 did not arm the SCE-install re-entry contract\n",
+        fputs("instance 30/1 did not arm the pending target contract\n",
               stderr);
         return 1;
     }
-    initialTargetSerial = g_vm_net_mock_last_scene_change_target_serial;
     if (!build_scene_task_subset_request(taskSubset, sizeof(taskSubset),
                                          &taskSubsetLen) || taskSubsetLen != 39)
     {
@@ -737,31 +731,11 @@ static int assert_instance_sce_install_reenter_order(const char *targetScene)
     }
 
     vm_net_mock_note_update_chunk_complete(targetScene);
-    /* Complete both descriptor dependencies after the SCE. The old one-name
-     * marker was overwritten here and could no longer prove that the SCE
-     * itself installed after direct entry; a field17 Actor must never be
-     * silently treated as a cache hit. */
-    vm_net_mock_note_update_chunk_complete(spawn.actorResource);
+    /* Reconnects can retain the field17 body locally and therefore send no
+     * WT18/7 for it after the manifest.  The target SCE and field18 effect
+     * have completed; field17 must remain pending rather than be invented as
+     * a cache hit or used to hold the already-created shell forever. */
     vm_net_mock_note_update_chunk_complete(spawn.effectResource);
-    responseLen = vm_net_mock_build_scene_task_subset_followup_response(
-        taskSubset, taskSubsetLen, response, sizeof(response));
-    if (responseLen == 0 ||
-        response[4] != 1 ||
-        !response_has_object(response, responseLen, 0x1e, 1) ||
-        count_scene_result_posinfo(response, responseLen, false) != 0 ||
-        !g_vm_net_mock_last_scene_change_target_valid ||
-        !g_vm_net_mock_last_scene_change_target.reenterAfterSceInstallSent ||
-        vm_net_mock_content_client_resource_pending(clientId,
-                                                    spawn.actorResource) ||
-        vm_net_mock_content_client_resource_pending(clientId,
-                                                    spawn.effectResource) ||
-        g_vm_net_mock_last_scene_change_target_serial == initialTargetSerial)
-    {
-        fputs("first composite runtime request after final SCE install did not re-enter once\n",
-              stderr);
-        return 1;
-    }
-
     responseLen = vm_net_mock_build_scene_task_subset_followup_response(
         taskSubset, taskSubsetLen, response, sizeof(response));
     if (responseLen == 0 ||
@@ -770,20 +744,30 @@ static int assert_instance_sce_install_reenter_order(const char *targetScene)
         count_scene_result_posinfo(response, responseLen, false) != 1 ||
         g_vm_net_mock_last_scene_change_target_valid ||
         !g_vm_net_mock_last_completed_scene_change_target_valid ||
-        !g_vm_net_mock_last_completed_scene_change_target.sceneCompletionSent)
+        !g_vm_net_mock_last_completed_scene_change_target.sceneCompletionSent ||
+        !vm_net_mock_content_client_resource_pending(clientId,
+                                                     spawn.actorResource) ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.effectResource) ||
+        response_has_object(response, responseLen, 4, 5))
     {
-        fputs("second instance runtime request did not finish with one no-posinfo 30/2\n",
+        fputs("instance reconnect body-cache boundary did not complete with one no-posinfo 30/2\n",
               stderr);
         return 1;
     }
 
+    /* If the renderer subsequently proves the body missing and requests its
+     * normal WT18/7, completing that request must not recreate the scene. */
+    vm_net_mock_note_update_chunk_complete(spawn.actorResource);
     responseLen = vm_net_mock_build_scene_task_subset_followup_response(
         taskSubset, taskSubsetLen, response, sizeof(response));
     if (responseLen == 0 ||
         response_has_object(response, responseLen, 0x1e, 1) ||
-        response_has_object(response, responseLen, 0x1e, 2))
+        response_has_object(response, responseLen, 0x1e, 2) ||
+        vm_net_mock_content_client_resource_pending(clientId,
+                                                    spawn.actorResource))
     {
-        fputs("repeated post-install instance runtime request emitted another scene object\n",
+        fputs("post-body-install instance runtime request emitted another scene object\n",
               stderr);
         return 1;
     }
@@ -1458,7 +1442,7 @@ int main(void)
         return 1;
     if (assert_instance_direct_enter_followup_order(targetScene) != 0)
         return 1;
-    if (assert_instance_sce_install_reenter_order(targetScene) != 0)
+    if (assert_instance_sce_install_completion_order(targetScene) != 0)
         return 1;
     if (assert_startup_sce_install_no_second_scene_enter(targetScene) != 0)
         return 1;

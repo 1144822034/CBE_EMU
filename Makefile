@@ -63,7 +63,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check clean
+.PHONY: all build client server boundary-check content-update-manifest-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
 
 all: build
 build: client server
@@ -71,6 +71,26 @@ client: $(CLIENT_TARGET)
 server: $(SERVER_TARGET)
 boundary-check: build
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-service-boundary.ps1
+
+direct-scene-challenge-progress-regression: $(SERVER_OBJDIR)/direct-scene-challenge-progress-regression.exe
+
+$(SERVER_OBJDIR)/direct-scene-challenge-progress-regression.exe: scripts/direct-scene-challenge-progress-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+content-update-manifest-regression: $(SERVER_OBJDIR)/content-update-manifest-regression.exe
+
+$(SERVER_OBJDIR)/content-update-manifest-regression.exe: scripts/content-update-manifest-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+direct-scene-challenge-progress-client-regression: $(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe
+
+$(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe: scripts/direct-scene-challenge-progress-client-regression.c $(MOCK_SERVER_FRAGMENTS) src/main.c src/network-client.c src/md5.h | $(CLIENT_OBJDIR)
+	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) $< src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/automation_png.c src/md5.c -o $@ $(CLIENT_LDLIBS)
+
+startup-sce-direct-enter-test-gate-regression: $(SERVER_OBJDIR)/startup-sce-direct-enter-test-gate-regression.exe
+
+$(SERVER_OBJDIR)/startup-sce-direct-enter-test-gate-regression.exe: scripts/startup-sce-direct-enter-test-gate-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 $(CLIENT_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h

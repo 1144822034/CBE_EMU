@@ -282,7 +282,7 @@ static void vm_mock_admin_global_reward_render_nav(vm_mock_admin_text *page)
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>");
+        "<a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>");
 }
 
 static void vm_mock_admin_render_global_rewards_page(

@@ -1,4 +1,5 @@
 #include "main.h"
+#include <stdlib.h>
 #include <string.h>
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
@@ -54,6 +55,12 @@ static u32 g_vmMapControllerWatchWriteCount;
  * writes that establish or clear them.  This hook only observes Unicorn's
  * write notification and never changes guest registers, memory, or flow. */
 static u32 g_vmSceneInputDelegateWatchWriteCount;
+
+/* The scene input dispatcher gates auto-battle on Global_R9+23682.  The
+ * startup SCE investigation needs the native writer, not a host-written
+ * substitute, so retain only a bounded write history when explicitly enabled.
+ */
+static u32 g_vmSceneControlStateWatchWriteCount;
 
 static void vm_trace_map_controller_writer_context(uc_engine *uc, u32 pc,
                                                    u32 cursorRef)
@@ -201,6 +208,58 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         u32 end = start + size;
         u32 watchStart = Global_R9 + 0x9540u;
         u32 delegateStart = Global_R9 + 0x5D24u;
+        u32 sceneControlStateStart = Global_R9 + 23682u;
+        if (start < sceneControlStateStart + sizeof(u16) &&
+            end > sceneControlStateStart &&
+            g_vmSceneControlStateWatchWriteCount < 64u)
+        {
+            const char *enabled = getenv("CBE_TRACE_SCENE_BATTLE_CONTROL_STATE");
+
+            if (enabled != NULL && strcmp(enabled, "1") == 0)
+            {
+                u32 pc = 0;
+                u32 lr = 0;
+                u32 r0 = 0;
+                u32 r1 = 0;
+                u32 r2 = 0;
+                u32 r3 = 0;
+                u32 sp = 0;
+                u32 stackWords[12] = {0};
+                u16 prior = 0;
+                FILE *trace = NULL;
+
+                (void)uc_mem_read(uc, sceneControlStateStart, &prior,
+                                  sizeof(prior));
+                (void)uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                (void)uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                (void)uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                (void)uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                (void)uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+                (void)uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                if (sp != 0)
+                    (void)uc_mem_read(uc, sp, stackWords, sizeof(stackWords));
+                ++g_vmSceneControlStateWatchWriteCount;
+                trace = fopen("logs/scene-battle-collision.log", "ab");
+                if (trace != NULL)
+                {
+                    fprintf(trace,
+                            "scene_battle_control_state_write count=%u "
+                            "pc=%08x lr=%08x addr=%08x size=%u value=%llx "
+                            "prior=%u regs=%08x,%08x,%08x,%08x r9=%08x "
+                            "sp=%08x stack=%08x,%08x,%08x,%08x,%08x,%08x,"
+                            "%08x,%08x,%08x,%08x,%08x,%08x\n",
+                            g_vmSceneControlStateWatchWriteCount, pc, lr,
+                            start, size, value, (unsigned)prior,
+                            r0, r1, r2, r3, Global_R9, sp,
+                            stackWords[0], stackWords[1], stackWords[2],
+                            stackWords[3], stackWords[4], stackWords[5],
+                            stackWords[6], stackWords[7], stackWords[8],
+                            stackWords[9], stackWords[10], stackWords[11]);
+                    fclose(trace);
+                }
+            }
+        }
 
         if (start < delegateStart + 12u && end > delegateStart &&
             g_vmSceneInputDelegateWatchWriteCount < 48u)

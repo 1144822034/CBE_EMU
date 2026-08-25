@@ -1797,7 +1797,13 @@ enum
     VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX = 8192,
     VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX = 24,
     VM_NET_MOCK_SCENE_BATTLE_MONSTER_QUANTITY_MAX = 5,
-    VM_NET_MOCK_SCENE_BATTLE_MONSTER_SPAWN_SPACING = 16
+    VM_NET_MOCK_SCENE_BATTLE_MONSTER_SPAWN_SPACING = 16,
+    /* One SCE kind-3 record has two Actor roots, each of which can own the
+     * validated maximum of 16 GIF leaves.  The node limit bounds enabled
+     * records to 24, so this is the largest meaningful per-deployment list. */
+    VM_NET_MOCK_SCENE_BATTLE_MONSTER_PUBLISH_NAME_MAX =
+        1 + VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX * 2 *
+                (1 + VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX)
 };
 
 typedef struct
@@ -3512,11 +3518,14 @@ static bool vm_net_mock_actor_scene_node_reserve(
 static u32 vm_net_mock_scene_battle_monster_collect_publish_names(
     const char *scene,
     const vm_net_mock_scene_battle_monster_admin_row *rows, u32 rowCount,
-    const char **names, u32 nameCap)
+    const char **names, u32 nameCap, char imageNameStorage[][64],
+    u32 imageNameStorageCap)
 {
     u32 nameCount = 0;
+    u32 imageNameStorageCount = 0;
 
-    if (scene == NULL || rows == NULL || names == NULL || nameCap == 0)
+    if (scene == NULL || rows == NULL || names == NULL || nameCap == 0 ||
+        imageNameStorage == NULL || imageNameStorageCap == 0)
         return 0;
     names[nameCount++] = scene;
     for (u32 i = 0; i < rowCount; ++i)
@@ -3529,21 +3538,47 @@ static u32 vm_net_mock_scene_battle_monster_collect_publish_names(
         dependencies[1] = rows[i].effectResource;
         for (u32 dependencyIndex = 0; dependencyIndex < 2; ++dependencyIndex)
         {
-            bool duplicate = false;
+            char imageNames[VM_NET_MOCK_ACTOR_RESOURCE_IMAGE_MAX][64];
+            u32 imageCount = 0;
 
-            for (u32 existing = 0; existing < nameCount; ++existing)
+            memset(imageNames, 0, sizeof(imageNames));
+            if (!vm_net_mock_actor_resource_collect_images(
+                    dependencies[dependencyIndex], imageNames, &imageCount))
             {
-                if (strcmp(names[existing], dependencies[dependencyIndex]) == 0)
-                {
-                    duplicate = true;
-                    break;
-                }
+                return 0;
             }
-            if (!duplicate)
+            for (u32 sourceIndex = 0; sourceIndex <= imageCount; ++sourceIndex)
             {
-                if (nameCount >= nameCap)
-                    return 0;
-                names[nameCount++] = dependencies[dependencyIndex];
+                const char *sourceName = sourceIndex == 0 ?
+                    dependencies[dependencyIndex] : imageNames[sourceIndex - 1u];
+                bool duplicate = false;
+
+                for (u32 existing = 0; existing < nameCount; ++existing)
+                {
+                    if (strcmp(names[existing], sourceName) == 0)
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate)
+                {
+                    if (nameCount >= nameCap)
+                        return 0;
+                    if (sourceIndex != 0)
+                    {
+                        if (imageNameStorageCount >= imageNameStorageCap ||
+                            snprintf(imageNameStorage[imageNameStorageCount],
+                                     sizeof(imageNameStorage[0]), "%s",
+                                     sourceName) >=
+                                (int)sizeof(imageNameStorage[0]))
+                        {
+                            return 0;
+                        }
+                        sourceName = imageNameStorage[imageNameStorageCount++];
+                    }
+                    names[nameCount++] = sourceName;
+                }
             }
         }
     }
@@ -3585,12 +3620,13 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     u32 insertOffset = 0;
     u32 ignoredTrailingBytes = 0;
     u32 fingerprint = 0;
-    /* A generated SCE kind-3 record is not self-contained: the client must
-     * have both Actor descriptors referenced by the record before it can
-     * create the scene entity.  Publish those dependencies in the same
-     * native content-update release as the SCE, otherwise a re-entering
-     * client may install the scene bytes but silently skip the monster. */
-    const char *names[1 + VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX * 2u];
+    /* A generated SCE kind-3 record is not self-contained: each referenced
+     * Actor descriptor in turn names one or more GIF sheets.  Publish the
+     * complete, deduplicated closure in the same native content-update
+     * release as the SCE.  A bare fireball effect can otherwise render while
+     * the absent body Actor prevents creation of a battle-capable node. */
+    const char *names[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PUBLISH_NAME_MAX];
+    char imageNameStorage[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PUBLISH_NAME_MAX][64];
     u32 nameCount = 0;
     bool contentChanged = false;
 
@@ -3803,9 +3839,10 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     {
         return false;
     }
+    memset(imageNameStorage, 0, sizeof(imageNameStorage));
     nameCount = vm_net_mock_scene_battle_monster_collect_publish_names(
-        scene, rows, rowCount, names,
-        sizeof(names) / sizeof(names[0]));
+        scene, rows, rowCount, names, sizeof(names) / sizeof(names[0]),
+        imageNameStorage, sizeof(imageNameStorage) / sizeof(imageNameStorage[0]));
     if (nameCount == 0)
     {
         if (errorOut)
@@ -6349,10 +6386,17 @@ static bool vm_net_mock_scene_client_content_ready(
         return false;
     }
 
-    /* Scene-battle deployment publishes the SCE, the motion Actor and its
-     * exit-effect Actor in one invalidation release.  Parse the authoritative
-     * SCE2 grammar and wait for those exact dependencies; server-side file
-     * existence says nothing about this client's deleted cache. */
+    /* Scene-battle deployment publishes the SCE, the field17 body Actor and
+     * the field18 exit-effect Actor in one invalidation release.  WT6/1 is
+     * only emitted after the target SCE runtime has initialized, and it also
+     * supplies the existing evidence boundary for field18.  A field17 body,
+     * however, can be looked up later by the battle renderer: it is neither
+     * a prerequisite for closing this already-created scene shell nor a
+     * cache hit that the server may infer.  Holding 30/2 until an absent
+     * field17 WT18/7 arrives deadlocks a reconnect whose client already has
+     * the body locally and therefore makes no request.  Leave it pending;
+     * the client's normal bare-Actor cache-miss path will request WT18/7 if
+     * it truly lacks the resource. */
     len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
     start = vm_net_mock_scene_payload_start(data, len);
     if (len == 0 || start == 0)
@@ -6370,11 +6414,6 @@ static bool vm_net_mock_scene_client_content_ready(
                 data, len, combatOrdinal, &spawn, NULL))
             return false;
         if (vm_net_mock_content_client_resource_pending(
-                g_vm_mock_service_active_client_id, spawn.actorResource))
-        {
-            pendingName = spawn.actorResource;
-        }
-        else if (vm_net_mock_content_client_resource_pending(
                      g_vm_mock_service_active_client_id,
                      spawn.effectResource))
         {
@@ -7823,16 +7862,27 @@ static void vm_net_mock_complete_startup_scene_followup(const char *currentScene
                      target.scene, target.x, target.y, source ? source : "-", objectCount);
 }
 
+/* This is deliberately test-only while the startup shell's destruction
+ * boundary is validated in an isolated client/service run.  Production
+ * startup keeps the WT25/5 control acknowledgement. */
+static bool vm_net_mock_startup_sce_direct_enter_test_enabled(void)
+{
+    const char *value = getenv("CBE_TEST_STARTUP_SCE_DIRECT_ENTER");
+
+    return value != NULL && strcmp(value, "1") == 0;
+}
+
 /* Role-select has already built the first scene shell from actorinfo.  A
- * final SCE WT18/7 must not turn a later standalone WT25/5 into a scene
- * re-entry.  Runtime evidence shows that mmGame:sub_11CE's 16/2(result=1)
- * branch calls sub_BCC() and main API +116 without releasing that shell's
- * live background Actor array.  Sending it here repeats the same unsafe
- * allocation that 16/3(result=2) caused.  Keep this narrow marker only for
- * evidence; the normal WT25/5 control-ACK path owns the response. */
+ * final SCE WT18/7 normally must not turn a later standalone WT25/5 into a
+ * scene re-entry.  The test gate below permits one packet-correct comparison
+ * through the documented mmGame 16/3(result=2) parser branch; it does not
+ * write client state or bypass the parser. */
 static void vm_net_mock_arm_startup_sce_install_scene_enter(const char *scene)
 {
     vm_net_mock_role_state *role = NULL;
+    vm_net_mock_scene_change_target target;
+    u16 targetX = 0;
+    u16 targetY = 0;
     u32 installGeneration = 0;
 
     if (g_vm_net_mock_startup_sce_enter_pending ||
@@ -7849,9 +7899,39 @@ static void vm_net_mock_arm_startup_sce_install_scene_enter(const char *scene)
     {
         return;
     }
-    printf("[info][network] mock_startup_sce_install_scene_enter_suppressed scene=%s install_generation=%u action=control-ack-only reason=16-2-direct-enter-retains-live-background-array evidence=mmGame:0x11CE->0x0BCC+runtime-array-lifetime\n",
+    if (vm_net_mock_startup_sce_direct_enter_test_enabled())
+    {
+        targetX = role->x;
+        targetY = role->y;
+        if (!vm_net_mock_read_current_player_grid(NULL, NULL, &targetX,
+                                                   &targetY, NULL, NULL))
+        {
+            vm_net_mock_adjust_safe_player_pos_for_scene(scene, &targetX,
+                                                          &targetY);
+        }
+        if (targetX == 0 || targetY == 0)
+            return;
+
+        memset(&target, 0, sizeof(target));
+        snprintf(target.scene, sizeof(target.scene), "%s", scene);
+        target.x = targetX;
+        target.y = targetY;
+        target.mapType = 2;
+        target.hasSceEntry = true;
+        target.needsSceneDownload = false;
+        g_vm_net_mock_startup_sce_enter_target = target;
+        g_vm_net_mock_startup_sce_enter_install_generation = installGeneration;
+        g_vm_net_mock_startup_sce_enter_armed_tick = g_schedulerTick;
+        g_vm_net_mock_startup_sce_enter_pending = true;
+        printf("[info][network] mock_startup_sce_install_scene_enter_test_armed scene=%s pos=(%u,%u) install_generation=%u request=WT25/5 response=16/3-result2-once evidence=WT18/7+mmGame:0x11CE->0x0BCC\n",
+               target.scene, target.x, target.y, installGeneration);
+        vm_autotest_note("mock_startup_sce_install_scene_enter_test_armed scene=%s pos=(%u,%u) install_generation=%u request=WT25/5 response=16/3-result2-once test_gate=CBE_TEST_STARTUP_SCE_DIRECT_ENTER\n",
+                         target.scene, target.x, target.y, installGeneration);
+        return;
+    }
+    printf("[info][network] mock_startup_sce_install_scene_enter_suppressed scene=%s install_generation=%u action=control-ack-only reason=startup-scene-rebuild-test-disabled evidence=mmGame:0x11CE->0x0BCC+runtime-array-lifetime\n",
            scene, installGeneration);
-    vm_autotest_note("mock_startup_sce_install_scene_enter_suppressed scene=%s install_generation=%u action=control-ack-only reason=16-2-direct-enter-retains-live-background-array evidence=mmGame:0x11CE->0x0BCC+runtime-array-lifetime\n",
+    vm_autotest_note("mock_startup_sce_install_scene_enter_suppressed scene=%s install_generation=%u action=control-ack-only reason=startup-scene-rebuild-test-disabled evidence=mmGame:0x11CE->0x0BCC+runtime-array-lifetime\n",
                      scene, installGeneration);
 }
 
@@ -9868,8 +9948,14 @@ static u32 vm_net_mock_build_startup_sce_install_scene_enter_response(
         g_vm_net_mock_startup_sce_enter_pending = false;
         return 0;
     }
+    /*
+     * mmGame:sub_11CE dispatches only 16/3(result=2) to sub_BCC.  The
+     * previously probed 16/2(result=1) is a different settings/recovery
+     * contract: it caused a client WT2/3 round-trip and did not rebuild the
+     * startup action route.  Keep this exact branch test-gated and one-shot.
+     */
     if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(
-            out, outCap, &pos, 2, 1, &target))
+            out, outCap, &pos, 3, 2, &target))
     {
         return 0;
     }
@@ -9878,11 +9964,11 @@ static u32 vm_net_mock_build_startup_sce_install_scene_enter_response(
     vm_net_mock_mark_direct_scene_enter_completed(
         &target, "startup-sce-install-25-5");
     vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
-    printf("[info][network] mock_scene_npc_rearm scene=%s trigger=startup-sce-install response=16/2-result1 immediate=0 next=WT16/3+27/11+7/42 evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
+    printf("[info][network] mock_scene_npc_rearm scene=%s trigger=startup-sce-install response=16/3-result2 immediate=0 next=WT16/3+27/11+7/42 evidence=mmGame:0x11CE->0x0BCC+JianghuOL.CBE:0x01012FB4+0x01037998\n",
            target.scene);
-    printf("[info][network] mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/2-result1 next=client-runtime-16/3+27/11+7/42 evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
+    printf("[info][network] mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/3-result2 next=client-runtime-16/3+27/11+7/42 evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
            target.scene, target.x, target.y, installGeneration);
-    vm_autotest_note("mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/2-result1 next=client-runtime-16/3+27/11+7/42 evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
+    vm_autotest_note("mock_startup_sce_install_scene_enter scene=%s pos=(%u,%u) install_generation=%u response=16/3-result2 next=client-runtime-16/3+27/11+7/42 evidence=mmGame:0x11CE->0x0BCC->main-api+116\n",
                      target.scene, target.x, target.y, installGeneration);
     return pos;
 }
@@ -9991,6 +10077,36 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
     const char *fromSource = "role-pos";
 
     memset(target, 0, sizeof(*target));
+    /*
+     * A settings recovery 16/2 or 16/3 response enters its `scene` through
+     * mmGame's direct scene-entry API.  It is not an in-place coordinate
+     * repair.  On player-3, a visible transient instance followed by a same
+     * scene direct-enter retained its nested background Actor array
+     * (050163a8/count=2) across screen destruction and started a second
+     * descriptor walk with no FreeBattleActorArray boundary.  The exhausted
+     * allocator then faulted at JianghuOL.CBE:0x0100DA4E before the later
+     * mmGame fault.  Until an observed native instance exit/resume contract
+     * exists, the durable world anchor is the only proven different-scene
+     * recovery target; do not turn the session target into a same-shell
+     * direct re-entry.
+     */
+    if (session != NULL && session->transientInstanceActive &&
+        session->sceneVisibleReady && !session->sceneVisiblePending &&
+        vm_net_mock_scene_name_is_safe(session->transientInstanceScene) &&
+        vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene,
+                                            session->transientInstanceScene) &&
+        role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
+    {
+        printf("[warn][network] mock_unstuck_transient_same_scene_unsafe scene=%s visible_pos=(%u,%u) durable_anchor=%s@(%u,%u) action=use-durable-anchor reason=16-2-direct-enter-retains-background-actor-array evidence=player-3:0x0100DA4E\n",
+               session->transientInstanceScene,
+               session->sceneVisibleX,
+               session->sceneVisibleY,
+               role->scene,
+               role->x,
+               role->y);
+        vm_autotest_note("mock_unstuck_transient_same_scene_unsafe scene=%s action=use-durable-anchor evidence=player-3:0x0100DA4E\n",
+                         session->transientInstanceScene);
+    }
     /*
      * 12/3 belongs to the authenticated service session.  The role's scene
      * and position are durable request-scoped state; the host CBE runtime grid
@@ -10147,14 +10263,71 @@ static bool vm_net_mock_is_settings_unstuck_16_2_request(const u8 *request, u32 
            !vm_net_mock_request_contains(request, requestLen, "posinfo");
 }
 
+/* A completed transient instance already owns a live scene shell.  The
+ * compact settings request is parsed by mmGame:sub_11CE: result=1 enters the
+ * scene again, whereas result=4 reads only `hint`, clears the menu wait state
+ * and leaves the current shell in place.  Keep this exact predicate separate
+ * from the generic recovery target chooser: there is no in-place coordinate
+ * relocation payload in the observed 16/2 contract. */
+static bool vm_net_mock_settings_unstuck_hits_live_transient_instance(
+    const vm_mock_service_client_session *session)
+{
+    return session != NULL && session->transientInstanceActive &&
+           session->sceneVisibleReady && !session->sceneVisiblePending &&
+           session->sceneVisibleX != 0 && session->sceneVisibleY != 0 &&
+           vm_net_mock_scene_name_is_safe(session->transientInstanceScene) &&
+           vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene,
+                                               session->transientInstanceScene);
+}
+
+static u32 vm_net_mock_build_settings_unstuck_live_instance_reject_response(
+    u8 *out, u32 outCap)
+{
+    /* GBK: 副本内无法使用脱离卡死 */
+    static const char hint[] =
+        "\xb8\xb1\xb1\xbe\xc4\xda\xce\xde\xb7\xa8\xca\xb9\xd3\xc3\xcd\xd1\xc0\xeb\xbf\xa8\xcb\xc0";
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, 2, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 4) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "hint", hint))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
 static u32 vm_net_mock_build_settings_unstuck_16_2_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap)
 {
     u32 pos = 5;
     vm_net_mock_scene_change_target target;
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
 
     if (outCap < pos || !vm_net_mock_is_settings_unstuck_16_2_request(request, requestLen))
         return 0;
+
+    if (vm_net_mock_settings_unstuck_hits_live_transient_instance(session))
+    {
+        u32 responseLen = vm_net_mock_build_settings_unstuck_live_instance_reject_response(
+            out, outCap);
+        if (responseLen == 0)
+            return 0;
+        printf("[info][network] mock_unstuck_live_instance_preserved scene=%s pos=(%u,%u) response=16/2-result4-hint action=no-direct-reenter reason=16-2-result1-retains-background-actor-array evidence=mmGame:0x11CE+player-3:0x0100DA4E\n",
+               session->transientInstanceScene,
+               session->sceneVisibleX,
+               session->sceneVisibleY);
+        vm_autotest_note("mock_unstuck_live_instance_preserved scene=%s pos=(%u,%u) response=16/2-result4-hint action=no-direct-reenter evidence=mmGame:0x11CE(result4)+player-3:0x0100DA4E\n",
+                         session->transientInstanceScene,
+                         session->sceneVisibleX,
+                         session->sceneVisibleY);
+        return responseLen;
+    }
 
     vm_net_mock_get_current_scene_unstuck_target(&target);
     if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(out, outCap, &pos,
