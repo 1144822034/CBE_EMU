@@ -7,6 +7,7 @@ import { BitmapLabel } from "./BitmapLabel";
 import { clearPointerHits } from "./pointerHit";
 import {
   listShellBounds,
+  listShellStepPage,
   paintListShellBody,
   paintListShellChrome,
   type ListShellCtx,
@@ -125,11 +126,29 @@ export class MountPanel extends Container {
       pageSize: PAGE_SIZE,
       paging: "local",
       emptyText: "尚无已解锁坐骑",
+      footerHint: "点选切换 · 首项关闭坐骑",
       onRow: (absIndex) => {
         this.listCursor = absIndex;
         this.confirm();
       },
+      onPrevPage: () => {
+        this.listCursor = listShellStepPage(
+          this.listCursor,
+          this.rows.length,
+          PAGE_SIZE,
+          -1,
+        );
+        this.redraw();
+      },
+      onNextPage: () => {
+        this.listCursor = listShellStepPage(
+          this.listCursor,
+          this.rows.length,
+          PAGE_SIZE,
+          1,
+        );
+        this.redraw();
+      },
     });
-    this.addLabel("点选切换 · 首项关闭坐骑", bounds.x + 10, footY + 6, CBE.inkLabel);
   }
 }

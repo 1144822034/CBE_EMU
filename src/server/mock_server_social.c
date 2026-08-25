@@ -5229,13 +5229,13 @@ static int vm_net_mock_append_scene_sync_chat_objects_budgeted(
             capacity = VM_MOCK_SERVICE_CHAT_POLL_MAX;
     }
     if (capacity == 0 &&
-        vm_mock_service_session_has_pending_cosmetics(observer))
+        vm_mock_service_session_poll_needs_cosmetics_flush(observer))
     {
         capacity = cosmeticsOverflowMax;
     }
     else if (capacity > 0 &&
              capacity < cosmeticsOverflowMax &&
-             vm_mock_service_session_has_pending_cosmetics(observer))
+             vm_mock_service_session_poll_needs_cosmetics_flush(observer))
     {
         /* Prefer draining peer cosmetics when soft room is tiny. */
         capacity = cosmeticsOverflowMax;
@@ -7468,7 +7468,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         observer->chestAnnounceCount == 0 &&
         !observer->systemWelcomeQueued &&
         !observer->worldChatHistoryQueued &&
-        !vm_mock_service_session_has_pending_cosmetics(observer))
+        !vm_mock_service_session_poll_needs_cosmetics_flush(observer))
     {
         bool hasSocial = false;
         bool hasPeerVisible = false;

@@ -4,7 +4,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -503,10 +503,11 @@ export class WagerPanel extends Container {
     color: number,
   ): void {
     const t = new BitmapLabel();
-    void t.setText(text, color).then(() => {
-      t.position.set(cx - t.width / 2, cy - t.height / 2);
-    });
-    t.position.set(cx, cy);
+    t.anchor.set(0.5, 0.5);
+    t.position.set(Math.round(cx), Math.round(cy));
+    // Don't recenter in setText().then — redraw/clearLabels can destroy t first
+    // (Pixi nulls position → "Cannot read properties of null (reading 'set')").
+    void t.setText(text, color);
     this.addChild(t);
     this.labels.push(t);
   }
@@ -693,7 +694,7 @@ export class WagerPanel extends Container {
     this.box.clear();
     const panelW = LCD_WIDTH - PANEL_X * 2;
     const panelH = LCD_HEIGHT - SOFTKEY_H - PANEL_Y - PANEL_BOTTOM_GAP;
-    drawCbePanel(this.box, PANEL_X, PANEL_Y, panelW, panelH, CBE.bgDeep);
+    paintCbePanel(this, this.box, PANEL_X, PANEL_Y, panelW, panelH, CBE.bgDeep);
     const pillW = Math.min(panelW - 24, 100);
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, PANEL_Y + 6, pillW, 22);
     this.addLabelCentered("赏金擂台", LCD_WIDTH / 2, PANEL_Y + 17, CBE.cream);

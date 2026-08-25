@@ -29,6 +29,8 @@ export type ArenaStatus = {
   enabled: boolean;
   status: number;
   canEnter: boolean;
+  /** Today's open bracket: 0=rest, 10/50/70. */
+  activeBracket: number;
   dayYmd: number;
   minute: number;
   sessionId: number;
@@ -127,6 +129,7 @@ export function parseArenaStatus(packet: WtPacket): ArenaStatus | null {
     enabled: fieldU32(obj, "enabled") !== 0,
     status: fieldU32(obj, "status"),
     canEnter: fieldU32(obj, "canEnter") !== 0,
+    activeBracket: fieldU32(obj, "activeBracket"),
     dayYmd: fieldU32(obj, "dayYmd"),
     minute: fieldU32(obj, "minute"),
     sessionId: fieldU32(obj, "sessionId"),

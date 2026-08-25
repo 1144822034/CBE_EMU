@@ -1,5 +1,5 @@
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, drawCbePanel, makePixelText } from "./constants";
+import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, makePixelText, paintCbePanel } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -75,7 +75,7 @@ export class DialogPanel extends Container {
     const y = 60;
     const w = LCD_WIDTH - 24;
     const h = 220;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     const opts = this.dialog.options;
     const pages = Math.max(1, Math.ceil(Math.max(opts.length, 1) / OPTION_PAGE_SIZE));

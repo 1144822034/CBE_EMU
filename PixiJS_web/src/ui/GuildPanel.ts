@@ -7,7 +7,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
   drawCbeTitlePill,
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
@@ -359,7 +359,7 @@ export class GuildPanel extends Container {
     const y = 28;
     const w = LCD_WIDTH - 16;
     const h = LCD_HEIGHT - SOFTKEY_H - 40;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
     const pillW = Math.min(w - 20, Math.max(80, this.title.length * 12 + 20));
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 20);
     this.addLabel(

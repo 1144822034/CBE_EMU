@@ -1,6 +1,7 @@
 /**
- * CBE-style two-level scene menu (scroll list).
- * L1: 江湖商城 / 玩家信息 / 帮派家族 / 社交聊天 / 系统设置
+ * CBE-style two-level scene menu (UI_menu2 scroll).
+ * Fixed scroll frame; cursor moves inside the white box; page buttons when
+ * items exceed PAGE_ROWS — the menu never shifts upward.
  */
 import { Container, Graphics } from "pixi.js";
 import {
@@ -8,13 +9,23 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
-  makePixelText,
+  paintCbePanel,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { isSoundEnabled } from "../audio/GameBgm";
 import { isPeerCosmeticsVisible } from "../resources/peerCosmeticsPref";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons, preloadPageNavTextures } from "./pageNav";
+import {
+  MENU2_CAP_H,
+  MENU2_WHITE_FILL,
+  MENU2_WHITE_TARGET_W,
+  addMenuScrollBackgroundSliced,
+  menu2CenteredLayout,
+  menu2ContentRect,
+  menu2ScrollFixedHeight,
+  preloadMenuScrollTexture,
+} from "./menuScrollUi";
 
 export type MenuLeaf =
   | "mall"
@@ -40,13 +51,40 @@ export type MenuLeaf =
 
 type MenuNode = {
   label: string;
-  /** Direct leaf — confirm opens immediately. */
   leaf?: MenuLeaf;
   children?: { label: string; leaf: MenuLeaf }[];
 };
 
+/** Native index order (main.c): 0..5. */
 const ROOT: MenuNode[] = [
-  { label: "江湖商城", leaf: "mall" },
+  {
+    label: "系统设置",
+    children: [
+      { label: "离开游戏", leaf: "leave_game" },
+      { label: "脱离卡死", leaf: "unstuck" },
+      { label: "离开队伍", leaf: "leave_team" },
+      { label: "开关声音", leaf: "sound" },
+    ],
+  },
+  {
+    label: "个性功能",
+    children: [
+      { label: "快速修理", leaf: "quick_repair" },
+      { label: "字体切换", leaf: "font" },
+      { label: "挂机战斗", leaf: "hangup" },
+      { label: "屏蔽特效", leaf: "peer_fx" },
+    ],
+  },
+  {
+    label: "社交聊天",
+    children: [
+      { label: "周围玩家", leaf: "nearby" },
+      { label: "好友列表", leaf: "friends" },
+      { label: "聊天信息", leaf: "chat" },
+      { label: "排行榜", leaf: "rank" },
+    ],
+  },
+  { label: "帮派家族", leaf: "guild" },
   {
     label: "玩家信息",
     children: [
@@ -58,39 +96,33 @@ const ROOT: MenuNode[] = [
       { label: "称号", leaf: "title" },
     ],
   },
-  { label: "帮派家族", leaf: "guild" },
-  {
-    label: "社交聊天",
-    children: [
-      { label: "周围玩家", leaf: "nearby" },
-      { label: "好友列表", leaf: "friends" },
-      { label: "聊天信息", leaf: "chat" },
-      { label: "排行榜", leaf: "rank" },
-    ],
-  },
-  {
-    label: "系统设置",
-    children: [
-      { label: "离开游戏", leaf: "leave_game" },     
-      { label: "脱离卡死", leaf: "unstuck" },
-      { label: "离开队伍", leaf: "leave_team" },
-      { label: "快速修理", leaf: "quick_repair" },
-      { label: "开关声音", leaf: "sound" },
-      { label: "屏蔽特效", leaf: "peer_fx" },
-      { label: "字体切换", leaf: "font" },
-      { label: "挂机战斗", leaf: "hangup" },
-    ],
-  },
+  { label: "江湖商城", leaf: "mall" },
 ];
+
+/** Top-to-bottom on scroll (native WQVGA). */
+const ROOT_DISPLAY_IDX = [5, 4, 3, 2, 1, 0];
+
+const SCROLL_WHITE_W = MENU2_WHITE_TARGET_W;
+/** Fixed Y — menu never repositions when paging or entering L2. */
+const SCROLL_Y = 80;
+const ROW_H = 18;
+/** Visible rows inside the white parchment column. */
+const PAGE_ROWS = 6;
+const SCROLL_H = menu2ScrollFixedHeight(PAGE_ROWS, ROW_H);
+const INK = 0x181818;
+const INK_HI = 0xffffff;
+const SEL_FILL = 0x505850;
 
 export class MenuScreen extends Container {
   private level: 1 | 2 = 1;
-  private rootCursor = 0;
-  private subCursor = 0;
+  /** Index into ROOT_DISPLAY_IDX (L1) or sub row (L2). */
+  private menuCursor = 0;
   private subParent: MenuNode | null = null;
+  private scrollHost = new Container();
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
+  private redrawGen = 0;
 
   onSelect: ((leaf: MenuLeaf, label: string) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -101,53 +133,50 @@ export class MenuScreen extends Container {
       .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
       .fill({ color: 0x000000, alpha: 0.35 });
     this.addChild(dim);
+    this.scrollHost.eventMode = "none";
+    this.addChild(this.scrollHost);
     this.addChild(this.box);
     this.eventMode = "static";
+    preloadMenuScrollTexture(() => this.redraw());
+    preloadPageNavTextures(() => this.redraw());
     this.reset();
   }
 
-  /** Open at root level (call when entering menu phase). */
   reset(): void {
     this.level = 1;
-    this.rootCursor = 0;
-    this.subCursor = 0;
+    this.menuCursor = 0;
     this.subParent = null;
     this.redraw();
   }
 
   move(delta: number): void {
-    if (this.level === 1) {
-      const n = ROOT.length;
-      this.rootCursor = (this.rootCursor + delta + n) % n;
-    } else {
-      const kids = this.subParent?.children ?? [];
-      const n = kids.length + 1; /* +返回 */
-      this.subCursor = (this.subCursor + delta + n) % n;
-    }
+    const total = this.entryCount();
+    this.menuCursor = (this.menuCursor + delta + total) % total;
     this.redraw();
   }
 
   confirm(): void {
     if (this.level === 1) {
-      const node = ROOT[this.rootCursor]!;
+      const node = this.rootNode();
       if (node.leaf) {
         this.onSelect?.(node.leaf, node.label);
         return;
       }
       this.subParent = node;
-      this.subCursor = 0;
+      this.menuCursor = 0;
       this.level = 2;
       this.redraw();
       return;
     }
     const kids = this.subParent?.children ?? [];
-    if (this.subCursor >= kids.length) {
+    if (this.menuCursor >= kids.length) {
       this.level = 1;
       this.subParent = null;
+      this.menuCursor = 0;
       this.redraw();
       return;
     }
-    const child = kids[this.subCursor]!;
+    const child = kids[this.menuCursor]!;
     this.onSelect?.(child.leaf, child.label);
   }
 
@@ -155,80 +184,171 @@ export class MenuScreen extends Container {
     if (this.level === 2) {
       this.level = 1;
       this.subParent = null;
+      this.menuCursor = 0;
       this.redraw();
       return;
     }
     this.onClose?.();
   }
 
-  private currentLabels(): string[] {
-    if (this.level === 1) return ROOT.map((n) => n.label);
+  private entryCount(): number {
+    if (this.level === 1) return ROOT_DISPLAY_IDX.length;
+    return (this.subParent?.children?.length ?? 0) + 1;
+  }
+
+  private rootNode(): MenuNode {
+    return ROOT[ROOT_DISPLAY_IDX[this.menuCursor]!]!;
+  }
+
+  private childLabel(leaf: MenuLeaf, label: string): string {
+    if (leaf === "sound") {
+      return isSoundEnabled() ? "关闭声音" : "开启声音";
+    }
+    if (leaf === "peer_fx") {
+      return isPeerCosmeticsVisible() ? "屏蔽特效" : "显示特效";
+    }
+    return label;
+  }
+
+  private allLabels(): string[] {
+    if (this.level === 1) {
+      return ROOT_DISPLAY_IDX.map((i) => ROOT[i]!.label);
+    }
     const kids = this.subParent?.children ?? [];
     return [
-      ...kids.map((c) =>
-        c.leaf === "sound"
-          ? isSoundEnabled()
-            ? "关闭声音"
-            : "开启声音"
-          : c.leaf === "peer_fx"
-            ? isPeerCosmeticsVisible()
-              ? "屏蔽特效"
-              : "显示特效"
-            : c.label,
-      ),
+      ...kids.map((c) => this.childLabel(c.leaf, c.label)),
       "返回",
     ];
   }
 
+  /** Page-aligned window so 上一页 / 下一页 jump whole pages. */
+  private pageStart(total: number): number {
+    if (total <= PAGE_ROWS) return 0;
+    return Math.floor(this.menuCursor / PAGE_ROWS) * PAGE_ROWS;
+  }
+
+  private listTop(y: number): number {
+    return y + MENU2_CAP_H + 3;
+  }
+
+  private async addCenteredLabel(
+    text: string,
+    cx: number,
+    y: number,
+    color: number,
+    gen: number,
+    maxWidth: number,
+  ): Promise<void> {
+    const lab = new BitmapLabel();
+    lab.eventMode = "none";
+    lab.anchor.set(0.5, 0);
+    lab.position.set(cx, y);
+    await lab.setText(text, color, {
+      outline: false,
+      maxWidth: maxWidth - 2,
+    });
+    if (gen !== this.redrawGen) {
+      lab.destroy();
+      return;
+    }
+    this.addChild(lab);
+    this.labels.push(lab);
+  }
+
+  private addNavLabel(text: string, x: number, y: number, color: number): void {
+    const lab = new BitmapLabel();
+    lab.eventMode = "none";
+    lab.position.set(x, y);
+    void lab.setText(text, color, { outline: false });
+    this.addChild(lab);
+    this.labels.push(lab);
+  }
+
   private redraw(): void {
+    const gen = ++this.redrawGen;
     for (const t of this.labels) t.destroy();
     this.labels = [];
     clearPointerHits(this.rowHits);
     this.box.clear();
+    this.scrollHost.removeChildren().forEach((c) =>
+      c.destroy({ children: true }),
+    );
 
-    const labels = this.currentLabels();
-    const cursor = this.level === 1 ? this.rootCursor : this.subCursor;
-    const rowH = 20;
-    const w = 132;
-    const h = labels.length * rowH + 28;
-    const x = Math.floor((LCD_WIDTH - w) / 2);
-    const y = Math.floor((LCD_HEIGHT - SOFTKEY_H - h) / 2);
-    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+    const layout = menu2CenteredLayout(LCD_WIDTH, SCROLL_WHITE_W);
+    const x = layout.scrollX;
+    const SCROLL_W = layout.scrollW;
+    const content = menu2ContentRect(x, SCROLL_WHITE_W);
+    const y = SCROLL_Y;
+    const labels = this.allLabels();
+    const total = labels.length;
+    const start = this.pageStart(total);
+    const visible = labels.slice(start, start + PAGE_ROWS);
+    const pages = Math.max(1, Math.ceil(total / PAGE_ROWS));
+    const page = Math.floor(start / PAGE_ROWS) + 1;
 
-    /* Scroll header strip like CBE */
-    this.box.rect(x + 4, y + 4, w - 8, 14).fill({ color: CBE.bgPanelDark });
-    const head =
-      this.level === 1
-        ? "菜单"
-        : (this.subParent?.label ?? "子菜单").slice(0, 8);
-    const ht = makePixelText(head, 11, CBE.inkLabel);
-    ht.position.set(x + 10, y + 5);
-    this.addChild(ht);
-    this.labels.push(ht);
+    preloadMenuScrollTexture();
+    if (
+      !addMenuScrollBackgroundSliced(
+        this.scrollHost,
+        x,
+        y,
+        SCROLL_H,
+        SCROLL_WHITE_W,
+      )
+    ) {
+      paintCbePanel(this, this.box, x, y, SCROLL_W, SCROLL_H, CBE.bgPanel);
+    }
 
-    labels.forEach((label, i) => {
-      const iy = y + 22 + i * rowH;
-      if (i === cursor) {
-        this.box.rect(x + 5, iy, w - 10, rowH - 2).fill({ color: CBE.select });
+    const bodyTop = y + MENU2_CAP_H;
+    const bodyH = SCROLL_H - MENU2_CAP_H * 2;
+    const top = this.listTop(y);
+    this.box.rect(content.x, bodyTop, content.w, bodyH).fill({ color: MENU2_WHITE_FILL });
+    visible.forEach((label, vi) => {
+      const abs = start + vi;
+      const iy = top + vi * ROW_H;
+      const hi = abs === this.menuCursor;
+      if (hi) {
+        this.box.rect(content.x, iy, content.w, ROW_H - 1).fill({ color: SEL_FILL });
       }
-      const t = makePixelText(
+      void this.addCenteredLabel(
         label,
-        12,
-        i === cursor ? CBE.ink : CBE.inkMint,
+        content.cx,
+        iy + 1,
+        hi ? INK_HI : INK,
+        gen,
+        content.w,
       );
-      t.position.set(x + 14, iy + 2);
-      t.eventMode = "none";
-      this.addChild(t);
-      this.labels.push(t);
-      const idx = i;
       this.rowHits.push(
-        attachRowPointerHit(this, x + 5, iy, w - 10, rowH - 2, () => {
-          if (this.level === 1) this.rootCursor = idx;
-          else this.subCursor = idx;
+        attachRowPointerHit(this, content.x, iy, content.w, ROW_H - 1, () => {
+          this.menuCursor = abs;
           this.redraw();
           this.confirm();
         }),
       );
     });
+
+    if (pages > 1) {
+      const navW = Math.min(LCD_WIDTH - 16, 180);
+      const navX = Math.floor((LCD_WIDTH - navW) / 2);
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: navX,
+        y: y + SCROLL_H + 6,
+        w: navW,
+        page,
+        pages,
+        addLabel: (t, lx, ly, c) => this.addNavLabel(t, lx, ly, c),
+        onPrev: () => {
+          this.menuCursor = Math.max(0, start - PAGE_ROWS);
+          this.redraw();
+        },
+        onNext: () => {
+          this.menuCursor = Math.min(total - 1, start + PAGE_ROWS);
+          this.redraw();
+        },
+      });
+    }
   }
 }

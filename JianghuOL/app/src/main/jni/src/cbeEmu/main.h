@@ -74,7 +74,6 @@ const char *cbeAndroidInputGetPromptUtf8(void);
 void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancelled);
 int cbeAndroidConsumeAccountWebOpenRequest(void);
 int cbeAndroidConsumeRechargeBlockedTip(void);
-const char *cbeAndroidGetPreferredServerName(void);
 #endif
 
 u32 last_gpt1_interrupt_time;

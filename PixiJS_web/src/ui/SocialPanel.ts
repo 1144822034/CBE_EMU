@@ -7,6 +7,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
+  drawCbeTitlePill,
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
@@ -455,10 +456,14 @@ export class SocialPanel extends Container {
     };
   }
 
+  private listPageSize(): number {
+    if (this.kind === "rank") return RANK_PAGE_SIZE;
+    return LIST_PAGE_SIZE;
+  }
+
   private listPageStart(): number {
     if (!this.rows.length) return 0;
-    const pageSize = this.kind === "rank" ? RANK_PAGE_SIZE : LIST_PAGE_SIZE;
-    return listShellPageInfo(this.rows.length, this.listCursor, pageSize)
+    return listShellPageInfo(this.rows.length, this.listCursor, this.listPageSize())
       .pageStart;
   }
 
@@ -476,6 +481,13 @@ export class SocialPanel extends Container {
       return;
     }
     if (this.mode === "text") {
+      if (this.kind === "titles") {
+        const pages = this.titleDetailPages();
+        if (pages <= 1) return;
+        this.textPage = (this.textPage + delta + pages) % pages;
+        this.redraw();
+        return;
+      }
       const ps = this.textPageSize();
       const pages = Math.max(1, Math.ceil(this.textLines.length / ps));
       this.textPage = (this.textPage + delta + pages) % pages;
@@ -519,6 +531,10 @@ export class SocialPanel extends Container {
   confirm(): void {
     if (!this.visible) return;
     if (this.mode === "text") {
+      if (this.kind === "titles") {
+        this.openActions();
+        return;
+      }
       const ps = this.textPageSize();
       const pages = Math.max(1, Math.ceil(this.textLines.length / ps));
       if (pages > 1 && this.textPage < pages - 1) {
@@ -539,6 +555,10 @@ export class SocialPanel extends Container {
       if (row && row.id) {
         this.onAction?.(this.kind, "hunt_order", row);
       }
+      return;
+    }
+    if (this.mode === "list" && this.kind === "titles") {
+      this.openTitleDetail();
       return;
     }
     if (this.mode === "list") {
@@ -575,6 +595,16 @@ export class SocialPanel extends Container {
     if (!this.visible) return;
     if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     if (this.mode === "actions") {
+      if (this.kind === "titles") {
+        this.mode = "text";
+        this.redraw();
+        return;
+      }
+      this.mode = "list";
+      this.redraw();
+      return;
+    }
+    if (this.mode === "text" && this.kind === "titles") {
       this.mode = "list";
       this.redraw();
       return;
@@ -599,6 +629,17 @@ export class SocialPanel extends Container {
     this.mode = "list";
     this.listCursor = 0;
     this.visible = true;
+    this.redraw();
+  }
+
+  private openTitleDetail(): void {
+    const row = this.rows[this.listCursor];
+    if (!row) return;
+    const desc = (row.subtitle || "").trim() || "（无说明）";
+    const wrapCols = Math.max(10, Math.floor((LCD_WIDTH - 36) / 14));
+    this.textLines = wrapChars(desc, wrapCols);
+    this.textPage = 0;
+    this.mode = "text";
     this.redraw();
   }
 
@@ -660,6 +701,10 @@ export class SocialPanel extends Container {
 
     try {
       if (this.mode === "text") {
+        if (this.kind === "titles") {
+          this.drawTitleDetail(x, y, w, h);
+          return;
+        }
         const ps = this.textPageSize();
         const pages = Math.max(1, Math.ceil(this.textLines.length / ps));
         const start = this.textPage * ps;
@@ -732,15 +777,20 @@ export class SocialPanel extends Container {
         return;
       }
 
+      const pageSize = this.listPageSize();
       paintListShellBody({
         ctx,
         x,
         listTop: y + 36,
         w,
         footY: y + h - 18,
-        rows: this.rows.map((r) => ({ name: r.name, subtitle: r.subtitle })),
+        rows: this.rows.map((r) =>
+          this.kind === "titles"
+            ? { name: r.name }
+            : { name: r.name, subtitle: r.subtitle },
+        ),
         cursor: this.listCursor,
-        pageSize: LIST_PAGE_SIZE,
+        pageSize,
         emptyText: "(空)",
         paging: "local",
         onRow: (abs) => {
@@ -752,7 +802,7 @@ export class SocialPanel extends Container {
           this.listCursor = listShellStepPage(
             this.listCursor,
             this.rows.length,
-            LIST_PAGE_SIZE,
+            pageSize,
             -1,
           );
           this.redraw();
@@ -761,7 +811,7 @@ export class SocialPanel extends Container {
           this.listCursor = listShellStepPage(
             this.listCursor,
             this.rows.length,
-            LIST_PAGE_SIZE,
+            pageSize,
             1,
           );
           this.redraw();
@@ -1061,6 +1111,77 @@ export class SocialPanel extends Container {
   }
 
   /** Wealth score: copper total → gold count + jin.gif (no 银/铜). */
+  private titleDetailLinesPerPage(panelH: number): number {
+    const lineH = 16;
+    const descH = panelH - 28 - 36 - 8 - 24;
+    return Math.max(4, Math.floor((descH - 28) / lineH));
+  }
+
+  private titleDetailPages(panelH = LCD_HEIGHT - SOFTKEY_H - 40): number {
+    const per = this.titleDetailLinesPerPage(panelH);
+    return Math.max(1, Math.ceil(this.textLines.length / per));
+  }
+
+  private drawTitleDetail(x: number, y: number, w: number, h: number): void {
+    const row = this.rows[this.listCursor];
+    if (!row) return;
+
+    const titleH = 28;
+    const titleY = y + 8;
+    const pillW = Math.min(w - 16, Math.max(72, row.name.length * 14 + 24));
+    drawCbeTitlePill(this.box, LCD_WIDTH / 2, titleY, pillW, titleH);
+    this.addLabelCentered(row.name, LCD_WIDTH / 2, titleY + titleH / 2, CBE.inkBody);
+
+    const descX = x + 10;
+    const descY = titleY + titleH + 8;
+    const descW = w - 20;
+    const footY = y + h - 18;
+    const descH = Math.max(48, footY - descY - 22);
+    this.box.rect(descX, descY, descW, descH).fill({ color: 0x0a1410 });
+    this.addLabel("称号说明", descX + 6, descY + 6, CBE.inkTip);
+
+    const lineH = 16;
+    const perPage = this.titleDetailLinesPerPage(h);
+    const pages = this.titleDetailPages(h);
+    const start = this.textPage * perPage;
+    this.textLines.slice(start, start + perPage).forEach((line, i) => {
+      this.addLabel(line, descX + 6, descY + 24 + i * lineH, CBE.inkMint);
+    });
+
+    const hint =
+      pages > 1
+        ? `↑↓翻页 ${this.textPage + 1}/${pages} · 左=操作 右=返回`
+        : "左=操作 右=返回";
+    this.addLabel(hint, x + 10, footY, CBE.inkLabel);
+
+    if (pages > 1) {
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 8,
+        y: footY - 22,
+        w: w - 16,
+        page: this.textPage + 1,
+        pages,
+        addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+        onPrev: () => {
+          this.textPage = Math.max(0, this.textPage - 1);
+          this.redraw();
+        },
+        onNext: () => {
+          this.textPage = Math.min(pages - 1, this.textPage + 1);
+          this.redraw();
+        },
+      });
+    }
+
+    this.rowHits.push(
+      attachRowPointerHit(this, x + 6, descY, w - 12, descH, () => this.confirm()),
+    );
+  }
+
+  /** Wealth score: copper total → gold count + jin.gif (no 银/铜). */
   private drawWealthScore(score: string, rightX: number, y: number): void {
     const gold = wealthGoldFromScore(score);
     const iw = 11;
@@ -1103,10 +1224,10 @@ export class SocialPanel extends Container {
     color: number,
   ): void {
     const t = new BitmapLabel();
-    void t.setText(text, color).then(() => {
-      t.position.set(cx - t.width / 2, cy - t.height / 2);
-    });
-    t.position.set(cx, cy);
+    t.anchor.set(0.5, 0.5);
+    t.position.set(Math.round(cx), Math.round(cy));
+    // Don't recenter in setText().then — redraw/clearLabels can destroy t first.
+    void t.setText(text, color);
     this.addChild(t);
     this.labels.push(t);
   }
@@ -1118,10 +1239,10 @@ export class SocialPanel extends Container {
     color: number,
   ): void {
     const t = new BitmapLabel();
-    void t.setText(text, color).then(() => {
-      t.position.set(rightX - t.width, ly);
-    });
+    t.anchor.set(1, 0);
     t.position.set(rightX, ly);
+    // Don't right-align in setText().then — redraw/clearLabels can destroy t first.
+    void t.setText(text, color);
     this.addChild(t);
     this.labels.push(t);
   }

@@ -101,6 +101,9 @@ import {
   buildExpCardStatusRequest,
   buildCombatPillUseRequest,
   parseExpCardStatusInfo,
+  parseExpCardStatusInfoFromPacket,
+  parseBattleInsightRemainSecFromStatus,
+  parseBattleInsightIteminfoFromPacket,
   isCombatPillItem,
   buildEquipSwapRequest,
   buildItemDiscardRequest,
@@ -262,6 +265,7 @@ import {
 } from "../net/protocolArena";
 import {
   buildAuctionBidRequest,
+  buildAuctionBuyoutChallengeRequest,
   buildAuctionBuyoutRequest,
   buildAuctionCancelRequest,
   buildAuctionClaimRequest,
@@ -270,12 +274,14 @@ import {
   buildAuctionListRequest,
   buildAuctionMineRequest,
   buildAuctionStatusRequest,
+  parseAuctionBuyoutChallenge,
   parseAuctionClaim,
   parseAuctionClaimsList,
   parseAuctionEvent,
   parseAuctionList,
   parseAuctionOpResult,
   parseAuctionStatus,
+  type AuctionBuyoutChallengeResult,
   type AuctionClaimResult,
   type AuctionClaimRow,
   type AuctionEvent,
@@ -283,7 +289,7 @@ import {
   type AuctionOpResult,
   type AuctionStatus,
 } from "../net/protocolAuction";
-import { decodeWtPacket } from "../net/wt";
+import { decodeWtPacket, type WtPacket } from "../net/wt";
 import {
   type BagItem,
   type BattleActionUpdate,
@@ -330,6 +336,7 @@ import {
 import {
   parseGuildManagePackets,
   GUILD_PAGE_SIZE,
+  guildPageRowIndex,
   type GuildManageUpdate,
 } from "../net/protocolGuild";
 import {
@@ -540,6 +547,11 @@ export class GameSession {
    * startBattleNearPlayer). Not driven by server hangup battle delivery.
    */
   hangupActive = false;
+  /**
+   * Item 828 wall-clock expiry (ms). Updated from 7/31 / 25/6 status copy;
+   * same source as map-corner「修」buff list.
+   */
+  private battleInsightExpireAtMs = 0;
   /**
    * Player intent to keep hangup running across disconnect/relogin / between fights.
    */
@@ -928,7 +940,7 @@ export class GameSession {
       this.handleBodies(listBodies);
     };
     await tryOnce();
-    if (this.servers.length === 0) await tryOnce();
+    if (this.servers.length === 0 && lastResult !== 2) await tryOnce();
     if (this.servers.length === 0) {
       // result=2 is a real 1/1/12 failure (codeVersion / auth), not a missing packet.
       if (lastResult === 2 || lastInfo) {
@@ -2700,16 +2712,39 @@ export class GameSession {
     return null;
   }
 
-  async auctionBuyout(listingId: number): Promise<AuctionOpResult | null> {
+  async auctionBuyout(
+    listingId: number,
+    captcha: string,
+  ): Promise<AuctionOpResult | null> {
     if (!this.transport) return null;
     const bodies = await this.transport.exchange(
       0,
-      buildAuctionBuyoutRequest(listingId),
+      buildAuctionBuyoutRequest(listingId, captcha),
     );
     this.handleBodies(bodies);
     for (const body of bodies) {
       try {
         const r = parseAuctionOpResult(decodeWtPacket(body), 9);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async auctionBuyoutChallenge(
+    listingId: number,
+  ): Promise<AuctionBuyoutChallengeResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildAuctionBuyoutChallengeRequest(listingId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseAuctionBuyoutChallenge(decodeWtPacket(body));
         if (r) return r;
       } catch {
         /* ignore */
@@ -3399,7 +3434,45 @@ export class GameSession {
     const bodies = await this.transport.exchange(0, buildExpCardStatusRequest());
     this.handleBodies(bodies);
     const info = parseExpCardStatusInfo(bodies);
+    if (!info.trim()) {
+      this.battleInsightExpireAtMs = 0;
+    }
     return info || "当前没有生效的增益物品";
+  }
+
+  /** Remaining seconds for 战斗心得 — matches「修」status tip. */
+  getBattleInsightRemainingSec(): number {
+    if (this.battleInsightExpireAtMs <= 0) return 0;
+    return Math.max(
+      0,
+      Math.ceil((this.battleInsightExpireAtMs - Date.now()) / 1000),
+    );
+  }
+
+  private noteBattleInsightFromStatus(info: string): void {
+    const sec = parseBattleInsightRemainSecFromStatus(info);
+    if (sec === null) return;
+    if (sec <= 0) {
+      this.battleInsightExpireAtMs = 0;
+      return;
+    }
+    if (sec < 0) {
+      if (this.battleInsightExpireAtMs <= Date.now()) {
+        this.battleInsightExpireAtMs = Date.now() + 3600 * 1000;
+      }
+      return;
+    }
+    this.battleInsightExpireAtMs = Date.now() + sec * 1000;
+  }
+
+  private noteBattleInsightFromPacket(packet: WtPacket): void {
+    const status = parseExpCardStatusInfoFromPacket(packet);
+    if (status) {
+      this.noteBattleInsightFromStatus(status);
+      return;
+    }
+    const iteminfo = parseBattleInsightIteminfoFromPacket(packet);
+    if (iteminfo) this.noteBattleInsightFromStatus(iteminfo);
   }
 
   /**
@@ -3524,6 +3597,25 @@ export class GameSession {
   }
 
   /** 828: 25/6 apply + 25/7 wait-clear (docs/re/2026-07-23-special-item-use-contract.md). */
+  /**
+   * Hangup panel「补充时间」: use one 战斗心得 (828) from bag.
+   * Tip to buy from mall when bag has none.
+   */
+  async useBattleInsightFromBag(): Promise<ItemUseFeedback> {
+    const row = this.bagItems.find(
+      (it) => isBattleInsightItem(it.itemId) && it.count > 0 && it.seq > 0,
+    );
+    if (!row) {
+      const fb: ItemUseFeedback = {
+        ok: false,
+        message: "背包没有战斗心得，请先商城购买",
+      };
+      this.emitItemUseFeedback(fb);
+      return fb;
+    }
+    return this.useItem(row.itemId, row.seq);
+  }
+
   private async useBattleInsight(seq: number): Promise<ItemUseFeedback> {
     if (!this.transport) {
       return { ok: false, message: "未连接服务器" };
@@ -4315,11 +4407,18 @@ export class GameSession {
     seq: number,
     unlock: number,
     crystalItemId: number,
+    crystalCount = 1,
   ): Promise<EnhanceWashPreviewResult | null> {
     if (!this.transport || !crystalItemId) return null;
     const bodies = await this.transport.exchange(
       0,
-      buildEnhanceWashMaterialRequest(8, seq, unlock, crystalItemId),
+      buildEnhanceWashMaterialRequest(
+        8,
+        seq,
+        unlock,
+        crystalItemId,
+        crystalCount,
+      ),
     );
     this.handleBodies(bodies);
     for (const body of bodies) {
@@ -4339,6 +4438,7 @@ export class GameSession {
     seq: number,
     unlock: number,
     crystalItemId: number,
+    crystalCount = 1,
   ): Promise<EnhanceWashConfirmResult> {
     if (!this.transport) {
       return {
@@ -4362,7 +4462,13 @@ export class GameSession {
     }
     const bodies = await this.transport.exchange(
       0,
-      buildEnhanceWashMaterialRequest(9, seq, unlock, crystalItemId),
+      buildEnhanceWashMaterialRequest(
+        9,
+        seq,
+        unlock,
+        crystalItemId,
+        crystalCount,
+      ),
     );
     this.handleBodies(bodies);
     for (const body of bodies) {
@@ -4809,7 +4915,10 @@ export class GameSession {
     this.guildBrowseKind = "list";
     const bodies = await this.transport.exchange(
       0,
-      buildGuildListRequest(this.guildListPage, GUILD_PAGE_SIZE),
+      buildGuildListRequest(
+        guildPageRowIndex(this.guildListPage, GUILD_PAGE_SIZE),
+        GUILD_PAGE_SIZE,
+      ),
     );
     this.handleBodies(bodies);
   }
@@ -4851,7 +4960,10 @@ export class GameSession {
     this.guildBrowseKind = "members";
     const bodies = await this.transport.exchange(
       0,
-      buildGuildMemberPageRequest(this.guildMemberPage, GUILD_PAGE_SIZE),
+      buildGuildMemberPageRequest(
+        guildPageRowIndex(this.guildMemberPage, GUILD_PAGE_SIZE),
+        GUILD_PAGE_SIZE,
+      ),
     );
     this.handleBodies(bodies);
   }
@@ -4862,7 +4974,10 @@ export class GameSession {
     this.guildBrowseKind = "apps";
     const bodies = await this.transport.exchange(
       0,
-      buildGuildApplicationPageRequest(this.guildAppPage, GUILD_PAGE_SIZE),
+      buildGuildApplicationPageRequest(
+        guildPageRowIndex(this.guildAppPage, GUILD_PAGE_SIZE),
+        GUILD_PAGE_SIZE,
+      ),
     );
     this.handleBodies(bodies);
   }
@@ -5161,6 +5276,8 @@ export class GameSession {
       if (!body || body.length < 5) continue;
       const packet = ingestPacket(body);
       if (!packet) continue;
+
+      this.noteBattleInsightFromPacket(packet);
 
       const list = parseServerList(packet);
       if (list.result === 3 && list.username && list.password) {

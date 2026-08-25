@@ -9,7 +9,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
 } from "./constants";
 import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
 import type { BagItem } from "../net/protocolExtras";
@@ -431,7 +431,7 @@ export class EnhancePanel extends Container {
     const y = 20;
     const w = LCD_WIDTH - 16;
     const h = LCD_HEIGHT - SOFTKEY_H - 28;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     if (this.mode === "transferPick" || this.mode === "transferConfirm") {
       this.drawTransfer(x, y, w, h);

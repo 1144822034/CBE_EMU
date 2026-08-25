@@ -4,7 +4,8 @@ import {
   CBE,
   LCD_HEIGHT,
   LCD_WIDTH,
-  drawCbePanel,
+  paintCbePanel,
+  preloadCbeFlowerCorners,
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import type { BattleState, BattleSide } from "../net/protocol";
@@ -13,7 +14,7 @@ import {
   battleTargetWire,
   battleUnitForWire,
 } from "../net/protocol";
-import type { BattleActionUpdate, BattleSettlement } from "../net/protocolExtras";
+import type { BattleActionUpdate, BattleSettlement, HangupCombatinfo } from "../net/protocolExtras";
 import {
   actorResourceForJobSex,
   composeBattlePose,
@@ -25,6 +26,7 @@ import {
 } from "../resources/actor";
 import { resolveBattleSce } from "../resources/battleScene";
 import { eidolonActorForIndex } from "../resources/eidolon";
+import { lookupItemSync } from "../resources/itemCatalog";
 import { loadSceneMap, resourceExists, type LoadedScene } from "../resources/loader";
 import { rgbaToTexture } from "../render/rgbaTexture";
 import type { BattleSkillRow, SkillTargetKind } from "../resources/skill";
@@ -39,7 +41,32 @@ import {
 } from "./UiAssets";
 import { BattlePartyHud, BATTLE_PARTY_HUD_H } from "./BattlePartyHud";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, preloadPageNavTextures } from "./pageNav";
+import {
+  paintHangupPanel,
+  preloadHangupPanelTextures,
+} from "./hangupSettleUi";
+import {
+  paintBattleSettlePanel,
+  parseSettleDropLines,
+} from "./battleSettleUi";
+import {
+  MENU2_CAP_H,
+  MENU2_CENTER_W,
+  MENU2_LEFT_W,
+  MENU2_RIGHT_W,
+  MENU2_WHITE_FILL,
+  addMenuScrollBackground,
+  menu2ContentRect,
+  preloadMenuScrollTexture,
+} from "./menuScrollUi";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 /** Eidolon frames can be 170px+; clamp so FX cannot dominate the 240× stage. */
 const FX_MAX_W = 96;
@@ -55,6 +82,9 @@ const HEAL_GREEN = 0x50e080;
 const TOP_H = 36;
 /** Compact party vitals strip — flush to LCD bottom (HTML softkeys are outside). */
 const BOTTOM_H = BATTLE_PARTY_HUD_H;
+/** Battle log sits above party HUD — right of portrait so face stays visible. */
+const BOTTOM_LOG_X = 36;
+const BOTTOM_LOG_MAX_W = LCD_WIDTH - BOTTOM_LOG_X - 8;
 const STAGE_TOP = TOP_H;
 const STAGE_BOTTOM = LCD_HEIGHT - BOTTOM_H;
 const UNIT_LEFT_X = 22;
@@ -90,9 +120,21 @@ export type BattleSkill = BattleSkillRow;
 
 /** Screenshot order: 攻击 / 仙术 / 物品 / 逃跑 / 自动 / 查看 */
 const MENU_ITEMS = ["攻击", "仙术", "物品", "逃跑", "自动", "查看"] as const;
-/** Visible rows in the 仙术 / 物品 parchment (↑↓ wraps across pages). */
-const SKILL_PAGE_SIZE = 6;
-const ITEM_PAGE_SIZE = 6;
+/** Battle scroll row pitch inside the white list box. */
+const BATTLE_MENU_ROW_H = 16;
+/** Green band above white box for 行动 / 仙术 / 物品 title. */
+const BATTLE_MENU_TITLE_BAND = 18;
+/** Padding below white box before bottom roller. */
+const BATTLE_MENU_BOTTOM_PAD = 8;
+const BATTLE_MENU_SEL_FILL = 0x505850;
+/** CBE 仙术/物品选择面板 — 暗色列表可见行数（+ 翻页按钮）. */
+const BATTLE_PICK_VISIBLE = 6;
+const BATTLE_PICK_ROW_H = 18;
+const BATTLE_PICK_PANEL_X = 12;
+const BATTLE_PICK_PANEL_W = LCD_WIDTH - 24;
+const BATTLE_PICK_TITLE_H = 26;
+const BATTLE_PICK_NAV_H = 16;
+const BATTLE_PICK_DESC_LINES = 4;
 type MenuItem = (typeof MENU_ITEMS)[number];
 
 /** PvE / 普通切磋默认回合秒数。 */
@@ -161,16 +203,32 @@ export class BattleScreen extends Container {
   private fxHost = new Container();
   private menuHost = new Container();
   private settleHost = new Container();
+  /** Center toast (hangup add-time / battle tips). */
+  private toast: PanelTipState = createPanelTipState();
   private floatHost = new Container();
   private topHost = new Container();
   private bottomHost = new Container();
   /** Top-right 「自动/挂机战斗中」+ 关闭. */
   private autoBannerHost = new Container();
   private autoBannerBuilt = false;
-  private autoBannerTip: BitmapLabel | null = null;
+  private autoBannerArtGen = 0;
+  /** autobattle_words.gif — auto-fight banner copy. */
+  private autoBannerWords: Sprite | null = null;
+  /** Hangup has no words sheet; UC3 fallback beside the close tile. */
+  private autoBannerHangupTip: BitmapLabel | null = null;
   private autoActive = false;
   /** Hangup (client collide-loop) — hide operate scroll while armed. */
   private hangupActive = false;
+  /** Client-owned hangup settle tally when wire has no combatinfo. */
+  private hangupTally: HangupCombatinfo = {
+    completed: 0,
+    maximum: 64,
+    totalExp: 0,
+    totalGold: 0,
+    totalHpRecovered: 0,
+    totalMpRecovered: 0,
+  };
+  private hangupTallyArmed = false;
   private partyHud = new BattlePartyHud();
   private log = new BitmapLabel();
   private topTitle = new BitmapLabel();
@@ -258,6 +316,8 @@ export class BattleScreen extends Container {
   onAutoCancel: (() => void) | null = null;
   /** Fired when banner 关闭 while hangup owns the fight — local stop. */
   onHangupCancel: (() => void) | null = null;
+  /** Hangup settle「补充时间」— main uses bag 828 / tips mall. */
+  onHangupAddTime: (() => void | Promise<void>) | null = null;
   /** Fired when a round finishes playback and [自动] is still armed. */
   onAutoReady: (() => void) | null = null;
   /**
@@ -294,6 +354,15 @@ export class BattleScreen extends Container {
     // Above stage/menu so the 关闭 hit target stays tappable.
     this.addChild(this.autoBannerHost);
     this.buildChrome();
+    preloadCbeFlowerCorners(() => {
+      if (
+        this.visible &&
+        this.menuOpen &&
+        (this.menuMode === "skill" || this.menuMode === "item")
+      ) {
+        this.redrawMenu();
+      }
+    });
   }
 
   isAutoBattleActive(): boolean {
@@ -302,6 +371,16 @@ export class BattleScreen extends Container {
 
   isHangupActive(): boolean {
     return this.hangupActive;
+  }
+
+  /** Pixi panel toast — works while world HUD is hidden in battle. */
+  showTip(text: string, ms = 1800): void {
+    if (!this.visible) return;
+    const msg = text.trim();
+    if (!msg) return;
+    showPanelTip(this.toast, msg, () => {
+      if (this.visible) drawPanelTipOverlay(this, this.toast);
+    }, ms);
   }
 
   /** True when the action scroll may be shown (not [自动] / hangup). */
@@ -316,7 +395,15 @@ export class BattleScreen extends Container {
    */
   setHangupActive(on: boolean): void {
     this.ensureAutoBanner();
+    if (on && !this.hangupActive) {
+      this.resetHangupTally();
+      preloadHangupPanelTextures();
+    }
+    if (!on) {
+      this.hangupTallyArmed = false;
+    }
     this.hangupActive = on;
+    this.paintAutoBannerTip();
     this.refreshAutoBannerVisibility();
     if (on) {
       this.menuOpen = false;
@@ -345,6 +432,8 @@ export class BattleScreen extends Container {
   setAutoBattleActive(on: boolean): void {
     this.ensureAutoBanner();
     this.autoActive = on;
+    if (on) preloadHangupPanelTextures();
+    this.paintAutoBannerTip();
     this.refreshAutoBannerVisibility();
     if (on) {
       // Always hide the scroll while armed — even mid-playback / await.
@@ -475,6 +564,15 @@ export class BattleScreen extends Container {
     }
   }
 
+  /** Roster member left/offline during a shared team round. */
+  noteTeammateLeft(): void {
+    void this.log.setText(
+      this.awaitingRound ? "队友已离开，等待回合…" : "队友已离开",
+      CBE.inkTip,
+      { maxWidth: LCD_WIDTH - 16 },
+    );
+  }
+
   /**
    * Spar 4/10 left uses sexGroup 1..2; PvE subtype-10 fallback is visual0=0.
    * Flee is not offered in friendly spar.
@@ -548,6 +646,19 @@ export class BattleScreen extends Container {
   }
 
   show(state: BattleState): void {
+    preloadMenuScrollTexture(() => {
+      if (this.menuOpen && !this.awaitingExit && !this.awaitingDeathPrompt) {
+        this.redrawMenu();
+      }
+    });
+    preloadPageNavTextures(() => {
+      if (
+        this.menuOpen &&
+        (this.menuMode === "skill" || this.menuMode === "item")
+      ) {
+        this.redrawMenu();
+      }
+    });
     this.visible = true;
     this.state = state;
     this.awaitingExit = false;
@@ -593,9 +704,21 @@ export class BattleScreen extends Container {
     this.menuOpen = false;
     this.resetTargetPick();
     this.redrawMenu();
-    void this.log.setText(up.log, CBE.inkBody, {
-      maxWidth: LCD_WIDTH - 16,
-    });
+    const settleLog = up.settlement != null;
+    if (settleLog) {
+      const text = formatBattleBottomLog(up.log);
+      if (text) {
+        this.log.visible = true;
+        void this.log.setText(text, CBE.ink, { maxWidth: BOTTOM_LOG_MAX_W });
+      } else {
+        this.log.visible = false;
+      }
+    } else {
+      this.log.visible = true;
+      void this.log.setText(up.log, CBE.inkBody, {
+        maxWidth: LCD_WIDTH - 16,
+      });
+    }
 
     /*
      * With a round script, defer HP/MP onto each action landing so the bottom
@@ -685,12 +808,14 @@ export class BattleScreen extends Container {
   }
 
   hide(): void {
+    clearPanelTip(this.toast);
     // Flush last known seat vitals before tearing state (world HUD sync).
     if (this.state) this.notifyVitalsChanged();
     this.visible = false;
     this.state = null;
     this.arenaDuel = false;
     this.hangupActive = false;
+    this.hangupTallyArmed = false;
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
     this.playbackBusy = false;
@@ -739,14 +864,27 @@ export class BattleScreen extends Container {
    * Hangup / [自动] 出手：与手动攻击/仙术同一套选目标 + onAttack/onSkill。
    * 不在这里改写 actioninfo 播报（播报照服务器 child wire，与手动一致）。
    */
+  private resolveAutoOperateMp(operate: number): number {
+    const op = operate | 0;
+    if (op === 0) return 0;
+    const sk = this.skills.find((s) => s.id + 2 === op);
+    const mpCost = sk?.mpCost;
+    if (mpCost == null || mpCost <= 0) return op;
+    const vitals = this.allyVitals();
+    if (vitals != null && vitals.mp < mpCost) return 0;
+    return op;
+  }
+
   submitAutoOperate(operate: number, tip: string): boolean {
     if (!this.state || !this.canSubmitOperate()) return false;
-    const op = operate | 0;
+    const op = this.resolveAutoOperateMp(operate);
     if (op === 0) {
       const wires = this.livingEnemyWires();
       this.selectedTargetWire =
         wires[0] ?? battleTargetWire(this.state);
-      this.noteOperateSubmitted(tip);
+      this.noteOperateSubmitted(
+        op !== (operate | 0) ? "法力不足·普攻" : tip,
+      );
       // Prefer onSkill(0) so main.ts can tag the note as auto (does not
       // erase a remembered skill). Fall back to onAttack for older wires.
       if (this.onSkill) this.onSkill(0);
@@ -980,11 +1118,7 @@ export class BattleScreen extends Container {
     this.skillCursor = Math.min(this.skillCursor, this.skills.length - 1);
     this.clearTargetMark();
     this.redrawMenu();
-    const pages = Math.max(1, Math.ceil(this.skills.length / SKILL_PAGE_SIZE));
-    void this.log.setText(
-      pages > 1 ? `选择仙术（↑↓翻页 共${pages}页）` : "选择仙术…",
-      CBE.inkBody,
-    );
+    void this.log.setText("选择仙术…", CBE.inkBody);
   }
 
   item(): void {
@@ -1015,11 +1149,7 @@ export class BattleScreen extends Container {
     this.itemCursor = Math.min(this.itemCursor, this.items.length - 1);
     this.clearTargetMark();
     this.redrawMenu();
-    const pages = Math.max(1, Math.ceil(this.items.length / ITEM_PAGE_SIZE));
-    void this.log.setText(
-      pages > 1 ? `选择物品（↑↓翻页 共${pages}页）` : "选择物品…",
-      CBE.inkBody,
-    );
+    void this.log.setText("选择物品…", CBE.inkBody);
   }
 
   flee(): void {
@@ -1352,10 +1482,12 @@ export class BattleScreen extends Container {
     void this.mountTimerArt();
 
     this.bottomHost.y = STAGE_BOTTOM;
+    this.log.anchor.set(0, 1);
+    this.log.position.set(BOTTOM_LOG_X, -4);
+    // Log before partyHud so portrait / vitals paint above any wrap spill.
+    this.bottomHost.addChild(this.log);
     this.bottomHost.addChild(this.partyHud);
     void this.partyHud.mount();
-    this.log.position.set(8, STAGE_BOTTOM - 12);
-    this.addChild(this.log);
     void this.mountFloatDigits();
     this.ensureAutoBanner();
   }
@@ -1363,42 +1495,68 @@ export class BattleScreen extends Container {
   private ensureAutoBanner(): void {
     if (this.autoBannerBuilt) return;
     this.autoBannerBuilt = true;
+    this.autoBannerHost.visible = false;
+    this.autoBannerHost.eventMode = "static";
+    void this.mountAutoBannerArt();
+  }
+
+  /** Native autobattle_words.gif + autobattle_button.gif (mmBattle auto banner). */
+  private async mountAutoBannerArt(): Promise<void> {
+    const gen = ++this.autoBannerArtGen;
     const host = this.autoBannerHost;
-    host.visible = false;
-    host.eventMode = "static";
+    host.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.autoBannerWords = null;
+    this.autoBannerHangupTip = null;
 
-    // UC3「自动/挂机战斗中」≈60px; keep clear gap before 关闭.
     const panelW = 134;
-    const panelH = 22;
-    const bg = new Graphics()
-      .roundRect(0, 0, panelW, panelH, 3)
-      .fill({ color: 0x142820, alpha: 0.94 })
-      .stroke({ width: 1, color: CBE.inkTip });
-    host.addChild(bg);
+    const wordsTex = await tryLoadUiTexture("autobattle_words.gif");
+    const btnTex = await tryLoadUiTexture("autobattle_button.gif");
+    if (gen !== this.autoBannerArtGen) return;
 
-    const tip = new BitmapLabel();
-    tip.eventMode = "none";
-    tip.position.set(4, 5);
-    tip.show("自动战斗中", CBE.inkTip, { outline: false });
-    this.autoBannerTip = tip;
-    host.addChild(tip);
+    if (!wordsTex) {
+      const bg = new Graphics()
+        .roundRect(0, 0, panelW, 22, 3)
+        .fill({ color: 0x142820, alpha: 0.94 })
+        .stroke({ width: 1, color: CBE.inkTip });
+      host.addChild(bg);
+    }
+
+    if (wordsTex) {
+      const words = uiSprite(wordsTex);
+      words.eventMode = "none";
+      words.position.set(4, 6);
+      host.addChild(words);
+      this.autoBannerWords = words;
+    }
+
+    const hangTip = new BitmapLabel();
+    hangTip.eventMode = "none";
+    hangTip.position.set(4, 5);
+    hangTip.show("挂机战斗中", CBE.inkTip, { outline: false });
+    hangTip.visible = false;
+    host.addChild(hangTip);
+    this.autoBannerHangupTip = hangTip;
 
     const btn = new Container();
-    const btnBg = new Graphics()
-      .roundRect(0, 0, 34, 16, 2)
-      .fill({ color: 0x3a2818 })
-      .stroke({ width: 1, color: CBE.inkWarn });
-    const btnLabel = new BitmapLabel();
-    btnLabel.eventMode = "none";
-    btnLabel.position.set(3, 2);
-    btnLabel.show("关闭", CBE.inkWarn, { outline: false });
-    btn.addChild(btnBg, btnLabel);
-    btn.position.set(panelW - 38, 3);
+    if (btnTex) {
+      const spr = uiSprite(btnTex);
+      btn.addChild(spr);
+    } else {
+      const btnBg = new Graphics()
+        .roundRect(0, 0, 34, 16, 2)
+        .fill({ color: 0x3a2818 })
+        .stroke({ width: 1, color: CBE.inkWarn });
+      const btnLabel = new BitmapLabel();
+      btnLabel.eventMode = "none";
+      btnLabel.position.set(3, 2);
+      btnLabel.show("关闭", CBE.inkWarn, { outline: false });
+      btn.addChild(btnBg, btnLabel);
+    }
+    btn.position.set(panelW - (btnTex ? 22 : 38), btnTex ? 4 : 3);
     btn.eventMode = "static";
     btn.cursor = "pointer";
     btn.on("pointertap", (e) => {
       e.stopPropagation();
-      // Hangup owns the seat; closing it is the stop-hangup path (not [自动]).
       if (this.hangupActive) {
         this.closeHangup();
         return;
@@ -1408,14 +1566,22 @@ export class BattleScreen extends Container {
     host.addChild(btn);
 
     host.position.set(LCD_WIDTH - panelW - 4, STAGE_TOP + 2);
+    this.paintAutoBannerTip();
   }
 
   private paintAutoBannerTip(): void {
-    const tip = this.autoBannerTip;
-    if (!tip) return;
-    tip.show(this.hangupActive ? "挂机战斗中" : "自动战斗中", CBE.inkTip, {
-      outline: false,
-    });
+    const hangup = this.hangupActive;
+    if (this.autoBannerWords) {
+      this.autoBannerWords.visible = !hangup;
+    }
+    if (this.autoBannerHangupTip) {
+      this.autoBannerHangupTip.visible = hangup;
+      if (hangup) {
+        this.autoBannerHangupTip.show("挂机战斗中", CBE.inkTip, {
+          outline: false,
+        });
+      }
+    }
   }
 
   private refreshAutoBannerVisibility(): void {
@@ -1781,7 +1947,7 @@ export class BattleScreen extends Container {
     const opts = this.deathPromptOptions();
     const h = 80 + opts.length * 18;
     const box = new Graphics();
-    drawCbePanel(box, 20, 100, LCD_WIDTH - 40, h, CBE.bgPanelDark);
+    paintCbePanel(this.settleHost, box, 20, 100, LCD_WIDTH - 40, h, CBE.bgPanelDark);
     this.settleHost.addChild(box);
     const lines = [
       "你已经死亡",
@@ -2078,6 +2244,253 @@ export class BattleScreen extends Container {
     void this.log.setText("查看…", CBE.inkTip);
   }
 
+  /** Menu row label — horizontally centered like world MenuScreen. */
+  private addMenuCenteredLabel(
+    host: Container,
+    text: string,
+    cx: number,
+    y: number,
+    color: number,
+    maxWidth?: number,
+  ): void {
+    const lab = new BitmapLabel();
+    lab.eventMode = "none";
+    lab.anchor.set(0.5, 0);
+    lab.position.set(cx, y);
+    void lab.setText(text, color, {
+      outline: false,
+      maxWidth: maxWidth != null ? maxWidth - 2 : undefined,
+    });
+    host.addChild(lab);
+  }
+
+  private battlePickWindowStart(cursor: number, total: number): number {
+    if (total <= BATTLE_PICK_VISIBLE) return 0;
+    return Math.floor(cursor / BATTLE_PICK_VISIBLE) * BATTLE_PICK_VISIBLE;
+  }
+
+  private addBattleLabelCentered(
+    host: Container,
+    text: string,
+    cx: number,
+    cy: number,
+    color: number,
+  ): void {
+    const lab = new BitmapLabel();
+    lab.eventMode = "none";
+    lab.anchor.set(0.5, 0.5);
+    lab.position.set(Math.round(cx), Math.round(cy));
+    void lab.setText(text, color, { outline: false });
+    host.addChild(lab);
+  }
+
+  private addBattleLabelLeft(
+    host: Container,
+    text: string,
+    x: number,
+    y: number,
+    color: number,
+    maxWidth: number,
+  ): void {
+    const lab = new BitmapLabel();
+    lab.eventMode = "none";
+    lab.position.set(x, y);
+    void lab.setText(text, color, { outline: false, maxWidth });
+    host.addChild(lab);
+  }
+
+  private addBattleLabelRight(
+    host: Container,
+    text: string,
+    rightX: number,
+    y: number,
+    color: number,
+    maxWidth: number,
+  ): void {
+    const lab = new BitmapLabel();
+    lab.eventMode = "none";
+    lab.anchor.set(1, 0);
+    lab.position.set(rightX, y);
+    void lab.setText(text, color, { outline: false, maxWidth });
+    host.addChild(lab);
+  }
+
+  private wrapBattlePickDesc(text: string, maxCols = 14): string[] {
+    const body = text.trim() || "（无说明）";
+    return body.split("\n").flatMap((part) => wrapChars(part, maxCols));
+  }
+
+  private paintBattlePickPanel(
+    title: string,
+    entries: { name: string; right: string; desc: string }[],
+    cursor: number,
+    onSelect: (index: number) => void,
+  ): void {
+    const panelX = BATTLE_PICK_PANEL_X;
+    const panelY = STAGE_TOP + 32;
+    const panelW = BATTLE_PICK_PANEL_W;
+    const listInset = 8;
+    const total = entries.length;
+    const pages = Math.max(1, Math.ceil(Math.max(total, 1) / BATTLE_PICK_VISIBLE));
+    const navReserve = pages > 1 ? BATTLE_PICK_NAV_H + 4 : 0;
+    const listBoxH =
+      BATTLE_PICK_VISIBLE * BATTLE_PICK_ROW_H + navReserve + 8;
+    const descLineH = 16;
+    const descH = BATTLE_PICK_DESC_LINES * descLineH + 8;
+    const panelH = BATTLE_PICK_TITLE_H + listBoxH + 8 + descH + 8;
+
+    const chrome = new Graphics();
+    chrome.eventMode = "none";
+    paintCbePanel(this.menuHost, chrome, panelX, panelY, panelW, panelH, CBE.bgDeep);
+    this.menuHost.addChild(chrome);
+
+    this.addBattleLabelCentered(
+      this.menuHost,
+      title,
+      panelX + panelW / 2,
+      panelY + BATTLE_PICK_TITLE_H / 2,
+      CBE.ink,
+    );
+
+    const listX = panelX + listInset;
+    const listW = panelW - listInset * 2;
+    const listY = panelY + BATTLE_PICK_TITLE_H;
+    const listBg = new Graphics();
+    listBg.eventMode = "none";
+    listBg.rect(listX, listY, listW, listBoxH).fill({ color: CBE.bgPanelDark });
+    this.menuHost.addChild(listBg);
+
+    const start = this.battlePickWindowStart(cursor, total);
+    const visible = entries.slice(start, start + BATTLE_PICK_VISIBLE);
+    const page = Math.floor(start / BATTLE_PICK_VISIBLE) + 1;
+    const rowTop = listY + 4;
+
+    if (!total) {
+      this.addBattleLabelCentered(
+        this.menuHost,
+        "(无)",
+        listX + listW / 2,
+        rowTop + BATTLE_PICK_ROW_H / 2,
+        CBE.inkMint,
+      );
+    } else {
+      visible.forEach((entry, vi) => {
+        const abs = start + vi;
+        const rowY = rowTop + vi * BATTLE_PICK_ROW_H;
+        const hi = abs === cursor;
+        if (hi) {
+          const hiGfx = new Graphics()
+            .rect(listX + 2, rowY, listW - 4, BATTLE_PICK_ROW_H - 1)
+            .fill({ color: CBE.select });
+          hiGfx.eventMode = "none";
+          this.menuHost.addChild(hiGfx);
+        }
+        const ink = hi ? CBE.ink : CBE.inkMint;
+        this.addBattleLabelLeft(
+          this.menuHost,
+          entry.name,
+          listX + 6,
+          rowY + 1,
+          ink,
+          listW - 56,
+        );
+        this.addBattleLabelRight(
+          this.menuHost,
+          entry.right,
+          listX + listW - 6,
+          rowY + 1,
+          ink,
+          48,
+        );
+        this.rowHits.push(
+          attachRowPointerHit(
+            this.menuHost,
+            listX + 2,
+            rowY,
+            listW - 4,
+            BATTLE_PICK_ROW_H - 1,
+            () => {
+              onSelect(abs);
+              this.redrawMenu();
+              this.confirm();
+            },
+          ),
+        );
+      });
+    }
+
+    if (pages > 1) {
+      const navY = listY + listBoxH - BATTLE_PICK_NAV_H - 2;
+      attachPageNavButtons({
+        host: this.menuHost,
+        hits: this.rowHits,
+        box: chrome,
+        x: listX,
+        y: navY,
+        w: listW,
+        page,
+        pages,
+        addLabel: (t, lx, ly, c) =>
+          this.addBattleLabelLeft(this.menuHost, t, lx, ly, c, 48),
+        onPrev: () => {
+          onSelect(Math.max(0, start - BATTLE_PICK_VISIBLE));
+          this.redrawMenu();
+        },
+        onNext: () => {
+          onSelect(Math.min(total - 1, start + BATTLE_PICK_VISIBLE));
+          this.redrawMenu();
+        },
+      });
+    }
+
+    const descY = listY + listBoxH + 8;
+    const descX = panelX + listInset;
+    const descW = panelW - listInset * 2;
+    const sel = entries[cursor];
+    const descLines = this.wrapBattlePickDesc(sel?.desc ?? "", 14).slice(
+      0,
+      BATTLE_PICK_DESC_LINES,
+    );
+    descLines.forEach((line, i) => {
+      this.addBattleLabelLeft(
+        this.menuHost,
+        line,
+        descX + 2,
+        descY + i * descLineH,
+        CBE.ink,
+        descW - 4,
+      );
+    });
+  }
+
+  private paintBattleSkillPick(): void {
+    const entries = this.skills.map((sk) => ({
+      name: sk.name,
+      right: sk.mpCost != null && sk.mpCost > 0 ? `${sk.mpCost}术` : "",
+      desc:
+        (sk.desc && sk.desc !== "-" ? sk.desc : "") || "（无技能介绍）",
+    }));
+    this.paintBattlePickPanel("仙术", entries, this.skillCursor, (index) => {
+      this.skillCursor = index;
+    });
+  }
+
+  private paintBattleItemPick(): void {
+    const entries = this.items.map((it) => {
+      const cat = lookupItemSync(it.itemId);
+      const desc =
+        (cat?.desc && cat.desc !== "-" ? cat.desc : "") || "（无物品说明）";
+      return {
+        name: it.name,
+        right: `${it.count}个`,
+        desc,
+      };
+    });
+    this.paintBattlePickPanel("物品", entries, this.itemCursor, (index) => {
+      this.itemCursor = index;
+    });
+  }
+
   private redrawMenu(): void {
     clearPointerHits(this.rowHits);
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
@@ -2111,264 +2524,79 @@ export class BattleScreen extends Container {
     }
 
     this.menuHost.eventMode = "static";
+    if (this.menuMode === "skill") {
+      this.paintBattleSkillPick();
+      return;
+    }
+    if (this.menuMode === "item") {
+      this.paintBattleItemPick();
+      return;
+    }
+
     const rootItems = this.rootMenuItems();
-    const skillPages = Math.max(
-      1,
-      Math.ceil(Math.max(this.skills.length, 1) / SKILL_PAGE_SIZE),
-    );
-    const skillPage = Math.min(
-      skillPages - 1,
-      Math.floor(this.skillCursor / SKILL_PAGE_SIZE),
-    );
-    const skillPageStart = skillPage * SKILL_PAGE_SIZE;
-    const itemPages = Math.max(
-      1,
-      Math.ceil(Math.max(this.items.length, 1) / ITEM_PAGE_SIZE),
-    );
-    const itemPage = Math.min(
-      itemPages - 1,
-      Math.floor(this.itemCursor / ITEM_PAGE_SIZE),
-    );
-    const itemPageStart = itemPage * ITEM_PAGE_SIZE;
-    const listPageRows =
-      this.menuMode === "skill"
-        ? Math.min(
-            SKILL_PAGE_SIZE,
-            Math.max(1, this.skills.length - skillPageStart),
-          )
-        : this.menuMode === "item"
-          ? Math.min(
-              ITEM_PAGE_SIZE,
-              Math.max(1, this.items.length - itemPageStart),
-            )
-          : 0;
-    const rows =
-      this.menuMode === "skill" || this.menuMode === "item"
-        ? listPageRows
-        : rootItems.length;
-    const showPageNav =
-      (this.menuMode === "skill" && skillPages > 1) ||
-      (this.menuMode === "item" && itemPages > 1);
-    const h = 28 + rows * 16 + (showPageNav ? 22 : 0);
-    // 仙术行带「耗蓝N」，比根菜单略宽；物品名更长用 120；翻页按钮再加宽
-    const w =
-      this.menuMode === "skill"
-        ? showPageNav
-          ? 148
-          : 128
-        : this.menuMode === "item"
-          ? showPageNav
-            ? 140
-            : 120
-          : 100;
+    const rows = rootItems.length;
+    const listH = rows * BATTLE_MENU_ROW_H;
+    const h =
+      MENU2_CAP_H * 2 +
+      BATTLE_MENU_TITLE_BAND +
+      listH +
+      BATTLE_MENU_BOTTOM_PAD;
+    const w = 100;
     const x = (LCD_WIDTH - w) / 2;
     const y = STAGE_TOP + 40;
 
-    // Parchment scroll (screenshot) — Graphics approximation + optional UI_menu2.
-    const panel = new Graphics();
-    panel.eventMode = "none";
-    panel
-      .roundRect(x, y, w, h, 2)
-      .fill({ color: 0xc8c4a0 })
-      .stroke({ width: 2, color: 0x3a6658 });
-    panel.roundRect(x - 4, y - 6, w + 8, 10, 3).fill({ color: 0x4a7a6a });
-    panel.roundRect(x - 4, y + h - 4, w + 8, 10, 3).fill({ color: 0x4a7a6a });
-    this.menuHost.addChild(panel);
+    addMenuScrollBackground(this.menuHost, x, y, w, h, "parchment");
+
+    const whiteW = Math.max(MENU2_CENTER_W, w - MENU2_LEFT_W - MENU2_RIGHT_W);
+    const content = menu2ContentRect(x, whiteW);
+    const listTop = y + MENU2_CAP_H + BATTLE_MENU_TITLE_BAND;
+
+    const whiteBox = new Graphics();
+    whiteBox.eventMode = "none";
+    whiteBox
+      .rect(content.x, listTop, content.w, listH)
+      .fill({ color: MENU2_WHITE_FILL });
+    this.menuHost.addChild(whiteBox);
 
     const title = new BitmapLabel();
     title.eventMode = "none";
-    title.position.set(x + 18, y + 4);
-    let titleText = "行动";
-    if (this.menuMode === "skill" && skillPages > 1) {
-      titleText = `仙术${skillPage + 1}/${skillPages}`;
-    } else if (this.menuMode === "item" && itemPages > 1) {
-      titleText = `物品${itemPage + 1}/${itemPages}`;
-    } else if (this.menuMode === "item") {
-      titleText = "物品";
-    } else if (this.menuMode === "skill") {
-      titleText = "仙术";
-    }
-    void title.setText(titleText, SETTLE_GOLD, { outline: false });
+    title.anchor.set(0.5, 0);
+    title.position.set(content.cx, y + MENU2_CAP_H + 2);
+    void title.setText("行动", SETTLE_GOLD, { outline: false });
     this.menuHost.addChild(title);
-
-    if (this.menuMode === "skill") {
-      if (!this.skills.length) {
-        const lab = new BitmapLabel();
-        lab.eventMode = "none";
-        lab.position.set(x + 10, y + 22);
-        void lab.setText("(无)", 0x606060);
-        this.menuHost.addChild(lab);
-        return;
-      }
-      const pageSkills = this.skills.slice(
-        skillPageStart,
-        skillPageStart + SKILL_PAGE_SIZE,
-      );
-      pageSkills.forEach((sk, i) => {
-        const abs = skillPageStart + i;
-        const lab = new BitmapLabel();
-        lab.eventMode = "none";
-        lab.position.set(x + 10, y + 22 + i * 16);
-        const hi = abs === this.skillCursor;
-        if (hi) {
-          const hiGfx = new Graphics()
-            .rect(x + 6, y + 20 + i * 16, w - 12, 14)
-            .fill({ color: 0x4a4a4a });
-          hiGfx.eventMode = "none";
-          this.menuHost.addChild(hiGfx);
-        }
-        const line =
-          sk.mpCost != null ? `${sk.name} 耗蓝${sk.mpCost}` : sk.name;
-        void lab.setText(line, hi ? CBE.ink : 0x202020, {
-          outline: false,
-          maxWidth: w - 16,
-        });
-        this.menuHost.addChild(lab);
-        this.rowHits.push(
-          attachRowPointerHit(this.menuHost, x + 6, y + 20 + i * 16, w - 12, 14, () => {
-            this.skillCursor = abs;
-            this.redrawMenu();
-            this.confirm();
-          }),
-        );
-      });
-      if (showPageNav) {
-        const navGfx = new Graphics();
-        navGfx.eventMode = "none";
-        this.menuHost.addChild(navGfx);
-        attachPageNavButtons({
-          host: this.menuHost,
-          hits: this.rowHits,
-          box: navGfx,
-          x: x + 4,
-          y: y + 22 + pageSkills.length * 16,
-          w: w - 8,
-          page: skillPage + 1,
-          pages: skillPages,
-          h: 16,
-          addLabel: (t, lx, ly, c) => {
-            const lab = new BitmapLabel();
-            lab.eventMode = "none";
-            lab.position.set(lx, ly);
-            void lab.setText(t, c, { outline: false });
-            this.menuHost.addChild(lab);
-          },
-          onPrev: () => {
-            this.skillCursor = Math.max(0, skillPageStart - SKILL_PAGE_SIZE);
-            this.redrawMenu();
-          },
-          onNext: () => {
-            this.skillCursor = Math.min(
-              this.skills.length - 1,
-              skillPageStart + SKILL_PAGE_SIZE,
-            );
-            this.redrawMenu();
-          },
-        });
-      }
-      return;
-    }
-
-    if (this.menuMode === "item") {
-      if (!this.items.length) {
-        const lab = new BitmapLabel();
-        lab.eventMode = "none";
-        lab.position.set(x + 10, y + 22);
-        void lab.setText("(无)", 0x606060);
-        this.menuHost.addChild(lab);
-        return;
-      }
-      const pageItems = this.items.slice(
-        itemPageStart,
-        itemPageStart + ITEM_PAGE_SIZE,
-      );
-      pageItems.forEach((it, i) => {
-        const abs = itemPageStart + i;
-        const lab = new BitmapLabel();
-        lab.eventMode = "none";
-        lab.position.set(x + 8, y + 22 + i * 16);
-        const hi = abs === this.itemCursor;
-        if (hi) {
-          const hiGfx = new Graphics()
-            .rect(x + 4, y + 20 + i * 16, w - 8, 14)
-            .fill({ color: 0x4a4a4a });
-          hiGfx.eventMode = "none";
-          this.menuHost.addChild(hiGfx);
-        }
-        const label =
-          it.count > 1 ? `${it.name}×${it.count}` : it.name;
-        void lab.setText(label, hi ? CBE.ink : 0x202020, {
-          outline: false,
-          maxWidth: w - 12,
-        });
-        this.menuHost.addChild(lab);
-        this.rowHits.push(
-          attachRowPointerHit(this.menuHost, x + 4, y + 20 + i * 16, w - 8, 14, () => {
-            this.itemCursor = abs;
-            this.redrawMenu();
-            this.confirm();
-          }),
-        );
-      });
-      if (showPageNav) {
-        const navGfx = new Graphics();
-        navGfx.eventMode = "none";
-        this.menuHost.addChild(navGfx);
-        attachPageNavButtons({
-          host: this.menuHost,
-          hits: this.rowHits,
-          box: navGfx,
-          x: x + 4,
-          y: y + 22 + pageItems.length * 16,
-          w: w - 8,
-          page: itemPage + 1,
-          pages: itemPages,
-          h: 16,
-          addLabel: (t, lx, ly, c) => {
-            const lab = new BitmapLabel();
-            lab.eventMode = "none";
-            lab.position.set(lx, ly);
-            void lab.setText(t, c, { outline: false });
-            this.menuHost.addChild(lab);
-          },
-          onPrev: () => {
-            this.itemCursor = Math.max(0, itemPageStart - ITEM_PAGE_SIZE);
-            this.redrawMenu();
-          },
-          onNext: () => {
-            this.itemCursor = Math.min(
-              this.items.length - 1,
-              itemPageStart + ITEM_PAGE_SIZE,
-            );
-            this.redrawMenu();
-          },
-        });
-      }
-      return;
-    }
 
     if (this.menuCursor >= rootItems.length) this.menuCursor = 0;
     rootItems.forEach((label, i) => {
-      const lab = new BitmapLabel();
-      lab.eventMode = "none";
-      lab.position.set(x + 22, y + 22 + i * 16);
+      const rowY = listTop + i * BATTLE_MENU_ROW_H;
       const hi = i === this.menuCursor;
       if (hi) {
         const hiGfx = new Graphics()
-          .rect(x + 6, y + 20 + i * 16, w - 12, 14)
-          .fill({ color: 0x4a4a4a });
+          .rect(content.x, rowY, content.w, BATTLE_MENU_ROW_H - 1)
+          .fill({ color: BATTLE_MENU_SEL_FILL });
         hiGfx.eventMode = "none";
         this.menuHost.addChild(hiGfx);
       }
-      void lab.setText(label, hi ? CBE.ink : 0x202020, { outline: false });
-      this.menuHost.addChild(lab);
+      this.addMenuCenteredLabel(
+        this.menuHost,
+        label,
+        content.cx,
+        rowY + 1,
+        hi ? 0xffffff : 0x202020,
+      );
       const idx = i;
       this.rowHits.push(
-        attachRowPointerHit(this.menuHost, x + 6, y + 20 + i * 16, w - 12, 14, () => {
+        attachRowPointerHit(
+          this.menuHost,
+          content.x,
+          rowY,
+          content.w,
+          BATTLE_MENU_ROW_H - 1,
+          () => {
           this.menuCursor = idx;
           this.redrawMenu();
           this.confirm();
-        }),
+        },
+        ),
       );
     });
   }
@@ -2688,12 +2916,53 @@ export class BattleScreen extends Container {
     this.floatHost.removeChildren().forEach((c) => c.destroy({ children: true }));
   }
 
+  private shouldPaintHangupSettlement(s: BattleSettlement): boolean {
+    return (
+      s.result === 1 &&
+      (this.hangupActive ||
+        this.hangupTallyArmed ||
+        s.hangupCombatinfo != null)
+    );
+  }
+
   private showSettlement(s: BattleSettlement): void {
     this.awaitingDeathPrompt = false;
     this.settleConfirmBusy = false;
     this.clearSettleCloseTimer();
+    this.clearFloats();
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    if (this.shouldPaintHangupSettlement(s)) {
+      void this.paintHangupSettlement(s);
+      return;
+    }
     void this.paintSettlement(s);
+  }
+
+  private resetHangupTally(maximum = 64): void {
+    this.hangupTally = {
+      completed: 0,
+      maximum: maximum >>> 0,
+      totalExp: 0,
+      totalGold: 0,
+      totalHpRecovered: 0,
+      totalMpRecovered: 0,
+    };
+    this.hangupTallyArmed = true;
+  }
+
+  /** Prefer wire combatinfo; otherwise accumulate per-fight gains client-side. */
+  private hangupSnapshot(s: BattleSettlement): HangupCombatinfo {
+    if (s.hangupCombatinfo) return s.hangupCombatinfo;
+    if (!this.hangupTallyArmed) this.resetHangupTally();
+    const t = this.hangupTally;
+    t.completed = Math.min(0xffff, t.completed + 1);
+    t.totalExp = (t.totalExp + Math.max(0, s.expGain | 0)) >>> 0;
+    t.totalGold = (t.totalGold + Math.max(0, s.goldGain | 0)) >>> 0;
+    t.totalHpRecovered =
+      (t.totalHpRecovered + Math.max(0, s.recoverHp | 0)) >>> 0;
+    t.totalMpRecovered =
+      (t.totalMpRecovered + Math.max(0, s.recoverMp | 0)) >>> 0;
+    return { ...t };
   }
 
   private clearSettleCloseTimer(): void {
@@ -2737,8 +3006,146 @@ export class BattleScreen extends Container {
   }
 
   /**
-   * CBE settle panel chrome from JHOnlineData (`pickupimage1.gif` labels).
-   * Display only — gains / recover / fdata already come from 4/7 parse.
+   * Hangup session summary — native mmBattle combatinfo panel
+   * (concernf1/concernp/effect/help/addtime/pickupimage1 + dark value pills).
+   */
+  private async paintHangupSettlement(s: BattleSettlement): Promise<void> {
+    const gen = ++this.settlePaintGen;
+    const tally = this.hangupSnapshot(s);
+    const bagUsed = this.hangupBagUsed;
+    const bagCap = this.hangupBagCap > 0 ? this.hangupBagCap : 64;
+
+    const ok = await paintHangupPanel(this.settleHost, {
+      tally,
+      bagUsed,
+      bagCap,
+      insightRemainSec: this.insightRemainSec,
+      onStop: () => {
+        if (gen !== this.settlePaintGen) return;
+        this.onHangupCancel?.();
+        this.confirmSettlement();
+      },
+      onAddTime: () => {
+        if (gen !== this.settlePaintGen) return;
+        void this.handleHangupAddTime(gen, s, tally, bagUsed, bagCap);
+      },
+    });
+    if (gen !== this.settlePaintGen) return;
+    if (!ok) {
+      /* Fallback if GIF fetch failed — keep prior text-only path. */
+      await this.paintHangupSettlementFallback(s, gen, tally, bagUsed, bagCap);
+      return;
+    }
+    this.armSettleAutoClose(gen);
+  }
+
+  private hangupAddTimeBusy = false;
+
+  /**
+   * 「补充时间」: pause auto-close, let main use bag 828, then refresh remain.
+   */
+  private async handleHangupAddTime(
+    gen: number,
+    s: BattleSettlement,
+    tally: HangupCombatinfo,
+    bagUsed: number,
+    bagCap: number,
+  ): Promise<void> {
+    if (this.hangupAddTimeBusy || gen !== this.settlePaintGen) return;
+    this.hangupAddTimeBusy = true;
+    this.clearSettleCloseTimer();
+    try {
+      await this.onHangupAddTime?.();
+    } finally {
+      this.hangupAddTimeBusy = false;
+    }
+    if (gen !== this.settlePaintGen) return;
+    const nextBagUsed = this.hangupBagUsed;
+    const nextBagCap = this.hangupBagCap > 0 ? this.hangupBagCap : bagCap;
+    const ok = await paintHangupPanel(this.settleHost, {
+      tally,
+      bagUsed: nextBagUsed,
+      bagCap: nextBagCap,
+      insightRemainSec: this.insightRemainSec,
+      onStop: () => {
+        if (gen !== this.settlePaintGen) return;
+        this.onHangupCancel?.();
+        this.confirmSettlement();
+      },
+      onAddTime: () => {
+        if (gen !== this.settlePaintGen) return;
+        void this.handleHangupAddTime(gen, s, tally, nextBagUsed, nextBagCap);
+      },
+    });
+    if (gen !== this.settlePaintGen) return;
+    if (!ok) {
+      await this.paintHangupSettlementFallback(
+        s,
+        gen,
+        tally,
+        nextBagUsed,
+        nextBagCap,
+      );
+      return;
+    }
+    this.armSettleAutoClose(gen);
+  }
+
+  /** Text-only fallback when JHOnlineData chrome is unavailable. */
+  private async paintHangupSettlementFallback(
+    s: BattleSettlement,
+    gen: number,
+    tally: HangupCombatinfo,
+    bagUsed: number,
+    bagCap: number,
+  ): Promise<void> {
+    this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    const panelX = 10;
+    const panelY = 48;
+    const panelW = LCD_WIDTH - 20;
+    const box = new Graphics();
+    paintCbePanel(this.settleHost, box, panelX, panelY, panelW, 180, CBE.bgPanelDark);
+    this.settleHost.addChild(box);
+    this.settleHost.eventMode = "static";
+    const labels = await loadHangupLabelTextures();
+    if (gen !== this.settlePaintGen) return;
+    const titleLab = new BitmapLabel();
+    titleLab.anchor.set(0.5, 0);
+    titleLab.position.set(LCD_WIDTH / 2, panelY + 8);
+    titleLab.show("挂机中", SETTLE_GOLD, { outline: false });
+    this.settleHost.addChild(titleLab);
+    let y = panelY + 30;
+    const row = (text: string) => {
+      const lab = new BitmapLabel();
+      lab.position.set(panelX + 10, y);
+      lab.show(text, CBE.inkMint, { outline: false });
+      this.settleHost.addChild(lab);
+      y += 14;
+    };
+    row(`战斗场次 ${tally.completed}/${tally.maximum}  背包 ${bagUsed}/${bagCap}`);
+    row(`获得经验 ${tally.totalExp}  金钱 ${tally.totalGold}`);
+    row(`自动回血 ${tally.totalHpRecovered}  回魔 ${tally.totalMpRecovered}`);
+    this.armSettleAutoClose(gen);
+  }
+
+  /** Bag used/cap for hangup settle panel (from session backpack). */
+  private hangupBagUsed = 0;
+  private hangupBagCap = 64;
+  /** Item 828 remaining — same wall-clock as map「修」status tip. */
+  private insightRemainSec = 0;
+
+  setHangupBagSlots(used: number, capacity: number): void {
+    this.hangupBagUsed = Math.max(0, used | 0);
+    this.hangupBagCap = Math.max(1, capacity | 0);
+  }
+
+  setBattleInsightRemainSec(sec: number): void {
+    this.insightRemainSec = Math.max(0, sec | 0);
+  }
+
+  /**
+   * CBE settle panel — native pickupimage1 2-col + bag bar + fdata drops.
+   * Arena/spar keeps text layout; PvE uses battleSettleUi chrome.
    */
   private async paintSettlement(s: BattleSettlement): Promise<void> {
     const gen = ++this.settlePaintGen;
@@ -2757,6 +3164,30 @@ export class BattleScreen extends Container {
         s.expGain < 0 ||
         s.goldGain < 0);
     const draw = spar && s.fdata.includes("比武平局");
+
+    if (!arenaFdata) {
+      const bagUsed = this.hangupBagUsed;
+      const bagCap = this.hangupBagCap > 0 ? this.hangupBagCap : 64;
+      const ok = await paintBattleSettlePanel(this.settleHost, {
+        expGain: s.expGain,
+        goldGain: s.goldGain,
+        recoverHp: s.recoverHp,
+        recoverMp: s.recoverMp,
+        bagUsed,
+        bagCap,
+        drops: parseSettleDropLines(s.fdata),
+        onClose: () => {
+          if (gen !== this.settlePaintGen) return;
+          this.confirmSettlement();
+        },
+      });
+      if (gen !== this.settlePaintGen) return;
+      if (ok) {
+        this.armSettleAutoClose(gen);
+        return;
+      }
+    }
+
     const parsed = parseSettleFdata(s.fdata);
     const title = arenaFdata
       ? draw
@@ -2772,7 +3203,6 @@ export class BattleScreen extends Container {
 
     const rows: SettleRow[] = [];
     if (arenaFdata) {
-      /* Keep 积分 + n胜/n负/n平 on one settle line. */
       rows.push({ kind: "text", text: s.fdata, color: CBE.inkBody });
     } else {
       rows.push({ kind: "stat", label: "exp", value: formatSettleDelta(s.expGain) });
@@ -2787,11 +3217,19 @@ export class BattleScreen extends Container {
         label: "mp",
         value: formatSettleDelta(s.recoverMp),
       });
-      if (s.level > 0) {
-        rows.push({ kind: "text", text: `等级 ${s.level}`, color: CBE.inkBody });
+      if (parsed.bloodFlask) {
+        rows.push({
+          kind: "text",
+          text: parsed.bloodFlask,
+          color: CBE.inkMint,
+        });
       }
-      if (parsed.prefix) {
-        rows.push({ kind: "text", text: parsed.prefix, color: CBE.inkMint });
+      if (parsed.blueFlask) {
+        rows.push({
+          kind: "text",
+          text: parsed.blueFlask,
+          color: CBE.inkMint,
+        });
       }
       if (parsed.extra) {
         rows.push({
@@ -2819,7 +3257,7 @@ export class BattleScreen extends Container {
     );
 
     const box = new Graphics();
-    drawCbePanel(box, panelX, panelY, panelW, panelH, CBE.bgPanelDark);
+    paintCbePanel(this.settleHost, box, panelX, panelY, panelW, panelH, CBE.bgPanelDark);
     this.settleHost.addChild(box);
     this.settleHost.eventMode = "static";
 
@@ -2933,7 +3371,7 @@ export class BattleScreen extends Container {
   }
 }
 
-/** pickupimage1.gif: 18×12px cells — 获得经验金钱自动回血回魔战斗场次背包 */
+/** pickupimage1.gif: 12px cells — 获得经验|金钱|自动回血|回魔|战斗场次|背包 */
 const PICKUP_CELL = 12;
 
 type SettleLabelKey = "exp" | "gold" | "hp" | "mp";
@@ -2950,19 +3388,63 @@ type SettleLabelTextures = {
   huoMo: Texture | null;
 };
 
+type HangupLabelTextures = {
+  exp: Texture | null;
+  gold: Texture | null;
+  hp: Texture | null;
+  mp: Texture | null;
+  battles: Texture | null;
+  bag: Texture | null;
+  titleIcon: Texture | null;
+};
+
 let settleLabelCache: SettleLabelTextures | null = null;
+let hangupLabelCache: HangupLabelTextures | null = null;
+
+function uiLabelCacheReady(
+  tex: Record<string, Texture | null | undefined>,
+): boolean {
+  return Object.values(tex).some((t) => t != null);
+}
+
+/** Warm JHOnlineData hangup panel chrome. */
+function preloadHangupLabelTextures(): void {
+  preloadHangupPanelTextures();
+}
 
 async function loadSettleLabelTextures(): Promise<SettleLabelTextures> {
-  if (settleLabelCache) return settleLabelCache;
+  if (settleLabelCache && uiLabelCacheReady(settleLabelCache)) {
+    return settleLabelCache;
+  }
   const sheet = "pickupimage1.gif";
-  settleLabelCache = {
+  const loaded: SettleLabelTextures = {
     exp: await loadUiCrop(sheet, 0, 0, PICKUP_CELL * 4, 11),
     gold: await loadUiCrop(sheet, PICKUP_CELL * 4, 0, PICKUP_CELL * 2, 11),
     hp: await loadUiCrop(sheet, PICKUP_CELL * 6, 0, PICKUP_CELL * 4, 11),
     auto: await loadUiCrop(sheet, PICKUP_CELL * 6, 0, PICKUP_CELL * 2, 11),
     huoMo: await loadUiCrop(sheet, PICKUP_CELL * 10, 0, PICKUP_CELL * 2, 11),
   };
-  return settleLabelCache;
+  if (uiLabelCacheReady(loaded)) settleLabelCache = loaded;
+  return loaded;
+}
+
+/** Legacy loader — title icon now concernp.gif via hangupSettleUi. */
+async function loadHangupLabelTextures(): Promise<HangupLabelTextures> {
+  if (hangupLabelCache && uiLabelCacheReady(hangupLabelCache)) {
+    return hangupLabelCache;
+  }
+  const sheet = "pickupimage1.gif";
+  const loaded: HangupLabelTextures = {
+    exp: await loadUiCrop(sheet, 0, 0, PICKUP_CELL * 4, 11),
+    gold: await loadUiCrop(sheet, PICKUP_CELL * 4, 0, PICKUP_CELL * 2, 11),
+    hp: await loadUiCrop(sheet, PICKUP_CELL * 6, 0, PICKUP_CELL * 4, 11),
+    mp: await loadUiCrop(sheet, PICKUP_CELL * 10, 0, PICKUP_CELL * 2, 11),
+    battles: await loadUiCrop(sheet, PICKUP_CELL * 12, 0, PICKUP_CELL * 4, 11),
+    bag: await loadUiCrop(sheet, PICKUP_CELL * 16, 0, PICKUP_CELL * 2, 11),
+    titleIcon: await tryLoadUiTexture("concernp.gif"),
+  };
+  if (uiLabelCacheReady(loaded)) hangupLabelCache = loaded;
+  return loaded;
 }
 
 function formatSettleDelta(n: number): string {
@@ -2977,17 +3459,29 @@ function settleValueColor(text: string): number {
   return CBE.inkBody;
 }
 
+/** Bottom HUD tip on 4/7 — drop「· 结算」suffix and EXP/金 debug tail. */
+function formatBattleBottomLog(raw: string): string {
+  const i = raw.indexOf("结算");
+  if (i < 0) return raw;
+  return raw
+    .slice(0, i)
+    .replace(/\s*[·．.,，]\s*$/, "")
+    .trimEnd();
+}
+
 /** fdata may be `N/M 战斗胜利` (flask reserve prefix) or drop/extra text. */
 function parseSettleFdata(fdata: string): {
   title: string;
-  prefix: string;
+  bloodFlask: string;
+  blueFlask: string;
   extra: string;
 } {
   const raw = (fdata || "").trim();
-  if (!raw) return { title: "", prefix: "", extra: "" };
+  if (!raw) return { title: "", bloodFlask: "", blueFlask: "", extra: "" };
   const m = raw.match(/^(\d+)\/(\d+)\s*(.*)$/);
   if (m) {
-    const prefix = `血壶:${m[1]} 蓝壶:${m[2]}`;
+    const bloodFlask = `血壶:${m[1]}`;
+    const blueFlask = `蓝壶:${m[2]}`;
     const rest = (m[3] || "").trim();
     if (
       !rest ||
@@ -2995,7 +3489,7 @@ function parseSettleFdata(fdata: string): {
       rest === "切磋胜利" ||
       rest === "切磋失败"
     ) {
-      return { title: rest, prefix, extra: "" };
+      return { title: rest, bloodFlask, blueFlask, extra: "" };
     }
     if (
       rest.includes("比武") ||
@@ -3003,9 +3497,9 @@ function parseSettleFdata(fdata: string): {
       rest.includes("胜利") ||
       rest.includes("失败")
     ) {
-      return { title: rest, prefix, extra: "" };
+      return { title: rest, bloodFlask, blueFlask, extra: "" };
     }
-    return { title: "战斗胜利", prefix, extra: rest };
+    return { title: "战斗胜利", bloodFlask, blueFlask, extra: rest };
   }
   if (
     raw === "战斗胜利" ||
@@ -3013,9 +3507,9 @@ function parseSettleFdata(fdata: string): {
     raw.includes("切磋") ||
     raw.includes("挑战")
   ) {
-    return { title: raw, prefix: "", extra: "" };
+    return { title: raw, bloodFlask: "", blueFlask: "", extra: "" };
   }
-  return { title: "战斗胜利", prefix: "", extra: raw };
+  return { title: "战斗胜利", bloodFlask: "", blueFlask: "", extra: raw };
 }
 
 /** Pending battle playback waits — flushed when Android FGS pokes while hidden. */

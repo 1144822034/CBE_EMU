@@ -9,7 +9,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
   drawCbeTitlePill,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
@@ -540,7 +540,7 @@ export class TradePanel extends Container {
     const y = 24;
     const w = LCD_WIDTH - 12;
     const h = LCD_HEIGHT - SOFTKEY_H - 32;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
     const title = `交易·${this.peerName}`;
     const pillW = Math.min(w - 16, title.length * 12 + 20);
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 18);

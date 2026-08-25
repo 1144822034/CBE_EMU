@@ -4,7 +4,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -226,12 +226,11 @@ export class ArenaPanel extends Container {
 
   private ensureListVisible(): void {
     const rows = this.page?.rows.length ?? 0;
-    /* Only scroll the rank rows; action rows always stay in view below. */
+    /* Only scroll the rank rows; action rows always stay in view below.
+     * Keep listScroll page-aligned so 上一页/下一页 page index stays correct
+     * when the last page has fewer than LIST_PAGE rows. */
     if (this.listCursor < rows) {
-      if (this.listCursor < this.listScroll)
-        this.listScroll = this.listCursor;
-      if (this.listCursor >= this.listScroll + LIST_PAGE)
-        this.listScroll = this.listCursor - LIST_PAGE + 1;
+      this.listScroll = Math.floor(this.listCursor / LIST_PAGE) * LIST_PAGE;
     }
   }
 
@@ -256,10 +255,10 @@ export class ArenaPanel extends Container {
     color: number,
   ): void {
     const t = new BitmapLabel();
-    void t.setText(text, color).then(() => {
-      t.position.set(cx - t.width / 2, cy - t.height / 2);
-    });
-    t.position.set(cx, cy);
+    t.anchor.set(0.5, 0.5);
+    t.position.set(Math.round(cx), Math.round(cy));
+    // Don't recenter in setText().then — redraw/clearLabels can destroy t first.
+    void t.setText(text, color);
     this.addChild(t);
     this.labels.push(t);
   }
@@ -312,7 +311,7 @@ export class ArenaPanel extends Container {
   private redraw(): void {
     this.clearLabels();
     this.box.clear();
-    drawCbePanel(this.box, 0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
+    paintCbePanel(this, this.box, 0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
     drawCbeTitlePill(this.box, 8, 6, LCD_WIDTH - 16, 22);
     this.addLabel("比武排行榜", 16, 8, CBE.cream);
 
@@ -428,7 +427,8 @@ export class ArenaPanel extends Container {
         this.redraw();
       },
       onPrevPage: () => {
-        this.listScroll = Math.max(0, this.listScroll - LIST_PAGE);
+        const cur = Math.floor(this.listScroll / LIST_PAGE);
+        this.listScroll = Math.max(0, (cur - 1) * LIST_PAGE);
         this.listCursor = Math.min(
           this.listCursor,
           this.listScroll + LIST_PAGE - 1,
@@ -437,8 +437,11 @@ export class ArenaPanel extends Container {
         this.redraw();
       },
       onNextPage: () => {
-        const maxScroll = Math.max(0, rows.length - LIST_PAGE);
-        this.listScroll = Math.min(maxScroll, this.listScroll + LIST_PAGE);
+        /* Page-aligned max — not (rows - LIST_PAGE), else a short last page
+         * leaves listScroll mid-page and page stays 1 (上一页 stuck off). */
+        const cur = Math.floor(this.listScroll / LIST_PAGE);
+        const maxScroll = Math.max(0, (pages - 1) * LIST_PAGE);
+        this.listScroll = Math.min(maxScroll, (cur + 1) * LIST_PAGE);
         this.listCursor = Math.max(this.listCursor, this.listScroll);
         this.listCursor = Math.min(
           rows.length - 1,

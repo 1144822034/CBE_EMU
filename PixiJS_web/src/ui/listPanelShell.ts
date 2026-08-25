@@ -8,15 +8,23 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
   drawCbeTitlePill,
+  paintCbePanel,
 } from "./constants";
 import { attachRowPointerHit } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
-import { UI_WRAP_CHARS, wrapChars } from "./BitmapLabel";
+import { UI_WRAP_CHARS, UC3_CELL, measureUiTextBytes, uiCharByteWidth, wrapChars } from "./BitmapLabel";
 
 export const LIST_SHELL_DEFAULT_PAGE_SIZE = 8;
+/** Dual-line list row height (name + desc, UC3 14px cell). */
+export const LIST_DUAL_LINE_ROW_H = 36;
+/** Titles panel fits 7 dual-line rows in the social shell. */
+export const LIST_TITLES_PAGE_SIZE = 7;
 export const LIST_SHELL_TAB_BG = 0x375946;
+
+/** Inset from row top for dual-line name / desc (px). */
+const DUAL_LINE_NAME_Y = 3;
+const DUAL_LINE_SUB_Y = 18;
 
 export type ListShellCtx = {
   host: Container;
@@ -90,7 +98,7 @@ export function paintListShellChrome(
   bounds: ListShellBounds = listShellBounds(),
 ): ListShellBounds {
   const { x, y, w, h } = bounds;
-  drawCbePanel(ctx.box, x, y, w, h, fill);
+  paintCbePanel(ctx.host, ctx.box, x, y, w, h, fill);
   const pillW = Math.min(120, Math.max(56, title.length * 12 + 24));
   const pillH = 20;
   drawCbeTitlePill(ctx.box, LCD_WIDTH / 2, y + 6, pillW, pillH);
@@ -196,9 +204,13 @@ export function paintListShellBody(
   } = opts;
   const paging = opts.paging ?? "local";
   const pageSize = Math.max(1, opts.pageSize | 0);
-  const rowH = opts.rowH ?? (dualLine ? 28 : 20);
-  const nameMax = Math.max(1, opts.nameMax ?? UI_WRAP_CHARS);
-  const subtitleMax = Math.max(1, opts.subtitleMax ?? UI_WRAP_CHARS);
+  const rowH = opts.rowH ?? (dualLine ? LIST_DUAL_LINE_ROW_H : 20);
+  const dualColMax = Math.max(6, Math.floor((w - 24) / UC3_CELL));
+  const fullNameMax = Math.max(1, opts.nameMax ?? UI_WRAP_CHARS);
+  const fullSubMax = Math.max(1, opts.subtitleMax ?? UI_WRAP_CHARS);
+  const splitX = listShellSplitX(x);
+  const nameColMax = listShellColMax(x, w, "name", opts.nameMax);
+  const subtitleColMax = listShellColMax(x, w, "subtitle", opts.subtitleMax);
 
   let page = 1;
   let pages = 1;
@@ -235,33 +247,46 @@ export function paintListShellBody(
     shown.forEach((row, i) => {
       const abs = pageStart + i;
       const hi = i === localCursor;
-      const nameLines = wrapChars(row.name, nameMax).length;
-      const subLines = row.subtitle ? wrapChars(row.subtitle, subtitleMax).length : 0;
-      const effRowH = dualLine
-        ? rowH
-        : Math.max(rowH, nameLines * 14 + 6);
+      const nameMax = dualLine
+        ? opts.nameMax ?? dualColMax
+        : row.subtitle
+          ? nameColMax
+          : fullNameMax;
+      const subtitleMax = dualLine
+        ? opts.subtitleMax ?? dualColMax
+        : subtitleColMax;
+      const nameText = clipListCol(row.name, nameMax);
+      const subText = row.subtitle ? clipListCol(row.subtitle, subtitleMax) : "";
+      const effRowH = dualLine && !subText ? 20 : rowH;
       if (listY + effRowH > listBottom + 4) return;
       if (hi) {
         ctx.box.rect(x + 6, listY, w - 12, effRowH - 2).fill({ color: CBE.select });
       }
       const nameCol = hi ? CBE.ink : (row.nameColor ?? CBE.inkMint);
-      ctx.addLabel(row.name, x + 10, listY + 2, nameCol);
-      if (row.subtitle) {
+      const padX = x + 10;
+      ctx.addLabel(nameText, padX, listY + (dualLine ? DUAL_LINE_NAME_Y : 2), nameCol);
+      if (subText) {
         if (dualLine) {
           ctx.addLabel(
-            row.subtitle,
-            x + 12,
-            listY + 14,
-            row.subtitleColor ?? CBE.inkLabel,
+            subText,
+            padX + 2,
+            listY + DUAL_LINE_SUB_Y,
+            row.subtitleColor ?? (hi ? CBE.inkMint : CBE.inkLabel),
           );
-        } else if (subLines > 0) {
+        } else {
           ctx.addLabel(
-            row.subtitle,
-            x + 100,
+            subText,
+            splitX,
             listY + 2,
             row.subtitleColor ?? CBE.inkLabel,
           );
         }
+      }
+      if (dualLine && subText && i < shown.length - 1) {
+        ctx.box
+          .moveTo(x + 8, listY + effRowH - 1)
+          .lineTo(x + w - 8, listY + effRowH - 1)
+          .stroke({ width: 1, color: CBE.borderDim, alpha: 0.35 });
       }
       ctx.hits.push(
         attachRowPointerHit(ctx.host, x + 6, listY, w - 12, effRowH - 2, () =>
@@ -294,4 +319,48 @@ export function paintListShellBody(
   }
 
   return { page, pages, pageStart, navH };
+}
+
+/** Single-line clip for list columns — prevents two-column bleed / overlap. */
+function clipToByteBudget(text: string, maxBytes: number): string {
+  let bytes = 0;
+  let out = "";
+  for (const ch of text) {
+    const bw = uiCharByteWidth(ch);
+    if (bytes + bw > maxBytes) break;
+    out += ch;
+    bytes += bw;
+  }
+  return out;
+}
+
+function clipListCol(text: string, maxCols: number): string {
+  const maxBytes = Math.max(2, maxCols * 2);
+  const lines = wrapChars(text, maxCols);
+  const first = (lines[0] ?? "").trimEnd();
+  const truncated =
+    lines.length > 1 || measureUiTextBytes(text) > measureUiTextBytes(first);
+  if (!truncated) return first;
+  const ellipsisBytes = uiCharByteWidth("…");
+  if (maxBytes <= ellipsisBytes) return clipToByteBudget(text, maxBytes);
+  return `${clipToByteBudget(text, maxBytes - ellipsisBytes)}…`;
+}
+
+function listShellSplitX(x: number): number {
+  return x + 100;
+}
+
+function listShellColMax(
+  x: number,
+  w: number,
+  side: "name" | "subtitle",
+  override?: number,
+): number {
+  if (override != null) return Math.max(1, override | 0);
+  const splitX = listShellSplitX(x);
+  const px =
+    side === "name"
+      ? splitX - (x + 10) - 2
+      : x + w - 10 - splitX;
+  return Math.max(4, Math.floor(px / UC3_CELL));
 }

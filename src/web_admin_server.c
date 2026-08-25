@@ -702,7 +702,8 @@ static const char g_vm_mock_admin_script[] =
     "if(!message)message=ok?'\u5df2\u4fdd\u5b58':'\u64cd\u4f5c\u5931\u8d25';"
     "if(sameAdminContext(target)){showAdminNotice(ok,message);"
     "const action=String(formData.get('action')||'');"
-    "if(ok&&(action==='add-wcoin'||action==='add-money'))"
+    "if(ok&&(action==='add-wcoin'||action==='add-money'||"
+    "action==='rename-role'||action==='set-role-exp'))"
     "await refreshRoleDetails(target);"
     "const row=form.closest('tr');"
     "const enabled=form.querySelector('select[name=enabled]');"
@@ -6487,7 +6488,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     vm_mock_admin_text_append_html(&page, selectedAccount[0] ? selectedAccount : "未选择");
     vm_mock_admin_text_appendf(&page,
                                "</h2><div id=\"role-details\" class=\"table-wrap\"><table><thead><tr>"
-                               "<th>角色</th><th>等级 / 状态</th><th>普通钱币</th><th>W 币</th><th>操作</th>"
+                               "<th>角色</th><th>等级 / 总经验</th><th>普通钱币</th><th>W 币</th><th>操作</th>"
                                "</tr></thead><tbody>");
 
     if (selectedAccount[0] != 0)
@@ -6516,11 +6517,38 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             vm_mock_admin_text_appendf(&page, "<tr><td><strong>");
             vm_mock_admin_text_append_html(&page, roleNameUtf8);
             vm_mock_admin_text_appendf(&page, "</strong><br><span class=\"muted\">ID %u</span></td>", role->roleId);
-            vm_mock_admin_text_appendf(&page, "<td>Lv.%u%s</td>", role->level,
-                                       active ? " <span class=\"badge\">当前角色</span>" : "");
+            vm_mock_admin_text_appendf(&page,
+                                       "<td>Lv.%u%s<br><span class=\"muted\">总经验 %u</span></td>",
+                                       role->level,
+                                       active ? " <span class=\"badge\">当前角色</span>" : "",
+                                       role->exp);
             vm_mock_admin_text_appendf(&page,
                                        "<td class=\"money\">%u 金 %u 银 %u 铜<br><span class=\"muted\">总计 %u 铜</span></td><td>%u</td><td>",
                                        gold, silver, copper, role->money, role->wcoin);
+            vm_mock_admin_text_appendf(&page,
+                "<form class=\"inline\" method=\"post\" action=\"/action\">"
+                "<input type=\"hidden\" name=\"action\" value=\"rename-role\">"
+                "<input type=\"hidden\" name=\"account\" value=\"");
+            vm_mock_admin_text_append_html(&page, selectedAccount);
+            vm_mock_admin_text_appendf(&page,
+                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
+                "<input type=\"text\" name=\"name\" maxlength=\"31\" value=\"",
+                role->roleId);
+            vm_mock_admin_text_append_html(&page, roleNameUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "\" placeholder=\"新角色名\" required>"
+                "<button type=\"submit\">改名</button></form>");
+            vm_mock_admin_text_appendf(&page,
+                "<form class=\"inline\" method=\"post\" action=\"/action\">"
+                "<input type=\"hidden\" name=\"action\" value=\"set-role-exp\">"
+                "<input type=\"hidden\" name=\"account\" value=\"");
+            vm_mock_admin_text_append_html(&page, selectedAccount);
+            vm_mock_admin_text_appendf(&page,
+                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
+                "<input type=\"number\" name=\"exp\" min=\"0\" max=\"4294967295\" "
+                "value=\"%u\" placeholder=\"总经验\" required>"
+                "<button type=\"submit\">调整总经验</button></form>",
+                role->roleId, role->exp);
             vm_mock_admin_text_appendf(&page,
                 "<form class=\"inline\" method=\"post\" action=\"/action\">"
                 "<input type=\"hidden\" name=\"action\" value=\"add-money\">"
@@ -9257,6 +9285,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     char role[64];
     char itemText[32];
     char amountText[32];
+    char nameUtf8[96];
+    char nameGbk[96];
     const char *error = NULL;
     u32 itemId = 0;
     u32 amount = 0;
@@ -9269,6 +9299,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     memset(role, 0, sizeof(role));
     memset(itemText, 0, sizeof(itemText));
     memset(amountText, 0, sizeof(amountText));
+    memset(nameUtf8, 0, sizeof(nameUtf8));
+    memset(nameGbk, 0, sizeof(nameGbk));
     if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
     {
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
@@ -9406,6 +9438,43 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
             ok = vm_mock_service_account_set_password(account, password, &error);
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "密码修改成功" : (error ? error : "密码修改失败"));
+        return;
+    }
+    if (strcmp(action, "rename-role") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "name", nameUtf8, sizeof(nameUtf8)))
+        {
+            vm_mock_admin_redirect(client, account, "error", "角色名参数不完整");
+            return;
+        }
+        if (!vm_mock_admin_utf8_to_gbk_text(nameUtf8, nameGbk, sizeof(nameGbk), false) ||
+            strlen(nameGbk) >= 32u)
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "角色名无效或过长（GBK 最多 31 字节）");
+            return;
+        }
+        ok = vm_mock_service_account_set_role_name(account, role, nameGbk, &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "角色改名成功"
+                                  : (error ? error : "角色改名失败"));
+        return;
+    }
+    if (strcmp(action, "set-role-exp") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "exp", amountText, sizeof(amountText)) ||
+            !vm_net_mock_parse_u32_strict(amountText, &amount))
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "总经验必须是 0 或正整数");
+            return;
+        }
+        ok = vm_mock_service_account_set_role_exp(account, role, amount, &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "总经验已更新"
+                                  : (error ? error : "总经验修改失败"));
         return;
     }
     if (strcmp(action, "add-money") == 0)
@@ -10104,8 +10173,8 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                         json);
             return 0;
         }
-        if (!vm_mock_service_account_create_record(account, password,
-                                                   &createMessage))
+        if (!vm_mock_service_account_register_user(account, password,
+                                                 &createMessage))
         {
             const char *err = "账号注册失败，请稍后重试";
             int statusConflict = 0;
@@ -10114,6 +10183,11 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             {
                 err = "该账号名已被注册";
                 statusConflict = 1;
+            }
+            else if (createMessage &&
+                     strcmp(createMessage, "daily registration limit reached") == 0)
+            {
+                err = "今日全服注册名额已满（每天最多 3 个），请明天再试";
             }
             else if (createMessage &&
                      strcmp(createMessage, "account db unavailable") == 0)
@@ -10382,13 +10456,17 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             const char *createMessage = NULL;
             if (vm_mock_user_valid_registration(account, password, &message))
             {
-                ok = vm_mock_service_account_create_record(account, password,
+                ok = vm_mock_service_account_register_user(account, password,
                                                            &createMessage);
                 if (!ok)
                 {
                     if (createMessage && strcmp(createMessage,
                                                 "account already exists") == 0)
                         message = "该账号名已被注册";
+                    else if (createMessage &&
+                             strcmp(createMessage,
+                                    "daily registration limit reached") == 0)
+                        message = "今日全服注册名额已满（每天最多 3 个），请明天再试";
                     else
                         message = "账号注册失败，请稍后重试";
                 }

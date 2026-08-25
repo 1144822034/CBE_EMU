@@ -1,7 +1,7 @@
 /**
  * Pixi-only 物品竞拍 protocol (WT kind=42).
  * subtypes: 1 status, 2 list, 3 mine, 4 create, 5 bid, 6 cancel, 7 claim,
- * 8 event, 9 buyout, 10 claims-list.
+ * 8 event, 9 buyout, 10 claims-list, 11 buyout-challenge (captcha).
  */
 import {
   SeqReader,
@@ -177,10 +177,44 @@ export function buildAuctionClaimRequest(): Uint8Array {
   return b.finish();
 }
 
-export function buildAuctionBuyoutRequest(listingId: number): Uint8Array {
+export function buildAuctionBuyoutRequest(
+  listingId: number,
+  captcha: string,
+): Uint8Array {
   const b = new WtBuilder();
-  b.object(1, AUCTION_WT_KIND, 9).u32("listingId", listingId >>> 0);
+  b.object(1, AUCTION_WT_KIND, 9)
+    .u32("listingId", listingId >>> 0)
+    .string("captcha", (captcha || "").toUpperCase());
   return b.finish();
+}
+
+/** Request a fresh 4-char buyout captcha for listing. */
+export function buildAuctionBuyoutChallengeRequest(
+  listingId: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, AUCTION_WT_KIND, 11).u32("listingId", listingId >>> 0);
+  return b.finish();
+}
+
+export type AuctionBuyoutChallengeResult = {
+  result: number;
+  listingId: number;
+  captcha: string;
+  message: string;
+};
+
+export function parseAuctionBuyoutChallenge(
+  packet: WtPacket,
+): AuctionBuyoutChallengeResult | null {
+  const obj = packet.objects.find((o) => o.kind === AUCTION_WT_KIND && o.subtype === 11);
+  if (!obj) return null;
+  return {
+    result: fieldU32(obj, "result"),
+    listingId: fieldU32(obj, "listingId"),
+    captcha: fieldStr(obj, "captcha").toUpperCase(),
+    message: fieldStr(obj, "message"),
+  };
 }
 
 export function buildAuctionClaimsListRequest(pageIndex = 0): Uint8Array {
@@ -407,6 +441,12 @@ export function copperToGold(copper: number): number {
 
 export function goldToCopper(gold: number): number {
   return ((gold >>> 0) * COPPER_PER_GOLD) >>> 0;
+}
+
+/** 每次加价幅度 = floor(起拍价/10)，至少 1（与服务端一致）. */
+export function auctionBidStep(startPrice: number): number {
+  const step = Math.floor((startPrice >>> 0) / 10);
+  return step > 0 ? step : 1;
 }
 
 /** 设价单位：铜币档按「金」输入，酷宝仍按酷宝. */

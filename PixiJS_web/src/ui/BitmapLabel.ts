@@ -33,8 +33,11 @@ export const UC3_DISPLAY_SCALE = UC3_CELL / UC3_NATIVE_CELL;
 /** Floor for opt-in smooth Pixi.Text resolution. */
 export const UI_TEXT_RESOLUTION = 2;
 
-/** LCD UI: wrap single-line copy at this many characters (CJK / ASCII each count as 1). */
-export const UI_WRAP_CHARS = 14;
+/** LCD UI: max full-width (CJK) chars per line; ASCII counts as half (GBK byte width). */
+export const UI_WRAP_CHARS = 15;
+
+/** GBK-style bytes per line (= {@link UI_WRAP_CHARS} × 2). */
+export const UI_WRAP_BYTES = UI_WRAP_CHARS * 2;
 
 /**
  * CSS scale of #phone-wrap (wrapCssPx / LCD_WIDTH). Crisp bake supersamples
@@ -609,11 +612,13 @@ export function layoutSameColorRuns(
   },
 ): LaidOutRun[] {
   const maxCols = Math.max(1, opts.maxCols | 0);
+  const maxBytes = maxCols * 2;
   let remaining =
     opts.visibleChars == null
       ? Number.POSITIVE_INFINITY
       : Math.max(0, opts.visibleChars | 0);
   let col = 0;
+  let lineBytes = 0;
   let row = 0;
   let run = "";
   let runColor = 0;
@@ -633,12 +638,14 @@ export function layoutSameColorRuns(
     const take = Math.min(chars.length, remaining);
     remaining -= take;
     for (let i = 0; i < take; i++) {
-      if (col + 1 > maxCols) {
+      const ch = chars[i]!;
+      const bw = uiCharByteWidth(ch);
+      if (lineBytes + bw > maxBytes && run) {
         flush();
         col = 0;
+        lineBytes = 0;
         row += 1;
       }
-      const ch = chars[i]!;
       if (!run) {
         runColor = seg.color;
         runCol = col;
@@ -654,10 +661,22 @@ export function layoutSameColorRuns(
         run = ch;
       }
       col += 1;
+      lineBytes += bw;
     }
   }
   flush();
   return out;
+}
+
+/** GBK-style display bytes: CJK=2, ASCII=1 (matches UC3 advance ratio). */
+export function uiCharByteWidth(ch: string): number {
+  return (ch.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+}
+
+export function measureUiTextBytes(text: string): number {
+  let n = 0;
+  for (const ch of text) n += uiCharByteWidth(ch);
+  return n;
 }
 
 /** Advance width for default UC3 layout (CJK=16, ASCII=8). */
@@ -671,22 +690,28 @@ export function measureUiTextWidth(text: string, cell = UC3_CELL): number {
 }
 
 /**
- * Character-count wrap (each code unit = 1). Honors existing `\n` paragraphs.
+ * Wrap by GBK byte width (CJK=2, ASCII=1). `maxCols` = full-width char budget
+ * (default {@link UI_WRAP_CHARS}). Honors existing `\n` paragraphs.
  */
 export function wrapChars(
   text: string,
   maxCols = UI_WRAP_CHARS,
 ): string[] {
-  const cols = Math.max(1, maxCols | 0);
+  const maxBytes = Math.max(2, (Math.max(1, maxCols | 0)) * 2);
   const lines: string[] = [];
   for (const para of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
     let cur = "";
+    let bytes = 0;
     for (const ch of para) {
-      if (cur.length >= cols) {
+      const bw = uiCharByteWidth(ch);
+      if (bytes + bw > maxBytes && cur) {
         lines.push(cur);
-        cur = "";
+        cur = ch;
+        bytes = bw;
+      } else {
+        cur += ch;
+        bytes += bw;
       }
-      cur += ch;
     }
     lines.push(cur || " ");
   }

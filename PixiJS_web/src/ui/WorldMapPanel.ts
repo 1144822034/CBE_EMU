@@ -3,7 +3,7 @@ import {
   CBE,
   LCD_HEIGHT,
   LCD_WIDTH,
-  drawCbePanel,
+  paintCbePanel,
   drawCbeTitlePill,
 } from "./constants";
 import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
@@ -267,7 +267,7 @@ export class WorldMapPanel extends Container {
     const y = 2;
     const w = LCD_WIDTH - 4;
     const h = LCD_HEIGHT - 4;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     const title = this.mode === "world" ? "世界地图" : "区域地图";
     const pillW = 88;

@@ -1,6 +1,6 @@
 {
   "name": "pixijs-jianghu",
-  "version": "1.0.42",
+  "version": "1.0.46",
   "private": true,
   "description": "PixiJS web client for 江湖 OL — reuses JHOnlineData + mock-server protocol notes",
   "author": "Jianghu OL",
@@ -19,6 +19,8 @@
     "electron": "electron .",
     "build:exe": "npm run build && node scripts/build-electron-exe.mjs",
     "smoke": "node scripts/smoke-decode.mjs && tsx scripts/smoke-scene.ts && tsx scripts/smoke-protocol.ts && tsx scripts/smoke-actor.ts",
+    "load:ping": "tsx scripts/load-test-tcp.ts --mode ping",
+    "load:login": "tsx scripts/load-test-tcp.ts --mode login",
     "smoke:live": "tsx scripts/smoke-live.ts",
     "smoke:world": "tsx scripts/smoke-world-enter.ts",
     "smoke:npc": "tsx scripts/smoke-npc-catalog.ts",

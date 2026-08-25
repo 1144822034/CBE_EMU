@@ -67,6 +67,7 @@ export function drawCbePanel(
   w: number,
   h: number,
   fill = CBE.bgPanel,
+  vectorCorners = true,
 ): void {
   g.roundRect(x, y, w, h, 2).fill({ color: fill });
   g.roundRect(x, y, w, h, 2).stroke({ width: 1, color: CBE.border });
@@ -76,6 +77,17 @@ export function drawCbePanel(
     color: CBE.borderBright,
     alpha: 0.35,
   });
+  if (vectorCorners) drawCbePanelVectorCorners(g, x, y, w, h);
+}
+
+/** Vector xiangyun corners only — use when flowerStyle.gif is unavailable. */
+export function drawCbePanelVectorCorners(
+  g: Graphics,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
   const c = CBE.borderBright;
   const s = 12;
   drawCorner(g, x + 3, y + 3, s, c, 0);
@@ -199,3 +211,9 @@ export function makePixelText(
   });
   return t;
 }
+
+export {
+  paintCbePanel,
+  preloadCbeFlowerCorners,
+  clearCbeFlowerCorners,
+} from "./cbePanelCorners";

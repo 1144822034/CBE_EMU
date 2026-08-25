@@ -14,6 +14,8 @@ enum
     /* Cap concurrent LIVE arena fights (protocol-lock / battle fan-out).
      * Excess seats defer until a slot frees — not bye. Global DUEL_MAX=64. */
     VM_MOCK_ARENA_MAX_CONCURRENT_DUELS = 24,
+    /* Per 1Hz tick: max new arena duel_begin calls (spread lock/GameThread load). */
+    VM_MOCK_ARENA_MAX_STARTS_PER_TICK = 6,
     VM_MOCK_ARENA_WT_KIND = 41,
     VM_MOCK_ARENA_WT_STATUS = 1,
     VM_MOCK_ARENA_WT_RANK = 2,
@@ -36,7 +38,9 @@ typedef struct
     char scene[64];
     u16 spawnX;
     u16 spawnY;
-    u32 weekdayMask;
+    u32 weekdayMask; /* derived from weekdayBrackets[i]!=0 */
+    /* Sun..Sat: 0=rest, 10=10-49, 50=50-69, 70=70+. One bracket per day. */
+    u16 weekdayBrackets[7];
     u16 entryStartMinute;
     u16 entryEndMinute;
     u16 matchStartMinute;
@@ -123,6 +127,8 @@ static u32 g_vm_mock_arena_deferred_unmatched = 0;
 /* Past matchEndMinute: same job×bracket×score>0 ties stay LIVE until resolved. */
 static bool g_vm_mock_arena_playoff = false;
 static bool g_vm_mock_arena_playoff_announced = false;
+/* GBK tip when NPC enter is refused (wrong day bracket / closed). */
+static char g_vm_mock_arena_enter_refuse_tip[96];
 
 /* Dedicated matchmaking RNG. Server-only builds never srand() libc rand();
  * relying on rand() alone yields a fixed sequence and sticky pairings. */
@@ -172,6 +178,204 @@ static u16 vm_mock_arena_bracket_for_level(u32 level)
     return 0;
 }
 
+static u16 vm_mock_arena_normalize_bracket_key(u32 value)
+{
+    if (value == 10u || value == 50u || value == 70u)
+        return (u16)value;
+    return 0;
+}
+
+static void vm_mock_arena_sync_weekday_mask(vm_mock_arena_config *cfg)
+{
+    u32 i;
+    u32 mask = 0;
+
+    if (cfg == NULL)
+        return;
+    for (i = 0; i < 7u; ++i)
+    {
+        cfg->weekdayBrackets[i] =
+            vm_mock_arena_normalize_bracket_key(cfg->weekdayBrackets[i]);
+        if (cfg->weekdayBrackets[i] != 0)
+            mask |= (1u << i);
+    }
+    cfg->weekdayMask = mask;
+}
+
+static void vm_mock_arena_parse_weekday_brackets(vm_mock_arena_config *cfg,
+                                                 const char *text, size_t len)
+{
+    char buf[64];
+    char *cursor;
+    char *tok;
+    u32 idx = 0;
+
+    if (cfg == NULL)
+        return;
+    memset(cfg->weekdayBrackets, 0, sizeof(cfg->weekdayBrackets));
+    if (text == NULL || len == 0)
+    {
+        vm_mock_arena_sync_weekday_mask(cfg);
+        return;
+    }
+    if (len >= sizeof(buf))
+        len = sizeof(buf) - 1u;
+    memcpy(buf, text, len);
+    buf[len] = 0;
+    cursor = buf;
+    while (idx < 7u && cursor != NULL && *cursor != 0)
+    {
+        unsigned long parsed = 0;
+        char *end = NULL;
+        tok = cursor;
+        while (*cursor != 0 && *cursor != ',')
+            ++cursor;
+        if (*cursor == ',')
+        {
+            *cursor = 0;
+            ++cursor;
+        }
+        else
+            cursor = NULL;
+        parsed = strtoul(tok, &end, 10);
+        if (end != tok)
+            cfg->weekdayBrackets[idx] = vm_mock_arena_normalize_bracket_key(
+                (u32)parsed);
+        ++idx;
+    }
+    vm_mock_arena_sync_weekday_mask(cfg);
+}
+
+static void vm_mock_arena_format_weekday_brackets(const vm_mock_arena_config *cfg,
+                                                  char *out, size_t outCap)
+{
+    if (out == NULL || outCap == 0)
+        return;
+    if (cfg == NULL)
+    {
+        out[0] = 0;
+        return;
+    }
+    snprintf(out, outCap, "%u,%u,%u,%u,%u,%u,%u",
+             (u32)cfg->weekdayBrackets[0], (u32)cfg->weekdayBrackets[1],
+             (u32)cfg->weekdayBrackets[2], (u32)cfg->weekdayBrackets[3],
+             (u32)cfg->weekdayBrackets[4], (u32)cfg->weekdayBrackets[5],
+             (u32)cfg->weekdayBrackets[6]);
+}
+
+static bool vm_mock_arena_load_config(bool force);
+
+/* Today's open bracket (0=rest). Uses local tm_wday (0=Sun..6=Sat). */
+static u16 vm_mock_arena_active_bracket_today(void)
+{
+    time_t now = time(NULL);
+    struct tm *tmNow = localtime(&now);
+
+    (void)vm_mock_arena_load_config(false);
+    if (tmNow == NULL)
+        return 0;
+    return g_vm_mock_arena_config.weekdayBrackets[(u32)tmNow->tm_wday % 7u];
+}
+
+static const char *vm_mock_arena_enter_refuse_tip(void)
+{
+    if (g_vm_mock_arena_enter_refuse_tip[0] != 0)
+        return g_vm_mock_arena_enter_refuse_tip;
+    /* 本次比武未开放或已关闭进场。 */
+    return "\xb1\xbe\xb4\xce\xb1\xc8\xce\xe4\xce\xb4\xbf\xaa\xb7\xc5\xbb\xf2"
+           "\xd2\xd1\xb9\xd8\xb1\xd5\xbd\xf8\xb3\xa1\xa1\xa3";
+}
+
+static void vm_mock_arena_set_enter_refuse_tip_closed(void)
+{
+    /* 本次比武未开放或已关闭进场。 */
+    snprintf(g_vm_mock_arena_enter_refuse_tip,
+             sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
+             "\xb1\xbe\xb4\xce\xb1\xc8\xce\xe4\xce\xb4\xbf\xaa\xb7\xc5\xbb\xf2"
+             "\xd2\xd1\xb9\xd8\xb1\xd5\xbd\xf8\xb3\xa1\xa1\xa3");
+}
+
+static void vm_mock_arena_set_enter_refuse_tip_bracket(u16 activeBracket)
+{
+    if (activeBracket == 0)
+    {
+        /* 今日比武休息。 */
+        snprintf(g_vm_mock_arena_enter_refuse_tip,
+                 sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
+                 "\xbd\xf1\xc8\xd5\xb1\xc8\xce\xe4\xd0\xdd\xcf\xa2\xa1\xa3");
+        return;
+    }
+    if (activeBracket >= 70)
+    {
+        /* 今日开放70级段，你的等级不符。 */
+        snprintf(g_vm_mock_arena_enter_refuse_tip,
+                 sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
+                 "\xbd\xf1\xc8\xd5\xbf\xaa\xb7\xc5"
+                 "70"
+                 "\xbc\xb6\xb6\xce\xa3\xac\xc4\xe3\xb5\xc4\xb5\xc8\xbc\xb6\xb2"
+                 "\xbb\xb7\xfb\xa1\xa3");
+        return;
+    }
+    if (activeBracket >= 50)
+    {
+        /* 今日开放50-69级段，你的等级不符。 */
+        snprintf(g_vm_mock_arena_enter_refuse_tip,
+                 sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
+                 "\xbd\xf1\xc8\xd5\xbf\xaa\xb7\xc5"
+                 "50-69"
+                 "\xbc\xb6\xb6\xce\xa3\xac\xc4\xe3\xb5\xc4\xb5\xc8\xbc\xb6\xb2"
+                 "\xbb\xb7\xfb\xa1\xa3");
+        return;
+    }
+    /* 今日开放10-49级段，你的等级不符。 */
+    snprintf(g_vm_mock_arena_enter_refuse_tip,
+             sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
+             "\xbd\xf1\xc8\xd5\xbf\xaa\xb7\xc5"
+             "10-49"
+             "\xbc\xb6\xb6\xce\xa3\xac\xc4\xe3\xb5\xc4\xb5\xc8\xbc\xb6\xb2"
+             "\xbb\xb7\xfb\xa1\xa3");
+}
+
+/*
+ * Job venues (same spawn): 天机→base, 幻剑→base+"50", 鬼道→base+"70".
+ * Maps still named c04比武擂台 / 50 / 70; assignment is by profession, not level.
+ */
+static void vm_mock_arena_scene_for_job(u8 job, char *out, size_t outCap)
+{
+    const char *base;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    (void)vm_mock_arena_load_config(false);
+    base = g_vm_mock_arena_config.scene;
+    if (base == NULL || base[0] == 0)
+        base = VM_MOCK_ARENA_DEFAULT_SCENE;
+    if (job == 3)
+        snprintf(out, outCap, "%s70", base);
+    else if (job == 2)
+        snprintf(out, outCap, "%s50", base);
+    else
+        snprintf(out, outCap, "%s", base);
+}
+
+static bool vm_mock_arena_on_job_venue(const char *sceneVisible,
+                                       const char *onlineScene, u8 job)
+{
+    char want[80];
+
+    vm_mock_arena_scene_for_job(job, want, sizeof(want));
+    if (want[0] == 0)
+        return false;
+    if (sceneVisible != NULL && sceneVisible[0] != 0 &&
+        vm_net_mock_scene_names_equal_loose(sceneVisible, want))
+        return true;
+    if (onlineScene != NULL && onlineScene[0] != 0 &&
+        vm_net_mock_scene_names_equal_loose(onlineScene, want))
+        return true;
+    return false;
+}
+
 static bool vm_mock_arena_same_bucket(u8 jobA, u16 bracketA, u16 levelA,
                                        u8 jobB, u16 bracketB, u16 levelB)
 {
@@ -193,7 +397,15 @@ static void vm_mock_arena_config_set_defaults(vm_mock_arena_config *cfg)
     snprintf(cfg->scene, sizeof(cfg->scene), "%s", VM_MOCK_ARENA_DEFAULT_SCENE);
     cfg->spawnX = 120;
     cfg->spawnY = 120;
-    cfg->weekdayMask = (1u << 3) | (1u << 6); /* Wed + Sat */
+    /* Mon70 Tue50 Wed10 Thu70 Fri50 Sat10 Sun rest — one bracket/day. */
+    cfg->weekdayBrackets[0] = 0;
+    cfg->weekdayBrackets[1] = 70;
+    cfg->weekdayBrackets[2] = 50;
+    cfg->weekdayBrackets[3] = 10;
+    cfg->weekdayBrackets[4] = 70;
+    cfg->weekdayBrackets[5] = 50;
+    cfg->weekdayBrackets[6] = 10;
+    vm_mock_arena_sync_weekday_mask(cfg);
     cfg->entryStartMinute = 20 * 60 + 20;
     cfg->entryEndMinute = 20 * 60 + 29;
     cfg->matchStartMinute = 20 * 60 + 30;
@@ -222,7 +434,8 @@ static bool vm_mock_arena_ensure_tables(void)
             "scene VARBINARY(64) NOT NULL,"
             "spawn_x SMALLINT UNSIGNED NOT NULL DEFAULT 120,"
             "spawn_y SMALLINT UNSIGNED NOT NULL DEFAULT 120,"
-            "weekday_mask INT UNSIGNED NOT NULL DEFAULT 72,"
+            "weekday_mask INT UNSIGNED NOT NULL DEFAULT 126,"
+            "weekday_brackets VARCHAR(32) NOT NULL DEFAULT '0,70,50,10,70,50,10',"
             "entry_start_minute SMALLINT UNSIGNED NOT NULL DEFAULT 1220,"
             "entry_end_minute SMALLINT UNSIGNED NOT NULL DEFAULT 1229,"
             "match_start_minute SMALLINT UNSIGNED NOT NULL DEFAULT 1230,"
@@ -315,6 +528,10 @@ static bool vm_mock_arena_ensure_tables(void)
     {
         return false;
     }
+    /* Existing installs: add per-day bracket schedule (ignore if already present). */
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_config ADD COLUMN weekday_brackets "
+        "VARCHAR(32) NOT NULL DEFAULT '0,70,50,10,70,50,10' AFTER weekday_mask");
     if (!vm_mock_wager_ensure_member_table())
         return false;
     ready = true;
@@ -344,34 +561,38 @@ static bool vm_mock_arena_config_row(void *contextValue, unsigned int columnCoun
         cfg->spawnY = (u16)tmp;
     if (values[4] && vm_mock_mysql_parse_u32(values[4], lengths[4], &tmp))
         cfg->weekdayMask = tmp;
-    if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
-        cfg->entryStartMinute = (u16)tmp;
+    if (values[5] && lengths[5] > 0)
+        vm_mock_arena_parse_weekday_brackets(cfg, values[5], lengths[5]);
+    else
+        vm_mock_arena_sync_weekday_mask(cfg);
     if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
-        cfg->entryEndMinute = (u16)tmp;
+        cfg->entryStartMinute = (u16)tmp;
     if (values[7] && vm_mock_mysql_parse_u32(values[7], lengths[7], &tmp))
-        cfg->matchStartMinute = (u16)tmp;
+        cfg->entryEndMinute = (u16)tmp;
     if (values[8] && vm_mock_mysql_parse_u32(values[8], lengths[8], &tmp))
-        cfg->matchEndMinute = (u16)tmp;
+        cfg->matchStartMinute = (u16)tmp;
     if (values[9] && vm_mock_mysql_parse_u32(values[9], lengths[9], &tmp))
-        cfg->roundSeconds = tmp ? tmp : 300;
+        cfg->matchEndMinute = (u16)tmp;
     if (values[10] && vm_mock_mysql_parse_u32(values[10], lengths[10], &tmp))
-        cfg->battleTimeoutSeconds = tmp ? tmp : 240;
+        cfg->roundSeconds = tmp ? tmp : 300;
     if (values[11] && vm_mock_mysql_parse_u32(values[11], lengths[11], &tmp))
-        cfg->scoreWin = tmp;
+        cfg->battleTimeoutSeconds = tmp ? tmp : 240;
     if (values[12] && vm_mock_mysql_parse_u32(values[12], lengths[12], &tmp))
-        cfg->scoreBye = tmp;
+        cfg->scoreWin = tmp;
     if (values[13] && vm_mock_mysql_parse_u32(values[13], lengths[13], &tmp))
+        cfg->scoreBye = tmp;
+    if (values[14] && vm_mock_mysql_parse_u32(values[14], lengths[14], &tmp))
         cfg->scoreDraw = tmp;
-    if (values[14] && lengths[14] > 0 && lengths[14] < sizeof(cfg->npcNameKeyword))
+    if (values[15] && lengths[15] > 0 && lengths[15] < sizeof(cfg->npcNameKeyword))
     {
-        memcpy(cfg->npcNameKeyword, values[14], lengths[14]);
-        cfg->npcNameKeyword[lengths[14]] = 0;
+        memcpy(cfg->npcNameKeyword, values[15], lengths[15]);
+        cfg->npcNameKeyword[lengths[15]] = 0;
     }
-    if (values[15] && lengths[15])
-        cfg->wagerEnabled = (u8)(values[15][0] == '0' ? 0 : 1);
-    if (values[16] && vm_mock_mysql_parse_u32(values[16], lengths[16], &tmp))
-        cfg->wagerFeePercent = (u8)tmp;
+    if (values[16] && lengths[16])
+        cfg->wagerEnabled = (u8)(values[16][0] == '0' ? 0 : 1);
     if (values[17] && vm_mock_mysql_parse_u32(values[17], lengths[17], &tmp))
+        cfg->wagerFeePercent = (u8)tmp;
+    if (values[18] && vm_mock_mysql_parse_u32(values[18], lengths[18], &tmp))
         cfg->wagerCurrency = (u8)tmp;
     return true;
 }
@@ -428,7 +649,7 @@ static bool vm_mock_arena_load_config(bool force)
     vm_mock_arena_config_set_defaults(&g_vm_mock_arena_config);
     count = 0;
     if (vm_mysql_query(
-            "SELECT enabled,scene,spawn_x,spawn_y,weekday_mask,"
+            "SELECT enabled,scene,spawn_x,spawn_y,weekday_mask,weekday_brackets,"
             "entry_start_minute,entry_end_minute,match_start_minute,match_end_minute,"
             "round_seconds,battle_timeout_seconds,score_win,score_bye,score_draw,"
             "npc_name_keyword,wager_enabled,wager_fee_percent,wager_currency "
@@ -439,7 +660,10 @@ static bool vm_mock_arena_load_config(bool force)
     }
     if (g_vm_mock_arena_config.scene[0] == 0)
     {
+        char bracketsText[48];
         vm_mock_arena_config_set_defaults(&g_vm_mock_arena_config);
+        vm_mock_arena_format_weekday_brackets(&g_vm_mock_arena_config, bracketsText,
+                                              sizeof(bracketsText));
         if (vm_mysql_hex_encode(g_vm_mock_arena_config.scene,
                                 strlen(g_vm_mock_arena_config.scene), sceneHex,
                                 sizeof(sceneHex)) != 0 &&
@@ -449,16 +673,16 @@ static bool vm_mock_arena_load_config(bool force)
         {
             snprintf(query, sizeof(query),
                      "INSERT INTO server_arena_config ("
-                     "id,enabled,scene,spawn_x,spawn_y,weekday_mask,"
+                     "id,enabled,scene,spawn_x,spawn_y,weekday_mask,weekday_brackets,"
                      "entry_start_minute,entry_end_minute,match_start_minute,"
                      "match_end_minute,round_seconds,battle_timeout_seconds,"
                      "score_win,score_bye,score_draw,npc_name_keyword,"
                      "wager_enabled,wager_fee_percent,wager_currency) VALUES ("
-                     "1,1,UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                     "1,1,UNHEX('%s'),%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,"
                      "UNHEX('%s'),0,10,0) ON DUPLICATE KEY UPDATE id=id",
                      sceneHex, g_vm_mock_arena_config.spawnX,
                      g_vm_mock_arena_config.spawnY,
-                     g_vm_mock_arena_config.weekdayMask,
+                     g_vm_mock_arena_config.weekdayMask, bracketsText,
                      g_vm_mock_arena_config.entryStartMinute,
                      g_vm_mock_arena_config.entryEndMinute,
                      g_vm_mock_arena_config.matchStartMinute,
@@ -488,11 +712,16 @@ static bool vm_mock_arena_is_arena_scene(const char *scene)
         return false;
     if (vm_net_mock_scene_names_equal_loose(scene, g_vm_mock_arena_config.scene))
         return true;
-    /* Encoding / suffix fallbacks — fail closed for isolation must still fire. */
+    /* Encoding / suffix fallbacks — fail closed for isolation must still fire.
+     * Also accept c04比武擂台50 / c04比武擂台70 job venues. */
     if (strstr(scene, "\xb1\xc8\xce\xe4\xc0\xde\xcc\xa8") != NULL) /* GBK 比武擂台 */
         return true;
+    /* UTF-8 比武擂台 (擂=U+64C2 → E6 93 82) */
+    if (strstr(scene, "\xe6\xaf\x94\xe6\xad\xa6\xe6\x93\x82\xe5\x8f\xb0") != NULL)
+        return true;
+    /* Legacy mistyped UTF-8 擂 (E6 92 92) kept for old clients/logs. */
     if (strstr(scene, "\xe6\xaf\x94\xe6\xad\xa6\xe6\x92\x92\xe5\x8f\xb0") != NULL)
-        return true; /* UTF-8 比武擂台 */
+        return true;
     return false;
 }
 
@@ -766,16 +995,23 @@ static void vm_mock_arena_restore_venue_scene_if_needed(vm_net_mock_role_state *
     if (p == NULL || !p->inArenaScene)
         return;
     (void)vm_mock_arena_load_config(false);
-    if (vm_mock_arena_is_arena_scene(role->scene))
-        return;
-    x = g_vm_mock_arena_config.spawnX ? g_vm_mock_arena_config.spawnX : 120;
-    y = g_vm_mock_arena_config.spawnY ? g_vm_mock_arena_config.spawnY : 120;
-    printf("[info][mock-service] arena_restore_venue role=%u from=%s to=%s "
-           "pos=(%u,%u) evidence=offline-rejoin-keep-venue\n",
-           role->roleId, role->scene[0] ? role->scene : "-",
-           g_vm_mock_arena_config.scene, x, y);
-    vm_net_mock_role_set_position(g_vm_mock_arena_config.scene, x, y,
-                                  "arena-restore-venue");
+    {
+        char venue[80];
+        u8 job = role->job ? role->job : (p->job ? p->job : 1);
+        if (p->job != 0)
+            job = p->job;
+        vm_mock_arena_scene_for_job(job, venue, sizeof(venue));
+        if (venue[0] != 0 &&
+            vm_net_mock_scene_names_equal_loose(role->scene, venue))
+            return;
+        x = g_vm_mock_arena_config.spawnX ? g_vm_mock_arena_config.spawnX : 120;
+        y = g_vm_mock_arena_config.spawnY ? g_vm_mock_arena_config.spawnY : 120;
+        printf("[info][mock-service] arena_restore_venue role=%u from=%s to=%s "
+               "job=%u pos=(%u,%u) evidence=offline-rejoin-keep-venue\n",
+               role->roleId, role->scene[0] ? role->scene : "-", venue,
+               (u32)job, x, y);
+        vm_net_mock_role_set_position(venue, x, y, "arena-restore-venue");
+    }
 }
 
 /* 离线再上线：仍在擂台场景且本场未结束 → 重绑 clientId / inArenaScene。 */
@@ -2522,6 +2758,7 @@ static void vm_mock_arena_match_playoff_ties(void)
     u32 j;
     u32 pairs = 0;
     u32 freeSlots;
+    u32 startsThisTick = 0;
 
     if (!g_vm_mock_arena_playoff ||
         g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_LIVE)
@@ -2592,6 +2829,8 @@ static void vm_mock_arena_match_playoff_ties(void)
 
             if (vm_mock_arena_match_slots_available() == 0)
                 break;
+            if (startsThisTick >= (u32)VM_MOCK_ARENA_MAX_STARTS_PER_TICK)
+                break;
             inv = vm_mock_arena_live_session_for_part(left);
             resp = vm_mock_arena_live_session_for_part(right);
             if (inv == NULL || resp == NULL)
@@ -2613,6 +2852,7 @@ static void vm_mock_arena_match_playoff_ties(void)
             left->lastOpponentRoleId = right->roleId;
             right->lastOpponentRoleId = left->roleId;
             ++pairs;
+            ++startsThisTick;
             printf("[info][mock-service] arena_playoff_match a=%u b=%u "
                    "score=%u job=%u bracket=%u serial=%u\n",
                    left->roleId, right->roleId, left->score, (u32)left->job,
@@ -2666,8 +2906,10 @@ static void vm_mock_arena_match_round(void)
     u32 matchedPairs = 0;
     u32 byeCount = 0;
     u32 deferredCount = 0;
+    u32 startsThisTick = 0;
     bool overflowRetry = false;
     u32 freeSlotsAtStart = 0;
+    bool startBudgetExhausted = false;
 
     vm_mock_arena_wall_clock(&dayYmd, &minute, NULL, &unixTs);
     /* Config minutes own the LIVE window; always repair stale session ts first. */
@@ -2733,6 +2975,8 @@ static void vm_mock_arena_match_round(void)
         vm_mock_arena_participant *seed = &g_vm_mock_arena_parts[i];
         bool alreadyGrouped = false;
 
+        if (startBudgetExhausted)
+            break;
         if (!seed->inArenaScene)
             continue;
         for (j = 0; j < i; ++j)
@@ -2758,6 +3002,10 @@ static void vm_mock_arena_match_round(void)
             if (!vm_mock_arena_same_bucket(seed->job, seed->bracket, seed->level,
                                           cand->job, cand->bracket, cand->level))
                 continue;
+            /* Only today's scheduled bracket may fight (other tiers rest). */
+            if (cand->bracket == 0 ||
+                cand->bracket != vm_mock_arena_active_bracket_today())
+                continue;
             sess = vm_mock_arena_live_session_for_part(cand);
             if (sess == NULL || !sess->roleOnline)
                 continue;
@@ -2770,6 +3018,16 @@ static void vm_mock_arena_match_round(void)
                 printf("[info][mock-service] arena_match_skip role=%u scene=%s "
                        "evidence=not-on-venue\n",
                        cand->roleId,
+                       sess->sceneVisibleScene[0] ? sess->sceneVisibleScene
+                       : (sess->onlineScene[0] ? sess->onlineScene : "-"));
+                continue;
+            }
+            if (!vm_mock_arena_on_job_venue(sess->sceneVisibleScene,
+                                            sess->onlineScene, cand->job))
+            {
+                printf("[info][mock-service] arena_match_skip role=%u "
+                       "job=%u scene=%s evidence=wrong-job-venue\n",
+                       cand->roleId, (u32)cand->job,
                        sess->sceneVisibleScene[0] ? sess->sceneVisibleScene
                        : (sess->onlineScene[0] ? sess->onlineScene : "-"));
                 continue;
@@ -2866,6 +3124,16 @@ static void vm_mock_arena_match_round(void)
                            vm_mock_arena_match_block_reason());
                     break;
                 }
+                if (startsThisTick >= (u32)VM_MOCK_ARENA_MAX_STARTS_PER_TICK)
+                {
+                    printf("[info][mock-service] arena_match_start_throttle "
+                           "round=%u started=%u/%u evidence=defer-next-tick\n",
+                           roundIndex, startsThisTick,
+                           (u32)VM_MOCK_ARENA_MAX_STARTS_PER_TICK);
+                    startBudgetExhausted = true;
+                    j = poolCount;
+                    break;
+                }
                 inv = vm_mock_arena_live_session_for_part(left);
                 resp = vm_mock_arena_live_session_for_part(right);
                 if (inv == NULL || resp == NULL)
@@ -2895,12 +3163,13 @@ static void vm_mock_arena_match_round(void)
                 left->lastOpponentRoleId = right->roleId;
                 right->lastOpponentRoleId = left->roleId;
                 ++matchedPairs;
+                ++startsThisTick;
                 printf("[info][mock-service] arena_match round=%u a=%u b=%u serial=%u "
-                       "pool=%u avoided_rematch=%u overflow=%u "
+                       "pool=%u avoided_rematch=%u overflow=%u starts_tick=%u "
                        "evidence=rng+retry-partners\n",
                        roundIndex, left->roleId, right->roleId, duel->serial,
                        poolCount, preferCount > 0 ? 1u : 0u,
-                       overflowRetry ? 1u : 0u);
+                       overflowRetry ? 1u : 0u, startsThisTick);
                 break;
             }
         }
@@ -3171,17 +3440,39 @@ static u32 vm_net_mock_build_arena_enter_response(u8 *out, u32 outCap)
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
     vm_mock_arena_participant *p;
+    u16 activeBracket;
+    u16 playerBracket;
 
+    g_vm_mock_arena_enter_refuse_tip[0] = 0;
     (void)vm_mock_arena_tick();
     if (role == NULL || session == NULL || out == NULL)
         return 0;
+    activeBracket = vm_mock_arena_active_bracket_today();
+    playerBracket = vm_mock_arena_bracket_for_level(role->level);
     if (!vm_mock_arena_entry_window_open() || g_vm_mock_arena_rt.sessionId == 0)
+    {
+        if (activeBracket == 0)
+            vm_mock_arena_set_enter_refuse_tip_bracket(0);
+        else
+            vm_mock_arena_set_enter_refuse_tip_closed();
         return 0;
-    if (role->level < 10)
+    }
+    if (role->level < 10 || playerBracket == 0)
+    {
+        vm_mock_arena_set_enter_refuse_tip_bracket(activeBracket);
         return 0;
+    }
+    if (playerBracket != activeBracket)
+    {
+        vm_mock_arena_set_enter_refuse_tip_bracket(activeBracket);
+        return 0;
+    }
     p = vm_mock_arena_ensure_participant(session, role);
     if (p == NULL)
+    {
+        vm_mock_arena_set_enter_refuse_tip_closed();
         return 0;
+    }
     if (!vm_mock_arena_is_arena_scene(session->sceneVisibleScene))
     {
         snprintf(p->returnScene, sizeof(p->returnScene), "%s",
@@ -3193,9 +3484,17 @@ static u32 vm_net_mock_build_arena_enter_response(u8 *out, u32 outCap)
     p->inArenaScene = 1;
     (void)vm_mock_arena_persist_score(p);
     vm_mock_arena_disband_team_for_session(session, "arena-enter");
-    return vm_net_mock_build_arena_teleport_response(
-        out, outCap, g_vm_mock_arena_config.scene, g_vm_mock_arena_config.spawnX,
-        g_vm_mock_arena_config.spawnY);
+    {
+        char venue[80];
+        u8 job = p->job ? p->job : (role->job ? role->job : 1);
+        vm_mock_arena_scene_for_job(job, venue, sizeof(venue));
+        printf("[info][mock-service] arena_enter role=%u job=%u bracket=%u "
+               "scene=%s evidence=job-venue-day-bracket\n",
+               role->roleId, (u32)job, (u32)p->bracket, venue);
+        return vm_net_mock_build_arena_teleport_response(
+            out, outCap, venue, g_vm_mock_arena_config.spawnX,
+            g_vm_mock_arena_config.spawnY);
+    }
 }
 
 static u32 vm_net_mock_build_arena_leave_response(u8 *out, u32 outCap)
@@ -3349,6 +3648,8 @@ static u32 vm_net_mock_build_arena_status_response(const u8 *request, u32 reques
     u32 weekdayBit = 0;
     u8 canEnter = 0;
     u8 status = 0;
+    u16 activeBracket = 0;
+    vm_net_mock_role_state *role;
 
     if (out == NULL || outCap < 5 || request == NULL ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
@@ -3357,7 +3658,15 @@ static u32 vm_net_mock_build_arena_status_response(const u8 *request, u32 reques
         return 0;
     (void)vm_mock_arena_tick();
     vm_mock_arena_wall_clock(&dayYmd, &minute, &weekdayBit, NULL);
-    canEnter = vm_mock_arena_entry_window_open() ? 1 : 0;
+    activeBracket = vm_mock_arena_active_bracket_today();
+    role = vm_net_mock_active_role();
+    canEnter = 0;
+    if (vm_mock_arena_entry_window_open() && activeBracket != 0 && role != NULL)
+    {
+        u16 playerBracket = vm_mock_arena_bracket_for_level(role->level);
+        if (playerBracket != 0 && playerBracket == activeBracket)
+            canEnter = 1;
+    }
     status = g_vm_mock_arena_rt.sessionId ? g_vm_mock_arena_rt.status
                                           : vm_mock_arena_desired_status(minute);
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_ARENA_WT_KIND,
@@ -3367,6 +3676,8 @@ static u32 vm_net_mock_build_arena_status_response(const u8 *request, u32 reques
                                     g_vm_mock_arena_config.enabled) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "status", status) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "canEnter", canEnter) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "activeBracket",
+                                    activeBracket) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "dayYmd", dayYmd) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "minute", minute) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "sessionId",
@@ -3836,10 +4147,10 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
             if (reward->itemId && reward->itemCount)
                 (void)vm_net_mock_role_add_backpack_item_to_role(
                     role, reward->itemId, reward->itemCount, 0, &seq,
-                    "arena-claim-item");
+                    "arena-claim-item", NULL);
             if (reward->equipId)
                 (void)vm_net_mock_role_add_backpack_item_to_role(
-                    role, reward->equipId, 1, 0, &seq, "arena-claim-equip");
+                    role, reward->equipId, 1, 0, &seq, "arena-claim-equip", NULL);
             p->claimed = 1;
             (void)vm_mock_arena_persist_score(p);
             result = 1;
@@ -3907,14 +4218,18 @@ static u32 vm_net_mock_build_arena_protocol_response(const u8 *request, u32 requ
 
 static bool vm_net_mock_arena_admin_save_config(
     u8 enabled, const char *scene, u16 spawnX, u16 spawnY, u32 weekdayMask,
-    u16 entryStart, u16 entryEnd, u16 matchStart, u16 matchEnd, u32 roundSec,
-    u32 battleTimeout, u32 scoreWin, u32 scoreBye, u32 scoreDraw,
-    const char *npcKeyword, u8 wagerEnabled, u8 wagerFee, u8 wagerCurrency)
+    const u16 weekdayBrackets[7], u16 entryStart, u16 entryEnd, u16 matchStart,
+    u16 matchEnd, u32 roundSec, u32 battleTimeout, u32 scoreWin, u32 scoreBye,
+    u32 scoreDraw, const char *npcKeyword, u8 wagerEnabled, u8 wagerFee,
+    u8 wagerCurrency)
 {
     char sceneHex[192];
     char kwHex[96];
-    char query[2048];
+    char bracketsText[48];
+    char query[2200];
     int written;
+    vm_mock_arena_config tmpCfg;
+    u32 i;
 
     if (!vm_mock_arena_ensure_tables() || scene == NULL || scene[0] == 0)
         return false;
@@ -3924,16 +4239,31 @@ static bool vm_net_mock_arena_admin_save_config(
         npcKeyword = "";
     if (vm_mysql_hex_encode(npcKeyword, strlen(npcKeyword), kwHex, sizeof(kwHex)) == 0)
         return false;
+    memset(&tmpCfg, 0, sizeof(tmpCfg));
+    if (weekdayBrackets != NULL)
+    {
+        for (i = 0; i < 7u; ++i)
+            tmpCfg.weekdayBrackets[i] = weekdayBrackets[i];
+    }
+    vm_mock_arena_sync_weekday_mask(&tmpCfg);
+    if (tmpCfg.weekdayMask == 0 && weekdayMask != 0)
+        tmpCfg.weekdayMask = weekdayMask;
+    else
+        weekdayMask = tmpCfg.weekdayMask;
+    vm_mock_arena_format_weekday_brackets(&tmpCfg, bracketsText,
+                                          sizeof(bracketsText));
     written = snprintf(
         query, sizeof(query),
         "INSERT INTO server_arena_config (id,enabled,scene,spawn_x,spawn_y,"
-        "weekday_mask,entry_start_minute,entry_end_minute,match_start_minute,"
-        "match_end_minute,round_seconds,battle_timeout_seconds,score_win,"
-        "score_bye,score_draw,npc_name_keyword,wager_enabled,wager_fee_percent,"
-        "wager_currency) VALUES (1,%u,UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-        "%u,%u,%u,UNHEX('%s'),%u,%u,%u) ON DUPLICATE KEY UPDATE "
+        "weekday_mask,weekday_brackets,entry_start_minute,entry_end_minute,"
+        "match_start_minute,match_end_minute,round_seconds,battle_timeout_seconds,"
+        "score_win,score_bye,score_draw,npc_name_keyword,wager_enabled,"
+        "wager_fee_percent,wager_currency) VALUES (1,%u,UNHEX('%s'),%u,%u,%u,"
+        "'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,UNHEX('%s'),%u,%u,%u) ON DUPLICATE KEY "
+        "UPDATE "
         "enabled=VALUES(enabled),scene=VALUES(scene),spawn_x=VALUES(spawn_x),"
         "spawn_y=VALUES(spawn_y),weekday_mask=VALUES(weekday_mask),"
+        "weekday_brackets=VALUES(weekday_brackets),"
         "entry_start_minute=VALUES(entry_start_minute),"
         "entry_end_minute=VALUES(entry_end_minute),"
         "match_start_minute=VALUES(match_start_minute),"
@@ -3946,9 +4276,9 @@ static bool vm_net_mock_arena_admin_save_config(
         "wager_fee_percent=VALUES(wager_fee_percent),"
         "wager_currency=VALUES(wager_currency)",
         (u32)enabled, sceneHex, (u32)spawnX, (u32)spawnY, weekdayMask,
-        (u32)entryStart, (u32)entryEnd, (u32)matchStart, (u32)matchEnd,
-        roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw, kwHex,
-        (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency);
+        bracketsText, (u32)entryStart, (u32)entryEnd, (u32)matchStart,
+        (u32)matchEnd, roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw,
+        kwHex, (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency);
     if (written < 0 || (size_t)written >= sizeof(query))
     {
         printf("[error][mock-service] arena_admin_save_config query truncated "

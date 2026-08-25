@@ -2804,6 +2804,8 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
             role, 0, offer->items[i].sourceSeq);
         if (item == NULL || item->itemId == 0 || item->count < offer->items[i].count)
             return false;
+        if (!vm_net_mock_item_is_tradeable(item->itemId, item->enhanceLevel))
+            return false;
         offer->items[i].itemId = item->itemId;
         offer->items[i].enhanceLevel = item->enhanceLevel;
         vm_net_mock_enhance_wash_copy(&offer->items[i].enhanceWash,

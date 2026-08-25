@@ -163,6 +163,9 @@ typedef struct
     u32 hp;
     u32 mp;
     u32 exp;
+    /* item.dsh col 2 / col 7 — trade filter (Pixi isTradeableItem). */
+    u32 questLink;
+    u32 bindAttr;
 } vm_net_mock_item_effect_catalog_item;
 
 typedef struct
@@ -2140,7 +2143,8 @@ static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId)
 static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,
                                                      u32 levelRequired, u32 stack,
                                                      u32 consumeMode, u32 durationMinutes,
-                                                     u32 hp, u32 mp, u32 exp)
+                                                     u32 hp, u32 mp, u32 exp,
+                                                     u32 questLink, u32 bindAttr)
 {
     vm_net_mock_item_effect_catalog_item *item = NULL;
 
@@ -2161,6 +2165,8 @@ static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,
     item->hp = hp;
     item->mp = mp;
     item->exp = exp;
+    item->questLink = questLink;
+    item->bindAttr = bindAttr;
     return true;
 }
 
@@ -2205,6 +2211,8 @@ static u32 vm_net_mock_load_item_effect_catalog_dsh(const char *path)
         u32 hp = 0;
         u32 mp = 0;
         u32 exp = 0;
+        u32 questLink = 0;
+        u32 bindAttr = 0;
 
         if (rowEnd > len || rowEnd < rowPos)
             break;
@@ -2223,8 +2231,14 @@ static u32 vm_net_mock_load_item_effect_catalog_dsh(const char *path)
             case 0:
                 itemId = parsed;
                 break;
+            case 2:
+                questLink = parsed;
+                break;
             case 5:
                 category = parsed;
+                break;
+            case 7:
+                bindAttr = parsed;
                 break;
             case 6:
                 levelRequired = parsed ? parsed : 1;
@@ -2255,7 +2269,7 @@ static u32 vm_net_mock_load_item_effect_catalog_dsh(const char *path)
 
         if (vm_net_mock_add_item_effect_catalog_item(itemId, category, levelRequired,
                                                      stack, consumeMode, durationMinutes,
-                                                     hp, mp, exp))
+                                                     hp, mp, exp, questLink, bindAttr))
         {
             ++added;
         }
@@ -2280,18 +2294,18 @@ static u32 vm_net_mock_load_item_effect_catalog(void)
 
     if (itemCount == 0)
     {
-        (void)vm_net_mock_add_item_effect_catalog_item(301, 10, 1, 20, 1, 0, 100, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(302, 10, 1, 20, 1, 0, 350, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(303, 10, 1, 20, 1, 0, 600, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(304, 10, 1, 20, 1, 0, 850, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(305, 10, 1, 20, 1, 0, 1100, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(321, 10, 1, 20, 1, 0, 0, 100, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(322, 10, 1, 20, 1, 0, 0, 350, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(323, 10, 1, 20, 1, 0, 0, 600, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(324, 10, 1, 20, 1, 0, 0, 850, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(325, 10, 1, 20, 1, 0, 0, 1100, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(802, 10, 200, 1, 2, 0, 50000, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(803, 10, 200, 1, 2, 0, 0, 50000, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(301, 10, 1, 20, 1, 0, 100, 0, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(302, 10, 1, 20, 1, 0, 350, 0, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(303, 10, 1, 20, 1, 0, 600, 0, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(304, 10, 1, 20, 1, 0, 850, 0, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(305, 10, 1, 20, 1, 0, 1100, 0, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(321, 10, 1, 20, 1, 0, 0, 100, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(322, 10, 1, 20, 1, 0, 0, 350, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(323, 10, 1, 20, 1, 0, 0, 600, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(324, 10, 1, 20, 1, 0, 0, 850, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(325, 10, 1, 20, 1, 0, 0, 1100, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(802, 10, 200, 1, 2, 0, 50000, 0, 0, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(803, 10, 200, 1, 2, 0, 0, 50000, 0, 0, 0);
         printf("[warn][network] mock_item_effect_catalog fallback=item.dsh-not-found total=%u\n",
                g_vm_net_mock_item_effect_catalog_count);
     }
@@ -2315,6 +2329,38 @@ static const vm_net_mock_item_effect_catalog_item *vm_net_mock_find_item_effect_
             return &g_vm_net_mock_item_effect_catalog[i];
     }
     return NULL;
+}
+
+/* Mirror PixiJS_web itemCatalog.isTradeableItem — server-side guard against
+ * crafted trade offers that bypass the client pick filter. */
+static bool vm_net_mock_item_is_tradeable(u32 itemId, u16 enhanceLevel)
+{
+    const vm_net_mock_equipment_catalog_item *equip = NULL;
+    const vm_net_mock_item_effect_catalog_item *item = NULL;
+
+    if (itemId >= 901 && itemId <= 916)
+        return false;
+    if (itemId == 840)
+        return false;
+    if (enhanceLevel > 0)
+        return false;
+
+    equip = vm_net_mock_find_equipment_catalog_item(itemId);
+    if (equip != NULL)
+        return true;
+
+    item = vm_net_mock_find_item_effect_catalog_item(itemId);
+    if (item == NULL)
+        return true;
+    if (item->category == 23)
+        return false;
+    if (item->category == 11)
+        return false;
+    if (item->questLink != 0)
+        return false;
+    if (item->bindAttr != 0)
+        return false;
+    return true;
 }
 
 /* These ids have client-side request/response handlers that are distinct from
@@ -6990,7 +7036,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return pos;
     }
     if (!vm_net_mock_role_add_backpack_item_to_role(
-            role, rewardItemId, 1, 0, &rewardSeq, "chest-open"))
+            role, rewardItemId, 1, 0, &rewardSeq, "chest-open", NULL))
     {
         *role = before;
         result = 4;
@@ -7373,7 +7419,7 @@ static u32 vm_net_mock_build_chest_open_batch_response(const u8 *request,
                                                      NULL) ||
             !vm_net_mock_role_add_backpack_item_to_role(role, rewardItemId, 1, 0,
                                                         &rewardSeq,
-                                                        "chest-open-batch"))
+                                                        "chest-open-batch", NULL))
         {
             *role = before;
             result = 4;
@@ -9923,13 +9969,24 @@ static bool vm_net_mock_parse_equipment_enhance_wash_request(
             return false;
         }
         parsed.crystalItemId = crystalId;
-        if (vm_net_mock_get_object_number_field(
-                object.payload, object.payloadLen, "count", &crystalCount) &&
-            crystalCount != 1)
-        {
+        /*
+         * Default count=1. +16 洗练可用多颗十六级玄晶叠成功率：最多 3 颗 → 100%.
+         * Other unlock/crystal pairs still accept only 1.
+         */
+        crystalCount = 1;
+        (void)vm_net_mock_get_object_number_field(
+            object.payload, object.payloadLen, "count", &crystalCount);
+        if (crystalCount == 0 || crystalCount > 3u)
             return false;
+        if (crystalCount > 1u)
+        {
+            if (parsed.unlockLevel != 16 ||
+                crystalId != (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST)
+            {
+                return false;
+            }
         }
-        parsed.crystalCount = 1;
+        parsed.crystalCount = (u8)crystalCount;
     }
 
     if (parsedOut)

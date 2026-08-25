@@ -17,6 +17,7 @@ static bool vm_net_mock_battle_operate_skill_targets_friendly_group_heal(u32 ope
 static bool vm_net_mock_battle_operate_skill_targets_friendly_group_modifier(u32 operate);
 static bool vm_net_mock_battle_operate_skill_targets_enemy_status_no_damage(u32 operate);
 static void vm_net_mock_battle_sync_role_mp_from_role(vm_net_mock_role_state *role);
+static u32 vm_net_mock_battle_role_mp_current(void);
 static void vm_net_mock_battle_enemy_ailments_clear(void);
 static u8 vm_net_mock_battle_enemy_ailments_advance_round(void);
 static u8 vm_net_mock_battle_enemy_ailments_advance_round_collect(
@@ -684,6 +685,30 @@ static void vm_net_mock_battle_remember_last_operate(u32 index, u32 operate,
     g_mockBattleLastIndex = index;
 }
 
+static u32 vm_net_mock_battle_resolve_operate_for_mp(u32 operate,
+                                                     u32 mpNow,
+                                                     const char *via)
+{
+    const vm_net_mock_skill_catalog_item *skill = NULL;
+    u32 mpCost = 0;
+
+    if (!vm_net_mock_battle_operate_is_skill(operate))
+        return operate;
+    skill = vm_net_mock_battle_operate_skill(operate);
+    mpCost = skill ? skill->mpCost : 0;
+    if (mpCost == 0 || mpNow >= mpCost)
+        return operate;
+    printf("[info][network] mock_battle_mp_fallback operate=%u skill=%u "
+           "mpcost=%u rolemp=%u via=%s action=normal-attack "
+           "evidence=skill.dsh:mpCost\n",
+           operate,
+           vm_net_mock_battle_operate_skill_id(operate),
+           mpCost,
+           mpNow,
+           via ? via : "-");
+    return 0;
+}
+
 static u32 vm_net_mock_battle_auto_choose_operate(u32 *indexOut)
 {
     bool playerOnRight = vm_net_mock_battle_player_on_right();
@@ -734,29 +759,8 @@ static u32 vm_net_mock_battle_auto_choose_operate(u32 *indexOut)
     operate = g_mockBattleLastOperateValid ? g_mockBattleLastOperate : 0;
     if (vm_net_mock_battle_operate_is_skill(operate))
     {
-        const vm_net_mock_skill_catalog_item *skill =
-            vm_net_mock_battle_operate_skill(operate);
-        u32 mpCost = skill ? skill->mpCost : 0;
-        u32 mpNow;
-
-        if (g_mockBattleRoleMpMax == 0)
-        {
-            vm_net_mock_role_state *role = vm_net_mock_active_role();
-            if (role != NULL)
-                vm_net_mock_battle_sync_role_mp_from_role(role);
-        }
-        mpNow = g_mockBattleRoleMpCurrent;
-        if (mpCost != 0 && mpNow < mpCost)
-        {
-            printf("[info][network] mock_battle_auto_mp_fallback "
-                   "operate=%u skill=%u mpcost=%u rolemp=%u "
-                   "action=normal-attack evidence=skill.dsh:mpCost\n",
-                   operate,
-                   vm_net_mock_battle_operate_skill_id(operate),
-                   mpCost,
-                   mpNow);
-            operate = 0;
-        }
+        operate = vm_net_mock_battle_resolve_operate_for_mp(
+            operate, vm_net_mock_battle_role_mp_current(), "auto-synth");
     }
     return operate;
 }
@@ -3422,6 +3426,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &operate) &&
         vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &operate8))
         operate = operate8;
+    operate = vm_net_mock_battle_resolve_operate_for_mp(
+        operate, vm_net_mock_battle_role_mp_current(), "operate");
     operateIsSkill = vm_net_mock_battle_operate_is_skill(operate);
     operateConsumesTurn = operate == 0 || operateIsSkill;
     skillTargetsEnemyGroup = operateIsSkill &&
@@ -4218,6 +4224,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &operate) &&
         vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &operate8))
         operate = operate8;
+    operate = vm_net_mock_battle_resolve_operate_for_mp(
+        operate, vm_net_mock_battle_role_mp_current(), "operate");
     operateIsSkill = vm_net_mock_battle_operate_is_skill(operate);
     operateConsumesTurn = operate == 0 || operateIsSkill;
     skillTargetsEnemyGroup = operateIsSkill &&
@@ -5231,6 +5239,7 @@ static void vm_mock_service_team_battle_clear_round_actions(
         return;
     memset(team->battleRoundActions, 0, sizeof(team->battleRoundActions));
     team->battleRoundTerminalPending = false;
+    team->battleRoundTerminalActorIndex = 0xff;
 }
 
 static u32 vm_net_mock_build_team_battle_deferred_ack(
@@ -5320,6 +5329,24 @@ static bool vm_net_mock_team_battle_append_roster_ordered_actions(
 
         if (i == resolverIndex && currentActionInfo != NULL)
         {
+            /*
+             * Last-seat release after an earlier roster wipe must not inject
+             * another player prefix (terminal_wait usually avoids this; belt
+             * and suspenders for releaseRound + prior captures).
+             */
+            if (team->battleRoundTerminalActorIndex != 0xff &&
+                i > team->battleRoundTerminalActorIndex)
+            {
+                printf("[info][mock-service] team_battle_round_skip_post_wipe "
+                       "battle=%u round=%u actor=%u wipe_actor=%u "
+                       "via=resolver-current "
+                       "evidence=roster-merge-after-aoe-wipe\n",
+                       team->battleSerial,
+                       team->battleRoundSerial,
+                       i,
+                       team->battleRoundTerminalActorIndex);
+                continue;
+            }
             blob = currentActionInfo;
             blobLen = currentPlayerInfoLen;
             blobActions = currentPlayerActionCount;
@@ -5330,6 +5357,23 @@ static bool vm_net_mock_team_battle_append_roster_ordered_actions(
                 &team->battleRoundActions[i];
             if (!candidate->valid)
                 continue;
+            /*
+             * Roster-order merge after an earlier seat already wiped: drop
+             * later seats' captured blobs so clients do not play 打空气.
+             */
+            if (team->battleRoundTerminalActorIndex != 0xff &&
+                i > team->battleRoundTerminalActorIndex)
+            {
+                printf("[info][mock-service] team_battle_round_skip_post_wipe "
+                       "battle=%u round=%u actor=%u wipe_actor=%u "
+                       "actions=%u evidence=roster-merge-after-aoe-wipe\n",
+                       team->battleSerial,
+                       team->battleRoundSerial,
+                       i,
+                       team->battleRoundTerminalActorIndex,
+                       candidate->actionCount);
+                continue;
+            }
             blob = candidate->actionInfo;
             blobLen = candidate->actionInfoLen;
             blobActions = candidate->actionCount;
@@ -5343,6 +5387,15 @@ static bool vm_net_mock_team_battle_append_roster_ordered_actions(
         memcpy(combinedActionInfo + *combinedActionInfoLen, blob, blobLen);
         *combinedActionInfoLen += blobLen;
         *totalActionCount += blobActions;
+    }
+    if (suffixLen != 0 && suffixCount != 0)
+    {
+        /* Party wipe: do not append monster counter/DoT suffix into dead air. */
+        if (team->battleRoundTerminalActorIndex != 0xff)
+        {
+            suffixLen = 0;
+            suffixCount = 0;
+        }
     }
     if (suffixLen != 0 && suffixCount != 0)
     {
@@ -6502,6 +6555,47 @@ static void vm_mock_service_team_battle_flush_round_if_ready(
         vm_mock_service_team_battle_release_if_settled(team, "round-flush-finished");
 }
 
+/*
+ * Roster/offline removal must mirror flee/death exit: mark the battle seat
+ * left+acted and flush any deferred round so survivors are not stuck behind
+ * the barrier (docs/re/2026-07-25-team-battle-member-exit-stall.md).
+ */
+static void vm_mock_service_team_battle_note_roster_disconnect(
+    void *teamVoid,
+    vm_mock_service_client_session *leaver,
+    const char *reason)
+{
+    vm_mock_service_team *team = (vm_mock_service_team *)teamVoid;
+    int memberIndex = -1;
+    u8 memberBit = 0;
+
+    if (team == NULL || leaver == NULL || !team->battleActive)
+        return;
+    memberIndex = vm_mock_service_team_battle_member_index(
+        team, leaver->clientId);
+    if (memberIndex < 0 || memberIndex >= team->battleMemberCount)
+        return;
+
+    memberBit = (u8)(1u << memberIndex);
+    if ((team->battleMemberLeftMask & memberBit) != 0)
+        return;
+    team->battleMemberLeftMask = (u8)(team->battleMemberLeftMask | memberBit);
+    team->battleRoundActedMask =
+        (u8)(team->battleRoundActedMask | memberBit);
+    vm_mock_service_team_battle_publish_member_vitals(team);
+    printf("[info][mock-service] team_battle_member_exit battle=%u actor=%u "
+           "fled=0 offline=1 hp=%u left=%02x acted=%02x alive=%02x reason=%s\n",
+           team->battleSerial,
+           memberIndex,
+           team->battleMemberHp[memberIndex],
+           team->battleMemberLeftMask,
+           team->battleRoundActedMask,
+           vm_mock_service_team_battle_alive_mask(team),
+           reason ? reason : "roster-disconnect");
+    vm_mock_service_team_battle_flush_round_if_ready(
+        team, memberBit, reason ? reason : "roster-disconnect");
+}
+
 static void vm_mock_service_team_battle_note_member_exit(
     vm_mock_service_client_session *session,
     bool fled,
@@ -6993,18 +7087,44 @@ static u32 vm_net_mock_build_synchronized_team_battle_response(
                                  out, responseLen, "actionnum", &actionCount) &&
                              actionCount != 0;
             releaseRound = actionAccepted && context.resolvesRound;
-            if (actionAccepted && !releaseRound &&
+            if (actionAccepted &&
                 vm_net_mock_battle_all_enemies_defeated())
             {
-                context.team->battleRoundTerminalPending = true;
-                printf("[info][mock-service] team_battle_round_terminal_capture "
-                       "battle=%u round=%u source=%08x actor=%u acted=%02x alive=%02x\n",
-                       context.team->battleSerial,
-                       context.team->battleRoundSerial,
-                       context.session ? context.session->clientId : 0,
-                       context.memberIndex,
-                       context.team->battleRoundActedMask,
-                       context.aliveMask);
+                /*
+                 * Record wipe seat for roster-ordered merge.  Applies to both
+                 * deferred terminal_capture and last-seat releaseRound — the
+                 * latter used to leave later captures in the merged 4/6 so
+                 * clients played 打空气 after the AOE kill.
+                 */
+                if (context.team->battleRoundTerminalActorIndex == 0xff)
+                    context.team->battleRoundTerminalActorIndex =
+                        context.memberIndex;
+                if (!releaseRound)
+                {
+                    context.team->battleRoundTerminalPending = true;
+                    printf("[info][mock-service] team_battle_round_terminal_capture "
+                           "battle=%u round=%u source=%08x actor=%u "
+                           "wipe_actor=%u acted=%02x alive=%02x\n",
+                           context.team->battleSerial,
+                           context.team->battleRoundSerial,
+                           context.session ? context.session->clientId : 0,
+                           context.memberIndex,
+                           context.team->battleRoundTerminalActorIndex,
+                           context.team->battleRoundActedMask,
+                           context.aliveMask);
+                }
+                else
+                {
+                    printf("[info][mock-service] team_battle_round_wipe_actor "
+                           "battle=%u round=%u source=%08x actor=%u "
+                           "wipe_actor=%u acted=%02x via=releaseRound\n",
+                           context.team->battleSerial,
+                           context.team->battleRoundSerial,
+                           context.session ? context.session->clientId : 0,
+                           context.memberIndex,
+                           context.team->battleRoundTerminalActorIndex,
+                           context.team->battleRoundActedMask);
+                }
             }
             if (actionAccepted && !releaseRound &&
                 !vm_mock_service_team_battle_capture_round_action(
@@ -8576,6 +8696,29 @@ static u32 vm_mock_service_duel_round_commit_timeout_ticks(void)
     return ticks;
 }
 
+/* Recompute agility winner each round (battle buffs/debuffs included). */
+static u8 vm_mock_service_duel_compute_first_turn_index(
+    const vm_mock_service_duel *duel)
+{
+    vm_net_mock_player_stats stats[2];
+
+    if (duel == NULL)
+        return 0;
+    memset(stats, 0, sizeof(stats));
+    for (u8 seat = 0; seat < 2; ++seat)
+    {
+        vm_mock_service_client_session *session =
+            vm_mock_service_find_client_session(duel->clientIds[seat]);
+        vm_net_mock_role_state *role =
+            vm_mock_service_trade_role_for_session(session, NULL);
+
+        vm_net_mock_role_build_player_stats(role, &stats[seat]);
+        vm_mock_service_duel_apply_seat_modifier(duel, (int)seat, &stats[seat]);
+    }
+    /* Higher agility first; equal keeps seat 0 (inviter / arena pool-left). */
+    return stats[1].agility > stats[0].agility ? 1u : 0u;
+}
+
 static bool vm_mock_service_duel_resolve_committed_round(
     vm_mock_service_duel *duel)
 {
@@ -8585,14 +8728,17 @@ static bool vm_mock_service_duel_resolve_committed_round(
     bool terminal = false;
     u8 freshModifierMask = 0;
     u8 freshSilenceMask = 0;
+    u8 firstTurnIndex = 0;
 
     if (duel == NULL || duel->finished || duel->roundCommitMask != 3)
         return false;
     if (vm_mock_service_duel_has_undelivered_action(duel))
         return false;
 
-    order[0] = duel->firstTurnIndex;
-    order[1] = (u8)(1u - duel->firstTurnIndex);
+    firstTurnIndex = vm_mock_service_duel_compute_first_turn_index(duel);
+    duel->firstTurnIndex = firstTurnIndex;
+    order[0] = firstTurnIndex;
+    order[1] = (u8)(1u - firstTurnIndex);
     for (u8 i = 0; i < 2; ++i)
     {
         u8 sourceIndex = order[i];
@@ -8665,11 +8811,13 @@ static bool vm_mock_service_duel_resolve_committed_round(
                 continue;
         }
         /*
-         * Offensive hits with 0 damage are skipped (nothing to play).
-         * Support skills always emit a 4/6 even when heal amount is 0
-         * (full HP) so the client plays the cast/buff FX like PvE.
+         * Offensive 0-damage with no outcome flag has nothing to play.
+         * Miss/dodge must still emit actioninfo + child_flag=3 (PvE contract:
+         * docs/re/2026-07-29-battle-hit-crit-resist.md). Skipping the first
+         * seat's dodge made higher-agility "先手" invisible — peer looked first.
          */
-        if (!hit.supportNoDamage && hit.damage == 0)
+        if (!hit.supportNoDamage && hit.damage == 0 &&
+            hit.childFlag != VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE)
             continue;
 
         nextSerial = duel->actionSerial + 1;

@@ -4,7 +4,8 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
+  preloadCbeFlowerCorners,
   drawLocBanner,
   makePixelText,
 } from "./constants";
@@ -68,7 +69,10 @@ export class CreateRoleScreen extends Container {
     );
     this.addChild(this.bannerGfx);
     drawLocBanner(this.bannerGfx, this, "创建角色", 8);
-    drawCbePanel(this.frame, 6, PANEL_TOP, LCD_WIDTH - 12, PANEL_H, CBE.bgDeep);
+    this.paintFrame();
+    preloadCbeFlowerCorners(() => {
+      if (this.visible) this.paintFrame();
+    });
     this.addChild(this.frame);
     this.addChild(this.previewHost, this.rowsHost);
 
@@ -82,6 +86,19 @@ export class CreateRoleScreen extends Container {
       this.redraw();
     };
     this.ime.onSubmit = () => this.confirm();
+  }
+
+  private paintFrame(): void {
+    this.frame.clear();
+    paintCbePanel(
+      this,
+      this.frame,
+      6,
+      PANEL_TOP,
+      LCD_WIDTH - 12,
+      PANEL_H,
+      CBE.bgDeep,
+    );
   }
 
   open(): void {

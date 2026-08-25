@@ -4,7 +4,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
   drawCbeTitlePill,
 } from "./constants";
 import { BitmapLabel, measureUiTextWidth, wrapChars } from "./BitmapLabel";
@@ -57,7 +57,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, preloadPageNavTextures } from "./pageNav";
 
 export type SystemKind =
   | "bag"
@@ -69,7 +69,12 @@ export type SystemKind =
   | "skill"
   | "status";
 
-type ViewMode = "list" | "detail" | "actions" | "recharge_pay";
+type ViewMode =
+  | "list"
+  | "detail"
+  | "actions"
+  | "recharge_amount"
+  | "recharge_pay";
 
 export type SystemAction =
   | "use"
@@ -275,6 +280,8 @@ export class SystemPanel extends Container {
   private buyQty = 1;
   /** Pending mall RMB recharge yuan (before channel pick). */
   private rechargeYuan = 0;
+  /** Native LCD keypad draft for mall 赞助 (no HTML prompt). */
+  private rechargeDraft = "1";
   /** Transient hit targets (mall footer 充值); destroyed each redraw. */
   private hitSprites: Container[] = [];
   /** Selectable row pointer hits (list / actions); cleared each redraw. */
@@ -313,6 +320,9 @@ export class SystemPanel extends Container {
         .fill({ color: 0x000000, alpha: 0.35 }),
     );
     this.addChild(this.box, this.brokenGlowGfx);
+    preloadPageNavTextures(() => {
+      if (this.visible) this.redraw();
+    });
   }
 
   open(kind: SystemKind, _hint = ""): void {
@@ -323,6 +333,7 @@ export class SystemPanel extends Container {
     this.detailPage = 0;
     this.buyQty = 1;
     this.rechargeYuan = 0;
+    this.rechargeDraft = "1";
     this.replaceCandidates = [];
     // Bag defaults to 道具; enhance picker still opens on 装备.
     this.categoryIndex = kind === "enhance" ? 1 : 0;
@@ -491,6 +502,13 @@ export class SystemPanel extends Container {
     }
     if (
       this.kind === "mall" &&
+      this.mode === "recharge_amount"
+    ) {
+      this.adjustRechargeDraft(delta);
+      return;
+    }
+    if (
+      this.kind === "mall" &&
       this.mode === "actions" &&
       this.selected &&
       isGoods(this.selected)
@@ -530,6 +548,51 @@ export class SystemPanel extends Container {
     if (index < 0 || index >= tabs.length || index === this.categoryIndex) return;
     this.categoryIndex = index;
     this.cursorIndex = 0;
+    this.redraw();
+  }
+
+  private adjustRechargeDraft(delta: number): void {
+    const cur = Math.floor(Number(this.rechargeDraft.trim() || "0"));
+    let next = (Number.isFinite(cur) ? cur : 0) + delta;
+    if (delta < 0 && next < 1) next = 1;
+    next = Math.min(100000, Math.max(1, next));
+    this.rechargeDraft = String(next);
+    this.redraw();
+  }
+
+  private appendRechargeKey(key: string): void {
+    if (this.mode !== "recharge_amount") return;
+    if (key === "删除") {
+      this.rechargeDraft =
+        this.rechargeDraft.length <= 1 ? "" : this.rechargeDraft.slice(0, -1);
+      this.redraw();
+      return;
+    }
+    if (key === "确定") {
+      this.confirmRechargeAmount();
+      return;
+    }
+    if (!/^\d$/.test(key)) return;
+    if (this.rechargeDraft === "0") this.rechargeDraft = key;
+    else if (this.rechargeDraft.length >= 6) return;
+    else this.rechargeDraft += key;
+    this.redraw();
+  }
+
+  private confirmRechargeAmount(): void {
+    const yuan = Math.floor(Number(this.rechargeDraft.trim() || "0"));
+    if (!Number.isFinite(yuan) || yuan < 1) {
+      this.showTip("请输入有效整数金额");
+      return;
+    }
+    if (yuan > 100000) {
+      this.showTip("金额超出允许范围");
+      return;
+    }
+    this.rechargeYuan = yuan;
+    this.mode = "recharge_pay";
+    this.actionLabels = ["支付宝", "微信"];
+    this.actionCursor = 0;
     this.redraw();
   }
 
@@ -615,6 +678,10 @@ export class SystemPanel extends Container {
       this.confirmEquip();
       return;
     }
+    if (this.mode === "recharge_amount") {
+      this.confirmRechargeAmount();
+      return;
+    }
     if (this.mode === "recharge_pay") {
       const label = this.actionLabels[this.actionCursor];
       if (!label || !this.rechargeYuan) return;
@@ -660,25 +727,13 @@ export class SystemPanel extends Container {
     }
   }
 
-  /** Mall footer 充值: prompt yuan then pick 支付宝/微信. */
+  /** Mall footer 赞助: native LCD amount keypad → 支付宝/微信. */
   beginMallRecharge(): void {
     if (this.kind !== "mall") return;
-    const raw = window.prompt("赞助金额(元)", "1");
-    if (raw == null) return;
-    const yuan = Math.floor(Number(String(raw).trim()));
-    if (!Number.isFinite(yuan) || yuan < 1) {
-      this.showTip("请输入有效整数金额");
-      return;
-    }
-    if (yuan > 100000) {
-      this.showTip("金额超出允许范围");
-      return;
-    }
-    this.rechargeYuan = yuan;
+    this.rechargeDraft = "1";
+    this.rechargeYuan = 0;
     this.selected = null;
-    this.mode = "recharge_pay";
-    this.actionLabels = ["支付宝", "微信"];
-    this.actionCursor = 0;
+    this.mode = "recharge_amount";
     this.redraw();
   }
 
@@ -757,9 +812,15 @@ export class SystemPanel extends Container {
       this.onClose?.();
       return;
     }
-    if (this.mode === "recharge_pay") {
+    if (this.mode === "recharge_amount") {
       this.mode = "list";
+      this.rechargeDraft = "1";
       this.rechargeYuan = 0;
+      this.redraw();
+      return;
+    }
+    if (this.mode === "recharge_pay") {
+      this.mode = "recharge_amount";
       this.actionLabels = [];
       this.redraw();
       return;
@@ -1045,9 +1106,13 @@ export class SystemPanel extends Container {
       const y = 48;
       const w = LCD_WIDTH - 20;
       const h = LCD_HEIGHT - SOFTKEY_H - 64;
-      drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+      paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
-      this.addLabel(titleOf(this.kind), x + 10, y + 8, CBE.ink);
+      const rechargeOverlay =
+        this.mode === "recharge_amount" || this.mode === "recharge_pay";
+      if (!rechargeOverlay) {
+        this.addLabel(titleOf(this.kind), x + 10, y + 8, CBE.ink);
+      }
       const showCatTabs = this.mode === "list" && this.usesCategoryTabs();
       const tabH = 20;
       const tabY = y + 26;
@@ -1060,16 +1125,19 @@ export class SystemPanel extends Container {
           this.categoryTabs(),
         );
         this.addLabel(this.listHint(), x + 10, tabY + tabH + 4, CBE.inkLabel);
-      } else {
+      } else if (!rechargeOverlay) {
         this.addLabel(this.listHint(), x + 10, y + 26, CBE.inkLabel);
       }
 
-      if (this.mode === "recharge_pay") {
-        this.addLabel(`赞助 ${this.rechargeYuan} 元`, x + 10, y + 46, CBE.inkTipGreen);
-        this.addLabel("选择支付方式", x + 10, y + 64, CBE.inkLabel);
+      if (this.mode === "recharge_amount") {
+        this.drawRechargeAmountPanel(x, y, w);
+      } else if (this.mode === "recharge_pay") {
+        this.addLabel("赞助支付", x + 10, y + 8, CBE.ink);
+        this.addLabel(`金额 ${this.rechargeYuan} 元`, x + 10, y + 26, CBE.inkTipGreen);
+        this.addLabel("选择支付方式", x + 10, y + 44, CBE.inkLabel);
         this.actionLabels.forEach((label, i) => {
           const hi = i === this.actionCursor;
-          const rowY = y + 86 + i * 20;
+          const rowY = y + 66 + i * 20;
           if (hi) this.box.rect(x + 4, rowY, w - 8, 19).fill({ color: CBE.select });
           this.addLabel(label, x + 12, rowY + 2, hi ? CBE.ink : CBE.inkMint);
           const idx = i;
@@ -1102,7 +1170,7 @@ export class SystemPanel extends Container {
     const y = 2;
     const w = LCD_WIDTH - 8;
     const h = LCD_HEIGHT - 4;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     if (this.mode === "detail") {
       this.brokenSlotRects = [];
@@ -1395,7 +1463,7 @@ export class SystemPanel extends Container {
       return;
     }
 
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     const pillW = 72;
     const pillH = 22;
@@ -1610,7 +1678,7 @@ export class SystemPanel extends Container {
     const sk = this.selected;
     if (!sk || !isSkill(sk)) return;
 
-    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     const titleH = 28;
     const titleY = y + 8;
@@ -1623,13 +1691,28 @@ export class SystemPanel extends Container {
       .stroke({ width: 1, color: CBE.borderDim });
     this.addLabelCentered(sk.name, LCD_WIDTH / 2, titleY + titleH / 2, CBE.inkBody);
 
-    const softY = y + h - PANEL_BOTTOM_PAD;
-    const metaH = 36;
-    const metaTop = softY - metaH - 4;
-
+    const softY = y + h - 12;
     const descX = x + 10;
     const descY = titleY + titleH + 8;
     const descW = w - 20;
+    const mpLine = sk.mpCost != null ? `耗蓝 ${sk.mpCost}` : "";
+    const battleLine = this.inBattle
+      ? "战斗中可施放"
+      : isMapHealSkill(sk)
+        ? "地图可施放回血"
+        : "地图不可施放";
+    const footerRows: { text: string; color: number }[] = [
+      ...(mpLine ? [{ text: mpLine, color: CBE.inkMint }] : []),
+      { text: battleLine, color: CBE.inkMint },
+      { text: "左=操作 右=返回", color: CBE.inkLabel },
+    ];
+    const wrappedFooter = footerRows.flatMap(({ text, color }) =>
+      wrapUc3Lines(text, descW - 12).map((line) => ({ line, color })),
+    );
+    const footerLineH = 16;
+    const metaH = wrappedFooter.length * footerLineH + 10;
+    const metaTop = softY - metaH;
+
     const descH = Math.max(40, metaTop - descY - 8);
     this.box.rect(descX, descY, descW, descH).fill({ color: 0x0a1410 });
 
@@ -1637,29 +1720,21 @@ export class SystemPanel extends Container {
     const desc =
       (sk.desc && sk.desc !== "-" ? sk.desc : "") || "（无技能介绍）";
     const wrapped = wrapUc3Lines(desc, descW - 12);
-    const maxLines = Math.max(1, Math.floor((descH - 28) / 16));
+    const maxLines = Math.max(1, Math.floor((descH - 28) / footerLineH));
     wrapped.slice(0, maxLines).forEach((line, i) => {
-      this.addAttrText(line, descX + 6, descY + 24 + i * 16, CBE.ink);
+      this.addAttrText(line, descX + 6, descY + 24 + i * footerLineH, CBE.ink);
     });
 
-    const mpLine = sk.mpCost != null ? `耗蓝 ${sk.mpCost}` : "";
-    const battleLine = this.inBattle
-      ? "战斗中可施放"
-      : this.selected && isSkill(this.selected) && isMapHealSkill(this.selected)
-        ? "地图可施放回血"
-        : "地图上无法施放仙术";
-    this.addAttrText(
-      [mpLine, battleLine].filter(Boolean).join("  "),
-      descX + 6,
-      metaTop + 8,
-      CBE.inkMint,
-    );
-    this.addAttrText(
-      "左软=操作(含遗忘5金)  右软=返回",
-      descX + 6,
-      metaTop + 24,
-      CBE.inkLabel,
-    );
+    this.box.rect(descX, metaTop, descW, metaH).fill({ color: CBE.bgPanelDark });
+    this.box
+      .moveTo(descX, metaTop)
+      .lineTo(descX + descW, metaTop)
+      .stroke({ width: 1, color: CBE.borderDim });
+    let fy = metaTop + 5;
+    for (const row of wrappedFooter) {
+      this.addAttrText(row.line, descX + 6, fy, row.color);
+      fy += footerLineH;
+    }
   }
 
   /**
@@ -1669,7 +1744,7 @@ export class SystemPanel extends Container {
     const it = this.selected;
     if (!it || !isBag(it)) return;
 
-    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     const titleH = 28;
     const titleY = y + 8;
@@ -1749,13 +1824,62 @@ export class SystemPanel extends Container {
   }
 
   /**
+   * Mall 赞助金额 — UC3 keypad on LCD (←→ ±1, tap digits, 确定/软左继续).
+   */
+  private drawRechargeAmountPanel(x: number, y: number, w: number): void {
+    this.addLabel("赞助金额(元)", x + 10, y + 8, CBE.ink);
+    this.addLabel("←→微调 · 点按数字", x + 10, y + 26, CBE.inkLabel);
+
+    const boxY = y + 46;
+    const boxH = 28;
+    this.box
+      .roundRect(x + 10, boxY, w - 20, boxH, 3)
+      .fill({ color: CBE.bgPanel })
+      .stroke({ width: 1, color: CBE.borderBright });
+    const shown = (this.rechargeDraft || "").trim() || "0";
+    this.addLabelCentered(`${shown} 元`, LCD_WIDTH / 2, boxY + boxH / 2, CBE.inkTipGreen);
+
+    const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "删除", "0", "确定"];
+    const keyW = 58;
+    const keyH = 26;
+    const gap = 6;
+    const gridW = keyW * 3 + gap * 2;
+    const startX = x + Math.floor((w - gridW) / 2);
+    let baseY = boxY + boxH + 10;
+    for (let i = 0; i < keys.length; i++) {
+      const col = i % 3;
+      const row = Math.floor(i / 3);
+      const kx = startX + col * (keyW + gap);
+      const ky = baseY + row * (keyH + gap);
+      const key = keys[i]!;
+      const hi = key === "确定";
+      const keyInk =
+        key === "确定"
+          ? CBE.inkTipGreen
+          : key === "删除"
+            ? CBE.inkWarn
+            : CBE.inkMint;
+      this.box
+        .roundRect(kx, ky, keyW, keyH, 3)
+        .fill({ color: hi ? CBE.bgPanelDark : CBE.bgDeep })
+        .stroke({ width: 1, color: CBE.borderBright });
+      this.addLabelCentered(key, kx + keyW / 2, ky + keyH / 2, keyInk);
+      this.rowHits.push(
+        attachRowPointerHit(this, kx, ky, keyW, keyH, () => {
+          this.appendRechargeKey(key);
+        }),
+      );
+    }
+  }
+
+  /**
    * 商城详情：与背包道具详情同壳——标题、暗色说明、底栏购买；←→ 调数量。
    */
   private drawMallItemDetail(x: number, y: number, w: number, h: number): void {
     const g = this.selected;
     if (!g || !isGoods(g)) return;
 
-    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     const titleH = 28;
     const titleY = y + 8;
@@ -1844,7 +1968,7 @@ export class SystemPanel extends Container {
     const it = this.selected;
     if (!it || !isBag(it)) return;
 
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     const qColor = qualityColor(it.quality);
     const titleH = 28;
@@ -2009,7 +2133,7 @@ export class SystemPanel extends Container {
     const y = 2;
     const w = LCD_WIDTH - 8;
     const h = LCD_HEIGHT - 4;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     const pillW = 72;
     const pillH = 22;
@@ -2142,6 +2266,7 @@ export class SystemPanel extends Container {
   }
 
   private listHint(): string {
+    if (this.mode === "recharge_amount") return "输入赞助金额";
     if (this.mode === "recharge_pay") return "选择支付方式";
     if (this.mode === "actions") return "选择操作";
     if (this.mode === "detail") return "详细信息";
@@ -2160,14 +2285,16 @@ export class SystemPanel extends Container {
 
   private drawList(x: number, y: number, w: number, listTop = y + 44): void {
     const lines = this.listLines();
+    const paged = this.usesCategoryTabs() || this.kind === "skill";
+    const pageSize = PAGE_SIZE;
     const pageStart =
-      this.usesCategoryTabs() && lines.length
-        ? Math.floor(this.cursorIndex / PAGE_SIZE) * PAGE_SIZE
+      paged && lines.length
+        ? Math.floor(this.cursorIndex / pageSize) * pageSize
         : 0;
-    const pageLines = this.usesCategoryTabs()
-      ? lines.slice(pageStart, pageStart + PAGE_SIZE)
+    const pageLines = paged
+      ? lines.slice(pageStart, pageStart + pageSize)
       : lines.slice(0, Math.min(14, lines.length));
-    const localCursor = this.usesCategoryTabs()
+    const localCursor = paged
       ? this.cursorIndex - pageStart
       : this.cursorIndex;
 
@@ -2198,9 +2325,9 @@ export class SystemPanel extends Container {
     }
 
     const footY = y + LCD_HEIGHT - SOFTKEY_H - 64 - 18;
-    if (this.usesCategoryTabs() && lines.length > PAGE_SIZE) {
-      const pages = Math.max(1, Math.ceil(lines.length / PAGE_SIZE));
-      const page = Math.floor(pageStart / PAGE_SIZE) + 1;
+    if (paged && lines.length > pageSize) {
+      const pages = Math.max(1, Math.ceil(lines.length / pageSize));
+      const page = Math.floor(pageStart / pageSize) + 1;
       attachPageNavButtons({
         host: this,
         hits: this.rowHits,
@@ -2212,11 +2339,11 @@ export class SystemPanel extends Container {
         pages,
         addLabel: (t, lx, ly, c) => this.addAttrText(t, lx, ly, c),
         onPrev: () => {
-          this.cursorIndex = Math.max(0, pageStart - PAGE_SIZE);
+          this.cursorIndex = Math.max(0, pageStart - pageSize);
           this.redraw();
         },
         onNext: () => {
-          this.cursorIndex = Math.min(lines.length - 1, pageStart + PAGE_SIZE);
+          this.cursorIndex = Math.min(lines.length - 1, pageStart + pageSize);
           this.redraw();
         },
       });

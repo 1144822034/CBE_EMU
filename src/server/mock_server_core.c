@@ -5475,11 +5475,13 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                         u32 count,
                                                         u16 enhanceLevel,
                                                         u16 *seqOut,
-                                                        const char *reason);
+                                                        const char *reason,
+                                                        const vm_net_mock_enhance_wash_state *wash);
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut);
 static bool vm_net_mock_role_add_backpack_item_enhanced(u32 itemId, u32 count,
                                                         u16 enhanceLevel,
-                                                        u16 *seqOut);
+                                                        u16 *seqOut,
+                                                        const vm_net_mock_enhance_wash_state *wash);
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
                                                                             u32 itemId,
                                                                             u16 seq);

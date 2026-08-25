@@ -2157,6 +2157,149 @@ static bool vm_mock_service_account_copy_password(const char *username,
     return passwordOut[0] != 0;
 }
 
+enum
+{
+    VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT = 3
+};
+
+static u32 vm_mock_service_local_day_ymd(void)
+{
+    time_t now = time(NULL);
+    struct tm *tmNow = localtime(&now);
+
+    if (tmNow == NULL)
+        return 0;
+    return (u32)((tmNow->tm_year + 1900) * 10000 + (tmNow->tm_mon + 1) * 100 +
+                 tmNow->tm_mday);
+}
+
+static bool vm_mock_service_register_daily_count_row(void *contextValue,
+                                                     unsigned int columnCount,
+                                                     const char *const *values,
+                                                     const size_t *lengths)
+{
+    u32 *countOut = (u32 *)contextValue;
+    u32 used = 0;
+
+    (void)columnCount;
+    if (countOut == NULL || values == NULL || lengths == NULL || values[0] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &used))
+        return false;
+    *countOut = used;
+    return true;
+}
+
+static bool vm_mock_service_register_daily_affected_row(void *contextValue,
+                                                          unsigned int columnCount,
+                                                          const char *const *values,
+                                                          const size_t *lengths)
+{
+    u32 *affectedOut = (u32 *)contextValue;
+
+    (void)columnCount;
+    if (affectedOut == NULL || values == NULL || lengths == NULL || values[0] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], affectedOut))
+        return false;
+    return true;
+}
+
+static bool vm_mock_service_register_daily_ensure_table(void)
+{
+    static bool ready = false;
+
+    if (ready)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_registration_daily ("
+            "day_ymd INT UNSIGNED NOT NULL,"
+            "register_count INT UNSIGNED NOT NULL DEFAULT 0,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(day_ymd)) ENGINE=InnoDB"))
+    {
+        return false;
+    }
+    ready = true;
+    return true;
+}
+
+static bool vm_mock_service_register_daily_exec_affected(const char *sql,
+                                                         u32 *affectedOut)
+{
+    u32 affected = 0;
+
+    if (affectedOut != NULL)
+        *affectedOut = 0;
+    if (sql == NULL || !vm_mysql_exec(sql))
+        return false;
+    if (!vm_mysql_query("SELECT ROW_COUNT()",
+                        vm_mock_service_register_daily_affected_row, &affected))
+        return false;
+    if (affectedOut != NULL)
+        *affectedOut = affected;
+    return true;
+}
+
+static u32 vm_mock_service_register_daily_count(u32 dayYmd)
+{
+    char query[256];
+    u32 used = 0;
+
+    if (dayYmd == 0 || !vm_mock_service_register_daily_ensure_table())
+        return 0;
+    snprintf(query, sizeof(query),
+             "SELECT register_count FROM server_registration_daily "
+             "WHERE day_ymd=%u LIMIT 1",
+             dayYmd);
+    if (!vm_mysql_query(query, vm_mock_service_register_daily_count_row, &used))
+        return 0;
+    return used;
+}
+
+static void vm_mock_service_register_daily_release(void)
+{
+    u32 dayYmd = vm_mock_service_local_day_ymd();
+    char query[256];
+
+    if (dayYmd == 0 || !vm_mock_service_register_daily_ensure_table())
+        return;
+    snprintf(query, sizeof(query),
+             "UPDATE server_registration_daily "
+             "SET register_count=IF(register_count>0,register_count-1,0) "
+             "WHERE day_ymd=%u",
+             dayYmd);
+    (void)vm_mysql_exec(query);
+}
+
+static bool vm_mock_service_register_daily_try_reserve(void)
+{
+    u32 dayYmd = vm_mock_service_local_day_ymd();
+    u32 affected = 0;
+    u32 count = 0;
+    char query[384];
+
+    if (dayYmd == 0 || !vm_mock_service_register_daily_ensure_table())
+        return false;
+
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_registration_daily(day_ymd,register_count) "
+             "VALUES(%u,1) ON DUPLICATE KEY UPDATE "
+             "register_count=IF(register_count<%u,register_count+1,register_count)",
+             dayYmd, VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT);
+    if (!vm_mock_service_register_daily_exec_affected(query, &affected) ||
+        affected == 0)
+        return false;
+
+    count = vm_mock_service_register_daily_count(dayYmd);
+    if (count == 0 || count > VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT)
+    {
+        vm_mock_service_register_daily_release();
+        return false;
+    }
+    return true;
+}
+
 static bool vm_mock_service_account_create_record(const char *username,
                                                   const char *password,
                                                   const char **messageOut)
@@ -2193,6 +2336,31 @@ static bool vm_mock_service_account_create_record(const char *username,
             *messageOut = "account persistence failed";
         return false;
     }
+    return true;
+}
+
+static bool vm_mock_service_account_register_user(const char *username,
+                                                  const char *password,
+                                                  const char **messageOut)
+{
+    if (messageOut)
+        *messageOut = "ok";
+    if (!vm_mock_service_register_daily_try_reserve())
+    {
+        if (messageOut)
+            *messageOut = "daily registration limit reached";
+        return false;
+    }
+    if (!vm_mock_service_account_create_record(username, password, messageOut))
+    {
+        vm_mock_service_register_daily_release();
+        return false;
+    }
+    printf("[info][mock-service] account_register_user account=%s day=%u "
+           "daily_used=%u/%u\n",
+           username ? username : "-", vm_mock_service_local_day_ymd(),
+           vm_mock_service_register_daily_count(vm_mock_service_local_day_ymd()),
+           VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT);
     return true;
 }
 
@@ -10755,25 +10923,12 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
             addCount = 1;
         if (!vm_net_mock_role_add_backpack_item_to_role(
                 role, moved.itemId, addCount, moved.enhanceLevel, &addedSeq,
-                "warehouse-retrieve-bag"))
+                "warehouse-retrieve-bag", &moved.enhanceWash))
         {
             *warehouse = beforeWarehouse;
             if (reasonOut)
                 *reasonOut = "backpack-full";
             return false;
-        }
-        /* add_backpack may reset enhance; restore it.  Never rewrite stack
-         * count — that overwrote bag-side merge (docs/re/2026-08-03-warehouse-
-         * retrieve-stack-overwrite.md). */
-        if (addedSeq != 0)
-        {
-            vm_net_mock_backpack_item_state *added =
-                vm_net_mock_role_find_backpack_item(role, moved.itemId, addedSeq);
-            if (added != NULL)
-            {
-                added->enhanceLevel = moved.enhanceLevel;
-                vm_net_mock_enhance_wash_copy(&added->enhanceWash, &moved.enhanceWash);
-            }
         }
     }
     /* add_backpack already marked dirty; re-mark after reservoir/enhance fix. */
@@ -10964,7 +11119,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                         u32 count,
                                                         u16 enhanceLevel,
                                                         u16 *seqOut,
-                                                        const char *reason)
+                                                        const char *reason,
+                                                        const vm_net_mock_enhance_wash_state *wash)
 {
     const vm_net_mock_item_effect_catalog_item *effect = NULL;
     u32 reservoirCapacity = 0;
@@ -11128,6 +11284,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
             item->count = 1;
             item->enhanceLevel = clampedEnhance;
+            if (wash != NULL)
+                vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
             if (firstSeq == 0)
                 firstSeq = item->seq;
             role->nextBackpackSeq = (u16)(item->seq + 1);
@@ -11188,15 +11346,17 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut)
 {
     return vm_net_mock_role_add_backpack_item_to_role(
-        vm_net_mock_active_role(), itemId, count, 0, seqOut, NULL);
+        vm_net_mock_active_role(), itemId, count, 0, seqOut, NULL, NULL);
 }
 
 static bool vm_net_mock_role_add_backpack_item_enhanced(u32 itemId, u32 count,
                                                         u16 enhanceLevel,
-                                                        u16 *seqOut)
+                                                        u16 *seqOut,
+                                                        const vm_net_mock_enhance_wash_state *wash)
 {
     return vm_net_mock_role_add_backpack_item_to_role(
-        vm_net_mock_active_role(), itemId, count, enhanceLevel, seqOut, NULL);
+        vm_net_mock_active_role(), itemId, count, enhanceLevel, seqOut, NULL,
+        wash);
 }
 
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
@@ -11493,24 +11653,17 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
         {
             u16 oldSeq = 0;
             if (!vm_net_mock_role_add_backpack_item_enhanced(oldItemId, 1, oldEnhance,
-                                                             &oldSeq))
+                                                             &oldSeq, &oldWash))
             {
                 role->equippedItemIds[slot] = oldItemId;
                 role->equippedEnhanceLevels[slot] = oldEnhance;
                 vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot],
                                               &oldWash);
                 (void)vm_net_mock_role_add_backpack_item_enhanced(itemId, 1, newEnhance,
-                                                                   NULL);
+                                                                   NULL, &newWash);
                 if (reasonOut)
                     *reasonOut = "old-return-failed";
                 return false;
-            }
-            if (oldSeq != 0)
-            {
-                vm_net_mock_backpack_item_state *returned =
-                    vm_net_mock_role_find_backpack_item(role, oldItemId, oldSeq);
-                if (returned != NULL)
-                    vm_net_mock_enhance_wash_copy(&returned->enhanceWash, &oldWash);
             }
         }
     }

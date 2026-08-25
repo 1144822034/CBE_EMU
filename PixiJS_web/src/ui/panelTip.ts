@@ -8,8 +8,8 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
   makePixelText,
+  paintCbePanel,
 } from "./constants";
 import { UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
 
@@ -176,7 +176,7 @@ export function drawPanelTipOverlay(
     Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2) - padFrame - 24;
   const fw = boxW + padFrame * 2;
   const fh = boxH + padFrame * 2;
-  drawCbePanel(state.gfx, bx, by, fw, fh, CBE.bgPanelDark);
+  paintCbePanel(state.host, state.gfx, bx, by, fw, fh, CBE.bgPanelDark);
 
   const textLeft = bx + padFrame + padX;
   const textTop = by + padFrame + padYTop;

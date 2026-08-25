@@ -8,7 +8,8 @@ Status: implemented (PixiJS_web only; CBE 不做)
 
 - 入口：地图左上角「修」右侧「拍」徽章；背包物品动作「拍卖」。
 - 上架：选背包物品 → 设起拍价 / 可选一口价（铜币或酷宝）与时长档 → **先扣手续费并删除背包物品**，再写入拍卖行。
-- 一口价：`buyout_price=0` 表示无；若设置必须 `≥ startPrice`。买家可在详情直接一口价成交；出价金额 `≥ buyout` 同样立即成交。
+- 一口价：`buyout_price=0` 表示无；若设置必须 `≥ startPrice` 且 **`≤ startPrice×10`**。买家可在详情「一口价」经验证码成交；普通出价不得直接按一口价秒成。
+- 加价幅度：每次加价为 **起拍价的 1/10**（`max(1, startPrice/10)`）；首次无人出价可按起拍价成交。
 - 手续费：`fee = max(1, startPrice * feePercent / 100)`；`feePercent = base(2) + tier * perTier(2)`（1/6/12/24 时 → **2/4/6/8%**）。
 - 竞拍：同货币出价；被超价后拍金进入 **待领退款**（不自动入账）。
 - 禁止同 `roleId` 与同 `accountId` 自拍。
@@ -23,6 +24,12 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - 浏览/我的列表「确定」进入物品详情（装备走 `buildEquipDetailLines`，道具显示说明）。
 - 详情操作：出价 / 一口价（有则显示）/ 撤拍（我的且无出价）/ 返回。
 - 一口价成交：条件更新 `OPEN→SOLD`，退还前高价方，卖家待领拍金、买家待领物品；已是最高出价者补差额即可。
+
+### 一口价验证码防秒拍（2026-08-22）
+
+- 点「一口价」先请求 `42/11` 挑战，服务端签发 4 位字母+数字验证码（排除易混字符）。
+- 玩家输入匹配后才发 `42/9`（带 `captcha` 字段）；错码/未挑战/过快（&lt;1.5s）拒绝。
+- 出价金额 `≥` 一口价不再直接成交，返回 `use-buyout`，必须走验证码一口价。
 
 ## 装备详情与背包一致（2026-08-11）
 
@@ -67,12 +74,13 @@ Status: implemented (PixiJS_web only; CBE 不做)
 | 2 | req/resp | 浏览列表（rows 含 buyoutPrice；pageIndex/hasMore） |
 | 3 | req/resp | 我的参与：OPEN 且（卖家=自己 或 当前最高出价=自己） |
 | 4 | req/resp | 上架（…startPrice/buyoutPrice/currency/durationTier） |
-| 5 | req/resp | 出价（≥一口价时走 buyout 成交） |
+| 5 | req/resp | 出价（≥一口价时拒绝，须走 42/9+验证码） |
 | 6 | req/resp | 撤拍（仅无出价）→ 物品直接回背包 |
 | 7 | req/resp | 领取待领（写 claimed=1 后发货） |
 | 8 | push | 事件（挂 scene-sync poll） |
-| 9 | req/resp | 一口价购买 |
+| 9 | req/resp | 一口价购买（须带 `captcha`，先 42/11） |
 | 10 | req/resp | 待领列表预览（不发货；pageIndex/hasMore/pendingClaims） |
+| 11 | req/resp | 一口价验证码挑战（返回 `captcha` 4 位） |
 
 ### 我的 / 领取分页（2026-08-10）
 

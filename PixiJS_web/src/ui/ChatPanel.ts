@@ -9,7 +9,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
 } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
@@ -416,7 +416,7 @@ export class ChatPanel extends Container {
     const y = 24;
     const w = LCD_WIDTH - 16;
     const h = LCD_HEIGHT - SOFTKEY_H - 32;
-    drawCbePanel(this.box, x, y, w, h, 0x0a1812);
+    paintCbePanel(this, this.box, x, y, w, h, 0x0a1812);
 
     // Tab strip
     const tabY = y + 8;

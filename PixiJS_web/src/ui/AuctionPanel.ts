@@ -4,7 +4,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -1231,7 +1231,7 @@ export class AuctionPanel extends Container {
     const y = 2;
     const w = LCD_WIDTH - 8;
     const h = LCD_HEIGHT - SOFTKEY_H - 4;
-    drawCbePanel(this.box, x, y, w, h);
+    paintCbePanel(this, this.box, x, y, w, h);
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 4, Math.min(w - 20, 120), 18);
     this.addLabelCentered("物品竞拍", LCD_WIDTH / 2, y + 13, CBE.cream);
 

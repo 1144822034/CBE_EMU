@@ -305,7 +305,402 @@ typedef struct
 {
     u32 clientId;
     char preferredTitleServerGbk[32];
+    u32 clientIpv4;
+    bool haveClientIpv4;
 } vm_mock_service_request_meta;
+
+enum
+{
+    VM_MOCK_SERVICE_META_CLIENT_IPV4_TAG = 0xFE,
+    VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS = 60000u,
+    VM_MOCK_LOGIN_FAIL_LIMIT_IP_THRESHOLD = 3u,
+    VM_MOCK_LOGIN_FAIL_LIMIT_USER_THRESHOLD = 1u,
+    VM_MOCK_LOGIN_FAIL_LIMIT_SLOT_MAX = 512
+};
+
+typedef struct
+{
+    bool used;
+    u32 ipv4;
+    u32 lastFailMs;
+    u32 failCount;
+    bool rateLimitLogged;
+    u32 rateLimitSuppressCount;
+} vm_mock_service_login_fail_limit_ip_entry;
+
+typedef struct
+{
+    bool used;
+    char userName[64];
+    u32 lastFailMs;
+    u32 failCount;
+    bool rateLimitLogged;
+    u32 rateLimitSuppressCount;
+} vm_mock_service_login_fail_limit_user_entry;
+
+static vm_mock_service_login_fail_limit_ip_entry
+    g_vm_mock_service_login_fail_limit_ips[VM_MOCK_LOGIN_FAIL_LIMIT_SLOT_MAX];
+static vm_mock_service_login_fail_limit_user_entry
+    g_vm_mock_service_login_fail_limit_users[VM_MOCK_LOGIN_FAIL_LIMIT_SLOT_MAX];
+
+static u32 vm_mock_service_login_fail_limit_ip_slot(u32 ipv4)
+{
+    u32 hash = ipv4 ^ 0x9E3779B9u;
+    hash ^= hash >> 16;
+    return hash % VM_MOCK_LOGIN_FAIL_LIMIT_SLOT_MAX;
+}
+
+static u32 vm_mock_service_login_fail_limit_user_slot(const char *userName)
+{
+    u32 hash = 0x811C9DC5u;
+    const char *p = userName ? userName : "";
+
+    while (*p)
+    {
+        hash = (hash * 131u) ^ (u8)(*p);
+        ++p;
+    }
+    return hash % VM_MOCK_LOGIN_FAIL_LIMIT_SLOT_MAX;
+}
+
+static bool vm_mock_service_login_fail_limit_active(u32 lastFailMs)
+{
+    u32 nowMs;
+    u32 elapsed;
+
+    if (lastFailMs == 0)
+        return false;
+    nowMs = scheduler_get_tick_ms();
+    elapsed = nowMs >= lastFailMs ? nowMs - lastFailMs : 0;
+    return elapsed < VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS;
+}
+
+static void vm_mock_service_login_fail_limit_flush_ip_summary(
+    vm_mock_service_login_fail_limit_ip_entry *entry)
+{
+    u32 ipv4;
+
+    if (entry == NULL || !entry->used)
+        return;
+    ipv4 = entry->ipv4;
+    if (entry->rateLimitSuppressCount > 0)
+    {
+        printf("[warn][mock-service] login_reject_rate_limited_summary "
+               "ip=%u.%u.%u.%u suppressed=%u cooldown_ms=%u "
+               "evidence=ip-or-user-cooldown\n",
+               (ipv4 >> 24) & 0xffu,
+               (ipv4 >> 16) & 0xffu,
+               (ipv4 >> 8) & 0xffu,
+               ipv4 & 0xffu,
+               entry->rateLimitSuppressCount,
+               (u32)VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS);
+    }
+    entry->rateLimitLogged = false;
+    entry->rateLimitSuppressCount = 0;
+}
+
+static void vm_mock_service_login_fail_limit_flush_user_summary(
+    vm_mock_service_login_fail_limit_user_entry *entry)
+{
+    if (entry == NULL || !entry->used)
+        return;
+    if (entry->rateLimitSuppressCount > 0)
+    {
+        printf("[warn][mock-service] login_reject_rate_limited_summary "
+               "user=%s suppressed=%u cooldown_ms=%u "
+               "evidence=ip-or-user-cooldown\n",
+               entry->userName[0] ? entry->userName : "-",
+               entry->rateLimitSuppressCount,
+               (u32)VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS);
+    }
+    entry->rateLimitLogged = false;
+    entry->rateLimitSuppressCount = 0;
+}
+
+static bool vm_mock_service_login_fail_limit_ip_blocks(u32 ipv4)
+{
+    vm_mock_service_login_fail_limit_ip_entry *entry;
+
+    if (ipv4 == 0)
+        return false;
+    entry = &g_vm_mock_service_login_fail_limit_ips[
+        vm_mock_service_login_fail_limit_ip_slot(ipv4)];
+    if (!entry->used || entry->ipv4 != ipv4)
+        return false;
+    if (vm_mock_service_login_fail_limit_active(entry->lastFailMs))
+        return entry->failCount >= VM_MOCK_LOGIN_FAIL_LIMIT_IP_THRESHOLD;
+    vm_mock_service_login_fail_limit_flush_ip_summary(entry);
+    return false;
+}
+
+static bool vm_mock_service_login_fail_limit_user_blocks(const char *userName)
+{
+    vm_mock_service_login_fail_limit_user_entry *entry;
+
+    if (userName == NULL || userName[0] == 0)
+        return false;
+    entry = &g_vm_mock_service_login_fail_limit_users[
+        vm_mock_service_login_fail_limit_user_slot(userName)];
+    if (!entry->used || strcmp(entry->userName, userName) != 0)
+        return false;
+    if (vm_mock_service_login_fail_limit_active(entry->lastFailMs))
+        return entry->failCount >= VM_MOCK_LOGIN_FAIL_LIMIT_USER_THRESHOLD;
+    vm_mock_service_login_fail_limit_flush_user_summary(entry);
+    return false;
+}
+
+static bool vm_mock_service_login_fail_limit_ip_active(u32 ipv4)
+{
+    return vm_mock_service_login_fail_limit_ip_blocks(ipv4);
+}
+
+static bool vm_mock_service_login_fail_limit_user_active(const char *userName)
+{
+    return vm_mock_service_login_fail_limit_user_blocks(userName);
+}
+
+static void vm_mock_service_login_fail_limit_log_rate_limited(
+    u32 clientIpv4,
+    const char *userName,
+    u32 clientId,
+    u32 workerQueueWaitMs,
+    u32 protocolWaitMs,
+    u32 protocolHoldMs)
+{
+    bool ipHit = false;
+    bool userHit = false;
+    vm_mock_service_login_fail_limit_ip_entry *ipEntry = NULL;
+    vm_mock_service_login_fail_limit_user_entry *userEntry = NULL;
+
+    ipHit = vm_mock_service_login_fail_limit_ip_blocks(clientIpv4);
+    userHit = vm_mock_service_login_fail_limit_user_blocks(userName);
+
+    if (clientIpv4 != 0)
+    {
+        ipEntry = &g_vm_mock_service_login_fail_limit_ips[
+            vm_mock_service_login_fail_limit_ip_slot(clientIpv4)];
+        if (!ipEntry->used || ipEntry->ipv4 != clientIpv4)
+            ipEntry = NULL;
+    }
+    if (userName != NULL && userName[0] != 0)
+    {
+        userEntry = &g_vm_mock_service_login_fail_limit_users[
+            vm_mock_service_login_fail_limit_user_slot(userName)];
+        if (!userEntry->used || strcmp(userEntry->userName, userName) != 0)
+            userEntry = NULL;
+    }
+
+    if (ipHit && ipEntry != NULL)
+    {
+        if (!ipEntry->rateLimitLogged)
+        {
+            printf("[warn][mock-service] login_reject client=%08x user=%s "
+                   "reason=rate-limited ip=%u.%u.%u.%u ip_hit=%u user_hit=%u "
+                   "cooldown_ms=%u queue_wait_ms=%u state_wait_ms=%u "
+                   "state_hold_ms=%u evidence=ip-or-user-cooldown\n",
+                   clientId,
+                   userName != NULL && userName[0] ? userName : "-",
+                   (clientIpv4 >> 24) & 0xffu,
+                   (clientIpv4 >> 16) & 0xffu,
+                   (clientIpv4 >> 8) & 0xffu,
+                   clientIpv4 & 0xffu,
+                   1u,
+                   userHit ? 1u : 0u,
+                   (u32)VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS,
+                   workerQueueWaitMs,
+                   protocolWaitMs,
+                   protocolHoldMs);
+            ipEntry->rateLimitLogged = true;
+        }
+        else
+        {
+            ipEntry->rateLimitSuppressCount++;
+        }
+        return;
+    }
+
+    if (userHit && userEntry != NULL)
+    {
+        if (!userEntry->rateLimitLogged)
+        {
+            printf("[warn][mock-service] login_reject client=%08x user=%s "
+                   "reason=rate-limited ip=%u.%u.%u.%u ip_hit=%u user_hit=%u "
+                   "cooldown_ms=%u queue_wait_ms=%u state_wait_ms=%u "
+                   "state_hold_ms=%u evidence=ip-or-user-cooldown\n",
+                   clientId,
+                   userName != NULL && userName[0] ? userName : "-",
+                   (clientIpv4 >> 24) & 0xffu,
+                   (clientIpv4 >> 16) & 0xffu,
+                   (clientIpv4 >> 8) & 0xffu,
+                   clientIpv4 & 0xffu,
+                   0u,
+                   1u,
+                   (u32)VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS,
+                   workerQueueWaitMs,
+                   protocolWaitMs,
+                   protocolHoldMs);
+            userEntry->rateLimitLogged = true;
+        }
+        else
+        {
+            userEntry->rateLimitSuppressCount++;
+        }
+        return;
+    }
+
+    printf("[warn][mock-service] login_reject client=%08x user=%s "
+           "reason=rate-limited ip=%u.%u.%u.%u ip_hit=%u user_hit=%u "
+           "cooldown_ms=%u queue_wait_ms=%u state_wait_ms=%u "
+           "state_hold_ms=%u evidence=ip-or-user-cooldown\n",
+           clientId,
+           userName != NULL && userName[0] ? userName : "-",
+           (clientIpv4 >> 24) & 0xffu,
+           (clientIpv4 >> 16) & 0xffu,
+           (clientIpv4 >> 8) & 0xffu,
+           clientIpv4 & 0xffu,
+           ipHit ? 1u : 0u,
+           userHit ? 1u : 0u,
+           (u32)VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS,
+           workerQueueWaitMs,
+           protocolWaitMs,
+           protocolHoldMs);
+}
+
+static bool vm_mock_service_login_fail_limit_allows(u32 ipv4,
+                                                    const char *userName,
+                                                    const char **errorOut)
+{
+    if (errorOut)
+        *errorOut = "account or password error";
+    if (ipv4 == 0 && (userName == NULL || userName[0] == 0))
+        return true;
+    if (vm_mock_service_login_fail_limit_ip_blocks(ipv4))
+        return false;
+    if (vm_mock_service_login_fail_limit_user_blocks(userName))
+        return false;
+    return true;
+}
+
+static void vm_mock_service_login_fail_limit_record(u32 ipv4, const char *userName)
+{
+    u32 nowMs = scheduler_get_tick_ms();
+
+    if (ipv4 != 0)
+    {
+        vm_mock_service_login_fail_limit_ip_entry *entry =
+            &g_vm_mock_service_login_fail_limit_ips[
+                vm_mock_service_login_fail_limit_ip_slot(ipv4)];
+        if (entry->used && entry->ipv4 == ipv4)
+        {
+            if (vm_mock_service_login_fail_limit_active(entry->lastFailMs))
+                entry->failCount++;
+            else
+            {
+                vm_mock_service_login_fail_limit_flush_ip_summary(entry);
+                entry->failCount = 1;
+            }
+        }
+        else
+        {
+            entry->failCount = 1;
+        }
+        entry->used = true;
+        entry->ipv4 = ipv4;
+        entry->lastFailMs = nowMs;
+        entry->rateLimitLogged = false;
+        entry->rateLimitSuppressCount = 0;
+    }
+    if (userName != NULL && userName[0] != 0)
+    {
+        vm_mock_service_login_fail_limit_user_entry *entry =
+            &g_vm_mock_service_login_fail_limit_users[
+                vm_mock_service_login_fail_limit_user_slot(userName)];
+        if (entry->used && strcmp(entry->userName, userName) == 0)
+        {
+            if (vm_mock_service_login_fail_limit_active(entry->lastFailMs))
+                entry->failCount++;
+            else
+            {
+                vm_mock_service_login_fail_limit_flush_user_summary(entry);
+                entry->failCount = 1;
+            }
+        }
+        else
+        {
+            entry->failCount = 1;
+        }
+        entry->used = true;
+        snprintf(entry->userName, sizeof(entry->userName), "%s", userName);
+        entry->lastFailMs = nowMs;
+        entry->rateLimitLogged = false;
+        entry->rateLimitSuppressCount = 0;
+    }
+}
+
+static void vm_mock_service_login_fail_limit_clear(u32 ipv4, const char *userName)
+{
+    if (ipv4 != 0)
+    {
+        vm_mock_service_login_fail_limit_ip_entry *entry =
+            &g_vm_mock_service_login_fail_limit_ips[
+                vm_mock_service_login_fail_limit_ip_slot(ipv4)];
+        if (entry->used && entry->ipv4 == ipv4)
+        {
+            vm_mock_service_login_fail_limit_flush_ip_summary(entry);
+            memset(entry, 0, sizeof(*entry));
+        }
+    }
+    if (userName != NULL && userName[0] != 0)
+    {
+        vm_mock_service_login_fail_limit_user_entry *entry =
+            &g_vm_mock_service_login_fail_limit_users[
+                vm_mock_service_login_fail_limit_user_slot(userName)];
+        if (entry->used && strcmp(entry->userName, userName) == 0)
+        {
+            vm_mock_service_login_fail_limit_flush_user_summary(entry);
+            memset(entry, 0, sizeof(*entry));
+        }
+    }
+}
+
+static bool vm_mock_service_socket_peer_ipv4(vm_mock_service_socket client, u32 *ipv4Out)
+{
+    struct sockaddr_in addr;
+#ifdef _WIN32
+    int addrLen = (int)sizeof(addr);
+#else
+    socklen_t addrLen = (socklen_t)sizeof(addr);
+#endif
+
+    if (ipv4Out)
+        *ipv4Out = 0;
+    if (client == VM_MOCK_SERVICE_INVALID_SOCKET || ipv4Out == NULL)
+        return false;
+    memset(&addr, 0, sizeof(addr));
+    if (getpeername(client, (struct sockaddr *)&addr, &addrLen) != 0)
+        return false;
+    if (addr.sin_family != AF_INET)
+        return false;
+    *ipv4Out = ntohl(addr.sin_addr.s_addr);
+    return true;
+}
+
+static u32 vm_mock_service_request_meta_offset_after_zone(const u8 *meta, u32 metaLen)
+{
+    u32 off = 4;
+
+    if (meta == NULL || metaLen < 4)
+        return metaLen;
+    if (metaLen < 5)
+        return off;
+    if (meta[4] == VM_MOCK_SERVICE_META_CLIENT_IPV4_TAG)
+        return 4;
+    if (meta[4] > 31)
+        return off;
+    if (5u + (u32)meta[4] > metaLen)
+        return off;
+    return 5u + (u32)meta[4];
+}
 
 static bool vm_mock_service_parse_login_request(const u8 *request,
                                                 u32 requestLen,
@@ -429,12 +824,19 @@ static void vm_mock_service_parse_account_metadata(const u8 *meta,
     if (metaLen >= 5)
     {
         u32 nameLen = meta[4];
-        if (nameLen > 31)
-            nameLen = 31;
-        if (5 + nameLen <= metaLen && nameLen > 0)
+        if (nameLen > 0 && nameLen <= 31 && 5u + nameLen <= metaLen)
         {
             memcpy(parsed->preferredTitleServerGbk, meta + 5, nameLen);
             parsed->preferredTitleServerGbk[nameLen] = 0;
+        }
+    }
+    {
+        u32 extOff = vm_mock_service_request_meta_offset_after_zone(meta, metaLen);
+        if (extOff + 5u <= metaLen &&
+            meta[extOff] == VM_MOCK_SERVICE_META_CLIENT_IPV4_TAG)
+        {
+            parsed->clientIpv4 = vm_mock_service_read_le32(meta + extOff + 1);
+            parsed->haveClientIpv4 = true;
         }
     }
 }
@@ -556,6 +958,154 @@ static void vm_mock_protocol_lock_dump_holder(const char *reason)
            g_vm_mock_protocol_lock_holder[0] ? g_vm_mock_protocol_lock_holder : "-",
            holdMs);
     fflush(stdout);
+}
+
+/*
+ * Single GameThread (architecture B): IO workers accept in parallel, but all
+ * game handle_client world mutations run FIFO on one thread. Cuts 32-way
+ * protocol_mutex convoy. Rollback: CBE_MOCK_GAME_THREAD=0.
+ */
+static bool g_vm_mock_game_thread_enabled = true;
+static bool g_vm_mock_game_thread_started = false;
+static bool g_vm_mock_game_thread_stop = false;
+static pthread_t g_vm_mock_game_thread;
+static pthread_mutex_t g_vm_mock_game_thread_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_vm_mock_game_thread_job_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t g_vm_mock_game_thread_done_cond = PTHREAD_COND_INITIALIZER;
+static _Thread_local int g_vm_mock_on_game_thread = 0;
+
+typedef struct
+{
+    vm_mock_service_socket client;
+    u8 *requestBuffer;
+    u32 requestCap;
+    u8 *responseBuffer;
+    u32 responseCap;
+    u32 workerQueueWaitMs;
+    int result;
+    bool occupied;
+} vm_mock_game_thread_job;
+
+static vm_mock_game_thread_job g_vm_mock_game_job;
+
+static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
+                                             u8 *requestBuffer,
+                                             u32 requestCap,
+                                             u8 *responseBuffer,
+                                             u32 responseCap,
+                                             u32 workerQueueWaitMs);
+
+static bool vm_mock_game_thread_env_enabled(void)
+{
+    const char *e = getenv("CBE_MOCK_GAME_THREAD");
+    if (e == NULL || e[0] == 0)
+        return true;
+    if ((e[0] == '0' && e[1] == 0) ||
+        strcmp(e, "off") == 0 || strcmp(e, "false") == 0 ||
+        strcmp(e, "OFF") == 0 || strcmp(e, "FALSE") == 0)
+        return false;
+    return true;
+}
+
+static void *vm_mock_game_thread_main(void *arg)
+{
+    (void)arg;
+    g_vm_mock_on_game_thread = 1;
+    pthread_mutex_lock(&g_vm_mock_game_thread_mutex);
+    while (!g_vm_mock_game_thread_stop)
+    {
+        vm_mock_game_thread_job job;
+        int rc;
+
+        while (!g_vm_mock_game_job.occupied && !g_vm_mock_game_thread_stop)
+            pthread_cond_wait(&g_vm_mock_game_thread_job_cond,
+                              &g_vm_mock_game_thread_mutex);
+        if (g_vm_mock_game_thread_stop)
+            break;
+        job = g_vm_mock_game_job;
+        pthread_mutex_unlock(&g_vm_mock_game_thread_mutex);
+
+        rc = vm_net_mock_service_handle_client(job.client,
+                                                job.requestBuffer,
+                                                job.requestCap,
+                                                job.responseBuffer,
+                                                job.responseCap,
+                                                job.workerQueueWaitMs);
+
+        pthread_mutex_lock(&g_vm_mock_game_thread_mutex);
+        g_vm_mock_game_job.result = rc;
+        g_vm_mock_game_job.occupied = false;
+        pthread_cond_broadcast(&g_vm_mock_game_thread_done_cond);
+    }
+    pthread_mutex_unlock(&g_vm_mock_game_thread_mutex);
+    g_vm_mock_on_game_thread = 0;
+    return NULL;
+}
+
+static bool vm_mock_game_thread_start(void)
+{
+    g_vm_mock_game_thread_enabled = vm_mock_game_thread_env_enabled();
+    if (!g_vm_mock_game_thread_enabled)
+    {
+        printf("[info][mock-service] game_thread=0 evidence=CBE_MOCK_GAME_THREAD "
+               "rollback-protocol-mutex\n");
+        return true;
+    }
+    if (g_vm_mock_game_thread_started)
+        return true;
+    g_vm_mock_game_thread_stop = false;
+    memset(&g_vm_mock_game_job, 0, sizeof(g_vm_mock_game_job));
+    if (pthread_create(&g_vm_mock_game_thread, NULL, vm_mock_game_thread_main,
+                       NULL) != 0)
+    {
+        printf("[error][mock-service] game_thread_start_failed "
+               "fallback=protocol-mutex\n");
+        g_vm_mock_game_thread_enabled = false;
+        return true;
+    }
+    g_vm_mock_game_thread_started = true;
+    printf("[info][mock-service] game_thread=1 "
+           "evidence=FIFO-world-mutations-on-one-thread "
+           "rollback=CBE_MOCK_GAME_THREAD=0\n");
+    return true;
+}
+
+static int vm_mock_game_thread_handle_client(vm_mock_service_socket client,
+                                             u8 *requestBuffer,
+                                             u32 requestCap,
+                                             u8 *responseBuffer,
+                                             u32 responseCap,
+                                             u32 workerQueueWaitMs)
+{
+    int rc;
+
+    if (!g_vm_mock_game_thread_enabled || !g_vm_mock_game_thread_started ||
+        g_vm_mock_on_game_thread)
+    {
+        return vm_net_mock_service_handle_client(client, requestBuffer, requestCap,
+                                                 responseBuffer, responseCap,
+                                                 workerQueueWaitMs);
+    }
+
+    pthread_mutex_lock(&g_vm_mock_game_thread_mutex);
+    while (g_vm_mock_game_job.occupied)
+        pthread_cond_wait(&g_vm_mock_game_thread_done_cond,
+                          &g_vm_mock_game_thread_mutex);
+    g_vm_mock_game_job.client = client;
+    g_vm_mock_game_job.requestBuffer = requestBuffer;
+    g_vm_mock_game_job.requestCap = requestCap;
+    g_vm_mock_game_job.responseBuffer = responseBuffer;
+    g_vm_mock_game_job.responseCap = responseCap;
+    g_vm_mock_game_job.workerQueueWaitMs = workerQueueWaitMs;
+    g_vm_mock_game_job.result = 0;
+    g_vm_mock_game_job.occupied = true;
+    pthread_cond_signal(&g_vm_mock_game_thread_job_cond);
+    while (g_vm_mock_game_job.occupied)
+        pthread_cond_wait(&g_vm_mock_game_thread_done_cond,
+                          &g_vm_mock_game_thread_mutex);
+    rc = g_vm_mock_game_job.result;
+    pthread_mutex_unlock(&g_vm_mock_game_thread_mutex);
+    return rc;
 }
 
 /* HTTP management implementation depends on the shared helpers above. */
@@ -1553,6 +2103,46 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     haveLoginRequest = vm_mock_service_parse_login_request(requestBuffer + requestMetaLen,
                                                            payloadLen,
                                                            &loginRequest);
+    if (haveLoginRequest && vm_mock_service_login_requires_auth(&loginRequest))
+    {
+        u32 clientIpv4 = 0;
+
+        if (requestMeta.haveClientIpv4)
+            clientIpv4 = requestMeta.clientIpv4;
+        else
+            vm_mock_service_socket_peer_ipv4(client, &clientIpv4);
+        if (!vm_mock_service_login_fail_limit_allows(clientIpv4,
+                                                     loginRequest.userName,
+                                                     &authError))
+        {
+            responseLen = vm_net_mock_build_login_failure_response(
+                loginRequest.requestSubtype,
+                authError ? authError : "account or password error",
+                responseBuffer,
+                responseCap);
+            vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
+            VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
+            if (!vm_mock_service_send_all(client, header, sizeof(header)))
+                return 0;
+            if (responseLen > 0 &&
+                !vm_mock_service_send_all(client, responseBuffer, responseLen))
+            {
+                return 0;
+            }
+            vm_mock_service_login_fail_limit_log_rate_limited(
+                clientIpv4,
+                loginRequest.userName,
+                requestMeta.clientId,
+                workerQueueWaitMs,
+                protocolWaitMs,
+                protocolHoldMs);
+            vm_mock_service_frame_forensics_note("login_reject_rate_limited",
+                                                 protocolWaitMs,
+                                                 protocolHoldMs,
+                                                 0);
+            return 1;
+        }
+    }
     if (haveLoginRequest)
     {
         g_vm_mock_service_active_client_id = requestMeta.clientId;
@@ -1591,7 +2181,43 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         }
         g_vm_mock_service_active_client_id = 0;
     }
-    if (haveLoginRequest && !vm_mock_service_authenticate_login_request(&loginRequest, &authError))
+    if (haveLoginRequest && vm_mock_service_login_requires_auth(&loginRequest))
+    {
+        u32 clientIpv4 = 0;
+
+        if (requestMeta.haveClientIpv4)
+            clientIpv4 = requestMeta.clientIpv4;
+        else
+            vm_mock_service_socket_peer_ipv4(client, &clientIpv4);
+        if (!vm_mock_service_authenticate_login_request(&loginRequest, &authError))
+        {
+            vm_mock_service_login_fail_limit_record(clientIpv4, loginRequest.userName);
+            responseLen = vm_net_mock_build_login_failure_response(loginRequest.requestSubtype,
+                                                                   authError ? authError : "account or password error",
+                                                                   responseBuffer,
+                                                                   responseCap);
+            vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
+            VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
+            if (!vm_mock_service_send_all(client, header, sizeof(header)))
+                return 0;
+            if (responseLen > 0 && !vm_mock_service_send_all(client, responseBuffer, responseLen))
+                return 0;
+            printf("[info][mock-service] login_reject client=%08x user=%s reason=%s queue_wait_ms=%u state_wait_ms=%u state_hold_ms=%u\n",
+                   requestMeta.clientId,
+                   loginRequest.userName[0] ? loginRequest.userName : "-",
+                   authError ? authError : "account or password error",
+                   workerQueueWaitMs,
+                   protocolWaitMs,
+                   protocolHoldMs);
+            vm_mock_service_frame_forensics_note("login_reject_auth",
+                                                 protocolWaitMs,
+                                                 protocolHoldMs,
+                                                 0);
+            return 1;
+        }
+        vm_mock_service_login_fail_limit_clear(clientIpv4, loginRequest.userName);
+    }
+    else if (haveLoginRequest && !vm_mock_service_authenticate_login_request(&loginRequest, &authError))
     {
         responseLen = vm_net_mock_build_login_failure_response(loginRequest.requestSubtype,
                                                                authError ? authError : "account or password error",
@@ -2300,7 +2926,7 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
                     int frameRc;
 
                     vm_mock_service_worker_set_phase(worker, "handle");
-                    frameRc = vm_net_mock_service_handle_client(
+                    frameRc = vm_mock_game_thread_handle_client(
                         job.socket,
                         worker->requestBuffer,
                         sizeof(g_netMockResponse),
@@ -2658,6 +3284,12 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     }
 
     printf("[info][mock-service] listening=%s:%u\n", resolvedBindHost, port);
+    if (!vm_mock_game_thread_start())
+    {
+        printf("[error][mock-service] game thread start failed\n");
+        vm_mock_service_socket_close(serverSocket);
+        return -1;
+    }
     if (g_mockAdminPort == port)
     {
         printf("[error][mock-admin] port conflicts with game service port=%u\n", g_mockAdminPort);
@@ -2700,6 +3332,12 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
         adminSocket = VM_MOCK_SERVICE_INVALID_SOCKET;
     }
     printf("[info][mock-service] state_model=serialized-legacy-context admin_isolated=1\n");
+    printf("[info][mock-service] cosmetics_peer_flush_ms=%u presence_timeout_ms=%u "
+           "login_fail_limit_ms=%u evidence=default-cadence\n",
+           (u32)VM_MOCK_SERVICE_COSMETICS_PEER_FLUSH_MS,
+           (u32)VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS *
+               (u32)VM_SCHED_FRAME_MS,
+           (u32)VM_MOCK_LOGIN_FAIL_LIMIT_COOLDOWN_MS);
     fflush(stdout);
     for (;;)
     {

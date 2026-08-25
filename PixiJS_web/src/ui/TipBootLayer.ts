@@ -3,11 +3,11 @@ import {
   CBE,
   LCD_HEIGHT,
   LCD_WIDTH,
-  drawCbePanel,
+  paintCbePanel,
   drawLocBanner,
   makePixelText,
 } from "./constants";
-import { BitmapLabel, layoutSameColorRuns } from "./BitmapLabel";
+import { BitmapLabel, layoutSameColorRuns, UI_WRAP_CHARS } from "./BitmapLabel";
 import { tryLoadUiTexture } from "./UiAssets";
 import {
   BOOT_TIPS,
@@ -169,7 +169,7 @@ export class TipBootLayer extends Container {
     this.panel.clear();
     this.panel.rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgPanel });
     // Inset ornate frame matching tip shots (full LCD).
-    drawCbePanel(this.panel, 4, 4, LCD_WIDTH - 8, LCD_HEIGHT - 8, CBE.bgPanel);
+    paintCbePanel(this, this.panel, 4, 4, LCD_WIDTH - 8, LCD_HEIGHT - 8, CBE.bgPanel);
   }
 
   private setLoadingProgress(t: number): void {
@@ -190,7 +190,7 @@ export class TipBootLayer extends Container {
     const startX = 18;
     const startY = 98;
     const runs = layoutSameColorRuns(this.tip.segments, {
-      maxCols: 14,
+      maxCols: UI_WRAP_CHARS,
       visibleChars,
     });
     for (const run of runs) {

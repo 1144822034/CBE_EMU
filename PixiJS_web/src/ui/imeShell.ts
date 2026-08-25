@@ -138,6 +138,42 @@ function clearViewportOffset(): void {
   if (app) app.style.transform = "";
 }
 
+/**
+ * Undo WebView adjustPan / visualViewport / IME translate residue.
+ * Black-screen GL recover used to skip this → LCD content stayed shifted
+ * toward the top-left and the HUD corner was clipped.
+ */
+export function resetShellViewportLayout(): void {
+  clearViewportOffset();
+  try {
+    window.scrollTo(0, 0);
+    if (document.body) document.body.scrollTop = 0;
+    document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollLeft = 0;
+    document.documentElement.scrollLeft = 0;
+  } catch {
+    /* ignore */
+  }
+  const vv = window.visualViewport;
+  if (vv) {
+    const scrollToVv = (vv as unknown as { scrollTo?: (x: number, y: number) => void })
+      .scrollTo;
+    if (typeof scrollToVv === "function") {
+      try {
+        scrollToVv.call(vv, 0, 0);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  /* Stale pin after screen-off with IME dismissed by the system. */
+  if (activeCount <= 0) {
+    clearLayoutHeight();
+    document.getElementById("app")?.classList.remove("ime-open");
+    document.documentElement.classList.remove("ime-open");
+  }
+}
+
 function wireViewport(on: boolean): void {
   const vv = window.visualViewport;
   if (!vv) return;
@@ -145,10 +181,12 @@ function wireViewport(on: boolean): void {
     onViewport = () => {
       if (activeCount <= 0) return;
       /* Keep layout viewport fixed; nudge wrap so focused field stays on-screen. */
-      const offset = vv.offsetTop || 0;
+      const ox = vv.offsetLeft || 0;
+      const oy = vv.offsetTop || 0;
       const wrap = document.getElementById("phone-wrap");
       if (wrap) {
-        wrap.style.transform = offset > 0 ? `translateY(${-offset}px)` : "";
+        wrap.style.transform =
+          ox !== 0 || oy !== 0 ? `translate(${-ox}px, ${-oy}px)` : "";
       }
       window.scrollTo(0, 0);
     };

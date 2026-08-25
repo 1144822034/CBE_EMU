@@ -7,6 +7,7 @@ import { BitmapLabel } from "./BitmapLabel";
 import { clearPointerHits } from "./pointerHit";
 import {
   listShellBounds,
+  listShellStepPage,
   paintListShellBody,
   paintListShellChrome,
   type ListShellCtx,
@@ -128,6 +129,24 @@ export class WingPanel extends Container {
       onRow: (absIndex) => {
         this.listCursor = absIndex;
         this.confirm();
+      },
+      onPrevPage: () => {
+        this.listCursor = listShellStepPage(
+          this.listCursor,
+          this.rows.length,
+          PAGE_SIZE,
+          -1,
+        );
+        this.redraw();
+      },
+      onNextPage: () => {
+        this.listCursor = listShellStepPage(
+          this.listCursor,
+          this.rows.length,
+          PAGE_SIZE,
+          1,
+        );
+        this.redraw();
       },
     });
   }

@@ -84,26 +84,52 @@ static u32 vm_mock_admin_arena_form_hm(const char *body, const char *nameHour,
     return hour * 60u + minute;
 }
 
-static u32 vm_mock_admin_arena_form_weekday_mask(const char *body, u32 fallback)
+/* Per-day bracket: 0=rest, 10/50/70. Builds mask from non-rest days. */
+static void vm_mock_admin_arena_form_weekday_brackets(const char *body,
+                                                      u16 outBrackets[7],
+                                                      u32 *maskOut)
 {
-    u32 mask = 0;
     u32 i;
-    char key[16];
-    char value[16];
-    bool any = false;
+    char key[24];
+    u32 value = 0;
+    u32 mask = 0;
 
+    if (outBrackets == NULL)
+        return;
+    for (i = 0; i < 7; ++i)
+        outBrackets[i] = 0;
+    if (body == NULL)
+    {
+        if (maskOut)
+            *maskOut = 0;
+        return;
+    }
     for (i = 0; i < 7; ++i)
     {
-        snprintf(key, sizeof(key), "weekday_%u", i);
-        memset(value, 0, sizeof(value));
-        if (vm_mock_admin_form_value(body, key, value, sizeof(value)) &&
-            value[0] != 0 && strcmp(value, "0") != 0)
-        {
+        snprintf(key, sizeof(key), "bracket_wd_%u", i);
+        value = 0;
+        (void)vm_mock_admin_form_u32(body, key, 70u, &value);
+        if (value != 10u && value != 50u && value != 70u)
+            value = 0;
+        outBrackets[i] = (u16)value;
+        if (value != 0)
             mask |= (1u << i);
-            any = true;
-        }
     }
-    return any ? mask : fallback;
+    if (maskOut)
+        *maskOut = mask;
+}
+
+static void vm_mock_admin_arena_append_bracket_options(vm_mock_admin_text *page,
+                                                       u16 selected)
+{
+    vm_mock_admin_text_appendf(
+        page,
+        "<option value=\"0\"%s>休息</option>"
+        "<option value=\"10\"%s>10-49级</option>"
+        "<option value=\"50\"%s>50-69级</option>"
+        "<option value=\"70\"%s>70级+</option>",
+        selected == 0 ? " selected" : "", selected == 10 ? " selected" : "",
+        selected == 50 ? " selected" : "", selected == 70 ? " selected" : "");
 }
 
 static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
@@ -181,14 +207,22 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
             strcmp(status, "ok") == 0 ? "ok" : "error", message);
     }
 
-    vm_mock_admin_text_appendf(
-        &page,
-        "<section class=\"card\"><h2>运行状态</h2>"
-        "<p>session=%u status=%u 参与者=%u</p>"
-        "<p class=\"muted\">status: 0空闲 1进场 2比赛 3已结算</p></section>",
-        vm_net_mock_arena_runtime_session_id(),
-        (u32)vm_net_mock_arena_runtime_status(),
-        vm_net_mock_arena_runtime_participant_count());
+    {
+        u16 todayBracket = 0;
+        time_t now = time(NULL);
+        struct tm *tmNow = localtime(&now);
+        if (cfg != NULL && tmNow != NULL)
+            todayBracket = cfg->weekdayBrackets[(u32)tmNow->tm_wday % 7u];
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>运行状态</h2>"
+            "<p>session=%u status=%u 参与者=%u 今日段位=%u</p>"
+            "<p class=\"muted\">status: 0空闲 1进场 2比赛 3已结算；段位 0=休息 / "
+            "10=10-49 / 50=50-69 / 70=70+</p></section>",
+            vm_net_mock_arena_runtime_session_id(),
+            (u32)vm_net_mock_arena_runtime_status(),
+            vm_net_mock_arena_runtime_participant_count(), (u32)todayBracket);
+    }
 
     vm_mock_admin_text_appendf(
         &page,
@@ -199,7 +233,7 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<div><label>启用</label><select name=\"enabled\">"
         "<option value=\"1\"%s>开启</option><option value=\"0\"%s>关闭</option>"
         "</select></div>"
-        "<div><label>场景名(GBK文件名)</label>"
+        "<div><label>基准场景(天机用；幻剑+50/鬼道+70)</label>"
         "<input name=\"scene\" value=\"%s\"></div>"
         "<div><label>出生点X</label><input name=\"spawn_x\" value=\"%u\"></div>"
         "<div><label>出生点Y</label><input name=\"spawn_y\" value=\"%u\"></div>"
@@ -213,19 +247,20 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
     {
         static const char *const weekdayNames[7] = {
             "周日", "周一", "周二", "周三", "周四", "周五", "周六"};
-        u32 wdMask = cfg ? cfg->weekdayMask : 72u;
+        static const u16 defaultBrackets[7] = {0, 70, 50, 10, 70, 50, 10};
         u32 wd;
         vm_mock_admin_text_appendf(
-            &page, "<div style=\"margin:12px 0 4px\"><label>活动星期</label>"
-                   "<div class=\"days\">");
+            &page,
+            "<div style=\"margin:12px 0 4px\"><label>每日开放段位（每天仅一段）</label>"
+            "<div class=\"grid2\">");
         for (wd = 0; wd < 7; ++wd)
         {
+            u16 selected = cfg ? cfg->weekdayBrackets[wd] : defaultBrackets[wd];
             vm_mock_admin_text_appendf(
-                &page,
-                "<label><input type=\"checkbox\" name=\"weekday_%u\" value=\"1\"%s> "
-                "%s</label>",
-                wd, (wdMask & (1u << wd)) != 0 ? " checked" : "",
-                weekdayNames[wd]);
+                &page, "<div><label>%s</label><select name=\"bracket_wd_%u\">",
+                weekdayNames[wd], wd);
+            vm_mock_admin_arena_append_bracket_options(&page, selected);
+            vm_mock_admin_text_appendf(&page, "</select></div>");
         }
         vm_mock_admin_text_appendf(&page, "</div></div>");
     }
@@ -255,9 +290,10 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<div><label>NPC名关键字</label>"
         "<input name=\"npc_keyword\" value=\"%s\"></div>"
         "</div><button type=\"submit\">保存配置</button></form>"
-        "<p class=\"muted\">星期可多选。时间用时:分选择；进场结束为不含该时刻"
-        "（例如结束选 20:29 表示最晚可进到 20:28）。默认周三/周六，"
-        "进场 20:20–20:29，比赛 20:30–21:00。</p></section>",
+        "<p class=\"muted\">每天只开一个等级段；场地按职业分流：天机→基准图，"
+        "幻剑→基准50，鬼道→基准70。默认周一70/周二50-69/周三10-49/周四70/"
+        "周五50-69/周六10-49/周日休息；进场 20:20–20:29，比赛 20:30–21:00。"
+        "</p></section>",
         cfg ? cfg->roundSeconds : 300,
         cfg ? cfg->battleTimeoutSeconds : 240,
         cfg ? cfg->scoreWin : 20,
@@ -364,7 +400,8 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
     u32 enabled = 1;
     u32 spawnX = 120;
     u32 spawnY = 120;
-    u32 weekdayMask = 72;
+    u32 weekdayMask = 126;
+    u16 weekdayBrackets[7];
     u32 entryStart = 1220;
     u32 entryEnd = 1229;
     u32 matchStart = 1230;
@@ -383,6 +420,14 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
     char kwGbk[32];
     const vm_mock_arena_config *cfg;
 
+    weekdayBrackets[0] = 0;
+    weekdayBrackets[1] = 70;
+    weekdayBrackets[2] = 50;
+    weekdayBrackets[3] = 10;
+    weekdayBrackets[4] = 70;
+    weekdayBrackets[5] = 50;
+    weekdayBrackets[6] = 10;
+
     if (strcmp(action, "save-arena-config") == 0)
     {
         memset(sceneUtf8, 0, sizeof(sceneUtf8));
@@ -395,7 +440,8 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         (void)vm_mock_admin_form_value(body, "npc_keyword", kwUtf8, sizeof(kwUtf8));
         (void)vm_mock_admin_form_u32(body, "spawn_x", 0xffffu, &spawnX);
         (void)vm_mock_admin_form_u32(body, "spawn_y", 0xffffu, &spawnY);
-        weekdayMask = vm_mock_admin_arena_form_weekday_mask(body, weekdayMask);
+        vm_mock_admin_arena_form_weekday_brackets(body, weekdayBrackets,
+                                                   &weekdayMask);
         entryStart = vm_mock_admin_arena_form_hm(body, "entry_start_h",
                                                 "entry_start_m", entryStart);
         entryEnd = vm_mock_admin_arena_form_hm(body, "entry_end_h", "entry_end_m",
@@ -405,7 +451,9 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         matchEnd = vm_mock_admin_arena_form_hm(body, "match_end_h", "match_end_m",
                                               matchEnd);
         if (weekdayMask == 0)
-            weekdayMask = 72;
+        {
+            /* All rest is allowed (Sunday-only rest week); keep zeros. */
+        }
         if (entryEnd > 24u * 60u)
             entryEnd = 24u * 60u;
         if (matchEnd > 24u * 60u)
@@ -428,8 +476,9 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         cfg = vm_net_mock_arena_config_get();
         if (vm_net_mock_arena_admin_save_config(
                 (u8)enabled, sceneGbk, (u16)spawnX, (u16)spawnY, weekdayMask,
-                (u16)entryStart, (u16)entryEnd, (u16)matchStart, (u16)matchEnd,
-                roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw, kwGbk,
+                weekdayBrackets, (u16)entryStart, (u16)entryEnd,
+                (u16)matchStart, (u16)matchEnd, roundSec, battleTimeout,
+                scoreWin, scoreBye, scoreDraw, kwGbk,
                 cfg ? cfg->wagerEnabled : 0, cfg ? cfg->wagerFeePercent : 10,
                 cfg ? cfg->wagerCurrency : 0))
             vm_mock_admin_redirect_arena(client, "ok", "比武配置已保存");
@@ -480,11 +529,11 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         (void)vm_mock_admin_form_u32(body, "wager_currency", 10u, &wagerCurrency);
         if (vm_net_mock_arena_admin_save_config(
                 cfg->enabled, cfg->scene, cfg->spawnX, cfg->spawnY,
-                cfg->weekdayMask, cfg->entryStartMinute, cfg->entryEndMinute,
-                cfg->matchStartMinute, cfg->matchEndMinute, cfg->roundSeconds,
-                cfg->battleTimeoutSeconds, cfg->scoreWin, cfg->scoreBye,
-                cfg->scoreDraw, cfg->npcNameKeyword, (u8)wagerEnabled,
-                (u8)wagerFee, (u8)wagerCurrency))
+                cfg->weekdayMask, cfg->weekdayBrackets, cfg->entryStartMinute,
+                cfg->entryEndMinute, cfg->matchStartMinute, cfg->matchEndMinute,
+                cfg->roundSeconds, cfg->battleTimeoutSeconds, cfg->scoreWin,
+                cfg->scoreBye, cfg->scoreDraw, cfg->npcNameKeyword,
+                (u8)wagerEnabled, (u8)wagerFee, (u8)wagerCurrency))
             vm_mock_admin_redirect_arena(client, "ok", "赏金擂台配置已保存");
         else
             vm_mock_admin_redirect_arena(client, "error", "保存失败");

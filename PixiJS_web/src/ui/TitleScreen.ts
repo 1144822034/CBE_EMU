@@ -4,7 +4,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
   drawLocBanner,
   makePixelText,
 } from "./constants";
@@ -570,14 +570,14 @@ export class TitleScreen extends Container {
     this.loginGfx.clear();
 
     const registering = this.mode === "register";
-    const boxX = 12;
+    const boxX = 14;
     const boxY = 48;
     const boxW = LCD_WIDTH - 24;
     const boxH = registering ? 248 : 200;
-    drawCbePanel(this.loginGfx, boxX, boxY, boxW, boxH, CBE.bgPanel);
+    paintCbePanel(this, this.loginGfx, boxX, boxY, boxW, boxH, CBE.bgPanel);
 
     const hint = makePixelText(
-      registering ? "点输入框弹出键盘 · 确定注册" : "点输入框弹出键盘 · 确定登录",
+      registering ? "点输入框 · 确定注册" : "点输入框 · 确定登录",
       11,
       CBE.inkMint,
     );
@@ -616,7 +616,7 @@ export class TitleScreen extends Container {
     const linkY = registering ? boxY + 224 : boxY + 178;
     const note = makePixelText(
       registering
-        ? "账号4-32位字母数字下划线，密码至少6位"
+        ? "账号4-32位，密码6位"
         : this.userValue || this.passValue
           ? "将使用上方账号登录"
           : "输入已有账号密码登录",
@@ -725,7 +725,7 @@ export class TitleScreen extends Container {
     const boxY = 44;
     const boxW = LCD_WIDTH - 16;
     const boxH = LCD_HEIGHT - SOFTKEY_H - boxY - TIP_STRIP_H;
-    drawCbePanel(this.serverGfx, boxX, boxY, boxW, boxH, CBE.bgDeep);
+    paintCbePanel(this, this.serverGfx, boxX, boxY, boxW, boxH, CBE.bgDeep);
 
     this.serverGfx.rect(boxX + 2, boxY + 2, boxW - 4, 24).fill({ color: CBE.bgPanel });
     this.serverGfx

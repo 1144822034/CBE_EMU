@@ -37,6 +37,11 @@ Agent 复用：`.codex/skills/pixijs-android-apk/SKILL.md`。
 
 Manifest：`WAKE_LOCK`、`FOREGROUND_SERVICE`/`_DATA_SYNC`/`_SPECIAL_USE`、`POST_NOTIFICATIONS`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`、`usesCleartextTraffic`
 
+## 2026-08-21 出包
+
+`versionCode` **44** / `1.0.44`，`client_code_version` **24**，服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **24**。  
+含比武禁自动/物品 + 20s 超时普攻。APK：`android/app/release/jh_ol.apk`；PC：`electron-release/江湖OL-1.0.44-portable.exe`。
+
 ## 2026-08-19 出包
 
 `versionCode` **42** / `1.0.42`，`client_code_version` **22**（`bundledCodeVersion.ts` 同步），服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **22**。  

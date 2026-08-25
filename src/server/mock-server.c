@@ -96,6 +96,12 @@ static void vm_mock_arena_on_session_offline(
 static void vm_mock_arena_restore_venue_scene_if_needed(
     vm_net_mock_role_state *role);
 
+/* Implemented in mock_server_battle.c; team_remove_member runs earlier. */
+static void vm_mock_service_team_battle_note_roster_disconnect(
+    void *team,
+    struct vm_mock_service_client_session *leaver,
+    const char *reason);
+
 #include "mock_server_equipment_npc.c"
 #include "mock_server_cosmetics.c"
 #include "mock_server_recovered_helpers.inc"
@@ -122,6 +128,7 @@ static bool vm_net_mock_append_arena_hud_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_mock_arena_poll_needs_body(vm_mock_service_client_session *session);
 static u32 vm_net_mock_build_arena_enter_response(u8 *out, u32 outCap);
 static u32 vm_net_mock_build_arena_leave_response(u8 *out, u32 outCap);
+static const char *vm_mock_arena_enter_refuse_tip(void);
 static u32 vm_net_mock_build_arena_protocol_response(const u8 *request,
                                                       u32 requestLen, u8 *out,
                                                       u32 outCap);

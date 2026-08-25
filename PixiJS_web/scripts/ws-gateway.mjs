@@ -7,11 +7,16 @@
  *   PIX_TCP_HOST / PIX_TCP_PORT — mock-server (default 127.0.0.1:19090)
  *   PIX_ADMIN_HOST / PIX_ADMIN_PORT — admin HTTP for /api/* proxy
  *     (monster-levels, recharge/create, register; default same host as TCP, port 19091)
- *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 10000; 0=off)
+ *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 30000; 0=off)
  *   PIX_GATEWAY_KEEPALIVE_IDLE_MS — silence before synth poll (default 2200)
+ *   PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS — mock TCP read budget per CBMS (default 60000)
  *   PIX_GATEWAY_ORPHAN_MS — after WS drop (no DISCONNECT), keep TCP scene-poll
  *     for this clientId so mock presence does not heartbeat-timeout (default
  *     600000 = 10min; 0=off). Client LiveTransport reconnects with same id.
+ *   PIX_GATEWAY_MOCK_TCP_MAX — max concurrent outbound mock TCP sockets (default
+ *     48; prevents Windows ephemeral-port EADDRINUSE under login brute force).
+ *   PIX_GATEWAY_WS_PER_IP_MAX — max new WS handshakes per IPv4 per 60s (default
+ *     24; 0=off). Rejects excess with close code 1008 before opening mock TCP.
  *
  * Each CBMS request opens a short-lived TCP to the mock service (CBE host model).
  * Do NOT close the WebSocket on a single TCP failure — the browser session must
@@ -36,103 +41,227 @@ const listenHost =
 const adminHost = process.env.PIX_ADMIN_HOST || tcpHost || "127.0.0.1";
 const adminPort = Number(process.env.PIX_ADMIN_PORT || 19091);
 
+const CBMS_META_CLIENT_IPV4_TAG = 0xfe;
+
+function parseIpv4String(host) {
+  if (!host) return 0;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return 0;
+  const octets = m.slice(1, 5).map((part) => Number(part));
+  if (octets.some((value) => value > 255)) return 0;
+  return (
+    ((octets[0] << 24) |
+      (octets[1] << 16) |
+      (octets[2] << 8) |
+      octets[3]) >>>
+    0
+  );
+}
+
+function formatIpv4(ipv4) {
+  if (!ipv4) return "0.0.0.0";
+  return [
+    (ipv4 >>> 24) & 0xff,
+    (ipv4 >>> 16) & 0xff,
+    (ipv4 >>> 8) & 0xff,
+    ipv4 & 0xff,
+  ].join(".");
+}
+
+function clientRemoteIpv4(ws) {
+  const raw = ws?._socket?.remoteAddress;
+  if (!raw) return 0;
+  if (raw.startsWith("::ffff:")) return parseIpv4String(raw.slice(7));
+  if (raw.includes(":")) return 0;
+  return parseIpv4String(raw);
+}
+
+function cbmsMetaHasClientIp(meta) {
+  return meta.length >= 5 && meta[meta.length - 5] === CBMS_META_CLIENT_IPV4_TAG;
+}
+
+function injectClientIpIntoCbms(req, remoteIpv4) {
+  if (!remoteIpv4 || !Buffer.isBuffer(req) || req.length < 20) return req;
+  if (req.toString("ascii", 0, 4) !== "CBMS") return req;
+  const payloadLen = req.readUInt32LE(12);
+  const metaLen = req.readUInt32LE(16);
+  if (payloadLen < metaLen || 20 + payloadLen > req.length) return req;
+  const meta = req.subarray(20, 20 + metaLen);
+  if (cbmsMetaHasClientIp(meta)) return req;
+  const ext = Buffer.alloc(5);
+  ext[0] = CBMS_META_CLIENT_IPV4_TAG;
+  ext.writeUInt32LE(remoteIpv4 >>> 0, 1);
+  const newMeta = Buffer.concat([meta, ext]);
+  const wtBody = req.subarray(20 + metaLen, 20 + payloadLen);
+  const newPayloadLen = newMeta.length + wtBody.length;
+  const out = Buffer.alloc(20 + newPayloadLen);
+  req.copy(out, 0, 0, 16);
+  out.writeUInt32LE(newPayloadLen, 12);
+  out.writeUInt32LE(newMeta.length, 16);
+  newMeta.copy(out, 20);
+  wtBody.copy(out, 20 + newMeta.length);
+  return out;
+}
+
+const MOCK_TCP_MAX = Number(process.env.PIX_GATEWAY_MOCK_TCP_MAX || 48);
+const WS_PER_IP_MAX = Number(process.env.PIX_GATEWAY_WS_PER_IP_MAX || 24);
+const WS_PER_IP_WINDOW_MS = 60000;
+
+let mockTcpInflight = 0;
+/** @type {Array<() => void>} */
+const mockTcpWaiters = [];
+
+function acquireMockTcpSlot() {
+  if (mockTcpInflight < MOCK_TCP_MAX) {
+    mockTcpInflight += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    mockTcpWaiters.push(() => {
+      mockTcpInflight += 1;
+      resolve();
+    });
+  });
+}
+
+function releaseMockTcpSlot() {
+  mockTcpInflight = Math.max(0, mockTcpInflight - 1);
+  const next = mockTcpWaiters.shift();
+  if (next) next();
+}
+
+/** @type {Map<number, { count: number, resetAt: number }>} */
+const wsConnectBudgetByIpv4 = new Map();
+
+function allowWsHandshake(remoteIpv4) {
+  if (!WS_PER_IP_MAX || !remoteIpv4) return true;
+  const now = Date.now();
+  let entry = wsConnectBudgetByIpv4.get(remoteIpv4);
+  if (!entry || now >= entry.resetAt) {
+    entry = { count: 0, resetAt: now + WS_PER_IP_WINDOW_MS };
+    wsConnectBudgetByIpv4.set(remoteIpv4, entry);
+  }
+  entry.count += 1;
+  return entry.count <= WS_PER_IP_MAX;
+}
+
 async function exchangeOnce(reqBuf) {
-  const socket = net.connect({ host: tcpHost, port: tcpPort });
-  await new Promise((resolve, reject) => {
-    socket.once("connect", resolve);
-    socket.once("error", reject);
-  });
+  await acquireMockTcpSlot();
+  try {
+    const socket = net.connect({ host: tcpHost, port: tcpPort });
+    await new Promise((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
 
-  // Continuous buffer — do not attach one-shot `data` listeners inside pull();
-  // localhost CBMR can arrive before the listener is registered and be lost.
-  let pending = Buffer.alloc(0);
-  let wait = null;
-  let ended = null;
+    const mockTcpTimeoutMs = Number(
+      process.env.PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS || 60000,
+    );
 
-  const wake = () => {
-    if (!wait) return;
-    if (ended) {
-      const { reject } = wait;
-      wait = null;
-      reject(ended);
-      return;
-    }
-    if (pending.length >= wait.n) {
-      const { n, resolve } = wait;
-      wait = null;
-      const out = pending.subarray(0, n);
-      pending = pending.subarray(n);
-      resolve(out);
-    }
-  };
+    // Continuous buffer — do not attach one-shot `data` listeners inside pull();
+    // localhost CBMR can arrive before the listener is registered and be lost.
+    let pending = Buffer.alloc(0);
+    let wait = null;
+    let ended = null;
 
-  socket.on("data", (buf) => {
-    pending = Buffer.concat([pending, buf]);
-    wake();
-  });
-  socket.on("error", (e) => {
-    ended = e instanceof Error ? e : new Error(String(e));
-    wake();
-  });
-  socket.on("end", () => {
-    ended = ended || new Error("tcp ended early");
-    wake();
-  });
+    const failSocket = (err) => {
+      ended = err instanceof Error ? err : new Error(String(err));
+      socket.destroy();
+      wake();
+    };
 
-  const pull = (n) =>
-    new Promise((resolve, reject) => {
-      if (pending.length >= n) {
-        const out = pending.subarray(0, n);
-        pending = pending.subarray(n);
-        resolve(out);
-        return;
-      }
+    const wake = () => {
+      if (!wait) return;
       if (ended) {
+        const { reject } = wait;
+        wait = null;
         reject(ended);
         return;
       }
-      wait = { n, resolve, reject };
+      if (pending.length >= wait.n) {
+        const { n, resolve } = wait;
+        wait = null;
+        const out = pending.subarray(0, n);
+        pending = pending.subarray(n);
+        resolve(out);
+      }
+    };
+
+    socket.on("data", (buf) => {
+      pending = Buffer.concat([pending, buf]);
+      wake();
     });
-
-  const cancelPull = (err) => {
-    if (!wait) return;
-    const { reject } = wait;
-    wait = null;
-    reject(err instanceof Error ? err : new Error(String(err)));
-  };
-
-  socket.write(reqBuf);
-
-  const header = await pull(20);
-  if (header.toString("ascii", 0, 4) !== "CBMR") {
-    socket.destroy();
-    throw new Error("not CBMR");
-  }
-  const bodyLen = header.readUInt32LE(12);
-  const body = bodyLen ? await pull(bodyLen) : Buffer.alloc(0);
-  const flags = header.readUInt32LE(8);
-  const frames = [Buffer.concat([header, body])];
-
-  // HAS_FOLLOWUP = 0x2 — read one more CBMR if present (best-effort short timeout).
-  // Cancel the same pull waiter on timeout (no orphaned Promise.race loser).
-  if (flags & 0x2) {
-    const onTimeout = () => cancelPull(new Error("followup timeout"));
-    try {
-      socket.setTimeout(800);
-      socket.once("timeout", onTimeout);
-      const h2 = await pull(20);
-      const l2 = h2.readUInt32LE(12);
-      const b2 = l2 ? await pull(l2) : Buffer.alloc(0);
-      frames.push(Buffer.concat([h2, b2]));
-    } catch {
-      /* ignore */
-    } finally {
-      socket.setTimeout(0);
-      socket.off("timeout", onTimeout);
+    socket.on("error", (e) => {
+      failSocket(e);
+    });
+    socket.on("end", () => {
+      failSocket(new Error("tcp ended early"));
+    });
+    if (mockTcpTimeoutMs > 0) {
+      socket.setTimeout(mockTcpTimeoutMs);
+      socket.on("timeout", () => {
+        failSocket(new Error(`mock tcp timeout ${mockTcpTimeoutMs}ms`));
+      });
     }
+
+    const pull = (n) =>
+      new Promise((resolve, reject) => {
+        if (pending.length >= n) {
+          const out = pending.subarray(0, n);
+          pending = pending.subarray(n);
+          resolve(out);
+          return;
+        }
+        if (ended) {
+          reject(ended);
+          return;
+        }
+        wait = { n, resolve, reject };
+      });
+
+    const cancelPull = (err) => {
+      if (!wait) return;
+      const { reject } = wait;
+      wait = null;
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+
+    socket.write(reqBuf);
+
+    const header = await pull(20);
+    if (header.toString("ascii", 0, 4) !== "CBMR") {
+      socket.destroy();
+      throw new Error("not CBMR");
+    }
+    const bodyLen = header.readUInt32LE(12);
+    const body = bodyLen ? await pull(bodyLen) : Buffer.alloc(0);
+    const flags = header.readUInt32LE(8);
+    const frames = [Buffer.concat([header, body])];
+
+    // HAS_FOLLOWUP = 0x2 — read one more CBMR if present (best-effort short timeout).
+    // Cancel the same pull waiter on timeout (no orphaned Promise.race loser).
+    if (flags & 0x2) {
+      const onTimeout = () => cancelPull(new Error("followup timeout"));
+      try {
+        socket.setTimeout(800);
+        socket.once("timeout", onTimeout);
+        const h2 = await pull(20);
+        const l2 = h2.readUInt32LE(12);
+        const b2 = l2 ? await pull(l2) : Buffer.alloc(0);
+        frames.push(Buffer.concat([h2, b2]));
+      } catch {
+        /* ignore */
+      } finally {
+        socket.setTimeout(0);
+        socket.off("timeout", onTimeout);
+      }
+    }
+    socket.setTimeout(0);
+    socket.destroy();
+    return frames;
+  } finally {
+    releaseMockTcpSlot();
   }
-  socket.destroy();
-  return frames;
 }
 
 function lanIpv4s() {
@@ -331,10 +460,10 @@ process.on("unhandledRejection", (err) => {
 const CBMS_FLAG_SCENE_POLL = 0x2;
 const CBMS_FLAG_DISCONNECT = 0x4;
 /**
- * Idle scene-poll (presence keepalive). Default 10000ms (~1/3 of ~30s kick).
+ * Idle scene-poll (presence keepalive). Default 30000ms (~1/3 of ~90s kick).
  * Set PIX_GATEWAY_KEEPALIVE_MS=0 to disable. Unrelated to mock hangup 2/10.
  */
-const GATEWAY_KEEPALIVE_MS = Number(process.env.PIX_GATEWAY_KEEPALIVE_MS || 10000);
+const GATEWAY_KEEPALIVE_MS = Number(process.env.PIX_GATEWAY_KEEPALIVE_MS || 30000);
 /** Only synth poll when client has been silent this long (avoid double-poll races). */
 const GATEWAY_KEEPALIVE_IDLE_MS = Number(
   process.env.PIX_GATEWAY_KEEPALIVE_IDLE_MS || 2200,
@@ -419,7 +548,16 @@ function encodeScenePollCbms(clientId) {
   return out;
 }
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  const remoteIpv4 = clientRemoteIpv4(ws);
+  if (!allowWsHandshake(remoteIpv4)) {
+    console.warn(
+      `[ws-gateway] ws rate-limited ip=${formatIpv4(remoteIpv4)} ` +
+        `max=${WS_PER_IP_MAX}/${WS_PER_IP_WINDOW_MS}ms`,
+    );
+    ws.close(1008, "rate-limited");
+    return;
+  }
   // Serialize per-socket exchanges so overlapping browser sends cannot interleave.
   let chain = Promise.resolve();
   /** Last CBMS clientId — gateway keepalive reuses it. */
@@ -497,7 +635,9 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (data) => {
     lastClientMsgAt = Date.now();
-    const req = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    let req = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    const remoteIpv4 = clientRemoteIpv4(ws);
+    if (remoteIpv4) req = injectClientIpIntoCbms(req, remoteIpv4);
     const head = parseCbmsHead(req);
     if (head) {
       clientId = head.clientId || clientId;
@@ -522,8 +662,12 @@ wss.on("connection", (ws) => {
 console.log(
   GATEWAY_KEEPALIVE_MS > 0
     ? `[ws-gateway] idle scene-poll keepalive ${GATEWAY_KEEPALIVE_MS}ms ` +
-        `(idle≥${GATEWAY_KEEPALIVE_IDLE_MS}ms; PIX_GATEWAY_KEEPALIVE_MS)`
+        `(idle≥${GATEWAY_KEEPALIVE_IDLE_MS}ms; PIX_GATEWAY_KEEPALIVE_MS) ` +
+        `mock_tcp_timeout=${Number(process.env.PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS || 60000)}ms`
     : "[ws-gateway] idle scene-poll keepalive off (PIX_GATEWAY_KEEPALIVE_MS=0)",
+);
+console.log(
+  `[ws-gateway] mock_tcp_max=${MOCK_TCP_MAX} ws_per_ip_max=${WS_PER_IP_MAX || "off"}`,
 );
 console.log(
   GATEWAY_ORPHAN_MS > 0 && GATEWAY_KEEPALIVE_MS > 0

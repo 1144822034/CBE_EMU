@@ -4,7 +4,8 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
+  preloadCbeFlowerCorners,
   drawLocBanner,
   makePixelText,
 } from "./constants";
@@ -60,11 +61,14 @@ export class RoleScreen extends Container {
     );
     this.addChild(this.bannerGfx);
     drawLocBanner(this.bannerGfx, this, "选择人物登录", 8);
-    drawCbePanel(this.frame, 6, PANEL_TOP, LCD_WIDTH - 12, PANEL_H, CBE.bgDeep);
+    this.paintFrame();
+    preloadCbeFlowerCorners(() => {
+      if (this.visible) this.paintFrame();
+    });
     this.addChild(this.frame);
     this.addChild(this.rowsHost, this.confirmHost);
 
-    this.tipLabel = makePixelText("OK键删除 · 需输入角色名确认", 11, CBE.inkTip);
+    this.tipLabel = makePixelText("OK键删除 · 需输入角色名", 11, CBE.inkTip);
     this.tipLabel.anchor.set(0.5, 0);
     this.tipLabel.position.set(LCD_WIDTH / 2, FOOTER_TIP_Y);
     this.addChild(this.tipLabel);
@@ -79,6 +83,19 @@ export class RoleScreen extends Container {
 
   async mountArt(): Promise<void> {
     // Bodies come from hW_*/h_* map actors (prefetchBodies).
+  }
+
+  private paintFrame(): void {
+    this.frame.clear();
+    paintCbePanel(
+      this,
+      this.frame,
+      6,
+      PANEL_TOP,
+      LCD_WIDTH - 12,
+      PANEL_H,
+      CBE.bgDeep,
+    );
   }
 
   setRoles(roles: RoleRow[]): void {
@@ -170,7 +187,7 @@ export class RoleScreen extends Container {
     this.ime.hide();
     this.confirmHost.visible = false;
     this.confirmHost.removeChildren().forEach((c) => c.destroy({ children: true }));
-    this.setTip("OK键删除 · 需输入角色名确认");
+    this.setTip("OK键删除 · 需输入角色名");
     this.onDeleteConfirmChange?.(false);
   }
 

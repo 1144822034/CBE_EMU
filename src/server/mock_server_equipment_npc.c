@@ -235,18 +235,11 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         vm_net_mock_enhance_wash_state unequipWash;
         vm_net_mock_enhance_wash_copy(&unequipWash, &role->equippedEnhanceWash[slot]);
         if (!vm_net_mock_role_add_backpack_item_enhanced(
-                itemId, 1, role->equippedEnhanceLevels[slot], &seq))
+                itemId, 1, role->equippedEnhanceLevels[slot], &seq, &unequipWash))
         {
             if (reasonOut)
                 *reasonOut = "bag-full";
             return false;
-        }
-        if (seq != 0)
-        {
-            vm_net_mock_backpack_item_state *added =
-                vm_net_mock_role_find_backpack_item(role, itemId, seq);
-            if (added != NULL)
-                vm_net_mock_enhance_wash_copy(&added->enhanceWash, &unequipWash);
         }
     }
 
@@ -1563,8 +1556,42 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
 }
 
 /*
+ * Wash crystal success rate.
+ * Base: unit_rate(unlock, tier) × count, capped at 100.
+ * Special (+16 + 十六级玄晶): 1→33%, 2→66%, 3→100% (count*100/3).
+ */
+static u32 vm_net_mock_equipment_enhance_wash_success_rate(
+    u8 unlockLevel,
+    u32 crystalTier,
+    u8 crystalCount)
+{
+    u32 unit;
+    u32 total;
+
+    if (crystalCount == 0 || crystalTier == 0)
+        return 0;
+    if (unlockLevel == 16 && crystalTier == 16)
+    {
+        if (crystalCount >= 3u)
+            return 100u;
+        return (crystalCount * 100u) / 3u;
+    }
+    unit = vm_net_mock_equipment_enhance_crystal_unit_rate(unlockLevel,
+                                                           crystalTier);
+    if (unit == 0)
+        return 0;
+    if (crystalCount > 1u &&
+        unit > 0xffffffffu / (u32)crystalCount)
+        total = 0xffffffffu;
+    else
+        total = unit * (u32)crystalCount;
+    return total > 100u ? 100u : total;
+}
+
+/*
  * PixiJS-only 强化洗练 (WT 29/7 open, 29/8 preview, 29/9 confirm).
  * Crystal rate: unit_rate(unlock, tier) — tier > unlock → 100%.
+ * +16 档可用 1..3 颗十六级玄晶叠成功率（3 颗 = 100%）.
  * Gold: 5*(washCount+1) 金 per attempt on that equip+tier.
  */
 static u32 vm_net_mock_build_equipment_enhance_wash_response(
@@ -1645,8 +1672,8 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
             u16 washCount =
                 equipment->enhanceWash.slots[unlockIndex].washCount;
             moneyCost = vm_net_mock_enhance_wash_next_copper(washCount);
-            successRate = vm_net_mock_equipment_enhance_crystal_unit_rate(
-                parsed.unlockLevel, crystalTier);
+            successRate = vm_net_mock_equipment_enhance_wash_success_rate(
+                parsed.unlockLevel, crystalTier, parsed.crystalCount);
             if (successRate == 0)
             {
                 result = 4;
@@ -1659,6 +1686,8 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
     {
         vm_net_mock_backpack_item_state *crystal = NULL;
         u32 remaining = 0;
+        u8 needCount =
+            parsed.crystalCount != 0 ? parsed.crystalCount : 1u;
 
         if (role->money < moneyCost)
         {
@@ -1669,9 +1698,10 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
         {
             crystal = vm_net_mock_role_find_backpack_item(
                 role, parsed.crystalItemId, 0);
-            if (crystal == NULL ||
+            if (crystal == NULL || crystal->count < needCount ||
                 !vm_net_mock_role_consume_backpack_item(
-                    role, parsed.crystalItemId, crystal->seq, 1, &remaining))
+                    role, parsed.crystalItemId, crystal->seq, needCount,
+                    &remaining))
             {
                 result = 4;
                 reason = "crystal-insufficient";
@@ -1691,7 +1721,8 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
                     g_schedulerTick ^ ((u32)parsed.equipSeq << 16) ^
                     ((u32)parsed.unlockLevel << 8) ^
                     ((u32)priorWashCount * 0x85ebca6bu) ^
-                    ((u32)parsed.crystalItemId * 0xc2b2ae35u));
+                    ((u32)parsed.crystalItemId * 0xc2b2ae35u) ^
+                    ((u32)needCount * 0x27d4eb2du));
                 roll = vm_net_mock_enhance_wash_rand_below(100u);
                 role->money -= moneyCost;
                 washSucceeded = roll < successRate;
@@ -1900,13 +1931,13 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     printf("[info][network] mock_equipment_enhance_wash phase=%u seq=%u "
-           "item=%u level=%u unlock=%u crystal=%u rate=%u money=%u "
+           "item=%u level=%u unlock=%u crystal=%u count=%u rate=%u money=%u "
            "result=%u success=%u type=%u flag=%u value=%u inv_sync=%u "
            "reason=%s resp=29/%u\n",
            parsed.subtype, parsed.equipSeq,
            equipment ? equipment->itemId : 0, currentLevel, parsed.unlockLevel,
-           parsed.crystalItemId, successRate, moneyCost, result,
-           washSucceeded ? 1 : 0, rolledType, rolledFlag, rolledValue,
+           parsed.crystalItemId, parsed.crystalCount, successRate, moneyCost,
+           result, washSucceeded ? 1 : 0, rolledType, rolledFlag, rolledValue,
            inventorySynced ? 1 : 0, reason, parsed.subtype);
     return pos;
 }
@@ -2018,11 +2049,11 @@ static u32 vm_net_mock_build_crystal_combine_response(const u8 *request,
             reason = "consume-failed";
         }
         else if (!vm_net_mock_role_add_backpack_item_to_role(
-                     role, destItemId, 1, 0, &destSeq, "crystal-combine"))
+                     role, destItemId, 1, 0, &destSeq, "crystal-combine", NULL))
         {
             /* Should be rare after pre-check; restore 3 source crystals. */
             (void)vm_net_mock_role_add_backpack_item_to_role(
-                role, srcItemId, 3, 0, NULL, "crystal-combine-rollback");
+                role, srcItemId, 3, 0, NULL, "crystal-combine-rollback", NULL);
             result = 3;
             reason = "grant-failed";
             srcRemaining = srcRemaining + 3;
@@ -2161,11 +2192,11 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
         }
         else if (!vm_net_mock_role_add_backpack_item_to_role(
                      role, destItemId, 1, 0, &destSeq,
-                     "crystal-fragment-combine"))
+                     "crystal-fragment-combine", NULL))
         {
             (void)vm_net_mock_role_add_backpack_item_to_role(
                 role, srcItemId, cost, 0, NULL,
-                "crystal-fragment-combine-rollback");
+                "crystal-fragment-combine-rollback", NULL);
             result = 3;
             reason = "grant-failed";
             srcRemaining = srcRemaining + cost;
@@ -2343,11 +2374,11 @@ static u32 vm_net_mock_build_dream_badge_combine_response(
         }
         else if (!vm_net_mock_role_add_backpack_item_to_role(
                      role, destItemId, 1, 0, &destSeq,
-                     "dream-badge-combine"))
+                     "dream-badge-combine", NULL))
         {
             (void)vm_net_mock_role_add_backpack_item_to_role(
                 role, srcItemId, cost, 0, NULL,
-                "dream-badge-combine-rollback");
+                "dream-badge-combine-rollback", NULL);
             result = 3;
             reason = "grant-failed";
             srcRemaining = srcRemaining + cost;
@@ -4083,6 +4114,8 @@ typedef struct vm_mock_service_client_session
     } cosmeticNotices[64];
     /* Admin unlock / grant: next poll delivers fresh 31/2 for this session. */
     bool cosmeticsStatePushPending;
+    /* scheduler tick ms of last peer 31/5 drain (scene_sync_poll rate limit). */
+    u32 cosmeticsPeerFlushLastMs;
     u32 onlineHp;
     u32 onlineHpMax;
     u32 onlineMp;
@@ -4672,6 +4705,13 @@ typedef struct
     u32 battleRoundActDeadlineTick;
     u32 battleRoundSerial;
     bool battleRoundTerminalPending;
+    /*
+     * Member index of the seat whose captured 4/6 first wiped all enemies.
+     * Merge playback is roster-ordered: seats after this index must not append
+     * their baked attacks (would animate into already-dead targets / 打空气).
+     * 0xff = unset. Evidence: docs/re/2026-08-21-team-battle-post-wipe-air-swing.md
+     */
+    u8 battleRoundTerminalActorIndex;
     u32 battleRoundActionSerial;
     vm_mock_service_team_battle_round_action
         battleRoundActions[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
@@ -4705,8 +4745,9 @@ typedef struct
     u8 silenceRounds[2];
     u8 startPendingMask;
     u8 startedMask;
-    /* firstTurnIndex: agility winner — playback order only after both seats
-     * commit Operate (or timeout fills the missing seat with normal attack). */
+    /* firstTurnIndex: agility winner — refreshed each resolved round (seat
+     * modifiers included); duel_begin seeds the initial value for logs only.
+     * Playback order applies after both seats commit Operate (or timeout NA). */
     u8 firstTurnIndex;
     u8 roundCommitMask;
     u32 roundCommitOperate[2];
@@ -4741,7 +4782,8 @@ static vm_mock_service_trade g_vm_mock_service_trades[VM_MOCK_SERVICE_TRADE_MAX]
 
 enum
 {
-    VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS = 300,
+    /* 900 ticks × 100ms = 90s scene-poll / gateway keepalive budget. */
+    VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS = 900,
     VM_MOCK_SERVICE_SESSION_MOVEINFO_MAX = 512
 };
 
@@ -8640,6 +8682,7 @@ static void vm_mock_service_team_clear_battle_state(vm_mock_service_team *team,
     team->battleMemberLeftMask = 0;
     team->battleRoundActDeadlineTick = 0;
     team->battleRoundTerminalPending = false;
+    team->battleRoundTerminalActorIndex = 0xff;
     team->battleRoundActionSerial = 0;
     team->battleActionSerial = 0;
     memset(team->battleMemberClientIds, 0, sizeof(team->battleMemberClientIds));
@@ -8676,39 +8719,49 @@ static bool vm_mock_service_team_remove_member(vm_mock_service_client_session *l
     leaderLeaves = team->leaderClientId == leaver->clientId;
     leaver->pendingTeamBattleSerial = 0;
     vm_mock_service_team_notify_leave(team, leaver);
+    if (team->battleActive)
+        vm_mock_service_team_battle_note_roster_disconnect(team, leaver, reason);
     if (leaderLeaves)
     {
+        /*
+         * Mid-fight leader disconnect must not memset the shared battle while
+         * other seats are still in Battle.cbm — promote a survivor instead.
+         */
+        if (team->battleActive && team->memberCount > 1)
+        {
+            for (u8 member = memberIndex + 1; member < team->memberCount; ++member)
+                team->memberClientIds[member - 1] = team->memberClientIds[member];
+            --team->memberCount;
+            team->memberClientIds[team->memberCount] = 0;
+            team->leaderClientId = team->memberClientIds[0];
+            printf("[info][mock-service] team_promote_leader battle=%u "
+                   "new_leader=%08x count=%u reason=%s\n",
+                   team->battleSerial,
+                   team->leaderClientId,
+                   team->memberCount,
+                   reason ? reason : "-");
+            if (team->memberCount < 2 &&
+                (!team->battleActive || team->battleFinished))
+            {
+                vm_mock_service_team_clear_battle_state(team, "roster-below-two");
+            }
+            return true;
+        }
         printf("[info][mock-service] team_disband leader=%08x/%u reason=%s\n",
                leaver->clientId, leaver->onlineRoleId, reason ? reason : "-");
         memset(team, 0, sizeof(*team));
         return true;
     }
 
-    /* Departing seat must not keep a shared round barrier / finished-fight
-     * latch that would later block the leader's solo hangup auto synth. */
-    if (team->battleActive || team->battleFinished)
-    {
-        for (u8 battleSeat = 0; battleSeat < team->battleMemberCount; ++battleSeat)
-        {
-            if (team->battleMemberClientIds[battleSeat] != leaver->clientId)
-                continue;
-            {
-                u8 bit = (u8)(1u << battleSeat);
-                team->battleMemberLeftMask =
-                    (u8)(team->battleMemberLeftMask | bit);
-                team->battleRoundActedMask =
-                    (u8)(team->battleRoundActedMask | bit);
-            }
-            break;
-        }
-    }
-
     for (u8 member = memberIndex + 1; member < team->memberCount; ++member)
         team->memberClientIds[member - 1] = team->memberClientIds[member];
     --team->memberCount;
     team->memberClientIds[team->memberCount] = 0;
-    if (team->memberCount < 2)
+    if (team->memberCount < 2 &&
+        (!team->battleActive || team->battleFinished))
+    {
         vm_mock_service_team_clear_battle_state(team, "roster-below-two");
+    }
     printf("[info][mock-service] team_remove leader=%08x member=%08x/%u count=%u reason=%s\n",
            team->leaderClientId, leaver->clientId, leaver->onlineRoleId,
            team->memberCount, reason ? reason : "-");
@@ -11542,6 +11595,7 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
     team->battleRoundActDeadlineTick = 0;
     team->battleRoundSerial = 1;
     team->battleRoundTerminalPending = false;
+    team->battleRoundTerminalActorIndex = 0xff;
     team->battleRoundActionSerial = 0;
     memset(team->battleRoundActions, 0, sizeof(team->battleRoundActions));
     team->battleActionSerial = 0;
@@ -11731,6 +11785,152 @@ static bool vm_mock_service_migrate_account_role_databases(void)
 }
 
 
+static void vm_mock_service_account_sync_online_role_admin_fields(
+    const char *accountId, const vm_net_mock_role_state *role)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+
+    if (accountId == NULL || accountId[0] == 0 || role == NULL || role->roleId == 0)
+        return;
+    while (session != NULL)
+    {
+        if (session->accountId[0] != 0 &&
+            strcmp(session->accountId, accountId) == 0 &&
+            session->onlineRoleId == role->roleId)
+        {
+            snprintf(session->onlineRoleName, sizeof(session->onlineRoleName), "%s",
+                     role->name[0] ? role->name : vm_net_mock_default_role_name());
+            session->onlineLevel = (u16)(role->level ? role->level : 1);
+            session->onlineHp = role->hp;
+            session->onlineHpMax = role->hpMax;
+            session->onlineMp = role->mp;
+            session->onlineMpMax = role->mpMax;
+            break;
+        }
+        session = session->next;
+    }
+}
+
+static bool vm_mock_service_account_set_role_name(const char *accountId,
+                                                  const char *roleSelector,
+                                                  const char *nameGbk,
+                                                  const char **messageOut)
+{
+    vm_mock_service_account_state *state =
+        vm_mock_service_open_account_role_db_for_management(accountId, messageOut);
+    vm_net_mock_role_state *role = NULL;
+    char before[32];
+    size_t nameLen = 0;
+
+    before[0] = 0;
+    if (state == NULL)
+        return false;
+    if (nameGbk == NULL || nameGbk[0] == 0)
+    {
+        if (messageOut)
+            *messageOut = "角色名不能为空";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    nameLen = strlen(nameGbk);
+    if (nameLen >= 32u)
+    {
+        if (messageOut)
+            *messageOut = "角色名过长（GBK 最多 31 字节）";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "role not found";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    snprintf(before, sizeof(before), "%s", role->name);
+    memset(role->name, 0, sizeof(role->name));
+    memcpy(role->name, nameGbk, nameLen);
+    role->name[nameLen] = 0;
+    if (!vm_net_mock_role_db_save_role("admin-rename", role->roleId))
+    {
+        snprintf(role->name, sizeof(role->name), "%s", before);
+        vm_mock_service_account_capture(state);
+        if (messageOut)
+            *messageOut = "role persistence failed";
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
+    vm_mock_service_account_sync_online_role_admin_fields(accountId, role);
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-service] account_role_rename user=%s id=%u before=%s after=%s\n",
+           accountId,
+           role->roleId,
+           before[0] ? before : "-",
+           role->name[0] ? role->name : "-");
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
+static bool vm_mock_service_account_set_role_exp(const char *accountId,
+                                                 const char *roleSelector,
+                                                 u32 exp,
+                                                 const char **messageOut)
+{
+    vm_mock_service_account_state *state =
+        vm_mock_service_open_account_role_db_for_management(accountId, messageOut);
+    vm_net_mock_role_state *role = NULL;
+    u32 beforeExp = 0;
+    u32 beforeLevel = 1;
+    u32 afterLevel = 1;
+
+    if (state == NULL)
+        return false;
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "role not found";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    beforeExp = role->exp;
+    beforeLevel = role->level ? role->level : 1;
+    role->exp = exp;
+    afterLevel = vm_net_mock_role_level_from_exp(role->exp);
+    role->level = afterLevel;
+    vm_net_mock_role_sync_derived_vitals(role);
+    if (afterLevel > beforeLevel)
+    {
+        role->hp = role->hpMax;
+        role->mp = role->mpMax;
+    }
+    if (!vm_net_mock_role_db_save_role("admin-exp-set", role->roleId))
+    {
+        role->exp = beforeExp;
+        role->level = beforeLevel;
+        vm_net_mock_role_sync_derived_vitals(role);
+        vm_mock_service_account_capture(state);
+        if (messageOut)
+            *messageOut = "role persistence failed";
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
+    vm_mock_service_account_sync_online_role_admin_fields(accountId, role);
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-service] account_role_exp_set user=%s role=%s id=%u "
+           "exp=%u->%u level=%u->%u\n",
+           accountId,
+           role->name[0] ? role->name : "-",
+           role->roleId,
+           beforeExp,
+           role->exp,
+           beforeLevel,
+           role->level);
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
 static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
                                                    const char *roleSelector,
                                                    int32_t delta,
@@ -11902,7 +12102,7 @@ static bool vm_mock_service_account_grant_role_item(const char *accountId,
     existing = vm_net_mock_role_find_backpack_item(role, itemId, 0);
     before = existing ? existing->count : 0;
     if (!vm_net_mock_role_add_backpack_item_to_role(role, itemId, count, 0, &seq,
-                                                     "admin-item-grant"))
+                                                     "admin-item-grant", NULL))
     {
         if (messageOut)
             *messageOut = "角色背包已满，无法加入新物品";

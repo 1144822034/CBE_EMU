@@ -87,7 +87,7 @@ import { GuildPanel } from "./ui/GuildPanel";
 import { MiniMapOverlay } from "./ui/MiniMapOverlay";
 import { WorldMapPanel } from "./ui/WorldMapPanel";
 import { TouchControls, type TouchDir } from "./ui/TouchControls";
-import { CBE, LCD_HEIGHT, LCD_WIDTH } from "./ui/constants";
+import { CBE, LCD_HEIGHT, LCD_WIDTH, preloadCbeFlowerCorners } from "./ui/constants";
 import { setLcdDisplayScale } from "./ui/BitmapLabel";
 import {
   imeShellAdoptLock,
@@ -95,6 +95,7 @@ import {
   imeShellClearLockSize,
   imeShellIsActive,
   imeShellLockedSize,
+  resetShellViewportLayout,
 } from "./ui/imeShell";
 import { dismissOverlayIme } from "./ui/dismissOverlayIme";
 import type { RoleRow } from "./net/protocol";
@@ -616,6 +617,7 @@ async function main(): Promise<void> {
   } catch (e) {
     console.warn("[boot] uc3 font", e);
   }
+  preloadCbeFlowerCorners();
 
   // server_monsters overrides via gateway → admin; builtin fallback on failure.
   await loadMonsterLevelOverrides(
@@ -772,6 +774,11 @@ async function main(): Promise<void> {
         h.showTip(msg);
         return;
       }
+    }
+    /* Hangup settle / battle: world HUD is hidden. */
+    if (battle.visible) {
+      battle.showTip(msg);
+      return;
     }
     if (hud.visible) hud.showTip(msg);
   };
@@ -1048,6 +1055,16 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (action === "buyout_challenge" && listingId) {
+      void session.auctionBuyoutChallenge(listingId).then((r) => {
+        if (!r?.captcha) {
+          auctionPanel.showTip(auctionMsgTip(r?.message, "获取验证码失败"));
+          return;
+        }
+        auctionPanel.showBuyoutCaptcha(listingId, r.captcha);
+      });
+      return;
+    }
     if (action === "buyout" && listingId) {
       const row =
         auctionCache.rows.find((x) => x.listingId === listingId) ||
@@ -1060,7 +1077,8 @@ async function main(): Promise<void> {
         showGameTip("无一口价");
         return;
       }
-      void session.auctionBuyout(listingId).then((r) => {
+      const captcha = auctionPanel.getBuyoutCaptchaAnswer();
+      void session.auctionBuyout(listingId, captcha).then((r) => {
         const tip =
           r?.result === 1
             ? `一口价${formatAuctionPrice(row.buyoutPrice, row.currency)}成交`
@@ -1746,6 +1764,7 @@ async function main(): Promise<void> {
       } else if (n.kind === "team_leave") {
         hud.pushChat(`[队]成员离开 ${n.id >>> 0}`);
         if (social.visible) social.showTip("队员已离开");
+        if (phase === "battle" && battle.visible) battle.noteTeammateLeft();
       } else if (n.kind === "trade_result") {
         if (n.result !== 1) {
           hud.pushChat(`[交]${n.name || "对方"} 拒绝/结束交易`);
@@ -2134,6 +2153,15 @@ async function main(): Promise<void> {
         } else {
           battle.setHangupActive(session.hangupActive);
           battle.setAutoBattleActive(session.autoBattleActive);
+          if (session.hangupActive) {
+            const cap =
+              session.characterStats?.backpackCapacity ||
+              Math.max(64, session.bagItems.length);
+            battle.setHangupBagSlots(session.bagItems.length, cap);
+            battle.setBattleInsightRemainSec(
+              session.getBattleInsightRemainingSec(),
+            );
+          }
         }
         battle.show(state);
         touch.releaseAll();
@@ -2181,6 +2209,16 @@ async function main(): Promise<void> {
       }
       if (up.settlement) {
         const s = up.settlement;
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(64, session.bagItems.length);
+        battle.setHangupBagSlots(session.bagItems.length, cap);
+        if (session.hangupActive || s.hangupCombatinfo) {
+          battle.setBattleInsightRemainSec(
+            session.getBattleInsightRemainingSec(),
+          );
+          battle.setHangupActive(session.hangupActive || !!s.hangupCombatinfo);
+        }
         const pct =
           s.curExp > s.lastExp
             ? (s.expTotal - s.lastExp) / Math.max(1, s.curExp - s.lastExp)
@@ -3146,7 +3184,7 @@ async function main(): Promise<void> {
       .then(() => {
         pendingRoles = session.roles;
         roles.setRoles(session.roles);
-        roles.setTip("OK键删除 · 需输入角色名确认");
+        roles.setTip("OK键删除 · 需输入角色名");
         setChromeStatus(session.roles.length ? "已删除，可选其他角色" : "已删除，可创建角色");
       })
       .catch((err) => {
@@ -3478,8 +3516,9 @@ async function main(): Promise<void> {
     const seq = washUi.getEquipSeq();
     const unlock = washUi.getSelectedUnlock();
     const crystal = washUi.getSelectedCrystalId();
-    if (!seq || !crystal) return;
-    const prev = await session.previewEnhanceWash(seq, unlock, crystal);
+    const count = washUi.getSelectedCrystalCount();
+    if (!seq || !crystal || count <= 0) return;
+    const prev = await session.previewEnhanceWash(seq, unlock, crystal, count);
     if (prev && prev.result === 1) {
       washUi.setPreview(prev.rate, prev.money);
     } else if (prev) {
@@ -3528,8 +3567,9 @@ async function main(): Promise<void> {
         const seq = washUi.getEquipSeq();
         const unlock = washUi.getSelectedUnlock();
         const crystal = washUi.getSelectedCrystalId();
+        const count = washUi.getSelectedCrystalCount();
         showGameTip("洗练中…");
-        const res = await session.confirmEnhanceWash(seq, unlock, crystal);
+        const res = await session.confirmEnhanceWash(seq, unlock, crystal, count);
         await session.openBag();
         washUi.setBag(session.bagItems);
         const fresh = session.bagItems.find((b) => b.seq === seq);
@@ -3538,6 +3578,7 @@ async function main(): Promise<void> {
           washUi.openWash(fresh, session.bagItems, reopen, {
             keepUnlock: unlock,
             keepCrystalId: crystal,
+            keepCrystalCount: count,
           });
         }
         if (res.ok) {
@@ -3571,6 +3612,11 @@ async function main(): Promise<void> {
       })();
     }
   };
+
+  const handleWashHorizontal = (delta: number) => {
+    if (washUi.adjustCount(delta)) void refreshWashPreview();
+  };
+
   enhanceUi.onAction = (action, payload) => {
     if (action === "cancel") {
       void closeEnhanceToBag();
@@ -4838,6 +4884,25 @@ dialog.hide();
     void session.stopHangup();
     syncWorldStatusBadges();
   };
+  battle.onHangupAddTime = async () => {
+    const fb = await session.useBattleInsightFromBag();
+    if (fb.ok) {
+      try {
+        await session.openBag();
+      } catch {
+        /* bag refresh optional after consume */
+      }
+      const cap =
+        session.characterStats?.backpackCapacity ||
+        Math.max(64, session.bagItems.length);
+      battle.setHangupBagSlots(session.bagItems.length, cap);
+      battle.setBattleInsightRemainSec(
+        session.getBattleInsightRemainingSec(),
+      );
+    }
+    /* Battle hides world HUD — show Pixi toast on the battle stage. */
+    if (fb.message) battle.showTip(fb.message);
+  };
   battle.onVitalsChanged = () => {
     const vitals = battle.allyVitals();
     if (!vitals) return;
@@ -5339,6 +5404,10 @@ dialog.hide();
         enhanceUi.move(delta);
         return;
       }
+      if (phase === "wash") {
+        handleWashHorizontal(delta);
+        return;
+      }
       if (phase === "chat") {
         chatPanel.cycleChannel(delta);
         return;
@@ -5517,6 +5586,14 @@ dialog.hide();
         washUi.move(1);
         e.preventDefault();
       }
+      if (k === "arrowleft" || k === "a") {
+        handleWashHorizontal(-1);
+        e.preventDefault();
+      }
+      if (k === "arrowright" || k === "d") {
+        handleWashHorizontal(1);
+        e.preventDefault();
+      }
     }
     if (phase === "social") {
       if (k === "arrowup" || k === "w") social.move(-1);
@@ -5688,7 +5765,7 @@ dialog.hide();
   });
 
   showPhase("splash");
-  title.setStatus("开始游戏/登陆游戏=创建或登录账号");
+  title.setStatus("开始游戏/登陆游戏=创建或登录");
   setChromeStatus("就绪");
 
   // Screen unlock / return to app: heal Live WS if OEM suspended the WebView.
@@ -6204,6 +6281,25 @@ dialog.hide();
       void recordForensic(`recover-hung:${why}`, { forceBlankProbe: true });
       softReloadGl("recover-hung");
     }, GL_RECOVER_HANG_MS);
+    const refitShellLayout = (): void => {
+      // adjustPan / visualViewport residue shifts the LCD toward top-left.
+      resetShellViewportLayout();
+      wrap.dataset.fitW = "0";
+      wrap.dataset.fitH = "0";
+      fitPhoneWrap();
+      try {
+        shell.layout();
+      } catch {
+        /* ignore */
+      }
+      try {
+        const canvas = app.canvas as HTMLCanvasElement;
+        canvas.style.width = "100%";
+        canvas.style.height = "100%";
+      } catch {
+        /* ignore */
+      }
+    };
     try {
       const stillLostBefore = isGlContextLost();
       console.info(
@@ -6217,16 +6313,20 @@ dialog.hide();
         blank: null,
         forceBlankProbe: stillLostBefore || glLostAt > 0,
       });
-      wrap.dataset.fitW = "0";
-      wrap.dataset.fitH = "0";
-      fitPhoneWrap();
+      refitShellLayout();
       tryRestoreGlContext();
       try {
+        syncLcdResolution(lcdCssScaleFromWrap());
         app.renderer.resize(LCD_WIDTH, LCD_HEIGHT);
       } catch (e) {
         console.warn("[gl] resize after resume", e);
       }
       app.ticker.start();
+      await new Promise<void>((r) => {
+        requestAnimationFrame(() => r());
+      });
+      // WebView often settles insets/pan one frame late after screen-on.
+      refitShellLayout();
       await new Promise<void>((r) => {
         requestAnimationFrame(() => r());
       });
@@ -6255,6 +6355,19 @@ dialog.hide();
         console.warn("[gl] render after resume", e);
       }
       syncInputAfterGlRecover();
+      // Late system-bar / adjustPan settle after onResume.
+      window.setTimeout(() => {
+        if (!rendererReady) return;
+        refitShellLayout();
+        try {
+          syncLcdResolution(lcdCssScaleFromWrap());
+          app.renderer.resize(LCD_WIDTH, LCD_HEIGHT);
+          shell.layout();
+          app.render();
+        } catch (e) {
+          console.warn("[gl] late layout refit", e);
+        }
+      }, 280);
       const probeBlank =
         why === "contextrestored" ||
         why === "ticker-lost" ||
@@ -6339,6 +6452,11 @@ dialog.hide();
       return;
     }
     setTextureGcEnabled(true);
+    // Always undo adjustPan / translate residue — even if GL recover debounces.
+    resetShellViewportLayout();
+    wrap.dataset.fitW = "0";
+    wrap.dataset.fitH = "0";
+    fitPhoneWrap();
     void recordForensic("visibility-visible", { forceBlankProbe: true });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("visibility");
@@ -6346,6 +6464,10 @@ dialog.hide();
   });
   window.addEventListener("focus", () => {
     setTextureGcEnabled(true);
+    resetShellViewportLayout();
+    wrap.dataset.fitW = "0";
+    wrap.dataset.fitH = "0";
+    fitPhoneWrap();
     void recordForensic("window-focus", { forceBlankProbe: true });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("focus");

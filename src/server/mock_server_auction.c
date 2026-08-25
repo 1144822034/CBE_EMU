@@ -17,6 +17,11 @@ enum
     VM_MOCK_AUCTION_WT_BUYOUT = 9,
     /* Pending-claims preview (does not grant). */
     VM_MOCK_AUCTION_WT_CLAIMS_LIST = 10,
+    /* Pixi: issue buyout captcha for listing (anti-snipe). */
+    VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE = 11,
+    VM_MOCK_AUCTION_CAPTCHA_LEN = 4,
+    /* Min human delay between challenge and buyout accept (ms). */
+    VM_MOCK_AUCTION_CAPTCHA_MIN_MS = 1500,
     VM_MOCK_AUCTION_ST_OPEN = 0,
     VM_MOCK_AUCTION_ST_SOLD = 1,
     VM_MOCK_AUCTION_ST_EXPIRED = 2,
@@ -62,6 +67,17 @@ typedef struct
     u32 amount;
     u8 blink;
 } vm_mock_auction_notice;
+
+/* Per-role buyout captcha (Pixi anti-instant-snipe). */
+typedef struct
+{
+    u32 roleId;
+    u32 listingId;
+    char code[VM_MOCK_AUCTION_CAPTCHA_LEN + 1];
+    u32 issuedMs;
+} vm_mock_auction_buyout_captcha;
+
+static vm_mock_auction_buyout_captcha g_auctionBuyoutCaptcha;
 
 typedef struct
 {
@@ -298,6 +314,13 @@ static u32 vm_mock_auction_calc_fee(u32 startPrice, u8 tier)
     return (u32)fee;
 }
 
+/** Bid raise step = floor(startPrice / 10), at least 1. */
+static u32 vm_mock_auction_bid_step(u32 startPrice)
+{
+    u32 step = startPrice / 10u;
+    return step == 0 ? 1u : step;
+}
+
 static void vm_mock_auction_item_name(u32 itemId, char *out, u32 outCap)
 {
     const vm_net_mock_shop_catalog_item *shop;
@@ -515,16 +538,10 @@ static bool vm_mock_auction_return_item_to_bag(
                                                             &seq, reason);
     else
         ok = vm_net_mock_role_add_backpack_item_to_role(role, itemId, itemCount,
-                                                        enhanceLevel, &seq, reason);
+                                                        enhanceLevel, &seq, reason,
+                                                        wash);
     if (!ok)
         return false;
-    if (seq != 0 && wash != NULL)
-    {
-        vm_net_mock_backpack_item_state *added =
-            vm_net_mock_role_find_backpack_item(role, itemId, seq);
-        if (added != NULL)
-            vm_net_mock_enhance_wash_copy(&added->enhanceWash, wash);
-    }
     bagAfter = vm_mock_auction_bag_item_total(role, itemId);
     printf("[info][mock-service] auction_return_item reason=%s role=%u item=%u "
            "grant=%u bag_before=%u bag_after=%u seq=%u "
@@ -935,12 +952,17 @@ static void vm_mock_auction_tick(void)
     vm_mock_auction_id_list list;
     char query[256];
     u32 i;
+    static bool s_tablesReady = false;
 
     if (now == g_vm_mock_auction_last_tick_sec)
         return;
     g_vm_mock_auction_last_tick_sec = now;
-    if (!vm_mock_auction_ensure_tables())
-        return;
+    if (!s_tablesReady)
+    {
+        if (!vm_mock_auction_ensure_tables())
+            return;
+        s_tablesReady = true;
+    }
     memset(&list, 0, sizeof(list));
     snprintf(query, sizeof(query),
              "SELECT listing_id FROM server_auction_listings "
@@ -1190,6 +1212,10 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
     if (buyoutPrice > 0 && buyoutPrice < startPrice)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
                                                    4, 0, "buyout-low");
+    if (buyoutPrice > 0 &&
+        (u64)buyoutPrice > (u64)startPrice * 10ull)
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
+                                                   4, 0, "buyout-high");
     if (durationTier > 3)
         durationTier = 3;
     if (currency > 1)
@@ -1311,9 +1337,143 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
                                                listingId, "ok");
 }
 
+/* Unambiguous A-Z/2-9 (skip 0/O/1/I/L) for LCD captcha. */
+static char vm_mock_auction_captcha_alphabet_char(u32 n)
+{
+    static const char kAlpha[] = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    return kAlpha[n % (sizeof(kAlpha) - 1u)];
+}
+
+static void vm_mock_auction_captcha_clear(void)
+{
+    memset(&g_auctionBuyoutCaptcha, 0, sizeof(g_auctionBuyoutCaptcha));
+}
+
+static void vm_mock_auction_captcha_issue(u32 roleId, u32 listingId)
+{
+    u32 seed;
+    u32 i;
+
+    vm_mock_auction_captcha_clear();
+    g_auctionBuyoutCaptcha.roleId = roleId;
+    g_auctionBuyoutCaptcha.listingId = listingId;
+    g_auctionBuyoutCaptcha.issuedMs = (u32)SDL_GetTicks();
+    seed = g_auctionBuyoutCaptcha.issuedMs ^ (roleId * 0x9e3779b9u) ^
+           (listingId * 0x85ebca6bu) ^ 0xa5a5a5a5u;
+    for (i = 0; i < VM_MOCK_AUCTION_CAPTCHA_LEN; ++i)
+    {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        if (seed == 0)
+            seed = 0x9e3779b9u + i;
+        g_auctionBuyoutCaptcha.code[i] =
+            vm_mock_auction_captcha_alphabet_char(seed);
+    }
+    g_auctionBuyoutCaptcha.code[VM_MOCK_AUCTION_CAPTCHA_LEN] = 0;
+}
+
+static void vm_mock_auction_captcha_normalize(char *dst, u32 dstCap, const char *src)
+{
+    u32 n = 0;
+    if (dst == NULL || dstCap == 0)
+        return;
+    dst[0] = 0;
+    if (src == NULL)
+        return;
+    while (*src != 0 && n + 1u < dstCap)
+    {
+        char c = *src++;
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 'A');
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+            dst[n++] = c;
+    }
+    dst[n] = 0;
+}
+
+/* Returns NULL on ok; otherwise short reason for op_result message. */
+static const char *vm_mock_auction_captcha_consume(u32 roleId, u32 listingId,
+                                                   const char *answerIn)
+{
+    char answer[VM_MOCK_AUCTION_CAPTCHA_LEN + 1];
+    u32 now;
+    u32 elapsed;
+
+    if (g_auctionBuyoutCaptcha.roleId != roleId ||
+        g_auctionBuyoutCaptcha.listingId != listingId ||
+        g_auctionBuyoutCaptcha.code[0] == 0)
+        return "captcha-need";
+    vm_mock_auction_captcha_normalize(answer, sizeof(answer), answerIn);
+    if (answer[0] == 0 ||
+        strcmp(answer, g_auctionBuyoutCaptcha.code) != 0)
+        return "captcha";
+    now = (u32)SDL_GetTicks();
+    elapsed = now - g_auctionBuyoutCaptcha.issuedMs;
+    if (elapsed < (u32)VM_MOCK_AUCTION_CAPTCHA_MIN_MS)
+        return "captcha-wait";
+    vm_mock_auction_captcha_clear();
+    return NULL;
+}
+
+static u32 vm_net_mock_build_auction_buyout_challenge_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    u32 listingId = 0;
+    vm_mock_auction_listing_row row;
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (request == NULL || out == NULL ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != VM_MOCK_AUCTION_WT_KIND ||
+        object.subtype != VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE)
+        return 0;
+    (void)vm_mock_auction_tick();
+    (void)vm_mock_auction_load_config(false);
+    if (role == NULL || session == NULL)
+        return vm_net_mock_build_auction_op_result(
+            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 2, 0, "no-role");
+    (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "listingId", &listingId);
+    if (listingId == 0 || !vm_mock_auction_load_listing(listingId, &row) ||
+        row.status != VM_MOCK_AUCTION_ST_OPEN)
+        return vm_net_mock_build_auction_op_result(
+            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 3, listingId,
+            "not-open");
+    if (row.buyoutPrice == 0)
+        return vm_net_mock_build_auction_op_result(
+            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 14, listingId,
+            "no-buyout");
+    if (row.sellerRoleId == role->roleId)
+        return vm_net_mock_build_auction_op_result(
+            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 4, listingId,
+            "self");
+    vm_mock_auction_captcha_issue(role->roleId, listingId);
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_AUCTION_WT_KIND,
+                                     VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "listingId", listingId) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "captcha",
+                                       g_auctionBuyoutCaptcha.code) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "message", "ok"))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    printf("[info][mock-service] auction_buyout_challenge listing=%u role=%u\n",
+           listingId, role->roleId);
+    return vm_mock_auction_finish_packet(out, pos, 1);
+}
+
 /*
  * Instant buyout: charge buyer (delta if already high), refund prior bidder,
  * mark SOLD, enqueue seller payout + winner item claims.
+ * Caller must already verify buyout captcha (42/11 + matching answer).
  */
 static u32 vm_net_mock_build_auction_buyout_core(
     u8 *out, u32 outCap, u8 subtype, u32 listingId,
@@ -1568,6 +1728,8 @@ static u32 vm_net_mock_build_auction_buyout_response(const u8 *request, u32 requ
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
     u32 listingId = 0;
+    char captchaIn[16];
+    const char *captchaErr = NULL;
 
     if (request == NULL || out == NULL ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
@@ -1584,6 +1746,20 @@ static u32 vm_net_mock_build_auction_buyout_response(const u8 *request, u32 requ
     if (listingId == 0)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BUYOUT,
                                                    3, 0, "not-open");
+    captchaIn[0] = 0;
+    (void)vm_net_mock_get_object_string_field(object.payload, object.payloadLen,
+                                              "captcha", captchaIn, sizeof(captchaIn));
+    captchaErr = vm_mock_auction_captcha_consume(role->roleId, listingId, captchaIn);
+    if (captchaErr != NULL)
+    {
+        u32 code = 16;
+        if (strcmp(captchaErr, "captcha-need") == 0)
+            code = 18;
+        else if (strcmp(captchaErr, "captcha-wait") == 0)
+            code = 17;
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BUYOUT,
+                                                   code, listingId, captchaErr);
+    }
     return vm_net_mock_build_auction_buyout_core(out, outCap, VM_MOCK_AUCTION_WT_BUYOUT,
                                                  listingId, NULL, role, session);
 }
@@ -1641,23 +1817,23 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
                                                    listingId, "self-account");
     if (row.highBidderRoleId == role->roleId)
     {
-        /* Already high: only allow topping via buyout. */
+        /* Already high: topping to buyout must use 一口价+验证码. */
         if (row.buyoutPrice > 0 && amount >= row.buyoutPrice)
-            return vm_net_mock_build_auction_buyout_core(
-                out, outCap, VM_MOCK_AUCTION_WT_BID, listingId, &row, role, session);
+            return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID,
+                                                       19, listingId, "use-buyout");
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 5,
                                                    listingId, "already-high");
     }
     minNeed = row.currentPrice;
     if (row.highBidderRoleId != 0)
-        minNeed = row.currentPrice + g_vm_mock_auction_config.minBidStep;
+        minNeed = row.currentPrice + vm_mock_auction_bid_step(row.startPrice);
     if (amount < minNeed)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 6,
                                                    listingId, "low");
-    /* Bid at/above buyout → instant purchase. */
+    /* Bid at/above buyout → must use 一口价+验证码 path. */
     if (row.buyoutPrice > 0 && amount >= row.buyoutPrice)
-        return vm_net_mock_build_auction_buyout_core(out, outCap, VM_MOCK_AUCTION_WT_BID,
-                                                     listingId, &row, role, session);
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 19,
+                                                   listingId, "use-buyout");
 
     if (vm_mysql_hex_encode(session->accountId, strlen(session->accountId), accountEsc,
                             sizeof(accountEsc)) == 0)
@@ -2254,6 +2430,9 @@ static u32 vm_net_mock_build_auction_protocol_response(const u8 *request, u32 re
     if (object.subtype == VM_MOCK_AUCTION_WT_BUYOUT)
         return vm_net_mock_build_auction_buyout_response(request, requestLen, out,
                                                          outCap);
+    if (object.subtype == VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE)
+        return vm_net_mock_build_auction_buyout_challenge_response(
+            request, requestLen, out, outCap);
     if (object.subtype == VM_MOCK_AUCTION_WT_CANCEL)
         return vm_net_mock_build_auction_cancel_response(request, requestLen, out,
                                                          outCap);

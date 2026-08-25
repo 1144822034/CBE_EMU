@@ -2597,6 +2597,484 @@ static bool vm_client_strip_cbe_unsupported_objects(u8 **packet, u32 *packetLen)
     return true;
 }
 
+/*
+ * Hangup settlement UI shim (mmBattle:sub_7794 reads 4/7.combatinfo while the
+ * native auto-battle flag is set).  Remote/live servers may omit combatinfo;
+ * synthesize it on the CBE downlink without touching the game server.
+ * evidence: CBE_EMU vm_net_mock_append_scene_hangup_combatinfo,
+ * docs/re/2026-08-20-hangup-summary-and-battle-insight.md
+ */
+enum
+{
+    VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX = 64u,
+    VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX = 200u
+};
+
+typedef struct
+{
+    u8 armed;
+    u16 completed;
+    u16 maxBattles;
+    u32 totalExp;
+    u32 totalGold;
+    u32 totalHpRecovered;
+    u32 totalMpRecovered;
+    u32 battleToken;
+    u32 lastAccountedToken;
+    u32 battlePreExp;
+    u32 battlePreGold;
+    u32 lastRoleExp;
+    u32 lastRoleGold;
+} vm_client_hangup_settle_ui_state;
+
+static vm_client_hangup_settle_ui_state g_vmClientHangupSettleUi;
+
+static u32 vm_client_add_capped_u32(u32 a, u32 b)
+{
+    u64 sum = (u64)a + (u64)b;
+    return (u32)(sum > 0xffffffffu ? 0xffffffffu : sum);
+}
+
+static void vm_client_hangup_settle_ui_clear(const char *reason)
+{
+    memset(&g_vmClientHangupSettleUi, 0, sizeof(g_vmClientHangupSettleUi));
+    if (reason != NULL && reason[0] != 0)
+    {
+        printf("[info][network] cbe_hangup_settle_ui_clear reason=%s\n", reason);
+    }
+}
+
+static void vm_client_hangup_settle_ui_arm(u16 maxBattles, const char *reason)
+{
+    g_vmClientHangupSettleUi.armed = 1;
+    g_vmClientHangupSettleUi.completed = 0;
+    g_vmClientHangupSettleUi.maxBattles = maxBattles;
+    g_vmClientHangupSettleUi.totalExp = 0;
+    g_vmClientHangupSettleUi.totalGold = 0;
+    g_vmClientHangupSettleUi.totalHpRecovered = 0;
+    g_vmClientHangupSettleUi.totalMpRecovered = 0;
+    g_vmClientHangupSettleUi.lastAccountedToken = 0;
+    printf("[info][network] cbe_hangup_settle_ui_arm max=%u reason=%s\n",
+           maxBattles, reason != NULL ? reason : "unknown");
+}
+
+static bool vm_client_hangup_settle_ui_active(void)
+{
+    return g_vmClientHangupSettleUi.armed != 0 &&
+           g_vmClientHangupSettleUi.maxBattles != 0;
+}
+
+static bool vm_client_decode_object_u32(const vm_client_response_object *object,
+                                        const char *field, u32 *valueOut)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+
+    if (valueOut != NULL)
+        *valueOut = 0;
+    if (object == NULL || valueOut == NULL ||
+        !vm_client_response_object_field(object, field, &encoded, &encodedLen))
+    {
+        return false;
+    }
+    return vm_client_decode_tagged_u32(encoded, encodedLen, valueOut);
+}
+
+static bool vm_client_decode_object_u8(const vm_client_response_object *object,
+                                       const char *field, u8 *valueOut)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+
+    if (valueOut != NULL)
+        *valueOut = 0;
+    if (object == NULL || valueOut == NULL ||
+        !vm_client_response_object_field(object, field, &encoded, &encodedLen))
+    {
+        return false;
+    }
+    if (encodedLen == 3u && encoded[0] == 0 && encoded[1] == 1)
+    {
+        *valueOut = encoded[2];
+        return true;
+    }
+    if (encodedLen >= 1u)
+    {
+        *valueOut = encoded[encodedLen - 1u];
+        return true;
+    }
+    return false;
+}
+
+static bool vm_client_object_has_field(const vm_client_response_object *object,
+                                       const char *field)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+
+    return object != NULL &&
+           vm_client_response_object_field(object, field, &encoded, &encodedLen);
+}
+
+static bool vm_client_build_hangup_combatinfo_raw(u8 *out, u32 outCap, u16 *outLen,
+                                                  u16 completed, u16 maximum,
+                                                  u32 totalExp, u32 totalGold,
+                                                  u32 totalMp, u32 totalHp)
+{
+    u32 pos = 0;
+
+    if (outLen != NULL)
+        *outLen = 0;
+    if (out == NULL || outLen == NULL)
+        return false;
+    if (!vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, completed) ||
+        !vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, maximum) ||
+        !vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, totalExp) ||
+        !vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, totalGold) ||
+        !vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, totalMp) ||
+        !vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, totalHp) ||
+        !vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, 0) ||
+        !vm_client_seq_put_tagged_u32_be32(out, outCap, &pos, 0) ||
+        !vm_client_seq_put_tagged_u8(out, outCap, &pos, 0))
+    {
+        return false;
+    }
+    *outLen = (u16)pos;
+    return true;
+}
+
+static bool vm_client_copy_object_field(const u8 *payload, u32 payloadLen,
+                                        u32 *payloadPos, u8 *out, u32 outCap,
+                                        u32 *outPos)
+{
+    u32 nameLen;
+    u16 valueLen;
+
+    if (payload == NULL || payloadPos == NULL || out == NULL || outPos == NULL ||
+        *payloadPos >= payloadLen)
+    {
+        return false;
+    }
+    nameLen = payload[(*payloadPos)++];
+    if (nameLen > payloadLen - *payloadPos)
+        return false;
+    if (*outPos + 1u + nameLen + 2u > outCap)
+        return false;
+    out[(*outPos)++] = (u8)nameLen;
+    memcpy(out + *outPos, payload + *payloadPos, nameLen);
+    *payloadPos += nameLen;
+    *outPos += nameLen;
+    if (*payloadPos + 2u > payloadLen)
+        return false;
+    valueLen = (u16)(((u16)payload[*payloadPos] << 8) | payload[*payloadPos + 1u]);
+    *payloadPos += 2u;
+    if (*payloadPos + valueLen > payloadLen ||
+        *outPos + valueLen > outCap)
+    {
+        return false;
+    }
+    out[(*outPos)++] = (u8)(valueLen >> 8);
+    out[(*outPos)++] = (u8)valueLen;
+    memcpy(out + *outPos, payload + *payloadPos, valueLen);
+    *payloadPos += valueLen;
+    *outPos += valueLen;
+    return true;
+}
+
+static bool vm_client_rewrite_battle47_add_combatinfo(
+    const vm_client_response_object *object, u8 *outObj, u32 outCap, u32 *outLen,
+    const u8 *combatinfo, u16 combatinfoLen)
+{
+    u32 payloadPos = 0;
+    u32 pos = 6;
+    bool inserted = false;
+
+    if (outLen != NULL)
+        *outLen = 0;
+    if (object == NULL || outObj == NULL || outLen == NULL || outCap < 8 ||
+        combatinfo == NULL || combatinfoLen == 0)
+    {
+        return false;
+    }
+    outObj[0] = object->major;
+    outObj[1] = object->kind;
+    outObj[2] = object->subtype;
+    outObj[3] = 0;
+    outObj[4] = 0;
+    outObj[5] = 0;
+    while (payloadPos < object->payloadLen)
+    {
+        u32 nameLen = object->payload[payloadPos];
+        const char *fieldName = (const char *)(object->payload + payloadPos + 1);
+
+        if ((u32)nameLen + 1u > object->payloadLen - payloadPos)
+            return false;
+        if (nameLen == 9 && memcmp(fieldName, "combatinfo", 9) == 0)
+        {
+            u16 skipLen = (u16)(((u16)object->payload[payloadPos + 1u + nameLen] << 8) |
+                                object->payload[payloadPos + 2u + nameLen]);
+            payloadPos += 1u + nameLen + 2u + skipLen;
+            continue;
+        }
+        if (!inserted &&
+            ((nameLen == 5 && memcmp(fieldName, "fdata", 5) == 0) ||
+             (nameLen == 10 && memcmp(fieldName, "autorevive", 10) == 0)))
+        {
+            if (!vm_client_put_object_field(outObj, outCap, &pos, "combatinfo",
+                                            combatinfo, combatinfoLen))
+            {
+                return false;
+            }
+            inserted = true;
+        }
+        if (!vm_client_copy_object_field(object->payload, object->payloadLen,
+                                         &payloadPos, outObj, outCap, &pos))
+        {
+            return false;
+        }
+    }
+    if (!inserted &&
+        !vm_client_put_object_field(outObj, outCap, &pos, "combatinfo",
+                                    combatinfo, combatinfoLen))
+    {
+        return false;
+    }
+    outObj[4] = (u8)(pos >> 8);
+    outObj[5] = (u8)pos;
+    *outLen = pos;
+    return true;
+}
+
+static void vm_client_hangup_settle_note_downlink(const u8 *packet, u32 packetLen)
+{
+    u32 offset = 5;
+    u8 objectCount = 0;
+    u8 parsed = 0;
+    vm_client_response_object object;
+
+    if (packet == NULL || packetLen < 5 || packet[0] != 'W' || packet[1] != 'T')
+        return;
+    objectCount = packet[4];
+    while (parsed < objectCount &&
+           offset + 6u <= packetLen &&
+           vm_client_next_response_object(packet, packetLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 4 && object.subtype == 11)
+        {
+            u8 result = 0;
+            u8 battle11Type = 0;
+            (void)vm_client_decode_object_u8(&object, "result", &result);
+            (void)vm_client_decode_object_u8(&object, "type", &battle11Type);
+            if (result == 1 && battle11Type == 0)
+            {
+                vm_client_hangup_settle_ui_clear("battle-auto-off");
+            }
+            else if (result == 1 && battle11Type == 1)
+            {
+                if (!vm_client_hangup_settle_ui_active())
+                {
+                    vm_client_hangup_settle_ui_arm(
+                        (u16)VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX,
+                        "battle-auto-on-4/11");
+                }
+                ++g_vmClientHangupSettleUi.battleToken;
+                g_vmClientHangupSettleUi.battlePreExp =
+                    g_vmClientHangupSettleUi.lastRoleExp;
+                g_vmClientHangupSettleUi.battlePreGold =
+                    g_vmClientHangupSettleUi.lastRoleGold;
+            }
+        }
+        if (object.major == 1 && object.kind == 25 && object.subtype == 6)
+        {
+            u32 insightMax = 0;
+            if (vm_client_decode_object_u32(&object, "maxnum", &insightMax) &&
+                insightMax >= VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX)
+            {
+                g_vmClientHangupSettleUi.maxBattles =
+                    (u16)VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX;
+            }
+        }
+        if (object.major == 1 && object.kind == 1 && object.subtype == 3)
+        {
+            char text[96];
+            if (vm_client_response_object_string(&object, "info", text,
+                                                 sizeof(text)) &&
+                strstr(text, "\xD2\xD1\xCD\xA3\xD6\xB9\xB9\xD2\xBB\xFA") != NULL)
+            {
+                vm_client_hangup_settle_ui_clear("chat-stop-hangup");
+            }
+        }
+        if (object.major == 1 && object.kind == 1 &&
+            (object.subtype == 6 || object.subtype == 14))
+        {
+            u32 actorExp = 0;
+            u32 actorGold = 0;
+            if (vm_client_decode_object_u32(&object, "exp", &actorExp))
+                g_vmClientHangupSettleUi.lastRoleExp = actorExp;
+            if (vm_client_decode_object_u32(&object, "money", &actorGold))
+                g_vmClientHangupSettleUi.lastRoleGold = actorGold;
+        }
+        ++parsed;
+    }
+}
+
+static bool vm_client_cbe_inject_hangup_combatinfo(u8 **packet, u32 *packetLen)
+{
+    u32 offset = 5;
+    u8 objectCount = 0;
+    u8 parsed = 0;
+    u8 newCount = 0;
+    u32 srcPos = 5;
+    u32 dstPos = 5;
+    u8 *out = NULL;
+    u32 outCap = 0;
+    bool changed = false;
+    vm_client_response_object object;
+
+    if (packet == NULL || packetLen == NULL || *packet == NULL ||
+        *packetLen < 5 || (*packet)[0] != 'W' || (*packet)[1] != 'T')
+    {
+        return false;
+    }
+    if (!vm_client_hangup_settle_ui_active())
+        return false;
+
+    objectCount = (*packet)[4];
+    outCap = *packetLen + 256u;
+    out = (u8 *)malloc(outCap);
+    if (out == NULL)
+        return false;
+    memcpy(out, *packet, 5);
+
+    while (parsed < objectCount &&
+           srcPos + 6u <= *packetLen &&
+           vm_client_next_response_object(*packet, *packetLen, &srcPos, &object))
+    {
+        u32 objectStart = srcPos - ((u32)object.payloadLen + 6u);
+        u32 objectLen = (u32)object.payloadLen + 6u;
+        const u8 *copySrc = *packet + objectStart;
+        u32 copyLen = objectLen;
+
+        if (object.major == 1 && object.kind == 4 && object.subtype == 7 &&
+            !vm_client_object_has_field(&object, "combatinfo"))
+        {
+            u8 result = 0;
+            u32 wireExp = 0;
+            u32 wireGold = 0;
+            u32 recoverHp = 0;
+            u32 recoverMp = 0;
+            u32 expGain = 0;
+            u32 goldGain = 0;
+            u16 completed = 0;
+            u16 maximum = g_vmClientHangupSettleUi.maxBattles;
+            u8 combatInfo[64];
+            u16 combatInfoLen = 0;
+            u8 rewritten[512];
+            u32 rewrittenLen = 0;
+
+            (void)vm_client_decode_object_u8(&object, "result", &result);
+            (void)vm_client_decode_object_u32(&object, "exp", &wireExp);
+            (void)vm_client_decode_object_u32(&object, "gold", &wireGold);
+            (void)vm_client_decode_object_u32(&object, "hp", &recoverHp);
+            (void)vm_client_decode_object_u32(&object, "mp", &recoverMp);
+            if (result == 1 &&
+                g_vmClientHangupSettleUi.lastAccountedToken !=
+                    g_vmClientHangupSettleUi.battleToken)
+            {
+                if (g_vmClientHangupSettleUi.battlePreExp != 0 &&
+                    wireExp >= g_vmClientHangupSettleUi.battlePreExp)
+                {
+                    expGain = wireExp - g_vmClientHangupSettleUi.battlePreExp;
+                }
+                else if (wireExp > g_vmClientHangupSettleUi.lastRoleExp)
+                {
+                    expGain = wireExp - g_vmClientHangupSettleUi.lastRoleExp;
+                }
+                if (g_vmClientHangupSettleUi.battlePreGold != 0 &&
+                    wireGold >= g_vmClientHangupSettleUi.battlePreGold)
+                {
+                    goldGain = wireGold - g_vmClientHangupSettleUi.battlePreGold;
+                }
+                else if (wireGold > g_vmClientHangupSettleUi.lastRoleGold)
+                {
+                    goldGain = wireGold - g_vmClientHangupSettleUi.lastRoleGold;
+                }
+                g_vmClientHangupSettleUi.totalExp = vm_client_add_capped_u32(
+                    g_vmClientHangupSettleUi.totalExp, expGain);
+                g_vmClientHangupSettleUi.totalGold = vm_client_add_capped_u32(
+                    g_vmClientHangupSettleUi.totalGold, goldGain);
+                g_vmClientHangupSettleUi.totalHpRecovered = vm_client_add_capped_u32(
+                    g_vmClientHangupSettleUi.totalHpRecovered, recoverHp);
+                g_vmClientHangupSettleUi.totalMpRecovered = vm_client_add_capped_u32(
+                    g_vmClientHangupSettleUi.totalMpRecovered, recoverMp);
+                g_vmClientHangupSettleUi.lastAccountedToken =
+                    g_vmClientHangupSettleUi.battleToken;
+                if (g_vmClientHangupSettleUi.completed < 0xffffu)
+                    ++g_vmClientHangupSettleUi.completed;
+            }
+            completed = g_vmClientHangupSettleUi.completed;
+            if (!vm_client_build_hangup_combatinfo_raw(
+                    combatInfo, sizeof(combatInfo), &combatInfoLen, completed,
+                    maximum, g_vmClientHangupSettleUi.totalExp,
+                    g_vmClientHangupSettleUi.totalGold,
+                    g_vmClientHangupSettleUi.totalMpRecovered,
+                    g_vmClientHangupSettleUi.totalHpRecovered) ||
+                !vm_client_rewrite_battle47_add_combatinfo(
+                    &object, rewritten, sizeof(rewritten), &rewrittenLen,
+                    combatInfo, combatInfoLen))
+            {
+                free(out);
+                return false;
+            }
+            copySrc = rewritten;
+            copyLen = rewrittenLen;
+            changed = true;
+            printf("[info][network] cbe_hangup_combatinfo tally=%u/%u exp=%u "
+                   "gold=%u hp=%u mp=%u raw_len=%u evidence=4/7.combatinfo\n",
+                   completed, maximum, g_vmClientHangupSettleUi.totalExp,
+                   g_vmClientHangupSettleUi.totalGold,
+                   g_vmClientHangupSettleUi.totalHpRecovered,
+                   g_vmClientHangupSettleUi.totalMpRecovered, combatInfoLen);
+        }
+        if (dstPos + copyLen > outCap)
+        {
+            u32 grownCap = outCap + copyLen + 128u;
+            u8 *grown = (u8 *)realloc(out, grownCap);
+            if (grown == NULL)
+            {
+                free(out);
+                return false;
+            }
+            out = grown;
+            outCap = grownCap;
+        }
+        memcpy(out + dstPos, copySrc, copyLen);
+        dstPos += copyLen;
+        ++newCount;
+        ++parsed;
+    }
+    if (!changed || parsed != objectCount || srcPos != *packetLen)
+    {
+        free(out);
+        return false;
+    }
+    vm_client_finish_wt_packet(out, dstPos, newCount);
+    if (dstPos > *packetLen)
+    {
+        u8 *grownPacket = (u8 *)realloc(*packet, dstPos);
+        if (grownPacket == NULL)
+        {
+            free(out);
+            return false;
+        }
+        *packet = grownPacket;
+    }
+    memcpy(*packet, out, dstPos);
+    *packetLen = dstPos;
+    free(out);
+    return true;
+}
+
 static void vm_client_prepare_cbe_downlink(u8 **packet, u32 *packetLen)
 {
     u32 offset = 5;
@@ -2609,6 +3087,8 @@ static void vm_client_prepare_cbe_downlink(u8 **packet, u32 *packetLen)
 
     if (packet == NULL || packetLen == NULL)
         return;
+    vm_client_hangup_settle_note_downlink(*packet, *packetLen);
+    (void)vm_client_cbe_inject_hangup_combatinfo(packet, packetLen);
     (void)vm_client_cbe_patch_actorinfo_packet(packet, packetLen);
     (void)vm_client_strip_cbe_unsupported_objects(packet, packetLen);
     (void)vm_client_cbe_clamp_backpack_packet(packet, packetLen);

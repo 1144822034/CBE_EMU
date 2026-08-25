@@ -2,7 +2,9 @@
  * PixiJS-only equipment enhance wash (洗练) panel.
  * Protocol: WT 29/7 open, 29/8 preview, 29/9 confirm.
  *
- * Controls: ↑↓ select tier · left soft=wash · D-pad OK=crystal · right=close
+ * Controls: ↑↓ select tier · ←→ adjust +16 crystal count · left soft=wash ·
+ * D-pad OK=crystal · right=close
+ * +16 档：←→ 加减十六级玄晶数量（最多 3，3 颗 100%）.
  * (No HTML center softkey above the D-pad.)
  */
 import { Container, Graphics } from "pixi.js";
@@ -11,14 +13,16 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
+  paintCbePanel,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import type { BagItem } from "../net/protocolExtras";
 import {
   ENHANCE_CRYSTAL_FIRST,
+  ENHANCE_CRYSTAL_LAST,
   enhanceCrystalName,
-  enhanceCrystalUnitRate,
+  enhanceWashMaxCrystalCount,
+  enhanceWashSuccessRate,
   isEnhanceCrystal,
   type EnhanceWashOpenResult,
   type EnhanceWashTier,
@@ -70,6 +74,7 @@ export class WashPanel extends Container {
   private openInfo: EnhanceWashOpenResult | null = null;
   private unlock = 4;
   private crystalId = 0;
+  private crystalCount = 0;
   private rate = 0;
   private money = 0;
   private toast: PanelTipState = createPanelTipState();
@@ -97,10 +102,15 @@ export class WashPanel extends Container {
     equip: BagItem,
     bag: BagItem[],
     info: EnhanceWashOpenResult,
-    opts?: { keepUnlock?: number; keepCrystalId?: number },
+    opts?: {
+      keepUnlock?: number;
+      keepCrystalId?: number;
+      keepCrystalCount?: number;
+    },
   ): void {
     const prevUnlock = opts?.keepUnlock ?? 0;
     const prevCrystal = opts?.keepCrystalId ?? 0;
+    const prevCount = opts?.keepCrystalCount ?? 0;
     this.equip = equip;
     this.bag = bag;
     this.openInfo = info;
@@ -111,9 +121,13 @@ export class WashPanel extends Container {
     if (prevUnlock && unlocked.includes(prevUnlock)) this.unlock = prevUnlock;
     else this.unlock = unlocked[0] ?? 4;
     const crystals = this.crystals();
-    if (prevCrystal && crystals.some((c) => c.itemId === prevCrystal))
+    if (prevCrystal && crystals.some((c) => c.itemId === prevCrystal)) {
       this.crystalId = prevCrystal;
-    else this.crystalId = 0;
+      this.crystalCount = this.clampCount(prevCrystal, prevCount || 1);
+    } else {
+      this.crystalId = 0;
+      this.crystalCount = 0;
+    }
     this.listCursor = 0;
     this.visible = true;
     this.redraw();
@@ -121,6 +135,13 @@ export class WashPanel extends Container {
 
   setBag(bag: BagItem[]): void {
     this.bag = bag;
+    if (this.crystalId) {
+      this.crystalCount = this.clampCount(this.crystalId, this.crystalCount);
+      if (this.crystalCount <= 0) {
+        this.crystalId = 0;
+        this.crystalCount = 0;
+      }
+    }
     if (this.visible) this.redraw();
   }
 
@@ -152,6 +173,8 @@ export class WashPanel extends Container {
     this.visible = false;
     this.equip = null;
     this.openInfo = null;
+    this.crystalId = 0;
+    this.crystalCount = 0;
     clearPanelTip(this.toast);
     this.clearLabels();
   }
@@ -173,15 +196,77 @@ export class WashPanel extends Container {
     const next = unlocked[(idx + delta + unlocked.length) % unlocked.length]!;
     if (next === this.unlock) return;
     this.unlock = next;
+    this.onUnlockChanged();
+    this.redraw();
+    this.onAction?.("back");
+  }
+
+  /**
+   * ←→：+16 已放十六级玄晶时加减数量（1..3，受背包限制）.
+   * Returns true when count changed (caller should refresh preview).
+   */
+  adjustCount(delta: number): boolean {
+    if (!this.visible || this.mode !== "main") return false;
+    if (!this.crystalId || this.crystalCount <= 0) return false;
+    const max = enhanceWashMaxCrystalCount(this.unlock, this.crystalId);
+    if (max <= 1) return false;
+    const bagN = this.bagCountOf(this.crystalId);
+    const lim = Math.min(max, bagN);
+    if (lim <= 0) return false;
+    const next = this.crystalCount + (delta < 0 ? -1 : 1);
+    if (next < 1) {
+      this.setTip("至少放入1颗");
+      return false;
+    }
+    if (next > lim) {
+      this.setTip(next > max ? "最多可放入三颗十六级玄晶" : "玄晶数量不足");
+      return false;
+    }
+    if (next === this.crystalCount) return false;
+    this.crystalCount = next;
     this.rate = 0;
     this.money = 0;
     this.redraw();
-    this.onAction?.("back");
+    return true;
   }
 
   private unlockedTiers(): number[] {
     const enhance = this.equip?.enhance ?? 0;
     return UNLOCKS.filter((u) => u <= enhance);
+  }
+
+  private bagCountOf(itemId: number): number {
+    let n = 0;
+    for (const it of this.bag) {
+      if (it.itemId === itemId && it.count > 0) n += it.count;
+    }
+    return n;
+  }
+
+  private clampCount(itemId: number, want: number): number {
+    if (!itemId || want <= 0) return 0;
+    const max = Math.min(
+      enhanceWashMaxCrystalCount(this.unlock, itemId),
+      this.bagCountOf(itemId),
+    );
+    if (max <= 0) return 0;
+    return Math.max(1, Math.min(max, Math.floor(want)));
+  }
+
+  private onUnlockChanged(): void {
+    this.rate = 0;
+    this.money = 0;
+    if (!this.crystalId) {
+      this.crystalCount = 0;
+      return;
+    }
+    const next = this.clampCount(this.crystalId, this.crystalCount || 1);
+    if (next <= 0) {
+      this.crystalId = 0;
+      this.crystalCount = 0;
+    } else {
+      this.crystalCount = next;
+    }
   }
 
   private clearLabels(): void {
@@ -233,10 +318,27 @@ export class WashPanel extends Container {
     if (!this.equip || unlock > this.equip.enhance) return;
     if (this.unlock === unlock) return;
     this.unlock = unlock;
-    this.rate = 0;
-    this.money = 0;
+    this.onUnlockChanged();
     this.redraw();
     this.onAction?.("back");
+  }
+
+  /** Place crystal (count starts at 1); ←→ adjusts stack on main. */
+  private applyCrystalPick(itemId: number): boolean {
+    if (!isEnhanceCrystal(itemId)) {
+      this.setTip("不是玄晶");
+      return false;
+    }
+    const bagN = this.bagCountOf(itemId);
+    if (bagN <= 0) {
+      this.setTip("玄晶数量不足");
+      return false;
+    }
+    this.crystalId = itemId;
+    this.crystalCount = 1;
+    this.rate = 0;
+    this.money = 0;
+    return true;
   }
 
   private confirmCrystalPick(): WashAction {
@@ -246,10 +348,11 @@ export class WashPanel extends Container {
       this.setTip("背包无玄晶");
       return "back";
     }
-    this.crystalId = row.itemId;
     this.mode = "main";
-    this.rate = 0;
-    this.money = 0;
+    if (!this.applyCrystalPick(row.itemId)) {
+      this.redraw();
+      return "back";
+    }
     this.redraw();
     return "back";
   }
@@ -261,11 +364,11 @@ export class WashPanel extends Container {
     const y = 18;
     const w = LCD_WIDTH - 16;
     const h = LCD_HEIGHT - SOFTKEY_H - y - 4;
-    drawCbePanel(this.box, x, y, w, h);
+    paintCbePanel(this, this.box, x, y, w, h);
     if (!this.equip || !this.openInfo) return;
 
     if (this.mode === "pickCrystal") {
-      this.drawPickCrystal(x, y, w);
+      this.drawPickCrystal(x, y, w, h);
       drawPanelTipOverlay(this, this.toast);
       return;
     }
@@ -299,9 +402,13 @@ export class WashPanel extends Container {
       ly += 15;
     }
 
-    const crystalName = this.crystalId
-      ? enhanceCrystalName(this.crystalId)
-      : "未放入玄晶";
+    const canStack =
+      this.unlock === 16 && this.crystalId === ENHANCE_CRYSTAL_LAST;
+    const crystalName = !this.crystalId
+      ? "未放入玄晶"
+      : canStack || this.crystalCount > 1
+        ? `${enhanceCrystalName(this.crystalId)} x${this.crystalCount}`
+        : enhanceCrystalName(this.crystalId);
     this.addAttr(`玄晶: ${crystalName}`, x + 10, ly + 4, CBE.ink);
     if (this.rate > 0 || this.money > 0) {
       const gold = Math.floor(this.money / 10000);
@@ -315,12 +422,21 @@ export class WashPanel extends Container {
       this.addAttr("放入玄晶后可预览", x + 10, ly + 20, EQUIP_DETAIL_GRAY);
     }
 
-    this.addAttr("↑↓选档 左软洗练 OK玄晶 右键关闭", x + 8, y + h - 16, CBE.inkLabel);
+    const hint = canStack
+      ? "↑↓选档 ←→数量 左软洗练 OK玄晶 右关"
+      : this.unlock === 16
+        ? "↑↓选档 ←→数量(十六级) 左软洗练 OK玄晶 右关"
+        : "↑↓选档 左软洗练 OK玄晶 右键关闭";
+    this.addAttr(hint, x + 8, y + h - 16, CBE.inkLabel);
     drawPanelTipOverlay(this, this.toast);
   }
 
-  private drawPickCrystal(x: number, y: number, w: number): void {
-    this.addAttr("选择玄晶(1颗)", x + 8, y + 4, EQUIP_DETAIL_YELLOW);
+  private drawPickCrystal(x: number, y: number, w: number, h: number): void {
+    const title =
+      this.unlock === 16
+        ? "选择玄晶(+16可叠3颗十六级)"
+        : "选择玄晶(1颗)";
+    this.addAttr(title, x + 8, y + 4, EQUIP_DETAIL_YELLOW);
     const rows = this.crystals();
     let ly = y + 24;
     rows.forEach((row, i) => {
@@ -329,21 +445,22 @@ export class WashPanel extends Container {
       if (selected || cursor) {
         this.box.rect(x + 6, ly - 1, w - 12, 14).fill({ color: SELECT_BG });
       }
-      const unit = enhanceCrystalUnitRate(this.unlock, row.tier);
+      const unit = enhanceWashSuccessRate(this.unlock, row.itemId, 1);
+      const stackHint =
+        this.unlock === 16 && row.itemId === ENHANCE_CRYSTAL_LAST
+          ? ` 1颗${unit}%/3颗100%`
+          : `  ${unit}%`;
       this.addAttr(
-        `${row.name} x${row.count}  ${unit}%`,
+        `${row.name} x${row.count}${stackHint}`,
         x + 10,
         ly,
         selected || cursor ? INK_CYAN : CBE.ink,
       );
       const hit = attachRowPointerHit(this, x + 6, ly - 1, w - 12, 14, () => {
         this.listCursor = i;
-        this.crystalId = row.itemId;
         this.mode = "main";
-        this.rate = 0;
-        this.money = 0;
-        this.redraw();
-        this.onAction?.("back");
+        if (this.applyCrystalPick(row.itemId)) this.onAction?.("back");
+        else this.redraw();
       });
       this.rowHits.push(hit);
       ly += 15;
@@ -351,14 +468,19 @@ export class WashPanel extends Container {
     if (!rows.length) {
       this.addAttr("背包无玄晶", x + 10, ly, CBE.inkWarn);
     }
-    this.addAttr("↑↓选择 左软确定 右键返回", x + 8, y + 24 + Math.max(rows.length, 1) * 15 + 8, CBE.inkLabel);
+    this.addAttr(
+      "↑↓选择 左软确定 右键返回",
+      x + 8,
+      y + h - 16,
+      CBE.inkLabel,
+    );
   }
 
   handleSoftLeft(): WashAction {
     if (this.mode === "pickCrystal") {
       return this.confirmCrystalPick();
     }
-    if (!this.crystalId) {
+    if (!this.crystalId || this.crystalCount <= 0) {
       this.setTip("请放入玄晶");
       return "back";
     }
@@ -400,6 +522,10 @@ export class WashPanel extends Container {
 
   getSelectedCrystalId(): number {
     return this.crystalId;
+  }
+
+  getSelectedCrystalCount(): number {
+    return this.crystalCount > 0 ? this.crystalCount : 0;
   }
 
   getEquipSeq(): number {

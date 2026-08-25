@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-19T06:39:15.361Z",
+  "generatedAt": "2026-08-24T11:01:09.869Z",
   "assetRootHint": "web/fs/JHOnlineData",
   "defaultScene": "01桃花岛_01.sce",
   "scenes": [
@@ -168,6 +168,8 @@
     "c00蓬莱仙岛_01.sce",
     "c00蓬莱仙岛_03.sce",
     "c04比武擂台.sce",
+    "c04比武擂台50.sce",
+    "c04比武擂台70.sce",
     "c04临安府_01.sce",
     "c04临安府_02.sce",
     "c04临安府_03.sce",

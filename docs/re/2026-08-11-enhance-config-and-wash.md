@@ -40,11 +40,21 @@ w,t,f,v,c;w,t,f,v,c;w,t,f,v,c;w,t,f,v,c
 | --- | --- |
 | 29/7 | 打开：`seq/curlevel/tiers/pool` |
 | 29/8 | 预览：`equipseq/unlock/crystal` → `rate/money` |
-| 29/9 | 确认：扣 1 玄晶 + 金币；成功随机词条并 `wash_count++` |
+| 29/9 | 确认：扣 `count` 玄晶 + 金币；成功随机词条并 `wash_count++` |
 
 ### 成功率
 
 `unit_rate(unlock, crystal_tier)`：玄晶等级 **>** 档次 → 100%；否则与强化同 `/3` 阶梯。
+
+**+16 档特例（2026-08-22）**：可放入 **1..3 颗十六级玄晶** 叠成功率：
+
+| 数量 | 成功率 |
+| --- | --- |
+| 1 | 33% |
+| 2 | 66% |
+| 3 | **100%** |
+
+其它档次 / 非十六级玄晶仍只允许 1 颗。请求字段 `count`（默认 1）；确认时按 `count` 扣晶。
 
 ### 金币
 
@@ -64,7 +74,7 @@ w,t,f,v,c;w,t,f,v,c;w,t,f,v,c;w,t,f,v,c
 - `src/server/mock_server_equipment_npc.c`：29/7–9
 - `src/web_admin_enhance.inc.c`：后台页
 - `PixiJS_web/src/ui/WashPanel.ts` + `protocolExtras.ts` 29/7–9
-  - 操作：↑↓选档 · 左软洗练 · D-pad OK/中键玄晶 · 右键关闭（无方向键上方中软按钮）
+  - 操作：↑↓选档 · ←→加减十六级数量（+16，最多 3）· 左软洗练 · D-pad OK/中键玄晶 · 右键关闭（无方向键上方中软按钮）
 - migrate：`server/mysql/migrate_add_enhance_wash_config.sql`
 
 ## 验证
@@ -73,4 +83,5 @@ w,t,f,v,c;w,t,f,v,c;w,t,f,v,c;w,t,f,v,c
 - [ ] 后台改默认档后新装备详情词条变化
 - [ ] 未洗练显示默认；洗练成功可同装多档同属性
 - [ ] 金币 5/10/15…；高等级玄晶 100%；失败不改词条
+- [ ] +16 放 1/2/3 颗十六级 → 预览 33%/66%/100%；确认扣对应数量
 - [ ] 穿脱/仓存后 wash 仍在；重铸转移带走 wash

@@ -5,7 +5,7 @@ import {
   LCD_WIDTH,
   WORLD_BOTTOM_H,
   WORLD_TOP_H,
-  drawCbePanel,
+  paintCbePanel,
   makePixelText,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
@@ -84,7 +84,7 @@ export class ApproachPrompt extends Container {
       WORLD_TOP_H + Math.floor((LCD_HEIGHT - WORLD_TOP_H - WORLD_BOTTOM_H) / 2);
     const y = Math.max(WORLD_TOP_H + 8, mapMid - Math.floor(h / 2) - 24);
 
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     const text = makePixelText(body, 12, CBE.ink);
     text.anchor.set(0.5, 0.5);

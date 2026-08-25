@@ -639,13 +639,63 @@ export function parseExpCardStatusInfo(bodies: Uint8Array[]): string {
     } catch {
       continue;
     }
-    for (const obj of packet.objects) {
-      if (obj.kind !== 7 || obj.subtype !== 31) continue;
-      const raw = findField(obj, "expinfo");
-      if (!raw) continue;
-      const text = decodeFieldString(raw).trim();
-      if (text) return text;
+    const text = parseExpCardStatusInfoFromPacket(packet);
+    if (text) return text;
+  }
+  return "";
+}
+
+/** Single-packet 7/31 { expinfo } — status icon / buff list. */
+export function parseExpCardStatusInfoFromPacket(packet: WtPacket): string {
+  for (const obj of packet.objects) {
+    if (obj.kind !== 7 || obj.subtype !== 31) continue;
+    const raw = findField(obj, "expinfo");
+    if (!raw) continue;
+    const text = decodeFieldString(raw).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+/**
+ * Remaining wall-clock seconds for item 828 from 7/31 / 25/6 status copy.
+ * null = no battle-insight line (caller should not clear cache).
+ * -1 = active but no remaining suffix on the wire.
+ */
+export function parseBattleInsightRemainSecFromStatus(info: string): number | null {
+  if (!info.trim()) return 0;
+  let sawInsight = false;
+  for (const line of info.split(/\n/)) {
+    if (!line.includes("战斗心得")) continue;
+    sawInsight = true;
+    const hours = line.match(/剩余(\d+)小时(\d+)分/);
+    if (hours) {
+      return (+hours[1]!) * 3600 + (+hours[2]!) * 60;
     }
+    const mins = line.match(/剩余(\d+)分钟/);
+    if (mins) return (+mins[1]!) * 60;
+    if (line.includes("生效中")) return -1;
+    return 0;
+  }
+  return sawInsight ? 0 : null;
+}
+
+/** Hangup combatinfo panel — wall-clock MM:SS (60min → 60:00 … 59:59). */
+export function formatBattleInsightRemainMmSs(totalSec: number): string {
+  const s = Math.max(0, totalSec | 0);
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+/** 25/6 iteminfo after using 828 — same remaining suffix as 7/31. */
+export function parseBattleInsightIteminfoFromPacket(packet: WtPacket): string {
+  for (const obj of packet.objects) {
+    if (obj.kind !== 25 || obj.subtype !== 6) continue;
+    const raw = findField(obj, "iteminfo");
+    if (!raw) continue;
+    const text = decodeFieldString(raw).trim();
+    if (text.includes("战斗心得")) return text;
   }
   return "";
 }
@@ -1117,6 +1167,34 @@ export function enhanceCrystalUnitRate(level: number, tier: number): number {
   return rate;
 }
 
+/** +16 洗练最多叠 3 颗十六级玄晶；其它档/玄晶仍为 1. */
+export function enhanceWashMaxCrystalCount(
+  unlock: number,
+  crystalItemId: number,
+): number {
+  if (unlock === 16 && crystalItemId === ENHANCE_CRYSTAL_LAST) return 3;
+  return 1;
+}
+
+/**
+ * Wash success rate mirror.
+ * +16 + 十六级: 1→33 / 2→66 / 3→100；其余 unit×count（封顶 100）.
+ */
+export function enhanceWashSuccessRate(
+  unlock: number,
+  crystalItemId: number,
+  count: number,
+): number {
+  if (!isEnhanceCrystal(crystalItemId) || count <= 0) return 0;
+  const tier = crystalItemId - ENHANCE_CRYSTAL_FIRST + 1;
+  const n = Math.max(0, Math.floor(count));
+  if (unlock === 16 && tier === 16) {
+    if (n >= 3) return 100;
+    return Math.floor((n * 100) / 3);
+  }
+  return Math.min(100, enhanceCrystalUnitRate(unlock, tier) * n);
+}
+
 export function enhanceSuccessRate(
   level: number,
   materials: { itemId: number; count: number }[],
@@ -1304,13 +1382,16 @@ export function buildEnhanceWashMaterialRequest(
   equipSeq: number,
   unlock: number,
   crystalItemId: number,
+  crystalCount = 1,
 ): Uint8Array {
+  const max = enhanceWashMaxCrystalCount(unlock, crystalItemId);
+  const count = Math.max(1, Math.min(max, Math.floor(crystalCount) || 1));
   const b = new WtBuilder();
   b.object(1, 29, subtype)
     .u16("equipseq", equipSeq & 0xffff)
     .u8("unlock", unlock & 0xff)
     .u32("crystal", crystalItemId >>> 0)
-    .u8("count", 1);
+    .u8("count", count & 0xff);
   return b.finish();
 }
 
@@ -2002,6 +2083,16 @@ export function parseMmGameUnstuckLanding(
   return { scene, x, y };
 }
 
+/** mmBattle:sub_7794 — 4/7.combatinfo hangup session snapshot (8×u32 + u8). */
+export type HangupCombatinfo = {
+  completed: number;
+  maximum: number;
+  totalExp: number;
+  totalGold: number;
+  totalMpRecovered: number;
+  totalHpRecovered: number;
+};
+
 export type BattleSettlement = {
   /** Absolute totals on the wire (HandleBattleSettleMsg). */
   expTotal: number;
@@ -2021,6 +2112,8 @@ export type BattleSettlement = {
   recoverMp: number;
   fdata: string;
   result: number;
+  /** Present when server (or CBE shim) appends 4/7.combatinfo during hangup. */
+  hangupCombatinfo?: HangupCombatinfo;
 };
 
 export type BattleActionChild = {
@@ -2076,6 +2169,32 @@ function readU32BE(buf: Uint8Array, off: number): number {
       buf[off + 3]!) >>>
     0
   );
+}
+
+/** Parse 4/7.combatinfo raw (00 04 + u32)×8 then optional 00 01 + u8 flag). */
+export function parseHangupCombatinfo(raw: Uint8Array): HangupCombatinfo | null {
+  try {
+    const r = new SeqReader(raw);
+    const completed = r.u32();
+    const maximum = r.u32();
+    const totalExp = r.u32();
+    const totalGold = r.u32();
+    const totalMpRecovered = r.u32();
+    const totalHpRecovered = r.u32();
+    r.u32();
+    r.u32();
+    if (r.remaining() >= 3) r.u8();
+    return {
+      completed: completed >>> 0,
+      maximum: maximum >>> 0,
+      totalExp: totalExp >>> 0,
+      totalGold: totalGold >>> 0,
+      totalMpRecovered: totalMpRecovered >>> 0,
+      totalHpRecovered: totalHpRecovered >>> 0,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Mock overlapped teaminfo + demo tagged triple-u32 rows. */
@@ -2352,6 +2471,10 @@ export function parseBattleAction(packet: WtPacket): BattleActionUpdate | null {
     const recoverMp = fieldU32(settleObj, "mp");
     const fRaw = findField(settleObj, "fdata");
     const fdata = fRaw ? decodeFieldString(fRaw) : "";
+    const combatRaw = findField(settleObj, "combatinfo");
+    const hangupCombatinfo = combatRaw
+      ? parseHangupCombatinfo(combatRaw)
+      : undefined;
     settlement = {
       expTotal,
       goldTotal,
@@ -2365,6 +2488,7 @@ export function parseBattleAction(packet: WtPacket): BattleActionUpdate | null {
       recoverMp,
       fdata,
       result,
+      hangupCombatinfo: hangupCombatinfo ?? undefined,
     };
     log += ` · 结算 EXP=${expTotal} 金=${goldTotal}`;
     if (recoverHp || recoverMp) log += ` 回血蓝=${recoverHp}/${recoverMp}`;

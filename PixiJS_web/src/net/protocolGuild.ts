@@ -418,3 +418,10 @@ export function parseGuildManagePackets(packet: WtPacket): GuildManageUpdate {
 }
 
 export { PAGE_SIZE as GUILD_PAGE_SIZE };
+
+/** CBE guild list/member paging: index = one-based first row (page1→1, page2→9 @ size 8). */
+export function guildPageRowIndex(page: number, pageSize = PAGE_SIZE): number {
+  const p = Math.max(1, page | 0);
+  const size = Math.max(1, pageSize | 0);
+  return (p - 1) * size + 1;
+}

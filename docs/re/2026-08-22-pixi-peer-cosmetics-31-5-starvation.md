@@ -42,6 +42,19 @@ Date: 2026-08-22
 3. `__pixiDebugPeerCosmetics()`：`peersWithCos > 0`，`plist.cachedSheets` 随附近翅增加。
 4. 取证不应再因单纯 ticker 渲染刷出持续 10s+ `RENDER_STALL`（除非真卡帧）。
 
+## 2026-08-23 性能热修（peer 31/5 限频）
+
+发版后只要有 pending peer 化妆品就不走 idle 快路径，30 人同图 poll 全变重 → 队列积压卡顿。
+
+| 项 | 行为 |
+|----|------|
+| 默认 cadence | peer `31/5` 最多 **30s** 刷一次（编译期常量，启动日志 `cosmetics_peer_flush_ms=30000`） |
+| 换装/新入队 | `cosmeticsPeerFlushLastMs=0`，下一 poll 立即刷 |
+| 自有 `31/2` | `cosmeticsStatePushPending` 仍下一 poll 即刷 |
+| idle 快路径 | 仅 `poll_needs_cosmetics_flush` 为真时阻塞 |
+| 服务端踢线 | `presence_timeout_ms=90000`（900 tick × 100ms） |
+| Gateway 代发 | `PIX_GATEWAY_KEEPALIVE_MS` 默认 **30000**；`PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS` 默认 **60000** |
+
 ## unresolved
 
 - 附近玩家若未解锁/未装备 Pixi 化妆品，仍应无翅（预期）。

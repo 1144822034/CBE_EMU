@@ -9,7 +9,9 @@ enum
     VM_NET_MOCK_COSMETIC_KIND_WING = 2,
     VM_NET_MOCK_COSMETIC_KIND_MOUNT = 3,
     /* Match VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX — 8 slots dropped peers in towns. */
-    VM_NET_MOCK_COSMETIC_NOTICE_MAX = 64
+    VM_NET_MOCK_COSMETIC_NOTICE_MAX = 64,
+    /* Peer wing/mount/chenghao 31/5 refresh cadence on scene_sync_poll. */
+    VM_MOCK_SERVICE_COSMETICS_PEER_FLUSH_MS = 30000u
 };
 
 static const u32 g_vm_net_mock_chenghao_ids[] = {
@@ -393,6 +395,8 @@ static bool vm_mock_service_session_enqueue_cosmetic_notice(
             target->cosmeticNotices[i].eqChenghao = eqChenghao;
             target->cosmeticNotices[i].eqWing = eqWing;
             target->cosmeticNotices[i].eqMount = eqMount;
+            /* Equip change: allow next poll to flush without waiting the cadence. */
+            target->cosmeticsPeerFlushLastMs = 0;
             return true;
         }
         if (freeIdx == 0xff && !target->cosmeticNotices[i].valid)
@@ -411,6 +415,7 @@ static bool vm_mock_service_session_enqueue_cosmetic_notice(
     target->cosmeticNotices[freeIdx].eqChenghao = eqChenghao;
     target->cosmeticNotices[freeIdx].eqWing = eqWing;
     target->cosmeticNotices[freeIdx].eqMount = eqMount;
+    target->cosmeticsPeerFlushLastMs = 0;
     return true;
 }
 
@@ -454,6 +459,37 @@ static void vm_mock_service_broadcast_cosmetics31_5(u32 roleId,
     }
 }
 
+static bool vm_mock_service_session_has_peer_cosmetic_notices(
+    const vm_mock_service_client_session *observer)
+{
+    u8 i;
+
+    if (observer == NULL)
+        return false;
+    for (i = 0; i < VM_NET_MOCK_COSMETIC_NOTICE_MAX; ++i)
+    {
+        if (observer->cosmeticNotices[i].valid)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_mock_service_session_peer_cosmetics_due_flush(
+    const vm_mock_service_client_session *observer)
+{
+    u32 nowMs;
+    u32 elapsed;
+
+    if (!vm_mock_service_session_has_peer_cosmetic_notices(observer))
+        return false;
+    if (observer->cosmeticsPeerFlushLastMs == 0)
+        return true;
+    nowMs = scheduler_get_tick_ms();
+    elapsed = nowMs >= observer->cosmeticsPeerFlushLastMs ?
+                  nowMs - observer->cosmeticsPeerFlushLastMs : 0;
+    return elapsed >= VM_MOCK_SERVICE_COSMETICS_PEER_FLUSH_MS;
+}
+
 static int vm_net_mock_append_pending_cosmetics31_5(u8 *out, u32 outCap, u32 *pos,
                                                     vm_mock_service_client_session *observer,
                                                     u8 maxObjects)
@@ -462,6 +498,8 @@ static int vm_net_mock_append_pending_cosmetics31_5(u8 *out, u32 outCap, u32 *po
     u8 i;
     if (out == NULL || pos == NULL || observer == NULL)
         return -1;
+    if (!vm_mock_service_session_peer_cosmetics_due_flush(observer))
+        return 0;
     for (i = 0; i < VM_NET_MOCK_COSMETIC_NOTICE_MAX && appended < maxObjects; ++i)
     {
         if (!observer->cosmeticNotices[i].valid)
@@ -476,6 +514,8 @@ static int vm_net_mock_append_pending_cosmetics31_5(u8 *out, u32 outCap, u32 *po
                sizeof(observer->cosmeticNotices[i]));
         ++appended;
     }
+    if (appended > 0)
+        observer->cosmeticsPeerFlushLastMs = scheduler_get_tick_ms();
     return appended;
 }
 
@@ -512,21 +552,15 @@ static void vm_mock_service_session_sync_online_cosmetics(
     vm_mock_service_client_session *session,
     const vm_net_mock_role_state *role);
 
-static bool vm_mock_service_session_has_pending_cosmetics(
+/* True when scene_sync_poll must run cosmetics work this tick (not merely queued). */
+static bool vm_mock_service_session_poll_needs_cosmetics_flush(
     const vm_mock_service_client_session *observer)
 {
-    u8 i;
-
     if (observer == NULL)
         return false;
     if (observer->cosmeticsStatePushPending)
         return true;
-    for (i = 0; i < VM_NET_MOCK_COSMETIC_NOTICE_MAX; ++i)
-    {
-        if (observer->cosmeticNotices[i].valid)
-            return true;
-    }
-    return false;
+    return vm_mock_service_session_peer_cosmetics_due_flush(observer);
 }
 
 static void vm_mock_service_session_enqueue_peer_cosmetics(

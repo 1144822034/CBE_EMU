@@ -7738,9 +7738,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         if (transferLen != 0)
             return transferLen;
         action = "arena-enter-refuse";
-        dialogText =
-            "\xb1\xbe\xb4\xce\xb1\xc8\xce\xe4\xce\xb4\xbf\xaa\xb7\xc5\xbb\xf2"
-            "\xd2\xd1\xb9\xd8\xb1\xd5\xbd\xf8\xb3\xa1\xa1\xa3"; /* 本次比武未开放或已关闭进场。 */
+        dialogText = vm_mock_arena_enter_refuse_tip();
         optionNames[optionCount] = "\xc8\xb7\xb6\xa8"; /* 确定 */
         optionDescriptions[optionCount] = "";
         optionValues[optionCount] = 0;
@@ -9106,7 +9104,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     else if (!vm_net_mock_role_add_backpack_item_to_role(
                                  role, buyItem->itemId, 1, 0, &backpackAddSeq,
                                  buyItem->isEquip ? "coolmall-equip-buy"
-                                                  : "coolmall-item-buy"))
+                                                  : "coolmall-item-buy",
+                                 NULL))
                     {
                         dialogText =
                             "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3";
@@ -9427,7 +9426,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 if (!vm_net_mock_role_add_backpack_item_to_role(
                         role, buyItem->itemId, 1, 0, &backpackAddSeq,
                         buyItem->isEquip ? "npc-equipment-buy"
-                                         : "npc-medicine-buy"))
+                                         : "npc-medicine-buy",
+                        NULL))
                 {
                     if (payWcoin)
                         role->wcoin += buyItem->price;

@@ -82,6 +82,14 @@ CREATE TABLE IF NOT EXISTS `server_data_migrations` (
   PRIMARY KEY (`migration_name`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `server_registration_daily` (
+  `day_ymd` INT UNSIGNED NOT NULL COMMENT 'YYYYMMDD local server day',
+  `register_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`day_ymd`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `server_login_servers` (
   `server_id` INT UNSIGNED NOT NULL,
   `display_name` VARBINARY(31) NOT NULL,
@@ -608,7 +616,8 @@ CREATE TABLE IF NOT EXISTS `server_arena_config` (
   `scene` VARBINARY(64) NOT NULL,
   `spawn_x` SMALLINT UNSIGNED NOT NULL DEFAULT 120,
   `spawn_y` SMALLINT UNSIGNED NOT NULL DEFAULT 120,
-  `weekday_mask` INT UNSIGNED NOT NULL DEFAULT 72 COMMENT 'bit0=Sun..bit6=Sat; default Wed+Sat',
+  `weekday_mask` INT UNSIGNED NOT NULL DEFAULT 126 COMMENT 'bit0=Sun..bit6=Sat; derived from weekday_brackets',
+  `weekday_brackets` VARCHAR(32) NOT NULL DEFAULT '0,70,50,10,70,50,10' COMMENT 'Sun..Sat: 0=rest,10/50/70 one bracket per day',
   `entry_start_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1220,
   `entry_end_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1229,
   `match_start_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1230,
