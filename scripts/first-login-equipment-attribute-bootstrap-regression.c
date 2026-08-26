@@ -327,6 +327,19 @@ static bool equip_vital_bonus_pair(vm_net_mock_role_state *role)
             role->equippedItems[mpItem->slot].itemId = mpItem->itemId;
             role->equippedItems[mpItem->slot].durability = mpItem->durabilityMax;
             role->equippedItems[mpItem->slot].durabilityMax = mpItem->durabilityMax;
+            if (!vm_net_mock_equipment_enhancement_ensure_affixes(
+                    hpItem, 0,
+                    &role->equippedItems[hpItem->slot].enhanceAffixes,
+                    role->roleId ^ hpItem->itemId ^
+                        ((hpItem->slot + 1u) * 0x9e3779b9u)) ||
+                !vm_net_mock_equipment_enhancement_ensure_affixes(
+                    mpItem, 0,
+                    &role->equippedItems[mpItem->slot].enhanceAffixes,
+                    role->roleId ^ mpItem->itemId ^
+                        ((mpItem->slot + 1u) * 0x9e3779b9u)))
+            {
+                return false;
+            }
             return true;
         }
     }
@@ -427,10 +440,15 @@ static int assert_group_equipment_seed(const u8 *packet, u32 length,
         !vm_net_mock_get_object_entry_bytes(equipmentPayload,
                                             equipmentPayloadLen, "iteminfo",
                                             &itemInfo, &itemInfoLen) ||
-        itemInfo == NULL || itemInfoLen < 3 || itemInfo[0] != 0 ||
-        itemInfo[1] != 1 || itemInfo[2] == 0)
+        /* The temporary compact 30/21 fallback must not also compact worn
+         * equipment.  This fixture has exactly two worn rows, each with the
+         * four persisted +4/+8/+12/+16 stage entries. */
+        itemInfo == NULL || itemInfoLen != 161 || itemInfo[0] != 0 ||
+        itemInfo[1] != 1 || itemInfo[2] != 2 ||
+        itemInfo[27] != 0 || itemInfo[28] != 1 || itemInfo[29] != 4 ||
+        itemInfo[106] != 0 || itemInfo[107] != 1 || itemInfo[108] != 4)
     {
-        fputs("group bootstrap lacks the ordered durable equipment instance\n",
+        fputs("group bootstrap lacks full stage plans for worn equipment\n",
               stderr);
         return 1;
     }
@@ -455,7 +473,7 @@ static int assert_group_equipment_seed(const u8 *packet, u32 length,
     return 0;
 }
 
-static int assert_grid_equipment_stage_plan(const u8 *packet, u32 length)
+static int assert_grid_legacy_compact_plan(const u8 *packet, u32 length)
 {
     const u8 *gridPayload = NULL;
     const u8 *itemInfo = NULL;
@@ -484,36 +502,19 @@ static int assert_grid_equipment_stage_plan(const u8 *packet, u32 length)
         !vm_net_mock_get_object_entry_bytes(gridPayload, gridPayloadLen,
                                             "iteminfo", &itemInfo,
                                             &itemInfoLen) ||
-        itemInfo == NULL || itemInfoLen != 106 ||
-        /* First row is a normal item: zero attribute rows stay compact. */
-        itemInfo[26] != 0 ||
-        /* Second row is a +0 equipment instance: 4 future stages are
-         * installed on first construction, not added by 29/3 later. */
-        itemInfo[53] != 4)
+        itemInfo == NULL || itemInfoLen != 54 ||
+        /* The normal row and the equipment row both use the legacy compact
+         * current/max-enhancement form.  This keeps old Android's combined
+         * group reply under its parser-pool boundary. */
+        itemInfo[26] != 0 || itemInfo[53] != 0)
     {
         fprintf(stderr,
-                "grid did not encode one compact item plus one four-stage "
-                "equipment instance: iteminfo_len=%u attr0=%u attr1=%u\n",
+                "grid did not preserve the legacy compact item form: "
+                "iteminfo_len=%u attr0=%u attr1=%u\n",
                 itemInfoLen,
                 itemInfo != NULL && itemInfoLen > 26 ? itemInfo[26] : 0,
                 itemInfo != NULL && itemInfoLen > 53 ? itemInfo[53] : 0);
         return 1;
-    }
-    for (u8 stage = 0; stage < 4; ++stage)
-    {
-        u32 attr = 54u + (u32)stage * 13u;
-
-        if (itemInfo[attr] != 0 || itemInfo[attr + 1] != 1 ||
-            itemInfo[attr + 2] != (u8)((stage + 1u) * 4u) ||
-            itemInfo[attr + 3] != 0 || itemInfo[attr + 4] != 1 ||
-            itemInfo[attr + 5] == 0 || itemInfo[attr + 6] != 0 ||
-            itemInfo[attr + 7] != 1 || itemInfo[attr + 8] != 0 ||
-            itemInfo[attr + 9] != 0 || itemInfo[attr + 10] != 2 ||
-            (itemInfo[attr + 11] == 0 && itemInfo[attr + 12] == 0))
-        {
-            fprintf(stderr, "grid stage %u is missing or malformed\n", stage);
-            return 1;
-        }
     }
     return 0;
 }
@@ -649,7 +650,7 @@ int main(void)
         groupRequest, groupRequestLen, response, sizeof(response));
     if (assert_group_equipment_seed(response, responseLen, roleId, true,
                                     true) != 0 ||
-        assert_grid_equipment_stage_plan(response, responseLen) != 0)
+        assert_grid_legacy_compact_plan(response, responseLen) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_group_type1_response(
@@ -670,6 +671,6 @@ int main(void)
                                     true) != 0)
         return 1;
 
-    printf("first-login equipment attribute bootstrap regression passed type3_completion=1\n");
+    printf("first-login legacy compact bootstrap regression passed type3_completion=1\n");
     return 0;
 }
