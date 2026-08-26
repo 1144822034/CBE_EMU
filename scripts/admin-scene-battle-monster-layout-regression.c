@@ -15,12 +15,18 @@ static bool verify_scene_battle_draft_catalog_contract(void)
     size_t lengths[] = {strlen(scene), strlen(monsterId), strlen(name)};
     vm_net_mock_monster_catalog_scene_battle_draft_context context;
     vm_net_mock_monster_admin_row rows[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    vm_net_mock_monster_admin_row sourceTemplate;
+    vm_net_mock_monster_admin_row clonedTemplate;
     int index = -1;
+    u32 firstGeneratedId = 0;
+    u32 secondGeneratedId = 0;
     u32 listed = 0;
     bool listedDraft = false;
 
     memset(&context, 0, sizeof(context));
     memset(rows, 0, sizeof(rows));
+    memset(&sourceTemplate, 0, sizeof(sourceTemplate));
+    memset(&clonedTemplate, 0, sizeof(clonedTemplate));
     memset(g_vm_net_mock_monster_catalog_entries, 0,
            sizeof(g_vm_net_mock_monster_catalog_entries));
     memset(g_vm_net_mock_monster_catalog_draft_only, 0,
@@ -35,8 +41,39 @@ static bool verify_scene_battle_draft_catalog_contract(void)
     g_vm_net_mock_monster_db_loaded = true;
     g_vm_net_mock_monster_db_valid = false;
     vm_net_mock_monster_catalog_seed_base_entries();
+    sourceTemplate.enemyId = 1000;
+    sourceTemplate.level = 45;
+    sourceTemplate.family = VM_NET_MOCK_MONSTER_BOSS;
+    sourceTemplate.hp = 12000;
+    sourceTemplate.mp = 3200;
+    sourceTemplate.attack = 680;
+    sourceTemplate.defense = 440;
+    sourceTemplate.exp = 900;
+    sourceTemplate.gold = 650;
+    sourceTemplate.dropCount = 1;
+    sourceTemplate.drops[0].itemId = 12;
+    sourceTemplate.drops[0].rateBasisPoints = 250;
 
-    if (!vm_net_mock_monster_catalog_scene_battle_draft_row(
+    if (!vm_net_mock_scene_battle_monster_admin_choose_monster_id(
+            VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN - 1u,
+            &firstGeneratedId, NULL) ||
+        firstGeneratedId != VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN ||
+        firstGeneratedId == 1000u ||
+        !vm_net_mock_scene_battle_monster_admin_prepare_reference_clone(
+            &sourceTemplate, firstGeneratedId, &clonedTemplate, NULL) ||
+        sourceTemplate.enemyId != 1000u ||
+        clonedTemplate.enemyId != firstGeneratedId ||
+        clonedTemplate.level != sourceTemplate.level ||
+        clonedTemplate.hp != sourceTemplate.hp ||
+        clonedTemplate.drops[0].itemId != sourceTemplate.drops[0].itemId ||
+        clonedTemplate.drops[0].rateBasisPoints !=
+            sourceTemplate.drops[0].rateBasisPoints ||
+        vm_net_mock_monster_catalog_add_scene_entry(firstGeneratedId) < 0 ||
+        !vm_net_mock_scene_battle_monster_admin_choose_monster_id(
+            VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN - 1u,
+            &secondGeneratedId, NULL) ||
+        secondGeneratedId != firstGeneratedId + 1u ||
+        !vm_net_mock_monster_catalog_scene_battle_draft_row(
             &context, 3, values, lengths) ||
         context.invalid || context.rows != 1 || context.added != 1 ||
         context.rejected != 0 ||
@@ -102,12 +139,14 @@ int main(void)
         strstr(page,
                "@media(max-width:560px){.battle-monster-fields{grid-template-columns:1fr}") == NULL ||
         strstr(page,
-               "<div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>怪物</span>") == NULL ||
+               "<div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>参考怪物（保存时生成新怪物 ID）</span>") == NULL ||
         strstr(page, "id=\"scene-battle-monster-search\"") == NULL ||
         strstr(page, "id=\"scene-battle-monster-list\"") == NULL ||
         strstr(page, "data-scene-battle-monster-scene=\"") == NULL ||
         strstr(page, "同一场景可保存多条") == NULL ||
-        strstr(page, "怪物 ID 会立即出现在“怪物管理”") == NULL ||
+        strstr(page, "保存会自动分配一个新的独立怪物 ID") == NULL ||
+        strstr(page, "参考怪物（保存时生成新怪物 ID）") == NULL ||
+        strstr(page, "name=\"source_monster_id\"") == NULL ||
         strstr(g_vm_mock_admin_script,
                "const setupSceneBattleMonsterSearch=()=>{") == NULL ||
         strstr(page, "<span>显示名称（GBK ≤29字节）</span>") == NULL ||

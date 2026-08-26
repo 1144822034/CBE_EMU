@@ -10385,7 +10385,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         return;
     }
     vm_mock_admin_text_appendf(&page,
-        "<div class=\"callout\"><strong>保存仅更新草稿，且同一场景可保存多条。</strong>每次在“新增下一条”中保存，都会追加一条独立的怪物 ID、坐标和数量配置；怪物 ID 会立即出现在“怪物管理”，可先配置属性和掉落，但只有部署后客户端才会创建战斗节点。点击一次部署会把全部启用草稿一起编译进场景。相同场景、怪物 ID 和坐标不能重复；总节点仍会在部署时按客户端最多 24 个非本地场景节点严格校验。本体 Actor 只能选择原生 SCE2 kind-3 战斗节点已使用过的资源；部署会从首次捕获的服务端基础 SCE 重建完整记录（含 field18 效果 Actor），并校验 Actor 依赖和记录解析。c 开头的城市会同时生成带专属 b_ 背景的非 c 战斗镜像，供 NPC 副本传送到该城市并按正常碰撞开战；原城市界面仍保留原生城镇交互。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
+        "<div class=\"callout\"><strong>保存仅更新草稿，且同一场景可保存多条。</strong>新增时选择的“参考怪物”只用于复制初始属性、奖励和掉落；保存会自动分配一个新的独立怪物 ID，绝不会改写参考怪物。新 ID 会立即出现在“怪物管理”，可继续单独配置，但只有部署后客户端才会创建战斗节点。点击一次部署会把全部启用草稿一起编译进场景。相同场景、怪物 ID 和坐标不能重复；总节点仍会在部署时按客户端最多 24 个非本地场景节点严格校验。本体 Actor 只能选择原生 SCE2 kind-3 战斗节点已使用过的资源；部署会从首次捕获的服务端基础 SCE 重建完整记录（含 field18 效果 Actor），并校验 Actor 依赖和记录解析。c 开头的城市会同时生成带专属 b_ 背景的非 c 战斗镜像，供 NPC 副本传送到该城市并按正常碰撞开战；原城市界面仍保留原生城镇交互。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
         "<form class=\"deploy\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"deploy-scene-battle-monsters\"><input type=\"hidden\" name=\"scene\" value=\"");
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
@@ -10394,9 +10394,9 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         selectedSceneUtf8);
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
-        "\"><div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>怪物</span>");
+        "\"><div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>参考怪物（保存时生成新怪物 ID）</span>");
     vm_mock_admin_render_monster_picker_field(
-        &page, "monster_id", 0, true, false, false);
+        &page, "source_monster_id", 0, true, false, false);
     vm_mock_admin_text_appendf(
         &page,
         "</label><label class=\"field battle-monster-wide\"><span>显示名称（GBK ≤29字节）</span><input name=\"display_name\" maxlength=\"29\" required></label><label class=\"field battle-monster-wide\"><span>Actor 资源</span>");
@@ -10425,9 +10425,8 @@ static void vm_mock_admin_render_scene_battle_monster_page(
             rows[i].entryId);
         vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
         vm_mock_admin_text_appendf(&page,
-        "\"><div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>怪物</span>");
-        vm_mock_admin_render_monster_picker_field(
-            &page, "monster_id", rows[i].monsterId, true, false, false);
+        "\"><div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>怪物 ID（保存后保持不变）</span><input value=\"%u\" readonly></label>",
+        rows[i].monsterId);
         vm_mock_admin_text_appendf(
             &page,
             "</label><label class=\"field battle-monster-wide\"><span>显示名称</span><input name=\"display_name\" maxlength=\"29\" value=\"");
@@ -13630,13 +13629,16 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
     char actorUtf8[192];
     char effectUtf8[192];
     char enabledText[8];
+    char cloneMessage[256];
     const char *error = NULL;
-    u32 monsterId = 0;
+    u32 sourceMonsterId = 0;
     u32 posX = 0;
     u32 posY = 0;
     u32 quantity = 0;
     u32 visualHint = 0;
     u16 nativeVisualHint = 0;
+    vm_net_mock_monster_admin_row sourceMonster;
+    vm_net_mock_scene_battle_monster_admin_row existingRow;
 
     memset(&row, 0, sizeof(row));
     memset(sceneUtf8, 0, sizeof(sceneUtf8));
@@ -13645,6 +13647,9 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
     memset(actorUtf8, 0, sizeof(actorUtf8));
     memset(effectUtf8, 0, sizeof(effectUtf8));
     memset(enabledText, 0, sizeof(enabledText));
+    memset(cloneMessage, 0, sizeof(cloneMessage));
+    memset(&sourceMonster, 0, sizeof(sourceMonster));
+    memset(&existingRow, 0, sizeof(existingRow));
     if (!vm_mock_admin_scene_from_form(body, sceneUtf8, sizeof(sceneUtf8),
                                        runtimeScene, sizeof(runtimeScene)))
     {
@@ -13691,8 +13696,6 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
         return;
     }
     if (strcmp(action, "save-scene-battle-monster") != 0 ||
-        !vm_mock_admin_form_u32(body, "monster_id", 0xffffu, &monsterId) ||
-        monsterId == 0 ||
         !vm_mock_admin_form_u32(body, "pos_x", 0xffffu, &posX) ||
         posX == 0 ||
         !vm_mock_admin_form_u32(body, "pos_y", 0xffffu, &posY) ||
@@ -13721,10 +13724,9 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
     {
         vm_mock_admin_redirect_scene_battle_monsters(
             client, sceneUtf8, "error",
-            "怪物 ID、名称、本体 Actor、退场特效、坐标、数量、视觉提示或状态无效");
+            "参考怪物、名称、本体 Actor、退场特效、坐标、数量、视觉提示或状态无效");
         return;
     }
-    row.monsterId = (u16)monsterId;
     row.x = (u16)posX;
     row.y = (u16)posY;
     row.quantity = (u16)quantity;
@@ -13738,6 +13740,43 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
     }
     row.visualHint = nativeVisualHint;
     row.enabled = strcmp(enabledText, "1") == 0;
+    if (row.entryId == 0)
+    {
+        if (!vm_mock_admin_form_u32(body, "source_monster_id", 0xffffu,
+                                    &sourceMonsterId) ||
+            sourceMonsterId == 0 ||
+            !vm_net_mock_scene_battle_monster_reference_monster_get(
+                sourceMonsterId, &sourceMonster))
+        {
+            vm_mock_admin_redirect_scene_battle_monsters(
+                client, sceneUtf8, "error",
+                "请选择可作为属性和掉落模板的参考怪物");
+            return;
+        }
+        if (!vm_net_mock_scene_battle_monster_admin_allocate_monster_id(
+                &sourceMonsterId, &error))
+        {
+            vm_mock_admin_redirect_scene_battle_monsters(
+                client, sceneUtf8, "error",
+                error ? error : "无法分配新的场景战斗怪 ID");
+            return;
+        }
+        row.monsterId = (u16)sourceMonsterId;
+    }
+    else if (!vm_net_mock_scene_battle_monster_admin_get_entry(
+                 runtimeScene, row.entryId, &existingRow))
+    {
+        vm_mock_admin_redirect_scene_battle_monsters(
+            client, sceneUtf8, "error",
+            "该场景战斗怪已不存在或页面已过期");
+        return;
+    }
+    else
+    {
+        /* Existing drafts keep their generated identity even if a stale or
+         * forged form tries to submit another monster ID. */
+        row.monsterId = existingRow.monsterId;
+    }
     if (!vm_net_mock_scene_battle_monster_admin_save(runtimeScene, &row,
                                                       &error))
     {
@@ -13746,9 +13785,34 @@ static void vm_mock_admin_handle_scene_battle_monster_action(
             error ? error : "保存场景战斗怪草稿失败");
         return;
     }
+    if (row.entryId == 0 &&
+        !vm_net_mock_scene_battle_monster_admin_clone_reference(
+            &sourceMonster, row.monsterId, &error))
+    {
+        snprintf(cloneMessage, sizeof(cloneMessage),
+                 "复制参考怪物 ID %u 的属性和掉落失败%s",
+                 sourceMonster.enemyId,
+                 vm_net_mock_scene_battle_monster_admin_delete_generated(
+                     runtimeScene, row.monsterId)
+                     ? "，已撤销新草稿"
+                     : "，新草稿已保留，请检查 MySQL 后删除或重新保存");
+        vm_mock_admin_redirect_scene_battle_monsters(
+            client, sceneUtf8, "error", cloneMessage);
+        return;
+    }
+    if (row.entryId == 0)
+    {
+        printf("[info][mock-admin] scene_battle_monster_new_identity "
+               "scene=%s source_monster=%u monster=%u "
+               "action=clone-profile-before-deploy\n",
+               runtimeScene, sourceMonster.enemyId, row.monsterId);
+        snprintf(cloneMessage, sizeof(cloneMessage),
+                 "场景战斗怪草稿已新增：参考怪物 ID %u 已复制为新怪物 ID %u；请部署后客户端才会创建战斗节点",
+                 sourceMonster.enemyId, row.monsterId);
+    }
     vm_mock_admin_redirect_scene_battle_monsters(
         client, sceneUtf8, "ok",
-        row.entryId == 0 ? "场景战斗怪草稿已新增；请部署后客户端才会创建战斗节点" :
+        row.entryId == 0 ? cloneMessage :
                            "场景战斗怪草稿已保存；请部署后客户端才会更新战斗节点");
 }
 
