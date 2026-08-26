@@ -9962,14 +9962,21 @@ static bool vm_net_mock_find_teleport_stone_smap_scene_dsh(const char *path,
     return false;
 }
 
-/* Ordinary death recovery first finds a nearby safe sMap sub-scene. If the
- * local map component has none, wMap supplies the nearest town fallback.
+/* Ordinary death recovery first finds a nearby safe sMap sub-scene. Main-city
+ * sources instead recover at their city centre. If the local map component
+ * has no safe sub-scene, wMap and wMapLine supply the nearest city fallback
+ * along the authored travel lines.
  * Both tables mark safety with their authored monster-level value; SCE
  * resources supply the actual player landing point. */
 enum
 {
     VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX = 192,
-    VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX = 64
+    VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX = 64,
+    VM_NET_MOCK_DEATH_RESPAWN_WMAP_LINE_MAX = 64,
+    /* The authored world-map canvas is 224x296.  Keep a bounded parser
+     * surface rather than accepting an arbitrary DSH coordinate allocation. */
+    VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX = 512,
+    VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE = 16
 };
 
 typedef struct
@@ -9986,9 +9993,24 @@ typedef struct
 typedef struct
 {
     u32 worldId;
-    u32 neighbors[4];
-    bool isTown;
+    u32 mapMarkerX;
+    u32 mapMarkerY;
+    /* These four IDs drive directional world-map cursor navigation.  They
+     * are not the travel graph: notably, 幽冥鬼府's UI-right ID is 蓬莱 while
+     * its authored line joins 蜀山. */
+    u32 uiNeighbors[4];
+    u32 baseSmapRowId;
+    bool isSafeWorld;
 } vm_net_mock_death_respawn_wmap_node;
+
+typedef struct
+{
+    u32 lineId;
+    u32 x1;
+    u32 y1;
+    u32 x2;
+    u32 y2;
+} vm_net_mock_death_respawn_wmap_line;
 
 static int vm_net_mock_death_respawn_find_wmap_node(
     const vm_net_mock_death_respawn_wmap_node *nodes, u32 count, u32 worldId)
@@ -10496,14 +10518,21 @@ static bool vm_net_mock_death_respawn_load_wmap_topology(
             }
             if (col == 0)
                 node.worldId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 4)
+                node.mapMarkerX = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 5)
+                node.mapMarkerY = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
             else if (col >= 8 && col <= 11)
-                node.neighbors[col - 8] = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                node.uiNeighbors[col - 8] = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 12)
+                node.baseSmapRowId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
             else if (col == 16)
             {
-                /* GBK "无": the authored wMap monster-level value for the
-                 * safe city maps (蓬莱、临安府、雁门关、蜀山、大理). */
-                node.isTown = vm_net_mock_death_respawn_is_safe_level(value,
-                                                                        valueLen);
+                /* GBK "无" identifies a safe world region.  It includes
+                 * the starter island 蓬莱 as well as the actual city worlds;
+                 * the city predicate below distinguishes those two cases. */
+                node.isSafeWorld = vm_net_mock_death_respawn_is_safe_level(value,
+                                                                             valueLen);
             }
             rowPos += valueLen;
         }
@@ -10514,6 +10543,297 @@ static bool vm_net_mock_death_respawn_load_wmap_topology(
     if (nodeCountOut)
         *nodeCountOut = nodeCount;
     return nodeCount != 0;
+}
+
+static bool vm_net_mock_death_respawn_load_wmap_lines(
+    vm_net_mock_death_respawn_wmap_line *lines, u32 lineCap, u32 *lineCountOut)
+{
+    char path[256];
+    u8 data[4096];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 headerBytes = 0;
+    u32 pos = 0;
+    u32 lineCount = 0;
+
+    if (lineCountOut)
+        *lineCountOut = 0;
+    if (lines == NULL || lineCap == 0 ||
+        !vm_net_mock_open_server_data_resource("wMapLine.dsh", ".dsh", NULL,
+                                               path, sizeof(path)))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (columnCount < 5 || columnCount > 64 || rowCount > lineCap ||
+        16u + headerBytes > len)
+    {
+        return false;
+    }
+    pos = 16u + headerBytes;
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        vm_net_mock_death_respawn_wmap_line line;
+        bool valid = true;
+
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            return false;
+        memset(&line, 0, sizeof(line));
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+            {
+                valid = false;
+                break;
+            }
+            if (col == 0)
+                line.lineId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 1)
+                line.x1 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 2)
+                line.y1 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 3)
+                line.x2 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 4)
+                line.y2 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            rowPos += valueLen;
+        }
+        if (valid && line.lineId != 0)
+            lines[lineCount++] = line;
+        pos = rowEnd;
+    }
+    if (lineCountOut)
+        *lineCountOut = lineCount;
+    return lineCount != 0;
+}
+
+static int vm_net_mock_death_respawn_wmap_index_at_canvas_point(
+    const vm_net_mock_death_respawn_wmap_node *wmap, u32 wmapCount,
+    u32 x, u32 y)
+{
+    if (wmap == NULL)
+        return -1;
+    for (u32 i = 0; i < wmapCount; ++i)
+    {
+        if (x >= wmap[i].mapMarkerX &&
+            x < wmap[i].mapMarkerX + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE &&
+            y >= wmap[i].mapMarkerY &&
+            y < wmap[i].mapMarkerY + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE)
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* wMap.dsh position X/Y is the upper-left of a 16x16 world-node sprite and
+ * wMapLine.dsh contains the rendered travel lines.  A line that crosses a
+ * node must be split there: a traveller enters that world before continuing
+ * along the next rendered segment.  Rasterising this small authored canvas
+ * gives that split without inventing connections from directional UI fields.
+ */
+static bool vm_net_mock_death_respawn_build_wmap_line_topology(
+    const vm_net_mock_death_respawn_wmap_node *wmap, u32 wmapCount,
+    const vm_net_mock_death_respawn_wmap_line *lines, u32 lineCount,
+    bool *edgesOut, u32 edgesOutCount)
+{
+    u32 maxX = 0;
+    u32 maxY = 0;
+    u32 width = 0;
+    u32 height = 0;
+    u32 cellCount = 0;
+    u8 *road = NULL;
+    u32 *queue = NULL;
+    bool result = false;
+
+    if (edgesOut != NULL && edgesOutCount != 0)
+        memset(edgesOut, 0, edgesOutCount * sizeof(*edgesOut));
+    if (wmap == NULL || wmapCount == 0 ||
+        wmapCount > VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX ||
+        lines == NULL || lineCount == 0 ||
+        edgesOut == NULL || edgesOutCount < wmapCount * wmapCount)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < wmapCount; ++i)
+    {
+        if (wmap[i].mapMarkerX >
+                VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX -
+                    VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE ||
+            wmap[i].mapMarkerY >
+                VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX -
+                    VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE)
+        {
+            return false;
+        }
+        if (wmap[i].mapMarkerX + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE > maxX)
+            maxX = wmap[i].mapMarkerX + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE;
+        if (wmap[i].mapMarkerY + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE > maxY)
+            maxY = wmap[i].mapMarkerY + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE;
+    }
+    for (u32 i = 0; i < lineCount; ++i)
+    {
+        if (lines[i].x1 >= VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX ||
+            lines[i].y1 >= VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX ||
+            lines[i].x2 >= VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX ||
+            lines[i].y2 >= VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX)
+        {
+            return false;
+        }
+        if (lines[i].x1 > maxX)
+            maxX = lines[i].x1;
+        if (lines[i].x2 > maxX)
+            maxX = lines[i].x2;
+        if (lines[i].y1 > maxY)
+            maxY = lines[i].y1;
+        if (lines[i].y2 > maxY)
+            maxY = lines[i].y2;
+    }
+    width = maxX + 1;
+    height = maxY + 1;
+    if (width == 0 || height == 0 ||
+        width > VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX ||
+        height > VM_NET_MOCK_DEATH_RESPAWN_WMAP_CANVAS_AXIS_MAX ||
+        width > 0xffffffffu / height)
+    {
+        return false;
+    }
+    cellCount = width * height;
+    road = (u8 *)calloc(cellCount, sizeof(*road));
+    queue = (u32 *)malloc(cellCount * sizeof(*queue));
+    if (road == NULL || queue == NULL)
+        goto done;
+
+    for (u32 i = 0; i < lineCount; ++i)
+    {
+        int x = (int)lines[i].x1;
+        int y = (int)lines[i].y1;
+        const int targetX = (int)lines[i].x2;
+        const int targetY = (int)lines[i].y2;
+        const int deltaX = targetX >= x ? targetX - x : x - targetX;
+        const int deltaY = targetY >= y ? targetY - y : y - targetY;
+        const int stepX = targetX >= x ? 1 : -1;
+        const int stepY = targetY >= y ? 1 : -1;
+        int error = deltaX - deltaY;
+
+        for (;;)
+        {
+            road[(u32)y * width + (u32)x] = 1;
+            if (x == targetX && y == targetY)
+                break;
+            {
+                const int twiceError = error * 2;
+
+                if (twiceError > -deltaY)
+                {
+                    error -= deltaY;
+                    x += stepX;
+                }
+                if (twiceError < deltaX)
+                {
+                    error += deltaX;
+                    y += stepY;
+                }
+            }
+        }
+    }
+
+    /* Remove the inside of every world node.  The exterior fragments on its
+     * sides become separate road components, so no route can skip through an
+     * intervening world map node. */
+    for (u32 i = 0; i < wmapCount; ++i)
+    {
+        for (u32 y = wmap[i].mapMarkerY;
+             y < wmap[i].mapMarkerY + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE;
+             ++y)
+        {
+            for (u32 x = wmap[i].mapMarkerX;
+                 x < wmap[i].mapMarkerX + VM_NET_MOCK_DEATH_RESPAWN_WMAP_NODE_SIZE;
+                 ++x)
+            {
+                road[y * width + x] = 0;
+            }
+        }
+    }
+
+    for (u32 start = 0; start < cellCount; ++start)
+    {
+        bool attached[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
+        u32 queueHead = 0;
+        u32 queueTail = 0;
+
+        if (road[start] != 1)
+            continue;
+        memset(attached, 0, sizeof(attached));
+        road[start] = 2;
+        queue[queueTail++] = start;
+        while (queueHead < queueTail)
+        {
+            const u32 point = queue[queueHead++];
+            const u32 x = point % width;
+            const u32 y = point / width;
+            static const int offsets[4][2] = {
+                {0, -1}, {1, 0}, {0, 1}, {-1, 0}
+            };
+
+            for (u32 side = 0; side < 4; ++side)
+            {
+                const int nextX = (int)x + offsets[side][0];
+                const int nextY = (int)y + offsets[side][1];
+                int mapIndex = -1;
+                u32 nextPoint = 0;
+
+                if (nextX < 0 || nextY < 0 ||
+                    (u32)nextX >= width || (u32)nextY >= height)
+                {
+                    continue;
+                }
+                mapIndex = vm_net_mock_death_respawn_wmap_index_at_canvas_point(
+                    wmap, wmapCount, (u32)nextX, (u32)nextY);
+                if (mapIndex >= 0)
+                {
+                    attached[mapIndex] = true;
+                    continue;
+                }
+                nextPoint = (u32)nextY * width + (u32)nextX;
+                if (road[nextPoint] == 1)
+                {
+                    road[nextPoint] = 2;
+                    queue[queueTail++] = nextPoint;
+                }
+            }
+        }
+        for (u32 from = 0; from < wmapCount; ++from)
+        {
+            if (!attached[from])
+                continue;
+            for (u32 to = from + 1; to < wmapCount; ++to)
+            {
+                if (!attached[to])
+                    continue;
+                edgesOut[from * wmapCount + to] = true;
+                edgesOut[to * wmapCount + from] = true;
+                result = true;
+            }
+        }
+    }
+
+done:
+    free(queue);
+    free(road);
+    return result;
 }
 
 static bool vm_net_mock_find_town_center_smap_node(
@@ -10553,9 +10873,13 @@ static bool vm_net_mock_find_town_center_smap_node(
         unsigned long long dx = 0;
         unsigned long long dy = 0;
         unsigned long long distance = 0;
+        u16 spawnX = 0;
+        u16 spawnY = 0;
 
         if (smap[i].parentWorldId != townWorldId ||
-            !vm_net_mock_scene_name_is_download_key(smap[i].scene))
+            !vm_net_mock_scene_name_is_download_key(smap[i].scene) ||
+            !vm_net_mock_get_scene_reasonable_spawn_from_sce(
+                smap[i].scene, &spawnX, &spawnY, NULL))
         {
             continue;
         }
@@ -10579,6 +10903,42 @@ static bool vm_net_mock_find_town_center_smap_node(
     return true;
 }
 
+static bool vm_net_mock_death_respawn_scene_is_main_city_key(const char *scene)
+{
+    return scene != NULL && scene[0] == 'c' &&
+           scene[1] >= '0' && scene[1] <= '9' &&
+           scene[2] >= '0' && scene[2] <= '9' &&
+           (scene[1] != '0' || scene[2] != '0') &&
+           vm_net_mock_scene_name_is_download_key(scene);
+}
+
+static bool vm_net_mock_death_respawn_is_city_world(
+    const vm_net_mock_death_respawn_smap_node *smap, u32 smapCount,
+    const vm_net_mock_death_respawn_wmap_node *world)
+{
+    int baseSmapIndex = -1;
+    const char *scene = NULL;
+
+    if (smap == NULL || smapCount == 0 || world == NULL ||
+        world->worldId == 0 || world->baseSmapRowId == 0)
+        return false;
+    baseSmapIndex = vm_net_mock_death_respawn_find_smap_node(
+        smap, smapCount, world->baseSmapRowId);
+    if (baseSmapIndex < 0 ||
+        smap[baseSmapIndex].parentWorldId != world->worldId)
+    {
+        return false;
+    }
+    scene = smap[baseSmapIndex].scene;
+
+    /* The wMap "下级地图" row is the authoritative base child scene.  Its
+     * nonzero cNN prefix identifies the four main cities (c04临安府,
+     * c08雁门关, c14蜀山, c18大理).  c00蓬莱仙岛 is a special starter-island
+     * key rather than a main-city identifier, so it must not become a global
+     * town fallback. */
+    return vm_net_mock_death_respawn_scene_is_main_city_key(scene);
+}
+
 static bool vm_net_mock_resolve_nearest_safe_respawn(
     const char *fromScene, char *sceneOut, size_t sceneOutCap,
     u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
@@ -10586,13 +10946,18 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
 {
     vm_net_mock_death_respawn_smap_node smap[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
     vm_net_mock_death_respawn_wmap_node wmap[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
+    vm_net_mock_death_respawn_wmap_line
+        wmapLines[VM_NET_MOCK_DEATH_RESPAWN_WMAP_LINE_MAX];
     bool smapVisited[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
+    bool wmapLineEdges[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX *
+                       VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
     u32 smapQueue[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
     u32 smapDistance[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
     u32 wmapQueue[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
     u32 wmapDistance[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
     u32 smapCount = 0;
     u32 wmapCount = 0;
+    u32 wmapLineCount = 0;
     u32 sourceIndex = 0;
     u32 targetIndex = 0;
     u32 targetWorldId = 0;
@@ -10603,6 +10968,7 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
     u16 landingY = 0;
     const char *route = "unresolved";
     bool localSafeTargetFound = false;
+    bool sourceIsMainCityScene = false;
 
     if (sceneOut != NULL && sceneOutCap != 0)
         sceneOut[0] = 0;
@@ -10637,11 +11003,15 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
         return false;
     if (sourceSmapRowOut)
         *sourceSmapRowOut = smap[sourceIndex].rowId;
+    sourceIsMainCityScene = vm_net_mock_death_respawn_scene_is_main_city_key(
+        smap[sourceIndex].scene);
 
     /* A source world can contain authored safe rooms even when its parent
      * wMap is not itself a city.  Those sMap links describe the player's
      * immediate map topology, so they must win over a one-hop global map link
-     * to Penglai (for example 23蟠龙寨_03 -> 23蟠龙寨_02). */
+     * to Penglai (for example 23蟠龙寨_03 -> 23蟠龙寨_02).  A main-city source
+     * is the exception: its recovery contract uses that city's centre rather
+     * than retaining a particular safe gate sub-scene. */
     memset(smapVisited, 0, sizeof(smapVisited));
     queueHead = 0;
     queueTail = 0;
@@ -10652,7 +11022,7 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
     {
         u32 index = smapQueue[queueHead++];
 
-        if (smap[index].isSafe)
+        if (smap[index].isSafe && !sourceIsMainCityScene)
         {
             targetIndex = index;
             targetWorldId = smap[index].parentWorldId;
@@ -10675,12 +11045,21 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
         }
     }
 
-    /* Not every world has a local safe room.  Only then cross the authored
-     * wMap links and choose the nearest town centre. */
+    /* Not every world has a local safe room. Only then follow the authored
+     * world-map travel lines to the nearest reachable real city.  wMap's
+     * four directional IDs are cursor-navigation hints and can point at a
+     * visually adjacent but unconnected map (幽冥鬼府 -> 蓬莱), so they must
+     * not decide a death-revival route. */
     if (!localSafeTargetFound)
     {
         if (!vm_net_mock_death_respawn_load_wmap_topology(
-                wmap, sizeof(wmap) / sizeof(wmap[0]), &wmapCount))
+                wmap, sizeof(wmap) / sizeof(wmap[0]), &wmapCount) ||
+            !vm_net_mock_death_respawn_load_wmap_lines(
+                wmapLines, sizeof(wmapLines) / sizeof(wmapLines[0]),
+                &wmapLineCount) ||
+            !vm_net_mock_death_respawn_build_wmap_line_topology(
+                wmap, wmapCount, wmapLines, wmapLineCount, wmapLineEdges,
+                sizeof(wmapLineEdges) / sizeof(wmapLineEdges[0])))
         {
             return false;
         }
@@ -10697,21 +11076,22 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
         while (queueHead < queueTail)
         {
             u32 index = wmapQueue[queueHead++];
-            for (u32 edge = 0; edge < 4; ++edge)
+            for (u32 candidate = 0; candidate < wmapCount; ++candidate)
             {
-                int neighbor = vm_net_mock_death_respawn_find_wmap_node(
-                    wmap, wmapCount, wmap[index].neighbors[edge]);
-                if (neighbor >= 0 && wmapDistance[neighbor] == 0xffffffffu &&
+                if (wmapLineEdges[index * wmapCount + candidate] &&
+                    wmapDistance[candidate] == 0xffffffffu &&
                     queueTail < wmapCount)
                 {
-                    wmapDistance[neighbor] = wmapDistance[index] + 1;
-                    wmapQueue[queueTail++] = (u32)neighbor;
+                    wmapDistance[candidate] = wmapDistance[index] + 1;
+                    wmapQueue[queueTail++] = candidate;
                 }
             }
         }
         for (u32 i = 0; i < wmapCount; ++i)
         {
-            if (!wmap[i].isTown || wmapDistance[i] == 0xffffffffu)
+            if (!wmap[i].isSafeWorld || wmapDistance[i] == 0xffffffffu ||
+                !vm_net_mock_death_respawn_is_city_world(
+                    smap, smapCount, &wmap[i]))
                 continue;
             if (wmapDistance[i] < bestDistance ||
                 (wmapDistance[i] == bestDistance &&
@@ -10721,13 +11101,25 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
                 bestDistance = wmapDistance[i];
             }
         }
-        if (targetWorldId == 0 ||
-            !vm_net_mock_find_town_center_smap_node(
-                smap, smapCount, targetWorldId, &targetIndex))
+        if (targetWorldId == 0)
         {
+            printf("[warn][network] mock_death_respawn_nearest_city_unresolved "
+                   "source_scene=%s source_smap=%u source_world=%u "
+                   "reason=no-reachable-sce-backed-main-city\n",
+                   fromScene, smap[sourceIndex].rowId,
+                   smap[sourceIndex].parentWorldId);
             return false;
         }
-        route = "wmap-nearest-town-center";
+        if (!vm_net_mock_find_town_center_smap_node(
+                smap, smapCount, targetWorldId, &targetIndex))
+        {
+            printf("[warn][network] mock_death_respawn_nearest_city_unresolved "
+                   "source_scene=%s source_smap=%u target_world=%u "
+                   "reason=no-sce-backed-city-scene\n",
+                   fromScene, smap[sourceIndex].rowId, targetWorldId);
+            return false;
+        }
+        route = "wmapline-nearest-city-link-distance";
     }
     if (targetWorldId == 0 ||
         !vm_net_mock_get_scene_reasonable_spawn_from_sce(
@@ -10752,14 +11144,15 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
         *routeOut = route;
     printf("[info][network] mock_death_respawn_nearest_safe source_scene=%s "
            "source_smap=%u target_scene=%s target_smap=%u target_world=%u "
-           "route=%s hops=%u landing=(%u,%u) evidence=sMap.dsh(monster-level=none)+wMap.dsh+SCE\n",
+           "route=%s hops=%u landing=(%u,%u) "
+           "evidence=sMap.dsh(monster-level=none)+wMap.dsh+wMapLine.dsh+SCE\n",
            fromScene, smap[sourceIndex].rowId,
            smap[targetIndex].scene, smap[targetIndex].rowId,
            targetWorldId, route, bestDistance, landingX, landingY);
     vm_autotest_note("mock_death_respawn_nearest_safe source_scene=%s "
                      "source_smap=%u target_scene=%s target_smap=%u "
                      "target_world=%u route=%s hops=%u landing=(%u,%u) "
-                     "evidence=sMap.dsh(monster-level=none)/wMap.dsh/SCE\n",
+                     "evidence=sMap.dsh(monster-level=none)/wMap.dsh/wMapLine.dsh/SCE\n",
                      fromScene, smap[sourceIndex].rowId,
                      smap[targetIndex].scene, smap[targetIndex].rowId,
                      targetWorldId, route, bestDistance, landingX, landingY);
