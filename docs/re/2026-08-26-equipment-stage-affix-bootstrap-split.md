@@ -2,7 +2,22 @@
 
 Date: 2026-08-26
 
-Status: fixed in source; deterministic packet-order and atomic-delivery regressions passed; normal game-client verification pending deployment of both updated binaries
+Status: temporary legacy compatibility fallback active.  The server has restored compact `30/21` rows for all clients; the newer client-side split remains in source, pending a proved per-connection capability negotiation.
+
+## 当前临时兼容策略
+
+2026-08-26，旧版 Android APK 登录后出现“解包错误”。原因是该 APK 不含客户端
+分包逻辑，却收到包含完整四档强化词条的首登 `30/21` 组合包。为恢复旧 APK 登录，
+服务端目前对所有客户端重新发送紧凑的 `30/21` 行：仅包含当前/最高强化和
+`attrCount=0`。
+
+这不会删除或修改数据库中的装备、强化等级或词条；已穿戴装备仍通过 `7/7 type=2`
+的完整 common-extra 行下发四档词条。代价是未穿戴的背包装备会重新回到旧行为：首次
+实例化后不显示灰色 `+4/+8/+12/+16` 词条，且仅凭后续 `17/1` 或 `29/3` 不能补回。
+
+`src/network-client.c` 的原子分包代码没有回退：旧 APK 从未包含它，回退不会消除旧
+APK 的解包错误；保留它也不会改变服务端当前紧凑行的字节。完整行恢复需先实现并验证
+新版客户端显式能力声明，再仅向已声明的连接发送完整 `30/21`。
 
 ## 触发与首个偏离
 
@@ -40,10 +55,10 @@ Status: fixed in source; deterministic packet-order and atomic-delivery regressi
 “解包错误”。因此不能仅把完整行恢复到原来的同一回复；也不能用 `17/1`、重复 `30/21`
 或伪造 `7/7 type=2` 去覆盖已经存在的装备实例。
 
-## 修复的响应契约
+## 已暂停的完整响应契约
 
-服务端恢复了 `30/21` 装备行的完整 common-extra：当前/最高强化、属性数和稳定的四条
-`+4/+8/+12/+16` 实例词条。普通物品仍自然得到零属性的短行。
+此前服务端曾恢复 `30/21` 装备行的完整 common-extra：当前/最高强化、属性数和稳定的
+四条 `+4/+8/+12/+16` 实例词条。该编码当前已暂停，等待能力协商后再按连接启用。
 
 客户端远程传输层只对下列**精确的首登组同步形状**拆分正常 event-7 事件：
 
@@ -90,10 +105,10 @@ Status: fixed in source; deterministic packet-order and atomic-delivery regressi
 ## 修改点
 
 - `src/server/mock_server_catalog.c`
-  - `vm_net_mock_build_backpack_grid_iteminfo_blob()` 对装备实例恢复完整
-    `vm_net_mock_seq_put_item_common_extra()` 编码；四阶段计划在实例首次进入主背包
-    管理器时下发。
-  - 场景启动用的紧凑 `17/1` 路径仍保留，未扩大该大包。
+  - `vm_net_mock_build_backpack_grid_iteminfo_blob()` 当前再次使用
+    `vm_net_mock_seq_put_item_compact_extra()`，以兼容不具备分包能力的旧 Android。
+  - `7/7 type=2` 已穿戴装备路径仍使用完整 common-extra；场景启动的紧凑 `17/1`
+    路径也保持不变。
 - `src/network-client.c`
   - 新增窄匹配的 `vm_client_extract_login_backpack_bootstrap_followup()`；它只重组已由
     服务端生成的 WT 对象，并通过现有 event-7 follow-up 队列按顺序投递。
@@ -113,11 +128,13 @@ Status: fixed in source; deterministic packet-order and atomic-delivery regressi
 3. 隔离服务端夹具（不连接 MySQL、不启动监听器）通过，日志确认：
 
 ```text
-mock_backpack_grid ... gridnum=2 ... iteminfo_len=106
-first-login equipment attribute bootstrap regression passed type3_completion=1
+mock_backpack_grid ... gridnum=2 ... iteminfo_len=54
+mock_equipment_login ... rows=2 iteminfo_len=161 response=7/7-type2
+first-login legacy compact bootstrap regression passed type3_completion=1
 ```
 
-其中 106 字节为一条普通 27 字节行加一条带四阶段词条的 79 字节装备行。
+临时兼容回退后，该夹具应输出 54 字节：一条普通 27 字节行加一条紧凑装备行；
+`7/7 type=2` 的已穿戴装备行未改。
 
 4. 隔离客户端传输夹具（不启动模拟器、不连接服务）通过：
 

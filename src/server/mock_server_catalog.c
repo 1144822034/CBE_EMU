@@ -3853,17 +3853,14 @@ static bool vm_net_mock_seq_put_item_compact_extra(u8 *out, u32 outCap,
                                                     u8 enhanceMaxLevel)
 {
     /*
-     * The 17/1 row used during scene startup is delivered inside a larger
-     * bootstrap response.  Its ParseEquipAttributes(0x010185C2) reader
-     * defines zero stage attributes as a valid compact row after current/max
-     * enhancement.
+     * The 17/1 scene-start row and the legacy-compatible 30/21 login grid
+     * both accept this current/max-enhancement plus zero-attribute form.
      *
-     * Do not use this compact form for 30/21: HandleItemGridResponse creates
-     * the live backpack instances there, while 29/3 later changes only their
-     * current/max enhancement fields.  The remote client transport splits the
-     * complete 30/21 bootstrap into its own event-7 frame when necessary, so
-     * every equipment instance can retain its four future-stage rows without
-     * exceeding the combined login packet's parser pool.
+     * Keep 30/21 compact until the server has a proved per-connection
+     * capability negotiation for the client-side split bootstrap.  Older
+     * Android clients do not have that transport split; sending all four
+     * future-stage rows in their combined group reply exhausts the fixed
+     * parser pool before any business object is dispatched.
      */
     return vm_net_mock_seq_put_i16(out, outCap, pos, enhanceLevel) &&
            vm_net_mock_seq_put_i16(out, outCap, pos, enhanceMaxLevel) &&
@@ -4055,19 +4052,16 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
-        /* HandleItemGridResponse(0x01039952) creates the live backpack
-         * instance, and 29/3 only changes its current/max enhancement fields.
-         * The complete +4/+8/+12/+16 plan must therefore be present in this
-         * first row so the detail renderer can show grey future stages and
-         * unlock them at +4 without rebuilding the instance.  The remote
-         * client sends this bootstrap in a dedicated event-7 frame, keeping
-         * the large-inventory parser-pool limit separate from group state. */
-        if (!vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, item->itemId,
+        /* Temporary legacy fallback.  A full stage plan here makes the
+         * first 5/10 group reply exceed old Android clients' fixed parser
+         * pool.  The worn-equipment 7/7(type=2) stream remains on its
+         * complete common-extra path, so existing equipment-slot stage
+         * display is unchanged. */
+        if (!vm_net_mock_seq_put_item_compact_extra(
+                out, outCap, &pos,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                vm_net_mock_item_common_extra_enhance_cap(item->itemId),
-                &item->enhanceAffixes))
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
             return false;
     }
     *blobLenOut = pos;
