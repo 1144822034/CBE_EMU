@@ -1049,6 +1049,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_teleport_stone_selected_direct_catalog_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-teleport-stone-selected-direct-catalog",
+                                  request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     /* The client uses the same compact 16/3 type=0 shape for a normal runtime
      * position acknowledgement and a named SCE portal.  The named handler
      * proves source scene, rectangle and entry id before returning a native

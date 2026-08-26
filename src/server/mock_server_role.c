@@ -3390,12 +3390,6 @@ static const char *vm_net_mock_role_spouse_name(const vm_net_mock_role_state *ro
                                "\xce\xde"); /* GBK: wu */
 }
 
-static u32 vm_net_mock_add_u32_saturating(u32 left, u32 right)
-{
-    uint64_t sum = (uint64_t)left + right;
-    return sum > 0xffffffffull ? 0xffffffffu : (u32)sum;
-}
-
 static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
 {
     static const u16 base[3][5] = {
@@ -3434,11 +3428,6 @@ static u16 vm_net_mock_role_charm(const vm_net_mock_role_state *role, u32 level,
     return (u16)value;
 }
 
-static u32 vm_net_mock_cap_u32(u32 value, u32 cap)
-{
-    return value > cap ? cap : value;
-}
-
 /* JianghuOL.CBE: scene_apply_levelup_status_growth (0x01017F1C) changes
  * ActorSceneNode::statusBarPrimaryBaseMax / statusBarSecondaryBaseMax by
  * these exact values for visualVariant 0, 1 and 2.  Login maps job 1..3 to
@@ -3464,17 +3453,17 @@ static void vm_net_mock_equipment_bonus_add(vm_net_mock_equipment_bonus *dst,
 {
     if (dst == NULL || src == NULL)
         return;
-    dst->hp += src->hp;
-    dst->mp += src->mp;
-    dst->attack += src->attack;
-    dst->armor += src->armor;
-    dst->strength += src->strength;
-    dst->agility += src->agility;
-    dst->wisdom += src->wisdom;
-    dst->crit += src->crit;
-    dst->hit += src->hit;
-    dst->dodge += src->dodge;
-    dst->resist += src->resist;
+    dst->hp = vm_net_mock_add_u32_saturating(dst->hp, src->hp);
+    dst->mp = vm_net_mock_add_u32_saturating(dst->mp, src->mp);
+    dst->attack = vm_net_mock_add_u32_saturating(dst->attack, src->attack);
+    dst->armor = vm_net_mock_add_u32_saturating(dst->armor, src->armor);
+    dst->strength = vm_net_mock_add_u32_saturating(dst->strength, src->strength);
+    dst->agility = vm_net_mock_add_u32_saturating(dst->agility, src->agility);
+    dst->wisdom = vm_net_mock_add_u32_saturating(dst->wisdom, src->wisdom);
+    dst->crit = vm_net_mock_add_u32_saturating(dst->crit, src->crit);
+    dst->hit = vm_net_mock_add_u32_saturating(dst->hit, src->hit);
+    dst->dodge = vm_net_mock_add_u32_saturating(dst->dodge, src->dodge);
+    dst->resist = vm_net_mock_add_u32_saturating(dst->resist, src->resist);
 }
 
 /* This is the server-authoritative definition of an equipped state that may
@@ -3665,8 +3654,10 @@ static void vm_net_mock_role_build_player_stats_impl(
      * client has an exact, class-specific level growth path for HP/MP; use it
      * here so durable battle maxima and the client-side reconstructed meter
      * start from the same base. */
-    stats->maxHp = vm_net_mock_role_base_vital_max(level, job, true) + equipment.hp;
-    stats->maxMp = vm_net_mock_role_base_vital_max(level, job, false) + equipment.mp;
+    stats->maxHp = vm_net_mock_add_u32_saturating(
+        vm_net_mock_role_base_vital_max(level, job, true), equipment.hp);
+    stats->maxMp = vm_net_mock_add_u32_saturating(
+        vm_net_mock_role_base_vital_max(level, job, false), equipment.mp);
     /* The two base combat columns in equip.dsh are not balancing hints.  The
      * client loads them into an equipped item and
      * CalcEquipStatBonus(0x01028B34) first adds the exact base value, then
@@ -3675,17 +3666,31 @@ static void vm_net_mock_role_build_player_stats_impl(
      * displayed item contribute a different server-side base value.  Keep the
      * still-unrecovered role-derived part separate, but carry each confirmed
      * DSH equipment value at full strength into authoritative combat. */
-    stats->attack = 6 + level * 2 + stats->strength / 2 + equipment.attack;
-    stats->defense = 4 + level + stats->endurance / 2 + equipment.armor;
-    stats->hit = 75 + level + stats->agility * 2 + equipment.hit;
+    stats->attack = vm_net_mock_add_u32_saturating(
+        vm_net_mock_add_u32_saturating(6u + level * 2u, stats->strength / 2u),
+        equipment.attack);
+    stats->defense = vm_net_mock_add_u32_saturating(
+        vm_net_mock_add_u32_saturating(4u + level, stats->endurance / 2u),
+        equipment.armor);
+    stats->hit = vm_net_mock_add_u32_saturating(
+        vm_net_mock_add_u32_saturating(
+            75u + level,
+            vm_net_mock_mul_div_u32_saturating(stats->agility, 2u, 1u)),
+        equipment.hit);
     /* `scene_rebuild_status_meter_node(0x0100FED8)` passes the DSH combat
      * fields to AddActorStatBonus(0x0100FE2C), which adds each supplied field
      * directly to the matching client status slot.  As with attack/armor,
      * the old `/2` factors below were only mock balancing and gave a durable
      * equipped instance a different authoritative base from its client-side
      * stat contribution. */
-    stats->dodge = 3 + level / 2 + stats->agility / 2 + equipment.dodge;
-    stats->crit = 1 + stats->agility / 3 + stats->wisdom / 5 + equipment.crit;
+    stats->dodge = vm_net_mock_add_u32_saturating(
+        vm_net_mock_add_u32_saturating(3u + level / 2u, stats->agility / 2u),
+        equipment.dodge);
+    stats->crit = vm_net_mock_add_u32_saturating(
+        vm_net_mock_add_u32_saturating(
+            vm_net_mock_add_u32_saturating(1u, stats->agility / 3u),
+            stats->wisdom / 5u),
+        equipment.crit);
     /* The confirmed level-up path only grows strength, agility and wisdom.
      * The old wisdom/endurance conversion was a mock balancing curve, not a
      * client or data-table contract.  Resistance is deliberately sourced
@@ -3701,24 +3706,12 @@ static void vm_net_mock_role_build_player_stats_impl(
         if (vm_net_mock_role_active_timed_combat_bonus_percent(
                 role, &timedAttackPercent, &timedDefensePercent))
         {
-            uint64_t raisedAttack = (uint64_t)stats->attack *
-                                     (100u + timedAttackPercent) / 100u;
-            uint64_t raisedDefense = (uint64_t)stats->defense *
-                                      (100u + timedDefensePercent) / 100u;
-
-            stats->attack = raisedAttack > 9999u ? 9999u : (u32)raisedAttack;
-            stats->defense = raisedDefense > 9999u ? 9999u : (u32)raisedDefense;
+            stats->attack = vm_net_mock_mul_div_u32_saturating(
+                stats->attack, 100u + timedAttackPercent, 100u);
+            stats->defense = vm_net_mock_mul_div_u32_saturating(
+                stats->defense, 100u + timedDefensePercent, 100u);
         }
     }
-
-    stats->maxHp = vm_net_mock_cap_u32(stats->maxHp, 9999);
-    stats->maxMp = vm_net_mock_cap_u32(stats->maxMp, 9999);
-    stats->attack = vm_net_mock_cap_u32(stats->attack, 9999);
-    stats->defense = vm_net_mock_cap_u32(stats->defense, 9999);
-    stats->hit = vm_net_mock_cap_u32(stats->hit, 9999);
-    stats->dodge = vm_net_mock_cap_u32(stats->dodge, 9999);
-    stats->crit = vm_net_mock_cap_u32(stats->crit, 9999);
-    stats->resist = vm_net_mock_cap_u32(stats->resist, 9999);
 }
 
 /* ActorInfo is the base-status layer.  JianghuOL.CBE then rebuilds the status
@@ -3750,10 +3743,7 @@ static u32 vm_net_mock_battle_apply_signed_primary_stat_change(u32 value,
 static u32 vm_net_mock_battle_apply_signed_stat_change(u32 value, int32_t change)
 {
     if (change >= 0)
-    {
-        uint64_t raised = (uint64_t)value + (uint32_t)change;
-        return raised > 9999u ? 9999u : (u32)raised;
-    }
+        return vm_net_mock_add_u32_saturating(value, (u32)change);
     {
         u32 reduction = (u32)(0 - change);
         return value > reduction ? value - reduction : 0;

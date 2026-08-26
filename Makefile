@@ -63,7 +63,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression battle-primary-stat-uncap-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
+.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
 
 all: build
 build: client server
@@ -115,6 +115,11 @@ $(SERVER_OBJDIR)/admin-monster-picker-regression.exe: scripts/admin-monster-pick
 battle-primary-stat-uncap-regression: $(SERVER_OBJDIR)/battle-primary-stat-uncap-regression.exe
 
 $(SERVER_OBJDIR)/battle-primary-stat-uncap-regression.exe: scripts/battle-primary-stat-uncap-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+battle-derived-stat-uncap-regression: $(SERVER_OBJDIR)/battle-derived-stat-uncap-regression.exe
+
+$(SERVER_OBJDIR)/battle-derived-stat-uncap-regression.exe: scripts/battle-derived-stat-uncap-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 direct-scene-challenge-progress-client-regression: $(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe

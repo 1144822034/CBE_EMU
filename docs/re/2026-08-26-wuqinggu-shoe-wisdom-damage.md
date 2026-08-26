@@ -65,8 +65,14 @@ DSH 词条以 `u32` 饱和加法汇总：这只防止损坏资源导致无符号
 ActorInfo 的力量、敏捷、智慧基线和战斗内三种主属性增益也同步取消该截断，因此客户端
 属性重建与服务端技能结算使用同一份完整数值。
 
-本次只移除了造成问题的主属性上限；生命、法力、攻击、防御等派生属性原有的 `9999`
-保护边界不在本次变更范围内。目标当前生命的最终伤害限制亦保持不变。
+初次修复仅移除了造成问题的主属性上限。用户随后明确要求**完全移除**派生战斗属性的
+`9999` 保护边界；生命、法力、攻击、防御、命中、闪避、暴击和抗性现在均可保留超过
+`9999` 的有效装备与战斗增益。属性汇总、强化词条累加、临时攻击/防御百分比增益、战斗内
+直接增益及 ActorInfo 对应字段均使用完整 `u32` 值。
+
+为避免损坏资源把正数回绕为更小的数值，所有相关加法和百分比计算改为 `u32` 饱和算术；
+这不是新的玩法上限，而是协议字段本身可表示的最大值。目标当前生命的最终伤害限制、命中
+和暴击概率规则、等级与强化等级规则均未改变。
 
 新增离线回归 `battle-primary-stat-uncap-regression`，用同一套 70 级鬼道装备快照断言：
 脱鞋智慧为 `1251`、穿鞋后为 `1272`，并且技能 `201/operate=203` 的原始伤害与高生命
@@ -81,9 +87,19 @@ primary-stat uncap regression passed wisdom=1251->1272 raw=1423->1446
 damage=862->876 enemy_defense=65
 ```
 
+另新增 `battle-derived-stat-uncap-regression`：用单件合法的合成装备提供每项 `10000`
+加成，断言所有八项派生战斗属性、ActorInfo 的命中/防御/抗性字段和战斗内增益都不会在
+`9999` 停止。该夹具同样不监听端口、不连接 MySQL，也不读取 player-3 的存档。
+
+```text
+derived-stat uncap regression passed hp=11155 mp=11825 atk=15253 def=10146
+hit=30991 dodge=15249 crit=15643 resist=10000
+```
+
 ## 相关实现
 
 - `src/server/mock_server_role.c`：鬼道三维成长、无 999 截断的装备属性汇总与技能伤害计算。
 - `src/server/mock_server_equipment_npc.c`：`7/8` 穿脱鞋状态变更与持久化。
 - `bin/server_out.txt`：本次角色 `10762` 的穿鞋、脱鞋、再穿鞋及三次 `operate=203` 原始日志。
 - `scripts/battle-primary-stat-uncap-regression.c`：脱鞋/穿鞋智慧和伤害增量回归。
+- `scripts/battle-derived-stat-uncap-regression.c`：完整移除派生属性 `9999` 截断的回归。
