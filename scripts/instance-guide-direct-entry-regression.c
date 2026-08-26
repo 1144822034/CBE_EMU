@@ -42,6 +42,52 @@ static bool build_settings_unstuck_16_2_request(u8 *out, u32 outCap,
     return true;
 }
 
+static int assert_cross_scene_target_validation(void)
+{
+    static const char targetScene[] =
+        "00\xC5\xEE\xC0\xB3\xCF\xC9\xB5\xBA_02.sce"; /* 蓬莱仙岛 */
+    static const char visibleScene[] =
+        "b_29\xC3\xCE\xBE\xB3\xBF\xD5\xBC\xE4.sce"; /* 梦境空间 */
+    vm_mock_service_client_session *savedSessions =
+        g_vm_mock_service_client_sessions;
+    vm_mock_service_client_session *session = NULL;
+    u32 savedActiveClientId = g_vm_mock_service_active_client_id;
+    int result = 1;
+
+    g_vm_mock_service_client_sessions = NULL;
+    g_vm_mock_service_active_client_id = 0x105ea11u;
+    session = vm_mock_service_get_or_create_client_session(
+        g_vm_mock_service_active_client_id);
+    if (session == NULL)
+    {
+        fputs("cross-scene target fixture could not allocate a session\n", stderr);
+        goto done;
+    }
+    session->sceneVisibleReady = true;
+    session->sceneVisiblePending = false;
+    snprintf(session->sceneVisibleScene, sizeof(session->sceneVisibleScene),
+             "%s", visibleScene);
+
+    /* The destination SCE can be validated before 30/1 even though it is not
+     * yet the client's visible scene. The normal live-node selector must
+     * retain its opposite result for its later 4/5 battle-only contract. */
+    if (!vm_net_mock_sce_combat_spawn_resource_has(targetScene, 1000u) ||
+        vm_net_mock_select_sce_combat_spawn(targetScene, 1000u, NULL, NULL,
+                                            NULL))
+    {
+        fputs("instance entry did not separate target-resource and live-node validation\n",
+              stderr);
+        goto done;
+    }
+    result = 0;
+
+done:
+    g_vm_mock_service_client_sessions = savedSessions;
+    g_vm_mock_service_active_client_id = savedActiveClientId;
+    free(session);
+    return result;
+}
+
 static int assert_instance_session_ownership(void)
 {
     static const char instanceScene[] =
@@ -264,6 +310,7 @@ done:
 int main(void)
 {
     vm_net_mock_scene_npcinfo_seed seed;
+    vm_net_mock_scene_npcinfo_seed directGuard;
     const char *name = NULL;
     const char *description = NULL;
     u8 response[256];
@@ -279,6 +326,8 @@ int main(void)
     seed.instanceY = 50;
     seed.instanceSpawnEnemyId = 205;
     seed.challengeEnemyId = 105;
+    if (assert_cross_scene_target_validation() != 0)
+        return 1;
     if (assert_instance_session_ownership() != 0)
         return 1;
     if (!vm_net_mock_npc_service_option_default(
@@ -330,21 +379,41 @@ int main(void)
         return 1;
     }
 
+    /* A target-bearing NPC must never use action13, even if an old database
+     * row still carries a former guard-monster ID.  Its encounter is the
+     * target SCE kind-3 collision selected through instance_spawn_enemy_id. */
     value = 0;
     if (!vm_net_mock_npc_service_option_default(
             &seed, VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE, &name, &description,
             &value) ||
         value != (VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE | actorId) ||
-        !vm_net_mock_npc_service_is_direct_instance_challenge(
+        vm_net_mock_npc_service_is_direct_instance_challenge(
             &seed, VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE) ||
         vm_net_mock_npc_service_is_direct_instance_challenge(
             &seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE))
     {
-        fputs("dedicated guard challenge did not use direct action-13 routing\n",
+        fputs("target instance incorrectly retained direct action-13 routing\n",
               stderr);
         return 1;
     }
 
-    puts("instance guide direct-entry regression passed: direct 26/1 entry + action-13 guard challenge");
+    /* The legacy current-scene guard remains valid only for an NPC with no
+     * destination at all. */
+    directGuard = seed;
+    directGuard.instanceScene[0] = 0;
+    directGuard.instanceX = 0;
+    directGuard.instanceY = 0;
+    directGuard.instanceSpawnEnemyId = 0;
+    if (!vm_net_mock_npc_service_is_direct_instance_challenge(
+            &directGuard, VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE) ||
+        !vm_net_mock_npc_service_is_direct_instance_challenge(
+            &directGuard, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE))
+    {
+        fputs("destination-free guard no longer retained direct action-13 routing\n",
+              stderr);
+        return 1;
+    }
+
+    puts("instance guide direct-entry regression passed: target collision guard + destination-free action-13 guard");
     return 0;
 }

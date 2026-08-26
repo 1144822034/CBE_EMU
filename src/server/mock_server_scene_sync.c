@@ -3901,12 +3901,13 @@ static bool vm_net_mock_npc_service_is_direct_instance_challenge(
 {
     if (seed == NULL || seed->challengeEnemyId == 0)
         return false;
-    /* Kind 6 without a destination is the compatibility representation used
-     * by existing challenge-only NPCs.  Newly saved NPCs use kind 10, which
-     * remains direct even when the same NPC also offers instance transport. */
-    return serviceKind == VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE ||
-           (serviceKind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
-            seed->instanceScene[0] == 0);
+    /* Action13 is a current-scene request and cannot own a target-instance
+     * battle shell.  A destination-bearing NPC must use its normal 30/1
+     * entry and the target SCE's collision path instead.  Keep the legacy
+     * direct guard only for an NPC with no configured destination. */
+    return seed->instanceScene[0] == 0 &&
+           (serviceKind == VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE ||
+            serviceKind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE);
 }
 
 static void vm_net_mock_npc_service_context_record(
@@ -4520,6 +4521,17 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         {
             continue;
         }
+        /* Older rows could persist both a target scene and the former direct
+         * guard service.  Do not expose its action-1 fallback: that invokes
+         * the already disproved action13/4-10 owner path.  A subsequent admin
+         * save rejects this combination and retains the target's selected
+         * collision monster under instance_spawn_enemy_id. */
+        if (matchedSeed != NULL && matchedSeed->instanceScene[0] != 0 &&
+            configuredServices[serviceIndex].kind ==
+                VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE)
+        {
+            continue;
+        }
         if (directChallengeServiceConfigured && !directChallengeNodeReady &&
             vm_net_mock_npc_service_is_direct_instance_challenge(
                 matchedSeed, configuredServices[serviceIndex].kind))
@@ -4596,6 +4608,12 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 matchedSeed, configuredServices[serviceIndex].kind,
                 &defaultName, &defaultDescription, &serviceValue) ||
             serviceValue == 0)
+        {
+            continue;
+        }
+        if (matchedSeed != NULL && matchedSeed->instanceScene[0] != 0 &&
+            configuredServices[serviceIndex].kind ==
+                VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE)
         {
             continue;
         }
@@ -5438,23 +5456,25 @@ static u32 vm_net_mock_build_instance_enter_response(
     const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
 {
     vm_net_mock_scene_change_target target;
+    char entryScene[64];
     u32 pos = 0;
 
+    memset(entryScene, 0, sizeof(entryScene));
     if (seed == NULL || seed->instanceScene[0] == 0 ||
         !vm_net_mock_str_ends_with(seed->instanceScene, ".sce") ||
         seed->instanceX == 0 || seed->instanceY == 0 ||
-        (seed->instanceSpawnEnemyId != 0 &&
-         !vm_net_mock_scene_battle_monster_target_ready(
-             seed->instanceScene, seed->instanceSpawnEnemyId)))
+        !vm_net_mock_scene_battle_monster_instance_entry_scene(
+            seed->instanceScene, seed->instanceSpawnEnemyId, entryScene,
+            sizeof(entryScene)))
     {
         if (seed != NULL && seed->instanceSpawnEnemyId != 0)
-            printf("[error][network] mock_npc_instance_enter_spawn_unresolved actor=%u scene=%s spawn_enemy=%u source=SCE2-kind3 action=no-fallback\n",
+            printf("[error][network] mock_npc_instance_enter_spawn_unresolved actor=%u scene=%s spawn_enemy=%u source=SCE2-kind3+city-mirror action=no-fallback\n",
                    seed->actorId, seed->instanceScene,
                    seed->instanceSpawnEnemyId);
         return 0;
     }
     memset(&target, 0, sizeof(target));
-    snprintf(target.scene, sizeof(target.scene), "%s", seed->instanceScene);
+    snprintf(target.scene, sizeof(target.scene), "%s", entryScene);
     target.x = seed->instanceX;
     target.y = seed->instanceY;
     target.mapType = 2;
@@ -5494,8 +5514,8 @@ static u32 vm_net_mock_build_instance_enter_response(
         printf("[warn][network] mock_npc_instance_enter_session_unbound actor=%u scene=%s action=no-durable-position-save\n",
                seed->actorId, target.scene);
     }
-    printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) spawn_enemy=%u source=SCE2-kind3 response=30/1 resp=%u position_owner=session-transient evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
-           seed->actorId, target.scene, target.x, target.y,
+    printf("[info][network] mock_npc_instance_enter actor=%u configured_scene=%s scene=%s pos=(%u,%u) spawn_enemy=%u source=SCE2-kind3+city-mirror response=30/1 resp=%u position_owner=session-transient evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+           seed->actorId, seed->instanceScene, target.scene, target.x, target.y,
            seed->instanceSpawnEnemyId, pos);
     return pos;
 }

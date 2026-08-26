@@ -20,6 +20,7 @@ const TEST_SCENE_UTF8 = 'c04临安府_01.sce';
 const TEST_ACTOR_ID = 990001;
 const TEST_CREATED_ACTOR_ID = 990002;
 const TEST_EXTERNAL_ACTOR_ID = 990003;
+const TEST_ADMIN_ACCOUNT = 'npc-stock-admin';
 const TEST_ADMIN_PASSWORD = 'automation-admin';
 const TEST_BULK_SELECTION_COUNT = 84;
 const TEST_GAME_ACCOUNT = 'npc-stock-auto';
@@ -242,10 +243,10 @@ function prepare(string $database): void {
         )->execute([$legacyScene, TEST_ACTOR_ID, 160, 320, 2, 0,
                     'n_man1.actor', $name, '']);
         $pdo->prepare(
-            'INSERT INTO server_admin_config(config_id,password_value,failed_attempts,locked) '
-            . 'VALUES(1,?,0,0) ON DUPLICATE KEY UPDATE '
+            'INSERT INTO server_admin_users(account_id,password_value,failed_attempts,locked) '
+            . 'VALUES(?,?,0,0) ON DUPLICATE KEY UPDATE '
             . 'password_value=VALUES(password_value),failed_attempts=0,locked=0'
-        )->execute([TEST_ADMIN_PASSWORD]);
+        )->execute([TEST_ADMIN_ACCOUNT, TEST_ADMIN_PASSWORD]);
         /* This is the production regression: the global-mall switch is off,
          * while a later enabled NPC stock row must remain purchasable. */
         $pdo->prepare(
@@ -313,7 +314,8 @@ function verify_npc_shop_response(int $servicePort, int $expectedItemId): void {
 function verify(int $adminPort, int $servicePort, string $database): void {
     expect($adminPort >= 1024 && $adminPort <= 65535, 'invalid admin port');
     $login = http_request($adminPort, 'POST', '/admin-418yz6/login',
-                          http_build_query(['password' => TEST_ADMIN_PASSWORD]));
+                          http_build_query(['account' => TEST_ADMIN_ACCOUNT,
+                                            'password' => TEST_ADMIN_PASSWORD]));
     expect(is_redirect($login['status']),
            'admin login was rejected status=' . $login['status'] .
            ' headers=' . implode(' | ', $login['headers']) .

@@ -12,23 +12,8 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS `server_admin_config` (
-  `config_id` TINYINT UNSIGNED NOT NULL,
-  `password_value` VARBINARY(64) NOT NULL,
-  `failed_attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  `locked` TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`config_id`)
-) ENGINE=InnoDB;
-
-INSERT IGNORE INTO `server_admin_config`
-  (`config_id`, `password_value`, `failed_attempts`, `locked`)
-VALUES
-  (1, '123456', 0, 0);
-
--- 独立于玩家 accounts 的后台操作员身份。旧版单一后台密码会迁入默认 admin
--- 账号，便于已有部署平滑升级；之后可在此表新增多个后台账号。
+-- 独立于玩家 accounts 的后台操作员身份。首个操作员必须由可信数据库管理终端
+-- 显式创建；服务不会再生成默认 admin 账号。
 CREATE TABLE IF NOT EXISTS `server_admin_users` (
   `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `password_value` VARBINARY(64) NOT NULL,
@@ -38,12 +23,6 @@ CREATE TABLE IF NOT EXISTS `server_admin_users` (
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB;
-
-INSERT IGNORE INTO `server_admin_users`
-  (`account_id`, `password_value`, `failed_attempts`, `locked`)
-SELECT 'admin', `password_value`, `failed_attempts`, `locked`
-FROM `server_admin_config`
-WHERE `config_id` = 1;
 
 -- 游戏、账号中心和后台管理共用的来源 IPv4 登录失败计数。达到 15 次后
 -- 服务直接静默关闭该 IP 的后续连接，不再发送任何协议或 HTTP 响应。
@@ -55,6 +34,19 @@ CREATE TABLE IF NOT EXISTS `server_login_ip_blocks` (
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`ip_address`),
   KEY `idx_login_ip_blocks_blocked` (`blocked`)
+) ENGINE=InnoDB;
+
+-- 后台管理入口专用的来源 IPv4 登录风险。它与上面的 15 次共享封锁
+-- 分开：后台连续失败 5 次只会拒绝后台登录，不会阻断同一 IP 的游戏或账号中心登录。
+CREATE TABLE IF NOT EXISTS `server_admin_login_ip_blocks` (
+  `ip_address` VARCHAR(15) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `last_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
+  `failed_attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `blocked` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `blocked_at` TIMESTAMP NULL DEFAULT NULL,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`ip_address`),
+  KEY `idx_admin_login_ip_blocks_blocked` (`blocked`)
 ) ENGINE=InnoDB;
 
 -- 网页反向代理的可信 TCP 来源。只有来源 IP 匹配且启用时，服务端才会

@@ -63,7 +63,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
+.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-monster-picker-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
 
 all: build
 build: client server
@@ -85,6 +85,26 @@ $(SERVER_OBJDIR)/content-update-manifest-regression.exe: scripts/content-update-
 scene-battle-monster-field18-regression: $(SERVER_OBJDIR)/scene-battle-monster-field18-regression.exe
 
 $(SERVER_OBJDIR)/scene-battle-monster-field18-regression.exe: scripts/scene-battle-monster-field18-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+city-scene-battle-mirror-regression: $(SERVER_OBJDIR)/city-scene-battle-mirror-regression.exe
+
+$(SERVER_OBJDIR)/city-scene-battle-mirror-regression.exe: scripts/city-scene-battle-mirror-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+instance-guide-direct-entry-regression: $(SERVER_OBJDIR)/instance-guide-direct-entry-regression.exe
+
+$(SERVER_OBJDIR)/instance-guide-direct-entry-regression.exe: scripts/instance-guide-direct-entry-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+admin-scene-battle-monster-layout-regression: $(SERVER_OBJDIR)/admin-scene-battle-monster-layout-regression.exe
+
+$(SERVER_OBJDIR)/admin-scene-battle-monster-layout-regression.exe: scripts/admin-scene-battle-monster-layout-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+admin-monster-picker-regression: $(SERVER_OBJDIR)/admin-monster-picker-regression.exe
+
+$(SERVER_OBJDIR)/admin-monster-picker-regression.exe: scripts/admin-monster-picker-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 direct-scene-challenge-progress-client-regression: $(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe

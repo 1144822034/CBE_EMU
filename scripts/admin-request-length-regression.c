@@ -129,7 +129,7 @@ int main(int argc, char **argv)
     char renderedMonsterDropBatch[24576];
     char renderedAdminLogin[16384];
     char renderedDesignations[65536];
-    char renderedRoleOperations[16384];
+    char renderedRoleOperations[32768];
     char adminCookieRequest[256];
     char endpointHost[64];
     char resolvedLoginSource[VM_MOCK_SERVICE_LOGIN_IP_CAP];
@@ -204,6 +204,17 @@ int main(int argc, char **argv)
     roleOperationFixture.equippedItems[0].enhanceLevel = 9;
     roleOperationFixture.equippedItems[0].durability = 48;
     roleOperationFixture.equippedItems[0].durabilityMax = 50;
+    roleOperationFixture.backpackCapacity = 24;
+    roleOperationFixture.backpackItemCount = 2;
+    roleOperationFixture.backpackItems[0].itemId = 802;
+    roleOperationFixture.backpackItems[0].seq = 19;
+    roleOperationFixture.backpackItems[0].count = 240;
+    roleOperationFixture.backpackItems[1].itemId = 1001;
+    roleOperationFixture.backpackItems[1].seq = 20;
+    roleOperationFixture.backpackItems[1].count = 1;
+    roleOperationFixture.backpackItems[1].enhanceLevel = 9;
+    roleOperationFixture.backpackItems[1].durability = 48;
+    roleOperationFixture.backpackItems[1].durabilityMax = 50;
     memset(renderedRoleOperations, 0, sizeof(renderedRoleOperations));
     vm_mock_admin_text_init(&renderedRoleOperationsPage,
                             renderedRoleOperations,
@@ -219,6 +230,12 @@ int main(int argc, char **argv)
         strstr(renderedRoleOperations,
                "data-role-operation-pane=\"equipment\"") == NULL ||
         strstr(renderedRoleOperations,
+               "data-role-operation-tab=\"backpack\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-role-operation-pane=\"backpack\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-role-backpack-list") == NULL ||
+        strstr(renderedRoleOperations,
                "data-item-picker-open=\"role-grant-item-37\"") == NULL ||
         strstr(renderedRoleOperations,
                "name=\"action\" value=\"set-role-name\"") == NULL ||
@@ -229,6 +246,8 @@ int main(int argc, char **argv)
         strstr(renderedRoleOperations,
                "name=\"action\" value=\"grant-item\"") == NULL ||
         strstr(renderedRoleOperations,
+               "name=\"action\" value=\"remove-role-backpack-item\"") == NULL ||
+        strstr(renderedRoleOperations,
                "name=\"action\" value=\"reset-role-selected-scene\"") == NULL ||
         strstr(renderedRoleOperations,
                "name=\"action\" value=\"set-equipped-enhance-level\"") == NULL ||
@@ -236,6 +255,10 @@ int main(int argc, char **argv)
                "name=\"equipment_slot\" value=\"0\"") == NULL ||
         strstr(renderedRoleOperations,
                "name=\"enhance_level\" min=\"0\" max=\"16\" value=\"9\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"item\" value=\"802\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"item_seq\" value=\"19\"") == NULL ||
         strstr(renderedRoleOperations,
                "name=\"role\" value=\"37\"") == NULL)
     {
@@ -247,9 +270,10 @@ int main(int argc, char **argv)
         !vm_mock_service_login_ip_is_valid("255.255.255.255") ||
         vm_mock_service_login_ip_is_valid("203.0.113.256") ||
         vm_mock_service_login_ip_is_valid("203.0.113") ||
-        VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT != 15)
+        VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT != 15 ||
+        VM_MOCK_ADMIN_LOGIN_IP_FAILURE_LIMIT != 5)
     {
-        fprintf(stderr, "login IP validation or failure limit is invalid\n");
+        fprintf(stderr, "login IP validation or failure limits are invalid\n");
         return 1;
     }
     memset(resolvedLoginSource, 0, sizeof(resolvedLoginSource));
@@ -930,6 +954,11 @@ int main(int argc, char **argv)
                "后台配置编辑") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("set-role-level"),
                "设置角色等级") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("ban-account"),
+               "账号管理封号") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label(
+                   "remove-role-backpack-item"),
+               "删除背包物品") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label(
                    "set-equipped-enhance-level"),
                "设置穿戴装备强化等级") != 0 ||

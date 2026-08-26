@@ -141,10 +141,12 @@ int main(void)
     char *page1 = NULL;
     char *page2 = NULL;
     char *ipPage = NULL;
+    char *loginAccountPage = NULL;
     char *junk = NULL;
     char *clamp = NULL;
     char riskQuery[768];
     char ipQuery[512];
+    char loginAccountQuery[640];
     u32 page = 0;
     u32 pageCount = 0;
     u32 total = 0;
@@ -177,6 +179,19 @@ int main(void)
         fputs("risk IP SQL escaped-percent contract violated\n", stderr);
         return 1;
     }
+    if (!vm_mock_admin_risk_login_account_build_query(
+            loginAccountQuery, sizeof(loginAccountQuery),
+            VM_MOCK_ADMIN_RISK_LOGIN_ACCOUNT_PAGE_SIZE,
+            VM_MOCK_ADMIN_RISK_LOGIN_ACCOUNT_PAGE_SIZE) ||
+        strstr(loginAccountQuery,
+               "FROM server_admin_login_ip_blocks WHERE blocked=1") == NULL ||
+        strstr(loginAccountQuery, "LIMIT 50,50") == NULL ||
+        strstr(loginAccountQuery, "%%Y") != NULL ||
+        VM_MOCK_ADMIN_LOGIN_IP_FAILURE_LIMIT != 5)
+    {
+        fputs("admin login risk SQL or failure-limit contract violated\n", stderr);
+        return 1;
+    }
     if (!risk_ip_clear_cache_contract_ok() ||
         strcmp(vm_mock_admin_operation_log_action_label("clear-risk-ip"),
                "清除风险 IP 封锁") != 0)
@@ -204,9 +219,24 @@ int main(void)
                "href=\"/?tab=risk&amp;risk_kind=roles\">风险角色</a>") == NULL ||
         strstr(page1,
                "href=\"/?tab=risk&amp;risk_kind=ips\">风险 IP</a>") == NULL ||
+        strstr(page1,
+               "href=\"/?tab=risk&amp;risk_kind=admin-accounts\">后台账号风险</a>") == NULL ||
         strstr(page1, "风险管理页面超过大小限制") != NULL)
     {
         fputs("risk page render failed before the pager could be checked\n", stderr);
+        failed = true;
+        goto done;
+    }
+    loginAccountPage = render_page("tab=risk&risk_kind=admin-accounts");
+    if (loginAccountPage == NULL ||
+        strstr(loginAccountPage, "无法读取后台账号登录风险") != NULL ||
+        strstr(loginAccountPage, "后台账号风险列表") == NULL ||
+        strstr(loginAccountPage, "后台登录连续凭据失败 5 次") == NULL ||
+        strstr(loginAccountPage,
+               "class=\"on\" href=\"/?tab=risk&amp;risk_kind=admin-accounts\">后台账号风险</a>") == NULL ||
+        strstr(loginAccountPage, "风险管理页面超过大小限制") != NULL)
+    {
+        fputs("admin login risk directory render failed\n", stderr);
         failed = true;
         goto done;
     }
@@ -253,6 +283,7 @@ int main(void)
         }
         free(page1);
         free(ipPage);
+        free(loginAccountPage);
         free(junk);
         free(clamp);
         printf("risk admin pagination regression passed (empty table): no rows rendered, no pager\n");
@@ -357,6 +388,7 @@ done:
     free(page1);
     free(page2);
     free(ipPage);
+    free(loginAccountPage);
     free(junk);
     free(clamp);
     if (failed)

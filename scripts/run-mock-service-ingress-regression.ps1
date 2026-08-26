@@ -182,6 +182,32 @@ function Invoke-ServicePing([int]$Port) {
         $client.Dispose()
     }
 }
+function Invoke-ServiceNonCanonicalPing([int]$Port) {
+    $client = New-Object Net.Sockets.TcpClient
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $client.ReceiveTimeout = 1500
+        $client.SendTimeout = 1500
+        $client.Connect('127.0.0.1', $Port)
+        # The legacy handler treats every PING-bit frame as a stateless empty
+        # CBMR probe, even when another transport flag is present.
+        [byte[]]$frame = New-CbmsHeader 3 0 0
+        $stream = $client.GetStream()
+        $stream.Write($frame, 0, $frame.Length)
+        [byte[]]$response = Read-Exactly $stream 20
+        $stopwatch.Stop()
+        if ([Text.Encoding]::ASCII.GetString($response, 0, 4) -ne 'CBMR') {
+            throw 'non-canonical ping response did not use CBMR'
+        }
+        if ([BitConverter]::ToUInt32($response, 12) -ne 0) {
+            throw 'non-canonical ping response unexpectedly contained a body'
+        }
+        return [uint32]$stopwatch.ElapsedMilliseconds
+    } finally {
+        if ($stopwatch.IsRunning) { $stopwatch.Stop() }
+        $client.Dispose()
+    }
+}
 function Invoke-ServiceLogin([int]$Port) {
     $client = New-Object Net.Sockets.TcpClient
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
@@ -225,7 +251,7 @@ try {
     & $php $fixture create $database | Tee-Object -FilePath (Join-Path $runDir 'fixture.log') -Append
     if ($LASTEXITCODE -ne 0) { throw 'fixture database create failed' }
 
-    foreach ($name in @('CBE_MYSQL_HOST','CBE_MYSQL_PORT','CBE_MYSQL_USER','CBE_MYSQL_PASSWORD','CBE_MYSQL_DATABASE','CBE_RESOURCE_ROOT','CBE_MOCK_VERBOSE')) {
+    foreach ($name in @('CBE_MYSQL_HOST','CBE_MYSQL_PORT','CBE_MYSQL_USER','CBE_MYSQL_PASSWORD','CBE_MYSQL_DATABASE','CBE_RESOURCE_ROOT','CBE_MOCK_VERBOSE_LOG')) {
         $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
     $env:CBE_MYSQL_HOST = '127.0.0.1'
@@ -234,22 +260,27 @@ try {
     $env:CBE_MYSQL_PASSWORD = $env:CBE_AUTOMATION_MYSQL_PASSWORD
     $env:CBE_MYSQL_DATABASE = $database
     $env:CBE_RESOURCE_ROOT = $resourceCopy
-    $env:CBE_MOCK_VERBOSE = '1'
+    $env:CBE_MOCK_VERBOSE_LOG = '1'
     $serverProcess = Start-Process -FilePath $server -WorkingDirectory $runDir -PassThru -WindowStyle Hidden `
         -ArgumentList '--mock-service-only', '--mock-service-bind=127.0.0.1', "--mock-service-port=$ServicePort", "--mock-admin-port=$AdminPort", "--resource-root=$resourceCopy" `
         -RedirectStandardOutput (Join-Path $runDir 'server.stdout.log') `
         -RedirectStandardError (Join-Path $runDir 'server.stderr.log')
-    [pscustomobject]@{ scenario = $ScenarioId; max_steps = 7; total_timeout_seconds = 30; single_step_timeout_seconds = 3; server_pid = $serverProcess.Id; database = $database } |
+    [pscustomobject]@{ scenario = $ScenarioId; max_steps = 8; total_timeout_seconds = 30; single_step_timeout_seconds = 3; server_pid = $serverProcess.Id; database = $database } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'run.json') -Encoding utf8
     Wait-OwnedService $serverProcess $ServicePort
 
     for ($i = 0; $i -lt 4; ++$i) { $partialClients += Open-IncompleteFrame $ServicePort }
+    # The fifth same-source incomplete connection must be reclaimed early;
+    # it must not prevent a well-formed frame from the same NAT address.
+    $partialClients += Open-IncompleteFrame $ServicePort
     for ($i = 0; $i -lt 4; ++$i) { $partialClients += Open-IncompleteAdminRequest $AdminPort }
     # Input pacing only: give the listener one select cycle to register all
     # four incomplete frames before the real ping is sent.
     Start-Sleep -Milliseconds 300
     $pingMs = Invoke-ServicePing $ServicePort
     if ($pingMs -gt 1500) { throw "valid ping waited $pingMs ms behind incomplete frames" }
+    $nonCanonicalPingMs = Invoke-ServiceNonCanonicalPing $ServicePort
+    if ($nonCanonicalPingMs -gt 1500) { throw "non-canonical ping waited $nonCanonicalPingMs ms behind incomplete frames" }
     $loginMs = Invoke-ServiceLogin $ServicePort
     if ($loginMs -gt 1500) { throw "valid login waited $loginMs ms behind incomplete admin frames" }
 
@@ -257,10 +288,14 @@ try {
     $serverLog = Get-Content -Raw -LiteralPath (Join-Path $runDir 'server.stdout.log')
     $timeoutCount = [regex]::Matches($serverLog, 'ingress_drop .*reason=frame-timeout').Count
     if ($timeoutCount -lt 4) { throw "expected four ingress frame timeouts, found $timeoutCount" }
-    if ($serverLog -notmatch 'ingress_ping ') { throw 'canonical ping did not use the ingress fast path' }
-    [pscustomobject]@{ result = 'passed'; scenario = $ScenarioId; ping_ms = $pingMs; login_ms = $loginMs; ingress_timeouts = $timeoutCount; assertions = @('four-incomplete-game-frames-never-enter-protocol-worker-pool','four-incomplete-admin-frames-never-starve-game-worker-pool','canonical-ping-received-cbmr-under-1500ms-without-protocol-worker','valid-login-received-cbmr-under-1500ms','incomplete-game-frames-reclaimed-at-ingress') } |
+    if ($serverLog -notmatch 'ingress_drop .*reason=source-pending-cap .*source=127\.0\.0\.1') {
+        throw 'fifth same-source incomplete frame was not reclaimed at ingress'
+    }
+    if ($serverLog -notmatch 'ingress_ping .*flags=1 ') { throw 'canonical ping did not use the ingress fast path' }
+    if ($serverLog -notmatch 'ingress_ping .*flags=3 ') { throw 'non-canonical ping did not use the ingress fast path' }
+    [pscustomobject]@{ result = 'passed'; scenario = $ScenarioId; ping_ms = $pingMs; noncanonical_ping_ms = $nonCanonicalPingMs; login_ms = $loginMs; ingress_timeouts = $timeoutCount; assertions = @('four-incomplete-game-frames-never-enter-protocol-worker-pool','same-source-fifth-incomplete-frame-reclaimed-before-timeout','four-incomplete-admin-frames-never-starve-game-worker-pool','all-ping-bit-frames-receive-cbmr-without-protocol-worker','valid-login-received-cbmr-under-1500ms','incomplete-game-frames-reclaimed-at-ingress') } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'result.json') -Encoding utf8
-    Write-Host "$ScenarioId passed run_dir=$runDir ping_ms=$pingMs login_ms=$loginMs ingress_timeouts=$timeoutCount"
+    Write-Host "$ScenarioId passed run_dir=$runDir ping_ms=$pingMs noncanonical_ping_ms=$nonCanonicalPingMs login_ms=$loginMs ingress_timeouts=$timeoutCount"
 }
 finally {
     foreach ($client in $partialClients) { try { $client.Dispose() } catch {} }

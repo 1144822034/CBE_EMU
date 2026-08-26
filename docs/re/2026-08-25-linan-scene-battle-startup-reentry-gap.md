@@ -1043,11 +1043,15 @@ mmGame scene code at `0x05017784` (address `0x8`); the later
 `SetMapCtrlViewport(0x01046C48)` read at `0x40` is a consequence and must not be
 treated as the root cause.
 
-`tools/prepare_linan_battle_mirror.py` now makes the disposable mirror by decoding the
-source SCE, replacing only that empty field-18 value with the existing, native-parseable
-`b_03丹霞山.sce` reference, validating the decoded result, then writing a valid literal
-type-2 resource. The original city SCE is read-only. The next acceptance criterion is
-that client startup opens the background SCE and allocates its two background rows before
-the same client-owned `TriggerAutoBattle -> WT4/1`; only then may battle-start behaviour
-be evaluated. This is still a bounded compatibility probe, not a permanent claim that a
-Danxia backdrop is the correct final presentation for a Linan combat mirror.
+`tools/prepare_linan_battle_mirror.py` now makes a dedicated, test-only Linan pair before
+the mirror: it copies `04临安府_01.map` as `b_04临安府.map`, uses the verified empty
+background-shell structure from `b_03丹霞山.sce` but rewrites its header dimensions to
+`400x400` and its map reference to `b_04临安府.map`, then writes
+`b_04临安府.sce`. The mirror's only empty named-portal field-18 value becomes that exact
+new background key. Every generated resource is decoded and parsed again before the mirror
+is published; the original city SCE and map remain read-only.
+
+The next acceptance criterion is that client startup opens `b_04临安府.sce`, allocates its
+two background rows, and then reaches the same client-owned
+`TriggerAutoBattle -> WT4/1` without regression. This preserves the native wilderness
+background-table contract while presenting the Linan map rather than a Danxia backdrop.

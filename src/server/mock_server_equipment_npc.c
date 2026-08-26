@@ -5739,20 +5739,24 @@ static u32 vm_mock_service_account_disconnect_role_sessions(const char *accountI
     return disconnected;
 }
 
-static bool vm_mock_service_account_ban_for_rapid_battle(const char *accountId,
-                                                          u32 *disconnectedOut,
-                                                          const char **errorOut)
+/* Account bans belong to the account-access layer.  Every caller first saves
+ * the durable denial, then uses the normal offline transition to clear any
+ * existing game-session binding; it never fabricates a client kick packet. */
+static bool vm_mock_service_account_ban(const char *accountId,
+                                        const char *reason,
+                                        u32 *disconnectedOut,
+                                        const char **errorOut)
 {
-    static const char reason[] = "risk:rapid-battle-entry-within-3s";
     char accountHex[129];
-    char reasonHex[sizeof(reason) * 2 + 1];
+    char reasonHex[513];
     char sql[1024];
 
     if (disconnectedOut != NULL)
         *disconnectedOut = 0;
     if (errorOut != NULL)
         *errorOut = "account ban failed";
-    if (accountId == NULL || accountId[0] == 0 ||
+    if (accountId == NULL || accountId[0] == 0 || reason == NULL ||
+        reason[0] == 0 || strlen(reason) > 255 ||
         !vm_mock_service_account_exists(accountId))
     {
         if (errorOut != NULL)
@@ -5779,21 +5783,21 @@ static bool vm_mock_service_account_ban_for_rapid_battle(const char *accountId,
     {
         if (errorOut != NULL)
             *errorOut = "account ban storage failed";
-        printf("[error][mock-admin] risk_account_ban_save_failed account=%s error=%s\n",
+        printf("[error][mock-admin] account_ban_save_failed account=%s error=%s\n",
                accountId, vm_mysql_last_error());
         return false;
     }
     if (disconnectedOut != NULL)
     {
         *disconnectedOut = vm_mock_service_account_disconnect_bound_sessions(
-            accountId, "risk-account-ban");
+            accountId, reason);
     }
     else
     {
         (void)vm_mock_service_account_disconnect_bound_sessions(
-            accountId, "risk-account-ban");
+            accountId, reason);
     }
-    printf("[warn][mock-admin] risk_account_banned account=%s reason=%s disconnected=%u\n",
+    printf("[warn][mock-admin] account_banned account=%s reason=%s disconnected=%u\n",
            accountId, reason,
            disconnectedOut != NULL ? *disconnectedOut : 0u);
     if (errorOut != NULL)
@@ -6854,6 +6858,21 @@ static bool vm_mock_service_account_set_role_level(const char *accountId,
     return true;
 }
 
+static bool vm_mock_service_account_ban_for_rapid_battle(
+    const char *accountId, u32 *disconnectedOut, const char **errorOut)
+{
+    return vm_mock_service_account_ban(
+        accountId, "risk:rapid-battle-entry-within-3s", disconnectedOut,
+        errorOut);
+}
+
+static bool vm_mock_service_account_ban_from_account_management(
+    const char *accountId, u32 *disconnectedOut, const char **errorOut)
+{
+    return vm_mock_service_account_ban(
+        accountId, "admin:account-management-ban", disconnectedOut, errorOut);
+}
+
 /* Admin equipment edits are an explicit offline maintenance operation.  An
  * equipped item is a durable instance: direct level changes retain its four
  * pre-rolled stage attributes, which are applied only after their +4/+8/+12/
@@ -7039,12 +7058,12 @@ static bool vm_mock_service_account_grant_role_item(const char *accountId,
     return true;
 }
 
-/* The public account page sends an exact persisted backpack identity.  Do not
- * fall back to an item-id-only lookup here: stacks, equipment and reservoir
- * items may legitimately share an item id while having distinct instances. */
+/* Account pages send an exact persisted backpack identity.  Do not fall back
+ * to an item-id-only lookup here: stacks, equipment and reservoir items may
+ * legitimately share an item id while having distinct instances. */
 static bool vm_mock_service_account_remove_role_backpack_item(
     const char *accountId, u32 roleId, u32 itemId, u16 itemSeq,
-    const char **messageOut)
+    u32 *removedCountOut, const char **messageOut)
 {
     vm_mock_service_account_state *state = NULL;
     vm_net_mock_role_state *role = NULL;
@@ -7053,6 +7072,8 @@ static bool vm_mock_service_account_remove_role_backpack_item(
     char roleSelector[32];
     u32 removedCount = 0;
 
+    if (removedCountOut)
+        *removedCountOut = 0;
     if (messageOut)
         *messageOut = "删除物品失败";
     if (accountId == NULL || accountId[0] == 0 || roleId == 0 || itemId == 0 ||
@@ -7095,7 +7116,7 @@ static bool vm_mock_service_account_remove_role_backpack_item(
     /* The selected role is not necessarily active.  A normal role save only
      * persists activeRoleId, so use the relational full snapshot transaction
      * and keep the account's active role unchanged. */
-    if (!vm_net_mock_role_db_save_relational("user-web-backpack-delete", NULL,
+    if (!vm_net_mock_role_db_save_relational("account-backpack-delete", NULL,
                                              NULL, 0, true, NULL, NULL, NULL))
     {
         *role = before;
@@ -7107,7 +7128,9 @@ static bool vm_mock_service_account_remove_role_backpack_item(
     }
 
     vm_mock_service_account_capture(state);
-    printf("[info][user-web] backpack_delete account=%s role=%u item=%u seq=%u count=%u result=success\n",
+    if (removedCountOut)
+        *removedCountOut = removedCount;
+    printf("[info][account-backpack] delete account=%s role=%u item=%u seq=%u count=%u result=success\n",
            accountId, roleId, itemId, itemSeq, removedCount);
     if (messageOut)
         *messageOut = "物品已删除";
