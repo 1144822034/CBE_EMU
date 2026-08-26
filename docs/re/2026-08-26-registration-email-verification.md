@@ -104,6 +104,13 @@ STARTTLS 或 SMTPS。生产环境必须把 SMTP 主机配置为本机或受信�
 TLS 转发的 relay（例如 MTA、Stunnel 或云服务商的本地代理），不要把 SMTP 认证
 凭据指向公网的明文端口。后台页面会显示同一限制。
 
+SMTP 投递失败会在服务标准输出中记录 `smtp_delivery_failed`，但不会记录收件人、
+认证账号、密码或验证码。`stage` 依次可能为 `resolve_ipv4`、`connect`、`greeting`、
+`ehlo`、`auth_plain`、`mail_from`、`rcpt_to`、`data` 与 `data_result`；`expected` 和
+`received` 记录 SMTP 状态码。部署在阿里云 ECS 时，直连 `smtpdm.aliyun.com:25` 通常
+会在 `connect` 阶段失败，因为该端口默认被禁用；应使用 TLS 终结在本机/内网的 relay，
+或先按云网络策略开通合适的出站路径。
+
 ## 验证
 
 ```text

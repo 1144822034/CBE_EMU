@@ -34,19 +34,16 @@ mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.
 [info][mock-admin] listening=http://0.0.0.0:19091/
 [info][mock-service] concurrency pool=game workers=4 queue=128 state_model=serialized-legacy-context
 [info][mock-service] concurrency pool=admin workers=2 queue=128 state_model=serialized-legacy-context
-[info][mock-admin] request pool=admin worker=1 sequence=1 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=16
+[info][mock-admin] request pool=admin worker=1 sequence=1 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
+[info][mock-admin] request pool=admin worker=2 sequence=2 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=110
+[info][mock-admin] request pool=admin worker=1 sequence=3 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=94
 [info][admin] login_success account=admin failed_attempts_reset=1
 [info][mock-service] equipment_instance_schema_prepare storage=relational
 [info][mock-admin] designation_config_load rows=27
 [info][network] mock_item_effect_catalog total=230 source=item.dsh
 mock_role_db_mysql_load account=07060707 source=relational roles=1 active=10438
 [info][mock-service] account_state_release account=07060707 reason=admin-management-close
-[info][mock-admin] request pool=admin worker=2 sequence=6 result=1 queue_wait_ms=0 state_wait_ms=32 process_ms=15
-[info][mock-admin] request pool=admin worker=2 sequence=10 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
-[info][user-web] registration_code_sent email=xiaoxuanaixiaojia@gmail.com smtp=smtpdm.aliyun.com:25
-[info][mock-admin] request pool=admin worker=1 sequence=13 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=453
-[info][mock-admin] request pool=admin worker=2 sequence=14 result=1 queue_wait_ms=0 state_wait_ms=453 process_ms=16
-[info][user-web] register account=114482203 result=success
-mock_role_db_mysql_save account=114482203 reason=init roles=0 active=0 scope=full storage=relational
-mock_role_db_mysql_load account=114482203 source=init roles=0 active=0
-[info][mock-service] account_state_release account=114482203 reason=admin-management-close
+[info][mock-admin] request pool=admin worker=2 sequence=10 result=1 queue_wait_ms=0 state_wait_ms=47 process_ms=0
+[info][user-web] registration_code_sent email=780505183@qq.com smtp=smtpdm.aliyun.com:25
+[info][mock-admin] request pool=admin worker=2 sequence=16 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=485
+[info][mock-admin] request pool=admin worker=1 sequence=17 result=1 queue_wait_ms=0 state_wait_ms=485 process_ms=15

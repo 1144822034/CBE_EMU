@@ -1176,12 +1176,15 @@ static void vm_mock_registration_smtp_set_timeout(vm_mock_service_socket socketV
 }
 
 static bool vm_mock_registration_smtp_read_reply(vm_mock_service_socket socketValue,
-                                                 int expectedCode)
+                                                 int expectedCode,
+                                                 int *receivedCodeOut)
 {
     char line[VM_MOCK_REGISTRATION_SMTP_REPLY_MAX];
     int firstCode = 0;
     size_t length = 0;
 
+    if (receivedCodeOut != NULL)
+        *receivedCodeOut = 0;
     while (length + 1 < sizeof(line))
     {
         char ch = 0;
@@ -1204,6 +1207,8 @@ static bool vm_mock_registration_smtp_read_reply(vm_mock_service_socket socketVa
                        (line[2] - '0');
             if (firstCode == 0)
                 firstCode = code;
+            if (receivedCodeOut != NULL)
+                *receivedCodeOut = code;
             if (code != firstCode)
                 return false;
             if (line[3] == ' ')
@@ -1214,14 +1219,39 @@ static bool vm_mock_registration_smtp_read_reply(vm_mock_service_socket socketVa
     return false;
 }
 
-static bool vm_mock_registration_smtp_command(vm_mock_service_socket socketValue,
-                                              const char *command,
-                                              int expectedCode)
+static void vm_mock_registration_smtp_log_failure(
+    const vm_mock_registration_smtp_config *config, const char *stage,
+    int expectedCode, int receivedCode)
 {
-    return command != NULL &&
-           vm_mock_service_send_all(socketValue, (const u8 *)command,
-                                    (u32)strlen(command)) &&
-           vm_mock_registration_smtp_read_reply(socketValue, expectedCode);
+    printf("[warn][user-web] smtp_delivery_failed stage=%s host=%s port=%u "
+           "expected=%d received=%d\n",
+           stage ? stage : "unknown",
+           config && config->host[0] ? config->host : "-",
+           config ? config->port : 0, expectedCode, receivedCode);
+}
+
+static bool vm_mock_registration_smtp_command(
+    const vm_mock_registration_smtp_config *config,
+    vm_mock_service_socket socketValue, const char *stage, const char *command,
+    int expectedCode)
+{
+    int receivedCode = 0;
+
+    if (command == NULL ||
+        !vm_mock_service_send_all(socketValue, (const u8 *)command,
+                                  (u32)strlen(command)))
+    {
+        vm_mock_registration_smtp_log_failure(config, stage, expectedCode, 0);
+        return false;
+    }
+    if (!vm_mock_registration_smtp_read_reply(socketValue, expectedCode,
+                                              &receivedCode))
+    {
+        vm_mock_registration_smtp_log_failure(config, stage, expectedCode,
+                                              receivedCode);
+        return false;
+    }
+    return true;
 }
 
 static bool vm_mock_registration_render_email_body(
@@ -1334,6 +1364,7 @@ static bool vm_mock_registration_smtp_send_code(
     bool ok = false;
     size_t userLen = 0;
     size_t passwordLen = 0;
+    int receivedCode = 0;
 
     if (!vm_mock_registration_smtp_config_ready(config) ||
         !vm_mock_registration_email_template_ready(emailTemplate) ||
@@ -1341,20 +1372,36 @@ static bool vm_mock_registration_smtp_send_code(
         !vm_mock_registration_code_is_valid(code) ||
         !vm_mock_service_socket_init())
     {
+        vm_mock_registration_smtp_log_failure(config, "preflight", 0, 0);
         return false;
     }
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_port = htons(config->port);
     if (!vm_mock_service_resolve_ipv4_host(config->host, 0, &address.sin_addr))
+    {
+        vm_mock_registration_smtp_log_failure(config, "resolve_ipv4", 0, 0);
         return false;
+    }
     socketValue = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (socketValue == VM_MOCK_SERVICE_INVALID_SOCKET)
+    {
+        vm_mock_registration_smtp_log_failure(config, "socket", 0, 0);
         return false;
+    }
     vm_mock_registration_smtp_set_timeout(socketValue);
-    if (connect(socketValue, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        !vm_mock_registration_smtp_read_reply(socketValue, 220) ||
-        !vm_mock_registration_smtp_command(socketValue,
+    if (connect(socketValue, (struct sockaddr *)&address, sizeof(address)) != 0)
+    {
+        vm_mock_registration_smtp_log_failure(config, "connect", 0, 0);
+        goto done;
+    }
+    if (!vm_mock_registration_smtp_read_reply(socketValue, 220, &receivedCode))
+    {
+        vm_mock_registration_smtp_log_failure(config, "greeting", 220,
+                                              receivedCode);
+        goto done;
+    }
+    if (!vm_mock_registration_smtp_command(config, socketValue, "ehlo",
                                             "EHLO jh-online-server\r\n", 250))
     {
         goto done;
@@ -1374,20 +1421,43 @@ static bool vm_mock_registration_smtp_send_code(
                                                authEncoded,
                                                sizeof(authEncoded)) == 0 ||
             snprintf(command, sizeof(command), "AUTH PLAIN %s\r\n", authEncoded) >=
-                (int)sizeof(command) ||
-            !vm_mock_registration_smtp_command(socketValue, command, 235))
+                (int)sizeof(command))
+        {
+            vm_mock_registration_smtp_log_failure(config, "auth_prepare", 235,
+                                                  0);
+            goto done;
+        }
+        if (!vm_mock_registration_smtp_command(config, socketValue, "auth_plain",
+                                                command, 235))
         {
             goto done;
         }
     }
     if (snprintf(command, sizeof(command), "MAIL FROM:<%s>\r\n",
-                 config->senderEmail) >= (int)sizeof(command) ||
-        !vm_mock_registration_smtp_command(socketValue, command, 250) ||
-        snprintf(command, sizeof(command), "RCPT TO:<%s>\r\n", recipient) >=
-            (int)sizeof(command) ||
-        !vm_mock_registration_smtp_command(socketValue, command, 250) ||
-        !vm_mock_registration_smtp_command(socketValue, "DATA\r\n", 354) ||
-        vm_mock_registration_base64_encode((const u8 *)emailTemplate->subject,
+                 config->senderEmail) >= (int)sizeof(command))
+    {
+        vm_mock_registration_smtp_log_failure(config, "mail_from_prepare", 250,
+                                              0);
+        goto done;
+    }
+    if (!vm_mock_registration_smtp_command(config, socketValue, "mail_from",
+                                            command, 250))
+        goto done;
+    if (snprintf(command, sizeof(command), "RCPT TO:<%s>\r\n", recipient) >=
+        (int)sizeof(command))
+    {
+        vm_mock_registration_smtp_log_failure(config, "rcpt_to_prepare", 250,
+                                              0);
+        goto done;
+    }
+    if (!vm_mock_registration_smtp_command(config, socketValue, "rcpt_to",
+                                            command, 250) ||
+        !vm_mock_registration_smtp_command(config, socketValue, "data",
+                                            "DATA\r\n", 354))
+    {
+        goto done;
+    }
+    if (vm_mock_registration_base64_encode((const u8 *)emailTemplate->subject,
                                            strlen(emailTemplate->subject),
                                            subjectEncoded,
                                            sizeof(subjectEncoded)) == 0 ||
@@ -1402,15 +1472,26 @@ static bool vm_mock_registration_smtp_send_code(
                  "MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n"
                  "Content-Transfer-Encoding: 8bit\r\n\r\n%s.\r\n",
                  config->senderEmail, recipient, subjectEncoded, escapedBody) >=
-            (int)sizeof(message) ||
-        !vm_mock_service_send_all(socketValue, (const u8 *)message,
-                                  (u32)strlen(message)) ||
-        !vm_mock_registration_smtp_read_reply(socketValue, 250))
+            (int)sizeof(message))
     {
+        vm_mock_registration_smtp_log_failure(config, "data_prepare", 250, 0);
+        goto done;
+    }
+    if (!vm_mock_service_send_all(socketValue, (const u8 *)message,
+                                  (u32)strlen(message)))
+    {
+        vm_mock_registration_smtp_log_failure(config, "data_body", 250, 0);
+        goto done;
+    }
+    receivedCode = 0;
+    if (!vm_mock_registration_smtp_read_reply(socketValue, 250, &receivedCode))
+    {
+        vm_mock_registration_smtp_log_failure(config, "data_result", 250,
+                                              receivedCode);
         goto done;
     }
     ok = true;
-    (void)vm_mock_registration_smtp_command(socketValue, "QUIT\r\n", 221);
+    (void)vm_mock_service_send_all(socketValue, (const u8 *)"QUIT\r\n", 6);
 
 done:
     memset(authRaw, 0, sizeof(authRaw));
@@ -1651,7 +1732,7 @@ static void vm_mock_admin_render_registration_settings_page(
         "*{box-sizing:border-box}body{margin:0;background:#f7f9fc;color:#1d2939;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(960px,calc(100%% - 28px));margin:0 auto;padding:28px 0 44px}header{display:flex;justify-content:space-between;gap:18px;align-items:center;margin-bottom:16px}h1{margin:0;font-size:24px}.sub,.hint{color:#667085;margin:4px 0 0}.logout{border:1px solid #d0d5dd;border-radius:8px;padding:8px 13px;background:#fff;cursor:pointer}.tabs{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 16px}.tab{padding:8px 11px;border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#344054;text-decoration:none}.tab.on{background:#175cd3;border-color:#175cd3;color:#fff}.card{margin-top:14px;padding:20px;border:1px solid #e4e7ec;border-radius:12px;background:#fff;box-shadow:0 2px 7px #1018280a}h2{font-size:18px;margin:0}form{display:grid;gap:16px}.switch{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid #d0d5dd;border-radius:9px;background:#fcfcfd}.switch input{margin-top:4px}.switch strong,.switch span{display:block}.switch span{font-size:13px;color:#667085}.fields{display:grid;grid-template-columns:1fr 120px;gap:12px}.fields .wide{grid-column:1/-1}.fields label{display:grid;gap:5px;color:#475467;font-weight:600}.fields input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit}.fields input:focus{border-color:#84adff;outline:0;box-shadow:0 0 0 3px #2e90fa18}.save{justify-self:start;border:0;border-radius:8px;padding:10px 15px;background:#175cd3;color:#fff;font-weight:700;cursor:pointer}.notice{padding:11px 13px;border-radius:9px;margin-bottom:14px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}.warning{padding:11px 13px;border-radius:9px;background:#fffaeb;color:#7a2e0e}.credential{font-size:12px;color:#667085;margin:0}@media(max-width:640px){.wrap{padding-top:18px}.fields{grid-template-columns:1fr}header{align-items:flex-start;flex-direction:column}}</style></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">账号注册与邮箱验证设置</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab on\" href=\"/?tab=registration\">注册设置</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>");
     vm_mock_admin_text_appendf(&page,
-        "<style>form.card{padding:0;overflow:hidden}form.card>section{padding:20px}form.card>section+section{border-top:1px solid #eaecf0}.switch{align-items:center;gap:14px;min-height:82px;padding:16px 18px;border-color:#d0d5dd;cursor:pointer;transition:border-color .15s,background .15s}.switch:hover{border-color:#98a2b3;background:#f8faff}.switch input[type=checkbox]{-webkit-appearance:none;appearance:none;position:relative;flex:0 0 auto;width:48px;height:28px;margin:0;border:1px solid #98a2b3;border-radius:999px;background:#d0d5dd;cursor:pointer;transition:background .15s,border-color .15s}.switch input[type=checkbox]::after{content:'';position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%%;background:#fff;box-shadow:0 1px 3px #10182840;transition:transform .15s}.switch input[type=checkbox]:checked{background:#175cd3;border-color:#175cd3}.switch input[type=checkbox]:checked::after{transform:translateX(20px)}.switch input[type=checkbox]:focus-visible{outline:3px solid #2e90fa40;outline-offset:2px}.switch strong{font-size:15px;color:#1d2939;margin-bottom:2px}.fields{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-top:16px}.fields .wide{grid-column:1/-1}.fields textarea{width:100%%;min-height:188px;resize:vertical;border:1px solid #d0d5dd;border-radius:8px;padding:10px;font:14px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}.fields textarea:focus{border-color:#84adff;outline:0;box-shadow:0 0 0 3px #2e90fa18}.fields .check-line{display:flex;align-items:center;gap:10px;font-weight:500;cursor:pointer}.fields .check-line input[type=checkbox]{width:20px;height:20px;margin:0;accent-color:#175cd3}.mail-template .hint{max-width:720px}.template-token{display:inline-block;padding:1px 6px;border-radius:5px;background:#eff4ff;color:#1849a9;font:600 12px ui-monospace,SFMono-Regular,Consolas,monospace}.save{margin:0 20px 20px}@media(max-width:640px){form.card>section{padding:16px}.switch{min-height:92px;padding:14px}.fields{grid-template-columns:1fr}.save{margin:0 16px 16px}}</style>");
+        "<style>html{scroll-behavior:smooth;scrollbar-gutter:stable}body{min-height:100vh;overflow-y:scroll}form.card{padding:0;overflow:hidden;scroll-margin-top:16px}form.card>section{padding:20px}form.card>section+section{border-top:1px solid #eaecf0}.switch{align-items:center;gap:14px;min-height:82px;padding:16px 18px;border-color:#d0d5dd;cursor:pointer;transition:border-color .15s,background .15s}.switch:hover{border-color:#98a2b3;background:#f8faff}.switch input[type=checkbox]{-webkit-appearance:none;appearance:none;position:relative;flex:0 0 auto;width:48px;height:28px;margin:0;border:1px solid #98a2b3;border-radius:999px;background:#d0d5dd;cursor:pointer;transition:background .15s,border-color .15s}.switch input[type=checkbox]::after{content:'';position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%%;background:#fff;box-shadow:0 1px 3px #10182840;transition:transform .15s}.switch input[type=checkbox]:checked{background:#175cd3;border-color:#175cd3}.switch input[type=checkbox]:checked::after{transform:translateX(20px)}.switch input[type=checkbox]:focus-visible{outline:3px solid #2e90fa40;outline-offset:2px}.switch strong{font-size:15px;color:#1d2939;margin-bottom:2px}.fields{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-top:16px}.fields .wide{grid-column:1/-1}.fields textarea{width:100%%;min-height:188px;max-height:min(52vh,460px);resize:vertical;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:#98a2b3 #f2f4f7;border:1px solid #d0d5dd;border-radius:8px;padding:10px;font:14px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}.fields textarea::-webkit-scrollbar{width:10px}.fields textarea::-webkit-scrollbar-track{background:#f2f4f7;border-radius:8px}.fields textarea::-webkit-scrollbar-thumb{background:#98a2b3;border:2px solid #f2f4f7;border-radius:8px}.fields textarea:focus{border-color:#84adff;outline:0;box-shadow:0 0 0 3px #2e90fa18}.fields .check-line{display:flex;align-items:center;gap:10px;font-weight:500;cursor:pointer}.fields .check-line input[type=checkbox]{width:20px;height:20px;margin:0;accent-color:#175cd3}.mail-template .hint{max-width:720px}.template-token{display:inline-block;padding:1px 6px;border-radius:5px;background:#eff4ff;color:#1849a9;font:600 12px ui-monospace,SFMono-Regular,Consolas,monospace}.save{margin:0 20px 20px}@media(max-width:640px){form.card>section{padding:16px}.switch{min-height:92px;padding:14px}.fields{grid-template-columns:1fr}.fields textarea{max-height:46vh}.save{margin:0 16px 16px}}</style>");
     if (status[0] != 0 && message[0] != 0)
     {
         vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
@@ -1689,7 +1770,7 @@ static void vm_mock_admin_render_registration_settings_page(
     vm_mock_admin_text_appendf(&page,
         "\"></label><label>SMTP 密码<input type=\"password\" name=\"smtp_password\" maxlength=\"255\" autocomplete=\"new-password\" placeholder=\"留空保持不变\"></label>"
         "<label class=\"wide check-line\"><input type=\"checkbox\" name=\"clear_smtp_password\" value=\"1\"><span>清除已保存的 SMTP 密码</span></label></div>"
-        "<p class=\"credential\">此服务内置的是明文 SMTP relay 客户端。生产环境请把它连接到本机或内网中已加密转发的 SMTP relay；不要把账号密码直接发送到公网的非加密端口。</p></section>"
+        "<p class=\"credential\">此服务内置的是明文 SMTP relay 客户端。生产环境请把它连接到本机或内网中已加密转发的 SMTP relay；不要把账号密码直接发送到公网的非加密端口。阿里云 ECS 默认限制 <code>smtpdm.aliyun.com:25</code>，请改用符合云网络策略的安全 relay。</p></section>"
         "<section class=\"mail-template\"><h2>注册验证码邮件</h2><p class=\"hint\">主题和内容会原样发送给注册用户。请在邮件内容中保留 <span class=\"template-token\">{{code}}</span>，发送时会自动替换为 6 位验证码。</p>"
         "<div class=\"fields\"><label class=\"wide\">邮件主题<input name=\"registration_email_subject\" maxlength=\"255\" required value=\"");
     vm_mock_admin_text_append_html(&page, emailTemplate.subject);
