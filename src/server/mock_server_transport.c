@@ -1593,6 +1593,25 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         }
         else
         {
+            if (!vm_mock_registration_game_auto_account_allowed())
+            {
+                authError = "当前服务器已关闭自动分配账号，请使用已注册账号登录";
+                responseLen = vm_net_mock_build_login_failure_response(
+                    loginRequest.requestSubtype, authError, responseBuffer,
+                    responseCap);
+                vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
+                VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
+                if (!vm_mock_service_send_all(client, header, sizeof(header)))
+                    return 0;
+                if (responseLen > 0 &&
+                    !vm_mock_service_send_all(client, responseBuffer, responseLen))
+                {
+                    return 0;
+                }
+                printf("[info][mock-service] login_no_account_reject client=%08x reason=registration-policy\n",
+                       requestMeta.clientId);
+                return 1;
+            }
             if (!vm_mock_service_account_issue_guest_credentials(requestMeta.clientId,
                                                                  accountId, sizeof(accountId),
                                                                  issuedPassword, sizeof(issuedPassword),

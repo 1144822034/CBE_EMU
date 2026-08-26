@@ -8,7 +8,7 @@
 #include <string.h>
 
 #define main cbe_server_program_main
-#include "../src/main.c"
+#include "../src/server_main.c"
 #undef main
 
 int main(void)
@@ -23,12 +23,27 @@ int main(void)
         "23\xF3\xB4\xC1\xFA\xD5\xAF_03.sce"; /* 23蟠龙寨_03.sce */
     static const char panlongSafeScene[] =
         "23\xF3\xB4\xC1\xFA\xD5\xAF_02.sce"; /* 23蟠龙寨_02.sce (止水堂) */
+    static const char ghostPalaceScene[] =
+        "21\xD3\xC4\xDA\xA4\xB9\xED\xB8\xAE_01.sce"; /* 21幽冥鬼府_01.sce */
+    static const char shushanRecoveryScene[] =
+        "c14\xCA\xF1\xC9\xBD_02.sce"; /* c14蜀山_02.sce (蜀山长亭) */
     vm_net_mock_scene_recovery_map map;
     vm_net_mock_scene_change_target target;
+    vm_net_mock_death_respawn_smap_node respawnSmap[
+        VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
+    vm_net_mock_death_respawn_wmap_node respawnWmap[
+        VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
+    vm_net_mock_death_respawn_wmap_line respawnWmapLines[
+        VM_NET_MOCK_DEATH_RESPAWN_WMAP_LINE_MAX];
+    bool respawnWmapLineEdges[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX *
+                              VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
     char respawnScene[64];
     u32 sourceRow = 0;
     u32 targetRow = 0;
     u32 distance = 0;
+    u32 respawnSmapCount = 0;
+    u32 respawnWmapCount = 0;
+    u32 respawnWmapLineCount = 0;
     const char *route = NULL;
     u16 x = 427;
     u16 y = 340;
@@ -64,7 +79,7 @@ int main(void)
                                                    &route) ||
         strcmp(respawnScene, linanCenterScene) != 0 ||
         sourceRow != 90 || targetRow != 56 || distance != 1 ||
-        route == NULL || strcmp(route, "wmap-nearest-town-center") != 0 ||
+        route == NULL || strcmp(route, "wmapline-nearest-city-link-distance") != 0 ||
         !vm_net_mock_scene_recovery_load_map(respawnScene, &map) ||
         !vm_net_mock_scene_recovery_candidate_is_clear(&map, x, y))
     {
@@ -84,11 +99,110 @@ int main(void)
                                                    &route) ||
         strcmp(respawnScene, linanCenterScene) != 0 ||
         sourceRow != 47 || targetRow != 56 || distance != 0 ||
-        route == NULL || strcmp(route, "wmap-nearest-town-center") != 0)
+        route == NULL || strcmp(route, "wmapline-nearest-city-link-distance") != 0)
     {
         fputs("Linan ordinary-death respawn did not retain its town centre\n",
               stderr);
         return 1;
+    }
+
+    /* Confirm the resource-only city classifier separately before asking for
+     * a recovery target, so c00蓬莱仙岛 cannot re-enter the candidate set. */
+    if (!vm_net_mock_death_respawn_load_smap_topology(
+            respawnSmap, sizeof(respawnSmap) / sizeof(respawnSmap[0]),
+            &respawnSmapCount) ||
+        !vm_net_mock_death_respawn_load_wmap_topology(
+            respawnWmap, sizeof(respawnWmap) / sizeof(respawnWmap[0]),
+            &respawnWmapCount) ||
+        !vm_net_mock_death_respawn_load_wmap_lines(
+            respawnWmapLines,
+            sizeof(respawnWmapLines) / sizeof(respawnWmapLines[0]),
+            &respawnWmapLineCount) ||
+        !vm_net_mock_death_respawn_build_wmap_line_topology(
+            respawnWmap, respawnWmapCount, respawnWmapLines,
+            respawnWmapLineCount, respawnWmapLineEdges,
+            sizeof(respawnWmapLineEdges) / sizeof(respawnWmapLineEdges[0])))
+    {
+        fputs("Death-respawn topology could not be loaded\n", stderr);
+        return 1;
+    }
+    {
+        int penglaiWorldIndex = vm_net_mock_death_respawn_find_wmap_node(
+            respawnWmap, respawnWmapCount, 1);
+        int shushanWorldIndex = vm_net_mock_death_respawn_find_wmap_node(
+            respawnWmap, respawnWmapCount, 14);
+        int ghostWorldIndex = vm_net_mock_death_respawn_find_wmap_node(
+            respawnWmap, respawnWmapCount, 21);
+
+        if (penglaiWorldIndex < 0 || shushanWorldIndex < 0 ||
+            ghostWorldIndex < 0 ||
+            vm_net_mock_death_respawn_is_city_world(
+                respawnSmap, respawnSmapCount,
+                &respawnWmap[penglaiWorldIndex]) ||
+            !vm_net_mock_death_respawn_is_city_world(
+                respawnSmap, respawnSmapCount,
+                &respawnWmap[shushanWorldIndex]) ||
+            !respawnWmapLineEdges[
+                ghostWorldIndex * respawnWmapCount + shushanWorldIndex] ||
+            respawnWmapLineEdges[
+                ghostWorldIndex * respawnWmapCount + penglaiWorldIndex])
+        {
+            fputs("World-map line topology does not separate Ghost Palace from Penglai\n",
+                  stderr);
+            return 1;
+        }
+    }
+    if (!vm_net_mock_scene_resource_exists(shushanRecoveryScene) ||
+        !vm_net_mock_get_scene_reasonable_spawn_from_sce(
+            shushanRecoveryScene, &x, &y, NULL))
+    {
+        fputs("Selected Shushan recovery scene has no resource-backed spawn point\n",
+              stderr);
+        return 1;
+    }
+    {
+        int ghostSmapIndex = -1;
+
+        for (u32 i = 0; i < respawnSmapCount; ++i)
+        {
+            if (strcmp(respawnSmap[i].scene, ghostPalaceScene) == 0)
+            {
+                ghostSmapIndex = (int)i;
+                break;
+            }
+        }
+        if (!vm_net_mock_scene_name_is_safe(ghostPalaceScene) ||
+            ghostSmapIndex < 0 || respawnSmap[ghostSmapIndex].rowId != 140)
+        {
+            fprintf(stderr,
+                    "Ghost Palace scene key is not an exact safe sMap row: safe=%u index=%d\n",
+                    vm_net_mock_scene_name_is_safe(ghostPalaceScene) ? 1u : 0u,
+                    ghostSmapIndex);
+            return 1;
+        }
+    }
+
+    /* 幽冥鬼府 has no local safe child scene.  Its rendered wMapLine road
+     * joins 蜀山 directly; 蓬莱 is only its directional UI-right entry and
+     * has no connecting world-map line. */
+    {
+        bool ghostResolved = vm_net_mock_resolve_nearest_safe_respawn(
+            ghostPalaceScene, respawnScene, sizeof(respawnScene), &x, &y,
+            &sourceRow, &targetRow, &distance, &route);
+
+        if (!ghostResolved ||
+        strcmp(respawnScene, shushanRecoveryScene) != 0 ||
+        sourceRow != 140 || targetRow != 105 || distance != 1 ||
+        route == NULL || strcmp(route, "wmapline-nearest-city-link-distance") != 0 ||
+        !vm_net_mock_scene_recovery_load_map(respawnScene, &map) ||
+        !vm_net_mock_scene_recovery_candidate_is_clear(&map, x, y))
+        {
+            fprintf(stderr,
+                    "Ghost Palace recovery mismatch: resolved=%u scene=%s source=%u target=%u hops=%u route=%s pos=(%u,%u)\n",
+                    ghostResolved ? 1u : 0u, respawnScene, sourceRow, targetRow,
+                    distance, route != NULL ? route : "-", x, y);
+            return 1;
+        }
     }
 
     /* 23蟠龙寨_03 has no safety marker itself, but its local sMap graph

@@ -12,6 +12,80 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `server_registration_config` (
+  `config_id` TINYINT UNSIGNED NOT NULL,
+  `allow_game_auto_account` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`config_id`)
+) ENGINE=InnoDB;
+
+INSERT IGNORE INTO `server_registration_config`
+  (`config_id`, `allow_game_auto_account`)
+VALUES
+  (1, 1);
+
+CREATE TABLE IF NOT EXISTS `server_smtp_config` (
+  `config_id` TINYINT UNSIGNED NOT NULL,
+  `host` VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
+  `port` SMALLINT UNSIGNED NOT NULL DEFAULT 25,
+  `username` VARBINARY(255) NOT NULL,
+  `password_value` VARBINARY(255) NOT NULL,
+  `sender_email` VARCHAR(254) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`config_id`)
+) ENGINE=InnoDB;
+
+INSERT IGNORE INTO `server_smtp_config`
+  (`config_id`, `host`, `port`, `username`, `password_value`, `sender_email`, `enabled`)
+VALUES
+  (1, '', 25, '', '', '', 0);
+
+-- The server initializes the first row with the built-in localized template
+-- on startup.  `{{code}}` in the body is substituted only at send time.
+CREATE TABLE IF NOT EXISTS `server_registration_email_templates` (
+  `config_id` TINYINT UNSIGNED NOT NULL,
+  `subject` VARBINARY(255) NOT NULL,
+  `body` VARBINARY(4096) NOT NULL,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`config_id`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `account_email_bindings` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `email` VARCHAR(254) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `verified_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`),
+  UNIQUE KEY `uk_account_email_bindings_email` (`email`),
+  CONSTRAINT `fk_account_email_bindings_account`
+    FOREIGN KEY (`account_id`) REFERENCES `accounts` (`account_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `web_registration_email_verifications` (
+  `email` VARCHAR(254) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `code_digest` CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `attempt_count` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `expires_at` TIMESTAMP NOT NULL,
+  `last_sent_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`email`),
+  KEY `idx_web_registration_verifications_expires` (`expires_at`)
+) ENGINE=InnoDB;
+
+-- A short-lived, single-use image challenge is required before an email
+-- verification code may be sent.  Only the answer digest is persisted.
+CREATE TABLE IF NOT EXISTS `web_registration_image_captchas` (
+  `captcha_token` CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `email` VARCHAR(254) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `code_digest` CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `attempt_count` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `expires_at` TIMESTAMP NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`captcha_token`),
+  KEY `idx_web_registration_image_captchas_expires` (`expires_at`)
+) ENGINE=InnoDB;
+
 -- 独立于玩家 accounts 的后台操作员身份。首个操作员必须由可信数据库管理终端
 -- 显式创建；服务不会再生成默认 admin 账号。
 CREATE TABLE IF NOT EXISTS `server_admin_users` (

@@ -698,7 +698,12 @@ typedef struct
 static VM_MOCK_ADMIN_THREAD_LOCAL vm_mock_admin_operation_audit_context
     g_vm_mock_admin_operation_audit_context;
 
+/* Configuration changes are not tied to a player account, but the immutable
+ * operation-log contract requires a non-empty target identifier. */
+#define VM_MOCK_ADMIN_OPERATION_LOG_CONFIG_TARGET "admin-config"
+
 #include "web_payment.inc.c"
+#include "web_registration.inc.c"
 
 /*
  * Declarative partial-navigation contract for list/detail management pages:
@@ -848,7 +853,7 @@ static const char g_vm_mock_admin_script[] =
     "const setupAdminToasts=()=>{const state=window.__cbeAdminToastState||(window.__cbeAdminToastState={queue:[],showing:false,observer:null});const host=()=>{let node=document.querySelector('#admin-toast-host');if(node)return node;const style=document.createElement('style');style.id='admin-toast-style';style.textContent='#admin-toast-host{position:fixed;z-index:10050;top:18px;right:18px;display:grid;justify-items:end;pointer-events:none} .admin-toast{width:min(380px,calc(100vw - 36px));display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:10px;align-items:start;padding:13px 12px 13px 15px;border:1px solid #b9d8ff;border-radius:10px;background:#fff;color:#18436f;box-shadow:0 14px 32px #10182833;opacity:0;transform:translateX(calc(100%% + 24px));transition:opacity .22s ease,transform .22s ease;pointer-events:auto} .admin-toast.show{opacity:1;transform:translateX(0)} .admin-toast.error{border-color:#f5b7b1;background:#fff7f6;color:#8f1d1d} .admin-toast.success{border-color:#9be3ba;background:#f3fff7;color:#05603a} .admin-toast-close{width:28px;height:28px;margin:-3px -3px 0 0;padding:0;border:0;border-radius:6px;background:transparent;color:currentColor;font:22px/1 sans-serif;cursor:pointer}@media(max-width:560px){#admin-toast-host{top:10px;right:10px}.admin-toast{width:min(380px,calc(100vw - 20px))}}';document.head.append(style);node=document.createElement('div');node.id='admin-toast-host';node.setAttribute('aria-live','polite');node.setAttribute('aria-atomic','true');document.body.append(node);return node;};const next=()=>{if(state.showing||!state.queue.length)return;state.showing=true;const entry=state.queue.shift(),node=document.createElement('section'),close=document.createElement('button'),dismiss=()=>{if(node.dataset.closing==='1')return;node.dataset.closing='1';node.classList.remove('show');setTimeout(()=>{node.remove();state.showing=false;next();},240);};node.className='admin-toast '+(entry.error?'error':'success');node.setAttribute('role',entry.error?'alert':'status');node.textContent=entry.text;close.type='button';close.className='admin-toast-close';close.setAttribute('aria-label','关闭提示');close.textContent='×';close.addEventListener('click',dismiss);node.append(close);host().append(node);requestAnimationFrame(()=>node.classList.add('show'));setTimeout(dismiss,5000);};const queue=node=>{if(!(node instanceof Element)||node.dataset.adminToastQueued==='1'||node.hasAttribute('data-admin-persistent-notice')||!node.matches('.notice.ok,.notice.error'))return;const text=node.textContent.trim();node.dataset.adminToastQueued='1';if(!text)return;state.queue.push({text,error:node.classList.contains('error')});node.remove();next();};const scan=root=>{if(root instanceof Element)queue(root);if(root.querySelectorAll)for(const node of root.querySelectorAll('.notice.ok,.notice.error'))queue(node);};scan(document);if(state.observer)return;state.observer=new MutationObserver(records=>{for(const record of records)for(const node of record.addedNodes)scan(node);});state.observer.observe(document.body,{childList:true,subtree:true});};"
     "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupActorPicker();setupMonsterPicker();setupNpcServices();setupContentUpdatePicker();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
     "const setupGlobalRewardsTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const accounts=nav.querySelector('[data-admin-tab=accounts],a[href*=\\\"tab=accounts\\\"]'),add=(key,label)=>{if(!accounts||[...nav.querySelectorAll('[data-admin-tab],a[href]')].some(link=>link.dataset.adminTab===key||link.getAttribute('href')?.includes('tab='+key)))return;const link=document.createElement('a');link.className='tab admin-spa-tab';link.dataset.adminTab=key;link.href='?tab='+key;link.textContent=label;accounts.after(link);};add('operations','操作日志');add('global-rewards','全服奖励管理');const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
-    "const setupDesignationTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const global=nav.querySelector('[data-admin-tab=global-rewards],a[href*=\\\"tab=global-rewards\\\"]');if(global)global.textContent='奖励邮件管理';let title=nav.querySelector('[data-admin-tab=designations],a[href*=\\\"tab=designations\\\"]');if(!title){title=document.createElement('a');title.className='tab admin-spa-tab';title.dataset.adminTab='designations';title.href='?tab=designations';title.textContent='称号管理';if(global)global.after(title);else nav.append(title);}const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
+    "const setupDesignationTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const global=nav.querySelector('[data-admin-tab=global-rewards],a[href*=\\\"tab=global-rewards\\\"]');if(global)global.textContent='奖励邮件管理';let title=nav.querySelector('[data-admin-tab=designations],a[href*=\\\"tab=designations\\\"]');if(!title){title=document.createElement('a');title.className='tab admin-spa-tab';title.dataset.adminTab='designations';title.href='?tab=designations';title.textContent='称号管理';if(global)global.after(title);else nav.append(title);}const registration=nav.querySelector('[data-admin-tab=registration]');if(!registration){const link=document.createElement('a'),accounts=nav.querySelector('[data-admin-tab=accounts]')||nav.querySelector('a');link.className='tab admin-spa-tab';link.dataset.adminTab='registration';link.href='?tab=registration';link.textContent='注册设置';if(accounts)accounts.after(link);else nav.prepend(link);}const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
     "const setupDesignationDirectory=()=>{for(const root of document.querySelectorAll('[data-designation-directory]')){if(root.dataset.designationDirectoryBound==='1')continue;root.dataset.designationDirectoryBound='1';const buttons=[...root.querySelectorAll('[data-designation-filter]')],cards=[...root.querySelectorAll('[data-designation-category]')],choose=category=>{if(!category)return;root.dataset.activeCategory=category;for(const card of cards)card.hidden=card.dataset.designationCategory!==category;for(const button of buttons){const on=button.dataset.designationFilter===category;button.classList.toggle('on',on);button.setAttribute('aria-pressed',on?'true':'false');}};for(const button of buttons)button.addEventListener('click',()=>choose(button.dataset.designationFilter));choose(root.dataset.activeCategory||buttons[0]?.dataset.designationFilter);}};"
     "const setupRoleOperationModal=()=>{const state=window.__cbeRoleOperationState||(window.__cbeRoleOperationState={bound:false,active:null,opener:null});const activate=(modal,key)=>{if(!modal||!key)return;for(const pane of modal.querySelectorAll('[data-role-operation-pane]'))pane.hidden=pane.dataset.roleOperationPane!==key;for(const button of modal.querySelectorAll('[data-role-operation-tab]')){const on=button.dataset.roleOperationTab===key;button.classList.toggle('on',on);if(on)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}};const close=modal=>{if(!modal)return;modal.hidden=true;if(state.active===modal)state.active=null;document.body.classList.remove('modal-open');const opener=state.opener;state.opener=null;if(opener&&document.contains(opener))opener.focus();};if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const opener=event.target.closest('[data-role-operation-open]');if(opener){const modal=document.getElementById(opener.dataset.roleOperationOpen);if(!modal)return;for(const other of document.querySelectorAll('[data-role-operation-modal]'))other.hidden=true;state.active=modal;state.opener=opener;modal.hidden=false;document.body.classList.add('modal-open');const focusTarget=modal.querySelector('[data-role-operation-tab].on')||modal.querySelector('[data-role-operation-tab]');focusTarget?.focus();event.preventDefault();return;}const tab=event.target.closest('[data-role-operation-tab]');if(tab){activate(tab.closest('[data-role-operation-modal]'),tab.dataset.roleOperationTab);tab.focus();return;}const closeButton=event.target.closest('[data-role-operation-close]');if(closeButton){close(closeButton.closest('[data-role-operation-modal]'));return;}const modal=event.target.closest('[data-role-operation-modal]');if(modal&&event.target===modal)close(modal);});document.addEventListener('keydown',event=>{const itemPicker=document.querySelector('#item-picker-modal'),scenePicker=document.querySelector('#scene-picker-modal');if(event.key==='Escape'&&((itemPicker&&!itemPicker.hidden)||(scenePicker&&!scenePicker.hidden)))return;if(event.key==='Escape'&&state.active&&!state.active.hidden){event.preventDefault();close(state.active);}});}for(const modal of document.querySelectorAll('[data-role-operation-modal]'))activate(modal,modal.querySelector('[data-role-operation-tab]')?.dataset.roleOperationTab);};"
     "const setupAdminContent=()=>{setupGlobalRewardsTab();setupDesignationTab();setupDesignationDirectory();setupRoleOperationModal();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupSceneBattleMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupMonsterPicker();setupTaskRequirementTargets();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
@@ -1921,7 +1926,7 @@ static void vm_mock_admin_operation_audit_begin(const char *operatorAccountId,
     snprintf(context->actionCode, sizeof(context->actionCode), "%s", actionCode);
     snprintf(context->targetAccountId, sizeof(context->targetAccountId), "%s",
              targetAccountId && targetAccountId[0] ? targetAccountId :
-                                                     "admin-config");
+                 VM_MOCK_ADMIN_OPERATION_LOG_CONFIG_TARGET);
     snprintf(context->detail, sizeof(context->detail),
              "后台编辑操作 %s 已完成", actionCode);
 }
@@ -9359,6 +9364,7 @@ typedef struct
 static const vm_mock_admin_operation_log_action
     g_vm_mock_admin_operation_log_actions[] = {
     {"admin-edit", "后台配置编辑"},
+    {"save-registration-settings", "保存注册与 SMTP 设置"},
     {"create-account", "创建账号"},
     {"set-password", "修改密码"},
     {"set-role-name", "修改角色名称"},
@@ -10726,6 +10732,12 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_operation_log_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "registration") == 0)
+    {
+        vm_mock_admin_render_registration_settings_page(response, responseCap,
+                                                        query);
+        return;
+    }
     if (strcmp(tab, "content") == 0)
     {
         if (strcmp(contentKind, "actor") == 0)
@@ -11547,6 +11559,24 @@ static void vm_mock_admin_redirect_servers(vm_mock_service_socket client,
     snprintf(location, sizeof(location),
              VM_MOCK_ADMIN_ROOT_PATH
              "?tab=servers&status=%s&message=%s",
+             statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_registration_settings(
+    vm_mock_service_socket client, const char *status, const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=registration&status=%s&message=%s",
              statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
@@ -14218,6 +14248,28 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
                                    sizeof(auditTarget));
     vm_mock_admin_operation_audit_begin(operatorAccountId, action,
                                         auditTarget);
+    if (strcmp(action, "save-registration-settings") == 0)
+    {
+        const char *saveMessage = NULL;
+
+        ok = vm_mock_registration_save_admin_config(body, &saveMessage);
+        if (ok && !vm_mock_admin_operation_log_record(
+                      "save-registration-settings",
+                      VM_MOCK_ADMIN_OPERATION_LOG_CONFIG_TARGET, 0, 0, 0, 0,
+                      "保存注册开关与 SMTP 邮件服务器配置（不记录 SMTP 密码）",
+                      operatorAccountId))
+        {
+            vm_mock_admin_redirect_registration_settings(
+                client, "error",
+                "注册设置已保存，但操作日志写入失败，请检查数据库");
+            return;
+        }
+        vm_mock_admin_redirect_registration_settings(
+            client, ok ? "ok" : "error",
+            ok ? "注册设置和 SMTP 配置已保存" :
+                 (saveMessage ? saveMessage : "注册设置保存失败"));
+        return;
+    }
     if (strcmp(action, "save-dsh-row") == 0)
     {
         vm_mock_admin_handle_dsh_row_action(client, body);
@@ -14823,9 +14875,14 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
 
 static void vm_mock_user_render_landing(char *response, size_t responseCap,
                                         const char *error,
-                                        bool registerActive)
+                                        bool registerActive,
+                                        const char *accountValue,
+                                        const char *emailValue)
 {
     vm_mock_admin_text page;
+    bool emailRegistrationAvailable = vm_mock_registration_web_email_available();
+    bool messageIsSuccess = error != NULL &&
+                            strncmp(error, "验证码已发送", strlen("验证码已发送")) == 0;
 
     vm_mock_admin_text_init(&page, response, responseCap);
     vm_mock_admin_text_appendf(&page,
@@ -14835,7 +14892,7 @@ static void vm_mock_user_render_landing(char *response, size_t responseCap,
         "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 18%% 12%%,#d1fae5 0,transparent 28%%),radial-gradient(circle at 82%% 18%%,#dbeafe 0,transparent 26%%),#f6f8fb;color:#1f2937;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}"
         ".wrap{width:min(480px,calc(100%% - 28px));margin:0 auto;padding:58px 0}.hero{text-align:center;margin-bottom:24px}.mark{display:grid;place-items:center;width:58px;height:58px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#0f766e,#175cd3);color:#fff;font:700 26px/1 serif;box-shadow:0 10px 26px #175cd333}.hero h1{font-size:30px;margin:0 0 5px}.hero p{color:#667085;margin:0}.card{background:#fffffff2;border:1px solid #e0e6ed;border-radius:16px;padding:8px 24px 24px;box-shadow:0 18px 50px #10182817;backdrop-filter:blur(8px)}"
         ".tab-toggle{position:absolute;opacity:0;pointer-events:none}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin:0 -16px 20px;padding:6px;border-radius:12px;background:#f2f4f7}.tabs label{padding:9px 12px;border-radius:8px;color:#667085;font-weight:650;text-align:center;cursor:pointer}.panels>section{display:none}#login-mode:checked~.tabs label[for=\"login-mode\"],#register-mode:checked~.tabs label[for=\"register-mode\"]{background:#fff;color:#175cd3;box-shadow:0 1px 4px #10182818}#login-mode:checked~.panels .login-panel,#register-mode:checked~.panels .register-panel{display:block}"
-        "h2{font-size:20px;margin:0 0 3px}.sub{color:#667085;margin:0 0 18px}.error{margin:0 0 17px;padding:10px 12px;border-radius:8px;background:#fef3f2;color:#b42318}form{display:grid;gap:12px}.field{display:grid;gap:5px;color:#475467;font-weight:550}.field input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:10px 11px;font:inherit;background:#fff;outline:none}.field input:focus{border-color:#84adff;box-shadow:0 0 0 3px #2e90fa18}button{border:0;border-radius:8px;padding:11px 13px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.register-panel button{background:#027a48}.note{margin:12px 0 0;color:#98a2b3;font-size:12px}@media(max-width:540px){.wrap{padding:28px 0}.hero h1{font-size:26px}.card{padding-inline:18px}}"
+        "h2{font-size:20px;margin:0 0 3px}.sub{color:#667085;margin:0 0 18px}.error,.notice{margin:0 0 17px;padding:10px 12px;border-radius:8px}.error{background:#fef3f2;color:#b42318}.notice{background:#ecfdf3;color:#027a48}form{display:grid;gap:12px}.field{display:grid;gap:5px;color:#475467;font-weight:550}.field input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:10px 11px;font:inherit;background:#fff;outline:none}.field input:focus{border-color:#84adff;box-shadow:0 0 0 3px #2e90fa18}button{border:0;border-radius:8px;padding:11px 13px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.register-panel button{background:#027a48}.code-send{background:#0f766e}.code-send:disabled{cursor:wait;opacity:.7}.unavailable{padding:12px;border-radius:9px;background:#fffaeb;color:#7a2e0e}.note{margin:12px 0 0;color:#98a2b3;font-size:12px}.captcha-status{min-height:20px;margin:0;color:#b42318;font-size:13px}.captcha-dialog{width:min(360px,calc(100%% - 28px));border:0;border-radius:14px;padding:20px;background:#fff;box-shadow:0 24px 60px #10182855}.captcha-dialog::backdrop{background:#10182888}.captcha-dialog h3{margin:0 0 5px;font-size:19px}.captcha-dialog p{margin:0 0 13px;color:#667085}.captcha-image{display:block;width:100%%;height:96px;border:1px solid #d0d5dd;border-radius:8px;background:#f8fafc;object-fit:contain}.captcha-actions{display:flex;justify-content:flex-end;gap:8px}.captcha-actions button:first-child{background:#667085}@media(max-width:540px){.wrap{padding:28px 0}.hero h1{font-size:26px}.card{padding-inline:18px}}"
         "</style></head><body><main class=\"wrap\"><header class=\"hero\"><div class=\"mark\">江</div><h1>江湖OL 账号中心</h1><p>管理你的江湖账号与角色资料</p></header>"
         "<section class=\"card\"><input class=\"tab-toggle\" type=\"radio\" id=\"login-mode\" name=\"auth-mode\"%s>"
         "<input class=\"tab-toggle\" type=\"radio\" id=\"register-mode\" name=\"auth-mode\"%s>"
@@ -14844,7 +14901,8 @@ static void vm_mock_user_render_landing(char *response, size_t responseCap,
         registerActive ? " checked" : "");
     if (error != NULL && error[0] != 0)
     {
-        vm_mock_admin_text_appendf(&page, "<div class=\"error\">");
+        vm_mock_admin_text_appendf(&page, "<div class=\"%s\">",
+                                   messageIsSuccess ? "notice" : "error");
         vm_mock_admin_text_append_html(&page, error);
         vm_mock_admin_text_appendf(&page, "</div>");
     }
@@ -14853,11 +14911,26 @@ static void vm_mock_user_render_landing(char *response, size_t responseCap,
         "<form method=\"post\" action=\"/user/login\"><label class=\"field\">账号<input name=\"account\" maxlength=\"63\" autocomplete=\"username\" required></label>"
         "<label class=\"field\">密码<input type=\"password\" name=\"password\" maxlength=\"63\" autocomplete=\"current-password\" required></label>"
         "<button type=\"submit\">登录账号</button></form></section>"
-        "<section class=\"register-panel\" role=\"tabpanel\"><h2>创建新账号</h2><p class=\"sub\">注册后将自动登录账号中心</p>"
-        "<form method=\"post\" action=\"/user/register\"><label class=\"field\">账号<input name=\"account\" minlength=\"4\" maxlength=\"32\" pattern=\"[A-Za-z0-9_]+\" autocomplete=\"username\" required></label>"
-        "<label class=\"field\">密码<input type=\"password\" name=\"password\" minlength=\"6\" maxlength=\"63\" autocomplete=\"new-password\" required></label>"
-        "<button type=\"submit\">注册并登录</button></form><p class=\"note\">账号名仅支持字母、数字和下划线，长度 4 至 32 位。</p></section></div></section>"
-        "</main></body></html>");
+        "<section class=\"register-panel\" role=\"tabpanel\"><h2>创建新账号</h2><p class=\"sub\">使用邮箱验证码完成注册，邮箱会绑定到该账号</p>");
+    if (!emailRegistrationAvailable)
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"unavailable\">注册邮箱服务尚未配置，暂时不能创建新账号。</div>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<form id=\"registration-form\" method=\"post\" action=\"/user/register\"><label class=\"field\">账号<input name=\"account\" minlength=\"4\" maxlength=\"32\" pattern=\"[A-Za-z0-9_]+\" autocomplete=\"username\" value=\"");
+        vm_mock_admin_text_append_html(&page, accountValue ? accountValue : "");
+        vm_mock_admin_text_appendf(&page,
+            "\" required></label><label class=\"field\">密码<input type=\"password\" name=\"password\" minlength=\"6\" maxlength=\"63\" autocomplete=\"new-password\" required></label><label class=\"field\">邮箱<input id=\"registration-email\" type=\"email\" name=\"email\" maxlength=\"254\" autocomplete=\"email\" value=\"");
+        vm_mock_admin_text_append_html(&page, emailValue ? emailValue : "");
+        vm_mock_admin_text_appendf(&page,
+            "\" required></label><input type=\"hidden\" name=\"captcha_token\"><input type=\"hidden\" name=\"captcha_code\"><button id=\"registration-code-send\" class=\"code-send\" type=\"button\" data-registration-captcha-open>发送邮箱验证码</button><p id=\"captcha-status\" class=\"captcha-status\" aria-live=\"polite\"></p><label class=\"field\">6 位邮箱验证码<input name=\"verification_code\" inputmode=\"numeric\" pattern=\"[0-9]{6}\" minlength=\"6\" maxlength=\"6\" autocomplete=\"one-time-code\" required></label><button type=\"submit\">验证邮箱并注册</button></form><dialog id=\"registration-captcha-dialog\" class=\"captcha-dialog\"><h3>图片验证码</h3><p>请输入图片中的 5 位字符，验证成功后才会发送邮件验证码。</p><div id=\"registration-captcha-image\" class=\"captcha-image\" style=\"display:grid;place-items:center;overflow:hidden\" role=\"img\" aria-label=\"图片验证码\"></div><label class=\"field\">图片验证码<input id=\"registration-captcha-code\" inputmode=\"text\" pattern=\"[A-Za-z0-9]{5}\" minlength=\"5\" maxlength=\"5\" autocomplete=\"off\" required></label><p id=\"registration-captcha-error\" class=\"captcha-status\" aria-live=\"polite\"></p><div class=\"captcha-actions\"><button type=\"button\" data-registration-captcha-cancel>取消</button><button type=\"button\" data-registration-captcha-confirm>验证并发送</button></div></dialog><noscript><p class=\"unavailable\">发送邮箱验证码需要启用浏览器脚本，以便完成图片验证码。</p></noscript><p class=\"note\">账号名仅支持字母、数字和下划线，长度 4 至 32 位；邮件验证码 10 分钟有效。图片验证码 5 分钟有效且仅可使用一次。</p>");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "<script src=\"/user/register.js\" defer></script>"
+        "</section></div></section></main></body></html>");
 }
 
 static const char *vm_mock_user_job_label(u8 job)
@@ -16474,6 +16547,15 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, "/payment/qrcode.js") == 0)
         return vm_mock_admin_send_payment_qrcode_script(client);
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, "/user/register.js") == 0)
+    {
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "application/javascript; charset=utf-8",
+                                    "Cache-Control: no-store, max-age=0\r\n",
+                                    g_vm_mock_registration_browser_script);
+        return 1;
+    }
     if (strcmp(target, "/payment/cbhub/notify") == 0 ||
         strcmp(target, "/payment/cbhub/return") == 0)
     {
@@ -16570,7 +16652,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                           session->accountId, status, message);
         else
             vm_mock_user_render_landing(response, VM_MOCK_ADMIN_RESPONSE_MAX,
-                                        NULL, false);
+                                        NULL, false, NULL, NULL);
         vm_mock_admin_send_response(client, "200 OK",
                                     "text/html; charset=utf-8", NULL, response);
         free(response);
@@ -16668,11 +16750,125 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         free(response);
         return visible ? 1 : 0;
     }
+    if (strcmp(target, "/user/register/captcha/new") == 0)
+    {
+        char emailInput[VM_MOCK_REGISTRATION_EMAIL_MAX];
+        char captchaToken[VM_MOCK_REGISTRATION_CAPTCHA_TOKEN_LEN + 1];
+        char captchaCode[VM_MOCK_REGISTRATION_CAPTCHA_CODE_LEN + 1];
+        char svg[768];
+        char json[1536];
+        const char *message = NULL;
+        bool ok = false;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "图片验证码请求只允许 POST。\n");
+            return 0;
+        }
+        memset(emailInput, 0, sizeof(emailInput));
+        memset(captchaToken, 0, sizeof(captchaToken));
+        memset(captchaCode, 0, sizeof(captchaCode));
+        if (vm_mock_admin_form_value(body, "email", emailInput,
+                                     sizeof(emailInput)))
+        {
+            ok = vm_mock_registration_create_captcha(
+                emailInput, captchaToken, captchaCode, &message);
+        }
+        else
+        {
+            message = "邮箱参数不完整";
+        }
+        if (ok &&
+            snprintf(svg, sizeof(svg),
+                     "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"96\" viewBox=\"0 0 300 96\"><rect width=\"300\" height=\"96\" rx=\"10\" fill=\"#f8fafc\"/><path d=\"M0 21 C56 4 84 46 146 19 S244 45 300 14 M0 72 C48 42 100 94 160 62 S248 83 300 58\" fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"2\" opacity=\".55\"/><path d=\"M12 47 L286 34 M30 84 L268 13\" stroke=\"#cbd5e1\" stroke-width=\"1.5\" opacity=\".8\"/><text x=\"150\" y=\"64\" text-anchor=\"middle\" font-family=\"monospace\" font-size=\"42\" font-weight=\"700\" letter-spacing=\"7\" fill=\"#0f766e\">%s</text></svg>",
+                     captchaCode) < (int)sizeof(svg) &&
+            snprintf(json, sizeof(json),
+                     "{\"token\":\"%s\",\"svg\":\"<svg xmlns='http://www.w3.org/2000/svg' width='300' height='96' viewBox='0 0 300 96'><rect width='300' height='96' rx='10' fill='#f8fafc'/><path d='M0 21 C56 4 84 46 146 19 S244 45 300 14 M0 72 C48 42 100 94 160 62 S248 83 300 58' fill='none' stroke='#94a3b8' stroke-width='2' opacity='.55'/><path d='M12 47 L286 34 M30 84 L268 13' stroke='#cbd5e1' stroke-width='1.5' opacity='.8'/><text x='150' y='64' text-anchor='middle' font-family='monospace' font-size='42' font-weight='700' letter-spacing='7' fill='#0f766e'>%s</text></svg>\"}",
+                     captchaToken, captchaCode) < (int)sizeof(json))
+        {
+            vm_mock_admin_send_response(client, "200 OK",
+                                        "application/json; charset=utf-8",
+                                        "Cache-Control: no-store\r\n"
+                                        "X-Content-Type-Options: nosniff\r\n",
+                                        json);
+            memset(captchaCode, 0, sizeof(captchaCode));
+            return 1;
+        }
+        memset(captchaCode, 0, sizeof(captchaCode));
+        snprintf(json, sizeof(json), "{\"error\":\"%s\"}",
+                 message ? message : "图片验证码暂不可用，请稍后重试");
+        vm_mock_admin_send_response(client, "422 Unprocessable Content",
+                                    "application/json; charset=utf-8",
+                                    "Cache-Control: no-store\r\n"
+                                    "X-Content-Type-Options: nosniff\r\n",
+                                    json);
+        return 0;
+    }
+    if (strcmp(target, "/user/register/code") == 0)
+    {
+        char emailInput[VM_MOCK_REGISTRATION_EMAIL_MAX];
+        char normalizedEmail[VM_MOCK_REGISTRATION_EMAIL_MAX];
+        char captchaToken[VM_MOCK_REGISTRATION_CAPTCHA_TOKEN_LEN + 1];
+        char captchaCode[VM_MOCK_REGISTRATION_CAPTCHA_CODE_LEN + 1];
+        const char *message = NULL;
+        bool ok = false;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "发送注册验证码只允许 POST。\n");
+            return 0;
+        }
+        memset(emailInput, 0, sizeof(emailInput));
+        memset(normalizedEmail, 0, sizeof(normalizedEmail));
+        memset(captchaToken, 0, sizeof(captchaToken));
+        memset(captchaCode, 0, sizeof(captchaCode));
+        if (!vm_mock_admin_form_value(body, "email", emailInput,
+                                      sizeof(emailInput)) ||
+            !vm_mock_admin_form_value(body, "captcha_token", captchaToken,
+                                      sizeof(captchaToken)) ||
+            !vm_mock_admin_form_value(body, "captcha_code", captchaCode,
+                                      sizeof(captchaCode)))
+        {
+            message = "请先完成图片验证码";
+        }
+        else if (!vm_mock_registration_verify_captcha(
+                     emailInput, captchaToken, captchaCode, &message))
+        {
+            /* A failed or expired image challenge must never reach SMTP. */
+            ok = false;
+        }
+        else
+            ok = vm_mock_registration_send_verification_code(
+                emailInput, normalizedEmail, sizeof(normalizedEmail), &message);
+        memset(captchaCode, 0, sizeof(captchaCode));
+        response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
+        if (response == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        NULL, NULL, "内存不足。\n");
+            return 0;
+        }
+        vm_mock_user_render_landing(
+            response, VM_MOCK_ADMIN_RESPONSE_MAX,
+            ok ? "验证码已发送，请查收邮箱并在下方完成注册" :
+                 (message ? message : "验证码发送失败"),
+            true, NULL, normalizedEmail[0] ? normalizedEmail : emailInput);
+        vm_mock_admin_send_response(client, ok ? "200 OK" : "422 Unprocessable Content",
+                                    "text/html; charset=utf-8", NULL, response);
+        free(response);
+        return ok ? 1 : 0;
+    }
     if (strcmp(target, "/user/login") == 0 ||
         strcmp(target, "/user/register") == 0)
     {
         char account[64];
         char password[64];
+        char email[VM_MOCK_REGISTRATION_EMAIL_MAX];
+        char verificationCode[VM_MOCK_REGISTRATION_CODE_LEN + 1];
         const char *message = NULL;
         bool registering = strcmp(target, "/user/register") == 0;
         bool ok = false;
@@ -16687,6 +16883,8 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         }
         memset(account, 0, sizeof(account));
         memset(password, 0, sizeof(password));
+        memset(email, 0, sizeof(email));
+        memset(verificationCode, 0, sizeof(verificationCode));
         if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)) ||
             !vm_mock_admin_form_value(body, "password", password, sizeof(password)))
         {
@@ -16696,17 +16894,34 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         else if (registering)
         {
             const char *createMessage = NULL;
-            if (vm_mock_user_valid_registration(account, password, &message))
+            if (!vm_mock_admin_form_value(body, "email", email, sizeof(email)) ||
+                !vm_mock_admin_form_value(body, "verification_code", verificationCode,
+                                          sizeof(verificationCode)))
             {
-                ok = vm_mock_service_account_create_record(account, password,
-                                                           &createMessage);
+                message = "邮箱或验证码参数不完整";
+            }
+            else if (!vm_mock_registration_web_email_available())
+            {
+                message = "注册邮箱服务尚未配置，请联系管理员";
+            }
+            else if (vm_mock_user_valid_registration(account, password, &message))
+            {
+                ok = vm_mock_registration_create_verified_account(
+                    account, password, email, verificationCode, &createMessage);
                 if (!ok)
                 {
                     if (createMessage && strcmp(createMessage,
                                                 "account already exists") == 0)
                         message = "该账号名已被注册";
+                    else if (createMessage && strcmp(createMessage,
+                                                    "email already bound") == 0)
+                        message = "该邮箱已绑定其他账号";
+                    else if (createMessage && strcmp(createMessage,
+                                                    "verification code invalid") == 0)
+                        message = "邮箱验证码错误";
                     else
-                        message = "账号注册失败，请稍后重试";
+                        message = createMessage ? createMessage :
+                                                  "账号注册失败，请稍后重试";
                 }
             }
         }
@@ -16731,6 +16946,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                 message = "账号或密码错误";
         }
         memset(password, 0, sizeof(password));
+        memset(verificationCode, 0, sizeof(verificationCode));
         if (ok)
         {
             vm_mock_user_session *session = vm_mock_user_issue_session(account);
@@ -16770,7 +16986,9 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
             return 0;
         }
         vm_mock_user_render_landing(response, VM_MOCK_ADMIN_RESPONSE_MAX,
-                                    message ? message : "操作失败", registering);
+                                    message ? message : "操作失败", registering,
+                                    registering ? account : NULL,
+                                    registering ? email : NULL);
         vm_mock_admin_send_response(client,
                                     registering ? "409 Conflict" :
                                                   "401 Unauthorized",
