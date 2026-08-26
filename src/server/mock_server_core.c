@@ -449,6 +449,28 @@ static u32 vm_net_mock_min_u32(u32 a, u32 b)
     return (a < b) ? a : b;
 }
 
+/* Preserve the full u32 protocol domain without letting malformed resource
+ * values wrap into a smaller combat stat.  This is representation safety, not
+ * a gameplay cap. */
+static u32 vm_net_mock_add_u32_saturating(u32 left, u32 right)
+{
+    uint64_t sum = (uint64_t)left + right;
+    return sum > 0xffffffffull ? 0xffffffffu : (u32)sum;
+}
+
+static u32 vm_net_mock_mul_div_u32_saturating(u32 value, u32 multiplier,
+                                              u32 divisor)
+{
+    uint64_t product = 0;
+    uint64_t quotient = 0;
+
+    if (divisor == 0)
+        return 0;
+    product = (uint64_t)value * multiplier;
+    quotient = product / divisor;
+    return quotient > 0xffffffffull ? 0xffffffffu : (u32)quotient;
+}
+
 static u8 vm_net_mock_env_u8(const char *name, u8 fallback);
 static bool vm_net_mock_role_db_has_role_id(u32 roleId);
 static u8 vm_net_mock_active_role_job_or(u8 fallback);

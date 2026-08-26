@@ -12270,6 +12270,73 @@ static u32 vm_net_mock_build_scene_runtime_direct_enter_followup_response(
     return pos;
 }
 
+/* A scene n_telestone list selection reaches the same direct mmGame entry
+ * parser as an unstuck response, but the live client does not always serialize
+ * the optional 16/3 current-X ACK.  Its observed first follow-up is exactly
+ * the two empty catalog requests below.  Match it only while the selected
+ * target is still the active direct-enter transition; a plain 27/11+7/42 from
+ * any other scene lifecycle remains available to its existing handlers. */
+static u32 vm_net_mock_build_teleport_stone_selected_direct_catalog_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_request_object object;
+    vm_net_mock_scene_change_target target;
+    const char *currentScene = NULL;
+    u32 offset = 4;
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 14 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        (u16)(((u16)request[2] << 8) | request[3]) != requestLen ||
+        !g_vm_net_mock_teleport_stone_direct_enter_pending ||
+        !g_vm_net_mock_last_scene_change_target_valid)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 0x1b || object.subtype != 11 ||
+        object.payloadLen != 0 ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 7 || object.subtype != 42 ||
+        object.payloadLen != 0 || offset != requestLen)
+    {
+        return 0;
+    }
+
+    target = g_vm_net_mock_last_scene_change_target;
+    currentScene = vm_net_mock_current_scene_name();
+    if (target.sceneCompletionSent ||
+        !vm_net_mock_scene_name_is_safe(target.scene) ||
+        currentScene == NULL ||
+        !vm_net_mock_scene_names_equal_exact(currentScene, target.scene))
+    {
+        return 0;
+    }
+
+    /* This is a real client scene shell. Consume the requested NPC directory
+     * now, but keep the direct-enter target pending for its later WT6/1
+     * resource-completion acknowledgement. */
+    vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
+    if (!vm_net_mock_append_scene_npcs11_once_or_empty(
+            out, outCap, &pos, target.scene,
+            "scene-teleport-stone-direct-catalog"))
+    {
+        return 0;
+    }
+    objectCount += 1;
+    if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+        return 0;
+    objectCount += 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    printf("[info][network] mock_teleport_stone_direct_catalog scene=%s pos=(%u,%u) objects=%u keep_pending=1 next=WT6/1 evidence=runtime:16/2-result1-then-27/11+7/42\n",
+           target.scene, target.x, target.y, (u32)objectCount);
+    vm_autotest_note("mock_teleport_stone_direct_catalog scene=%s pos=(%u,%u) objects=%u keep_pending=1 next=WT6/1 evidence=runtime:16/2-result1-then-27/11+7/42\n",
+                     target.scene, target.x, target.y, (u32)objectCount);
+    return pos;
+}
+
 static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request, u32 requestLen,
                                                               u8 subtype, u8 *out, u32 outCap)
 {
@@ -12347,22 +12414,50 @@ static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request,
                              responseKind);
             return pos;
         }
-        if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(out, outCap, &pos,
-                                                                         2, 2, &target))
+        /*
+         * A standalone 16/2 is a selection from the in-scene n_telestone
+         * destination list, not the follow-up of a 16/4 world-map purchase
+         * confirmation.  The old reply copied the obsolete 16/2(result=2)
+         * shape.  mmGame:0x11CE defines that exact result as the native
+         * "酷宝不足" branch, so it produced a recharge prompt even for a role
+         * that has both W-coin and item 800.  It also has no `value` field,
+         * which is why the prompt misleadingly displayed 传送石 x0.
+         *
+         * Scene teleport stones have no item or currency charge.  Their
+         * selected catalog target must use the direct mmGame
+         * 16/2(result=1,scene,posinfo,exitid) contract. Its live first
+         * follow-up is the target scene's 27/11 + 7/42 catalog stream; some
+         * runtime paths also prefix that stream with 16/3(type=0,current-X),
+         * but this selection path must not require that optional ACK.
+         *
+         * Do not manufacture a zero-cost item confirmation: that would still
+         * enter an unrelated item-use callback and could make the client
+         * inspect a local item stack.
+         */
+        if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(
+                out, outCap, &pos, 2, 1, &target))
+        {
             return 0;
+        }
         vm_net_mock_finish_wt_packet(out, pos, 1);
-        g_vm_net_mock_teleport_stone_confirm_target = target;
-        g_vm_net_mock_teleport_stone_confirm_target_valid = true;
+        g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+        g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+        g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
         g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
-        g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = true;
         g_vm_net_mock_teleport_stone_map_enter_pending = false;
-        responseKind = "16/2-confirm-target";
-        printf("[info][network] mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s pending=0 confirm=%u resp=%u\n",
+        vm_net_mock_remember_scene_change_target(&target);
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        g_vm_net_mock_last_scene_change_fb4_type = 1;
+        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                          "scene-teleport-stone-select");
+        responseKind = "16/2-result1-direct-no-cost";
+        printf("[info][network] mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s item800_cost=0 wcoin_cost=0 pending=1 confirm=0 next=27/11+7/42 resp=%u\n",
                subtype, target.exitId, target.scene, target.x, target.y,
-               responseKind, targetFromConfirm ? 1u : 0u, pos);
-        vm_autotest_note("mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s pending=0 confirm=%u evidence=JianghuOL:0x01018F66/0x0103573A\n",
+               responseKind, pos);
+        vm_autotest_note("mock_teleport_stone_transfer subtype=%u exit=%u scene=%s pos=(%u,%u) response=%s item800_cost=0 wcoin_cost=0 pending=1 next=27/11+7/42 evidence=mmGame:0x11CE->0x0BCC runtime=scene-teleport-stone-select negative=16/2-result2-native-recharge\n",
                          subtype, target.exitId, target.scene, target.x, target.y,
-                         responseKind, targetFromConfirm ? 1u : 0u);
+                         responseKind);
         return pos;
     }
 

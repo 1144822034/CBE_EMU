@@ -3137,10 +3137,10 @@ static void vm_net_mock_build_actorinfo_status_fields(
     fields->strength = stats->strength;
     fields->words[0] = stats->agility;
     fields->words[1] = stats->wisdom;
-    fields->words[2] = vm_net_mock_cap_u32(stats->hit, 9999);
+    fields->words[2] = stats->hit;
     fields->words[3] = 0; /* speed: unresolved; equip.dsh has no such column */
-    fields->words[4] = vm_net_mock_cap_u32(stats->defense, 9999);
-    fields->words[5] = vm_net_mock_cap_u32(stats->resist, 9999);
+    fields->words[4] = stats->defense;
+    fields->words[5] = stats->resist;
 }
 
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)

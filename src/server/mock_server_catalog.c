@@ -3115,7 +3115,10 @@ static u32 vm_net_mock_equipment_enhancement_bonus_from_base(u32 base,
     {
         const vm_net_mock_equipment_enhance_primary_rule *rule =
             &g_vm_net_mock_equipment_enhance_primary_rules[i];
-        result += (u32)rule->flat + (base * (u32)rule->percent) / 100u;
+        result = vm_net_mock_add_u32_saturating(result, (u32)rule->flat);
+        result = vm_net_mock_add_u32_saturating(
+            result, vm_net_mock_mul_div_u32_saturating(
+                        base, (u32)rule->percent, 100u));
     }
     return result;
 }
@@ -3230,34 +3233,34 @@ static void vm_net_mock_equipment_enhancement_add_attr_bonus(
     switch (type)
     {
     case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
-        bonus->strength += value;
+        bonus->strength = vm_net_mock_add_u32_saturating(bonus->strength, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_AGILITY:
-        bonus->agility += value;
+        bonus->agility = vm_net_mock_add_u32_saturating(bonus->agility, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_WISDOM:
-        bonus->wisdom += value;
+        bonus->wisdom = vm_net_mock_add_u32_saturating(bonus->wisdom, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_ATTACK:
-        bonus->attack += value;
+        bonus->attack = vm_net_mock_add_u32_saturating(bonus->attack, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_ARMOR:
-        bonus->armor += value;
+        bonus->armor = vm_net_mock_add_u32_saturating(bonus->armor, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_DODGE:
-        bonus->dodge += value;
+        bonus->dodge = vm_net_mock_add_u32_saturating(bonus->dodge, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_HIT:
-        bonus->hit += value;
+        bonus->hit = vm_net_mock_add_u32_saturating(bonus->hit, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_CRIT:
-        bonus->crit += value;
+        bonus->crit = vm_net_mock_add_u32_saturating(bonus->crit, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_HP:
-        bonus->hp += value;
+        bonus->hp = vm_net_mock_add_u32_saturating(bonus->hp, value);
         break;
     case VM_NET_MOCK_EQUIP_ATTR_MP:
-        bonus->mp += value;
+        bonus->mp = vm_net_mock_add_u32_saturating(bonus->mp, value);
         break;
     default:
         break;
