@@ -95,22 +95,15 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_conte
 字节变化时，客户端才会因 `id/code` 不同而删除并重取其中资源。服务启动也会自动补齐
 旧表的 `resource_checksum` 列，并一次性迁移旧 `server_content_update.tsv`（若存在）。
 
-已有数据库升级到用户账号中心和旧版数据库后台密码时执行：
-
-```powershell
-mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_web_accounts.sql
-```
-
-脚本新增 `server_admin_config`，这是旧版单一后台密码的兼容来源；不会修改游戏账号
-或角色数据。完成下面的多账号迁移后，后台入口 `/admin-418yz6/` 改为使用独立的
-后台账号登录，不再读取玩家 `accounts` 表。
+后台入口 `/admin-418yz6/` 仅使用独立的后台账号登录，不读取玩家 `accounts` 表，也不会
+生成默认 `admin`。已有数据库启用后台账号表时执行：
 
 ```powershell
 mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_admin_users.sql
 ```
 
-迁移会将原有共享密码平滑复制为默认后台账号 `admin`，不会覆盖已有 `admin` 记录；
-请立即为每位操作者创建独立账号并修改默认密码。账号名仅允许字母、数字、`. _ - @`：
+迁移只创建账号表和操作审计表，不会创建任何后台账号。请先在可信数据库管理终端为每位
+操作者显式创建账号；账号名仅允许字母、数字、`. _ - @`：
 
 ```sql
 INSERT INTO server_admin_users
@@ -126,6 +119,21 @@ VALUES
 UPDATE server_admin_users
 SET password_value = '新密码', failed_attempts = 0, locked = 0
 WHERE account_id = 'operator.alice';
+```
+
+后台登录还会按来源 IPv4 独立计算连续凭据错误。达到 5 次时，该来源会被拒绝继续访问
+后台登录，触发第 5 次错误时提交的账号会显示在后台“风险管理 → 后台账号风险”。此策略
+不影响同一 IP 的游戏客户端或玩家账号中心登录。已有数据库部署时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_admin_login_ip_blocks.sql
+```
+
+服务也会在首次使用时创建该表。解除后台来源 IP 限制前，应先在“后台账号风险”核对账号和
+来源；当前版本保留风险记录以供审计，恢复登录需在可信管理终端删除对应行：
+
+```sql
+DELETE FROM server_admin_login_ip_blocks WHERE ip_address = '203.0.113.7';
 ```
 
 已有数据库启用游戏与网页共用的来源 IP 登录封锁时执行：
@@ -405,8 +413,8 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 ## 表说明
 
 - `accounts`：账号与登录密码。
-- `server_admin_config`：旧版单一后台密码的兼容迁移来源；升级后不再用于登录验证。
 - `server_admin_users`：独立后台操作员账号、密码、连续失败次数和锁定状态；与玩家账号表隔离。
+- `server_admin_login_ip_blocks`：后台登录专用的来源 IP 连续错误记录、封锁状态与触发账号。
 - `server_login_ip_blocks`：游戏、账号中心和后台管理共用的来源 IP 连续登录失败计数与封锁状态。
 - `server_trusted_proxy_sources`：网页反向代理的可信 TCP 来源、可采信的真实 IP 请求头及启用状态。
 - `server_admin_operation_logs`：后台对账号和角色执行成功操作、以及游戏内成功 W 币消费的追加式审计记录，包含操作人（后台账号或游戏内）、时间、目标账号/角色、金额或物品信息及说明。

@@ -193,6 +193,85 @@ static bool verify_scene_insert(const char *scene, u32 expectedCountOffset,
     return true;
 }
 
+/* Saving two draft rows must result in two independent native kind-3 records.
+ * Quantity expansion alone is not sufficient evidence: these rows use a
+ * different monster ID, actor resource and coordinate, which is the operator
+ * contract for a multi-monster scene deployment. */
+static bool verify_multiple_draft_rows(
+    const char *scene,
+    const vm_net_mock_scene_battle_monster_admin_row *firstRow)
+{
+    static u8 first[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    static u8 second[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    vm_net_mock_scene_battle_monster_admin_row secondRow;
+    vm_net_mock_sce_entity_list before;
+    vm_net_mock_sce_entity_list after;
+    u32 firstLen = 0;
+    u32 secondLen = 0;
+    u32 beforeNodes = 0;
+    u32 afterNodes = 0;
+
+    if (scene == NULL || firstRow == NULL ||
+        !load_scene_payload(scene, first, sizeof(first), &firstLen) ||
+        !vm_net_mock_scene_battle_monster_parse_entity_list(
+            first, firstLen, &before) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            first, firstLen, &beforeNodes))
+    {
+        fputs("multiple draft fixture base parse failed\n", stderr);
+        return false;
+    }
+    secondRow = *firstRow;
+    secondRow.monsterId = 1001;
+    secondRow.x = 200;
+    secondRow.y = 140;
+    secondRow.visualHint = 5;
+    snprintf(secondRow.displayName, sizeof(secondRow.displayName), "tiger");
+    snprintf(secondRow.actorResource, sizeof(secondRow.actorResource),
+             "e_tiger.actor");
+    snprintf(secondRow.effectResource, sizeof(secondRow.effectResource),
+             "e_ghostfireB.actor");
+
+    memcpy(second, first, firstLen);
+    secondLen = firstLen;
+    if (!vm_net_mock_scene_battle_monster_insert_counted_record(
+            first, sizeof(first), &firstLen, firstRow) ||
+        !vm_net_mock_scene_battle_monster_insert_counted_record(
+            first, sizeof(first), &firstLen, &secondRow) ||
+        !vm_net_mock_scene_battle_monster_parse_entity_list(
+            first, firstLen, &after) ||
+        !vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            first, firstLen, &afterNodes) ||
+        after.recordCount != before.recordCount + 2u ||
+        after.combatRecordCount != before.combatRecordCount + 2u ||
+        afterNodes != beforeNodes + 2u ||
+        !vm_net_mock_scene_battle_monster_payload_has_row(
+            first, firstLen, firstRow) ||
+        !vm_net_mock_scene_battle_monster_payload_has_row(
+            first, firstLen, &secondRow))
+    {
+        fputs("multiple scene battle monster rows were not both compiled\n",
+              stderr);
+        return false;
+    }
+
+    /* Deployment starts from the captured base on every attempt.  Rebuild the
+     * two-row payload to ensure neither draft displaces or duplicates the
+     * other during a later deployment. */
+    if (!vm_net_mock_scene_battle_monster_insert_counted_record(
+            second, sizeof(second), &secondLen, firstRow) ||
+        !vm_net_mock_scene_battle_monster_insert_counted_record(
+            second, sizeof(second), &secondLen, &secondRow) ||
+        secondLen != firstLen || memcmp(second, first, firstLen) != 0)
+    {
+        fputs("multiple scene battle monster rows are not deterministic\n",
+              stderr);
+        return false;
+    }
+    puts("multiple scene battle monster draft rows compiled together");
+    return true;
+}
+
 int main(void)
 {
     static const char testScene[] =
@@ -377,6 +456,7 @@ int main(void)
     }
 
     if (!verify_all_scene_entity_lists() ||
+        !verify_multiple_draft_rows(testScene, &row) ||
         !verify_scene_insert(testScene, 38u, 6u, 428u, 0u, &row) ||
         !verify_scene_insert(penglaiScene, 100u, 4u, 395u, 1u, &row) ||
         !verify_scene_insert(taohuaScene, 102u, 8u, 619u, 4u, &row) ||

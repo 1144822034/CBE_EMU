@@ -1525,8 +1525,8 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                    workerQueueWaitMs,
                    protocolWaitMs,
                    protocolHoldMs);
+            fflush(stdout);
         }
-        fflush(stdout);
         return 1;
     }
     if (payloadLen == 0)
@@ -1775,12 +1775,10 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                protocolHoldMs,
                requestProcessEndMs >= requestProcessStartMs ?
                    requestProcessEndMs - requestProcessStartMs : 0);
+        /* A diagnostic was emitted. Keep that bounded output current without
+         * forcing stdout work for every normal gameplay request. */
+        fflush(stdout);
     }
-    /* Response bytes are already on the client socket and the protocol lock
-     * has been released.  Flush the service-only batch here so diagnostics
-     * remain current without putting disk latency on the request critical
-     * path. */
-    fflush(stdout);
 #undef VM_MOCK_SERVICE_PROTOCOL_RETURN
 #undef VM_MOCK_SERVICE_PROTOCOL_UNLOCK
     return 1;
@@ -1848,6 +1846,11 @@ enum
      * two listeners on Windows, so incomplete Internet connections cannot
      * consume protocol workers. */
     VM_MOCK_SERVICE_INGRESS_MAX = 32,
+    /* This applies only while a peer has not completed its first CBMS frame.
+     * A normal client releases the ingress entry immediately, so the cap
+     * prevents one slow or hostile source from occupying the whole public
+     * listener without imposing an online-player or account quota. */
+    VM_MOCK_SERVICE_INGRESS_PER_SOURCE_MAX = 4,
     VM_MOCK_SERVICE_INGRESS_FRAME_TIMEOUT_MS = 2000,
     /* The running MySQL configuration uses wait_timeout=120 seconds.  Wake
      * workers at half that interval so their thread-local durable connection
@@ -2309,6 +2312,49 @@ static bool vm_mock_service_ingress_add(vm_mock_service_ingress_table *table,
     return true;
 }
 
+static u32 vm_mock_service_ingress_source_pending_count(
+    const vm_mock_service_ingress_table *table, const char *sourceIp)
+{
+    u32 count = 0;
+
+    if (table == NULL || !vm_mock_service_login_ip_is_valid(sourceIp))
+        return 0;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_INGRESS_MAX; ++i)
+    {
+        const vm_mock_service_ingress_connection *entry = &table->entries[i];
+
+        if (entry->socket != VM_MOCK_SERVICE_INVALID_SOCKET &&
+            strcmp(entry->sourceIp, sourceIp) == 0)
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static bool vm_mock_service_ingress_drop_if_source_pending_cap(
+    vm_mock_service_ingress_table *table,
+    vm_mock_service_ingress_connection *entry)
+{
+    u32 pendingCount = 0;
+
+    if (table == NULL || entry == NULL ||
+        entry->socket == VM_MOCK_SERVICE_INVALID_SOCKET ||
+        !vm_mock_service_login_ip_is_valid(entry->sourceIp))
+    {
+        return false;
+    }
+    pendingCount = vm_mock_service_ingress_source_pending_count(table,
+                                                                 entry->sourceIp);
+    if (pendingCount <= VM_MOCK_SERVICE_INGRESS_PER_SOURCE_MAX)
+        return false;
+    printf("[warn][mock-service] ingress_drop ingress_id=%u reason=source-pending-cap pending=%u cap=%u source=%s\n",
+           entry->ingressId, pendingCount,
+           (u32)VM_MOCK_SERVICE_INGRESS_PER_SOURCE_MAX, entry->sourceIp);
+    vm_mock_service_ingress_clear(entry);
+    return true;
+}
+
 static bool vm_mock_service_ingress_expire_if_needed(
     vm_mock_service_ingress_connection *entry, u32 nowMs)
 {
@@ -2325,6 +2371,7 @@ static bool vm_mock_service_ingress_expire_if_needed(
 }
 
 static bool vm_mock_service_ingress_try_dispatch(
+    vm_mock_service_ingress_table *table,
     vm_mock_service_ingress_connection *entry,
     vm_mock_service_worker_pool *pool, u32 nowMs, bool readable)
 {
@@ -2340,6 +2387,8 @@ static bool vm_mock_service_ingress_try_dispatch(
         return false;
     if (!readable)
     {
+        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry))
+            return false;
         if (vm_mock_service_ingress_expire_if_needed(entry, nowMs))
             return false;
         return true;
@@ -2374,6 +2423,8 @@ static bool vm_mock_service_ingress_try_dispatch(
     }
     if (received < (int)sizeof(header))
     {
+        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry))
+            return false;
         if (vm_mock_service_ingress_expire_if_needed(entry, nowMs))
             return false;
         return true;
@@ -2416,17 +2467,18 @@ static bool vm_mock_service_ingress_try_dispatch(
     }
     if (pendingBytes < frameLen)
     {
+        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry))
+            return false;
         if (vm_mock_service_ingress_expire_if_needed(entry, nowMs))
             return false;
         return true;
     }
 
-    /* The existing client handler answers this canonical transport probe with
-     * an empty CBMR before it ever enters the legacy protocol-state mutex.
-     * Keep that byte contract, but answer it here so health checks cannot use
-     * one of the game workers while a battle request is waiting on state. */
-    if (requestFlags == VM_MOCK_SERVICE_REQUEST_FLAG_PING && requestLen == 0 &&
-        vm_mock_service_read_le32(header + 16) == 0)
+    /* The existing client handler answers every PING-flagged transport frame
+     * with an empty CBMR before it validates request length or touches legacy
+     * protocol state.  Preserve that byte contract at ingress so probe
+     * variants cannot consume a game worker while a battle request waits. */
+    if ((requestFlags & VM_MOCK_SERVICE_REQUEST_FLAG_PING) != 0)
     {
         vm_mock_service_encode_header(header, "CBMR", 0, 0, 0);
         if (!vm_mock_service_send_all(entry->socket, header, sizeof(header)))
@@ -2434,11 +2486,10 @@ static bool vm_mock_service_ingress_try_dispatch(
             printf("[warn][mock-service] ingress_ping_send_failed ingress_id=%u source=%s\n",
                    entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
         }
-        else if (nowMs - entry->acceptedMs > 20 ||
-                 vm_net_mock_verbose_logging_enabled())
+        else if (vm_net_mock_verbose_logging_enabled())
         {
-            printf("[info][mock-service] ingress_ping ingress_id=%u ingress_wait_ms=%u source=%s\n",
-                   entry->ingressId, nowMs - entry->acceptedMs,
+            printf("[info][mock-service] ingress_ping ingress_id=%u flags=%u ingress_wait_ms=%u source=%s\n",
+                   entry->ingressId, requestFlags, nowMs - entry->acceptedMs,
                    entry->sourceIp[0] ? entry->sourceIp : "-");
         }
         vm_mock_service_ingress_clear(entry);
@@ -2455,7 +2506,7 @@ static bool vm_mock_service_ingress_try_dispatch(
         vm_mock_service_ingress_clear(entry);
         return false;
     }
-    if (nowMs - entry->acceptedMs > 20 || vm_net_mock_verbose_logging_enabled())
+    if (vm_net_mock_verbose_logging_enabled())
     {
         printf("[info][mock-service] ingress_frame_ready ingress_id=%u sequence=%u ingress_wait_ms=%u bytes=%u source=%s\n",
                entry->ingressId, sequence, nowMs - entry->acceptedMs, frameLen,
@@ -2680,7 +2731,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             if (entry->socket == VM_MOCK_SERVICE_INVALID_SOCKET)
                 continue;
             (void)vm_mock_service_ingress_try_dispatch(
-                entry, &g_vmMockServiceWorkerPool, nowMs,
+                &gameIngress, entry, &g_vmMockServiceWorkerPool, nowMs,
                 selectRc > 0 && FD_ISSET(entry->socket, &readSet));
         }
 
@@ -2699,7 +2750,8 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                 if (!vm_mock_service_ingress_add(&gameIngress, client, sourceIp,
                                                  scheduler_get_tick_ms()))
                 {
-                    printf("[warn][mock-service] connection_rejected kind=game reason=ingress-full\n");
+                    printf("[warn][mock-service] connection_rejected kind=game reason=ingress-full source=%s\n",
+                           sourceIp[0] ? sourceIp : "-");
                     vm_mock_service_socket_close(client);
                 }
                 else if (vm_net_mock_verbose_logging_enabled() && acceptedGameLogCount++ < 8)

@@ -43,7 +43,11 @@ int main(void)
         strstr(g_vm_mock_admin_script, "#monster-picker-options") == NULL ||
         strstr(g_vm_mock_admin_script, "data-monster-picker-open") == NULL ||
         strstr(g_vm_mock_admin_script,
-               "select.monster-resource-select[required]") == NULL ||
+               "find(select=>!select.disabled&&!select.value)") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "some(select=>!select.disabled&&!select.value)") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "setupActorPicker();setupMonsterPicker();setupNpcServices();") == NULL ||
         strstr(g_vm_mock_admin_script, "const setupTaskRequirementTargets=()=>{") == NULL ||
         strstr(g_vm_mock_admin_script, "找到 ${shown} 个怪物") == NULL)
     {

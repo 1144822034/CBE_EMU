@@ -1,7 +1,7 @@
 USE `jh_online`;
 
--- Replace the legacy shared backend password with independent operator
--- accounts.  This table is intentionally separate from player `accounts`.
+-- Provision independent operator accounts.  This table is intentionally
+-- separate from player `accounts`; no default administrator is created.
 CREATE TABLE IF NOT EXISTS `server_admin_users` (
   `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `password_value` VARBINARY(64) NOT NULL,
@@ -11,14 +11,6 @@ CREATE TABLE IF NOT EXISTS `server_admin_users` (
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB;
-
--- Preserve the old credential as the first operator account.  The INSERT is
--- non-destructive and never overwrites a pre-existing `admin` account.
-INSERT IGNORE INTO `server_admin_users`
-  (`account_id`, `password_value`, `failed_attempts`, `locked`)
-SELECT 'admin', `password_value`, `failed_attempts`, `locked`
-FROM `server_admin_config`
-WHERE `config_id` = 1;
 
 CREATE TABLE IF NOT EXISTS `server_admin_operation_logs` (
   `log_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

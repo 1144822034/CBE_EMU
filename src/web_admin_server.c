@@ -625,6 +625,12 @@ enum
      * an explicit offset so every historical record stays reachable. */
     VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE = 50,
     VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE = VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE,
+    VM_MOCK_ADMIN_RISK_LOGIN_ACCOUNT_PAGE_SIZE =
+        VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE,
+    /* The administrator listener has a lower, independent source-IP
+     * threshold.  It must not make a few administrator password typos block
+     * the same player from the game or account-centre listeners. */
+    VM_MOCK_ADMIN_LOGIN_IP_FAILURE_LIMIT = 5,
     VM_MOCK_ADMIN_OPERATION_LOG_PAGE_SIZE = 50
 };
 
@@ -771,6 +777,7 @@ static const char g_vm_mock_admin_script[] =
     "const setupChestRewards=()=>{for(const box of document.querySelectorAll('[data-chest-reward-list]')){const form=box.closest('form'),add=form&&form.querySelector('[data-chest-reward-add]'),rows=[...box.querySelectorAll('[data-chest-reward-row]')];if(!form||!add||!rows.length)continue;const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const shown=()=>rows.filter(row=>!row.hidden);const update=()=>{const active=shown(),total=active.reduce((sum,row)=>sum+Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0),0);active.forEach((row,index)=>{const number=row.querySelector('[data-chest-reward-index]'),probability=row.querySelector('[data-chest-reward-probability]'),weight=Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0);if(number)number.textContent='#'+(index+1);if(probability)probability.textContent=total&&weight?(weight*100/total).toFixed(2)+'%':'—';});add.disabled=!rows.some(row=>row.hidden);add.textContent=`＋ 添加奖励（${active.length}/${rows.length}）`;};const showNext=()=>{const next=rows.find(row=>row.hidden);if(!next)return;next.hidden=false;sync(next);update();};add.addEventListener('click',showNext);for(const row of rows){for(const field of row.querySelectorAll('[data-chest-reward-count],[data-chest-reward-weight]'))field.addEventListener('input',update);const remove=row.querySelector('[data-chest-reward-remove]');if(!remove)continue;remove.addEventListener('click',()=>{const item=row.querySelector('[data-item-picker-input]'),count=row.querySelector('[data-chest-reward-count]'),weight=row.querySelector('[data-chest-reward-weight]'),broadcast=row.querySelector('[data-chest-reward-broadcast]');if(item)item.value='0';if(count)count.value='0';if(weight)weight.value='0';if(broadcast)broadcast.checked=false;row.hidden=true;sync(row);if(!shown().length){const first=rows[0];first.hidden=false;sync(first);}update();});}update();}};"
     "const setupGlobalRewards=()=>{const form=document.querySelector('[data-global-reward-form]');if(!form||form.dataset.globalRewardBound==='1')return;const rows=[...form.querySelectorAll('[data-global-reward-row]')],add=form.querySelector('[data-global-reward-add]'),counter=form.querySelector('[data-global-reward-item-count]');if(!rows.length||!add||!counter)return;form.dataset.globalRewardBound='1';const fields=row=>({item:row.querySelector('[data-item-picker-input]'),count:row.querySelector('[data-global-reward-count]')});const syncPicker=row=>{const input=fields(row).item;if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const assign=(row,itemValue,countValue)=>{const field=fields(row);if(field.item)field.item.value=itemValue||'0';if(field.count)field.count.value=countValue||'0';if(field.item)field.item.dispatchEvent(new Event('change',{bubbles:true}));syncPicker(row);};const sync=()=>{const visible=rows.filter(row=>!row.hidden);visible.forEach((row,index)=>{const order=row.querySelector('.reward-order');if(order)order.textContent='#'+(index+1);});counter.textContent='已添加 '+visible.length+' / '+rows.length;add.disabled=visible.length>=rows.length;};const clear=row=>assign(row,'0','0');add.addEventListener('click',()=>{const row=rows.find(entry=>entry.hidden);if(!row)return;row.hidden=false;syncPicker(row);sync();const trigger=row.querySelector('[data-item-picker-open]');if(trigger)trigger.focus();});for(const row of rows){const field=fields(row),remove=row.querySelector('[data-global-reward-remove]');if(field.item&&field.count)field.item.addEventListener('change',()=>{if(field.item.value&&field.item.value!=='0'&&Number(field.count.value)===0)field.count.value='1';});if(remove)remove.addEventListener('click',()=>{const visible=rows.filter(entry=>!entry.hidden),index=visible.indexOf(row);if(index<0)return;for(let i=index;i+1<visible.length;i++){const next=fields(visible[i+1]);assign(visible[i],next.item?next.item.value:'0',next.count?next.count.value:'0');}const last=visible[visible.length-1];clear(last);if(visible.length>1)last.hidden=true;sync();});}sync();};"
     "const setupMonsterSearch=()=>{const input=document.querySelector('#monster-search'),list=document.querySelector('#monster-list');if(!input||!list||input.dataset.monsterSearchBound==='1')return;input.dataset.monsterSearchBound='1';const apply=()=>{const keyword=input.value.trim().toLowerCase();for(const row of list.querySelectorAll('.monster')){const key=(row.dataset.key||'').toLowerCase(),host=row.closest('[data-monster-row]')||row;host.hidden=!!keyword&&!key.includes(keyword);}};input.addEventListener('input',apply);apply();};"
+    "const setupSceneBattleMonsterSearch=()=>{const input=document.querySelector('#scene-battle-monster-search'),list=document.querySelector('#scene-battle-monster-list');if(!input||!list||input.dataset.sceneBattleMonsterSearchBound==='1')return;input.dataset.sceneBattleMonsterSearchBound='1';const apply=()=>{const keyword=input.value.trim().toLocaleLowerCase();for(const row of list.querySelectorAll('[data-scene-battle-monster-scene]')){const key=(row.dataset.sceneBattleMonsterScene||row.textContent||'').toLocaleLowerCase();row.hidden=!!keyword&&!key.includes(keyword);}};input.addEventListener('input',apply);apply();};"
     "const setupMonsterBatchReset=()=>{const manager=document.querySelector('[data-monster-batch-manager]'),list=document.querySelector('#monster-list');if(!manager||!list||manager.dataset.monsterBatchBound==='1')return;manager.dataset.monsterBatchBound='1';const ids=[...manager.querySelectorAll('[data-monster-batch-ids]')],combat=manager.querySelector('[data-monster-batch-reset]'),sceneLevel=manager.querySelector('[data-monster-batch-level-reset]'),visible=manager.querySelector('[data-monster-batch-select-visible]'),clear=manager.querySelector('[data-monster-batch-clear]'),items=()=>[...list.querySelectorAll('[data-monster-batch-item]')],sync=()=>{const selected=items().filter(item=>item.checked).map(item=>item.value),value=selected.join(',');for(const input of ids)input.value=value;if(combat){combat.disabled=!selected.length;combat.textContent=`批量重置属性与奖励（${selected.length}）`;}if(sceneLevel){sceneLevel.disabled=!selected.length;sceneLevel.textContent=`按场景等级重置（${selected.length}）`;}};list.addEventListener('change',event=>{if(event.target.matches('[data-monster-batch-item]'))sync();});list.addEventListener('cbe-monster-list-updated',sync);visible?.addEventListener('click',()=>{for(const item of items()){const row=item.closest('[data-monster-row]');if(row&&!row.hidden)item.checked=true;}sync();});clear?.addEventListener('click',()=>{for(const item of items())item.checked=false;sync();});sync();};"
     "const setupMonsterActions=()=>{if(document.documentElement.dataset.monsterActionsBound==='1')return;document.documentElement.dataset.monsterActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-monster-action]')||event.defaultPrevented)return;const confirmation=form.dataset.confirmMessage;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();return;}event.preventDefault();if(form.dataset.submitting==='1')return;if(form.matches('[data-monster-drop-batch-form]')){const modal=document.querySelector('#monster-drop-batch-modal');if(modal){modal.hidden=true;document.body.classList.remove('modal-open');}}const list=document.querySelector('#monster-list'),detail=document.querySelector('[data-admin-detail]'),actionUrl=form.getAttribute('action')||window.location.href;if(!list||!detail)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(actionUrl,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('#monster-list'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail){if(new URL(url,window.location.href).pathname.endsWith('/login')){window.location.assign(url);return;}throw new Error('missing monster fragment');}const top=list.scrollTop;detail.innerHTML=nextDetail.innerHTML;list.innerHTML=nextList.innerHTML;list.scrollTop=top;document.querySelector('#monster-search')?.dispatchEvent(new Event('input'));list.dispatchEvent(new Event('cbe-monster-list-updated'));document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-monster-action-status]');if(status)status.innerHTML='<div class=\"notice error\">怪物操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
     "const setupTaskActions=()=>{if(document.documentElement.dataset.taskActionsBound==='1')return;document.documentElement.dataset.taskActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-task-action]')||event.defaultPrevented)return;event.preventDefault();if(form.dataset.submitting==='1')return;const catalog=document.querySelector('[data-task-catalog]'),detail=document.querySelector('[data-admin-detail]'),list=catalog?.querySelector('[data-admin-list]'),actionUrl=form.getAttribute('action')||window.location.href;if(!catalog||!detail||!list)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(actionUrl,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error('HTTP '+response.status);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextCatalog=next.querySelector('[data-task-catalog]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextCatalog||!nextDetail)throw new Error('missing task fragment');const top=list.scrollTop;catalog.innerHTML=nextCatalog.innerHTML;detail.innerHTML=nextDetail.innerHTML;catalog.querySelector('[data-admin-list]')?.scrollTo(0,top);document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupMonsterPicker();setupTaskRequirementTargets();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-task-action-status]');if(status)status.innerHTML='<div class=\"notice error\">任务操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
@@ -815,7 +822,7 @@ static const char g_vm_mock_admin_script[] =
     "state.apply=()=>{state.render();const keyword=state.search.value.trim().toLowerCase();let shown=0;for(const choice of state.choices){const visible=!keyword||choice.dataset.search.includes(keyword);choice.hidden=!visible;if(visible)shown++;}state.count.textContent=`找到 ${shown} 个怪物`;state.empty.hidden=shown!==0;};"
     "state.show=select=>{if(!select||!select.isConnected||select.disabled)return;state.active=select;state.search.value='';state.modal.hidden=false;document.body.classList.add('modal-open');state.error.textContent='';state.apply();state.search.focus();};"
     "state.hide=()=>{if(!state.modal)return;state.modal.hidden=true;if(!roleOperationOpen())document.body.classList.remove('modal-open');const field=state.active&&state.active.closest('.monster-picker-field'),trigger=field&&field.querySelector('[data-monster-picker-open]');if(trigger)trigger.focus();};"
-    "if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const trigger=event.target.closest('[data-monster-picker-open]');if(!trigger)return;const field=trigger.closest('.monster-picker-field'),select=field&&field.querySelector('select.monster-resource-select');if(!select||select.disabled)return;event.preventDefault();state.show(select);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.modal&&!state.modal.hidden)state.hide();});document.addEventListener('submit',event=>{const form=event.target,missing=form&&[...form.querySelectorAll('select.monster-resource-select[required]')].find(select=>!select.value);if(!missing)return;event.preventDefault();state.error.textContent='请先选择一个怪物';state.show(missing);});}"
+    "if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const trigger=event.target.closest('[data-monster-picker-open]');if(!trigger)return;const field=trigger.closest('.monster-picker-field'),select=field&&field.querySelector('select.monster-resource-select');if(!select||select.disabled)return;event.preventDefault();state.show(select);});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.modal&&!state.modal.hidden)state.hide();});document.addEventListener('submit',event=>{const form=event.target,missing=form&&[...form.querySelectorAll('select.monster-resource-select[required]')].find(select=>!select.disabled&&!select.value);if(!missing)return;event.preventDefault();state.error.textContent='请先选择一个怪物';state.show(missing);});}"
     "if(modal.dataset.monsterPickerBound!=='1'){modal.dataset.monsterPickerBound='1';close.addEventListener('click',()=>state.hide());modal.addEventListener('click',event=>{if(event.target===modal)state.hide();});search.addEventListener('input',()=>state.apply());}"
     "};"
     "const setupTaskRequirementTargets=()=>{const box=document.querySelector('#task-requirement-list'),add=document.querySelector('[data-task-requirement-add]');if(!box||!add||box.dataset.taskRequirementListBound==='1')return;const rows=[...box.querySelectorAll('[data-task-requirement-row]')];if(!rows.length)return;box.dataset.taskRequirementListBound='1';const fields=row=>{const target=row.querySelector('[data-task-requirement-target]'),slot=target?.dataset.taskRequirementTarget,type=slot&&row.closest('form')?.querySelector(`[data-task-requirement-type=\"${slot}\"]`),numeric=target?.querySelector('[data-task-requirement-numeric]'),itemPicker=target?.querySelector('[data-task-requirement-item-picker]'),monster=target?.querySelector('[data-task-requirement-monster]'),monsterSelect=monster?.querySelector('select.monster-resource-select');return{target,type,numeric,itemPicker,monster,monsterSelect,count:row.querySelector('[data-task-requirement-count]'),scene:row.querySelector('[data-task-requirement-scene]')};};const syncItemPicker=row=>{const input=fields(row).numeric;if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const applyMode=row=>{const field=fields(row);if(!field.type||!field.numeric||!field.itemPicker||!field.monster||!field.monsterSelect)return;const isMonster=field.type.value==='2';field.numeric.disabled=isMonster;field.numeric.hidden=true;field.itemPicker.hidden=field.type.value!=='1';field.monster.hidden=!isMonster;field.monsterSelect.disabled=!isMonster;};const visible=()=>rows.filter(row=>!row.hidden);const update=()=>{const active=visible(),empty=box.querySelector('[data-task-requirement-empty]');active.forEach((row,index)=>{const label=row.querySelector('[data-task-requirement-index]');if(label)label.textContent=`任务目标 ${index+1}`;});if(empty)empty.hidden=active.length!==0;add.disabled=!rows.some(row=>row.hidden);add.textContent=`＋ 新增任务目标（${active.length}/${rows.length}）`;};const clear=row=>{const field=fields(row);if(field.type)field.type.value='0';if(field.numeric)field.numeric.value='0';if(field.monsterSelect)field.monsterSelect.value='';if(field.count)field.count.value='0';if(field.scene)field.scene.value='';applyMode(row);row.hidden=true;syncItemPicker(row);};const showNext=()=>{const row=rows.find(current=>current.hidden);if(!row)return;const field=fields(row);row.hidden=false;if(field.type)field.type.value='1';if(field.numeric)field.numeric.value='0';if(field.monsterSelect)field.monsterSelect.value='';if(field.count)field.count.value='1';if(field.scene)field.scene.value='';applyMode(row);syncItemPicker(row);update();field.type?.focus();};add.addEventListener('click',showNext);for(const row of rows){const field=fields(row);if(!field.type)continue;field.type.addEventListener('change',()=>{if(field.type.value==='0'){clear(row);update();return;}applyMode(row);syncItemPicker(row);});row.querySelector('[data-task-requirement-remove]')?.addEventListener('click',()=>{clear(row);update();});applyMode(row);}update();};"
@@ -839,15 +846,15 @@ static const char g_vm_mock_admin_script[] =
     "const setupContentResourceSearch=()=>{for(const input of document.querySelectorAll('[data-content-resource-search]')){if(input.dataset.contentResourceSearchBound==='1')continue;const list=document.querySelector(input.getAttribute('data-content-resource-search')||'[data-content-resource-list]'),count=input.parentElement?.querySelector('[data-content-resource-search-count]');if(!list)continue;input.dataset.contentResourceSearchBound='1';const apply=()=>{const q=input.value.trim().toLowerCase();let shown=0,total=0;for(const item of list.querySelectorAll('[data-content-resource-item]')){const name=item.querySelector('span')?.textContent.toLowerCase()||'';const visible=!q||name.includes(q);item.hidden=!visible;total++;if(visible)shown++;}if(count)count.textContent=`显示 ${shown} / ${total} 项`;};input.addEventListener('input',apply);apply();}};"
     "const setupContentNavigation=()=>{const nav=document.querySelector('#admin-spa-tabs');if(!nav)return;nav.querySelector('[data-admin-tab=actors]')?.remove();if(new URL(window.location.href).searchParams.get('tab')!=='actors')return;for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab==='content';link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
     "const setupAdminToasts=()=>{const state=window.__cbeAdminToastState||(window.__cbeAdminToastState={queue:[],showing:false,observer:null});const host=()=>{let node=document.querySelector('#admin-toast-host');if(node)return node;const style=document.createElement('style');style.id='admin-toast-style';style.textContent='#admin-toast-host{position:fixed;z-index:10050;top:18px;right:18px;display:grid;justify-items:end;pointer-events:none} .admin-toast{width:min(380px,calc(100vw - 36px));display:grid;grid-template-columns:minmax(0,1fr) 28px;gap:10px;align-items:start;padding:13px 12px 13px 15px;border:1px solid #b9d8ff;border-radius:10px;background:#fff;color:#18436f;box-shadow:0 14px 32px #10182833;opacity:0;transform:translateX(calc(100%% + 24px));transition:opacity .22s ease,transform .22s ease;pointer-events:auto} .admin-toast.show{opacity:1;transform:translateX(0)} .admin-toast.error{border-color:#f5b7b1;background:#fff7f6;color:#8f1d1d} .admin-toast.success{border-color:#9be3ba;background:#f3fff7;color:#05603a} .admin-toast-close{width:28px;height:28px;margin:-3px -3px 0 0;padding:0;border:0;border-radius:6px;background:transparent;color:currentColor;font:22px/1 sans-serif;cursor:pointer}@media(max-width:560px){#admin-toast-host{top:10px;right:10px}.admin-toast{width:min(380px,calc(100vw - 20px))}}';document.head.append(style);node=document.createElement('div');node.id='admin-toast-host';node.setAttribute('aria-live','polite');node.setAttribute('aria-atomic','true');document.body.append(node);return node;};const next=()=>{if(state.showing||!state.queue.length)return;state.showing=true;const entry=state.queue.shift(),node=document.createElement('section'),close=document.createElement('button'),dismiss=()=>{if(node.dataset.closing==='1')return;node.dataset.closing='1';node.classList.remove('show');setTimeout(()=>{node.remove();state.showing=false;next();},240);};node.className='admin-toast '+(entry.error?'error':'success');node.setAttribute('role',entry.error?'alert':'status');node.textContent=entry.text;close.type='button';close.className='admin-toast-close';close.setAttribute('aria-label','关闭提示');close.textContent='×';close.addEventListener('click',dismiss);node.append(close);host().append(node);requestAnimationFrame(()=>node.classList.add('show'));setTimeout(dismiss,5000);};const queue=node=>{if(!(node instanceof Element)||node.dataset.adminToastQueued==='1'||node.hasAttribute('data-admin-persistent-notice')||!node.matches('.notice.ok,.notice.error'))return;const text=node.textContent.trim();node.dataset.adminToastQueued='1';if(!text)return;state.queue.push({text,error:node.classList.contains('error')});node.remove();next();};const scan=root=>{if(root instanceof Element)queue(root);if(root.querySelectorAll)for(const node of root.querySelectorAll('.notice.ok,.notice.error'))queue(node);};scan(document);if(state.observer)return;state.observer=new MutationObserver(records=>{for(const record of records)for(const node of record.addedNodes)scan(node);});state.observer.observe(document.body,{childList:true,subtree:true});};"
-    "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupActorPicker();setupNpcServices();setupContentUpdatePicker();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
+    "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupActorPicker();setupMonsterPicker();setupNpcServices();setupContentUpdatePicker();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
     "const setupGlobalRewardsTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const accounts=nav.querySelector('[data-admin-tab=accounts],a[href*=\\\"tab=accounts\\\"]'),add=(key,label)=>{if(!accounts||[...nav.querySelectorAll('[data-admin-tab],a[href]')].some(link=>link.dataset.adminTab===key||link.getAttribute('href')?.includes('tab='+key)))return;const link=document.createElement('a');link.className='tab admin-spa-tab';link.dataset.adminTab=key;link.href='?tab='+key;link.textContent=label;accounts.after(link);};add('operations','操作日志');add('global-rewards','全服奖励管理');const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
     "const setupDesignationTab=()=>{const nav=document.querySelector('#admin-spa-tabs')||document.querySelector('nav.tabs');if(!nav)return;const global=nav.querySelector('[data-admin-tab=global-rewards],a[href*=\\\"tab=global-rewards\\\"]');if(global)global.textContent='奖励邮件管理';let title=nav.querySelector('[data-admin-tab=designations],a[href*=\\\"tab=designations\\\"]');if(!title){title=document.createElement('a');title.className='tab admin-spa-tab';title.dataset.adminTab='designations';title.href='?tab=designations';title.textContent='称号管理';if(global)global.after(title);else nav.append(title);}const current=new URL(location.href).searchParams.get('tab')||'accounts';for(const link of nav.querySelectorAll('[data-admin-tab]')){const on=link.dataset.adminTab===current;link.classList.toggle('on',on);if(on)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}};"
     "const setupDesignationDirectory=()=>{for(const root of document.querySelectorAll('[data-designation-directory]')){if(root.dataset.designationDirectoryBound==='1')continue;root.dataset.designationDirectoryBound='1';const buttons=[...root.querySelectorAll('[data-designation-filter]')],cards=[...root.querySelectorAll('[data-designation-category]')],choose=category=>{if(!category)return;root.dataset.activeCategory=category;for(const card of cards)card.hidden=card.dataset.designationCategory!==category;for(const button of buttons){const on=button.dataset.designationFilter===category;button.classList.toggle('on',on);button.setAttribute('aria-pressed',on?'true':'false');}};for(const button of buttons)button.addEventListener('click',()=>choose(button.dataset.designationFilter));choose(root.dataset.activeCategory||buttons[0]?.dataset.designationFilter);}};"
     "const setupRoleOperationModal=()=>{const state=window.__cbeRoleOperationState||(window.__cbeRoleOperationState={bound:false,active:null,opener:null});const activate=(modal,key)=>{if(!modal||!key)return;for(const pane of modal.querySelectorAll('[data-role-operation-pane]'))pane.hidden=pane.dataset.roleOperationPane!==key;for(const button of modal.querySelectorAll('[data-role-operation-tab]')){const on=button.dataset.roleOperationTab===key;button.classList.toggle('on',on);if(on)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}};const close=modal=>{if(!modal)return;modal.hidden=true;if(state.active===modal)state.active=null;document.body.classList.remove('modal-open');const opener=state.opener;state.opener=null;if(opener&&document.contains(opener))opener.focus();};if(!state.bound){state.bound=true;document.addEventListener('click',event=>{const opener=event.target.closest('[data-role-operation-open]');if(opener){const modal=document.getElementById(opener.dataset.roleOperationOpen);if(!modal)return;for(const other of document.querySelectorAll('[data-role-operation-modal]'))other.hidden=true;state.active=modal;state.opener=opener;modal.hidden=false;document.body.classList.add('modal-open');const focusTarget=modal.querySelector('[data-role-operation-tab].on')||modal.querySelector('[data-role-operation-tab]');focusTarget?.focus();event.preventDefault();return;}const tab=event.target.closest('[data-role-operation-tab]');if(tab){activate(tab.closest('[data-role-operation-modal]'),tab.dataset.roleOperationTab);tab.focus();return;}const closeButton=event.target.closest('[data-role-operation-close]');if(closeButton){close(closeButton.closest('[data-role-operation-modal]'));return;}const modal=event.target.closest('[data-role-operation-modal]');if(modal&&event.target===modal)close(modal);});document.addEventListener('keydown',event=>{const itemPicker=document.querySelector('#item-picker-modal'),scenePicker=document.querySelector('#scene-picker-modal');if(event.key==='Escape'&&((itemPicker&&!itemPicker.hidden)||(scenePicker&&!scenePicker.hidden)))return;if(event.key==='Escape'&&state.active&&!state.active.hidden){event.preventDefault();close(state.active);}});}for(const modal of document.querySelectorAll('[data-role-operation-modal]'))activate(modal,modal.querySelector('[data-role-operation-tab]')?.dataset.roleOperationTab);};"
-    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupDesignationTab();setupDesignationDirectory();setupRoleOperationModal();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupMonsterPicker();setupTaskRequirementTargets();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
+    "const setupAdminContent=()=>{setupGlobalRewardsTab();setupDesignationTab();setupDesignationDirectory();setupRoleOperationModal();setupContentNavigation();setupAdminToasts();setupAccountList();setupMonsterSearch();setupSceneBattleMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupMonsterDropBatchModal();setupTaskRewards();setupChestRewards();setupGlobalRewards();setupActorPicker();setupMonsterPicker();setupTaskRequirementTargets();setupNpcServices();setupContentUpdatePicker();setupContentResourceSearch();};"
     "const setupAdminLayout=()=>{if(document.querySelector('#admin-spa-layout-style'))return;const style=document.createElement('style');style.id='admin-spa-layout-style';style.textContent='#admin-spa-shell{width:min(1680px,calc(100vw - 48px))!important;max-width:none!important;height:100vh!important;min-height:0!important;overflow:hidden!important;margin:0 auto!important}#admin-spa-content{display:flex!important;align-self:stretch!important;height:100%!important;flex-direction:column!important;min-height:0!important;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable;padding-bottom:2px}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:1 1 auto;min-height:0}#admin-spa-content [data-admin-list]{flex:1 1 auto;min-height:0;overflow:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}#admin-spa-content[aria-busy=true]>*{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{width:100%!important;height:auto!important;min-height:100vh!important;overflow:visible!important}#admin-spa-content{align-self:auto!important;height:auto!important;overflow:visible!important;scrollbar-gutter:auto;padding-bottom:0}#admin-spa-content>.grid,#admin-spa-content>.update-grid,#admin-spa-content>.shop-card{flex:none}#admin-spa-content [data-admin-list]{flex:none;scrollbar-gutter:auto}}';document.head.append(style);};"
     "const setupAdminHeader=()=>{const main=document.querySelector('#admin-spa-shell'),header=main&&[...main.children].find(node=>node.matches&&node.matches('header'));if(!header||header.dataset.adminSpaHeader==='1')return;header.dataset.adminSpaHeader='1';const logout=header.querySelector('form[action$=\"/logout\"]'),intro=document.createElement('div'),style=document.createElement('style');intro.innerHTML='<h1>江湖 OL 后台管理</h1><p class=\"sub\">账号、游戏内容与运营配置统一管理</p>';header.replaceChildren(intro);if(logout)header.append(logout);style.id='admin-spa-header-style';style.textContent='#admin-spa-shell>header[data-admin-spa-header]{display:flex!important;align-items:center;justify-content:space-between;gap:16px;margin:0 0 12px;padding:4px 2px}#admin-spa-shell>header[data-admin-spa-header] h1{margin:0;color:#183d6e;font-size:22px}#admin-spa-shell>header[data-admin-spa-header] .sub{margin:5px 0 0;color:#63738a}';document.head.append(style);};"
-    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{display:grid!important;grid-template-columns:216px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);column-gap:16px;align-items:start;min-height:100vh}#admin-spa-shell>header{grid-column:1/-1;grid-row:1}#admin-spa-tabs{display:flex!important;grid-column:1;grid-row:2;position:sticky;top:16px;align-self:start;flex-direction:column;align-items:stretch;gap:6px;flex-wrap:nowrap;margin:0;padding:10px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:flex-start;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding-right:2px}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{display:block!important;min-height:100vh}#admin-spa-tabs{position:static;flex-direction:row;align-items:center;flex-wrap:wrap;margin:0 0 16px}#admin-spa-tabs .admin-spa-tab{justify-content:center}#admin-spa-content{overflow:visible;padding-right:0}}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const confirmation=form.dataset.adminConfirm;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();event.stopPropagation();return;}const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value),missingMonster=[...form.querySelectorAll('select.monster-resource-select[required]')].some(select=>!select.value);if(missingActor||missingMonster)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
+    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['global-rewards','全服奖励管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{display:grid!important;grid-template-columns:216px minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);column-gap:16px;align-items:start;min-height:100vh}#admin-spa-shell>header{grid-column:1/-1;grid-row:1}#admin-spa-tabs{display:flex!important;grid-column:1;grid-row:2;position:sticky;top:16px;align-self:start;flex-direction:column;align-items:stretch;gap:6px;flex-wrap:nowrap;margin:0;padding:10px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:flex-start;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding-right:2px}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}@media(max-width:820px){#admin-spa-shell{display:block!important;min-height:100vh}#admin-spa-tabs{position:static;flex-direction:row;align-items:center;flex-wrap:wrap;margin:0 0 16px}#admin-spa-tabs .admin-spa-tab{justify-content:center}#admin-spa-content{overflow:visible;padding-right:0}}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const confirmation=form.dataset.adminConfirm;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();event.stopPropagation();return;}const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value),missingMonster=[...form.querySelectorAll('select.monster-resource-select[required]')].some(select=>!select.disabled&&!select.value);if(missingActor||missingMonster)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
     "const setupAdminTopbar=()=>{const main=document.querySelector('#admin-spa-shell'),header=main&&[...main.children].find(node=>node.matches&&node.matches('header[data-admin-spa-header]'));if(!main||!header)return;let topbar=document.querySelector('#admin-spa-topbar');if(!topbar){topbar=document.createElement('div');topbar.id='admin-spa-topbar';main.before(topbar);}topbar.append(header);if(document.querySelector('#admin-spa-topbar-style'))return;const style=document.createElement('style');style.id='admin-spa-topbar-style';style.textContent='#admin-spa-topbar{width:min(1680px,calc(100vw - 48px));max-width:none;margin:0 auto;padding:4px 2px 12px}#admin-spa-topbar>header[data-admin-spa-header]{display:flex!important;align-items:center;justify-content:space-between;gap:16px;margin:0;padding:4px 2px}#admin-spa-topbar>header[data-admin-spa-header] h1{margin:0;color:#183d6e;font-size:22px;white-space:nowrap}#admin-spa-topbar>header[data-admin-spa-header] .sub{margin:5px 0 0;color:#63738a}#admin-spa-shell{height:calc(100vh - 78px)!important;min-height:0!important;padding:0!important;grid-template-rows:minmax(0,1fr)!important}#admin-spa-tabs,#admin-spa-content{grid-row:1!important}@media(max-width:820px){#admin-spa-topbar{width:100%;padding:8px 10px 12px}#admin-spa-topbar>header[data-admin-spa-header]{padding:0}#admin-spa-shell{height:auto!important;min-height:0!important}}';document.head.append(style);};"
     "document.addEventListener('DOMContentLoaded',()=>queueMicrotask(setupAdminTopbar));"
     "document.addEventListener('DOMContentLoaded',()=>{setupMonsterActions();setupTaskActions();setupPartialNavigation();setupAdminSpa();setupAdminLayout();setupAdminHeader();setupAdminContent();});"
@@ -873,9 +880,172 @@ static bool vm_mock_admin_account_id_is_valid(const char *accountId)
     return true;
 }
 
-/* Keep the old shared-password row as a one-time compatibility source.  It
- * is intentionally not consulted after the admin account table has a row,
- * so changing the old value cannot silently change any operator credential. */
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 failedAttempts;
+    bool blocked;
+} vm_mock_admin_login_ip_block_state;
+
+/* This is deliberately separate from server_login_ip_blocks.  The latter is
+ * shared by game and player-account authentication with a 15-attempt policy;
+ * the administrator login needs a five-attempt policy without unexpectedly
+ * denying the same source access to a player's game account. */
+static bool vm_mock_admin_login_ip_schema_ensure(void)
+{
+    return vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS server_admin_login_ip_blocks ("
+        "ip_address VARCHAR(15) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+        "last_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',"
+        "failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "blocked TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "blocked_at TIMESTAMP NULL DEFAULT NULL,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(ip_address),KEY idx_admin_login_ip_blocks_blocked(blocked)"
+        ") ENGINE=InnoDB");
+}
+
+static bool vm_mock_admin_login_ip_block_state_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_admin_login_ip_block_state *state =
+        (vm_mock_admin_login_ip_block_state *)contextValue;
+    u32 blocked = 0;
+
+    if (state == NULL || state->found || columnCount != 2 || values == NULL ||
+        lengths == NULL || values[0] == NULL || values[1] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0],
+                                 &state->failedAttempts) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &blocked) ||
+        blocked > 1)
+    {
+        if (state != NULL)
+            state->invalid = true;
+        return true;
+    }
+    state->blocked = blocked != 0;
+    state->found = true;
+    return true;
+}
+
+static bool vm_mock_admin_login_ip_lookup(const char *address,
+                                          vm_mock_admin_login_ip_block_state *state)
+{
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char query[384];
+
+    if (state == NULL)
+        return false;
+    memset(state, 0, sizeof(*state));
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        !vm_mock_admin_login_ip_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "SELECT failed_attempts,blocked FROM server_admin_login_ip_blocks "
+             "WHERE ip_address=CAST(X'%s' AS CHAR)", addressHex);
+    return vm_mysql_query(query, vm_mock_admin_login_ip_block_state_row, state) &&
+           !state->invalid;
+}
+
+static bool vm_mock_admin_login_ip_is_blocked(const char *address)
+{
+    vm_mock_admin_login_ip_block_state state;
+
+    if (!vm_mock_admin_login_ip_lookup(address, &state))
+    {
+        printf("[error][admin-login-ip-lock] block_lookup_failed ip=%s error=%s\n",
+               address ? address : "-", vm_mysql_last_error());
+        return false;
+    }
+    return state.found && state.blocked;
+}
+
+static bool vm_mock_admin_login_ip_note_failure(const char *address,
+                                                const char *accountId,
+                                                u32 *attemptsOut)
+{
+    static const char invalidAccount[] = "(invalid)";
+    const char *recordedAccount = vm_mock_admin_account_id_is_valid(accountId)
+                                      ? accountId
+                                      : invalidAccount;
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char accountHex[127];
+    char query[1024];
+    vm_mock_admin_login_ip_block_state state;
+
+    if (attemptsOut != NULL)
+        *attemptsOut = 0;
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        !vm_mock_admin_login_ip_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0 ||
+        vm_mysql_hex_encode((const u8 *)recordedAccount,
+                            strlen(recordedAccount), accountHex,
+                            sizeof(accountHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_admin_login_ip_blocks "
+             "(ip_address,last_account_id,failed_attempts,blocked) "
+             "VALUES(CAST(X'%s' AS CHAR),CAST(X'%s' AS CHAR),1,0) "
+             "ON DUPLICATE KEY UPDATE "
+             "last_account_id=VALUES(last_account_id),"
+             "failed_attempts=LEAST(failed_attempts+1,%u),"
+             "blocked=IF(failed_attempts+1>=%u,1,blocked),"
+             "blocked_at=IF(failed_attempts+1>=%u,"
+             "COALESCE(blocked_at,CURRENT_TIMESTAMP),blocked_at)",
+             addressHex, accountHex, VM_MOCK_ADMIN_LOGIN_IP_FAILURE_LIMIT,
+             VM_MOCK_ADMIN_LOGIN_IP_FAILURE_LIMIT,
+             VM_MOCK_ADMIN_LOGIN_IP_FAILURE_LIMIT);
+    if (!vm_mysql_exec(query) || !vm_mock_admin_login_ip_lookup(address, &state) ||
+        !state.found)
+    {
+        printf("[error][admin-login-ip-lock] failure_record_failed ip=%s account=%s error=%s\n",
+               address, recordedAccount, vm_mysql_last_error());
+        return false;
+    }
+    if (attemptsOut != NULL)
+        *attemptsOut = state.failedAttempts;
+    if (state.blocked)
+    {
+        printf("[warn][admin-login-ip-lock] ip=%s blocked=1 failed_attempts=%u account=%s\n",
+               address, state.failedAttempts, recordedAccount);
+    }
+    return true;
+}
+
+static void vm_mock_admin_login_ip_note_success(const char *address)
+{
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char query[320];
+
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        !vm_mock_admin_login_ip_schema_ensure() ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0)
+    {
+        return;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_admin_login_ip_blocks "
+             "WHERE ip_address=CAST(X'%s' AS CHAR) AND blocked=0", addressHex);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][admin-login-ip-lock] success_reset_failed ip=%s error=%s\n",
+               address, vm_mysql_last_error());
+    }
+}
+
+/* Operator accounts are provisioned explicitly.  In particular, a missing
+ * account must never be recreated from a legacy shared-password table during
+ * login, because that would silently restore a default administrator. */
 static bool vm_mock_admin_user_schema_ensure(void)
 {
     if (!vm_mysql_exec(
@@ -887,12 +1057,7 @@ static bool vm_mock_admin_user_schema_ensure(void)
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(account_id)"
-            ") ENGINE=InnoDB") ||
-        !vm_mysql_exec(
-            "INSERT IGNORE INTO server_admin_users"
-            "(account_id,password_value,failed_attempts,locked) "
-            "SELECT 'admin',password_value,failed_attempts,locked "
-            "FROM server_admin_config WHERE config_id=1"))
+            ") ENGINE=InnoDB"))
     {
         printf("[error][admin] account_schema_prepare_failed error=%s\n",
                vm_mysql_last_error());
@@ -2785,13 +2950,13 @@ static void vm_mock_admin_render_instance_fields(
         "</label><label class=\"field\"><span>落点 X</span><input type=\"number\" name=\"instance_x\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<label class=\"field\"><span>落点 Y</span><input type=\"number\" name=\"instance_y\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<p class=\"instance-help\">落点 X/Y 都填 0 会自动解析目标 SCE 的安全入口。</p></div>"
-        "<div class=\"instance-fields\" data-npc-instance-spawn-fields hidden><label class=\"field\"><span>进入后刷新怪物</span>",
+        "<div class=\"instance-fields\" data-npc-instance-spawn-fields hidden><label class=\"field\"><span>传送后挑战怪物</span>",
         x, y);
     vm_mock_admin_render_monster_picker_field(
         page, "instance_spawn_enemy_id", spawnEnemyId, false, true, false);
     vm_mock_admin_text_appendf(
         page,
-        "</label><p class=\"instance-help\">必须是目标场景已启用并已部署到 SCE2 kind-3 的场景战斗怪；可选择“不额外刷新”。</p></div>"
+        "</label><p class=\"instance-help\">必须是目标场景已启用并已部署到 SCE2 kind-3 的场景战斗怪；传送后触碰该场景的火团进入战斗。目标为 c 开头城市时会自动进入已发布的战斗镜像；可选择“不设置挑战怪物”。</p></div>"
         "<div class=\"instance-fields\" data-npc-service-config=\"10\" data-npc-instance-challenge-fields hidden><label class=\"field\"><span>守关怪</span>");
     vm_mock_admin_render_monster_picker_field(
         page, "challenge_enemy_id", enemyId, true, false, false);
@@ -7143,6 +7308,7 @@ static void vm_mock_admin_render_role_operation_modal(
         "<button type=\"button\" data-role-operation-tab=\"money\">普通钱币</button>"
         "<button type=\"button\" data-role-operation-tab=\"equipment\">穿戴装备</button>"
         "<button type=\"button\" data-role-operation-tab=\"items\">物品与装备</button>"
+        "<button type=\"button\" data-role-operation-tab=\"backpack\">背包管理</button>"
         "<button type=\"button\" data-role-operation-tab=\"position\">角色位置</button>"
         "</nav><div class=\"role-operation-content\">"
         "<section class=\"role-operation-pane\" data-role-operation-pane=\"profile\"><h4>修改角色名称</h4><p class=\"muted\">名称按游戏客户端的 GBK 字节槽校验。</p>"
@@ -7242,6 +7408,72 @@ static void vm_mock_admin_render_role_operation_modal(
     vm_mock_admin_text_appendf(
         page,
         "<label><span>数量</span><input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required></label><div class=\"role-operation-actions\"><button type=\"submit\">给予物品</button></div></form></section>"
+        "<section class=\"role-operation-pane\" data-role-operation-pane=\"backpack\" hidden><h4>背包管理</h4><p class=\"muted\">以下为已持久化的背包物品。删除会移除对应序号的整组物品，无法恢复。</p><div class=\"role-equipment-list role-backpack-list\" data-role-backpack-list>");
+    {
+        u8 backpackCount = vm_net_mock_role_backpack_count(role);
+        bool hasBackpackItem = false;
+
+        for (u32 itemIndex = 0; itemIndex < backpackCount; ++itemIndex)
+        {
+            const vm_net_mock_backpack_item_state *item =
+                &role->backpackItems[itemIndex];
+            const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+            char itemNameUtf8[128];
+            const char *countLabel = "数量";
+
+            if (item->itemId == 0 || item->seq == 0 || item->count == 0)
+                continue;
+            hasBackpackItem = true;
+            memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+            catalogItem = vm_net_mock_find_shop_catalog_item(item->itemId);
+            if (catalogItem != NULL)
+            {
+                vm_net_mock_gbk_label_to_utf8(catalogItem->name, itemNameUtf8,
+                                              sizeof(itemNameUtf8));
+            }
+            if (item->itemId == 802)
+                countLabel = "剩余生命储量";
+            else if (item->itemId == 803)
+                countLabel = "剩余法力储量";
+
+            vm_mock_admin_text_appendf(
+                page,
+                "<article class=\"role-equipment-row\"><div class=\"role-equipment-summary\"><strong>");
+            if (itemNameUtf8[0] != 0)
+                vm_mock_admin_text_append_html(page, itemNameUtf8);
+            else
+                vm_mock_admin_text_appendf(page, "未知物品 #%u", item->itemId);
+            vm_mock_admin_text_appendf(
+                page, "</strong><small>物品 ID %u · 背包序号 %u · %s %u",
+                item->itemId, item->seq, countLabel, item->count);
+            if (item->enhanceLevel != 0)
+                vm_mock_admin_text_appendf(page, " · 强化 +%u",
+                                           item->enhanceLevel);
+            if (item->durabilityMax != 0)
+            {
+                vm_mock_admin_text_appendf(page, " · 耐久 %u/%u",
+                                           item->durability,
+                                           item->durabilityMax);
+            }
+            vm_mock_admin_text_appendf(
+                page,
+                "</small></div><form class=\"role-equipment-form\" method=\"post\" action=\"/action\" data-admin-confirm=\"确定删除这组背包物品？删除后无法恢复。\"><input type=\"hidden\" name=\"action\" value=\"remove-role-backpack-item\"><input type=\"hidden\" name=\"account\" value=\"");
+            vm_mock_admin_text_append_html(page, account);
+            vm_mock_admin_text_appendf(
+                page,
+                "\"><input type=\"hidden\" name=\"role\" value=\"%u\"><input type=\"hidden\" name=\"item\" value=\"%u\"><input type=\"hidden\" name=\"item_seq\" value=\"%u\"><button class=\"reset-position\" type=\"submit\">删除物品</button></form></article>",
+                role->roleId, item->itemId, item->seq);
+        }
+        if (!hasBackpackItem)
+        {
+            vm_mock_admin_text_appendf(
+                page,
+                "<p class=\"role-equipment-empty\">该角色当前背包为空。</p>");
+        }
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</div></section>"
         "<section class=\"role-operation-pane\" data-role-operation-pane=\"position\" hidden><h4>重置角色位置</h4><p class=\"muted\">选择服务端资源目录中的精确 SCE 场景后，服务端会解析并保存安全落点；无法验证时不会改写位置，也不会回退到出生点。</p>"
         "<form class=\"stack\" method=\"post\" action=\"/action\" data-admin-confirm=\"将角色重置到所选场景的服务端安全落点？若该角色在线，会先强制断开其游戏连接。\">"
         "<input type=\"hidden\" name=\"action\" value=\"reset-role-selected-scene\"><input type=\"hidden\" name=\"account\" value=\"");
@@ -8550,7 +8782,8 @@ static bool vm_mock_admin_risk_audit_query_count(u32 *countOut)
 typedef enum
 {
     VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES = 0,
-    VM_MOCK_ADMIN_RISK_DIRECTORY_IPS = 1
+    VM_MOCK_ADMIN_RISK_DIRECTORY_IPS = 1,
+    VM_MOCK_ADMIN_RISK_DIRECTORY_LOGIN_ACCOUNTS = 2
 } vm_mock_admin_risk_directory;
 
 typedef struct
@@ -8567,6 +8800,23 @@ typedef struct
     u32 count;
     bool invalid;
 } vm_mock_admin_risk_ip_page;
+
+typedef struct
+{
+    char accountId[64];
+    char address[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+    u32 failedAttempts;
+    char blockedAt[32];
+    char updatedAt[32];
+} vm_mock_admin_risk_login_account_row;
+
+typedef struct
+{
+    vm_mock_admin_risk_login_account_row
+        rows[VM_MOCK_ADMIN_RISK_LOGIN_ACCOUNT_PAGE_SIZE];
+    u32 count;
+    bool invalid;
+} vm_mock_admin_risk_login_account_page;
 
 static bool vm_mock_admin_risk_ip_row_callback(
     void *contextValue, unsigned int columnCount,
@@ -8654,6 +8904,99 @@ static bool vm_mock_admin_risk_ip_query_count(u32 *countOut)
     return true;
 }
 
+static bool vm_mock_admin_risk_login_account_row_callback(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_admin_risk_login_account_page *page =
+        (vm_mock_admin_risk_login_account_page *)contextValue;
+    vm_mock_admin_risk_login_account_row *row = NULL;
+
+    if (page == NULL ||
+        page->count >= VM_MOCK_ADMIN_RISK_LOGIN_ACCOUNT_PAGE_SIZE ||
+        columnCount != 5 || values == NULL || lengths == NULL)
+    {
+        if (page != NULL)
+            page->invalid = true;
+        return true;
+    }
+    row = &page->rows[page->count];
+    if (!vm_mock_mysql_copy_text(row->accountId, sizeof(row->accountId),
+                                 values[0], lengths[0]) ||
+        !vm_mock_mysql_copy_text(row->address, sizeof(row->address), values[1],
+                                 lengths[1]) ||
+        !vm_mock_service_login_ip_is_valid(row->address) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &row->failedAttempts) ||
+        !vm_mock_mysql_copy_text(row->blockedAt, sizeof(row->blockedAt),
+                                 values[3], lengths[3]) ||
+        !vm_mock_mysql_copy_text(row->updatedAt, sizeof(row->updatedAt),
+                                 values[4], lengths[4]))
+    {
+        page->invalid = true;
+        return true;
+    }
+    ++page->count;
+    return true;
+}
+
+static bool vm_mock_admin_risk_login_account_build_query(char *sql,
+                                                         size_t sqlCap,
+                                                         u32 offset,
+                                                         u32 limit)
+{
+    int written = 0;
+
+    if (sql == NULL || sqlCap == 0)
+        return false;
+    written = snprintf(
+        sql, sqlCap,
+        "SELECT last_account_id,ip_address,failed_attempts,"
+             "COALESCE(DATE_FORMAT(blocked_at,'%%Y-%%m-%%d %%H:%%i:%%s'),''),"
+        "DATE_FORMAT(updated_at,'%%Y-%%m-%%d %%H:%%i:%%s') "
+        "FROM server_admin_login_ip_blocks WHERE blocked=1 "
+        "ORDER BY blocked_at DESC,ip_address ASC LIMIT %u,%u",
+        offset, limit);
+    return written >= 0 && (size_t)written < sqlCap;
+}
+
+static bool vm_mock_admin_risk_login_account_query(
+    u32 offset, u32 limit, vm_mock_admin_risk_login_account_page *page)
+{
+    char sql[640];
+
+    if (page == NULL || !vm_mock_admin_login_ip_schema_ensure() ||
+        !vm_mock_admin_risk_login_account_build_query(sql, sizeof(sql), offset,
+                                                      limit))
+    {
+        return false;
+    }
+    memset(page, 0, sizeof(*page));
+    return vm_mysql_query(sql, vm_mock_admin_risk_login_account_row_callback,
+                          page) &&
+           !page->invalid;
+}
+
+static bool vm_mock_admin_risk_login_account_query_count(u32 *countOut)
+{
+    static const char sql[] =
+        "SELECT COUNT(*) FROM server_admin_login_ip_blocks WHERE blocked=1";
+    vm_mock_admin_count count;
+
+    if (countOut != NULL)
+        *countOut = 0;
+    if (!vm_mock_admin_login_ip_schema_ensure())
+        return false;
+    memset(&count, 0, sizeof(count));
+    if (!vm_mysql_query(sql, vm_mock_admin_count_row, &count) ||
+        count.invalid || !count.found)
+    {
+        return false;
+    }
+    if (countOut != NULL)
+        *countOut = count.value;
+    return true;
+}
+
 static void vm_mock_admin_render_risk_page(char *response,
                                            size_t responseCap,
                                            const char *query)
@@ -8661,6 +9004,7 @@ static void vm_mock_admin_render_risk_page(char *response,
     vm_mock_admin_text page;
     vm_mock_admin_risk_audit_page auditPage;
     vm_mock_admin_risk_ip_page ipPage;
+    vm_mock_admin_risk_login_account_page loginAccountPage;
     char status[16];
     char message[256];
     char pageText[16];
@@ -8676,6 +9020,7 @@ static void vm_mock_admin_render_risk_page(char *response,
 
     memset(&auditPage, 0, sizeof(auditPage));
     memset(&ipPage, 0, sizeof(ipPage));
+    memset(&loginAccountPage, 0, sizeof(loginAccountPage));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
     memset(pageText, 0, sizeof(pageText));
@@ -8690,14 +9035,22 @@ static void vm_mock_admin_render_risk_page(char *response,
         directory = VM_MOCK_ADMIN_RISK_DIRECTORY_IPS;
         pageSize = VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE;
     }
+    else if (strcmp(directoryText, "admin-accounts") == 0)
+    {
+        directory = VM_MOCK_ADMIN_RISK_DIRECTORY_LOGIN_ACCOUNTS;
+        pageSize = VM_MOCK_ADMIN_RISK_LOGIN_ACCOUNT_PAGE_SIZE;
+    }
     if (pageText[0] != 0 &&
         (!vm_net_mock_parse_u32_strict(pageText, &pageNumber) || pageNumber == 0))
     {
         pageNumber = 1;
     }
-    queryOk = directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS
-                  ? vm_mock_admin_risk_ip_query_count(&totalCount)
-                  : vm_mock_admin_risk_audit_query_count(&totalCount);
+    if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS)
+        queryOk = vm_mock_admin_risk_ip_query_count(&totalCount);
+    else if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_LOGIN_ACCOUNTS)
+        queryOk = vm_mock_admin_risk_login_account_query_count(&totalCount);
+    else
+        queryOk = vm_mock_admin_risk_audit_query_count(&totalCount);
     if (queryOk)
     {
         if (totalCount != 0)
@@ -8705,12 +9058,16 @@ static void vm_mock_admin_render_risk_page(char *response,
         if (pageNumber > pageCount)
             pageNumber = pageCount;
         offset = (pageNumber - 1) * pageSize;
-        queryOk = directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS
-                      ? vm_mock_admin_risk_ip_query(
-                            offset, VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE, &ipPage)
-                      : vm_mock_admin_risk_audit_query(
-                            offset, VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE,
-                            &auditPage);
+        if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS)
+            queryOk = vm_mock_admin_risk_ip_query(
+                offset, VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE, &ipPage);
+        else if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_LOGIN_ACCOUNTS)
+            queryOk = vm_mock_admin_risk_login_account_query(
+                offset, VM_MOCK_ADMIN_RISK_LOGIN_ACCOUNT_PAGE_SIZE,
+                &loginAccountPage);
+        else
+            queryOk = vm_mock_admin_risk_audit_query(
+                offset, VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE, &auditPage);
     }
 
     vm_mock_admin_text_init(&page, response, responseCap);
@@ -8720,22 +9077,29 @@ static void vm_mock_admin_render_risk_page(char *response,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 风险管理</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.risk-directory{display:flex;gap:8px;margin:0 0 16px}.risk-directory a{padding:9px 14px;border:1px solid #d0d5dd;border-radius:8px;color:#475467;background:#fff;text-decoration:none;font-weight:650}.risk-directory a.on{border-color:#175cd3;background:#eef4ff;color:#175cd3}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.rule{margin:0;color:#475467}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#fff1f3;color:#c01048;font-size:12px;font-weight:650}.state{font-size:12px;font-weight:650}.state.banned{color:#b42318}.state.open{color:#b54708}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%%;min-width:820px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.role{font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}button{border:0;border-radius:6px;padding:8px 11px;background:#b42318;color:#fff;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{background:#d0d5dd;color:#667085;cursor:not-allowed}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}}</style>"
-        "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">风险管理 · 风险角色审计与已封锁来源 IP</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">风险管理 · 风险角色、来源 IP 与后台登录风险</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab on\" href=\"/?tab=risk\">风险管理</a></nav>"
-        "<nav class=\"risk-directory\" aria-label=\"风险目录\"><a class=\"%s\" href=\"/?tab=risk&amp;risk_kind=roles\">风险角色</a><a class=\"%s\" href=\"/?tab=risk&amp;risk_kind=ips\">风险 IP</a></nav>",
+        "<nav class=\"risk-directory\" aria-label=\"风险目录\"><a class=\"%s\" href=\"/?tab=risk&amp;risk_kind=roles\">风险角色</a><a class=\"%s\" href=\"/?tab=risk&amp;risk_kind=ips\">风险 IP</a><a class=\"%s\" href=\"/?tab=risk&amp;risk_kind=admin-accounts\">后台账号风险</a></nav>",
         directory == VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES ? "on" : "",
-        directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS ? "on" : "");
+        directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS ? "on" : "",
+        directory == VM_MOCK_ADMIN_RISK_DIRECTORY_LOGIN_ACCOUNTS ? "on" : "");
     if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_ROLES)
     {
         vm_mock_admin_text_appendf(
             &page,
             "<section class=\"card\"><h2>审计条件 <span class=\"badge\">相邻进入战斗 ≤ 3000 ms</span></h2><p class=\"rule\">记录来自挑战和挂机两条真实战斗入口。封号是账号级永久访问限制：保存后立即注销该账号所有游戏会话与用户中心会话；之后的登录认证将被拒绝。</p></section>");
     }
-    else
+    else if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS)
     {
         vm_mock_admin_text_appendf(
             &page,
             "<section class=\"card\"><h2>封锁条件 <span class=\"badge\">连续凭据失败 15 次</span></h2><p class=\"rule\">IP 封锁跨游戏登录、用户中心和后台登录共享且持久化。清除会删除该 IP 的封锁及失败计数，并立即同步当前服务进程的封锁缓存；该 IP 之后的凭据失败将从第 1 次重新计数。</p></section>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>封锁条件 <span class=\"badge\">后台登录连续凭据失败 5 次</span></h2><p class=\"rule\">后台登录按来源 IP 独立统计。第 5 次错误会封锁该来源继续访问后台登录，并记录触发封锁时提交的后台账号；该策略不会影响游戏客户端或玩家账号中心使用同一来源 IP。</p></section>");
     }
     if (status[0] != 0 && message[0] != 0)
     {
@@ -8827,7 +9191,7 @@ static void vm_mock_admin_render_risk_page(char *response,
             "</div></div></section></main></body></html>");
     }
     }
-    else
+    else if (directory == VM_MOCK_ADMIN_RISK_DIRECTORY_IPS)
     {
         vm_mock_admin_text_appendf(
             &page,
@@ -8890,6 +9254,70 @@ static void vm_mock_admin_render_risk_page(char *response,
                 &page, "</div></div></section></main></body></html>");
         }
     }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>后台账号风险列表 <span class=\"badge\">来源 IP 已封锁</span></h2>");
+        if (!queryOk)
+        {
+            vm_mock_admin_text_appendf(
+                &page,
+                "<p class=\"muted\">无法读取后台账号登录风险：%s</p></section></main></body></html>",
+                vm_mysql_last_error());
+        }
+        else if (loginAccountPage.count == 0)
+        {
+            vm_mock_admin_text_appendf(
+                &page,
+                "<p class=\"muted\">暂无因后台登录错误而封锁的来源 IP。</p></section></main></body></html>");
+        }
+        else
+        {
+            vm_mock_admin_text_appendf(
+                &page,
+                "<div class=\"table-wrap\"><table><thead><tr><th>后台账号</th><th>来源 IP</th><th>失败次数</th><th>封锁时间</th><th>最近更新</th><th>状态</th></tr></thead><tbody>");
+            for (u32 i = 0; i < loginAccountPage.count; ++i)
+            {
+                const vm_mock_admin_risk_login_account_row *row =
+                    &loginAccountPage.rows[i];
+
+                vm_mock_admin_text_appendf(&page,
+                    "<tr><td class=\"mono\">");
+                vm_mock_admin_text_append_html(
+                    &page, row->accountId[0] ? row->accountId : "（未提供）");
+                vm_mock_admin_text_appendf(&page,
+                    "</td><td class=\"mono\">");
+                vm_mock_admin_text_append_html(&page, row->address);
+                vm_mock_admin_text_appendf(&page,
+                    "</td><td class=\"mono\">%u / %u</td><td class=\"mono\">",
+                    row->failedAttempts, VM_MOCK_ADMIN_LOGIN_IP_FAILURE_LIMIT);
+                vm_mock_admin_text_append_html(
+                    &page, row->blockedAt[0] ? row->blockedAt : "—");
+                vm_mock_admin_text_appendf(&page,
+                    "</td><td class=\"mono\">");
+                vm_mock_admin_text_append_html(&page, row->updatedAt);
+                vm_mock_admin_text_appendf(&page,
+                    "</td><td><span class=\"state banned\">已封锁</span></td></tr>");
+            }
+            vm_mock_admin_text_appendf(
+                &page,
+                "</tbody></table></div><div class=\"pages\"><span>第 %u / %u 页 · 共 %u 条</span><div class=\"page-links\">",
+                pageNumber, pageCount, totalCount);
+            if (pageNumber > 1)
+                vm_mock_admin_text_appendf(
+                    &page,
+                    "<a href=\"/?tab=risk&amp;risk_kind=admin-accounts&amp;page=%u\">上一页</a>",
+                    pageNumber - 1);
+            if (pageNumber < pageCount)
+                vm_mock_admin_text_appendf(
+                    &page,
+                    "<a href=\"/?tab=risk&amp;risk_kind=admin-accounts&amp;page=%u\">下一页</a>",
+                    pageNumber + 1);
+            vm_mock_admin_text_appendf(
+                &page, "</div></div></section></main></body></html>");
+        }
+    }
     if (page.truncated)
     {
         snprintf(response, responseCap,
@@ -8939,7 +9367,9 @@ static const vm_mock_admin_operation_log_action
     {"set-role-level", "设置角色等级"},
     {"set-equipped-enhance-level", "设置穿戴装备强化等级"},
     {"grant-item", "发放物品/装备"},
+    {"remove-role-backpack-item", "删除背包物品"},
     {"reset-role-selected-scene", "重置角色位置"},
+    {"ban-account", "账号管理封号"},
     {"ban-risk-account", "封禁风险账号"},
     {"clear-risk-ip", "清除风险 IP 封锁"},
     {"player-trade", "玩家交易"},
@@ -9907,11 +10337,11 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex:none}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 10px}.sub,.hint,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 14px;overflow:auto;flex:none}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec;white-space:nowrap}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{border:1px solid #d0d5dd;background:#fff;color:#475467;border-radius:6px;padding:8px 12px}.grid{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.scenes{display:flex;min-height:0;flex-direction:column}.scene-list{display:flex;flex:1;min-height:0;overflow:auto;flex-direction:column;gap:4px;padding-right:4px}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.size{font-size:12px;color:#98a2b3;white-space:nowrap}.editor{overflow:auto;padding-right:4px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:13px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}.summary{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.badge.warn{background:#fffaeb;color:#b54708}.callout{padding:12px;border:1px solid #b2ddff;border-radius:8px;background:#eff8ff;color:#1849a9;margin-bottom:14px}.deploy{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:0 0 14px;padding:12px;border:1px solid #d0d5dd;border-radius:8px;background:#f8fafc}.fields{display:grid;grid-template-columns:90px minmax(125px,1fr) minmax(170px,1.3fr) 82px 74px 74px 74px 90px auto;gap:9px;align-items:end}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.secondary{background:#475467}.danger{background:#b42318}.monster-list{display:grid;gap:11px}.monster{padding:13px;border:1px solid #e4e7ec;border-radius:9px}.monster.off{opacity:.62;background:#f9fafb}.monster-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.monster-head h3{font-size:15px;margin:0}.actions{display:flex;gap:8px;align-items:end}.new{border-color:#b2ddff;background:#fbfdff}.foot{font-size:12px;margin:13px 0 0;color:#667085}@media(max-width:920px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:16px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.scenes{max-height:250px}.editor{overflow:visible}.fields{grid-template-columns:1fr 1fr}.actions{align-items:stretch}}@media(max-width:560px){.fields{grid-template-columns:1fr}.deploy{align-items:stretch;flex-direction:column}.actions{display:grid;grid-template-columns:1fr}}</style></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">场景战斗怪 · 以客户端原生 SCE2 kind-3 战斗节点部署</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab on\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险管理</a></nav>"
         "<style>.actor-picker-field{display:grid;gap:4px}.actor-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.actor-picker-trigger small{color:#667085;font-weight:400}.actor-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.actor-picker-panel{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.actor-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.actor-picker-head h3{font-size:19px;margin:0}.actor-picker-head p{margin:2px 0 0;color:#667085}.actor-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.actor-picker-tools{padding:14px 20px 10px}.actor-picker-tools label{display:grid;gap:4px}.actor-picker-tools label>span{font-size:12px;color:#667085}.actor-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.actor-picker-error{color:#b42318;font-weight:600}.actor-picker-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;min-height:160px;overflow:auto;padding:0 20px 20px}.actor-choice{display:grid;grid-template-rows:92px auto;gap:7px;padding:10px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.actor-choice:hover{border-color:#84adff;background:#f5f8ff}.actor-choice img{display:block;width:100%%;height:88px;object-fit:contain;image-rendering:pixelated;background:#f9fafb;border-radius:5px}.actor-choice strong{font-size:12px;overflow-wrap:anywhere}.actor-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.monster-picker-list{grid-template-columns:repeat(2,minmax(0,1fr));min-height:140px}.monster-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.monster-choice:hover,.monster-choice.selected{border-color:#84adff;background:#f5f8ff}.monster-choice strong{font-size:14px}.monster-choice span{color:#667085;font-size:12px}[hidden]{display:none!important}.modal-open{overflow:hidden!important}</style>"
-        "<div class=\"grid\"><aside class=\"card scenes\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
+        "<div class=\"grid\"><aside class=\"card scenes\"><h2>SCE 场景（%u）</h2><label class=\"scene-search\"><span>搜索 SCE 场景</span><input id=\"scene-battle-monster-search\" type=\"search\" placeholder=\"按场景名称搜索\" autocomplete=\"off\"></label><div id=\"scene-battle-monster-list\" class=\"scene-list\">",
         sceneCount);
     vm_mock_admin_text_appendf(
         &page,
-        "<style>.battle-monster-fields{grid-template-columns:repeat(6,minmax(0,1fr))}.battle-monster-wide{grid-column:span 2}.battle-monster-fields .actions{grid-column:1/-1;justify-content:flex-end}@media(max-width:920px){.battle-monster-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.battle-monster-wide{grid-column:span 1}}@media(max-width:560px){.battle-monster-fields{grid-template-columns:1fr}.battle-monster-fields .actions{grid-column:auto}}</style>");
+        "<style>.scene-search{display:grid;gap:4px;margin:0 0 10px}.scene-search span{font-size:12px;color:#667085}.battle-monster-fields{grid-template-columns:repeat(6,minmax(0,1fr))}.battle-monster-wide{grid-column:span 2}.battle-monster-fields .actions{grid-column:1/-1;justify-content:flex-end}@media(max-width:920px){.battle-monster-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.battle-monster-wide{grid-column:span 1}}@media(max-width:560px){.battle-monster-fields{grid-template-columns:1fr}.battle-monster-fields .actions{grid-column:auto}}</style>");
     for (u32 i = 0; i < sceneCount; ++i)
     {
         char sceneUtf8[192];
@@ -9923,8 +10353,11 @@ static void vm_mock_admin_render_scene_battle_monster_page(
                                       sizeof(sceneUtf8));
         vm_mock_admin_url_encode(sceneUtf8, encoded, sizeof(encoded));
         vm_mock_admin_text_appendf(&page,
-            "<a class=\"scene%s\" href=\"/?tab=scene-monsters&amp;scene=%s\"><span>",
-            strcmp(sceneFiles[i].name, selectedSceneFile) == 0 ? " on" : "",
+            "<a class=\"scene%s\" data-scene-battle-monster-scene=\"",
+            strcmp(sceneFiles[i].name, selectedSceneFile) == 0 ? " on" : "");
+        vm_mock_admin_text_append_html(&page, sceneUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\" href=\"/?tab=scene-monsters&amp;scene=%s\"><span>",
             encoded);
         vm_mock_admin_text_append_html(&page, sceneUtf8);
         vm_mock_admin_text_appendf(&page, "</span><span class=\"size\">%llu</span></a>",
@@ -9932,9 +10365,11 @@ static void vm_mock_admin_render_scene_battle_monster_page(
     }
     vm_mock_admin_text_appendf(&page,
         "</div></aside><section class=\"card editor\">"
-        "<h2>场景：%s</h2><div class=\"summary\"><span class=\"badge\">草稿 %u</span><span class=\"badge\">启用节点 %u</span><span class=\"badge %s\">%s</span></div>",
+        "<h2>场景：%s</h2><div class=\"summary\"><span class=\"badge\">草稿 %u / %u</span><span class=\"badge\">启用节点 %u</span><span class=\"badge\">可继续新增 %u 条</span><span class=\"badge %s\">%s</span></div>",
         selectedSceneUtf8[0] ? selectedSceneUtf8 : "未选择", rowCount,
-        enabledCount, deployed ? "" : "warn",
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX, enabledCount,
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX - rowCount,
+        deployed ? "" : "warn",
         deployed ? "当前草稿已部署" : "存在未部署变更");
     if (status[0] != 0 && message[0] != 0)
     {
@@ -9950,12 +10385,12 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         return;
     }
     vm_mock_admin_text_appendf(&page,
-        "<div class=\"callout\"><strong>保存仅更新草稿。</strong>本体 Actor 只能选择原生 SCE2 kind-3 战斗节点已使用过的资源；部署会从首次捕获的服务端基础 SCE 重建完整记录（含 field18 效果 Actor），并校验 Actor 依赖、记录解析和客户端最多 24 个非本地场景节点的限制。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
+        "<div class=\"callout\"><strong>保存仅更新草稿，且同一场景可保存多条。</strong>每次在“新增下一条”中保存，都会追加一条独立的怪物 ID、坐标和数量配置；点击一次部署会把全部启用草稿一起编译进场景。相同场景、怪物 ID 和坐标不能重复；总节点仍会在部署时按客户端最多 24 个非本地场景节点严格校验。本体 Actor 只能选择原生 SCE2 kind-3 战斗节点已使用过的资源；部署会从首次捕获的服务端基础 SCE 重建完整记录（含 field18 效果 Actor），并校验 Actor 依赖和记录解析。c 开头的城市会同时生成带专属 b_ 背景的非 c 战斗镜像，供 NPC 副本传送到该城市并按正常碰撞开战；原城市界面仍保留原生城镇交互。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
         "<form class=\"deploy\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"deploy-scene-battle-monsters\"><input type=\"hidden\" name=\"scene\" value=\"");
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
         "\"><span><strong>部署场景战斗怪</strong><br><span class=\"hint\">将当前启用项编译进 %s</span></span><button type=\"submit\">验证并部署</button></form>"
-        "<div class=\"monster-list\"><article class=\"monster new\"><div class=\"monster-head\"><h3>新增场景战斗怪</h3><span class=\"badge\">草稿</span></div><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-scene-battle-monster\"><input type=\"hidden\" name=\"entry_id\" value=\"0\"><input type=\"hidden\" name=\"scene\" value=\"",
+        "<div class=\"monster-list\"><article class=\"monster new\"><div class=\"monster-head\"><h3>新增下一条场景战斗怪</h3><span class=\"badge\">追加草稿</span></div><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-scene-battle-monster\"><input type=\"hidden\" name=\"entry_id\" value=\"0\"><input type=\"hidden\" name=\"scene\" value=\"",
         selectedSceneUtf8);
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
@@ -10017,7 +10452,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
             rows[i].entryId);
     }
     vm_mock_admin_text_appendf(&page,
-        "</div><p class=\"foot\">怪物 ID 决定怪物属性、掉落和任务击败条件；数量会以所填坐标为中心展开为最多 5 个独立节点。本体 Actor 必须来自原生 kind-3 战斗节点，负责碰撞与战斗；退场火团只能填写在 field18。普通 NPC（含任务发布者）不属于此配置层。</p>");
+        "</div><p class=\"foot\">怪物 ID 决定怪物属性、掉落和任务击败条件；每次保存“新增下一条”都会保留已有草稿，部署时会同时生成全部启用项。数量会以所填坐标为中心展开为最多 5 个独立节点。本体 Actor 必须来自原生 kind-3 战斗节点，负责碰撞与战斗；退场火团只能填写在 field18。普通 NPC（含任务发布者）不属于此配置层。</p>");
     vm_mock_admin_render_scene_battle_actor_picker_modal(
         &page, actorFiles, actorCount);
     vm_mock_admin_render_monster_picker_modal(&page);
@@ -10380,13 +10815,14 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".sub{color:#667085;margin:4px 0 20px}.grid{display:grid;grid-template-columns:240px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:18px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
         ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
         ".account-search{display:flex;gap:7px;margin:0 0 8px}.account-search input{min-width:0}.account-search button{padding-inline:10px}.account-list-status{min-height:19px;margin:0 0 8px;color:#667085;font-size:12px}.account-list-status.error{color:#b42318}.accounts{display:flex;flex:1;min-height:0;flex-direction:column;gap:6px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.account{display:flex;justify-content:space-between;padding:9px 10px;border-radius:7px;color:#344054;text-decoration:none;scroll-margin-block:12px}.account:hover,.account.on{background:#eef4ff;color:#175cd3}.account-empty{padding:10px 2px}"
-        ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.account-wallet{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap}.account-wallet .inline{margin:0 0 0 auto}.account-wallet .inline input{min-width:160px}@media(max-width:620px){.account-wallet .inline{width:100%%;margin:0}.account-wallet .inline input{min-width:0}}"
+        ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.account-wallet{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap}.account-wallet .inline{margin:0 0 0 auto}.account-wallet .inline input{min-width:160px}.account-security{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin:0 0 16px;padding:14px;border:1px solid #fecdca;border-radius:9px;background:#fffbfa}.account-security h3{margin:0 0 3px;font-size:15px;color:#912018}.account-security p{margin:0;color:#667085}.account-security form{flex:none}.danger{background:#b42318}.danger:hover{background:#912018}@media(max-width:620px){.account-wallet .inline{width:100%%;margin:0}.account-wallet .inline input{min-width:0}.account-security{display:grid}.account-security form,.account-security button{width:100%%}}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
         ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.stack label{display:grid;gap:4px}.stack label>span{font-size:12px;color:#667085}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.role-action-trigger{min-width:78px}.role-operation-modal{position:fixed;inset:0;z-index:" VM_MOCK_ADMIN_STRINGIFY(VM_MOCK_ADMIN_ROLE_OPERATION_MODAL_Z_INDEX) ";display:grid;place-items:center;padding:28px;background:#10182899;backdrop-filter:blur(2px)}.role-operation-panel{width:min(1060px,100%%);max-height:calc(100vh - 56px);overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.role-operation-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 24px;border-bottom:1px solid #eaecf0}.role-operation-head h3{margin:0;font-size:20px}.role-operation-head p{margin:3px 0 0;color:#667085}.role-operation-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.role-operation-close:hover{background:#e4e7ec;color:#1d2939}.role-operation-layout{display:grid;grid-template-columns:208px minmax(0,1fr);min-height:480px;max-height:calc(100vh - 168px)}.role-operation-nav{display:grid;align-content:start;gap:7px;padding:18px;border-right:1px solid #eaecf0;background:#f8fafc}.role-operation-nav button{border:1px solid transparent;background:transparent;color:#475467;text-align:left}.role-operation-nav button:hover{background:#eef4ff;color:#175cd3}.role-operation-nav button.on,.role-operation-nav button[aria-current=page]{border-color:#b2ccff;background:#dbeafe;color:#1849a9}.role-operation-content{min-width:0;overflow:auto;padding:26px;overscroll-behavior:contain}.role-operation-pane{max-width:650px}.role-operation-pane h4{margin:0 0 6px;font-size:17px}.role-operation-pane>.muted{margin:0 0 18px}.role-operation-pane .item-field{display:grid;gap:4px}.role-operation-pane .item-field>span{font-size:12px;color:#667085}.role-operation-actions{display:flex;justify-content:flex-end;margin-top:8px}.role-operation-pane .item-picker-trigger{min-height:42px}.role-operation-pane input{min-height:40px}.role-equipment-list{display:grid;gap:10px}.role-equipment-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(210px,.75fr);gap:14px;align-items:center;padding:13px;border:1px solid #e4e7ec;border-radius:10px;background:#fff}.role-equipment-summary{display:grid;gap:3px;min-width:0}.role-equipment-summary strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.role-equipment-summary small{color:#667085}.role-equipment-slot{justify-self:start;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.role-equipment-form{display:grid;grid-template-columns:minmax(104px,1fr) auto;gap:8px;align-items:end}.role-equipment-form label{display:grid;gap:4px}.role-equipment-form label>span{font-size:12px;color:#667085}.role-equipment-empty{margin:0;padding:20px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.role-equipment-note{margin:12px 0 0!important;font-size:12px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:" VM_MOCK_ADMIN_STRINGIFY(VM_MOCK_ADMIN_ITEM_PICKER_MODAL_Z_INDEX) ";display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.item-modal,.role-operation-modal{padding:10px}.item-picker-panel,.role-operation-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}.role-operation-head{padding:16px}.role-operation-layout{grid-template-columns:1fr;min-height:0;max-height:calc(100vh - 118px)}.role-operation-nav{grid-template-columns:repeat(6,minmax(118px,1fr));overflow:auto;padding:10px;border-right:0;border-bottom:1px solid #eaecf0}.role-operation-nav button{text-align:center}.role-operation-content{padding:18px}.role-operation-actions{justify-content:stretch}.role-operation-actions button{width:100%%}.role-equipment-row,.role-equipment-form{grid-template-columns:1fr}.role-equipment-form button{width:100%%}}"
+        ".role-operation-layout{height:calc(100vh - 168px);min-height:0}.role-operation-content{min-height:0}.role-backpack-list{max-height:440px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}@media(max-width:780px){.role-operation-layout{height:calc(100vh - 118px)}.role-operation-nav{grid-template-columns:repeat(7,minmax(118px,1fr))}.role-backpack-list{max-height:360px}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
@@ -10450,6 +10886,16 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             vm_mock_admin_text_appendf(&page,
                 "<div class=\"notice error\">账号 W 币钱包暂不可读取，未提供修改入口。</div>");
         }
+    }
+    if (selectedAccount[0] != 0)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"account-security\"><div><h3>账号操作</h3><p>封号会立即将目标账号的游戏会话下线并注销用户中心会话；之后游戏与用户中心登录都会被拒绝。</p></div><form method=\"post\" action=\"/action\" data-admin-confirm=\"确认断开该账号的所有会话并永久封号？此操作会拒绝后续登录。\"><input type=\"hidden\" name=\"action\" value=\"ban-account\"><input type=\"hidden\" name=\"account\" value=\"");
+        vm_mock_admin_text_append_html(&page, selectedAccount);
+        vm_mock_admin_text_appendf(
+            &page,
+            "\"><button class=\"danger\" type=\"submit\">断开并封号</button></form></section>");
     }
     vm_mock_admin_text_appendf(&page, "<div class=\"table-wrap\"><table><thead><tr>"
                                "<th>角色 / 职业</th><th>等级 / 状态</th><th>当前位置</th><th>普通钱币</th><th>操作</th>"
@@ -12505,6 +12951,13 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     hasInstanceChallenge = vm_net_mock_npc_service_options_has_kind(
         serviceOptions, serviceOptionCount,
         VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE);
+    if (hasInstanceTeleport && hasInstanceChallenge)
+    {
+        vm_mock_admin_redirect_content(
+            client, sceneUtf8, "error",
+            "副本传送请在“传送后挑战怪物”选择目标；“守关怪挑战”是无目标场景的旧直开战服务，不能与副本传送同时启用");
+        return;
+    }
     if (hasInstanceTeleport || hasInstanceChallenge)
     {
         vm_mock_admin_scene_preview targetPreview;
@@ -13617,6 +14070,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
     char password[64];
     char role[64];
     char itemText[32];
+    char itemSeqText[32];
     char amountText[32];
     char levelText[32];
     char equipmentSlotText[32];
@@ -13629,6 +14083,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
     char auditTarget[64];
     const char *error = NULL;
     u32 itemId = 0;
+    u32 itemSeqValue = 0;
+    u32 removedCount = 0;
     u32 amount = 0;
     u32 level = 0;
     u32 equipmentSlot = 0;
@@ -13643,6 +14099,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
     memset(password, 0, sizeof(password));
     memset(role, 0, sizeof(role));
     memset(itemText, 0, sizeof(itemText));
+    memset(itemSeqText, 0, sizeof(itemSeqText));
     memset(amountText, 0, sizeof(amountText));
     memset(levelText, 0, sizeof(levelText));
     memset(equipmentSlotText, 0, sizeof(equipmentSlotText));
@@ -13879,6 +14336,46 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
             vm_mock_admin_redirect_risk(
                 client, pageNumber, "error", error ? error : "账号封禁失败");
         }
+        return;
+    }
+    if (strcmp(action, "ban-account") == 0)
+    {
+        u32 disconnected = 0;
+        u32 userSessions = 0;
+        char message[192];
+
+        memset(message, 0, sizeof(message));
+        if (!vm_mock_admin_form_value(body, "account", account,
+                                      sizeof(account)) || account[0] == 0)
+        {
+            vm_mock_admin_redirect(client, "", "error", "账号参数不完整");
+            return;
+        }
+        ok = vm_mock_service_account_ban_from_account_management(
+            account, &disconnected, &error);
+        if (ok)
+            userSessions = vm_mock_user_clear_account_sessions(account);
+        if (!ok)
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   error ? error : "账号封禁失败");
+            return;
+        }
+        snprintf(operationDetail, sizeof(operationDetail),
+                 "账号管理封号，断开 %u 个游戏会话、注销 %u 个用户中心会话",
+                 disconnected, userSessions);
+        if (!vm_mock_admin_operation_log_record(
+                "ban-account", account, 0, 0, 0, 0, operationDetail,
+                operatorAccountId))
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "账号已封禁，但操作日志写入失败，请检查数据库");
+            return;
+        }
+        snprintf(message, sizeof(message),
+                 "账号已封禁：已断开 %u 个游戏会话、注销 %u 个用户中心会话；后续登录将被拒绝",
+                 disconnected, userSessions);
+        vm_mock_admin_redirect(client, account, "ok", message);
         return;
     }
     if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))
@@ -14172,6 +14669,58 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "物品给予成功" :
                                     (error ? error : "物品给予失败"));
+        return;
+    }
+    if (strcmp(action, "remove-role-backpack-item") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "item", itemText,
+                                      sizeof(itemText)) ||
+            !vm_mock_admin_form_value(body, "item_seq", itemSeqText,
+                                      sizeof(itemSeqText)) ||
+            !vm_net_mock_parse_u32_strict(role, &roleId) || roleId == 0 ||
+            !vm_net_mock_parse_u32_strict(itemText, &itemId) || itemId == 0 ||
+            !vm_net_mock_parse_u32_strict(itemSeqText, &itemSeqValue) ||
+            itemSeqValue == 0 || itemSeqValue > 0xffffu)
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "角色或背包物品参数无效");
+            return;
+        }
+        itemSeq = (u16)itemSeqValue;
+        ok = vm_mock_service_account_remove_role_backpack_item(
+            account, roleId, itemId, itemSeq, &removedCount, &error);
+        if (ok)
+        {
+            const vm_net_mock_shop_catalog_item *catalogItem =
+                vm_net_mock_find_shop_catalog_item(itemId);
+            char itemNameUtf8[128];
+
+            memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+            if (catalogItem != NULL)
+            {
+                vm_net_mock_gbk_label_to_utf8(catalogItem->name,
+                                              itemNameUtf8,
+                                              sizeof(itemNameUtf8));
+            }
+            snprintf(operationDetail, sizeof(operationDetail),
+                     "删除背包%s %s（ID %u）×%u，背包序号 %u",
+                     catalogItem != NULL && catalogItem->isEquip ? "装备" :
+                                                                   "物品",
+                     itemNameUtf8[0] ? itemNameUtf8 : "未命名物品", itemId,
+                     removedCount, itemSeq);
+            if (!vm_mock_admin_operation_log_record(
+                    "remove-role-backpack-item", account, roleId, itemId,
+                    removedCount, 0, operationDetail, operatorAccountId))
+            {
+                vm_mock_admin_redirect(client, account, "error",
+                                       "背包物品已删除，但操作日志写入失败，请检查数据库");
+                return;
+            }
+        }
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "背包物品已删除" :
+                                    (error ? error : "背包物品删除失败"));
         return;
     }
 
@@ -16316,7 +16865,7 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         /* accountId comes exclusively from the authenticated cookie session;
          * a posted account id can never select another user's backpack. */
         ok = vm_mock_service_account_remove_role_backpack_item(
-            session->accountId, roleId, itemId, (u16)itemSeq, &error);
+            session->accountId, roleId, itemId, (u16)itemSeq, NULL, &error);
         vm_mock_user_redirect_message(client, ok ? "ok" : "error",
                                       ok ? "物品已丢弃" :
                                            (error ? error : "丢弃物品失败"));
@@ -16437,6 +16986,17 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         bool loginOk = false;
         bool credentialFailure = false;
 
+        /* The fifth failed admin credential submission records the submitted
+         * account and locks this source only for the admin login route.  As
+         * with the shared login gate, do not reveal a lock state or process
+         * another credential submission once it is in effect. */
+        if (vm_mock_service_login_ip_is_valid(
+                vm_mock_service_login_ip_current_source()) &&
+            vm_mock_admin_login_ip_is_blocked(
+                vm_mock_service_login_ip_current_source()))
+        {
+            return 0;
+        }
         memset(accountId, 0, sizeof(accountId));
         memset(password, 0, sizeof(password));
         if (strcmp(method, "POST") == 0 &&
@@ -16474,6 +17034,8 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                      adminSession->token);
             vm_mock_service_login_ip_note_success(
                 vm_mock_service_login_ip_current_source());
+            vm_mock_admin_login_ip_note_success(
+                vm_mock_service_login_ip_current_source());
             vm_mock_admin_send_location(client, VM_MOCK_ADMIN_ROOT_PATH,
                                         cookieHeader);
             memset(accountId, 0, sizeof(accountId));
@@ -16483,6 +17045,8 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         {
             (void)vm_mock_service_login_ip_note_failure(
                 vm_mock_service_login_ip_current_source(), "admin-web", NULL);
+            (void)vm_mock_admin_login_ip_note_failure(
+                vm_mock_service_login_ip_current_source(), accountId, NULL);
         }
         memset(accountId, 0, sizeof(accountId));
         if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0)

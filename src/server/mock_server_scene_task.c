@@ -2517,7 +2517,23 @@ static bool vm_net_mock_scene_battle_monster_admin_save(
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
-            *errorOut = vm_mysql_last_error();
+        {
+            const char *mysqlError = vm_mysql_last_error();
+
+            /* The multi-row contract deliberately deduplicates only an
+             * identical placement.  Surface that specific configuration
+             * error instead of making the operator infer it from MySQL's
+             * index name; any other database error remains observable. */
+            if (row->entryId == 0 && mysqlError != NULL &&
+                strstr(mysqlError, "uq_scene_battle_monster_pos") != NULL)
+            {
+                *errorOut = "同一场景中相同怪物 ID 不能占用相同坐标；请调整坐标或编辑已有草稿";
+            }
+            else
+            {
+                *errorOut = mysqlError;
+            }
+        }
         return false;
     }
     if (errorOut)
@@ -2931,6 +2947,59 @@ static bool vm_net_mock_scene_battle_monster_body_resource_is_supported(
     return false;
 }
 
+/* Instance entry occurs before the client has loaded the destination SCE, so
+ * it cannot use vm_net_mock_select_sce_combat_spawn(): that helper correctly
+ * requires a live, current-scene node for a 4/5 battle response.  This
+ * resource-only check proves that the exact SCE which the forthcoming 30/1
+ * will name contains the configured kind-3 spawn, without claiming that the
+ * client has already created its scene-node row. */
+static bool vm_net_mock_sce_combat_spawn_resource_has(const char *scene,
+                                                       u32 actorId)
+{
+    u8 data[8192];
+    u32 len = 0;
+    u32 propNodeCount = 0;
+
+    if (scene == NULL || scene[0] == 0 || actorId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    if (len == 0 ||
+        !vm_net_mock_parse_sce2_client_prefix(data, len, &propNodeCount,
+                                              NULL))
+    {
+        return false;
+    }
+    for (u32 combatOrdinal = 0; combatOrdinal < 256u; ++combatOrdinal)
+    {
+        vm_net_mock_sce_combat_spawn spawn;
+        u32 nodeOrdinal = 0;
+        u32 sceneNodeIndex = 0;
+
+        if (!vm_net_mock_scene_battle_monster_counted_spawn_at(
+                data, len, combatOrdinal, &spawn, &nodeOrdinal))
+        {
+            break;
+        }
+        if (spawn.actorId != actorId)
+            continue;
+        sceneNodeIndex = propNodeCount + nodeOrdinal;
+        if (sceneNodeIndex >= 25)
+        {
+            printf("[error][network] mock_npc_instance_entry_target scene=%s actor=%u runtime_index=%u action=reject-out-of-range evidence=mmBattle:0x66CC scene-node-table[25]\n",
+                   scene, actorId, sceneNodeIndex);
+            return false;
+        }
+        printf("[info][network] mock_npc_instance_entry_target scene=%s actor=%u runtime_index=%u prop_nodes=%u entity_node_ordinal=%u combat_ordinal=%u action=resource-proven-before-scene-enter evidence=SCE2-counted-entity-list+JianghuOL.CBE:0x010396D6\n",
+               scene, actorId, sceneNodeIndex, propNodeCount, nodeOrdinal,
+               combatOrdinal);
+        return true;
+    }
+    return false;
+}
+
 /* field 16 is a native node-class selector, not a player-facing strength
  * toggle.  The current Linan e_tiger deployment used 5 while the shipped
  * e_tiger record uses 17; that produced a visible generic node but never
@@ -3308,6 +3377,455 @@ static bool vm_net_mock_parse_sce_entity_record_at(
     if (endOut != NULL)
         *endOut = pos;
     return true;
+}
+
+/* The client classifies a scene key starting with 'c' as a town/special
+ * screen.  That screen never calls TriggerAutoBattle, even if its SCE2 data
+ * contains a valid kind-3 scene monster.  For an NPC instance target we can
+ * keep the original city resource authoritative and publish a sibling
+ * wilderness key with the same payload.  The client then selects the normal
+ * collision screen from the key itself; no client state or packet is forged.
+ *
+ * The child background is equally important.  A city SCE can omit field 18
+ * on its named portal, but a wilderness shell needs a b_*.sce descriptor to
+ * allocate the battle-background Actor table.  The generated background uses
+ * the shipped empty Danxia shell and an exact copy of the city map under a
+ * b_*.map key. */
+enum
+{
+    VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_NAME_CAP = 64,
+    VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_MAP_RAW_MAX = 8192
+};
+
+static bool vm_net_mock_scene_battle_monster_read_base_raw(
+    const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut);
+
+static bool vm_net_mock_scene_battle_monster_city_mirror_name(
+    const char *scene, char *mirrorOut, size_t mirrorOutCap)
+{
+    size_t sceneLen = 0;
+
+    if (mirrorOut != NULL && mirrorOutCap != 0)
+        mirrorOut[0] = 0;
+    if (scene == NULL || scene[0] != 'c' ||
+        !vm_net_mock_str_ends_with(scene, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(scene) || mirrorOut == NULL ||
+        mirrorOutCap == 0)
+    {
+        return false;
+    }
+    sceneLen = strlen(scene);
+    /* Replace, rather than prefix, the city discriminator.  The exact scene
+     * identity remains recognisable and cannot overflow the client's 0x64
+     * byte resource-name buffer. */
+    if (sceneLen + 1u > mirrorOutCap)
+        return false;
+    mirrorOut[0] = 'w';
+    memcpy(mirrorOut + 1, scene + 1, sceneLen);
+    /* This key does not exist until the enclosing deployment writes it.  At
+     * generation time validate only the server-safe resource-key grammar;
+     * instance entry later requires the actual published SCE through the
+     * resource-only target check below. */
+    return vm_net_mock_scene_name_is_download_key(mirrorOut) &&
+           vm_net_mock_str_ends_with(mirrorOut, ".sce");
+}
+
+/* Resolve the exact resource key sent in an NPC instance 30/1.  The durable
+ * configuration remains the administrator-selected scene; for city targets
+ * with a selected encounter, the generated mirror is the client-visible
+ * resource.  Both the source deployment and the mirror's actual kind-3 row
+ * are checked before the normal scene-enter packet is allowed. */
+static bool vm_net_mock_scene_battle_monster_instance_entry_scene(
+    const char *configuredScene, u32 spawnEnemyId, char *sceneOut,
+    size_t sceneOutCap)
+{
+    if (sceneOut != NULL && sceneOutCap != 0)
+        sceneOut[0] = 0;
+    if (configuredScene == NULL || configuredScene[0] == 0 ||
+        sceneOut == NULL || sceneOutCap == 0 ||
+        !vm_net_mock_scene_name_is_safe(configuredScene))
+    {
+        return false;
+    }
+    if (spawnEnemyId == 0)
+    {
+        if (strlen(configuredScene) >= sceneOutCap)
+            return false;
+        snprintf(sceneOut, sceneOutCap, "%s", configuredScene);
+        return true;
+    }
+    if (!vm_net_mock_scene_battle_monster_target_ready(configuredScene,
+                                                        spawnEnemyId))
+    {
+        return false;
+    }
+    if (configuredScene[0] != 'c')
+    {
+        if (strlen(configuredScene) >= sceneOutCap)
+            return false;
+        snprintf(sceneOut, sceneOutCap, "%s", configuredScene);
+        return vm_net_mock_sce_combat_spawn_resource_has(sceneOut,
+                                                          spawnEnemyId);
+    }
+    return vm_net_mock_scene_battle_monster_city_mirror_name(
+               configuredScene, sceneOut, sceneOutCap) &&
+           vm_net_mock_sce_combat_spawn_resource_has(sceneOut,
+                                                      spawnEnemyId);
+}
+
+static bool vm_net_mock_scene_battle_monster_city_background_names(
+    const char *scene, const char *mapName, char *backgroundOut,
+    size_t backgroundOutCap, char *backgroundMapOut,
+    size_t backgroundMapOutCap)
+{
+    int written = 0;
+
+    if (backgroundOut != NULL && backgroundOutCap != 0)
+        backgroundOut[0] = 0;
+    if (backgroundMapOut != NULL && backgroundMapOutCap != 0)
+        backgroundMapOut[0] = 0;
+    if (scene == NULL || scene[0] != 'c' || mapName == NULL ||
+        !vm_net_mock_str_ends_with(scene, ".sce") ||
+        !vm_net_mock_str_ends_with(mapName, ".map") ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        vm_net_mock_scene_name_has_path_separator(mapName) ||
+        backgroundOut == NULL || backgroundOutCap == 0 ||
+        backgroundMapOut == NULL || backgroundMapOutCap == 0)
+    {
+        return false;
+    }
+    written = snprintf(backgroundOut, backgroundOutCap, "b_%s", scene + 1);
+    if (written < 0 || (size_t)written >= backgroundOutCap ||
+        !vm_net_mock_scene_name_is_download_key(backgroundOut) ||
+        !vm_net_mock_str_ends_with(backgroundOut, ".sce"))
+    {
+        return false;
+    }
+    written = snprintf(backgroundMapOut, backgroundMapOutCap, "b_%s", mapName);
+    return written >= 0 && (size_t)written < backgroundMapOutCap &&
+           !vm_net_mock_scene_name_has_path_separator(backgroundMapOut) &&
+           vm_net_mock_str_ends_with(backgroundMapOut, ".map");
+}
+
+static bool vm_net_mock_scene_battle_monster_payload_map_name(
+    const u8 *payload, u32 payloadLen, char *mapNameOut, size_t mapNameOutCap,
+    u32 *afterMapOut)
+{
+    u32 afterMap = 0;
+    u8 nameLen = 0;
+
+    if (mapNameOut != NULL && mapNameOutCap != 0)
+        mapNameOut[0] = 0;
+    if (afterMapOut != NULL)
+        *afterMapOut = 0;
+    if (payload == NULL || payloadLen < 11 ||
+        memcmp(payload, "SCE2", 4) != 0 || mapNameOut == NULL ||
+        mapNameOutCap == 0)
+    {
+        return false;
+    }
+    nameLen = payload[10];
+    afterMap = 11u + (u32)nameLen;
+    if (nameLen == 0 || afterMap > payloadLen ||
+        (size_t)nameLen >= mapNameOutCap)
+    {
+        return false;
+    }
+    memcpy(mapNameOut, payload + 11, nameLen);
+    mapNameOut[nameLen] = 0;
+    if (!vm_net_mock_str_ends_with(mapNameOut, ".map") ||
+        vm_net_mock_scene_name_has_path_separator(mapNameOut))
+    {
+        return false;
+    }
+    if (afterMapOut != NULL)
+        *afterMapOut = afterMap;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_find_empty_background_slot(
+    const u8 *payload, u32 payloadLen, u32 *slotOut)
+{
+    u32 matches = 0;
+    u32 slot = 0;
+
+    if (slotOut != NULL)
+        *slotOut = 0;
+    if (payload == NULL || payloadLen < 16 || slotOut == NULL)
+        return false;
+    for (u32 off = 0; off + 12u <= payloadLen; ++off)
+    {
+        vm_net_mock_sce_named_portal portal;
+        u32 end = 0;
+
+        if (!vm_net_mock_parse_sce_named_portal_at(payload, payloadLen, off,
+                                                    &portal, &end) ||
+            portal.backgroundScene[0] != 0 || end <= off || end > payloadLen)
+        {
+            continue;
+        }
+        for (u32 token = off; token + 5u <= end; ++token)
+        {
+            if (vm_net_mock_read_le16_at(payload, token) == 3u &&
+                vm_net_mock_read_le16_at(payload, token + 2u) == 0x12u &&
+                payload[token + 4u] == 0u)
+            {
+                slot = token;
+                ++matches;
+            }
+        }
+    }
+    if (matches != 1u)
+        return false;
+    *slotOut = slot;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_wrap_type2(
+    const u8 *payload, u32 payloadLen, u8 *raw, u32 rawCap, u32 *rawLenOut)
+{
+    u32 encodedLen = 0;
+
+    if (rawLenOut != NULL)
+        *rawLenOut = 0;
+    if (payload == NULL || payloadLen == 0 || raw == NULL || rawCap < 5u ||
+        !vm_net_mock_scene_battle_monster_lzss_literal_encode(
+            payload, payloadLen, raw + 4, rawCap - 4u, &encodedLen) ||
+        encodedLen > rawCap - 4u)
+    {
+        return false;
+    }
+    raw[0] = (u8)encodedLen;
+    raw[1] = (u8)(encodedLen >> 8);
+    raw[2] = (u8)(encodedLen >> 16);
+    raw[3] = (u8)(encodedLen >> 24);
+    if (rawLenOut != NULL)
+        *rawLenOut = encodedLen + 4u;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_build_city_mirror(
+    const char *scene, const u8 *sourcePayload, u32 sourcePayloadLen,
+    char *mirrorNameOut, size_t mirrorNameOutCap, u8 *mirrorRaw,
+    u32 mirrorRawCap, u32 *mirrorRawLenOut, char *backgroundNameOut,
+    size_t backgroundNameOutCap, u8 *backgroundRaw, u32 backgroundRawCap,
+    u32 *backgroundRawLenOut, char *backgroundMapNameOut,
+    size_t backgroundMapNameOutCap, u8 *backgroundMapRaw,
+    u32 backgroundMapRawCap, u32 *backgroundMapRawLenOut)
+{
+    static const char backgroundTemplate[] =
+        "b_03\xB5\xA4\xCF\xBC\xC9\xBD.sce"; /* b_03丹霞山.sce */
+    u8 templateRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 templatePayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 mirrorPayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 backgroundPayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 verifyPayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    char sourceMapName[VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_NAME_CAP];
+    char sourceMapPath[1200];
+    char templatePath[1200];
+    u32 templateRawLen = 0;
+    u32 templatePayloadLen = 0;
+    u32 templateAfterMap = 0;
+    u32 mirrorPayloadLen = 0;
+    u32 backgroundPayloadLen = 0;
+    u32 verifyPayloadLen = 0;
+    u32 slot = 0;
+    u32 sourceAfterMap = 0;
+    u32 sourceMapRawLen = 0;
+    size_t backgroundNameLen = 0;
+
+    if (mirrorRawLenOut != NULL)
+        *mirrorRawLenOut = 0;
+    if (backgroundRawLenOut != NULL)
+        *backgroundRawLenOut = 0;
+    if (backgroundMapRawLenOut != NULL)
+        *backgroundMapRawLenOut = 0;
+    if (!vm_net_mock_scene_battle_monster_city_mirror_name(
+            scene, mirrorNameOut, mirrorNameOutCap) ||
+        sourcePayload == NULL || sourcePayloadLen == 0 || mirrorRaw == NULL ||
+        backgroundRaw == NULL || backgroundMapRaw == NULL ||
+        mirrorRawLenOut == NULL || backgroundRawLenOut == NULL ||
+        backgroundMapRawLenOut == NULL)
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=arguments scene=%s\n", scene ? scene : "-");
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_payload_map_name(
+            sourcePayload, sourcePayloadLen, sourceMapName,
+            sizeof(sourceMapName), &sourceAfterMap) ||
+        !vm_net_mock_scene_battle_monster_city_background_names(
+            scene, sourceMapName, backgroundNameOut, backgroundNameOutCap,
+            backgroundMapNameOut, backgroundMapNameOutCap) ||
+        !vm_net_mock_scene_battle_monster_find_empty_background_slot(
+            sourcePayload, sourcePayloadLen, &slot))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=source-shape scene=%s\n", scene);
+        return false;
+    }
+    if (!vm_net_mock_open_server_data_resource(
+            backgroundTemplate, ".sce", NULL, templatePath,
+            sizeof(templatePath)))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=open-background-template scene=%s\n", scene);
+        return false;
+    }
+
+    /* The background shell is a shipped static descriptor, not an
+     * administrator-editable SCE; it is deliberately not read from the
+     * captured scene-base store used for the city source. */
+    templateRawLen = vm_net_mock_load_response_file(
+        templatePath, templateRaw, sizeof(templateRaw));
+    if (templateRawLen == 0 ||
+        !vm_net_mock_scene_battle_monster_decode_raw_sce(
+            templateRaw, templateRawLen, templatePayload,
+            sizeof(templatePayload), &templatePayloadLen) ||
+        !vm_net_mock_scene_battle_monster_payload_map_name(
+            templatePayload, templatePayloadLen, sourceMapName,
+            sizeof(sourceMapName), &templateAfterMap))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=decode-background-template scene=%s raw=%u\n", scene,
+               templateRawLen);
+        return false;
+    }
+
+    /* Re-read the source map name: the template parse intentionally
+     * reused the same buffer only to validate the template's header. */
+    if (!vm_net_mock_scene_battle_monster_payload_map_name(
+            sourcePayload, sourcePayloadLen, sourceMapName,
+            sizeof(sourceMapName), &sourceAfterMap) ||
+        !vm_net_mock_open_server_data_resource(sourceMapName, ".map", NULL,
+                                                sourceMapPath,
+                                                sizeof(sourceMapPath)))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=open-city-map scene=%s map=%s\n", scene,
+               sourceMapName);
+        return false;
+    }
+    sourceMapRawLen = vm_net_mock_load_response_file(
+        sourceMapPath, backgroundMapRaw, backgroundMapRawCap);
+    if (sourceMapRawLen == 0 || sourceMapRawLen < 5u ||
+        backgroundMapRaw[4] != 2u)
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=validate-city-map scene=%s raw=%u type=%u\n", scene,
+               sourceMapRawLen, sourceMapRawLen > 4u ? backgroundMapRaw[4] : 0u);
+        return false;
+    }
+
+    backgroundNameLen = strlen(backgroundMapNameOut);
+    if (backgroundNameLen > 0xffu || templateAfterMap < 11u ||
+        templateAfterMap > templatePayloadLen ||
+        sourcePayloadLen + strlen(backgroundNameOut) >
+            sizeof(mirrorPayload) ||
+        11u + backgroundNameLen + (templatePayloadLen - templateAfterMap) >
+            sizeof(backgroundPayload))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=payload-capacity scene=%s source=%u template=%u "
+               "template_map_end=%u\n", scene, sourcePayloadLen,
+               templatePayloadLen, templateAfterMap);
+        return false;
+    }
+    memcpy(backgroundPayload, templatePayload, 10u);
+    memcpy(backgroundPayload + 4u, sourcePayload + 4u, 4u);
+    backgroundPayload[10] = (u8)backgroundNameLen;
+    memcpy(backgroundPayload + 11u, backgroundMapNameOut, backgroundNameLen);
+    memcpy(backgroundPayload + 11u + backgroundNameLen,
+           templatePayload + templateAfterMap,
+           templatePayloadLen - templateAfterMap);
+    backgroundPayloadLen = 11u + (u32)backgroundNameLen +
+                           templatePayloadLen - templateAfterMap;
+
+    mirrorPayloadLen = sourcePayloadLen;
+    memcpy(mirrorPayload, sourcePayload, sourcePayloadLen);
+    backgroundNameLen = strlen(backgroundNameOut);
+    if (backgroundNameLen == 0 || backgroundNameLen > 0xffu ||
+        slot + 5u > mirrorPayloadLen ||
+        mirrorPayloadLen + backgroundNameLen > sizeof(mirrorPayload))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=patch-background-field18 scene=%s slot=%u payload=%u "
+               "name_len=%u\n", scene, slot, mirrorPayloadLen,
+               (unsigned)backgroundNameLen);
+        return false;
+    }
+    memmove(mirrorPayload + slot + 5u + backgroundNameLen,
+            mirrorPayload + slot + 5u, mirrorPayloadLen - (slot + 5u));
+    mirrorPayload[slot + 4u] = (u8)backgroundNameLen;
+    memcpy(mirrorPayload + slot + 5u, backgroundNameOut, backgroundNameLen);
+    mirrorPayloadLen += (u32)backgroundNameLen;
+
+    if (!vm_net_mock_scene_battle_monster_wrap_type2(
+            backgroundPayload, backgroundPayloadLen, backgroundRaw,
+            backgroundRawCap, backgroundRawLenOut))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=encode-background scene=%s\n", scene);
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_wrap_type2(
+            mirrorPayload, mirrorPayloadLen, mirrorRaw, mirrorRawCap,
+            mirrorRawLenOut))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=encode-mirror scene=%s\n", scene);
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_decode_raw_sce(
+            backgroundRaw, *backgroundRawLenOut, verifyPayload,
+            sizeof(verifyPayload), &verifyPayloadLen) ||
+        verifyPayloadLen != backgroundPayloadLen ||
+        memcmp(verifyPayload, backgroundPayload, backgroundPayloadLen) != 0)
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=verify-background scene=%s raw=%u payload=%u decoded=%u\n",
+               scene, *backgroundRawLenOut, backgroundPayloadLen,
+               verifyPayloadLen);
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_decode_raw_sce(
+            mirrorRaw, *mirrorRawLenOut, verifyPayload, sizeof(verifyPayload),
+            &verifyPayloadLen) ||
+        verifyPayloadLen != mirrorPayloadLen ||
+        memcmp(verifyPayload, mirrorPayload, mirrorPayloadLen) != 0)
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror "
+               "stage=verify-mirror scene=%s raw=%u payload=%u decoded=%u\n",
+               scene, *mirrorRawLenOut, mirrorPayloadLen, verifyPayloadLen);
+        return false;
+    }
+    *backgroundMapRawLenOut = sourceMapRawLen;
+    return true;
+}
+
+static void vm_net_mock_scene_battle_monster_restore_overlay_resource(
+    const char *name, const u8 *previousRaw, u32 previousRawLen)
+{
+    char path[1200];
+    const char *ignoredError = NULL;
+
+    if (name == NULL || name[0] == 0 ||
+        !vm_net_mock_build_overlay_resource_path(name, path, sizeof(path)))
+    {
+        return;
+    }
+    if (previousRawLen != 0 && previousRaw != NULL)
+    {
+        (void)vm_net_mock_scene_battle_monster_write_resource(
+            path, previousRaw, previousRawLen, &ignoredError);
+    }
+    else
+    {
+        /* The path is an exact, server-derived overlay leaf.  Removing it
+         * restores the prior absence after a failed deploy; it never targets
+         * a source resource or an administrator-provided host path. */
+        (void)remove(path);
+    }
 }
 
 static bool vm_net_mock_sce_entity_tag_creates_node(u16 tag)
@@ -3803,11 +4321,24 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     u8 encoded[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
     u8 outputRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
     u8 roundTripPayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 cityMirrorRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 cityBackgroundRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 cityBackgroundMapRaw[VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_MAP_RAW_MAX];
+    u8 previousCityMirrorRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 previousCityBackgroundRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 previousCityBackgroundMapRaw
+        [VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_MAP_RAW_MAX];
     vm_net_mock_sce_entity_list baseEntityList;
     vm_net_mock_sce_entity_list finalEntityList;
     const char *baseSource = "unresolved";
     const char *publishError = NULL;
     char resourcePath[1200];
+    char cityMirrorPath[1200];
+    char cityBackgroundPath[1200];
+    char cityBackgroundMapPath[1200];
+    char cityMirrorName[VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_NAME_CAP];
+    char cityBackgroundName[VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_NAME_CAP];
+    char cityBackgroundMapName[VM_NET_MOCK_SCENE_BATTLE_CITY_MIRROR_NAME_CAP];
     u32 rowCount = 0;
     u32 storedRowCount = 0;
     u32 enabledCount = 0;
@@ -3817,6 +4348,12 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     u32 encodedLen = 0;
     u32 outputRawLen = 0;
     u32 roundTripPayloadLen = 0;
+    u32 cityMirrorRawLen = 0;
+    u32 cityBackgroundRawLen = 0;
+    u32 cityBackgroundMapRawLen = 0;
+    u32 previousCityMirrorRawLen = 0;
+    u32 previousCityBackgroundRawLen = 0;
+    u32 previousCityBackgroundMapRawLen = 0;
     u32 originalNodeCount = 0;
     u32 finalNodeCount = 0;
     u32 npcNodeReserve = 0;
@@ -3833,6 +4370,10 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     char imageNameStorage[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PUBLISH_NAME_MAX][64];
     u32 nameCount = 0;
     bool contentChanged = false;
+    bool cityMirrorRequired = false;
+    bool cityBackgroundMapWritten = false;
+    bool cityBackgroundWritten = false;
+    bool cityMirrorWritten = false;
 
     if (errorOut)
         *errorOut = "场景战斗怪部署失败";
@@ -4023,6 +4564,26 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
             *errorOut = "生成的场景资源未能按客户端 SCE2 格式解码";
         return false;
     }
+    cityMirrorRequired = scene[0] == 'c' && enabledCount != 0;
+    if (cityMirrorRequired &&
+        !vm_net_mock_scene_battle_monster_build_city_mirror(
+            scene, payload, payloadLen, cityMirrorName,
+            sizeof(cityMirrorName), cityMirrorRaw, sizeof(cityMirrorRaw),
+            &cityMirrorRawLen, cityBackgroundName,
+            sizeof(cityBackgroundName), cityBackgroundRaw,
+            sizeof(cityBackgroundRaw), &cityBackgroundRawLen,
+            cityBackgroundMapName, sizeof(cityBackgroundMapName),
+            cityBackgroundMapRaw, sizeof(cityBackgroundMapRaw),
+            &cityBackgroundMapRawLen))
+    {
+        printf("[error][mock-admin] scene_battle_monster_city_mirror stage=build "
+               "scene=%s action=reject-deploy reason=background-template-or-"
+               "empty-field18-contract-unavailable\n",
+               scene);
+        if (errorOut)
+            *errorOut = "城市场景战斗镜像生成失败：缺少可验证的背景模板、地图或空 field18 槽";
+        return false;
+    }
     if (!vm_net_mock_build_overlay_resource_path(scene, resourcePath,
                                                  sizeof(resourcePath)))
     {
@@ -4036,12 +4597,87 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     {
         previousRawLen = 0;
     }
+    if (cityMirrorRequired)
+    {
+        if (!vm_net_mock_build_overlay_resource_path(
+                cityMirrorName, cityMirrorPath, sizeof(cityMirrorPath)) ||
+            !vm_net_mock_build_overlay_resource_path(
+                cityBackgroundName, cityBackgroundPath,
+                sizeof(cityBackgroundPath)) ||
+            !vm_net_mock_build_overlay_resource_path(
+                cityBackgroundMapName, cityBackgroundMapPath,
+                sizeof(cityBackgroundMapPath)))
+        {
+            if (errorOut)
+                *errorOut = "无法建立城市场景战斗镜像发布目录";
+            return false;
+        }
+        if (!vm_net_mock_scene_battle_monster_read_overlay_raw(
+                cityMirrorName, previousCityMirrorRaw,
+                sizeof(previousCityMirrorRaw), &previousCityMirrorRawLen,
+                NULL, 0))
+        {
+            previousCityMirrorRawLen = 0;
+        }
+        if (!vm_net_mock_scene_battle_monster_read_overlay_raw(
+                cityBackgroundName, previousCityBackgroundRaw,
+                sizeof(previousCityBackgroundRaw),
+                &previousCityBackgroundRawLen, NULL, 0))
+        {
+            previousCityBackgroundRawLen = 0;
+        }
+        if (!vm_net_mock_scene_battle_monster_read_overlay_raw(
+                cityBackgroundMapName, previousCityBackgroundMapRaw,
+                sizeof(previousCityBackgroundMapRaw),
+                &previousCityBackgroundMapRawLen, NULL, 0))
+        {
+            previousCityBackgroundMapRawLen = 0;
+        }
+    }
     if (!vm_net_mock_scene_battle_monster_write_resource(resourcePath,
                                                           outputRaw,
                                                           outputRawLen,
                                                           errorOut))
     {
         return false;
+    }
+    if (cityMirrorRequired)
+    {
+        if (!vm_net_mock_scene_battle_monster_write_resource(
+                cityBackgroundMapPath, cityBackgroundMapRaw,
+                cityBackgroundMapRawLen, errorOut))
+        {
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                scene, previousRaw, previousRawLen);
+            return false;
+        }
+        cityBackgroundMapWritten = true;
+        if (!vm_net_mock_scene_battle_monster_write_resource(
+                cityBackgroundPath, cityBackgroundRaw, cityBackgroundRawLen,
+                errorOut))
+        {
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityBackgroundMapName, previousCityBackgroundMapRaw,
+                previousCityBackgroundMapRawLen);
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                scene, previousRaw, previousRawLen);
+            return false;
+        }
+        cityBackgroundWritten = true;
+        if (!vm_net_mock_scene_battle_monster_write_resource(
+                cityMirrorPath, cityMirrorRaw, cityMirrorRawLen, errorOut))
+        {
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityBackgroundName, previousCityBackgroundRaw,
+                previousCityBackgroundRawLen);
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityBackgroundMapName, previousCityBackgroundMapRaw,
+                previousCityBackgroundMapRawLen);
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                scene, previousRaw, previousRawLen);
+            return false;
+        }
+        cityMirrorWritten = true;
     }
     memset(imageNameStorage, 0, sizeof(imageNameStorage));
     nameCount = vm_net_mock_scene_battle_monster_collect_publish_names(
@@ -4051,21 +4687,78 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     {
         if (errorOut)
             *errorOut = "场景战斗怪依赖资源清单生成失败";
+        if (cityMirrorWritten)
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityMirrorName, previousCityMirrorRaw, previousCityMirrorRawLen);
+        if (cityBackgroundWritten)
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityBackgroundName, previousCityBackgroundRaw,
+                previousCityBackgroundRawLen);
+        if (cityBackgroundMapWritten)
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityBackgroundMapName, previousCityBackgroundMapRaw,
+                previousCityBackgroundMapRawLen);
+        vm_net_mock_scene_battle_monster_restore_overlay_resource(
+            scene, previousRaw, previousRawLen);
         return false;
+    }
+    if (cityMirrorRequired)
+    {
+        const char *cityNames[] = {cityMirrorName, cityBackgroundName,
+                                   cityBackgroundMapName};
+
+        for (u32 cityIndex = 0;
+             cityIndex < sizeof(cityNames) / sizeof(cityNames[0]); ++cityIndex)
+        {
+            bool present = false;
+
+            for (u32 existing = 0; existing < nameCount; ++existing)
+            {
+                if (strcmp(names[existing], cityNames[cityIndex]) == 0)
+                {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present)
+            {
+                if (nameCount >= sizeof(names) / sizeof(names[0]))
+                {
+                    if (errorOut)
+                        *errorOut = "城市场景战斗镜像资源清单超过上限";
+                    vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                        cityMirrorName, previousCityMirrorRaw,
+                        previousCityMirrorRawLen);
+                    vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                        cityBackgroundName, previousCityBackgroundRaw,
+                        previousCityBackgroundRawLen);
+                    vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                        cityBackgroundMapName, previousCityBackgroundMapRaw,
+                        previousCityBackgroundMapRawLen);
+                    vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                        scene, previousRaw, previousRawLen);
+                    return false;
+                }
+                names[nameCount++] = cityNames[cityIndex];
+            }
+        }
     }
     if (!vm_net_mock_content_update_publish_files(names, nameCount, &publishError,
                                                   &contentChanged))
     {
-        const char *restoreError = NULL;
-        if (previousRawLen != 0)
-        {
-            (void)vm_net_mock_scene_battle_monster_write_resource(
-                resourcePath, previousRaw, previousRawLen, &restoreError);
-        }
-        else
-        {
-            (void)remove(resourcePath);
-        }
+        if (cityMirrorWritten)
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityMirrorName, previousCityMirrorRaw, previousCityMirrorRawLen);
+        if (cityBackgroundWritten)
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityBackgroundName, previousCityBackgroundRaw,
+                previousCityBackgroundRawLen);
+        if (cityBackgroundMapWritten)
+            vm_net_mock_scene_battle_monster_restore_overlay_resource(
+                cityBackgroundMapName, previousCityBackgroundMapRaw,
+                previousCityBackgroundMapRawLen);
+        vm_net_mock_scene_battle_monster_restore_overlay_resource(
+            scene, previousRaw, previousRawLen);
         if (errorOut)
             *errorOut = publishError ? publishError : "内容更新发布失败";
         return false;
@@ -4087,13 +4780,14 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     printf("[info][mock-admin] scene_battle_monster_deploy scene=%s base=%s "
             "drafts=%u enabled=%u nodes=%u->%u raw=%u payload=%u "
             "entity_count=%u->%u entity_end=%u trailing_preserved=%u "
-            "manifest_files=%u resource_type=%u content_changed=%u publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-counted-entity-list+kind3+"
+            "manifest_files=%u resource_type=%u content_changed=%u city_mirror=%s publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-counted-entity-list+kind3+"
             "mmBattle:0x66CC\n",
             scene, baseSource, rowCount, enabledCount, originalNodeCount,
             finalNodeCount, outputRawLen, payloadLen,
             baseEntityList.recordCount, finalEntityList.recordCount,
             finalEntityList.recordsEnd, ignoredTrailingBytes, nameCount, outputRaw[4],
-            contentChanged ? 1u : 0u);
+            contentChanged ? 1u : 0u,
+            cityMirrorRequired ? cityMirrorName : "-");
     if (errorOut)
         *errorOut = "ok";
     return true;
