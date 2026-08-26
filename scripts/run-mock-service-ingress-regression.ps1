@@ -208,6 +208,26 @@ function Invoke-ServiceNonCanonicalPing([int]$Port) {
         $client.Dispose()
     }
 }
+function Assert-ServiceSourceBlocked([int]$Port) {
+    $client = New-Object Net.Sockets.TcpClient
+    try {
+        $client.ReceiveTimeout = 1500
+        $client.SendTimeout = 1500
+        $client.Connect('127.0.0.1', $Port)
+        [byte[]]$frame = New-CbmsHeader 1 0 0
+        $stream = $client.GetStream()
+        $stream.Write($frame, 0, $frame.Length)
+        [byte[]]$probe = New-Object byte[] 1
+        try {
+            $read = $stream.Read($probe, 0, 1)
+        } catch {
+            throw "blocked source did not close promptly: $_"
+        }
+        if ($read -ne 0) { throw 'blocked source unexpectedly received a response' }
+    } finally {
+        $client.Dispose()
+    }
+}
 function Invoke-ServiceLogin([int]$Port) {
     $client = New-Object Net.Sockets.TcpClient
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
@@ -265,7 +285,7 @@ try {
         -ArgumentList '--mock-service-only', '--mock-service-bind=127.0.0.1', "--mock-service-port=$ServicePort", "--mock-admin-port=$AdminPort", "--resource-root=$resourceCopy" `
         -RedirectStandardOutput (Join-Path $runDir 'server.stdout.log') `
         -RedirectStandardError (Join-Path $runDir 'server.stderr.log')
-    [pscustomobject]@{ scenario = $ScenarioId; max_steps = 8; total_timeout_seconds = 30; single_step_timeout_seconds = 3; server_pid = $serverProcess.Id; database = $database } |
+    [pscustomobject]@{ scenario = $ScenarioId; max_steps = 12; total_timeout_seconds = 30; single_step_timeout_seconds = 3; server_pid = $serverProcess.Id; database = $database } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'run.json') -Encoding utf8
     Wait-OwnedService $serverProcess $ServicePort
 
@@ -293,7 +313,32 @@ try {
     }
     if ($serverLog -notmatch 'ingress_ping .*flags=1 ') { throw 'canonical ping did not use the ingress fast path' }
     if ($serverLog -notmatch 'ingress_ping .*flags=3 ') { throw 'non-canonical ping did not use the ingress fast path' }
-    [pscustomobject]@{ result = 'passed'; scenario = $ScenarioId; ping_ms = $pingMs; noncanonical_ping_ms = $nonCanonicalPingMs; login_ms = $loginMs; ingress_timeouts = $timeoutCount; assertions = @('four-incomplete-game-frames-never-enter-protocol-worker-pool','same-source-fifth-incomplete-frame-reclaimed-before-timeout','four-incomplete-admin-frames-never-starve-game-worker-pool','all-ping-bit-frames-receive-cbmr-without-protocol-worker','valid-login-received-cbmr-under-1500ms','incomplete-game-frames-reclaimed-at-ingress') } |
+
+    # A successful login clears a non-blocked source record.  Establish three
+    # independent cap events afterwards; each is five simultaneous incomplete
+    # first frames from the same source, and the third must persist a block.
+    foreach ($client in $partialClients) { $client.Dispose() }
+    $partialClients = @()
+    for ($wave = 0; $wave -lt 3; ++$wave) {
+        for ($i = 0; $i -lt 5; ++$i) { $partialClients += Open-IncompleteFrame $ServicePort }
+        Start-Sleep -Milliseconds 300
+        foreach ($client in $partialClients) { $client.Dispose() }
+        $partialClients = @()
+        if ($wave -lt 2) { Start-Sleep -Milliseconds 300 }
+    }
+    Assert-ServiceSourceBlocked $ServicePort
+    # The listener retains the first source-pending-cap line, then emits one
+    # aggregate after its fixed ten-second window.  Waiting on that observable
+    # log boundary verifies suppression without changing client traffic.
+    Start-Sleep -Milliseconds 10500
+    $serverLog = Get-Content -Raw -LiteralPath (Join-Path $runDir 'server.stdout.log')
+    if ($serverLog -notmatch 'login-ip-lock.*blocked=1 .*reason=ingress-source-pending-cap .*ingress_violations=3') {
+        throw 'third same-source ingress-cap event did not persist the expected IP block'
+    }
+    if ($serverLog -notmatch 'ingress_drop_summary reason=source-pending-cap events=4 suppressed=3 .*source=127\.0\.0\.1') {
+        throw 'repeated source-pending-cap events were not summarized after the aggregation window'
+    }
+    [pscustomobject]@{ result = 'passed'; scenario = $ScenarioId; ping_ms = $pingMs; noncanonical_ping_ms = $nonCanonicalPingMs; login_ms = $loginMs; ingress_timeouts = $timeoutCount; assertions = @('four-incomplete-game-frames-never-enter-protocol-worker-pool','same-source-fifth-incomplete-frame-reclaimed-before-timeout','four-incomplete-admin-frames-never-starve-game-worker-pool','all-ping-bit-frames-receive-cbmr-without-protocol-worker','valid-login-received-cbmr-under-1500ms','incomplete-game-frames-reclaimed-at-ingress','three-source-cap-events-persist-shared-risk-ip-block','blocked-source-is-rejected-before-ingress-slot-allocation','repeated-ingress-drops-are-summarized-per-source-and-reason') } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'result.json') -Encoding utf8
     Write-Host "$ScenarioId passed run_dir=$runDir ping_ms=$pingMs noncanonical_ping_ms=$nonCanonicalPingMs login_ms=$loginMs ingress_timeouts=$timeoutCount"
 }

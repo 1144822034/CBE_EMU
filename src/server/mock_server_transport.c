@@ -390,6 +390,10 @@ enum
 {
     VM_MOCK_SERVICE_LOGIN_IP_CAP = 16,
     VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT = 15,
+    /* One source-pending-cap event already proves five concurrent incomplete
+     * first frames.  Require repeated events before a source-wide block so a
+     * transient mobile/NAT burst cannot be mistaken for ingress abuse. */
+    VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT = 3,
     VM_MOCK_SERVICE_LOGIN_IP_BLOCK_CACHE_MAX = 1024
 };
 
@@ -421,11 +425,17 @@ typedef struct
     bool invalid;
     bool blocked;
     u32 failedAttempts;
+    u32 ingressViolations;
 } vm_mock_service_login_ip_block_state;
 
 static vm_mock_service_login_ip_block_cache g_vmMockServiceLoginIpBlockCache = {
     PTHREAD_MUTEX_INITIALIZER, false, false, false, 0, {{0}}
 };
+/* CREATE TABLE IF NOT EXISTS does not upgrade an existing deployment.  Keep
+ * the compatibility migration serialized even though its MySQL connection is
+ * thread-local. */
+static pthread_mutex_t g_vmMockServiceLoginIpSchemaMutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_vmMockServiceLoginIpSchemaPrepared = false;
 
 #if defined(_MSC_VER)
 #define VM_MOCK_SERVICE_THREAD_LOCAL __declspec(thread)
@@ -489,6 +499,7 @@ static bool vm_mock_service_login_ip_block_load_row(
         (vm_mock_service_login_ip_block_load_context *)contextValue;
     vm_mock_service_login_ip_block_cache *cache =
         context != NULL ? context->cache : NULL;
+    char address[VM_MOCK_SERVICE_LOGIN_IP_CAP];
 
     if (context == NULL || cache == NULL || columnCount != 1 ||
         values == NULL || values[0] == NULL || lengths == NULL ||
@@ -498,7 +509,12 @@ static bool vm_mock_service_login_ip_block_load_row(
             context->invalid = true;
         return false;
     }
-    if (!vm_mock_service_login_ip_is_valid(values[0]))
+    /* vm_mysql_query() supplies a pointer and a byte length, not a C string.
+     * Copy before validation/cache storage so a valid blocked IP cannot be
+     * rejected because arbitrary bytes follow its MySQL field. */
+    memset(address, 0, sizeof(address));
+    memcpy(address, values[0], lengths[0]);
+    if (!vm_mock_service_login_ip_is_valid(address))
     {
         context->invalid = true;
         return false;
@@ -511,7 +527,7 @@ static bool vm_mock_service_login_ip_block_load_row(
         return true;
     }
     snprintf(cache->entries[cache->count].address,
-             sizeof(cache->entries[cache->count].address), "%s", values[0]);
+             sizeof(cache->entries[cache->count].address), "%s", address);
     ++cache->count;
     return true;
 }
@@ -524,10 +540,9 @@ static bool vm_mock_service_login_ip_block_state_row(
         (vm_mock_service_login_ip_block_state *)contextValue;
     char attempts[16];
 
-    if (state == NULL || columnCount != 2 || values == NULL ||
+    if (state == NULL || (columnCount != 2 && columnCount != 3) || values == NULL ||
         values[0] == NULL || values[1] == NULL || lengths == NULL ||
-        lengths[0] == 0 || lengths[0] >= sizeof(attempts) || lengths[1] != 1 ||
-        (values[1][0] != '0' && values[1][0] != '1'))
+        lengths[0] == 0 || lengths[0] >= sizeof(attempts))
     {
         if (state != NULL)
             state->invalid = true;
@@ -540,22 +555,157 @@ static bool vm_mock_service_login_ip_block_state_row(
         state->invalid = true;
         return false;
     }
-    state->blocked = values[1][0] == '1';
+    if (columnCount == 3)
+    {
+        if (values[2] == NULL || lengths[1] == 0 ||
+            lengths[1] >= sizeof(attempts) || lengths[2] != 1 ||
+            (values[2][0] != '0' && values[2][0] != '1'))
+        {
+            state->invalid = true;
+            return false;
+        }
+        memset(attempts, 0, sizeof(attempts));
+        memcpy(attempts, values[1], lengths[1]);
+        if (!vm_net_mock_parse_u32_strict(attempts, &state->ingressViolations))
+        {
+            state->invalid = true;
+            return false;
+        }
+        state->blocked = values[2][0] == '1';
+    }
+    else if (lengths[1] == 1 &&
+             (values[1][0] == '0' || values[1][0] == '1'))
+    {
+        state->blocked = values[1][0] == '1';
+    }
+    else
+    {
+        state->invalid = true;
+        return false;
+    }
     state->found = true;
+    return true;
+}
+
+typedef struct
+{
+    u32 count;
+    bool found;
+    bool invalid;
+} vm_mock_service_login_ip_schema_column_state;
+
+static bool vm_mock_service_login_ip_schema_column_count_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_service_login_ip_schema_column_state *state =
+        (vm_mock_service_login_ip_schema_column_state *)contextValue;
+    char countText[16];
+
+    if (state == NULL || columnCount != 1 || values == NULL ||
+        values[0] == NULL || lengths == NULL || lengths[0] == 0 ||
+        lengths[0] >= sizeof(countText))
+    {
+        if (state != NULL)
+            state->invalid = true;
+        return false;
+    }
+    memset(countText, 0, sizeof(countText));
+    memcpy(countText, values[0], lengths[0]);
+    if (!vm_net_mock_parse_u32_strict(countText, &state->count))
+    {
+        state->invalid = true;
+        return false;
+    }
+    state->found = true;
+    return true;
+}
+
+static bool vm_mock_service_login_ip_schema_has_column(const char *column,
+                                                        bool *hasOut)
+{
+    char query[320];
+    vm_mock_service_login_ip_schema_column_state state;
+
+    if (hasOut != NULL)
+        *hasOut = false;
+    if (column == NULL || column[0] == 0)
+        return false;
+    memset(&state, 0, sizeof(state));
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM information_schema.COLUMNS "
+             "WHERE TABLE_SCHEMA=DATABASE() "
+             "AND TABLE_NAME='server_login_ip_blocks' "
+             "AND COLUMN_NAME='%s'", column);
+    if (!vm_mysql_query(query,
+                        vm_mock_service_login_ip_schema_column_count_row,
+                        &state) || state.invalid || !state.found)
+    {
+        return false;
+    }
+    if (hasOut != NULL)
+        *hasOut = state.count != 0;
     return true;
 }
 
 static bool vm_mock_service_login_ip_schema_ensure(void)
 {
-    return vm_mysql_exec(
-        "CREATE TABLE IF NOT EXISTS server_login_ip_blocks ("
-        "ip_address VARCHAR(45) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
-        "failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,"
-        "blocked TINYINT UNSIGNED NOT NULL DEFAULT 0,"
-        "blocked_at TIMESTAMP NULL DEFAULT NULL,"
-        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
-        "PRIMARY KEY(ip_address),KEY idx_login_ip_blocks_blocked(blocked)"
-        ") ENGINE=InnoDB");
+    bool hasIngressViolations = false;
+    bool hasBlockReason = false;
+    bool ok = false;
+
+    pthread_mutex_lock(&g_vmMockServiceLoginIpSchemaMutex);
+    if (g_vmMockServiceLoginIpSchemaPrepared)
+    {
+        ok = true;
+        goto done;
+    }
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_login_ip_blocks ("
+            "ip_address VARCHAR(45) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "ingress_violations TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "blocked TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "block_reason VARCHAR(31) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',"
+            "blocked_at TIMESTAMP NULL DEFAULT NULL,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(ip_address),KEY idx_login_ip_blocks_blocked(blocked)"
+            ") ENGINE=InnoDB") ||
+        !vm_mock_service_login_ip_schema_has_column("ingress_violations",
+                                                     &hasIngressViolations) ||
+        !vm_mock_service_login_ip_schema_has_column("block_reason",
+                                                     &hasBlockReason))
+    {
+        goto done;
+    }
+    if (!hasIngressViolations &&
+        !vm_mysql_exec(
+            "ALTER TABLE server_login_ip_blocks "
+            "ADD COLUMN ingress_violations TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER failed_attempts") &&
+        (!vm_mock_service_login_ip_schema_has_column("ingress_violations",
+                                                      &hasIngressViolations) ||
+         !hasIngressViolations))
+    {
+        goto done;
+    }
+    if (!hasBlockReason &&
+        !vm_mysql_exec(
+            "ALTER TABLE server_login_ip_blocks "
+            "ADD COLUMN block_reason VARCHAR(31) CHARACTER SET ascii "
+            "COLLATE ascii_bin NOT NULL DEFAULT '' AFTER blocked") &&
+        (!vm_mock_service_login_ip_schema_has_column("block_reason",
+                                                      &hasBlockReason) ||
+         !hasBlockReason))
+    {
+        goto done;
+    }
+    g_vmMockServiceLoginIpSchemaPrepared = true;
+    ok = true;
+
+done:
+    pthread_mutex_unlock(&g_vmMockServiceLoginIpSchemaMutex);
+    return ok;
 }
 
 static bool vm_mock_service_login_ip_block_cache_contains(
@@ -663,7 +813,7 @@ static bool vm_mock_service_login_ip_lookup_blocked_locked(
         return false;
     }
     snprintf(query, sizeof(query),
-             "SELECT failed_attempts,blocked FROM server_login_ip_blocks "
+             "SELECT failed_attempts,ingress_violations,blocked FROM server_login_ip_blocks "
              "WHERE ip_address=CAST(X'%s' AS CHAR)", addressHex);
     memset(&state, 0, sizeof(state));
     if (!vm_mysql_query(query, vm_mock_service_login_ip_block_state_row,
@@ -702,8 +852,8 @@ static bool vm_mock_service_login_ip_is_blocked(const char *address)
 }
 
 /* A back-office risk-IP removal must update the database and this process's
- * fast-path cache under the same mutex.  Deleting the record also resets the
- * failed-attempt counter, so a later failure starts a fresh 15-attempt window.
+ * fast-path cache under the same mutex.  Deleting the record resets both
+ * credential and ingress-abuse counters before a later source event.
  */
 static bool vm_mock_service_login_ip_clear_block(const char *address,
                                                  bool *clearedOut)
@@ -779,20 +929,22 @@ static bool vm_mock_service_login_ip_note_failure(const char *address,
         goto done;
     snprintf(query, sizeof(query),
              "INSERT INTO server_login_ip_blocks "
-             "(ip_address,failed_attempts,blocked) "
-             "VALUES(CAST(X'%s' AS CHAR),1,0) "
+             "(ip_address,failed_attempts,ingress_violations,blocked,block_reason) "
+             "VALUES(CAST(X'%s' AS CHAR),1,0,0,'') "
              "ON DUPLICATE KEY UPDATE "
              "failed_attempts=LEAST(failed_attempts+1,%u),"
              "blocked=IF(failed_attempts>=%u,1,blocked),"
+             "block_reason=IF(failed_attempts>=%u,'credential-failure',block_reason),"
              "blocked_at=IF(failed_attempts>=%u,"
              "COALESCE(blocked_at,CURRENT_TIMESTAMP),blocked_at)",
              addressHex, VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT,
+             VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT,
              VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT,
              VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT);
     if (!vm_mysql_exec(query))
         goto done;
     snprintf(query, sizeof(query),
-             "SELECT failed_attempts,blocked FROM server_login_ip_blocks "
+             "SELECT failed_attempts,ingress_violations,blocked FROM server_login_ip_blocks "
              "WHERE ip_address=CAST(X'%s' AS CHAR)", addressHex);
     memset(&state, 0, sizeof(state));
     if (!vm_mysql_query(query, vm_mock_service_login_ip_block_state_row,
@@ -814,6 +966,80 @@ done:
     if (!ok)
     {
         printf("[error][login-ip-lock] failure_record_failed ip=%s error=%s\n",
+               address, vm_mysql_last_error());
+    }
+    pthread_mutex_unlock(&cache->mutex);
+    return ok;
+}
+
+/* Only a source-pending-cap event is strong enough to escalate into this
+ * shared source-IP block list: it proves more than four simultaneous peers
+ * from one IPv4 still lack a complete first CBMS frame.  A single closed peer
+ * or 2-second frame timeout remains observable but is intentionally not
+ * treated as abuse, because ordinary networks can produce either event. */
+static bool vm_mock_service_login_ip_note_ingress_source_cap(
+    const char *address, u32 *violationsOut, bool *blockedOut)
+{
+    vm_mock_service_login_ip_block_cache *cache =
+        &g_vmMockServiceLoginIpBlockCache;
+    char addressHex[VM_MOCK_SERVICE_LOGIN_IP_CAP * 2 + 1];
+    char query[1024];
+    vm_mock_service_login_ip_block_state state;
+    bool ok = false;
+
+    if (violationsOut != NULL)
+        *violationsOut = 0;
+    if (blockedOut != NULL)
+        *blockedOut = false;
+    if (!vm_mock_service_login_ip_is_valid(address) ||
+        vm_mysql_hex_encode((const u8 *)address, strlen(address), addressHex,
+                            sizeof(addressHex)) == 0)
+    {
+        return false;
+    }
+    pthread_mutex_lock(&cache->mutex);
+    if (!vm_mock_service_login_ip_block_cache_ensure_locked(cache))
+        goto done;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_login_ip_blocks "
+             "(ip_address,failed_attempts,ingress_violations,blocked,block_reason) "
+             "VALUES(CAST(X'%s' AS CHAR),0,1,0,'') "
+             "ON DUPLICATE KEY UPDATE "
+             "ingress_violations=LEAST(ingress_violations+1,%u),"
+             "blocked=IF(ingress_violations>=%u,1,blocked),"
+             "block_reason=IF(ingress_violations>=%u,"
+             "'ingress-source-pending-cap',block_reason),"
+             "blocked_at=IF(ingress_violations>=%u,"
+             "COALESCE(blocked_at,CURRENT_TIMESTAMP),blocked_at)",
+             addressHex, VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT,
+             VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT,
+             VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT,
+             VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT);
+    if (!vm_mysql_exec(query))
+        goto done;
+    snprintf(query, sizeof(query),
+             "SELECT failed_attempts,ingress_violations,blocked "
+             "FROM server_login_ip_blocks "
+             "WHERE ip_address=CAST(X'%s' AS CHAR)", addressHex);
+    memset(&state, 0, sizeof(state));
+    if (!vm_mysql_query(query, vm_mock_service_login_ip_block_state_row,
+                        &state) || state.invalid || !state.found)
+    {
+        goto done;
+    }
+    if (violationsOut != NULL)
+        *violationsOut = state.ingressViolations;
+    if (blockedOut != NULL)
+        *blockedOut = state.blocked;
+    if (state.blocked)
+        vm_mock_service_login_ip_block_cache_add(cache, address);
+    ok = true;
+
+done:
+    if (!ok)
+    {
+        printf("[error][login-ip-lock] ingress_violation_record_failed "
+               "ip=%s error=%s\n",
                address, vm_mysql_last_error());
     }
     pthread_mutex_unlock(&cache->mutex);
@@ -1871,6 +2097,11 @@ enum
      * listener without imposing an online-player or account quota. */
     VM_MOCK_SERVICE_INGRESS_PER_SOURCE_MAX = 4,
     VM_MOCK_SERVICE_INGRESS_FRAME_TIMEOUT_MS = 2000,
+    /* Internet scans often create many identical short-lived peers.  Keep
+     * the first raw event, then summarize the same source/reason pair rather
+     * than flooding the operator console. */
+    VM_MOCK_SERVICE_INGRESS_DROP_LOG_BUCKETS = 64,
+    VM_MOCK_SERVICE_INGRESS_DROP_LOG_WINDOW_MS = 10000,
     /* The running MySQL configuration uses wait_timeout=120 seconds.  Wake
      * workers at half that interval so their thread-local durable connection
      * stays alive without creating new idle connections. */
@@ -1907,6 +2138,24 @@ typedef struct
     u32 nextIngressId;
     vm_mock_service_ingress_connection entries[VM_MOCK_SERVICE_INGRESS_MAX];
 } vm_mock_service_ingress_table;
+
+typedef struct
+{
+    char sourceIp[VM_MOCK_SERVICE_LOGIN_IP_CAP];
+    char reason[32];
+    u32 firstIngressId;
+    u32 lastIngressId;
+    u32 firstEventMs;
+    u32 lastEventMs;
+    u32 eventCount;
+    u32 maxWaitedMs;
+} vm_mock_service_ingress_drop_log_bucket;
+
+typedef struct
+{
+    vm_mock_service_ingress_drop_log_bucket
+        buckets[VM_MOCK_SERVICE_INGRESS_DROP_LOG_BUCKETS];
+} vm_mock_service_ingress_drop_log_table;
 
 typedef struct vm_mock_service_worker_pool vm_mock_service_worker_pool;
 
@@ -2351,11 +2600,117 @@ static u32 vm_mock_service_ingress_source_pending_count(
     return count;
 }
 
+static void vm_mock_service_ingress_drop_log_flush_bucket(
+    vm_mock_service_ingress_drop_log_bucket *bucket, u32 nowMs)
+{
+    u32 windowMs = 0;
+
+    if (bucket == NULL || bucket->eventCount == 0)
+        return;
+    windowMs = nowMs - bucket->firstEventMs;
+    if (bucket->eventCount > 1)
+    {
+        printf("[warn][mock-service] ingress_drop_summary reason=%s events=%u "
+               "suppressed=%u first_ingress_id=%u last_ingress_id=%u "
+               "window_ms=%u max_waited_ms=%u source=%s\n",
+               bucket->reason, bucket->eventCount, bucket->eventCount - 1,
+               bucket->firstIngressId, bucket->lastIngressId, windowMs,
+               bucket->maxWaitedMs, bucket->sourceIp);
+    }
+    memset(bucket, 0, sizeof(*bucket));
+}
+
+/* Returns true for the first event in a source/reason window, so callers
+ * retain one full-fidelity diagnostic line.  Repeated events are counted and
+ * emitted later as a single summary.  This table belongs to the listener
+ * thread, so no lock is necessary. */
+static bool vm_mock_service_ingress_drop_log_should_emit(
+    vm_mock_service_ingress_drop_log_table *table, u32 nowMs,
+    const char *reason, const char *sourceIp, u32 ingressId, u32 waitedMs)
+{
+    vm_mock_service_ingress_drop_log_bucket *freeBucket = NULL;
+    vm_mock_service_ingress_drop_log_bucket *oldestBucket = NULL;
+    const char *safeReason = reason && reason[0] ? reason : "unknown";
+    const char *safeSource = sourceIp && sourceIp[0] ? sourceIp : "-";
+
+    if (table == NULL)
+        return true;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_INGRESS_DROP_LOG_BUCKETS; ++i)
+    {
+        vm_mock_service_ingress_drop_log_bucket *bucket = &table->buckets[i];
+
+        if (bucket->eventCount == 0)
+        {
+            if (freeBucket == NULL)
+                freeBucket = bucket;
+            continue;
+        }
+        if (strcmp(bucket->reason, safeReason) == 0 &&
+            strcmp(bucket->sourceIp, safeSource) == 0)
+        {
+            if (nowMs - bucket->firstEventMs >=
+                VM_MOCK_SERVICE_INGRESS_DROP_LOG_WINDOW_MS)
+            {
+                vm_mock_service_ingress_drop_log_flush_bucket(bucket, nowMs);
+                freeBucket = bucket;
+                break;
+            }
+            ++bucket->eventCount;
+            bucket->lastIngressId = ingressId;
+            bucket->lastEventMs = nowMs;
+            if (waitedMs > bucket->maxWaitedMs)
+                bucket->maxWaitedMs = waitedMs;
+            return false;
+        }
+        if (oldestBucket == NULL ||
+            nowMs - bucket->lastEventMs > nowMs - oldestBucket->lastEventMs)
+        {
+            oldestBucket = bucket;
+        }
+    }
+    if (freeBucket == NULL)
+    {
+        freeBucket = oldestBucket;
+        vm_mock_service_ingress_drop_log_flush_bucket(freeBucket, nowMs);
+    }
+    memset(freeBucket, 0, sizeof(*freeBucket));
+    snprintf(freeBucket->reason, sizeof(freeBucket->reason), "%s", safeReason);
+    snprintf(freeBucket->sourceIp, sizeof(freeBucket->sourceIp), "%s", safeSource);
+    freeBucket->firstIngressId = ingressId;
+    freeBucket->lastIngressId = ingressId;
+    freeBucket->firstEventMs = nowMs;
+    freeBucket->lastEventMs = nowMs;
+    freeBucket->eventCount = 1;
+    freeBucket->maxWaitedMs = waitedMs;
+    return true;
+}
+
+static void vm_mock_service_ingress_drop_log_flush_due(
+    vm_mock_service_ingress_drop_log_table *table, u32 nowMs)
+{
+    if (table == NULL)
+        return;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_INGRESS_DROP_LOG_BUCKETS; ++i)
+    {
+        vm_mock_service_ingress_drop_log_bucket *bucket = &table->buckets[i];
+
+        if (bucket->eventCount != 0 &&
+            nowMs - bucket->firstEventMs >=
+                VM_MOCK_SERVICE_INGRESS_DROP_LOG_WINDOW_MS)
+        {
+            vm_mock_service_ingress_drop_log_flush_bucket(bucket, nowMs);
+        }
+    }
+}
+
 static bool vm_mock_service_ingress_drop_if_source_pending_cap(
     vm_mock_service_ingress_table *table,
-    vm_mock_service_ingress_connection *entry)
+    vm_mock_service_ingress_connection *entry,
+    vm_mock_service_ingress_drop_log_table *dropLogs, u32 nowMs)
 {
     u32 pendingCount = 0;
+    u32 ingressViolations = 0;
+    bool sourceBlocked = false;
 
     if (table == NULL || entry == NULL ||
         entry->socket == VM_MOCK_SERVICE_INVALID_SOCKET ||
@@ -2367,24 +2722,45 @@ static bool vm_mock_service_ingress_drop_if_source_pending_cap(
                                                                  entry->sourceIp);
     if (pendingCount <= VM_MOCK_SERVICE_INGRESS_PER_SOURCE_MAX)
         return false;
-    printf("[warn][mock-service] ingress_drop ingress_id=%u reason=source-pending-cap pending=%u cap=%u source=%s\n",
-           entry->ingressId, pendingCount,
-           (u32)VM_MOCK_SERVICE_INGRESS_PER_SOURCE_MAX, entry->sourceIp);
+    if (vm_mock_service_ingress_drop_log_should_emit(
+            dropLogs, nowMs, "source-pending-cap", entry->sourceIp,
+            entry->ingressId, nowMs - entry->acceptedMs))
+    {
+        printf("[warn][mock-service] ingress_drop ingress_id=%u reason=source-pending-cap pending=%u cap=%u source=%s\n",
+               entry->ingressId, pendingCount,
+               (u32)VM_MOCK_SERVICE_INGRESS_PER_SOURCE_MAX, entry->sourceIp);
+    }
+    if (vm_mock_service_login_ip_note_ingress_source_cap(
+            entry->sourceIp, &ingressViolations, &sourceBlocked) &&
+        sourceBlocked)
+    {
+        printf("[warn][login-ip-lock] ip=%s blocked=1 "
+               "reason=ingress-source-pending-cap ingress_violations=%u "
+               "threshold=%u\n",
+               entry->sourceIp, ingressViolations,
+               (u32)VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT);
+    }
     vm_mock_service_ingress_clear(entry);
     return true;
 }
 
 static bool vm_mock_service_ingress_expire_if_needed(
-    vm_mock_service_ingress_connection *entry, u32 nowMs)
+    vm_mock_service_ingress_connection *entry,
+    vm_mock_service_ingress_drop_log_table *dropLogs, u32 nowMs)
 {
     if (entry == NULL || entry->socket == VM_MOCK_SERVICE_INVALID_SOCKET ||
         nowMs - entry->acceptedMs < VM_MOCK_SERVICE_INGRESS_FRAME_TIMEOUT_MS)
     {
         return false;
     }
-    printf("[warn][mock-service] ingress_drop ingress_id=%u reason=frame-timeout waited_ms=%u source=%s\n",
-           entry->ingressId, nowMs - entry->acceptedMs,
-           entry->sourceIp[0] ? entry->sourceIp : "-");
+    if (vm_mock_service_ingress_drop_log_should_emit(
+            dropLogs, nowMs, "frame-timeout", entry->sourceIp,
+            entry->ingressId, nowMs - entry->acceptedMs))
+    {
+        printf("[warn][mock-service] ingress_drop ingress_id=%u reason=frame-timeout waited_ms=%u source=%s\n",
+               entry->ingressId, nowMs - entry->acceptedMs,
+               entry->sourceIp[0] ? entry->sourceIp : "-");
+    }
     vm_mock_service_ingress_clear(entry);
     return true;
 }
@@ -2392,7 +2768,9 @@ static bool vm_mock_service_ingress_expire_if_needed(
 static bool vm_mock_service_ingress_try_dispatch(
     vm_mock_service_ingress_table *table,
     vm_mock_service_ingress_connection *entry,
-    vm_mock_service_worker_pool *pool, u32 nowMs, bool readable)
+    vm_mock_service_worker_pool *pool,
+    vm_mock_service_ingress_drop_log_table *dropLogs,
+    u32 nowMs, bool readable)
 {
     u8 header[VM_MOCK_SERVICE_FRAME_SIZE];
     u32 frameLen = 0;
@@ -2406,9 +2784,10 @@ static bool vm_mock_service_ingress_try_dispatch(
         return false;
     if (!readable)
     {
-        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry))
+        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry,
+                                                                dropLogs, nowMs))
             return false;
-        if (vm_mock_service_ingress_expire_if_needed(entry, nowMs))
+        if (vm_mock_service_ingress_expire_if_needed(entry, dropLogs, nowMs))
             return false;
         return true;
     }
@@ -2416,9 +2795,14 @@ static bool vm_mock_service_ingress_try_dispatch(
     received = recv(entry->socket, (char *)header, sizeof(header), MSG_PEEK);
     if (received == 0)
     {
-        printf("[warn][mock-service] ingress_drop ingress_id=%u reason=peer-closed waited_ms=%u source=%s\n",
-               entry->ingressId, nowMs - entry->acceptedMs,
-               entry->sourceIp[0] ? entry->sourceIp : "-");
+        if (vm_mock_service_ingress_drop_log_should_emit(
+                dropLogs, nowMs, "peer-closed", entry->sourceIp,
+                entry->ingressId, nowMs - entry->acceptedMs))
+        {
+            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=peer-closed waited_ms=%u source=%s\n",
+                   entry->ingressId, nowMs - entry->acceptedMs,
+                   entry->sourceIp[0] ? entry->sourceIp : "-");
+        }
         vm_mock_service_ingress_clear(entry);
         return false;
     }
@@ -2434,26 +2818,37 @@ static bool vm_mock_service_ingress_try_dispatch(
         if (socketError == EAGAIN || socketError == EWOULDBLOCK)
             return true;
 #endif
-        printf("[warn][mock-service] ingress_drop ingress_id=%u reason=peek-failed socket_error=%d waited_ms=%u source=%s\n",
-               entry->ingressId, socketError, nowMs - entry->acceptedMs,
-               entry->sourceIp[0] ? entry->sourceIp : "-");
+        if (vm_mock_service_ingress_drop_log_should_emit(
+                dropLogs, nowMs, "peek-failed", entry->sourceIp,
+                entry->ingressId, nowMs - entry->acceptedMs))
+        {
+            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=peek-failed socket_error=%d waited_ms=%u source=%s\n",
+                   entry->ingressId, socketError, nowMs - entry->acceptedMs,
+                   entry->sourceIp[0] ? entry->sourceIp : "-");
+        }
         vm_mock_service_ingress_clear(entry);
         return false;
     }
     if (received < (int)sizeof(header))
     {
-        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry))
+        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry,
+                                                                dropLogs, nowMs))
             return false;
-        if (vm_mock_service_ingress_expire_if_needed(entry, nowMs))
+        if (vm_mock_service_ingress_expire_if_needed(entry, dropLogs, nowMs))
             return false;
         return true;
     }
     if (memcmp(header, "CBMS", 4) != 0 ||
         vm_mock_service_read_le32(header + 4) != 1)
     {
-        printf("[warn][mock-service] ingress_drop ingress_id=%u reason=header-invalid waited_ms=%u source=%s\n",
-               entry->ingressId, nowMs - entry->acceptedMs,
-               entry->sourceIp[0] ? entry->sourceIp : "-");
+        if (vm_mock_service_ingress_drop_log_should_emit(
+                dropLogs, nowMs, "header-invalid", entry->sourceIp,
+                entry->ingressId, nowMs - entry->acceptedMs))
+        {
+            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=header-invalid waited_ms=%u source=%s\n",
+                   entry->ingressId, nowMs - entry->acceptedMs,
+                   entry->sourceIp[0] ? entry->sourceIp : "-");
+        }
         vm_mock_service_ingress_clear(entry);
         return false;
     }
@@ -2469,9 +2864,14 @@ static bool vm_mock_service_ingress_try_dispatch(
         if (requestLen == 0 || requestLen > sizeof(g_netMockResponse) ||
             vm_mock_service_read_le32(header + 16) > requestLen)
         {
-            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=frame-length-invalid request=%u source=%s\n",
-                   entry->ingressId, requestLen,
-                   entry->sourceIp[0] ? entry->sourceIp : "-");
+            if (vm_mock_service_ingress_drop_log_should_emit(
+                    dropLogs, nowMs, "frame-length-invalid", entry->sourceIp,
+                    entry->ingressId, nowMs - entry->acceptedMs))
+            {
+                printf("[warn][mock-service] ingress_drop ingress_id=%u reason=frame-length-invalid request=%u source=%s\n",
+                       entry->ingressId, requestLen,
+                       entry->sourceIp[0] ? entry->sourceIp : "-");
+            }
             vm_mock_service_ingress_clear(entry);
             return false;
         }
@@ -2479,16 +2879,22 @@ static bool vm_mock_service_ingress_try_dispatch(
     }
     if (!vm_mock_service_socket_pending_bytes(entry->socket, &pendingBytes))
     {
-        printf("[warn][mock-service] ingress_drop ingress_id=%u reason=pending-query-failed source=%s\n",
-               entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
+        if (vm_mock_service_ingress_drop_log_should_emit(
+                dropLogs, nowMs, "pending-query-failed", entry->sourceIp,
+                entry->ingressId, nowMs - entry->acceptedMs))
+        {
+            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=pending-query-failed source=%s\n",
+                   entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
+        }
         vm_mock_service_ingress_clear(entry);
         return false;
     }
     if (pendingBytes < frameLen)
     {
-        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry))
+        if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry,
+                                                                dropLogs, nowMs))
             return false;
-        if (vm_mock_service_ingress_expire_if_needed(entry, nowMs))
+        if (vm_mock_service_ingress_expire_if_needed(entry, dropLogs, nowMs))
             return false;
         return true;
     }
@@ -2520,8 +2926,13 @@ static bool vm_mock_service_ingress_try_dispatch(
                                               entry->sourceIp, entry->acceptedMs,
                                               nowMs, entry->ingressId, &sequence))
     {
-        printf("[warn][mock-service] ingress_drop ingress_id=%u reason=protocol-queue-full source=%s\n",
-               entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
+        if (vm_mock_service_ingress_drop_log_should_emit(
+                dropLogs, nowMs, "protocol-queue-full", entry->sourceIp,
+                entry->ingressId, nowMs - entry->acceptedMs))
+        {
+            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=protocol-queue-full source=%s\n",
+                   entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
+        }
         vm_mock_service_ingress_clear(entry);
         return false;
     }
@@ -2550,6 +2961,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     vm_mock_service_socket serverSocket = VM_MOCK_SERVICE_INVALID_SOCKET;
     vm_mock_service_socket adminSocket = VM_MOCK_SERVICE_INVALID_SOCKET;
     vm_mock_service_ingress_table gameIngress;
+    vm_mock_service_ingress_drop_log_table ingressDropLogs;
     struct sockaddr_in addr;
     const char *resolvedBindHost = bindHost && bindHost[0] ? bindHost : "127.0.0.1";
     u32 acceptedGameLogCount = 0;
@@ -2692,6 +3104,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
         }
     }
     vm_mock_service_ingress_init(&gameIngress);
+    memset(&ingressDropLogs, 0, sizeof(ingressDropLogs));
     fflush(stdout);
     for (;;)
     {
@@ -2750,9 +3163,11 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             if (entry->socket == VM_MOCK_SERVICE_INVALID_SOCKET)
                 continue;
             (void)vm_mock_service_ingress_try_dispatch(
-                &gameIngress, entry, &g_vmMockServiceWorkerPool, nowMs,
+                &gameIngress, entry, &g_vmMockServiceWorkerPool,
+                &ingressDropLogs, nowMs,
                 selectRc > 0 && FD_ISSET(entry->socket, &readSet));
         }
+        vm_mock_service_ingress_drop_log_flush_due(&ingressDropLogs, nowMs);
 
         if (selectRc > 0 && FD_ISSET(serverSocket, &readSet))
         {
@@ -2766,8 +3181,16 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                                                    sourceIp,
                                                    sizeof(sourceIp));
                 vm_mock_service_configure_accepted_socket(client);
-                if (!vm_mock_service_ingress_add(&gameIngress, client, sourceIp,
-                                                 scheduler_get_tick_ms()))
+                if (vm_mock_service_login_ip_is_blocked(sourceIp))
+                {
+                    /* Enforce a persisted ingress-abuse block before an
+                     * incomplete peer can take one of the listener slots.
+                     * This remains a silent close, matching the existing
+                     * shared source-IP lockout contract. */
+                    vm_mock_service_socket_close(client);
+                }
+                else if (!vm_mock_service_ingress_add(&gameIngress, client, sourceIp,
+                                                      scheduler_get_tick_ms()))
                 {
                     printf("[warn][mock-service] connection_rejected kind=game reason=ingress-full source=%s\n",
                            sourceIp[0] ? sourceIp : "-");

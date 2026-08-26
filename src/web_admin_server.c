@@ -8795,6 +8795,8 @@ typedef struct
 {
     char address[VM_MOCK_SERVICE_LOGIN_IP_CAP];
     u32 failedAttempts;
+    u32 ingressViolations;
+    char blockReason[32];
     char blockedAt[32];
     char updatedAt[32];
 } vm_mock_admin_risk_ip_row;
@@ -8832,7 +8834,7 @@ static bool vm_mock_admin_risk_ip_row_callback(
     vm_mock_admin_risk_ip_row *row = NULL;
 
     if (page == NULL || page->count >= VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE ||
-        columnCount != 4 || values == NULL || lengths == NULL)
+        columnCount != 6 || values == NULL || lengths == NULL)
     {
         if (page != NULL)
             page->invalid = true;
@@ -8843,10 +8845,13 @@ static bool vm_mock_admin_risk_ip_row_callback(
                                  lengths[0]) ||
         !vm_mock_service_login_ip_is_valid(row->address) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &row->failedAttempts) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &row->ingressViolations) ||
+        !vm_mock_mysql_copy_text(row->blockReason, sizeof(row->blockReason),
+                                 values[3], lengths[3]) ||
         !vm_mock_mysql_copy_text(row->blockedAt, sizeof(row->blockedAt),
-                                 values[2], lengths[2]) ||
+                                 values[4], lengths[4]) ||
         !vm_mock_mysql_copy_text(row->updatedAt, sizeof(row->updatedAt),
-                                 values[3], lengths[3]))
+                                 values[5], lengths[5]))
     {
         page->invalid = true;
         return true;
@@ -8864,7 +8869,7 @@ static bool vm_mock_admin_risk_ip_build_query(char *sql, size_t sqlCap,
         return false;
     written = snprintf(
         sql, sqlCap,
-        "SELECT ip_address,failed_attempts,"
+        "SELECT ip_address,failed_attempts,ingress_violations,block_reason,"
              "COALESCE(DATE_FORMAT(blocked_at,'%%Y-%%m-%%d %%H:%%i:%%s'),''),"
         "DATE_FORMAT(updated_at,'%%Y-%%m-%%d %%H:%%i:%%s') "
         "FROM server_login_ip_blocks WHERE blocked=1 "
@@ -8907,6 +8912,16 @@ static bool vm_mock_admin_risk_ip_query_count(u32 *countOut)
     if (countOut != NULL)
         *countOut = count.value;
     return true;
+}
+
+static const char *vm_mock_admin_risk_ip_block_reason_label(const char *reason)
+{
+    if (reason != NULL && strcmp(reason, "ingress-source-pending-cap") == 0)
+        return "入口未完成帧并发异常";
+    if (reason != NULL && strcmp(reason, "credential-failure") == 0)
+        return "连续凭据失败";
+    /* Historical rows predate block_reason and were only credential lockouts. */
+    return "连续凭据失败";
 }
 
 static bool vm_mock_admin_risk_login_account_row_callback(
@@ -9218,7 +9233,7 @@ static void vm_mock_admin_render_risk_page(char *response,
         {
             vm_mock_admin_text_appendf(
                 &page,
-                "<div class=\"table-wrap\"><table><thead><tr><th>来源 IP</th><th>失败次数</th><th>封锁时间</th><th>最近更新</th><th>状态</th><th>操作</th></tr></thead><tbody>");
+                "<div class=\"table-wrap\"><table><thead><tr><th>来源 IP</th><th>登录失败</th><th>入口异常</th><th>封锁原因</th><th>封锁时间</th><th>最近更新</th><th>状态</th><th>操作</th></tr></thead><tbody>");
             for (u32 i = 0; i < ipPage.count; ++i)
             {
                 const vm_mock_admin_risk_ip_row *row = &ipPage.rows[i];
@@ -9227,14 +9242,19 @@ static void vm_mock_admin_render_risk_page(char *response,
                     "<tr><td class=\"mono\">");
                 vm_mock_admin_text_append_html(&page, row->address);
                 vm_mock_admin_text_appendf(&page,
-                    "</td><td class=\"mono\">%u / %u</td><td class=\"mono\">",
-                    row->failedAttempts, VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT);
+                    "</td><td class=\"mono\">%u / %u</td><td class=\"mono\">%u / %u</td><td>",
+                    row->failedAttempts, VM_MOCK_SERVICE_LOGIN_IP_FAILURE_LIMIT,
+                    row->ingressViolations,
+                    VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT);
+                vm_mock_admin_text_append_html(
+                    &page, vm_mock_admin_risk_ip_block_reason_label(row->blockReason));
+                vm_mock_admin_text_appendf(&page, "</td><td class=\"mono\">");
                 vm_mock_admin_text_append_html(
                     &page, row->blockedAt[0] ? row->blockedAt : "—");
                 vm_mock_admin_text_appendf(&page, "</td><td class=\"mono\">");
                 vm_mock_admin_text_append_html(&page, row->updatedAt);
                 vm_mock_admin_text_appendf(&page,
-                    "</td><td><span class=\"state banned\">已封锁</span></td><td><form method=\"post\" action=\"/action\" onsubmit=\"return confirm('确认清除该 IP 的封锁和失败计数？该 IP 可立即再次尝试登录。');\"><input type=\"hidden\" name=\"action\" value=\"clear-risk-ip\"><input type=\"hidden\" name=\"risk_ip\" value=\"");
+                    "</td><td><span class=\"state banned\">已封锁</span></td><td><form method=\"post\" action=\"/action\" onsubmit=\"return confirm('确认清除该 IP 的封锁及登录/入口异常计数？该 IP 可立即再次尝试登录。');\"><input type=\"hidden\" name=\"action\" value=\"clear-risk-ip\"><input type=\"hidden\" name=\"risk_ip\" value=\"");
                 vm_mock_admin_text_append_html(&page, row->address);
                 vm_mock_admin_text_appendf(
                     &page,
