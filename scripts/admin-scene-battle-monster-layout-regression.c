@@ -6,6 +6,74 @@
 #include "../src/server_main.c"
 #undef main
 
+static bool verify_scene_battle_draft_catalog_contract(void)
+{
+    static const char scene[] = "draft-catalog.sce";
+    static const char name[] = "draft-monster";
+    static const char monsterId[] = "60000";
+    const char *values[] = {scene, monsterId, name};
+    size_t lengths[] = {strlen(scene), strlen(monsterId), strlen(name)};
+    vm_net_mock_monster_catalog_scene_battle_draft_context context;
+    vm_net_mock_monster_admin_row rows[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    int index = -1;
+    u32 listed = 0;
+    bool listedDraft = false;
+
+    memset(&context, 0, sizeof(context));
+    memset(rows, 0, sizeof(rows));
+    memset(g_vm_net_mock_monster_catalog_entries, 0,
+           sizeof(g_vm_net_mock_monster_catalog_entries));
+    memset(g_vm_net_mock_monster_catalog_draft_only, 0,
+           sizeof(g_vm_net_mock_monster_catalog_draft_only));
+    memset(g_vm_net_mock_monster_resource_labels, 0,
+           sizeof(g_vm_net_mock_monster_resource_labels));
+    memset(g_vm_net_mock_monster_overrides, 0,
+           sizeof(g_vm_net_mock_monster_overrides));
+    g_vm_net_mock_monster_catalog_count = 0;
+    g_vm_net_mock_monster_catalog_loaded = false;
+    g_vm_net_mock_monster_catalog_loading = false;
+    g_vm_net_mock_monster_db_loaded = true;
+    g_vm_net_mock_monster_db_valid = false;
+    vm_net_mock_monster_catalog_seed_base_entries();
+
+    if (!vm_net_mock_monster_catalog_scene_battle_draft_row(
+            &context, 3, values, lengths) ||
+        context.invalid || context.rows != 1 || context.added != 1 ||
+        context.rejected != 0 ||
+        (index = vm_net_mock_monster_catalog_index_loaded(60000)) < 0 ||
+        !g_vm_net_mock_monster_catalog_draft_only[index] ||
+        strcmp(g_vm_net_mock_monster_resource_labels[index].displayName,
+               name) != 0 ||
+        strcmp(g_vm_net_mock_monster_resource_labels[index].firstScene,
+               scene) != 0)
+    {
+        fputs("scene battle draft did not join the editable monster catalog\n",
+              stderr);
+        return false;
+    }
+
+    g_vm_net_mock_monster_catalog_loaded = true;
+    listed = vm_net_mock_monster_admin_list(
+        rows, VM_NET_MOCK_MONSTER_CATALOG_MAX);
+    for (u32 i = 0; i < listed && i < VM_NET_MOCK_MONSTER_CATALOG_MAX; ++i)
+    {
+        if (rows[i].enemyId == 60000 &&
+            strcmp(rows[i].displayName, name) == 0 &&
+            strcmp(rows[i].firstScene, scene) == 0)
+        {
+            listedDraft = true;
+            break;
+        }
+    }
+    if (!listedDraft || vm_net_mock_monster_enemy_id_known(60000))
+    {
+        fputs("scene battle draft catalog leaked into live encounters\n", stderr);
+        return false;
+    }
+    vm_net_mock_monster_catalog_invalidate();
+    return true;
+}
+
 int main(void)
 {
     char *page = (char *)calloc(VM_MOCK_ADMIN_RESPONSE_MAX, 1);
@@ -39,6 +107,7 @@ int main(void)
         strstr(page, "id=\"scene-battle-monster-list\"") == NULL ||
         strstr(page, "data-scene-battle-monster-scene=\"") == NULL ||
         strstr(page, "同一场景可保存多条") == NULL ||
+        strstr(page, "怪物 ID 会立即出现在“怪物管理”") == NULL ||
         strstr(g_vm_mock_admin_script,
                "const setupSceneBattleMonsterSearch=()=>{") == NULL ||
         strstr(page, "<span>显示名称（GBK ≤29字节）</span>") == NULL ||
@@ -49,6 +118,11 @@ int main(void)
     {
         free(page);
         fprintf(stderr, "scene battle monster editor layout regressed\n");
+        return 1;
+    }
+    if (!verify_scene_battle_draft_catalog_contract())
+    {
+        free(page);
         return 1;
     }
     free(page);

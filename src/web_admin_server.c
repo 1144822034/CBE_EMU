@@ -10385,7 +10385,7 @@ static void vm_mock_admin_render_scene_battle_monster_page(
         return;
     }
     vm_mock_admin_text_appendf(&page,
-        "<div class=\"callout\"><strong>保存仅更新草稿，且同一场景可保存多条。</strong>每次在“新增下一条”中保存，都会追加一条独立的怪物 ID、坐标和数量配置；点击一次部署会把全部启用草稿一起编译进场景。相同场景、怪物 ID 和坐标不能重复；总节点仍会在部署时按客户端最多 24 个非本地场景节点严格校验。本体 Actor 只能选择原生 SCE2 kind-3 战斗节点已使用过的资源；部署会从首次捕获的服务端基础 SCE 重建完整记录（含 field18 效果 Actor），并校验 Actor 依赖和记录解析。c 开头的城市会同时生成带专属 b_ 背景的非 c 战斗镜像，供 NPC 副本传送到该城市并按正常碰撞开战；原城市界面仍保留原生城镇交互。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
+        "<div class=\"callout\"><strong>保存仅更新草稿，且同一场景可保存多条。</strong>每次在“新增下一条”中保存，都会追加一条独立的怪物 ID、坐标和数量配置；怪物 ID 会立即出现在“怪物管理”，可先配置属性和掉落，但只有部署后客户端才会创建战斗节点。点击一次部署会把全部启用草稿一起编译进场景。相同场景、怪物 ID 和坐标不能重复；总节点仍会在部署时按客户端最多 24 个非本地场景节点严格校验。本体 Actor 只能选择原生 SCE2 kind-3 战斗节点已使用过的资源；部署会从首次捕获的服务端基础 SCE 重建完整记录（含 field18 效果 Actor），并校验 Actor 依赖和记录解析。c 开头的城市会同时生成带专属 b_ 背景的非 c 战斗镜像，供 NPC 副本传送到该城市并按正常碰撞开战；原城市界面仍保留原生城镇交互。部署完成会自动加入“游戏内容更新管理”的启动内容版本；客户端需完整退出并重新启动，再进入该场景。</div>"
         "<form class=\"deploy\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"deploy-scene-battle-monsters\"><input type=\"hidden\" name=\"scene\" value=\"");
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
@@ -10420,8 +10420,9 @@ static void vm_mock_admin_render_scene_battle_monster_page(
             rows[i].enabled ? "" : " off", rows[i].entryId);
         vm_mock_admin_text_append_html(&page, nameUtf8);
         vm_mock_admin_text_appendf(&page,
-            "</h3><span class=\"badge\">%s</span></div><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-scene-battle-monster\"><input type=\"hidden\" name=\"entry_id\" value=\"%u\"><input type=\"hidden\" name=\"scene\" value=\"",
-            rows[i].enabled ? "启用" : "停用", rows[i].entryId);
+            "</h3><span class=\"badge\">怪物 ID %u</span><span class=\"badge\">%s</span></div><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-scene-battle-monster\"><input type=\"hidden\" name=\"entry_id\" value=\"%u\"><input type=\"hidden\" name=\"scene\" value=\"",
+            rows[i].monsterId, rows[i].enabled ? "启用" : "停用",
+            rows[i].entryId);
         vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
         vm_mock_admin_text_appendf(&page,
         "\"><div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>怪物</span>");
