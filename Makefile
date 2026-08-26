@@ -63,7 +63,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression registration-email-contract-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression startup-sce-direct-enter-test-gate-regression clean
+.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression registration-email-contract-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression equipment-enhancement-bootstrap-split-regression equipment-enhancement-bootstrap-delivery-regression startup-sce-direct-enter-test-gate-regression clean
 
 all: build
 build: client server
@@ -135,6 +135,16 @@ $(SERVER_OBJDIR)/zhongnan-taiyi-recovery-landing-regression.exe: scripts/zhongna
 direct-scene-challenge-progress-client-regression: $(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe
 
 $(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe: scripts/direct-scene-challenge-progress-client-regression.c $(MOCK_SERVER_FRAGMENTS) src/main.c src/network-client.c src/md5.h | $(CLIENT_OBJDIR)
+	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) $< src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/automation_png.c src/md5.c -o $@ $(CLIENT_LDLIBS)
+
+equipment-enhancement-bootstrap-split-regression: $(CLIENT_OBJDIR)/equipment-enhancement-bootstrap-split-regression.exe
+
+$(CLIENT_OBJDIR)/equipment-enhancement-bootstrap-split-regression.exe: scripts/equipment-enhancement-bootstrap-split-regression.c $(MOCK_SERVER_FRAGMENTS) src/main.c src/network-client.c src/md5.h | $(CLIENT_OBJDIR)
+	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) $< src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/automation_png.c src/md5.c -o $@ $(CLIENT_LDLIBS)
+
+equipment-enhancement-bootstrap-delivery-regression: $(CLIENT_OBJDIR)/equipment-enhancement-bootstrap-delivery-regression.exe
+
+$(CLIENT_OBJDIR)/equipment-enhancement-bootstrap-delivery-regression.exe: scripts/equipment-enhancement-bootstrap-delivery-regression.c $(MOCK_SERVER_FRAGMENTS) src/main.c src/network-client.c src/md5.h | $(CLIENT_OBJDIR)
 	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) $< src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/automation_png.c src/md5.c -o $@ $(CLIENT_LDLIBS)
 
 startup-sce-direct-enter-test-gate-regression: $(SERVER_OBJDIR)/startup-sce-direct-enter-test-gate-regression.exe

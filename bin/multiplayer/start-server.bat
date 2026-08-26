@@ -3,7 +3,7 @@ setlocal EnableExtensions
 
 for %%I in ("%~dp0..") do set "BIN_DIR=%%~fI"
 set "PORT=%CBE_MULTIPLAYER_SERVER_PORT%"
-set "CBE_MYSQL_DATABASE=jh_online"
+set "CBE_MYSQL_DATABASE=jh_online_release_20260822"
 rem The standalone WT16/3(result=2) response is a disproven protocol probe.
 rem It reaches the parser but does not restore startup movement collision, so
 rem it must never be enabled as the normal startup repair.

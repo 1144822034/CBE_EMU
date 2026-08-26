@@ -2647,6 +2647,22 @@ static u32 scheduler_count_active_net_tasks(void)
     return active;
 }
 
+/* The client transport may need to deliver two parser transactions that came
+ * from one remote reply.  Reserve queue capacity before accepting either one:
+ * delivering only the first transaction would make the guest observe a
+ * partial protocol reply. */
+static bool scheduler_has_free_net_task_slots(u32 required)
+{
+    u32 freeSlots = 0;
+
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (!g_netTasks[i].active)
+            ++freeSlots;
+    }
+    return freeSlots >= required;
+}
+
 
 static void vm_shop_return_forensics_log(const char *phase, u32 eventType,
                                          u32 r0, u32 callback, u32 context)
@@ -2883,7 +2899,8 @@ static void vm_shop_return_forensics_note_mmgame_input_pc(u32 pc)
     fclose(trace);
 }
 
-static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32 callback, u32 context)
+static bool scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2,
+                                      u32 callback, u32 context)
 {
     static u32 s_netQueueObserveCount = 0;
     u32 activeBefore = scheduler_count_active_net_tasks();
@@ -2902,7 +2919,7 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
                 vm_shop_return_forensics_log("net-queue-dedup", eventType,
                                               r0, callback, context);
             }
-            return;
+            return true;
         }
     }
     for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
@@ -2953,7 +2970,7 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
                 vm_shop_return_forensics_log("net-queue-accepted", eventType,
                                               r0, callback, context);
             }
-            return;
+            return true;
         }
     }
     if (eventType == 5 || eventType == 7 || eventType == 8 || eventType == 9)
@@ -2961,6 +2978,39 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
         vm_shop_return_forensics_log("net-queue-full", eventType, r0,
                                       callback, context);
     }
+    return false;
+}
+
+/* The scheduler task table is only mutated on the emulator thread.  Once two
+ * vacant entries have been observed, the two calls below cannot race with a
+ * producer.  The response ranges start at distinct nonzero pointers, so
+ * neither request can be de-duplicated against the other. */
+static bool scheduler_queue_net_event_pair_atomic(
+    u32 firstEvent, u32 firstR0, u32 firstR1, u32 firstR2,
+    u32 secondEvent, u32 secondR0, u32 secondR1, u32 secondR2,
+    u32 callback, u32 context)
+{
+    if (firstR0 == 0 || secondR0 == 0 || firstR0 == secondR0 ||
+        !scheduler_has_free_net_task_slots(2))
+    {
+        return false;
+    }
+    if (!scheduler_queue_net_event(firstEvent, firstR0, firstR1, firstR2,
+                                   callback, context))
+    {
+        return false;
+    }
+    /* Capacity was reserved before the first insertion.  A false result here
+     * would mean an internal scheduler invariant was violated; do not expose
+     * a partial response as a recoverable protocol state. */
+    if (!scheduler_queue_net_event(secondEvent, secondR0, secondR1, secondR2,
+                                   callback, context))
+    {
+        printf("[error][network] net_pair_queue_invariant_failed first=%u/%08x second=%u/%08x callback=%08x context=%08x\n",
+               firstEvent, firstR0, secondEvent, secondR0, callback, context);
+        return false;
+    }
+    return true;
 }
 
 /* Preserve a real transport boundary when one remote completion contains two
@@ -5330,7 +5380,7 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
 #ifdef CBE_CLIENT_ONLY
         requestOk = vm_client_remote_request(
             request, requestLen, response, sizeof(response), &responseLen,
-            &eventType, NULL, NULL, 0, NULL, NULL);
+            &eventType, NULL, NULL, 0, NULL, NULL, NULL);
 #else
         requestOk = vm_net_mock_remote_request(
                         request, requestLen, response, sizeof(response),
