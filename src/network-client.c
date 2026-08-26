@@ -131,6 +131,38 @@ static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
     return responsePtr;
 }
 
+/* A split login bootstrap is one logical response.  Give both parser frames
+ * one guest allocation so a second allocation failure cannot leave the first
+ * frame queued on its own. */
+static bool vm_net_mock_sync_buffer_pair_to_vm(const u8 *first, u32 firstLen,
+                                               const u8 *second, u32 secondLen,
+                                               u32 *firstPtrOut,
+                                               u32 *secondPtrOut)
+{
+    u32 combinedPtr = 0;
+
+    if (firstPtrOut != NULL)
+        *firstPtrOut = 0;
+    if (secondPtrOut != NULL)
+        *secondPtrOut = 0;
+    if (first == NULL || second == NULL || firstLen == 0 || secondLen == 0 ||
+        firstLen > 0xffffffffu - secondLen || firstPtrOut == NULL ||
+        secondPtrOut == NULL)
+    {
+        return false;
+    }
+    combinedPtr = vm_malloc(firstLen + secondLen);
+    if (combinedPtr == 0 ||
+        uc_mem_write(MTK, combinedPtr, first, firstLen) != UC_ERR_OK ||
+        uc_mem_write(MTK, combinedPtr + firstLen, second, secondLen) != UC_ERR_OK)
+    {
+        return false;
+    }
+    *firstPtrOut = combinedPtr;
+    *secondPtrOut = combinedPtr + firstLen;
+    return true;
+}
+
 typedef struct
 {
     u8 major;
@@ -1019,7 +1051,8 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
                                      bool *closeAfterData,
                                      u8 *followup, u32 followupCap,
                                      u32 *followupLen,
-                                     bool *followupNextSchedulerTick)
+                                     bool *followupNextSchedulerTick,
+                                     bool *followupAtomicDelivery)
 {
     u8 header[VM_CLIENT_FRAME_SIZE];
     u8 meta[16];
@@ -1037,6 +1070,8 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
         *followupLen = 0;
     if (followupNextSchedulerTick != NULL)
         *followupNextSchedulerTick = false;
+    if (followupAtomicDelivery != NULL)
+        *followupAtomicDelivery = false;
     if (request == NULL || requestLen == 0 || response == NULL || metaLen == 0)
         return false;
 
@@ -1061,6 +1096,8 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
             /* The second bootstrap frame remains eligible in this scheduler
              * tick, after the group/type-1 acknowledgement already queued by
              * the same completion. */
+            if (followupAtomicDelivery != NULL)
+                *followupAtomicDelivery = true;
         }
         else if (vm_client_extract_action13_battle_followup(
                      response, responseLen, followup, followupCap,
@@ -1160,6 +1197,9 @@ typedef struct vm_client_completion
     bool success;
     bool closeAfterData;
     bool followupNextSchedulerTick;
+    bool followupAtomicDelivery;
+    bool followupSharesResponse;
+    u16 deliveryRetryCount;
     bool requestIsUpdateChunk;
     u32 updateChunkStart;
     char updateChunkName[64];
@@ -1193,8 +1233,33 @@ static void vm_client_free_completion(vm_client_completion *completion)
     if (completion == NULL)
         return;
     free(completion->response);
-    free(completion->followup);
+    if (!completion->followupSharesResponse)
+        free(completion->followup);
     free(completion);
+}
+
+/* Keep an undelivered split bootstrap ahead of later responses.  Its server
+ * counterpart has already advanced the one-bootstrap guard, so freeing this
+ * host-owned copy would turn a transient local resource shortage into a
+ * permanently incomplete client inventory for this login. */
+static bool vm_client_requeue_completion_front(vm_client_completion *completion)
+{
+    bool accepted = false;
+
+    if (completion == NULL)
+        return false;
+    pthread_mutex_lock(&g_vmClientAsync.mutex);
+    if (!g_vmClientAsync.stopRequested &&
+        completion->generation == g_vmClientAsync.generation)
+    {
+        completion->next = g_vmClientAsync.completionHead;
+        g_vmClientAsync.completionHead = completion;
+        if (g_vmClientAsync.completionTail == NULL)
+            g_vmClientAsync.completionTail = completion;
+        accepted = true;
+    }
+    pthread_mutex_unlock(&g_vmClientAsync.mutex);
+    return accepted;
 }
 
 static bool vm_client_capture_update_chunk_request(
@@ -1256,6 +1321,7 @@ static void *vm_client_worker_main(void *unused)
         u32 followupLen = 0;
         bool closeAfterData = false;
         bool followupNextSchedulerTick = false;
+        bool followupAtomicDelivery = false;
         bool success;
 
         pthread_mutex_lock(&g_vmClientAsync.mutex);
@@ -1318,7 +1384,8 @@ static void *vm_client_worker_main(void *unused)
                                                &closeAfterData,
                                                followupScratch, VM_CLIENT_FOLLOWUP_MAX,
                                                &followupLen,
-                                               &followupNextSchedulerTick);
+                                               &followupNextSchedulerTick,
+                                               &followupAtomicDelivery);
         }
         completion->workerDoneMs = SDL_GetTicks();
         completion->success = success;
@@ -1327,7 +1394,30 @@ static void *vm_client_worker_main(void *unused)
         completion->responseLen = responseLen;
         completion->followupLen = followupLen;
         completion->followupNextSchedulerTick = followupNextSchedulerTick;
-        if (success && responseLen != 0)
+        completion->followupAtomicDelivery = followupAtomicDelivery;
+        if (success && responseLen != 0 && followupAtomicDelivery)
+        {
+            if (followupLen == 0 || responseLen > 0xffffffffu - followupLen)
+            {
+                completion->success = false;
+            }
+            else
+            {
+                completion->response = (u8 *)malloc(responseLen + followupLen);
+                if (completion->response != NULL)
+                {
+                    memcpy(completion->response, responseScratch, responseLen);
+                    completion->followup = completion->response + responseLen;
+                    completion->followupSharesResponse = true;
+                    memcpy(completion->followup, followupScratch, followupLen);
+                }
+                else
+                {
+                    completion->success = false;
+                }
+            }
+        }
+        else if (success && responseLen != 0)
         {
             completion->response = (u8 *)malloc(responseLen);
             if (completion->response != NULL)
@@ -1335,7 +1425,8 @@ static void *vm_client_worker_main(void *unused)
             else
                 completion->success = false;
         }
-        if (completion->success && followupLen != 0)
+        if (completion->success && followupLen != 0 &&
+            !completion->followupSharesResponse)
         {
             completion->followup = (u8 *)malloc(followupLen);
             if (completion->followup != NULL)
@@ -1647,6 +1738,78 @@ static void vm_client_capture_hangup_battle_start_response(
     observation->hangupResponseLength = completion->responseLen;
 }
 
+static bool vm_client_queue_login_bootstrap_frames(
+    const vm_client_completion *completion, const vm_net_channel *channel,
+    u32 *primaryPtrOut, u32 *followupPtrOut, const char **failureOut)
+{
+    u32 primaryPtr = 0;
+    u32 followupPtr = 0;
+
+    if (primaryPtrOut != NULL)
+        *primaryPtrOut = 0;
+    if (followupPtrOut != NULL)
+        *followupPtrOut = 0;
+    if (failureOut != NULL)
+        *failureOut = "invalid";
+    if (completion == NULL || channel == NULL || completion->eventType != 7 ||
+        completion->response == NULL || completion->responseLen == 0 ||
+        completion->followup == NULL || completion->followupLen == 0)
+    {
+        return false;
+    }
+    if (!scheduler_has_free_net_task_slots(2))
+    {
+        if (failureOut != NULL)
+            *failureOut = "net-queue";
+        return false;
+    }
+    if (!vm_net_mock_sync_buffer_pair_to_vm(
+            completion->response, completion->responseLen,
+            completion->followup, completion->followupLen,
+            &primaryPtr, &followupPtr))
+    {
+        if (failureOut != NULL)
+            *failureOut = "vm-buffer";
+        return false;
+    }
+    if (!scheduler_queue_net_event_pair_atomic(
+            completion->eventType, primaryPtr, completion->responseLen,
+            completion->responseLen, 7, followupPtr, completion->followupLen,
+            completion->followupLen, channel->callback, channel->context))
+    {
+        if (failureOut != NULL)
+            *failureOut = "scheduler-invariant";
+        return false;
+    }
+    if (primaryPtrOut != NULL)
+        *primaryPtrOut = primaryPtr;
+    if (followupPtrOut != NULL)
+        *followupPtrOut = followupPtr;
+    if (failureOut != NULL)
+        *failureOut = NULL;
+    return true;
+}
+
+static bool vm_client_retry_login_bootstrap_delivery(
+    vm_client_completion *completion, const char *reason)
+{
+    u16 retry = 0;
+
+    if (completion == NULL)
+        return false;
+    if (completion->deliveryRetryCount != 0xffffu)
+        ++completion->deliveryRetryCount;
+    retry = completion->deliveryRetryCount;
+    if (retry == 1 || (retry % 32u) == 0)
+    {
+        printf("[warn][network] remote_login_backpack_bootstrap_retry seq=%u "
+               "attempt=%u reason=%s primary=%u followup=%u action=retain-both\n",
+               completion->sequence, retry, reason ? reason : "unknown",
+               completion->responseLen, completion->followupLen);
+    }
+    return vm_client_requeue_completion_front(completion);
+}
+
 static void vm_net_mock_async_drain_completions(void)
 {
     static u32 failureLogCount = 0;
@@ -1658,6 +1821,8 @@ static void vm_net_mock_async_drain_completions(void)
         u32 generation;
         u32 responsePtr;
         u32 nowMs;
+        bool bootstrapAtomicDelivery;
+        const char *bootstrapDeliveryFailure = NULL;
 
         memset(&remoteObservation, 0, sizeof(remoteObservation));
         pthread_mutex_lock(&g_vmClientAsync.mutex);
@@ -1703,12 +1868,39 @@ static void vm_net_mock_async_drain_completions(void)
             vm_client_free_completion(completion);
             continue;
         }
-        responsePtr = vm_net_mock_sync_buffer_to_vm(completion->response,
-                                                    completion->responseLen);
-        if (responsePtr == 0)
+        bootstrapAtomicDelivery = completion->followupAtomicDelivery;
+        if (bootstrapAtomicDelivery)
         {
-            vm_client_free_completion(completion);
-            continue;
+            if (!vm_client_queue_login_bootstrap_frames(
+                    completion, channel, &responsePtr, NULL,
+                    &bootstrapDeliveryFailure))
+            {
+                if (vm_client_retry_login_bootstrap_delivery(
+                        completion, bootstrapDeliveryFailure))
+                {
+                    /* The service already consumed its one-bootstrap guard.
+                     * Hold the exact pair locally and block later responses
+                     * until both normal event-7 frames can be accepted. */
+                    break;
+                }
+                printf("[error][network] remote_login_backpack_bootstrap_drop "
+                       "seq=%u reason=%s action=async-reset\n",
+                       completion->sequence,
+                       bootstrapDeliveryFailure ? bootstrapDeliveryFailure :
+                                                   "unknown");
+                vm_client_free_completion(completion);
+                continue;
+            }
+        }
+        else
+        {
+            responsePtr = vm_net_mock_sync_buffer_to_vm(completion->response,
+                                                        completion->responseLen);
+            if (responsePtr == 0)
+            {
+                vm_client_free_completion(completion);
+                continue;
+            }
         }
         if (completion->responseLen <= sizeof(g_netMockResponse))
         {
@@ -1737,9 +1929,20 @@ static void vm_net_mock_async_drain_completions(void)
                                                completion->sequence,
                                                completion->connectId);
         g_netDownLinkData += completion->responseLen;
-        scheduler_queue_net_event(completion->eventType, responsePtr,
-                                  completion->responseLen, completion->responseLen,
-                                  channel->callback, channel->context);
+        if (bootstrapAtomicDelivery)
+        {
+            g_netDownLinkData += completion->followupLen;
+            printf("[info][network] remote_login_backpack_bootstrap_queue "
+                   "seq=%u primary=%u followup=%u delivery=atomic-event7-pair\n",
+                   completion->sequence, completion->responseLen,
+                   completion->followupLen);
+        }
+        else
+        {
+            (void)scheduler_queue_net_event(
+                completion->eventType, responsePtr, completion->responseLen,
+                completion->responseLen, channel->callback, channel->context);
+        }
         if (remoteObservation.hasSceneTarget ||
             remoteObservation.sceneCompleteAfterCallback ||
             remoteObservation.updateComplete ||
@@ -1771,7 +1974,8 @@ static void vm_net_mock_async_drain_completions(void)
                completion->workerStartMs - completion->enqueueMs,
                completion->workerDoneMs - completion->workerStartMs,
                nowMs - completion->workerDoneMs);
-        if (completion->followupLen != 0 && completion->followup != NULL)
+        if (!bootstrapAtomicDelivery && completion->followupLen != 0 &&
+            completion->followup != NULL)
         {
             u32 followupPtr = vm_net_mock_sync_buffer_to_vm(completion->followup,
                                                             completion->followupLen);

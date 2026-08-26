@@ -2,7 +2,7 @@
 
 Date: 2026-08-26
 
-Status: fixed in source; deterministic server/client packet regressions passed; normal game-client verification pending deployment of both updated binaries
+Status: fixed in source; deterministic packet-order and atomic-delivery regressions passed; normal game-client verification pending deployment of both updated binaries
 
 ## 触发与首个偏离
 
@@ -66,6 +66,27 @@ Status: fixed in source; deterministic server/client packet regressions passed; 
 这保留了关键的客户端顺序：网格先创建背包实例，之后储量行与穿戴装备同步继续按原始
 顺序处理；`type=3` 仍在 `type=2` 后触发既有的装备属性重算完成分支。
 
+## 后续风险修复：分帧必须原子交付
+
+最初的分帧实现正确拆出两个 WT 包，但在宿主传输层先单独分配并入队首帧，再独立处理
+第二帧。服务端构造组同步时已经设置同角色的背包引导标记；若第二帧在客户机内存分配失败，
+或 scheduler 的 8 个网络任务仅剩一个可用槽位，客户端可能只收到首帧，服务端又不会在
+后续普通组同步中重发 `30/21 + 7/7(type=2,type=3)`。这不会删除 MySQL 中的装备实例，
+却会让本次登录的背包与装备栏看似没有加载。
+
+修复位于宿主传输层，仍只投递原始服务端 WT 对象：
+
+- 仅上述精确首登分帧形状标记为“必须成对交付”。
+- worker 将两个宿主帧复制进同一块宿主内存；进入客户机时也只进行一次连续的
+  `vm_malloc`，从该块的两个偏移分别作为两个 normal event-7 的数据指针。
+- 入队前必须有两个空闲网络任务槽；同一 emulator 线程中随后成对入队，因而不会接受
+  半个登录结果。
+- 暂无两个槽或客户机缓冲区时，保留原始两帧在 completion 队首并在后续 tick 重试，阻止
+  后到响应越过它。日志分别记录 `remote_login_backpack_bootstrap_retry` 与
+  `remote_login_backpack_bootstrap_queue`，用于区分资源等待和成功交付。
+
+该修复不触碰角色的装备 ID、槽位、词条、耐久或数据库保存事务。
+
 ## 修改点
 
 - `src/server/mock_server_catalog.c`
@@ -104,6 +125,16 @@ first-login equipment attribute bootstrap regression passed type3_completion=1
 remote_login_backpack_bootstrap_split original=3912 primary=234 followup=3683
 equipment enhancement bootstrap split regression passed
 ```
+
+5. 后续原子交付夹具（同样不启动模拟器、不连接服务）通过：
+
+```text
+remote_login_backpack_bootstrap_retry seq=77 attempt=1 reason=net-queue ... action=retain-both
+equipment enhancement bootstrap atomic delivery regression passed
+```
+
+它把 scheduler 填至仅剩一个槽，断言不会放入首帧；随后验证两槽可用时两帧按顺序一起
+入队。`make -j2` 也在本次修复后通过。
 
 还需要在重启并同时使用更新后的 `main.exe` 与 `jh-online-server.exe` 后，按正常路径验证：
 登录已有装备角色，查看背包装备的灰色四档词条，再从 `+3` 成功强化到 `+4`。预期第一条
