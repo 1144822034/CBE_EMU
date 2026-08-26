@@ -125,6 +125,73 @@ static bool risk_ip_clear_cache_contract_ok(void)
     return true;
 }
 
+static bool risk_ip_ingress_contract_ok(void)
+{
+    vm_mock_service_login_ip_block_cache cache;
+    vm_mock_service_login_ip_block_load_context context;
+    const char rawAddress[] = {
+        '1','9','8','.', '5','1','.', '1','0','0','.', '4','2','x','x'
+    };
+    const char *values[] = {rawAddress};
+    const size_t lengths[] = {13};
+
+    memset(&cache, 0, sizeof(cache));
+    memset(&context, 0, sizeof(context));
+    context.cache = &cache;
+    /* MySQL result fields are length-delimited, not NUL-terminated.  The
+     * trailing sentinels ensure the cache loader validates only the field. */
+    if (!vm_mock_service_login_ip_block_load_row(&context, 1, values, lengths) ||
+        context.invalid || cache.count != 1 ||
+        strcmp(cache.entries[0].address, "198.51.100.42") != 0 ||
+        VM_MOCK_SERVICE_LOGIN_IP_INGRESS_VIOLATION_LIMIT != 3 ||
+        strcmp(vm_mock_admin_risk_ip_block_reason_label(
+                   "ingress-source-pending-cap"),
+               "入口未完成帧并发异常") != 0 ||
+        strcmp(vm_mock_admin_risk_ip_block_reason_label("credential-failure"),
+               "连续凭据失败") != 0)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool ingress_drop_log_aggregation_contract_ok(void)
+{
+    vm_mock_service_ingress_drop_log_table table;
+    vm_mock_service_ingress_drop_log_bucket *peerClosed = NULL;
+
+    memset(&table, 0, sizeof(table));
+    if (!vm_mock_service_ingress_drop_log_should_emit(
+            &table, 100, "peer-closed", "198.51.100.42", 41, 0) ||
+        vm_mock_service_ingress_drop_log_should_emit(
+            &table, 300, "peer-closed", "198.51.100.42", 42, 7) ||
+        !vm_mock_service_ingress_drop_log_should_emit(
+            &table, 400, "source-pending-cap", "198.51.100.42", 43, 9))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < VM_MOCK_SERVICE_INGRESS_DROP_LOG_BUCKETS; ++i)
+    {
+        if (strcmp(table.buckets[i].reason, "peer-closed") == 0)
+        {
+            peerClosed = &table.buckets[i];
+            break;
+        }
+    }
+    if (peerClosed == NULL || peerClosed->eventCount != 2 ||
+        peerClosed->firstIngressId != 41 || peerClosed->lastIngressId != 42 ||
+        peerClosed->maxWaitedMs != 7)
+    {
+        return false;
+    }
+    vm_mock_service_ingress_drop_log_flush_due(
+        &table, 400 + VM_MOCK_SERVICE_INGRESS_DROP_LOG_WINDOW_MS);
+    for (u32 i = 0; i < VM_MOCK_SERVICE_INGRESS_DROP_LOG_BUCKETS; ++i)
+        if (table.buckets[i].eventCount != 0)
+            return false;
+    return true;
+}
+
 static bool page_ok(char *page, u32 *pageOut, u32 *pageCountOut, u32 *totalOut)
 {
     if (page == NULL || strstr(page, "风险管理页面超过大小限制") != NULL ||
@@ -145,7 +212,7 @@ int main(void)
     char *junk = NULL;
     char *clamp = NULL;
     char riskQuery[768];
-    char ipQuery[512];
+    char ipQuery[768];
     char loginAccountQuery[640];
     u32 page = 0;
     u32 pageCount = 0;
@@ -173,6 +240,7 @@ int main(void)
             ipQuery, sizeof(ipQuery), VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE,
             VM_MOCK_ADMIN_RISK_IP_PAGE_SIZE) ||
         strstr(ipQuery, "FROM server_login_ip_blocks WHERE blocked=1") == NULL ||
+        strstr(ipQuery, "ingress_violations,block_reason") == NULL ||
         strstr(ipQuery, "LIMIT 50,50") == NULL ||
         strstr(ipQuery, "%%Y") != NULL)
     {
@@ -192,11 +260,13 @@ int main(void)
         fputs("admin login risk SQL or failure-limit contract violated\n", stderr);
         return 1;
     }
-    if (!risk_ip_clear_cache_contract_ok() ||
+    if (!risk_ip_clear_cache_contract_ok() || !risk_ip_ingress_contract_ok() ||
+        !ingress_drop_log_aggregation_contract_ok() ||
         strcmp(vm_mock_admin_operation_log_action_label("clear-risk-ip"),
                "清除风险 IP 封锁") != 0)
     {
-        fputs("risk IP clear cache or audit contract violated\n", stderr);
+        fputs("risk IP cache, ingress, log aggregation, or audit contract violated\n",
+              stderr);
         return 1;
     }
 
@@ -243,7 +313,9 @@ int main(void)
     ipPage = render_page("tab=risk&risk_kind=ips");
     if (ipPage == NULL || strstr(ipPage, "无法读取已封锁 IP") != NULL ||
         strstr(ipPage, "风险 IP 列表") == NULL ||
-        strstr(ipPage, "清除会删除该 IP 的封锁及失败计数") == NULL ||
+        strstr(ipPage, "登录失败") == NULL ||
+        strstr(ipPage, "入口异常") == NULL ||
+        strstr(ipPage, "清除该 IP 的封锁及登录/入口异常计数") == NULL ||
         strstr(ipPage,
                "class=\"on\" href=\"/?tab=risk&amp;risk_kind=ips\">风险 IP</a>") == NULL ||
         strstr(ipPage, "风险管理页面超过大小限制") != NULL)
