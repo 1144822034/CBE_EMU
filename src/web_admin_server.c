@@ -6490,11 +6490,11 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_text_appendf(&page, "<p class=\"size\">该场景没有服务端动态 NPC。</p>");
     vm_mock_admin_text_appendf(&page,
         "</div><div class=\"npc new npc-editor\"><div class=\"npc-head\"><strong>增加动态 NPC</strong><span class=\"badge\">下次进入场景生效</span></div>"
-        "<form method=\"post\" action=\"/action\" class=\"npc-editor-form\"><input type=\"hidden\" name=\"action\" value=\"save-npc\">"
+        "<form method=\"post\" action=\"/action\" class=\"npc-editor-form\"><input type=\"hidden\" name=\"action\" value=\"save-npc\"><input type=\"hidden\" name=\"create_npc\" value=\"1\">"
         "<input type=\"hidden\" name=\"scene\" value=\"");
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
     vm_mock_admin_text_appendf(&page,
-        "\"><div class=\"npc-editor-grid\"><label class=\"field\"><span>Actor ID</span><input type=\"number\" name=\"actor_id\" min=\"1\" max=\"4294967295\" value=\"30000\" required></label>"
+        "\"><div class=\"npc-editor-grid\"><label class=\"field\"><span>Actor ID</span><input value=\"保存后自动分配\" readonly></label>"
         "<label class=\"field\"><span>显示名称</span><input name=\"display_name\" maxlength=\"29\" required></label>"
         "<label class=\"field\"><span>Actor 资源</span>");
     vm_mock_admin_render_actor_select(&page, actorFiles, actorCount,
@@ -12496,6 +12496,8 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     char instanceSceneUtf8[192];
     char instanceRuntimeScene[64];
     char enabledText[8];
+    char createNpcText[8];
+    char successMessage[256];
     vm_net_mock_scene_npcinfo_seed seed;
     vm_net_mock_npc_service_option
         serviceOptions[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
@@ -12514,6 +12516,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 serviceOptionCount = 0;
     bool hasInstanceTeleport = false;
     bool hasInstanceChallenge = false;
+    bool createNpc = false;
 
     memset(sceneUtf8, 0, sizeof(sceneUtf8));
     memset(runtimeScene, 0, sizeof(runtimeScene));
@@ -12523,15 +12526,27 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     memset(instanceSceneUtf8, 0, sizeof(instanceSceneUtf8));
     memset(instanceRuntimeScene, 0, sizeof(instanceRuntimeScene));
     memset(enabledText, 0, sizeof(enabledText));
+    memset(createNpcText, 0, sizeof(createNpcText));
+    memset(successMessage, 0, sizeof(successMessage));
     memset(&seed, 0, sizeof(seed));
     memset(serviceOptions, 0, sizeof(serviceOptions));
     if (!vm_mock_admin_scene_from_form(body, sceneUtf8, sizeof(sceneUtf8),
-                                       runtimeScene, sizeof(runtimeScene)) ||
-        !vm_mock_admin_form_u32(body, "actor_id", 0xffffffffu, &actorId) ||
-        actorId == 0)
+                                       runtimeScene, sizeof(runtimeScene)))
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
-                                       "场景或 Actor ID 无效");
+                                       "场景无效");
+        return;
+    }
+    createNpc = strcmp(action, "save-npc") == 0 &&
+                vm_mock_admin_form_value(body, "create_npc", createNpcText,
+                                         sizeof(createNpcText)) &&
+                strcmp(createNpcText, "1") == 0;
+    if (!createNpc &&
+        (!vm_mock_admin_form_u32(body, "actor_id", 0xffffffffu, &actorId) ||
+         actorId == 0))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "Actor ID 无效");
         return;
     }
 
@@ -12896,7 +12911,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
             return;
         }
         if (!found || !vm_net_mock_dynamic_npc_admin_save(
-                          runtimeScene, &seed, enabled, NULL, 0, false,
+                          runtimeScene, &seed, enabled, NULL, 0, false, false,
                           &error))
         {
             vm_mock_admin_redirect_content(
@@ -13099,6 +13114,13 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
                                        "所选 XSE 脚本资源不存在");
         return;
     }
+    if (createNpc && !vm_net_mock_dynamic_npc_admin_allocate_actor_id(
+                         &actorId, &error))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       error ? error : "无法分配新的动态 NPC ID");
+        return;
+    }
     seed.actorId = actorId;
     seed.x = (u16)x;
     seed.y = (u16)y;
@@ -13117,15 +13139,22 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", actorResource);
     if (!vm_net_mock_dynamic_npc_admin_save(
             runtimeScene, &seed, true, serviceOptions, serviceOptionCount,
-            true, &error))
+            true, createNpc, &error))
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        error ? error : "NPC 保存失败");
         return;
     }
+    if (createNpc)
+    {
+        snprintf(successMessage, sizeof(successMessage),
+                 "NPC 已新增，自动分配 Actor ID %u；缺失的 Actor/GIF 将由客户端通过资源更新下载",
+                 actorId);
+    }
     vm_mock_admin_redirect_content(
         client, sceneUtf8, "ok",
-        "NPC 保存成功；缺失的 Actor/GIF 将由客户端通过资源更新下载");
+        createNpc ? successMessage :
+                    "NPC 保存成功；缺失的 Actor/GIF 将由客户端通过资源更新下载");
 }
 
 static void vm_mock_admin_handle_update_action(vm_mock_service_socket client,

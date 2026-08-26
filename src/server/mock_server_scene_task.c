@@ -1360,6 +1360,12 @@ static bool vm_net_mock_scene_is_shushan_south_gate(const char *scene)
 enum
 {
     VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX = 256,
+    /* SCE-native interactive actors are deterministically assigned inside
+     * 20000..59999. Keep administrator-created dynamic NPCs above that
+     * range so a new service row cannot shadow a source-scene actor. */
+    VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN = 60000,
+    VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MAX =
+        VM_NET_MOCK_NPC_SERVICE_VALUE_MASK,
     /* Native SCE actors are immutable resource data.  These tables contain
      * only server-owned overlays keyed by the exact runtime scene filename
      * and the deterministic actor id derived from that source row. */
@@ -1456,6 +1462,13 @@ typedef struct
     bool invalid;
     u16 serviceKind;
 } vm_net_mock_dynamic_npc_exact_kind_context;
+
+typedef struct
+{
+    u32 maximum;
+    bool found;
+    bool invalid;
+} vm_net_mock_dynamic_npc_id_max_context;
 
 static bool vm_net_mock_dynamic_npc_column_count_row(
     void *contextValue, unsigned int columnCount, const char *const *values,
@@ -6766,6 +6779,99 @@ static bool vm_net_mock_dynamic_npc_admin_lookup_exact_kind(
     return true;
 }
 
+static bool vm_net_mock_dynamic_npc_id_max_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_dynamic_npc_id_max_context *context =
+        (vm_net_mock_dynamic_npc_id_max_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 || context->found ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->maximum) ||
+        context->maximum > VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MAX)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+/* This helper is intentionally independent of the current scene cache: the
+ * selected ID must also stay clear of a dynamic NPC or scene-battle actor
+ * which will be delivered after a later scene transition. */
+static bool vm_net_mock_dynamic_npc_admin_choose_actor_id(
+    u32 maximumStoredId, u32 *actorIdOut, const char **errorOut)
+{
+    if (actorIdOut != NULL)
+        *actorIdOut = 0;
+    if (errorOut != NULL)
+        *errorOut = "无法分配新的动态 NPC ID";
+    if (actorIdOut == NULL)
+        return false;
+    if (maximumStoredId >= VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MAX)
+    {
+        if (errorOut != NULL)
+            *errorOut = "可分配的动态 NPC ID 已用尽";
+        return false;
+    }
+    *actorIdOut = maximumStoredId < VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN
+                      ? VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN
+                      : maximumStoredId + 1u;
+    if (errorOut != NULL)
+        *errorOut = "ok";
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_admin_allocate_actor_id(
+    u32 *actorIdOut, const char **errorOut)
+{
+    vm_net_mock_dynamic_npc_id_max_context context;
+    char query[640];
+
+    if (actorIdOut != NULL)
+        *actorIdOut = 0;
+    if (errorOut != NULL)
+        *errorOut = "无法分配新的动态 NPC ID";
+    if (actorIdOut == NULL || !vm_net_mock_dynamic_npc_db_load())
+    {
+        if (errorOut != NULL)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(
+        query, sizeof(query),
+        "SELECT GREATEST("
+        "COALESCE((SELECT MAX(actor_id) FROM server_dynamic_npcs "
+        "WHERE actor_id BETWEEN %u AND %u),%u),"
+        "COALESCE((SELECT MAX(monster_id) FROM server_scene_battle_monsters "
+        "WHERE monster_id BETWEEN %u AND %u),%u))",
+        VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN,
+        VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MAX,
+        VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN - 1u,
+        VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN,
+        VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MAX,
+        VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN - 1u);
+    if (!vm_mysql_query(query, vm_net_mock_dynamic_npc_id_max_row, &context) ||
+        context.invalid || !context.found)
+    {
+        if (errorOut != NULL)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (!vm_net_mock_dynamic_npc_admin_choose_actor_id(
+            context.maximum, actorIdOut, errorOut))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_auto_id actor=%u range=%u..%u source=dynamic-npcs+scene-battle-monsters\n",
+           *actorIdOut, VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MIN,
+           VM_NET_MOCK_DYNAMIC_NPC_AUTOMATIC_ID_MAX);
+    return true;
+}
+
 static int vm_net_mock_dynamic_npc_find_override(const char *scene, u32 actorId)
 {
     if (!vm_net_mock_dynamic_npc_db_load() || scene == NULL || actorId == 0)
@@ -6805,7 +6911,7 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     const vm_net_mock_scene_npcinfo_seed *seed,
     bool enabled,
     const vm_net_mock_npc_service_option *serviceOptions,
-    u32 serviceOptionCount, bool replaceServiceOptions,
+    u32 serviceOptionCount, bool replaceServiceOptions, bool createOnly,
     const char **errorOut)
 {
     char sceneHex[sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene) * 2 + 1];
@@ -6929,6 +7035,12 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         return false;
     }
     existing = vm_net_mock_dynamic_npc_find_override(scene, seed->actorId);
+    if (createOnly && existing >= 0)
+    {
+        if (errorOut)
+            *errorOut = "自动分配的动态 NPC ID 已被占用，请重试";
+        return false;
+    }
     if (existing < 0 &&
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX)
     {
@@ -6974,17 +7086,34 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             *errorOut = "instance scene encoding failed";
         return false;
     }
-    snprintf(query, sizeof(query),
-             "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,service_option_name,service_option_description,enabled) "
-             "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',X'%s',X'%s',%u) "
-             "ON DUPLICATE KEY UPDATE pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
-             "npc_kind=VALUES(npc_kind),orientation=VALUES(orientation),"
-             "actor_resource=VALUES(actor_resource),display_name=VALUES(display_name),"
-             "script_name=VALUES(script_name),service_option_name=VALUES(service_option_name),"
-             "service_option_description=VALUES(service_option_description),enabled=VALUES(enabled)",
-             sceneHex, seed->actorId, seed->x, seed->y, seed->kind,
-             seed->orientation, actorHex, nameHex, scriptHex,
-             serviceOptionNameHex, serviceOptionDescriptionHex, enabled ? 1u : 0u);
+    if (createOnly)
+    {
+        /* A freshly allocated identity must never turn into an update if
+         * another admin request wins the same ID between allocation and this
+         * write. Let the primary key reject it; the user can retry safely. */
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,service_option_name,service_option_description,enabled) "
+                 "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',X'%s',X'%s',%u)",
+                 sceneHex, seed->actorId, seed->x, seed->y, seed->kind,
+                 seed->orientation, actorHex, nameHex, scriptHex,
+                 serviceOptionNameHex, serviceOptionDescriptionHex,
+                 enabled ? 1u : 0u);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,service_option_name,service_option_description,enabled) "
+                 "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',X'%s',X'%s',%u) "
+                 "ON DUPLICATE KEY UPDATE pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
+                 "npc_kind=VALUES(npc_kind),orientation=VALUES(orientation),"
+                 "actor_resource=VALUES(actor_resource),display_name=VALUES(display_name),"
+                 "script_name=VALUES(script_name),service_option_name=VALUES(service_option_name),"
+                 "service_option_description=VALUES(service_option_description),enabled=VALUES(enabled)",
+                 sceneHex, seed->actorId, seed->x, seed->y, seed->kind,
+                 seed->orientation, actorHex, nameHex, scriptHex,
+                 serviceOptionNameHex, serviceOptionDescriptionHex,
+                 enabled ? 1u : 0u);
+    }
     if (!vm_mysql_exec("START TRANSACTION"))
     {
         if (errorOut)
