@@ -3131,9 +3131,12 @@ static void vm_net_mock_build_actorinfo_status_fields(
     if (stats == NULL)
         return;
 
-    fields->strength = vm_net_mock_cap_u32(stats->strength, 999);
-    fields->words[0] = vm_net_mock_cap_u32(stats->agility, 999);
-    fields->words[1] = vm_net_mock_cap_u32(stats->wisdom, 999);
+    /* ActorInfo stores the three primary attributes as u32.  Keep its
+     * unequipped baseline uncapped so the client and server start from the
+     * same value before the client applies 1/7/7 equipment bonuses. */
+    fields->strength = stats->strength;
+    fields->words[0] = stats->agility;
+    fields->words[1] = stats->wisdom;
     fields->words[2] = vm_net_mock_cap_u32(stats->hit, 9999);
     fields->words[3] = 0; /* speed: unresolved; equip.dsh has no such column */
     fields->words[4] = vm_net_mock_cap_u32(stats->defense, 9999);

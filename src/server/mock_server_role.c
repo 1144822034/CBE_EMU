@@ -3390,6 +3390,12 @@ static const char *vm_net_mock_role_spouse_name(const vm_net_mock_role_state *ro
                                "\xce\xde"); /* GBK: wu */
 }
 
+static u32 vm_net_mock_add_u32_saturating(u32 left, u32 right)
+{
+    uint64_t sum = (uint64_t)left + right;
+    return sum > 0xffffffffull ? 0xffffffffu : (u32)sum;
+}
+
 static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
 {
     static const u16 base[3][5] = {
@@ -3412,20 +3418,19 @@ static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
 
     if (level == 0)
         level = 1;
+    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        level = VM_NET_MOCK_ROLE_LEVEL_CAP;
     if (attrIndex >= 5)
         attrIndex = 0;
     value = base[jobIndex][attrIndex] + (level - 1) * gain[jobIndex][attrIndex];
-    if (value > 999)
-        value = 999;
     return (u16)value;
 }
 
 static u16 vm_net_mock_role_charm(const vm_net_mock_role_state *role, u32 level, u32 job)
 {
     u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
-    u32 value = vm_net_mock_role_derived_attr(level, job, 4) + money / 100000;
-    if (value > 999)
-        value = 999;
+    u32 value = vm_net_mock_add_u32_saturating(
+        vm_net_mock_role_derived_attr(level, job, 4), money / 100000);
     return (u16)value;
 }
 
@@ -3623,6 +3628,8 @@ static void vm_net_mock_role_build_player_stats_impl(
         level = vm_net_mock_role_level_from_exp(role->exp);
     if (level == 0)
         level = 1;
+    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        level = VM_NET_MOCK_ROLE_LEVEL_CAP;
     if (job == 0 || job > 3)
         job = 1;
 
@@ -3638,11 +3645,20 @@ static void vm_net_mock_role_build_player_stats_impl(
     stats->baseWisdom = vm_net_mock_role_derived_attr(level, job, 2);
     stats->baseEndurance = vm_net_mock_role_derived_attr(level, job, 3);
     stats->baseCharm = vm_net_mock_role_derived_attr(level, job, 4);
-    stats->strength = vm_net_mock_cap_u32(stats->baseStrength + equipment.strength, 999);
-    stats->agility = vm_net_mock_cap_u32(stats->baseAgility + equipment.agility, 999);
-    stats->wisdom = vm_net_mock_cap_u32(stats->baseWisdom + equipment.wisdom, 999);
-    stats->endurance = vm_net_mock_cap_u32(stats->baseEndurance, 999);
-    stats->charm = vm_net_mock_cap_u32(vm_net_mock_role_charm(role, level, job), 999);
+    /* Main attributes are represented as u32 on the ActorInfo and battle
+     * paths.  Do not impose the old mock-only 999 display ceiling here: gear
+     * must retain its full DSH contribution in both client status rebuilding
+     * and server-side skill calculation.  Saturating arithmetic only guards
+     * the wire/in-memory type against malformed catalog data; it is not a
+     * gameplay cap. */
+    stats->strength = vm_net_mock_add_u32_saturating(stats->baseStrength,
+                                                      equipment.strength);
+    stats->agility = vm_net_mock_add_u32_saturating(stats->baseAgility,
+                                                     equipment.agility);
+    stats->wisdom = vm_net_mock_add_u32_saturating(stats->baseWisdom,
+                                                    equipment.wisdom);
+    stats->endurance = stats->baseEndurance;
+    stats->charm = vm_net_mock_role_charm(role, level, job);
 
     /* The old 90 + level*8 + endurance*2 / 70 + level*9 + wisdom*3 model
      * was an emulator-only approximation.  Unlike attack and defense, the
@@ -3720,6 +3736,17 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     vm_net_mock_role_build_player_stats_impl(role, stats, true, true);
 }
 
+static u32 vm_net_mock_battle_apply_signed_primary_stat_change(u32 value,
+                                                                int32_t change)
+{
+    if (change >= 0)
+        return vm_net_mock_add_u32_saturating(value, (u32)change);
+    {
+        u32 reduction = (u32)(0 - change);
+        return value > reduction ? value - reduction : 0;
+    }
+}
+
 static u32 vm_net_mock_battle_apply_signed_stat_change(u32 value, int32_t change)
 {
     if (change >= 0)
@@ -3749,11 +3776,11 @@ static void vm_net_mock_battle_apply_active_stat_modifier(vm_net_mock_player_sta
     strengthBefore = stats->strength;
     agilityBefore = stats->agility;
     wisdomBefore = stats->wisdom;
-    stats->strength = vm_net_mock_battle_apply_signed_stat_change(
+    stats->strength = vm_net_mock_battle_apply_signed_primary_stat_change(
         stats->strength, modifier->strength);
-    stats->agility = vm_net_mock_battle_apply_signed_stat_change(
+    stats->agility = vm_net_mock_battle_apply_signed_primary_stat_change(
         stats->agility, modifier->agility);
-    stats->wisdom = vm_net_mock_battle_apply_signed_stat_change(
+    stats->wisdom = vm_net_mock_battle_apply_signed_primary_stat_change(
         stats->wisdom, modifier->wisdom);
     /* The derived combat values were originally calculated from the unbuffed
      * primary attributes.  Apply their exact formula deltas before any direct
@@ -7970,9 +7997,9 @@ static bool vm_net_mock_battle_skill_is_hostile_damage(
  * power as a focus for offensive skills as well as for a normal strike.
  *
  * Without this term, a high-level ghost-path staff can raise normal attack
- * from a few hundred to thousands while spell damage remains capped by the
- * visible 999 wisdom limit.  That is the first point at which normal attacks
- * incorrectly overtake a wisdom-scaling spell.  A group spell retains its
+ * from a few hundred to thousands while spell damage omits the staff's
+ * weapon-power contribution.  That can make normal attacks incorrectly
+ * overtake a wisdom-scaling spell.  A group spell retains its
  * lower skill.dsh coefficient per target; this helper only preserves the
  * equipped weapon's contribution in the skill path. */
 static u32 vm_net_mock_battle_skill_raw_damage_from_stats(

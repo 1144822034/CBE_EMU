@@ -3850,16 +3850,17 @@ static bool vm_net_mock_seq_put_item_compact_extra(u8 *out, u32 outCap,
                                                     u8 enhanceMaxLevel)
 {
     /*
-     * 30/21 and the 17/1 row used during scene startup are item-instance
-     * seeds, delivered inside larger bootstrap responses.  Their
-     * ParseEquipAttributes(0x010185C2) reader defines zero stage attributes
-     * as a valid compact row after current/max enhancement.
+     * The 17/1 row used during scene startup is delivered inside a larger
+     * bootstrap response.  Its ParseEquipAttributes(0x010185C2) reader
+     * defines zero stage attributes as a valid compact row after current/max
+     * enhancement.
      *
-     * Full +4/+8/+12/+16 metadata must not be repeated for every backpack
-     * equipment row in either bootstrap packet.  The detailed 17/1 backpack
-     * response and the 7/7 equipped response retain
-     * vm_net_mock_seq_put_item_common_extra(), so the client still receives
-     * and consumes the complete stage data where it is needed.
+     * Do not use this compact form for 30/21: HandleItemGridResponse creates
+     * the live backpack instances there, while 29/3 later changes only their
+     * current/max enhancement fields.  The remote client transport splits the
+     * complete 30/21 bootstrap into its own event-7 frame when necessary, so
+     * every equipment instance can retain its four future-stage rows without
+     * exceeding the combined login packet's parser pool.
      */
     return vm_net_mock_seq_put_i16(out, outCap, pos, enhanceLevel) &&
            vm_net_mock_seq_put_i16(out, outCap, pos, enhanceMaxLevel) &&
@@ -4051,19 +4052,19 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
-        /* 30/21 is the bootstrap grid seed consumed by
-         * HandleItemGridResponse(0x01039952).  Its row parser accepts the
-         * compact current/max-enhance + zero-attribute form; the full
-         * persisted +4/+8/+12/+16 plan belongs to the later detailed 17/1
-         * backpack response and 7/7 equipped-item response.  Sending the
-         * expanded form here overflows the client's fixed downlink parse
-         * pool for large inventories and surfaces as the generic unpack
-         * error before business dispatch. */
-        if (!vm_net_mock_seq_put_item_compact_extra(
-                out, outCap, &pos,
+        /* HandleItemGridResponse(0x01039952) creates the live backpack
+         * instance, and 29/3 only changes its current/max enhancement fields.
+         * The complete +4/+8/+12/+16 plan must therefore be present in this
+         * first row so the detail renderer can show grey future stages and
+         * unlock them at +4 without rebuilding the instance.  The remote
+         * client sends this bootstrap in a dedicated event-7 frame, keeping
+         * the large-inventory parser-pool limit separate from group state. */
+        if (!vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos, item->itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                &item->enhanceAffixes))
             return false;
     }
     *blobLenOut = pos;
@@ -6623,7 +6624,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         rewardSeq == 0)
     {
         return vm_net_mock_build_item_use_hint_response(
-            out, outCap, "Backpack cannot receive chest reward");
+            out, outCap, "背包空间不足，无法获得宝箱奖励");
     }
     rewardItem = vm_net_mock_role_find_backpack_item(&projected,
                                                       reward->itemId, rewardSeq);
