@@ -588,6 +588,8 @@ static int vm_net_mock_monster_catalog_scene_file_compare(const void *left,
     return strcmp(a->name, b->name);
 }
 
+static u32 vm_net_mock_monster_catalog_add_scene_battle_drafts(void);
+
 /* This enumerates the same server resource root later used by
  * vm_net_mock_load_scene_resource().  The directory is only an index: every
  * selected name is subsequently opened through the normal safe game-resource
@@ -719,6 +721,7 @@ static void vm_net_mock_monster_catalog_sort(void)
             g_vm_net_mock_monster_catalog_entries[i];
         vm_net_mock_monster_resource_label label =
             g_vm_net_mock_monster_resource_labels[i];
+        bool draftOnly = g_vm_net_mock_monster_catalog_draft_only[i];
         u32 j = i;
 
         while (j > 0 &&
@@ -729,10 +732,13 @@ static void vm_net_mock_monster_catalog_sort(void)
                 g_vm_net_mock_monster_catalog_entries[j - 1];
             g_vm_net_mock_monster_resource_labels[j] =
                 g_vm_net_mock_monster_resource_labels[j - 1];
+            g_vm_net_mock_monster_catalog_draft_only[j] =
+                g_vm_net_mock_monster_catalog_draft_only[j - 1];
             --j;
         }
         g_vm_net_mock_monster_catalog_entries[j] = entry;
         g_vm_net_mock_monster_resource_labels[j] = label;
+        g_vm_net_mock_monster_catalog_draft_only[j] = draftOnly;
     }
 }
 
@@ -745,6 +751,7 @@ static void vm_net_mock_monster_catalog_ensure_loaded(void)
     u32 sceneAdded = 0;
     u32 parsedSpawnCount = 0;
     u32 rejectedSceneEntries = 0;
+    u32 draftAdded = 0;
 
     if (g_vm_net_mock_monster_catalog_loaded ||
         g_vm_net_mock_monster_catalog_loading)
@@ -845,13 +852,20 @@ static void vm_net_mock_monster_catalog_ensure_loaded(void)
         }
     }
 
+    /* Drafts are visible to the administrator immediately so their combat
+     * profile and drops can be configured before publishing.  The parallel
+     * draft-only bit keeps this edit-time identity out of live encounter
+     * validation until the normal SCE deployment has produced its kind-3
+     * record. */
+    draftAdded = vm_net_mock_monster_catalog_add_scene_battle_drafts();
     vm_net_mock_monster_catalog_sort();
     g_vm_net_mock_monster_catalog_loaded = true;
     g_vm_net_mock_monster_catalog_loading = false;
     printf("[info][network] mock_monster_catalog base=%u scenes=%u spawns=%u "
-           "scene_added=%u rejected=%u total=%u source=SCE2-kind3+task-kill-labels\n",
+           "scene_added=%u drafts_added=%u rejected=%u total=%u "
+           "source=SCE2-kind3+task-kill-labels+scene-battle-drafts\n",
            baseCount, sceneCount, parsedSpawnCount, sceneAdded,
-           rejectedSceneEntries, g_vm_net_mock_monster_catalog_count);
+           draftAdded, rejectedSceneEntries, g_vm_net_mock_monster_catalog_count);
 }
 
 static void vm_net_mock_monster_resource_labels_load(void)
@@ -1856,6 +1870,15 @@ typedef struct
 
 typedef struct
 {
+    u32 rows;
+    u32 added;
+    u32 labeled;
+    u32 rejected;
+    bool invalid;
+} vm_net_mock_monster_catalog_scene_battle_draft_context;
+
+typedef struct
+{
     bool found;
     bool invalid;
 } vm_net_mock_scene_battle_monster_column_context;
@@ -2247,6 +2270,91 @@ static bool vm_net_mock_scene_battle_monster_list_row(
     return true;
 }
 
+/* This is intentionally a catalog-only projection of the draft table.  It
+ * does not make the draft a live SCE node: the entry remains draft-only until
+ * a normal deployment makes the same ID observable in an SCE2 kind-3 record.
+ * Reusing the catalog slot lets Monster Management persist stats and drops
+ * before deployment, without maintaining a second incompatible override
+ * store. */
+static bool vm_net_mock_monster_catalog_scene_battle_draft_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_monster_catalog_scene_battle_draft_context *context =
+        (vm_net_mock_monster_catalog_scene_battle_draft_context *)contextValue;
+    vm_net_mock_monster_resource_label *label = NULL;
+    u32 monsterId = 0;
+    int index = -1;
+    bool existing = false;
+
+    if (context == NULL || columnCount != 3 || values == NULL ||
+        lengths == NULL || values[0] == NULL || values[1] == NULL ||
+        values[2] == NULL)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    if (!vm_mock_mysql_parse_u32(values[1], lengths[1], &monsterId) ||
+        monsterId == 0 || monsterId > 0xffffu || lengths[0] == 0 ||
+        lengths[0] >= sizeof(g_vm_net_mock_monster_resource_labels[0].firstScene) ||
+        lengths[2] >= sizeof(g_vm_net_mock_monster_resource_labels[0].displayName))
+    {
+        ++context->rejected;
+        return true;
+    }
+    existing = vm_net_mock_monster_catalog_index_loaded(monsterId) >= 0;
+    index = vm_net_mock_monster_catalog_add_scene_entry(monsterId);
+    if (index < 0)
+    {
+        ++context->rejected;
+        return true;
+    }
+
+    ++context->rows;
+    if (!existing)
+    {
+        g_vm_net_mock_monster_catalog_draft_only[index] = true;
+        ++context->added;
+    }
+    label = &g_vm_net_mock_monster_resource_labels[index];
+    if (label->displayName[0] == 0 && lengths[2] != 0)
+    {
+        memcpy(label->displayName, values[2], lengths[2]);
+        label->displayName[lengths[2]] = 0;
+        ++context->labeled;
+    }
+    if (label->firstScene[0] == 0)
+    {
+        memcpy(label->firstScene, values[0], lengths[0]);
+        label->firstScene[lengths[0]] = 0;
+        ++context->labeled;
+    }
+    return true;
+}
+
+static u32 vm_net_mock_monster_catalog_add_scene_battle_drafts(void)
+{
+    vm_net_mock_monster_catalog_scene_battle_draft_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_net_mock_scene_battle_monster_schema_ensure() ||
+        !vm_mysql_query(
+            "SELECT scene,monster_id,display_name "
+            "FROM server_scene_battle_monsters ORDER BY entry_id",
+            vm_net_mock_monster_catalog_scene_battle_draft_row, &context) ||
+        context.invalid)
+    {
+        printf("[warn][mock-admin] monster_catalog_scene_battle_drafts "
+               "action=skip error=%s\n", vm_mysql_last_error());
+        return 0;
+    }
+    printf("[info][mock-admin] monster_catalog_scene_battle_drafts "
+           "rows=%u added=%u labels=%u rejected=%u\n",
+           context.rows, context.added, context.labeled, context.rejected);
+    return context.added;
+}
+
 static u32 vm_net_mock_scene_battle_monster_admin_list(
     const char *scene, vm_net_mock_scene_battle_monster_admin_row *rows,
     u32 rowCap)
@@ -2536,6 +2644,10 @@ static bool vm_net_mock_scene_battle_monster_admin_save(
         }
         return false;
     }
+    /* The draft table is an edit-time source for Monster Management.  Refresh
+     * it immediately so the redirect after save sees a newly assigned ID,
+     * rather than waiting for an unrelated SCE deployment or server restart. */
+    vm_net_mock_monster_catalog_invalidate();
     if (errorOut)
         *errorOut = "ok";
     return true;
@@ -2568,6 +2680,7 @@ static bool vm_net_mock_scene_battle_monster_admin_delete(
             *errorOut = vm_mysql_last_error();
         return false;
     }
+    vm_net_mock_monster_catalog_invalidate();
     if (errorOut)
         *errorOut = "ok";
     return true;

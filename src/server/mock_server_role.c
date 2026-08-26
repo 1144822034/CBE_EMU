@@ -4130,12 +4130,15 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
  * scene parser extends this runtime catalog once, before any ID validation,
  * persistence lookup or administrator listing is attempted. */
 /* The authoritative list consists of the shipped catalog plus SCE2 combat
- * records.  Administrator-deployed scene combat spawns may introduce more
- * distinct stable ids, so retain room for a full content pass rather than
+ * records.  Saved scene-battle drafts may introduce a further editable ID
+ * before deployment, but those draft-only identities must not be accepted as
+ * live scene encounters.  Retain room for a full content pass rather than
  * silently omitting the tail of the catalog. */
 enum { VM_NET_MOCK_MONSTER_CATALOG_MAX = 256 };
 static vm_net_mock_monster_entry
     g_vm_net_mock_monster_catalog_entries[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+static bool
+    g_vm_net_mock_monster_catalog_draft_only[VM_NET_MOCK_MONSTER_CATALOG_MAX];
 static u32 g_vm_net_mock_monster_catalog_count = 0;
 static bool g_vm_net_mock_monster_catalog_loaded = false;
 static bool g_vm_net_mock_monster_catalog_loading = false;
@@ -4198,6 +4201,8 @@ static int vm_net_mock_monster_catalog_add_scene_entry(u32 enemyId)
 
     g_vm_net_mock_monster_catalog_entries[
         g_vm_net_mock_monster_catalog_count] = entry;
+    g_vm_net_mock_monster_catalog_draft_only[
+        g_vm_net_mock_monster_catalog_count] = false;
     return (int)g_vm_net_mock_monster_catalog_count++;
 }
 
@@ -4206,10 +4211,11 @@ static vm_net_mock_monster_override
 static bool g_vm_net_mock_monster_db_loaded = false;
 static bool g_vm_net_mock_monster_db_valid = false;
 
-/* A deployed scene-battle-monster release changes the authoritative SCE2
- * source.  Invalidate only the derived identity index; persistent monster
- * overrides remain valid because they are keyed by the stable monster id.
- * The next normal lookup rebuilds the catalog from the real scene files. */
+/* A scene-battle draft change alters the administrative identity directory,
+ * while a deployment alters the authoritative SCE2 source.  Both rebuild the
+ * sorted catalog, so reload the parallel database override cache as well:
+ * its storage is indexed by the catalog slot even though persistence itself
+ * is keyed by stable monster ID. */
 static void vm_net_mock_monster_catalog_invalidate(void)
 {
     if (g_vm_net_mock_monster_catalog_loading)
@@ -4218,6 +4224,12 @@ static void vm_net_mock_monster_catalog_invalidate(void)
     g_vm_net_mock_monster_catalog_count = 0;
     memset(g_vm_net_mock_monster_catalog_entries, 0,
            sizeof(g_vm_net_mock_monster_catalog_entries));
+    memset(g_vm_net_mock_monster_catalog_draft_only, 0,
+           sizeof(g_vm_net_mock_monster_catalog_draft_only));
+    memset(g_vm_net_mock_monster_overrides, 0,
+           sizeof(g_vm_net_mock_monster_overrides));
+    g_vm_net_mock_monster_db_loaded = false;
+    g_vm_net_mock_monster_db_valid = false;
 }
 
 static bool vm_net_mock_monster_enemy_id_known(u32 enemyId)
@@ -4225,7 +4237,11 @@ static bool vm_net_mock_monster_enemy_id_known(u32 enemyId)
     if (enemyId == 0 || enemyId > 0xffffu)
         return false;
     vm_net_mock_monster_catalog_ensure_loaded();
-    return vm_net_mock_monster_catalog_index_loaded(enemyId) >= 0;
+    {
+        int index = vm_net_mock_monster_catalog_index_loaded(enemyId);
+
+        return index >= 0 && !g_vm_net_mock_monster_catalog_draft_only[index];
+    }
 }
 
 static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId)
