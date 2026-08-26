@@ -31,7 +31,9 @@ finalDamage = min(damage, enemyHpCurrent)
 ## 隔离回归
 
 新增 `scripts/battle-wisdom-equipment-damage-regression.c`，不监听端口、不连接 MySQL，直接
-使用当前 `equip.dsh` 与 `skill.dsh` 建立装备前后两个权威角色快照。2026-08-20 的输出：
+使用当前 `equip.dsh` 与 `skill.dsh` 建立装备前后两个权威角色快照。以下是主属性 `999`
+截断仍存在时的 2026-08-20 输出；该截断已在 2026-08-26 移除，目标当前生命的 `609`
+伤害限制本身不变：
 
 ```
 staff=12013 wisdom=843->999 skill=201 coeff=110

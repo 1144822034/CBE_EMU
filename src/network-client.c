@@ -619,6 +619,178 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
     return true;
 }
 
+static bool vm_client_wt_object_tagged_u8(const vm_client_wt_object *object,
+                                          const char *field, u8 *valueOut)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+
+    if (!vm_client_wt_object_field(object, field, &encoded, &encodedLen) ||
+        encodedLen != 3 || encoded[0] != 0 || encoded[1] != 1)
+    {
+        return false;
+    }
+    if (valueOut != NULL)
+        *valueOut = encoded[2];
+    return true;
+}
+
+/*
+ * HandleItemGridResponse(30/21) constructs the client-owned backpack
+ * instances.  Its equipment rows must contain the complete +4/+8/+12/+16
+ * plan because 29/3 later updates only current/max enhancement.  A large
+ * group/type-1 login reply cannot carry that grid beside all of its other
+ * state: event_packet_init(10,19) exhausts the fixed parser pool before the
+ * CBE reaches any business object.
+ *
+ * Preserve the server's response objects and their bootstrap order, but use
+ * the existing normal event-7 queue as two parser transactions.  The first
+ * frame retains group/type-1 state; the second starts with 30/21 and then
+ * preserves optional reservoir rows and the paired equipment type-2/type-3
+ * initialization.  This is deliberately narrow to the exact group bootstrap
+ * shape, never a general-purpose packet splitter.
+ */
+static bool vm_client_extract_login_backpack_bootstrap_followup(
+    u8 *response, u32 *responseLen, u8 *followup, u32 followupCap,
+    u32 *followupLen)
+{
+    u32 offset = 5;
+    u32 primaryPos = 5;
+    u32 followPos = 5;
+    u32 originalLen = 0;
+    u8 primaryCount = 0;
+    u8 followCount = 0;
+    u8 seenCount = 0;
+    u8 gridIndex = 0xff;
+    u8 reservoirIndex = 0xff;
+    u8 equipmentIndex = 0xff;
+    u8 completionIndex = 0xff;
+    bool haveGroup = false;
+    bool haveType1 = false;
+    vm_client_wt_object object;
+
+    if (followupLen != NULL)
+        *followupLen = 0;
+    if (response == NULL || responseLen == NULL || *responseLen < 11 ||
+        response[0] != 'W' || response[1] != 'T' || followup == NULL ||
+        followupCap < 5)
+    {
+        return false;
+    }
+    originalLen = *responseLen;
+
+    while (offset + 6 <= originalLen &&
+           vm_client_next_wt_object(response, originalLen, &offset, &object))
+    {
+        u8 type = 0;
+
+        if (object.major == 1 && object.kind == 5 && object.subtype == 10)
+            haveGroup = true;
+        if (object.major == 1 && object.kind == 10 && object.subtype == 26)
+            haveType1 = true;
+        if (object.major == 1 && object.kind == 30 && object.subtype == 21)
+        {
+            if (gridIndex != 0xff)
+                return false;
+            gridIndex = seenCount;
+        }
+        else if (object.major == 1 && object.kind == 7 && object.subtype == 11)
+        {
+            if (reservoirIndex != 0xff)
+                return false;
+            reservoirIndex = seenCount;
+        }
+        else if (object.major == 1 && object.kind == 7 && object.subtype == 7 &&
+                 vm_client_wt_object_tagged_u8(&object, "type", &type))
+        {
+            if (type == 2)
+            {
+                if (equipmentIndex != 0xff)
+                    return false;
+                equipmentIndex = seenCount;
+            }
+            else if (type == 3)
+            {
+                if (completionIndex != 0xff)
+                    return false;
+                completionIndex = seenCount;
+            }
+        }
+        ++seenCount;
+    }
+    if (offset != originalLen || seenCount != response[4] || !haveGroup ||
+        !haveType1 || gridIndex == 0xff ||
+        ((equipmentIndex == 0xff) != (completionIndex == 0xff)) ||
+        (reservoirIndex != 0xff && reservoirIndex <= gridIndex) ||
+        (equipmentIndex != 0xff && equipmentIndex <= gridIndex) ||
+        (completionIndex != 0xff &&
+         (completionIndex != equipmentIndex + 1u ||
+          (reservoirIndex != 0xff && completionIndex <= reservoirIndex))))
+    {
+        return false;
+    }
+
+    offset = 5;
+    while (offset + 6 <= originalLen)
+    {
+        u32 start = offset;
+        u32 objectLen;
+        u8 type = 0;
+        bool isFollowup = false;
+
+        if (!vm_client_next_wt_object(response, originalLen, &offset, &object))
+            return false;
+        objectLen = offset - start;
+        if (object.major == 1 && object.kind == 30 && object.subtype == 21)
+        {
+            isFollowup = true;
+        }
+        else if (object.major == 1 && object.kind == 7 && object.subtype == 11)
+        {
+            isFollowup = true;
+        }
+        else if (object.major == 1 && object.kind == 7 && object.subtype == 7 &&
+                 vm_client_wt_object_tagged_u8(&object, "type", &type) &&
+                 (type == 2 || type == 3))
+        {
+            isFollowup = true;
+        }
+
+        if (isFollowup)
+        {
+            if (followPos + objectLen > followupCap || followCount == 0xff)
+                return false;
+            memcpy(followup + followPos, response + start, objectLen);
+            followPos += objectLen;
+            ++followCount;
+        }
+        else
+        {
+            memmove(response + primaryPos, response + start, objectLen);
+            primaryPos += objectLen;
+            ++primaryCount;
+        }
+    }
+    if (followCount == 0 || primaryCount == 0)
+        return false;
+
+    vm_client_finish_wt_packet(response, primaryPos, primaryCount);
+    vm_client_finish_wt_packet(followup, followPos, followCount);
+    *responseLen = primaryPos;
+    if (followupLen != NULL)
+        *followupLen = followPos;
+    printf("[info][network] remote_login_backpack_bootstrap_split original=%u "
+           "primary=%u followup=%u order=30/21+7/11+7/7(type2,type3) "
+           "delivery=event7-then-event7 evidence=JianghuOL.CBE:0x01039952+"
+           "0x01028726\n",
+           originalLen, primaryPos, followPos);
+    vm_autotest_note("remote_login_backpack_bootstrap_split original=%u "
+                     "primary=%u followup=%u order=30/21+7/11+7/7(type2,type3) "
+                     "evidence=JianghuOL.CBE:0x01039952+0x01028726\n",
+                     originalLen, primaryPos, followPos);
+    return true;
+}
+
 /* SendNPCInteractReq(action13) uses the task-hall acknowledgement as a
  * complete UI transaction.  DispatchItemEvent clears that transaction for
  * 26/0, but a scene battle must enter through the following normal data event.
@@ -883,9 +1055,17 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
         !vm_client_extract_item_followup(response, responseLen, followup,
                                          followupCap, followupLen, NULL))
     {
-        if (vm_client_extract_action13_battle_followup(
-                response, responseLen, followup, followupCap, followupLen) &&
-            followupNextSchedulerTick != NULL)
+        if (vm_client_extract_login_backpack_bootstrap_followup(
+                response, responseLen, followup, followupCap, followupLen))
+        {
+            /* The second bootstrap frame remains eligible in this scheduler
+             * tick, after the group/type-1 acknowledgement already queued by
+             * the same completion. */
+        }
+        else if (vm_client_extract_action13_battle_followup(
+                     response, responseLen, followup, followupCap,
+                     followupLen) &&
+                 followupNextSchedulerTick != NULL)
         {
             *followupNextSchedulerTick = true;
         }

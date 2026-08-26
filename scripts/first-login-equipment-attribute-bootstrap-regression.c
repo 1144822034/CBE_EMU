@@ -455,11 +455,75 @@ static int assert_group_equipment_seed(const u8 *packet, u32 length,
     return 0;
 }
 
+static int assert_grid_equipment_stage_plan(const u8 *packet, u32 length)
+{
+    const u8 *gridPayload = NULL;
+    const u8 *itemInfo = NULL;
+    u16 gridPayloadLen = 0;
+    u16 itemInfoLen = 0;
+
+    if (packet == NULL || length < 5)
+        return 1;
+    for (u8 index = 0; index < packet[4]; ++index)
+    {
+        u8 major = 0;
+        u8 kind = 0;
+        u8 subtype = 0;
+
+        if (!response_object_at(packet, length, index, &major, &kind,
+                                &subtype, &gridPayload, &gridPayloadLen))
+        {
+            fputs("could not parse group bootstrap while locating grid\n", stderr);
+            return 1;
+        }
+        if (major == 1 && kind == 30 && subtype == 21)
+            break;
+        gridPayload = NULL;
+    }
+    if (gridPayload == NULL ||
+        !vm_net_mock_get_object_entry_bytes(gridPayload, gridPayloadLen,
+                                            "iteminfo", &itemInfo,
+                                            &itemInfoLen) ||
+        itemInfo == NULL || itemInfoLen != 106 ||
+        /* First row is a normal item: zero attribute rows stay compact. */
+        itemInfo[26] != 0 ||
+        /* Second row is a +0 equipment instance: 4 future stages are
+         * installed on first construction, not added by 29/3 later. */
+        itemInfo[53] != 4)
+    {
+        fprintf(stderr,
+                "grid did not encode one compact item plus one four-stage "
+                "equipment instance: iteminfo_len=%u attr0=%u attr1=%u\n",
+                itemInfoLen,
+                itemInfo != NULL && itemInfoLen > 26 ? itemInfo[26] : 0,
+                itemInfo != NULL && itemInfoLen > 53 ? itemInfo[53] : 0);
+        return 1;
+    }
+    for (u8 stage = 0; stage < 4; ++stage)
+    {
+        u32 attr = 54u + (u32)stage * 13u;
+
+        if (itemInfo[attr] != 0 || itemInfo[attr + 1] != 1 ||
+            itemInfo[attr + 2] != (u8)((stage + 1u) * 4u) ||
+            itemInfo[attr + 3] != 0 || itemInfo[attr + 4] != 1 ||
+            itemInfo[attr + 5] == 0 || itemInfo[attr + 6] != 0 ||
+            itemInfo[attr + 7] != 1 || itemInfo[attr + 8] != 0 ||
+            itemInfo[attr + 9] != 0 || itemInfo[attr + 10] != 2 ||
+            (itemInfo[attr + 11] == 0 && itemInfo[attr + 12] == 0))
+        {
+            fprintf(stderr, "grid stage %u is missing or malformed\n", stage);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
     const u32 roleId = 910001;
     vm_net_mock_role_state *role = NULL;
     vm_mock_service_client_session *session = NULL;
+    const vm_net_mock_equipment_catalog_item *backpackEquipment = NULL;
     vm_net_mock_player_stats baseStats;
     vm_net_mock_player_stats fullStats;
     u8 selectRequest[128];
@@ -487,16 +551,40 @@ int main(void)
     role->exp = vm_net_mock_role_level_start_exp(role->level);
     role->hp = role->hpMax = 1000;
     role->mp = role->mpMax = 500;
-    role->nextBackpackSeq = 2;
+    role->nextBackpackSeq = 3;
     snprintf(role->name, sizeof(role->name), "seed-test");
     snprintf(role->scene, sizeof(role->scene), "01\xCC\xD2\xBB\xA8\xB5\xBA_01.sce");
-    role->backpackItemCount = 1;
+    role->backpackItemCount = 2;
     role->backpackItems[0].itemId = 801;
     role->backpackItems[0].seq = 1;
     role->backpackItems[0].count = 1;
     if (!equip_vital_bonus_pair(role))
     {
         fputs("could not find usable HP/MP equipment pair in catalog\n", stderr);
+        return 1;
+    }
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        if (role->equippedItems[slot].itemId != 0)
+        {
+            backpackEquipment = vm_net_mock_find_equipment_catalog_item(
+                role->equippedItems[slot].itemId);
+            break;
+        }
+    }
+    if (backpackEquipment == NULL)
+    {
+        fputs("could not select a catalog equipment item for backpack seed\n", stderr);
+        return 1;
+    }
+    role->backpackItems[1].itemId = backpackEquipment->itemId;
+    role->backpackItems[1].seq = 2;
+    role->backpackItems[1].count = 1;
+    if (!vm_net_mock_equipment_enhancement_ensure_affixes(
+            backpackEquipment, 0, &role->backpackItems[1].enhanceAffixes,
+            roleId ^ backpackEquipment->itemId ^ (2u * 0x9e3779b9u)))
+    {
+        fputs("could not create the backpack equipment stage plan\n", stderr);
         return 1;
     }
     vm_net_mock_role_build_base_player_stats(role, &baseStats);
@@ -560,7 +648,8 @@ int main(void)
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
     if (assert_group_equipment_seed(response, responseLen, roleId, true,
-                                    true) != 0)
+                                    true) != 0 ||
+        assert_grid_equipment_stage_plan(response, responseLen) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_group_type1_response(
