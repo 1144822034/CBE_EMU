@@ -1814,6 +1814,10 @@ enum
     VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX = 24,
     VM_NET_MOCK_SCENE_BATTLE_MONSTER_QUANTITY_MAX = 5,
     VM_NET_MOCK_SCENE_BATTLE_MONSTER_SPAWN_SPACING = 16,
+    /* Scene-battle drafts own their combat profile.  Keep generated IDs well
+     * clear of the shipped catalog, whose stable IDs are also valid picker
+     * templates. */
+    VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN = 2000,
     /* One SCE kind-3 record has two Actor roots, each of which can own the
      * validated maximum of 16 GIF leaves.  The node limit bounds enabled
      * records to 24, so this is the largest meaningful per-deployment list. */
@@ -1867,6 +1871,13 @@ typedef struct
     bool found;
     bool invalid;
 } vm_net_mock_scene_battle_monster_count_context;
+
+typedef struct
+{
+    u32 maximum;
+    bool found;
+    bool invalid;
+} vm_net_mock_scene_battle_monster_id_max_context;
 
 typedef struct
 {
@@ -2389,6 +2400,184 @@ static u32 vm_net_mock_scene_battle_monster_admin_list(
     return context.count;
 }
 
+static bool vm_net_mock_scene_battle_monster_id_max_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_scene_battle_monster_id_max_context *context =
+        (vm_net_mock_scene_battle_monster_id_max_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 || context->found ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->maximum) ||
+        context->maximum > 0xffffu)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_get_entry(
+    const char *scene, u32 entryId,
+    vm_net_mock_scene_battle_monster_admin_row *rowOut)
+{
+    vm_net_mock_scene_battle_monster_admin_row
+        rows[VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX];
+    u32 rowCount = 0;
+
+    if (rowOut != NULL)
+        memset(rowOut, 0, sizeof(*rowOut));
+    if (scene == NULL || entryId == 0 || rowOut == NULL)
+        return false;
+    memset(rows, 0, sizeof(rows));
+    rowCount = vm_net_mock_scene_battle_monster_admin_list(
+        scene, rows, VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX);
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].entryId == entryId)
+        {
+            *rowOut = rows[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_net_mock_scene_battle_monster_reference_monster_get(
+    u32 monsterId, vm_net_mock_monster_admin_row *rowOut)
+{
+    vm_net_mock_monster_admin_row rows[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    u32 rowCount = 0;
+
+    if (rowOut != NULL)
+        memset(rowOut, 0, sizeof(*rowOut));
+    if (monsterId == 0 || monsterId > 0xffffu || rowOut == NULL)
+        return false;
+    memset(rows, 0, sizeof(rows));
+    rowCount = vm_net_mock_monster_admin_list(
+        rows, VM_NET_MOCK_MONSTER_CATALOG_MAX);
+    if (rowCount > VM_NET_MOCK_MONSTER_CATALOG_MAX)
+        return false;
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].enemyId == monsterId)
+        {
+            *rowOut = rows[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+/* A newly configured scene battle monster owns a new stable identity.  The
+ * source picker is only a template: persisting its ID directly would make a
+ * later Monster Management edit alter the original monster everywhere else. */
+static bool vm_net_mock_scene_battle_monster_admin_choose_monster_id(
+    u32 maximumStoredId, u32 *monsterIdOut, const char **errorOut)
+{
+    u32 candidate = VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN;
+
+    if (monsterIdOut != NULL)
+        *monsterIdOut = 0;
+    if (errorOut != NULL)
+        *errorOut = "无法分配新的场景战斗怪 ID";
+    if (monsterIdOut == NULL)
+        return false;
+    if (maximumStoredId >= VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN)
+        candidate = maximumStoredId + 1u;
+    while (candidate <= 0xffffu)
+    {
+        if (vm_net_mock_monster_catalog_index(candidate) < 0)
+        {
+            *monsterIdOut = candidate;
+            if (errorOut != NULL)
+                *errorOut = "ok";
+            return true;
+        }
+        ++candidate;
+    }
+    if (errorOut != NULL)
+        *errorOut = "可分配的场景战斗怪 ID 已用尽";
+    return false;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_allocate_monster_id(
+    u32 *monsterIdOut, const char **errorOut)
+{
+    vm_net_mock_scene_battle_monster_id_max_context context;
+    char query[512];
+
+    if (monsterIdOut != NULL)
+        *monsterIdOut = 0;
+    if (errorOut != NULL)
+        *errorOut = "无法分配新的场景战斗怪 ID";
+    if (monsterIdOut == NULL || !vm_net_mock_monster_db_load() ||
+        !vm_net_mock_scene_battle_monster_schema_ensure())
+    {
+        if (errorOut != NULL)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(
+        query, sizeof(query),
+        "SELECT GREATEST("
+        "COALESCE((SELECT MAX(monster_id) FROM server_scene_battle_monsters "
+        "WHERE monster_id>=%u),%u),"
+        "COALESCE((SELECT MAX(monster_id) FROM server_monsters "
+        "WHERE monster_id>=%u),%u))",
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN,
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN - 1u,
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN,
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_CUSTOM_ID_MIN - 1u);
+    if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_id_max_row,
+                        &context) ||
+        context.invalid || !context.found)
+    {
+        if (errorOut != NULL)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    return vm_net_mock_scene_battle_monster_admin_choose_monster_id(
+        context.maximum, monsterIdOut, errorOut);
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_prepare_reference_clone(
+    const vm_net_mock_monster_admin_row *source, u32 monsterId,
+    vm_net_mock_monster_admin_row *cloneOut, const char **errorOut)
+{
+    if (source == NULL || source->enemyId == 0 || monsterId == 0 ||
+        monsterId > 0xffffu || source->enemyId == monsterId || cloneOut == NULL)
+    {
+        if (errorOut != NULL)
+            *errorOut = "参考怪物或新怪物 ID 无效";
+        return false;
+    }
+    *cloneOut = *source;
+    cloneOut->enemyId = monsterId;
+    cloneOut->overridden = false;
+    if (errorOut != NULL)
+        *errorOut = "ok";
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_clone_reference(
+    const vm_net_mock_monster_admin_row *source, u32 monsterId,
+    const char **errorOut)
+{
+    vm_net_mock_monster_admin_row clone;
+
+    memset(&clone, 0, sizeof(clone));
+    if (!vm_net_mock_scene_battle_monster_admin_prepare_reference_clone(
+            source, monsterId, &clone, errorOut))
+    {
+        return false;
+    }
+    return vm_net_mock_monster_admin_save(&clone, errorOut);
+}
+
 static bool vm_net_mock_scene_battle_monster_deployed_source_matches(
     const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
     u32 rowCount);
@@ -2683,6 +2872,33 @@ static bool vm_net_mock_scene_battle_monster_admin_delete(
     vm_net_mock_monster_catalog_invalidate();
     if (errorOut)
         *errorOut = "ok";
+    return true;
+}
+
+/* New identities are reserved by inserting the draft first so Monster
+ * Management can persist its independent profile.  If copying the selected
+ * template fails afterwards, remove that exact new ID rather than leaving a
+ * half-created scene configuration behind. */
+static bool vm_net_mock_scene_battle_monster_admin_delete_generated(
+    const char *scene, u32 monsterId)
+{
+    char sceneHex[129];
+    char query[384];
+
+    if (scene == NULL || monsterId == 0 || monsterId > 0xffffu ||
+        !vm_net_mock_scene_battle_monster_schema_ensure() ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_scene_battle_monsters "
+             "WHERE scene=X'%s' AND monster_id=%u",
+             sceneHex, monsterId);
+    if (!vm_mysql_exec(query))
+        return false;
+    vm_net_mock_monster_catalog_invalidate();
     return true;
 }
 
