@@ -58,6 +58,7 @@ import { ArenaHud } from "./ui/ArenaHud";
 import { ArenaPanel } from "./ui/ArenaPanel";
 import { WagerPanel } from "./ui/WagerPanel";
 import { LadderPanel } from "./ui/LadderPanel";
+import { GuessPanel } from "./ui/GuessPanel";
 import { AuctionPanel } from "./ui/AuctionPanel";
 import {
   EntertainmentPanel,
@@ -291,6 +292,26 @@ function wagerMsgTip(code: string | undefined, okText: string): string {
     pending: "等待队友确认",
     fight: "开战",
     "start-fail": "开战失败，已退挑战方押金",
+  };
+  return map[m] ?? `失败:${m}`;
+}
+
+/** Map server guess short codes to Chinese panel tips. */
+function guessMsgTip(code: string | undefined, okText: string): string {
+  const m = (code || "").trim();
+  if (!m || m === "ok") return okText;
+  const map: Record<string, string> = {
+    "no-role": "角色无效",
+    "bad-choice": "选项无效",
+    "bad-stake": "押金须1-999金",
+    round: "轮次异常",
+    locked: "开奖前30秒禁止押注",
+    balance: "金币不足",
+    encode: "编码失败",
+    insert: "押注保存失败",
+    nothing: "暂无可领奖励",
+    update: "领取失败",
+    conflict: "冲突，请重试",
   };
   return map[m] ?? `失败:${m}`;
 }
@@ -652,6 +673,7 @@ async function main(): Promise<void> {
   const arenaPanel = new ArenaPanel();
   const wagerPanel = new WagerPanel();
   const ladderPanel = new LadderPanel();
+  const guessPanel = new GuessPanel();
   const auctionPanel = new AuctionPanel();
   const entertainPanel = new EntertainmentPanel();
   const entertainWeb = new EntertainmentWebLayer();
@@ -701,6 +723,7 @@ async function main(): Promise<void> {
   arenaPanel.visible = false;
   wagerPanel.visible = false;
   ladderPanel.visible = false;
+  guessPanel.visible = false;
   auctionPanel.visible = false;
   entertainPanel.visible = false;
   wingPanel.visible = false;
@@ -741,6 +764,7 @@ async function main(): Promise<void> {
     arenaPanel,
     wagerPanel,
     ladderPanel,
+    guessPanel,
     auctionPanel,
     entertainPanel,
     wingPanel,
@@ -759,6 +783,7 @@ async function main(): Promise<void> {
   arenaPanel.zIndex = 55;
   wagerPanel.zIndex = 55;
   ladderPanel.zIndex = 55;
+  guessPanel.zIndex = 55;
   auctionPanel.zIndex = 55;
   entertainPanel.zIndex = 56;
   wingPanel.zIndex = 56;
@@ -776,6 +801,7 @@ async function main(): Promise<void> {
       auctionPanel,
       wagerPanel,
       ladderPanel,
+      guessPanel,
       arenaPanel,
       enhanceUi,
     washUi,
@@ -815,6 +841,7 @@ async function main(): Promise<void> {
       arenaPanel.visible ||
       wagerPanel.visible ||
       ladderPanel.visible ||
+      guessPanel.visible ||
       entertainPanel.visible ||
       wingPanel.visible ||
       mountPanel.visible ||
@@ -1201,6 +1228,102 @@ async function main(): Promise<void> {
     }
   };
 
+  let guessHistoryPage = 0;
+
+  const refreshGuessPanel = async (page = guessHistoryPage) => {
+    const board = await session.fetchGuessBoard(page);
+    guessHistoryPage = board.pageIndex;
+    if (guessPanel.visible) {
+      guessPanel.setBoard(board.status, board.rows, board.pageIndex, board.hasMore);
+      shell.setSoftkeys(guessPanel.softkeys());
+    }
+    return board;
+  };
+
+  const openGuessPanel = async () => {
+    dialog.hide();
+    closeApproach(false);
+    entertainPanel.close();
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    guessHistoryPage = 0;
+    const board = await session.fetchGuessBoard(0);
+    dialog.hide();
+    closeApproach(false);
+    guessHistoryPage = board.pageIndex;
+    guessPanel.open(board.status, board.rows, board.pageIndex, board.hasMore);
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(guessPanel.softkeys());
+    setChromeStatus("猜猜看");
+    if (!board.status) guessPanel.showTip("状态获取失败");
+  };
+
+  guessPanel.onAction = (action, betId) => {
+    if (action === "close") {
+      guessPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus("");
+      return;
+    }
+    if (action === "refresh") {
+      void refreshGuessPanel(guessHistoryPage).then((board) => {
+        if (!board.status) guessPanel.showTip("刷新失败");
+      });
+      return;
+    }
+    if (action === "prev_page") {
+      if (guessHistoryPage <= 0) return;
+      guessHistoryPage -= 1;
+      void refreshGuessPanel(guessHistoryPage).then(() => {
+        guessPanel.showTip(`第${guessHistoryPage + 1}页`);
+      });
+      return;
+    }
+    if (action === "next_page") {
+      guessHistoryPage += 1;
+      void refreshGuessPanel(guessHistoryPage).then((board) => {
+        if (board.rows.length === 0) {
+          guessHistoryPage = Math.max(0, guessHistoryPage - 1);
+          guessPanel.showTip("已是最后一页");
+        } else {
+          guessPanel.showTip(`第${guessHistoryPage + 1}页`);
+        }
+      });
+      return;
+    }
+    if (action === "bet") {
+      void session
+        .guessBet(guessPanel.selectedChoice, guessPanel.stakeGoldAmount)
+        .then(async (r) => {
+          const tip =
+            r?.result === 1
+              ? guessMsgTip(r.message, "押注成功")
+              : guessMsgTip(r?.message, "押注失败");
+          await refreshGuessPanel(guessHistoryPage);
+          guessPanel.showTip(tip);
+          shell.setSoftkeys(guessPanel.softkeys());
+        });
+      return;
+    }
+    if (action === "claim") {
+      void session.guessClaim(betId ?? 0).then(async (r) => {
+        const tip =
+          r?.result === 1
+            ? guessMsgTip(r.message, betId ? "领取成功" : "已全部领取")
+            : guessMsgTip(r?.message, "领取失败");
+        await refreshGuessPanel(guessHistoryPage);
+        guessPanel.showTip(tip);
+        shell.setSoftkeys(guessPanel.softkeys());
+      });
+    }
+  };
+
   const showPhase = (p: Phase) => {
     phase = p;
     title.visible = p === "splash" || p === "login" || p === "register" || p === "servers";
@@ -1281,6 +1404,7 @@ async function main(): Promise<void> {
       if (auctionPanel.visible) auctionPanel.close();
       if (wagerPanel.visible) wagerPanel.close();
       if (ladderPanel.visible) ladderPanel.close();
+      if (guessPanel.visible) guessPanel.close();
       if (entertainPanel.visible) entertainPanel.close();
       if (wingPanel.visible) wingPanel.close();
       if (mountPanel.visible) mountPanel.close();
@@ -2600,6 +2724,7 @@ async function main(): Promise<void> {
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     entertainPanel.open();
@@ -2640,12 +2765,20 @@ async function main(): Promise<void> {
     );
   };
 
-  entertainPanel.onPick = (entry) => openEntertainmentWeb(entry);
+  entertainPanel.onPick = (entry) => {
+    if (entry.nativePanel === "guess") {
+      void openGuessPanel();
+      return;
+    }
+    openEntertainmentWeb(entry);
+  };
   entertainPanel.onClose = () => {
     syncWorldWalkInput();
     if (phase === "battle") applyBattleSoftkeys();
-    else shell.setSoftkeys({ left: "菜单", right: "菜单" });
-    setChromeStatus(entertainWeb.isMinimized() ? entertainMinimizedStatus() : "");
+    else if (!guessPanel.visible) shell.setSoftkeys({ left: "菜单", right: "菜单" });
+    if (!guessPanel.visible) {
+      setChromeStatus(entertainWeb.isMinimized() ? entertainMinimizedStatus() : "");
+    }
   };
   entertainWeb.onClose = () => {
     syncWorldWalkInput();
@@ -2698,6 +2831,14 @@ async function main(): Promise<void> {
       );
       return;
     }
+    if (guessPanel.visible) {
+      guessPanel.close();
+      syncWorldWalkInput();
+      if (phase === "battle") applyBattleSoftkeys();
+      else shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus("");
+      return;
+    }
     openEntertainmentPanel();
   };
 
@@ -2707,6 +2848,7 @@ async function main(): Promise<void> {
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
@@ -2752,6 +2894,7 @@ async function main(): Promise<void> {
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (mountPanel.visible) mountPanel.close();
@@ -2805,6 +2948,7 @@ async function main(): Promise<void> {
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
@@ -5008,7 +5152,7 @@ dialog.hide();
   hud.onHome = () => cycleMapUi();
   hud.onChat = () => {
     if (phase !== "world" || session.inBattle) return;
-    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible) return;
+    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible || guessPanel.visible) return;
     showPhase("chat");
     chatPanel.open(hud.getChatEntries());
     setChromeStatus("聊天 · 点输入框打字 · ←→切换频道");
@@ -5196,6 +5340,25 @@ dialog.hide();
         }
         return;
       }
+      if (guessPanel.visible) {
+        if (which === "left") {
+          const sk = guessPanel.softkeys();
+          if (sk.left === "押注") guessPanel.confirm();
+          else void refreshGuessPanel(guessHistoryPage);
+        }
+        if (which === "center") {
+          guessPanel.confirm();
+          shell.setSoftkeys(guessPanel.softkeys());
+        }
+        if (which === "right") {
+          if (guessPanel.dismissTipOnSoftRight()) return;
+          guessPanel.close();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+          setChromeStatus("");
+        }
+        return;
+      }
       if (approach.open) {
         if (which === "left") approach.confirm();
         if (which === "right") approach.cancel();
@@ -5308,6 +5471,11 @@ dialog.hide();
     }
     if (phase === "world" && ladderPanel.visible) {
       ladderPanel.confirm();
+      return;
+    }
+    if (phase === "world" && guessPanel.visible) {
+      guessPanel.confirm();
+      shell.setSoftkeys(guessPanel.softkeys());
       return;
     }
     if (phase === "world" && arenaPanel.visible) {
@@ -5447,6 +5615,16 @@ dialog.hide();
     if (phase === "world" && entertainPanel.visible) {
       if (!down) return;
       if (dir === "up" || dir === "down") entertainPanel.move(dir === "up" ? -1 : 1);
+      return;
+    }
+    if (phase === "world" && guessPanel.visible) {
+      if (!down) return;
+      if (dir === "left" || dir === "right") {
+        guessPanel.adjustStake(dir === "left" ? -1 : 1);
+        shell.setSoftkeys(guessPanel.softkeys());
+      } else {
+        guessPanel.move(dir === "up" ? -1 : 1);
+      }
       return;
     }
     if (phase === "world" && (arenaPanel.visible || wagerPanel.visible)) {
@@ -5619,6 +5797,12 @@ dialog.hide();
         e.preventDefault();
       }
       return;
+    }
+    if (guessPanel.visible && guessPanel.currentTab === "bet") {
+      if (guessPanel.handleStakeKey(e.key)) {
+        e.preventDefault();
+        return;
+      }
     }
     if (entertainPanel.visible) {
       if (k === "arrowup" || k === "w") {
@@ -6318,6 +6502,7 @@ dialog.hide();
         else if (auctionPanel.visible) shell.setSoftkeys(auctionPanel.softkeys());
         else if (wagerPanel.visible) shell.setSoftkeys(wagerPanel.softkeys());
         else if (ladderPanel.visible) shell.setSoftkeys(ladderPanel.softkeys());
+        else if (guessPanel.visible) shell.setSoftkeys(guessPanel.softkeys());
         else if (arenaPanel.visible) shell.setSoftkeys(arenaPanel.softkeys());
         else shell.setSoftkeys({ left: "菜单", right: "菜单" });
       } else if (phase === "menu") {

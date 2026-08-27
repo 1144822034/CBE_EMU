@@ -8110,6 +8110,12 @@ static void vm_net_mock_chest_announce_flush_pending(
     case 524: /* 黄金宝箱 */
         chestNameGbk = "\xBB\xC6\xBD\xF0\xB1\xA6\xCF\xE4";
         break;
+    case 532: /* 玄晶宝箱 */
+        chestNameGbk = "\xD0\xFE\xBE\xA7\xB1\xA6\xCF\xE4";
+        break;
+    case 534: /* 幻彩宝箱 */
+        chestNameGbk = "\xBB\xC3\xB2\xCA\xB1\xA6\xCF\xE4";
+        break;
     default: /* 宝箱 */
         chestNameGbk = "\xB1\xA6\xCF\xE4";
         break;

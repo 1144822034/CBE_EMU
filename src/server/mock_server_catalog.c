@@ -2375,6 +2375,10 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 522: /* bronze/silver/gold chests: 1/7/15 + matching key */
     case 523:
     case 524:
+    case 532: /* 玄晶宝箱 / 幻彩宝箱 + matching key */
+    case 534:
+    case 533: /* 玄晶钥匙 / 幻彩钥匙 */
+    case 535:
     case 809:
     case 810:
     case 811:
@@ -6061,7 +6065,7 @@ static u32 vm_net_mock_build_practise_pill_followup_response(
  * Reward pools (isolated per chest — never mixed):
  *   - MySQL server_chest_rewards rows with matching chest_item_id only.
  *   - Weighted pick among enabled rows for that chest.
- *   - Empty/disabled pool => result=6 (all of 522/523/524).
+ *   - Empty/disabled pool => result=6 (522/523/524/532/534).
  *   - Admin may seed a chest via import-legacy, but open-time never falls
  *     back to the shared shop-catalog rule set.
  */
@@ -6070,14 +6074,18 @@ enum
     VM_NET_MOCK_BRONZE_CHEST_ITEM_ID = 522,
     VM_NET_MOCK_SILVER_CHEST_ITEM_ID = 523,
     VM_NET_MOCK_GOLD_CHEST_ITEM_ID = 524,
+    VM_NET_MOCK_XUANJING_CHEST_ITEM_ID = 532,
+    VM_NET_MOCK_HUANCAI_CHEST_ITEM_ID = 534,
     VM_NET_MOCK_BRONZE_CHEST_KEY_ID = 813,
     VM_NET_MOCK_SILVER_CHEST_KEY_ID = 814,
     VM_NET_MOCK_GOLD_CHEST_KEY_ID = 815,
-    VM_NET_MOCK_CHEST_KIND_COUNT = 3,
+    VM_NET_MOCK_XUANJING_CHEST_KEY_ID = 533,
+    VM_NET_MOCK_HUANCAI_CHEST_KEY_ID = 535,
+    VM_NET_MOCK_CHEST_KIND_COUNT = 5,
     /*
-     * Per-chest pools — never share one global row cap across 522/523/524.
-     * Old flat load (522 then 523 then 524) could leave 523/524 truncated in
-     * memory while MySQL still had the full table (523 always rolling 910).
+     * Per-chest pools — never share one global row cap across chest kinds.
+     * Old flat load could leave later chests truncated in memory while MySQL
+     * still had the full table.
      */
     VM_NET_MOCK_CHEST_REWARD_MAX_ROWS_PER_CHEST = 1536
 };
@@ -6095,6 +6103,8 @@ static const u32 g_vm_net_mock_chest_reward_chest_ids[VM_NET_MOCK_CHEST_KIND_COU
         VM_NET_MOCK_BRONZE_CHEST_ITEM_ID,
         VM_NET_MOCK_SILVER_CHEST_ITEM_ID,
         VM_NET_MOCK_GOLD_CHEST_ITEM_ID,
+        VM_NET_MOCK_XUANJING_CHEST_ITEM_ID,
+        VM_NET_MOCK_HUANCAI_CHEST_ITEM_ID,
     };
 
 static u32 g_vm_net_mock_chest_open_rng = 0;
@@ -6160,6 +6170,10 @@ static u32 vm_net_mock_chest_key_for_box(u32 boxItemId)
         return VM_NET_MOCK_SILVER_CHEST_KEY_ID;
     case VM_NET_MOCK_GOLD_CHEST_ITEM_ID:
         return VM_NET_MOCK_GOLD_CHEST_KEY_ID;
+    case VM_NET_MOCK_XUANJING_CHEST_ITEM_ID:
+        return VM_NET_MOCK_XUANJING_CHEST_KEY_ID;
+    case VM_NET_MOCK_HUANCAI_CHEST_ITEM_ID:
+        return VM_NET_MOCK_HUANCAI_CHEST_KEY_ID;
     default:
         return 0;
     }
@@ -6180,6 +6194,10 @@ static const char *vm_net_mock_chest_box_label_utf8(u32 boxItemId)
         return "白银宝箱";
     case VM_NET_MOCK_GOLD_CHEST_ITEM_ID:
         return "黄金宝箱";
+    case VM_NET_MOCK_XUANJING_CHEST_ITEM_ID:
+        return "玄晶宝箱";
+    case VM_NET_MOCK_HUANCAI_CHEST_ITEM_ID:
+        return "幻彩宝箱";
     default:
         return "宝箱";
     }
@@ -6713,6 +6731,88 @@ static bool vm_net_mock_chest_reward_admin_import_legacy_defaults(
     printf("[info][mock-admin] chest_reward_import_legacy chest=%u imported=%u\n",
            chestItemId, imported);
     return true;
+}
+
+/*
+ * Seed 532 with 901..908 or 534 with 908..916 (equal weight=1 each).
+ */
+static bool vm_net_mock_chest_reward_admin_import_crystal_defaults(
+    u32 chestItemId, const char **errorOut)
+{
+    u32 first = 0;
+    u32 last = 0;
+    u32 imported = 0;
+    char query[512];
+
+    if (errorOut)
+        *errorOut = "宝箱参数无效";
+    if (chestItemId == VM_NET_MOCK_XUANJING_CHEST_ITEM_ID)
+    {
+        first = (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST;
+        last = (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST + 7u;
+    }
+    else if (chestItemId == VM_NET_MOCK_HUANCAI_CHEST_ITEM_ID)
+    {
+        first = (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST + 7u;
+        last = (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST;
+    }
+    else
+    {
+        if (errorOut)
+            *errorOut = "仅玄晶/幻彩宝箱可导入玄晶默认池";
+        return false;
+    }
+    if (!g_vm_net_mock_chest_reward_db_valid &&
+        !vm_net_mock_chest_reward_admin_reload(errorOut))
+        return false;
+    (void)vm_net_mock_load_shop_catalog();
+    for (u32 itemId = first; itemId <= last; ++itemId)
+    {
+        if (vm_net_mock_find_shop_catalog_item(itemId) == NULL)
+            continue;
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_chest_rewards"
+                 "(chest_item_id,reward_item_id,weight,enabled) "
+                 "VALUES(%u,%u,1,1) "
+                 "ON DUPLICATE KEY UPDATE weight=VALUES(weight),"
+                 "enabled=VALUES(enabled)",
+                 chestItemId, itemId);
+        if (!vm_mysql_exec(query))
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+        ++imported;
+    }
+    if (!vm_net_mock_chest_reward_admin_reload(errorOut))
+        return false;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] chest_reward_import_crystal chest=%u imported=%u "
+           "range=%u..%u\n",
+           chestItemId, imported, first, last);
+    return true;
+}
+
+static u64 vm_net_mock_chest_reward_enabled_weight_total(u32 chestItemId)
+{
+    u64 total = 0;
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+    u32 rowCount = 0;
+
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+        return 0;
+    rowCount = g_vm_net_mock_chest_reward_count_by_chest[kind];
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        const vm_net_mock_chest_reward_row *row =
+            &g_vm_net_mock_chest_rewards[kind][i];
+        if (row->enabled == 0 || row->weight == 0)
+            continue;
+        total += row->weight;
+    }
+    return total;
 }
 
 static bool vm_net_mock_chest_roll_reward_from_db(u32 chestItemId,

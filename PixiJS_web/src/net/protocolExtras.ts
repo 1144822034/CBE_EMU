@@ -559,6 +559,8 @@ export const CHEST_KEY_BY_BOX: Readonly<Record<number, number>> = {
   522: 813,
   523: 814,
   524: 815,
+  532: 533,
+  534: 535,
 };
 
 export function isChestBoxItem(itemId: number): boolean {
@@ -566,7 +568,13 @@ export function isChestBoxItem(itemId: number): boolean {
 }
 
 export function isChestKeyItem(itemId: number): boolean {
-  return itemId === 813 || itemId === 814 || itemId === 815;
+  return (
+    itemId === 813 ||
+    itemId === 814 ||
+    itemId === 815 ||
+    itemId === 533 ||
+    itemId === 535
+  );
 }
 
 /** Official CBE exp cards → 1/7/30; custom 845 stays on generic 7/1. */

@@ -28,10 +28,18 @@ export type EntertainmentEntry = {
   videoApiJson?: boolean;
   /** Wider inset for music players (prev/next / lyrics hit targets). */
   panel?: "mall" | "wide";
+  /** Open in-game panel instead of web overlay. */
+  nativePanel?: "guess";
 };
 
 /** Same catalog as 银河西游 时辰.lua qipai / music / video entries. */
 export const ENTERTAINMENT_ENTRIES: EntertainmentEntry[] = [
+  {
+    id: "guess",
+    label: "猜猜看",
+    url: "",
+    nativePanel: "guess",
+  },
   {
     id: "qipai",
     label: "棋牌选择",

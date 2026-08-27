@@ -41,7 +41,9 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
     static const u32 chestIds[] = {
         VM_NET_MOCK_BRONZE_CHEST_ITEM_ID,
         VM_NET_MOCK_SILVER_CHEST_ITEM_ID,
-        VM_NET_MOCK_GOLD_CHEST_ITEM_ID
+        VM_NET_MOCK_GOLD_CHEST_ITEM_ID,
+        VM_NET_MOCK_XUANJING_CHEST_ITEM_ID,
+        VM_NET_MOCK_HUANCAI_CHEST_ITEM_ID
     };
 
     vm_mock_admin_text_init(&page, response, responseCap);
@@ -102,9 +104,10 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         "margin-right:6px}"
         "</style></head><body><main class=\"wrap\"><header><div>"
         "<h1>宝箱奖励管理</h1>"
-        "<p class=\"sub\">配置青铜/白银/黄金宝箱开出物品；保存后立即生效，无需重启。"
-        "权重越大越容易抽中。三种宝箱各自按 chest_item_id 隔离抽取，互不混用；"
-        "对应箱/钥：522↔813、523↔814、524↔815。任一宝箱无启用行时开箱失败。</p></div></header>"
+        "<p class=\"sub\">配置青铜/白银/黄金/玄晶/幻彩宝箱开出物品；保存后立即生效，无需重启。"
+        "权重越大越容易抽中。各宝箱按 chest_item_id 隔离抽取，互不混用；"
+        "对应箱/钥：522↔813、523↔814、524↔815、532↔533、534↔535。"
+        "任一宝箱无启用行时开箱失败。</p></div></header>"
         "<nav class=\"tabs\">"
         "<a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
@@ -156,14 +159,28 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         "<form class=\"inline\" method=\"post\" action=\"/action\">"
         "<input type=\"hidden\" name=\"action\" value=\"chest-import-legacy\">"
         "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
-        "<button type=\"submit\">导入旧黄金默认池到当前宝箱</button></form>"
+        "<button type=\"submit\">导入旧黄金默认池到当前宝箱</button></form>",
+        chestItemId);
+    if (chestItemId == VM_NET_MOCK_XUANJING_CHEST_ITEM_ID ||
+        chestItemId == VM_NET_MOCK_HUANCAI_CHEST_ITEM_ID)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<form class=\"inline\" method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" value=\"chest-import-crystal\">"
+            "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
+            "<button type=\"submit\">导入玄晶默认池（532→1-8级 / 534→8-16级）</button></form>",
+            chestItemId);
+    }
+    vm_mock_admin_text_appendf(
+        &page,
         "<form class=\"inline\" method=\"post\" action=\"/action\" "
         "onsubmit=\"return confirm('清空当前宝箱全部奖励？');\">"
         "<input type=\"hidden\" name=\"action\" value=\"chest-clear\">"
         "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
         "<button class=\"danger\" type=\"submit\">清空当前宝箱配置</button></form>"
         "</section>",
-        chestItemId, chestItemId);
+        chestItemId);
 
     {
         bool itemCats[256];
@@ -278,102 +295,125 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
     vm_mock_admin_render_item_picker_modal(&page);
     vm_mock_admin_text_appendf(&page, "</section>");
 
-    vm_mock_admin_text_appendf(
-        &page,
-        "<section class=\"card\"><h2>当前奖励池</h2>"
-        "<table><thead><tr><th>物品</th><th>分类/品质</th><th>权重</th><th>状态</th>"
-        "<th>操作</th></tr></thead><tbody>");
-    if (rowCount == 0)
     {
-        vm_mock_admin_text_appendf(
-            &page,
-            "<tr><td colspan=\"5\" class=\"muted\">尚无配置行。"
-            "可点「导入旧黄金默认池」或手动添加。</td></tr>");
-    }
-    for (u32 i = rowStart; i < rowEnd; ++i)
-    {
-        const vm_net_mock_chest_reward_row *row =
-            vm_net_mock_chest_reward_admin_row_at(chestItemId, i);
-        const vm_net_mock_shop_catalog_item *shop = NULL;
-        const vm_net_mock_equipment_catalog_item *equip = NULL;
-        const char *meta = "-";
+        u64 enabledWeightTotal =
+            vm_net_mock_chest_reward_enabled_weight_total(chestItemId);
 
-        if (row == NULL)
-            continue;
-        shop = vm_net_mock_find_shop_catalog_item(row->rewardItemId);
-        memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
-        if (shop != NULL && shop->name[0] != 0)
-            vm_net_mock_gbk_label_to_utf8(shop->name, itemNameUtf8,
-                                          sizeof(itemNameUtf8));
-        vm_mock_admin_text_appendf(&page, "<tr><td>#%u ", row->rewardItemId);
-        if (itemNameUtf8[0] != 0)
-            vm_mock_admin_text_append_html(&page, itemNameUtf8);
-        else
-            vm_mock_admin_text_appendf(&page, "<span class=\"muted\">未知</span>");
-        vm_mock_admin_text_appendf(&page, "</td><td>");
-        if (shop != NULL && shop->isEquip)
-        {
-            equip = vm_net_mock_find_equipment_catalog_item(row->rewardItemId);
-            vm_mock_admin_text_appendf(
-                &page, "%s · 品质%u",
-                vm_mock_admin_item_category_name(true, shop->category),
-                equip != NULL ? equip->quality : 0);
-        }
-        else if (shop != NULL)
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>当前奖励池</h2>"
+            "<table><thead><tr><th>物品</th><th>分类/品质</th><th>权重</th>"
+            "<th>概率</th><th>状态</th><th>操作</th></tr></thead><tbody>");
+        if (rowCount == 0)
         {
             vm_mock_admin_text_appendf(
-                &page, "%s",
-                vm_mock_admin_item_category_name(false, shop->category));
+                &page,
+                "<tr><td colspan=\"6\" class=\"muted\">尚无配置行。"
+                "可点「导入旧黄金默认池」「导入玄晶默认池」或手动添加。</td></tr>");
         }
-        else
+        for (u32 i = rowStart; i < rowEnd; ++i)
         {
-            vm_mock_admin_text_appendf(&page, "%s", meta);
+            const vm_net_mock_chest_reward_row *row =
+                vm_net_mock_chest_reward_admin_row_at(chestItemId, i);
+            const vm_net_mock_shop_catalog_item *shop = NULL;
+            const vm_net_mock_equipment_catalog_item *equip = NULL;
+            const char *meta = "-";
+            char probText[32];
+
+            memset(probText, 0, sizeof(probText));
+            if (row == NULL)
+                continue;
+            if (row->enabled != 0 && row->weight != 0 && enabledWeightTotal != 0)
+            {
+                double pct =
+                    ((double)row->weight * 100.0) / (double)enabledWeightTotal;
+                snprintf(probText, sizeof(probText), "%.2f%%", pct);
+            }
+            else if (row->enabled != 0 && enabledWeightTotal == 0)
+            {
+                snprintf(probText, sizeof(probText), "-");
+            }
+            else
+            {
+                snprintf(probText, sizeof(probText), "0.00%%");
+            }
+            shop = vm_net_mock_find_shop_catalog_item(row->rewardItemId);
+            memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+            if (shop != NULL && shop->name[0] != 0)
+                vm_net_mock_gbk_label_to_utf8(shop->name, itemNameUtf8,
+                                              sizeof(itemNameUtf8));
+            vm_mock_admin_text_appendf(&page, "<tr><td>#%u ", row->rewardItemId);
+            if (itemNameUtf8[0] != 0)
+                vm_mock_admin_text_append_html(&page, itemNameUtf8);
+            else
+                vm_mock_admin_text_appendf(&page, "<span class=\"muted\">未知</span>");
+            vm_mock_admin_text_appendf(&page, "</td><td>");
+            if (shop != NULL && shop->isEquip)
+            {
+                equip = vm_net_mock_find_equipment_catalog_item(row->rewardItemId);
+                vm_mock_admin_text_appendf(
+                    &page, "%s · 品质%u",
+                    vm_mock_admin_item_category_name(true, shop->category),
+                    equip != NULL ? equip->quality : 0);
+            }
+            else if (shop != NULL)
+            {
+                vm_mock_admin_text_appendf(
+                    &page, "%s",
+                    vm_mock_admin_item_category_name(false, shop->category));
+            }
+            else
+            {
+                vm_mock_admin_text_appendf(&page, "%s", meta);
+            }
+            vm_mock_admin_text_appendf(
+                &page,
+                "</td><td>"
+                "<form class=\"inline\" method=\"post\" action=\"/action\">"
+                "<input type=\"hidden\" name=\"action\" value=\"chest-upsert\">"
+                "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
+                "<input type=\"hidden\" name=\"reward\" value=\"%u\">"
+                "<input type=\"number\" name=\"weight\" min=\"1\" max=\"1000000\" "
+                "value=\"%u\" style=\"width:90px\" required>"
+                "<select name=\"enabled\">"
+                "<option value=\"1\"%s>启用</option>"
+                "<option value=\"0\"%s>禁用</option></select>"
+                "<button type=\"submit\">更新</button></form></td><td>%s</td><td>%s</td><td>"
+                "<form method=\"post\" action=\"/action\" "
+                "onsubmit=\"return confirm('删除该奖励？');\">"
+                "<input type=\"hidden\" name=\"action\" value=\"chest-delete\">"
+                "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
+                "<input type=\"hidden\" name=\"reward\" value=\"%u\">"
+                "<button class=\"danger\" type=\"submit\">删除</button></form>"
+                "</td></tr>",
+                chestItemId, row->rewardItemId, row->weight,
+                row->enabled ? " selected" : "",
+                row->enabled ? "" : " selected",
+                probText,
+                row->enabled ? "启用" : "禁用",
+                chestItemId, row->rewardItemId);
         }
         vm_mock_admin_text_appendf(
             &page,
-            "</td><td>"
-            "<form class=\"inline\" method=\"post\" action=\"/action\">"
-            "<input type=\"hidden\" name=\"action\" value=\"chest-upsert\">"
-            "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
-            "<input type=\"hidden\" name=\"reward\" value=\"%u\">"
-            "<input type=\"number\" name=\"weight\" min=\"1\" max=\"1000000\" "
-            "value=\"%u\" style=\"width:90px\" required>"
-            "<select name=\"enabled\">"
-            "<option value=\"1\"%s>启用</option>"
-            "<option value=\"0\"%s>禁用</option></select>"
-            "<button type=\"submit\">更新</button></form></td><td>%s</td><td>"
-            "<form method=\"post\" action=\"/action\" "
-            "onsubmit=\"return confirm('删除该奖励？');\">"
-            "<input type=\"hidden\" name=\"action\" value=\"chest-delete\">"
-            "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
-            "<input type=\"hidden\" name=\"reward\" value=\"%u\">"
-            "<button class=\"danger\" type=\"submit\">删除</button></form>"
-            "</td></tr>",
-            chestItemId, row->rewardItemId, row->weight,
-            row->enabled ? " selected" : "",
-            row->enabled ? "" : " selected",
-            row->enabled ? "启用" : "禁用",
-            chestItemId, row->rewardItemId);
+            "</tbody></table><p class=\"muted\">第 %u / %u 页，本页 %u 行。",
+            pageNumber, pageCount, rowEnd > rowStart ? (rowEnd - rowStart) : 0);
+        if (pageNumber > 1)
+            vm_mock_admin_text_appendf(
+                &page,
+                " <a href=\"/?tab=chests&amp;chest=%u&amp;page=%u\">上一页</a>",
+                chestItemId, pageNumber - 1);
+        if (pageNumber < pageCount)
+            vm_mock_admin_text_appendf(
+                &page,
+                " <a href=\"/?tab=chests&amp;chest=%u&amp;page=%u\">下一页</a>",
+                chestItemId, pageNumber + 1);
+        vm_mock_admin_text_appendf(
+            &page,
+            "</p><p class=\"muted\">表：MySQL <code>server_chest_rewards</code>。"
+            "开箱协议仍是 1/7/15；箱/钥配对 522↔813、523↔814、524↔815、"
+            "532↔533、534↔535。概率 = 启用行权重 / 启用权重总和。</p>"
+            "</section></main><script src=\"/admin.js?v=4\" defer></script></body></html>");
     }
-    vm_mock_admin_text_appendf(
-        &page,
-        "</tbody></table><p class=\"muted\">第 %u / %u 页，本页 %u 行。",
-        pageNumber, pageCount, rowEnd > rowStart ? (rowEnd - rowStart) : 0);
-    if (pageNumber > 1)
-        vm_mock_admin_text_appendf(
-            &page,
-            " <a href=\"/?tab=chests&amp;chest=%u&amp;page=%u\">上一页</a>",
-            chestItemId, pageNumber - 1);
-    if (pageNumber < pageCount)
-        vm_mock_admin_text_appendf(
-            &page,
-            " <a href=\"/?tab=chests&amp;chest=%u&amp;page=%u\">下一页</a>",
-            chestItemId, pageNumber + 1);
-    vm_mock_admin_text_appendf(
-        &page,
-        "</p><p class=\"muted\">表：MySQL <code>server_chest_rewards</code>。"
-        "开箱协议仍是 1/7/15；箱/钥配对 522↔813、523↔814、524↔815。</p>"
-        "</section></main><script src=\"/admin.js?v=4\" defer></script></body></html>");
 
     if (page.truncated)
         snprintf(response, responseCap,
@@ -408,6 +448,19 @@ static void vm_mock_admin_handle_chest_action(vm_mock_service_socket client,
         }
         vm_mock_admin_redirect_chests(client, chestItemId, "ok",
                                       "已导入旧默认池并热加载");
+        return;
+    }
+    if (strcmp(action, "chest-import-crystal") == 0)
+    {
+        if (!vm_net_mock_chest_reward_admin_import_crystal_defaults(chestItemId,
+                                                                    &error))
+        {
+            vm_mock_admin_redirect_chests(client, chestItemId, "error",
+                                          error ? error : "导入失败");
+            return;
+        }
+        vm_mock_admin_redirect_chests(client, chestItemId, "ok",
+                                      "已导入玄晶默认池并热加载");
         return;
     }
     if (strcmp(action, "chest-clear") == 0)

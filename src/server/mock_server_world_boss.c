@@ -478,6 +478,101 @@ u32 vm_mock_world_boss_runtime_status(void)
     return (u32)g_vm_mock_world_boss_rt.status;
 }
 
+void vm_mock_world_boss_admin_runtime_get(u8 *statusOut, char *sceneOut,
+                                          size_t sceneCap, u16 *xOut, u16 *yOut)
+{
+    if (statusOut)
+        *statusOut = g_vm_mock_world_boss_rt.status;
+    if (sceneOut != NULL && sceneCap > 0)
+        snprintf(sceneOut, sceneCap, "%s", g_vm_mock_world_boss_rt.scene);
+    if (xOut)
+        *xOut = g_vm_mock_world_boss_rt.x;
+    if (yOut)
+        *yOut = g_vm_mock_world_boss_rt.y;
+}
+
+static bool vm_mock_world_boss_admin_pick_preview_scene(char *msgOut, size_t msgCap)
+{
+    char scene[64];
+
+    if (!vm_mock_world_boss_pick_scene_and_pos(scene, sizeof(scene), NULL, NULL))
+    {
+        if (msgOut && msgCap > 0)
+            snprintf(msgOut, msgCap, "无可用户外地图");
+        return false;
+    }
+    snprintf(g_vm_mock_world_boss_rt.scene, sizeof(g_vm_mock_world_boss_rt.scene),
+             "%s", scene);
+    return true;
+}
+
+bool vm_mock_world_boss_admin_force_preview(char *msgOut, size_t msgCap)
+{
+    char sceneGbk[128];
+    char sceneUtf8[128];
+    u32 hourKey = 0;
+
+    vm_mock_world_boss_load_config(false);
+    if (!g_vm_mock_world_boss_config.enabled)
+    {
+        if (msgOut && msgCap > 0)
+            snprintf(msgOut, msgCap, "世界BOSS未启用");
+        return false;
+    }
+    if (!vm_mock_world_boss_admin_pick_preview_scene(msgOut, msgCap))
+        return false;
+    hourKey = vm_mock_world_boss_hour_key(time(NULL));
+    g_vm_mock_world_boss_rt.previewUnix = hourKey;
+    g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_PREVIEW;
+    memset(sceneUtf8, 0, sizeof(sceneUtf8));
+    memset(sceneGbk, 0, sizeof(sceneGbk));
+    vm_net_mock_gbk_label_to_utf8(g_vm_mock_world_boss_rt.scene, sceneUtf8,
+                                 sizeof(sceneUtf8));
+    vm_mock_world_boss_scene_utf8_to_gbk(
+        sceneUtf8[0] ? sceneUtf8 : g_vm_mock_world_boss_rt.scene, sceneGbk,
+        sizeof(sceneGbk));
+    vm_mock_world_boss_broadcast_preview(sceneGbk);
+    if (msgOut && msgCap > 0)
+        snprintf(msgOut, msgCap, "已发送全服预告");
+    return true;
+}
+
+bool vm_mock_world_boss_admin_force_spawn(char *msgOut, size_t msgCap)
+{
+    vm_mock_world_boss_load_config(false);
+    if (!g_vm_mock_world_boss_config.enabled ||
+        g_vm_mock_world_boss_config.monsterId == 0)
+    {
+        if (msgOut && msgCap > 0)
+            snprintf(msgOut, msgCap, "请先启用并配置BOSS怪物ID");
+        return false;
+    }
+    vm_mock_world_boss_spawn_now(vm_mock_world_boss_hour_key(time(NULL)));
+    if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_ACTIVE)
+    {
+        if (msgOut && msgCap > 0)
+            snprintf(msgOut, msgCap, "刷BOSS失败，检查怪物ID与户外地图");
+        return false;
+    }
+    if (msgOut && msgCap > 0)
+        snprintf(msgOut, msgCap, "已立即刷新世界BOSS");
+    return true;
+}
+
+bool vm_mock_world_boss_admin_force_despawn(char *msgOut, size_t msgCap)
+{
+    if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+    {
+        if (msgOut && msgCap > 0)
+            snprintf(msgOut, msgCap, "当前无活跃BOSS");
+        return false;
+    }
+    vm_mock_world_boss_despawn_active("admin");
+    if (msgOut && msgCap > 0)
+        snprintf(msgOut, msgCap, "已清除当前BOSS");
+    return true;
+}
+
 bool vm_mock_world_boss_admin_save(
     u8 enabled, u32 monsterId, u16 announceSeconds,
     u32 rewardExp, u32 rewardMoney, u32 rewardItemId, u32 rewardItemCount)

@@ -24,14 +24,27 @@ static void vm_mock_admin_render_world_boss_page(char *response, size_t response
     vm_mock_admin_text page;
     char status[16];
     char message[256];
+    char runtimeScene[64];
+    char runtimeSceneUtf8[128];
+    u8 runtimeStatus = 0;
+    u16 runtimeX = 0;
+    u16 runtimeY = 0;
     const vm_mock_world_boss_config *cfg;
 
     vm_mock_admin_text_init(&page, response, responseCap);
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
+    memset(runtimeScene, 0, sizeof(runtimeScene));
+    memset(runtimeSceneUtf8, 0, sizeof(runtimeSceneUtf8));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
     cfg = vm_net_mock_world_boss_config_get();
+    vm_mock_world_boss_admin_runtime_get(&runtimeStatus, runtimeScene,
+                                         sizeof(runtimeScene), &runtimeX,
+                                         &runtimeY);
+    if (runtimeScene[0] != 0)
+        vm_net_mock_gbk_label_to_utf8(runtimeScene, runtimeSceneUtf8,
+                                      sizeof(runtimeSceneUtf8));
 
     vm_mock_admin_text_appendf(
         &page,
@@ -45,7 +58,10 @@ static void vm_mock_admin_render_world_boss_page(char *response, size_t response
         "input,select{padding:8px;width:100%%;box-sizing:border-box}"
         "label{font-size:12px;color:#666;display:block;margin-bottom:4px}"
         ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}"
-        "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px}"
+        ".btn-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}"
+        "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px;cursor:pointer}"
+        ".btn-warn{background:#b54708}.btn-muted{background:#667085}"
+        ".muted{color:#667085;font-size:13px}"
         "</style></head><body><h1>世界BOSS</h1>"
         "<p>每小时整点刷新；提前30秒全服预告地图。首个队长遇怪开战，击杀发配置奖励。</p>"
         "<nav>"
@@ -62,8 +78,22 @@ static void vm_mock_admin_render_world_boss_page(char *response, size_t response
 
     vm_mock_admin_text_appendf(
         &page,
-        "<section class=\"card\"><h2>运行状态</h2><p>status=%u</p>"
-        "<p class=\"muted\">0=无 1=预告 2=已刷新 3=已被挑战</p></section>"
+        "<section class=\"card\"><h2>运行状态</h2>"
+        "<p>status=%u</p>"
+        "<p class=\"muted\">0=无 1=预告 2=已刷新 3=已被挑战</p>"
+        "<p>地图：%s</p>"
+        "<p>坐标：(%u,%u)</p>"
+        "<div class=\"btn-row\">"
+        "<form method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"world-boss-force-preview\">"
+        "<button type=\"submit\">立即预告</button></form>"
+        "<form method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"world-boss-force-spawn\">"
+        "<button type=\"submit\" class=\"btn-warn\">立即刷BOSS</button></form>"
+        "<form method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"world-boss-force-despawn\">"
+        "<button type=\"submit\" class=\"btn-muted\">清除当前BOSS</button></form>"
+        "</div></section>"
         "<section class=\"card\"><h2>配置</h2>"
         "<form method=\"post\" action=\"/action\">"
         "<input type=\"hidden\" name=\"action\" value=\"save-world-boss-config\">"
@@ -78,7 +108,10 @@ static void vm_mock_admin_render_world_boss_page(char *response, size_t response
         "<div><label>奖励数量</label><input name=\"reward_item_count\" value=\"%u\"></div>"
         "</div><button type=\"submit\">保存</button></form></section>"
         "</body></html>",
-        vm_mock_world_boss_runtime_status(),
+        (u32)runtimeStatus,
+        runtimeSceneUtf8[0] ? runtimeSceneUtf8
+                              : (runtimeScene[0] ? runtimeScene : "-"),
+        (u32)runtimeX, (u32)runtimeY,
         cfg && cfg->enabled ? " selected" : "",
         cfg && !cfg->enabled ? " selected" : "",
         cfg ? cfg->monsterId : 0,
@@ -93,6 +126,39 @@ static void vm_mock_admin_handle_world_boss_action(vm_mock_service_socket client
                                                    const char *action,
                                                    const char *body)
 {
+    char msg[256];
+
+    (void)body;
+    if (strcmp(action, "world-boss-force-preview") == 0)
+    {
+        memset(msg, 0, sizeof(msg));
+        if (vm_mock_world_boss_admin_force_preview(msg, sizeof(msg)))
+            vm_mock_admin_redirect_world_boss(client, "ok", msg);
+        else
+            vm_mock_admin_redirect_world_boss(client, "error",
+                                            msg[0] ? msg : "预告失败");
+        return;
+    }
+    if (strcmp(action, "world-boss-force-spawn") == 0)
+    {
+        memset(msg, 0, sizeof(msg));
+        if (vm_mock_world_boss_admin_force_spawn(msg, sizeof(msg)))
+            vm_mock_admin_redirect_world_boss(client, "ok", msg);
+        else
+            vm_mock_admin_redirect_world_boss(client, "error",
+                                            msg[0] ? msg : "刷BOSS失败");
+        return;
+    }
+    if (strcmp(action, "world-boss-force-despawn") == 0)
+    {
+        memset(msg, 0, sizeof(msg));
+        if (vm_mock_world_boss_admin_force_despawn(msg, sizeof(msg)))
+            vm_mock_admin_redirect_world_boss(client, "ok", msg);
+        else
+            vm_mock_admin_redirect_world_boss(client, "error",
+                                            msg[0] ? msg : "清除失败");
+        return;
+    }
     if (strcmp(action, "save-world-boss-config") == 0)
     {
         u32 enabled = 0;
@@ -112,7 +178,7 @@ static void vm_mock_admin_handle_world_boss_action(vm_mock_service_socket client
         (void)vm_mock_admin_form_u32(body, "reward_item_count", 0xffffffffu,
                                      &itemCount);
         if (vm_mock_world_boss_admin_save((u8)enabled, monsterId, (u16)announce,
-                                        exp, money, itemId, itemCount))
+                                          exp, money, itemId, itemCount))
             vm_mock_admin_redirect_world_boss(client, "ok", "世界BOSS配置已保存");
         else
             vm_mock_admin_redirect_world_boss(client, "error", "保存失败");

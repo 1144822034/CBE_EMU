@@ -299,6 +299,18 @@ import {
   parseLadderStatus,
   type LadderStatus,
 } from "../net/protocolLadder";
+import {
+  buildGuessBetRequest,
+  buildGuessClaimRequest,
+  buildGuessHistoryRequest,
+  buildGuessStatusRequest,
+  parseGuessHistory,
+  parseGuessOpResult,
+  parseGuessStatus,
+  type GuessHistoryRow,
+  type GuessOpResult,
+  type GuessStatus,
+} from "../net/protocolGuess";
 import { decodeWtPacket, type WtPacket } from "../net/wt";
 import {
   type BagItem,
@@ -2426,6 +2438,90 @@ export class GameSession {
       }
     }
     return { ok: false, tip: "挑战失败" };
+  }
+
+  async fetchGuessBoard(pageIndex = 0): Promise<{
+    status: GuessStatus | null;
+    rows: GuessHistoryRow[];
+    pageIndex: number;
+    hasMore: boolean;
+  }> {
+    if (!this.transport) {
+      return { status: null, rows: [], pageIndex: 0, hasMore: false };
+    }
+    const statusBodies = await this.transport.exchange(
+      0,
+      buildGuessStatusRequest(),
+    );
+    this.handleBodies(statusBodies);
+    const historyBodies = await this.transport.exchange(
+      0,
+      buildGuessHistoryRequest(pageIndex),
+    );
+    this.handleBodies(historyBodies);
+    let status: GuessStatus | null = null;
+    let rows: GuessHistoryRow[] = [];
+    let hasMore = false;
+    for (const body of statusBodies) {
+      try {
+        const st = parseGuessStatus(decodeWtPacket(body));
+        if (st) status = st;
+      } catch {
+        /* ignore */
+      }
+    }
+    for (const body of historyBodies) {
+      try {
+        const hist = parseGuessHistory(decodeWtPacket(body));
+        if (hist) {
+          rows = hist.rows;
+          hasMore = hist.hasMore;
+          pageIndex = hist.pageIndex;
+          if (status) {
+            status = { ...status, pendingClaims: hist.pendingClaims };
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return { status, rows, pageIndex, hasMore };
+  }
+
+  async guessBet(choice: number, stakeGold: number): Promise<GuessOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildGuessBetRequest(choice, stakeGold),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseGuessOpResult(decodeWtPacket(body), 2);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async guessClaim(betId = 0): Promise<GuessOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildGuessClaimRequest(betId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseGuessOpResult(decodeWtPacket(body), 4);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
   }
 
   /**

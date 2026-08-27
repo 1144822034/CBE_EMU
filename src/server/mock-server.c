@@ -123,6 +123,13 @@ void vm_mock_ladder_on_battle_end(bool victory);
 #include "mock_server_world_boss.c"
 #include "mock_server_ladder.c"
 
+static void vm_mock_guess_tick(void);
+static u32 vm_net_mock_build_guess_protocol_response(const u8 *request,
+                                                     u32 requestLen, u8 *out,
+                                                     u32 outCap);
+
+#include "mock_server_guess.c"
+
 /* Pixi arena (defined in mock_server_arena.c after guild). */
 static bool vm_mock_arena_npc_offers_entry(const char *npcName);
 static bool vm_mock_arena_wager_npc_offers(const char *npcName);

@@ -7029,6 +7029,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     vm_mock_world_boss_tick();
     vm_mock_arena_catchup_phase_tip_session(observer);
     vm_mock_auction_tick();
+    vm_mock_guess_tick();
     /* This one-shot is deliberately checked before sceneVisiblePending.  The
      * target is only marked pending while this builder emits 30/1, so the old
      * scene remains pollable during the item/confirmation phase.
