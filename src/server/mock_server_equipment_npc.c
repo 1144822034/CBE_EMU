@@ -2841,7 +2841,11 @@ enum
     VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET = 4,
     /* A blacksmith synthesis reserves the selected source crystal and the
      * fixed material count until its immediate action-1 confirmation. */
-    VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS = 5
+    VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS = 5,
+    /* The quote stores the authoritative candidate count in `selector` and
+     * total copper in `quotedPrice`; confirmation rechecks both before the
+     * one role transaction removes any quality-zero backpack equipment. */
+    VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO = 6
 };
 
 /* A 26/1 action=1 request only carries a private menu value.  Retain the

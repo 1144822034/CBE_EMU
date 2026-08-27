@@ -83,7 +83,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression admin-role-timed-item-effect-regression registration-email-contract-regression mailbox-claim-backpack-refresh-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression first-login-equipment-attribute-bootstrap-regression equipment-enhancement-bootstrap-split-regression equipment-enhancement-bootstrap-delivery-regression startup-sce-direct-enter-test-gate-regression teleport-stone-scene-catalog-regression npc-crystal-synthesis-regression battle-insight-followup-regression battle-insight-status-regression timed-item-status-icon-regression task-delivery-item-consumption-regression clean
+.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression admin-role-timed-item-effect-regression registration-email-contract-regression mailbox-claim-backpack-refresh-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression first-login-equipment-attribute-bootstrap-regression equipment-enhancement-bootstrap-split-regression equipment-enhancement-bootstrap-delivery-regression startup-sce-direct-enter-test-gate-regression teleport-stone-scene-catalog-regression npc-crystal-synthesis-regression npc-quality-zero-equipment-recycle-regression battle-insight-followup-regression battle-insight-status-regression timed-item-status-icon-regression task-delivery-item-consumption-regression clean
 
 $(SERVER_OBJDIR)/%-regression.exe: SERVER_CPPFLAGS += -DCBE_SERVER_TEST_INCLUDE_IMPLEMENTATION
 $(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
@@ -98,6 +98,11 @@ boundary-check: build
 npc-crystal-synthesis-regression: $(SERVER_OBJDIR)/npc-crystal-synthesis-regression.exe
 
 $(SERVER_OBJDIR)/npc-crystal-synthesis-regression.exe: scripts/npc-crystal-synthesis-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+npc-quality-zero-equipment-recycle-regression: $(SERVER_OBJDIR)/npc-quality-zero-equipment-recycle-regression.exe
+
+$(SERVER_OBJDIR)/npc-quality-zero-equipment-recycle-regression.exe: scripts/npc-quality-zero-equipment-recycle-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 battle-insight-followup-regression: $(SERVER_OBJDIR)/battle-insight-followup-regression.exe
@@ -158,6 +163,11 @@ $(SERVER_OBJDIR)/admin-dynamic-npc-id-regression.exe: scripts/admin-dynamic-npc-
 admin-monster-picker-regression: $(SERVER_OBJDIR)/admin-monster-picker-regression.exe
 
 $(SERVER_OBJDIR)/admin-monster-picker-regression.exe: scripts/admin-monster-picker-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+admin-task-target-list-regression: $(SERVER_OBJDIR)/admin-task-target-list-regression.exe
+
+$(SERVER_OBJDIR)/admin-task-target-list-regression.exe: scripts/admin-task-target-list-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/web_admin_server.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 admin-task-id-allocation-regression: $(SERVER_OBJDIR)/admin-task-id-allocation-regression.exe

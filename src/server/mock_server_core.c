@@ -5843,6 +5843,13 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE 0xec000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE 0xed000000u
 #define VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE 0xee000000u
+/* Equipment recovery's quality-zero batch action remains an ordinary
+ * action=1 value inside the native 26/1 dialog.  It is deliberately separate
+ * from the sequence-keyed single-item sale namespace so a forged item
+ * sequence can never be interpreted as a bulk request. */
+#define VM_NET_MOCK_NPC_SERVICE_SELL_QUALITY_ZERO_BASE 0xfa000000u
+#define VM_NET_MOCK_NPC_SERVICE_SELL_QUALITY_ZERO \
+    (VM_NET_MOCK_NPC_SERVICE_SELL_QUALITY_ZERO_BASE | 0x00000001u)
 /* The native task-hall has two mutually exclusive initial modes.  Keep their
  * service values separate so one NPC dialog can expose both actions without
  * ever composing 30/4 (create) and 30/3 (challenge list) in one response. */

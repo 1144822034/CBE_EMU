@@ -47,9 +47,12 @@ int main(void)
         strstr(g_vm_mock_admin_script,
                "[data-task-requirement-target] [data-monster-picker-open]") == NULL ||
         strstr(g_vm_mock_admin_script, "state.show(select)") == NULL ||
-        strstr(g_vm_mock_admin_script, "＋ 新增任务目标（${active.length}/${rows.length}）") == NULL)
+        strstr(g_vm_mock_admin_script, "＋ 新增任务目标（${active.length}/${rows.length}）") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "setupMonsterPicker();setupTaskRequirementTargets();setupNpcServices()") == NULL)
     {
-        fprintf(stderr, "task target list lifecycle is incomplete\n");
+        fprintf(stderr,
+                "task target list lifecycle or partial-navigation rebind is incomplete\n");
         return 1;
     }
 
