@@ -3025,39 +3025,90 @@ static bool vm_net_mock_task_delete(u32 roleId, u32 taskId)
     return vm_mysql_exec(query);
 }
 
-static u32 vm_net_mock_task_required_item_count(
-    const vm_net_mock_task_definition *task, u32 itemId)
+/* A task can consume two collected materials and the item it gave when the
+ * task was accepted.  Keep one canonical list for the persistence transaction,
+ * capacity projection and the native 6/4 client-side deletion stream. */
+enum
 {
-    u32 count = 0;
+    VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX = 3,
+    /* Every 6/4 iteminfo entry is a tagged i16 backpack sequence followed by
+     * a tagged u8 remaining count. */
+    VM_NET_MOCK_TASK_SUBMIT_ITEMINFO_MAX_BYTES =
+        VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX * (4 + 3)
+};
 
-    if (task == NULL || itemId == 0)
-        return 0;
-    if (task->requirementType1 == 1 && task->requirementId1 == itemId)
-        count += task->requirementCount1;
-    if (task->requirementType2 == 1 && task->requirementId2 == itemId)
-        count += task->requirementCount2;
-    return count;
+static bool vm_net_mock_task_collect_consumed_items(
+    const vm_net_mock_task_definition *task,
+    u32 itemIds[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u32 itemCounts[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u8 *itemCountOut)
+{
+    const u32 candidateIds[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX] = {
+        task != NULL && task->requirementType1 == 1 ? task->requirementId1 : 0,
+        task != NULL && task->requirementType2 == 1 ? task->requirementId2 : 0,
+        task != NULL ? task->givenItemId : 0};
+    const u32 candidateCounts[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX] = {
+        task != NULL && task->requirementType1 == 1 ? task->requirementCount1 : 0,
+        task != NULL && task->requirementType2 == 1 ? task->requirementCount2 : 0,
+        task != NULL ? task->givenItemCount : 0};
+    u8 itemCount = 0;
+
+    if (itemCountOut != NULL)
+        *itemCountOut = 0;
+    if (task == NULL || itemIds == NULL || itemCounts == NULL)
+        return false;
+    memset(itemIds, 0, VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX * sizeof(*itemIds));
+    memset(itemCounts, 0,
+           VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX * sizeof(*itemCounts));
+    for (u8 candidate = 0;
+         candidate < VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX; ++candidate)
+    {
+        bool merged = false;
+
+        if (candidateIds[candidate] == 0 || candidateCounts[candidate] == 0)
+            continue;
+        for (u8 index = 0; index < itemCount; ++index)
+        {
+            if (itemIds[index] != candidateIds[candidate])
+                continue;
+            if (0xffffffffu - itemCounts[index] < candidateCounts[candidate])
+                return false;
+            itemCounts[index] += candidateCounts[candidate];
+            merged = true;
+            break;
+        }
+        if (merged)
+            continue;
+        if (itemCount >= VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX)
+            return false;
+        itemIds[itemCount] = candidateIds[candidate];
+        itemCounts[itemCount] = candidateCounts[candidate];
+        ++itemCount;
+    }
+    if (itemCountOut != NULL)
+        *itemCountOut = itemCount;
+    return true;
 }
 
 static bool vm_net_mock_task_role_has_required_items(
     vm_net_mock_role_state *role, const vm_net_mock_task_definition *task)
 {
-    u32 itemIds[2];
+    u32 itemIds[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u32 itemCounts[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u8 itemCount = 0;
 
-    if (role == NULL || task == NULL)
+    if (role == NULL || task == NULL ||
+        !vm_net_mock_task_collect_consumed_items(task, itemIds, itemCounts,
+                                                 &itemCount))
+    {
         return false;
-    itemIds[0] = task->requirementType1 == 1 ? task->requirementId1 : 0;
-    itemIds[1] = task->requirementType2 == 1 ? task->requirementId2 : 0;
-    for (u32 i = 0; i < 2; ++i)
+    }
+    for (u8 i = 0; i < itemCount; ++i)
     {
         vm_net_mock_backpack_item_state *item = NULL;
-        u32 requiredCount = 0;
 
-        if (itemIds[i] == 0 || (i != 0 && itemIds[i] == itemIds[0]))
-            continue;
-        requiredCount = vm_net_mock_task_required_item_count(task, itemIds[i]);
         item = vm_net_mock_role_find_backpack_item(role, itemIds[i], 0);
-        if (requiredCount != 0 && (item == NULL || item->count < requiredCount))
+        if (item == NULL || item->count < itemCounts[i])
             return false;
     }
     return true;
@@ -3083,20 +3134,21 @@ static bool vm_net_mock_task_backpack_can_receive(
     }
     if (consumedByTask != NULL)
     {
-        u32 itemIds[2] = {
-            consumedByTask->requirementType1 == 1 ? consumedByTask->requirementId1 : 0,
-            consumedByTask->requirementType2 == 1 ? consumedByTask->requirementId2 : 0};
-        for (u32 i = 0; i < 2; ++i)
+        u32 itemIds[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+        u32 itemCounts[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+        u8 itemCount = 0;
+
+        if (!vm_net_mock_task_collect_consumed_items(
+                consumedByTask, itemIds, itemCounts, &itemCount))
+        {
+            return false;
+        }
+        for (u8 i = 0; i < itemCount; ++i)
         {
             vm_net_mock_backpack_item_state *item = NULL;
-            u32 consumedCount = 0;
 
-            if (itemIds[i] == 0 || (i != 0 && itemIds[i] == itemIds[0]))
-                continue;
-            consumedCount = vm_net_mock_task_required_item_count(consumedByTask,
-                                                                 itemIds[i]);
             item = vm_net_mock_role_find_backpack_item(role, itemIds[i], 0);
-            if (item != NULL && consumedCount != 0 && item->count <= consumedCount)
+            if (item != NULL && item->count <= itemCounts[i])
                 return true;
         }
     }
@@ -3128,34 +3180,19 @@ static bool vm_net_mock_task_backpack_can_receive_rewards(
     const vm_net_mock_task_definition *task)
 {
     vm_net_mock_role_state projected;
-    u32 consumedIds[2] = {0, 0};
-    u32 consumedCounts[2] = {0, 0};
-    u32 consumedSlots = 0;
+    u32 consumedIds[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u32 consumedCounts[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u8 consumedItemCount = 0;
 
     if (role == NULL || task == NULL ||
-        !vm_net_mock_task_reward_items_are_valid(task))
+        !vm_net_mock_task_reward_items_are_valid(task) ||
+        !vm_net_mock_task_collect_consumed_items(
+            task, consumedIds, consumedCounts, &consumedItemCount))
     {
         return false;
     }
     projected = *role;
-    if (task->requirementType1 == 1 && task->requirementId1 != 0 &&
-        task->requirementCount1 != 0)
-    {
-        consumedIds[consumedSlots] = task->requirementId1;
-        consumedCounts[consumedSlots++] = task->requirementCount1;
-    }
-    if (task->requirementType2 == 1 && task->requirementId2 != 0 &&
-        task->requirementCount2 != 0)
-    {
-        if (consumedSlots != 0 && consumedIds[0] == task->requirementId2)
-            consumedCounts[0] += task->requirementCount2;
-        else
-        {
-            consumedIds[consumedSlots] = task->requirementId2;
-            consumedCounts[consumedSlots++] = task->requirementCount2;
-        }
-    }
-    for (u32 i = 0; i < consumedSlots; ++i)
+    for (u8 i = 0; i < consumedItemCount; ++i)
     {
         if (!vm_net_mock_role_consume_backpack_item(
                 &projected, consumedIds[i], 0, consumedCounts[i], NULL))
@@ -3172,6 +3209,69 @@ static bool vm_net_mock_task_backpack_can_receive_rewards(
             return false;
         }
     }
+    return true;
+}
+
+/* `net_handle_task_response_dispatch` case 4 consumes a count-prefixed list
+ * of tagged `(i16 sequence, u8 remaining)` iteminfo rows before awardinfo.
+ * The server persistence step and this native client update must describe the
+ * same rows; otherwise an accepted task item can remain visible until relogin.
+ */
+static bool vm_net_mock_task_consume_items(
+    vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
+    u16 consumedSeqOut[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u8 consumedRemainingOut[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u8 *consumedCountOut)
+{
+    u32 consumedIds[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u32 consumedCounts[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u8 consumedItemCount = 0;
+
+    if (consumedSeqOut != NULL)
+        memset(consumedSeqOut, 0,
+               VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX * sizeof(*consumedSeqOut));
+    if (consumedRemainingOut != NULL)
+        memset(consumedRemainingOut, 0,
+               VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX * sizeof(*consumedRemainingOut));
+    if (consumedCountOut != NULL)
+        *consumedCountOut = 0;
+    if (role == NULL || task == NULL ||
+        !vm_net_mock_task_collect_consumed_items(
+            task, consumedIds, consumedCounts, &consumedItemCount))
+    {
+        return false;
+    }
+    /* Validate every row before changing the role. The case-4 iteminfo count
+     * reader is one byte wide, so do not silently truncate a visible stack. */
+    for (u8 i = 0; i < consumedItemCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *item =
+            vm_net_mock_role_find_backpack_item(role, consumedIds[i], 0);
+        if (item == NULL || item->seq == 0 || item->count < consumedCounts[i] ||
+            item->count - consumedCounts[i] > 0xffu)
+        {
+            return false;
+        }
+    }
+    for (u8 i = 0; i < consumedItemCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *item =
+            vm_net_mock_role_find_backpack_item(role, consumedIds[i], 0);
+        u16 sequence = item->seq;
+        u32 remaining = 0;
+
+        if (!vm_net_mock_role_consume_backpack_item(
+                role, consumedIds[i], 0, consumedCounts[i], &remaining))
+        {
+            return false;
+        }
+        if (consumedSeqOut != NULL)
+            consumedSeqOut[i] = sequence;
+        if (consumedRemainingOut != NULL)
+            consumedRemainingOut[i] = (u8)remaining;
+    }
+    if (consumedCountOut != NULL)
+        *consumedCountOut = consumedItemCount;
     return true;
 }
 
@@ -3208,11 +3308,11 @@ static u32 vm_net_mock_task_effective_reward_exp(
 static bool vm_net_mock_task_commit_reward(
     vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
     u16 rewardSeqOut[VM_NET_MOCK_TASK_REWARD_ITEM_MAX],
-    u8 *rewardCountOut)
+    u8 *rewardCountOut,
+    u16 consumedSeqOut[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u8 consumedRemainingOut[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u8 *consumedCountOut)
 {
-    u32 consumedIds[2] = {0, 0};
-    u32 consumedCounts[2] = {0, 0};
-    u32 consumedSlots = 0;
     u32 rewardExp = 0;
     vm_net_mock_role_state before;
 
@@ -3221,6 +3321,15 @@ static bool vm_net_mock_task_commit_reward(
                VM_NET_MOCK_TASK_REWARD_ITEM_MAX * sizeof(*rewardSeqOut));
     if (rewardCountOut != NULL)
         *rewardCountOut = 0;
+    if (consumedSeqOut != NULL)
+        memset(consumedSeqOut, 0,
+               VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX * sizeof(*consumedSeqOut));
+    if (consumedRemainingOut != NULL)
+        memset(consumedRemainingOut, 0,
+               VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX *
+                   sizeof(*consumedRemainingOut));
+    if (consumedCountOut != NULL)
+        *consumedCountOut = 0;
     if (role == NULL || task == NULL)
         return false;
     rewardExp = vm_net_mock_task_effective_reward_exp(task);
@@ -3232,35 +3341,12 @@ static bool vm_net_mock_task_commit_reward(
     if (!vm_net_mock_task_state_store(role->roleId, task->taskId, 3))
         return false;
     before = *role;
-
-    if (task->requirementType1 == 1 && task->requirementId1 != 0 &&
-        task->requirementCount1 != 0)
+    if (!vm_net_mock_task_consume_items(
+            role, task, consumedSeqOut, consumedRemainingOut, consumedCountOut))
     {
-        consumedIds[consumedSlots] = task->requirementId1;
-        consumedCounts[consumedSlots] = task->requirementCount1;
-        ++consumedSlots;
-    }
-    if (task->requirementType2 == 1 && task->requirementId2 != 0 &&
-        task->requirementCount2 != 0)
-    {
-        if (consumedSlots != 0 && consumedIds[0] == task->requirementId2)
-            consumedCounts[0] += task->requirementCount2;
-        else
-        {
-            consumedIds[consumedSlots] = task->requirementId2;
-            consumedCounts[consumedSlots] = task->requirementCount2;
-            ++consumedSlots;
-        }
-    }
-    for (u32 i = 0; i < consumedSlots; ++i)
-    {
-        if (!vm_net_mock_role_consume_backpack_item(role, consumedIds[i], 0,
-                                                    consumedCounts[i], NULL))
-        {
-            *role = before;
-            (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
-            return false;
-        }
+        *role = before;
+        (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
+        return false;
     }
     for (u8 i = 0; i < task->rewardItemNum; ++i)
     {
@@ -3295,7 +3381,38 @@ static bool vm_net_mock_task_commit_reward(
            task->taskId, role->roleId, rewardExp, task->rewardExp,
            task->rewardMoney,
            task->rewardItemNum, task->rewardItemId, task->rewardItemType,
-           task->rewardItemCount, consumedSlots);
+           task->rewardItemCount,
+           consumedCountOut != NULL ? *consumedCountOut : 0);
+    return true;
+}
+
+static bool vm_net_mock_build_task_submit_iteminfo(
+    u8 *out, u32 outCap, u32 *blobLenOut,
+    const u16 consumedSeqs[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    const u8 consumedRemainings[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u8 consumedCount)
+{
+    u32 pos = 0;
+
+    if (blobLenOut != NULL)
+        *blobLenOut = 0;
+    if (out == NULL || blobLenOut == NULL ||
+        consumedCount > VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX ||
+        (consumedCount != 0 &&
+         (consumedSeqs == NULL || consumedRemainings == NULL)))
+    {
+        return false;
+    }
+    for (u8 i = 0; i < consumedCount; ++i)
+    {
+        if (consumedSeqs[i] == 0 ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, consumedSeqs[i]) ||
+            !vm_net_mock_seq_put_u8(out, outCap, &pos, consumedRemainings[i]))
+        {
+            return false;
+        }
+    }
+    *blobLenOut = pos;
     return true;
 }
 
@@ -3946,7 +4063,7 @@ static void vm_net_mock_npc_service_context_record(
              sizeof(session->npcServiceContext.scene), "%s", scene);
 }
 
-static bool vm_net_mock_npc_service_context_has(
+bool vm_net_mock_npc_service_context_has(
     const vm_mock_service_npc_context *context, u16 serviceKind)
 {
     u32 bit = vm_net_mock_npc_service_kind_mask(serviceKind);
@@ -3955,7 +4072,7 @@ static bool vm_net_mock_npc_service_context_has(
            (context->serviceMask & bit) != 0;
 }
 
-static const vm_mock_service_npc_context *
+const vm_mock_service_npc_context *
 vm_net_mock_npc_service_context_get(const vm_mock_service_client_session *session,
                                     const vm_net_mock_role_state *role)
 {
@@ -5185,7 +5302,7 @@ static bool vm_net_mock_npc_service_opcode_is_supported(u32 opcode)
     }
 }
 
-static bool vm_net_mock_is_npc_service_dialog_request(
+bool vm_net_mock_is_npc_service_dialog_request(
     const u8 *request, u32 requestLen, u32 *serviceValueOut)
 {
     u32 offset = 4;
@@ -7978,6 +8095,11 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     u32 awardInfoLen = 0;
     u16 committedRewardSeqs[VM_NET_MOCK_TASK_REWARD_ITEM_MAX];
     u8 committedRewardCount = 0;
+    u8 consumedItemInfo[VM_NET_MOCK_TASK_SUBMIT_ITEMINFO_MAX_BYTES];
+    u32 consumedItemInfoLen = 0;
+    u16 committedConsumedSeqs[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u8 committedConsumedRemainings[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u8 committedConsumedCount = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 result = 1;
@@ -8103,6 +8225,10 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     memset(taskInfo, 0, sizeof(taskInfo));
     memset(awardInfo, 0, sizeof(awardInfo));
     memset(committedRewardSeqs, 0, sizeof(committedRewardSeqs));
+    memset(consumedItemInfo, 0, sizeof(consumedItemInfo));
+    memset(committedConsumedSeqs, 0, sizeof(committedConsumedSeqs));
+    memset(committedConsumedRemainings, 0,
+           sizeof(committedConsumedRemainings));
     memset(detailText, 0, sizeof(detailText));
     memset(destinationText, 0, sizeof(destinationText));
     memset(promptReceiver, 0, sizeof(promptReceiver));
@@ -8277,7 +8403,10 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             ((taskDefinition != NULL &&
               vm_net_mock_task_commit_reward(activeRole, taskDefinition,
                                              committedRewardSeqs,
-                                             &committedRewardCount)) ||
+                                             &committedRewardCount,
+                                             committedConsumedSeqs,
+                                             committedConsumedRemainings,
+                                             &committedConsumedCount)) ||
              (taskDefinition == NULL &&
               vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))))
         {
@@ -8307,7 +8436,11 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (result == 1)
         {
             u32 totalExp = activeRole->exp;
-            if (!vm_net_mock_build_task_awardinfo(
+            if (!vm_net_mock_build_task_submit_iteminfo(
+                    consumedItemInfo, sizeof(consumedItemInfo),
+                    &consumedItemInfoLen, committedConsumedSeqs,
+                    committedConsumedRemainings, committedConsumedCount) ||
+                !vm_net_mock_build_task_awardinfo(
                     awardInfo, sizeof(awardInfo), &awardInfoLen, activeRole,
                     taskDefinition, committedRewardSeqs,
                     committedRewardCount) ||
@@ -8321,8 +8454,11 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                                             vm_net_mock_role_next_level_start_exp(totalExp)) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "persentexp",
                                             vm_net_mock_role_exp_percent(totalExp)) ||
-                !vm_net_mock_put_object_u8(out, outCap, &pos, "seqnum", 0) ||
-                !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", NULL, 0) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "seqnum",
+                                           committedConsumedCount) ||
+                !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo",
+                                            consumedItemInfo,
+                                            (u16)consumedItemInfoLen) ||
                 !vm_net_mock_put_object_raw(out, outCap, &pos, "awardinfo",
                                             awardInfo, (u16)awardInfoLen) ||
                 /* case 4 reads taskdes through the WT string accessor
@@ -8336,6 +8472,9 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             {
                 return 0;
             }
+            printf("[info][network] mock_task_submit_iteminfo task=%u role=%u seqnum=%u iteminfo_len=%u evidence=JianghuOL.CBE:0x010473D0-0x01047430\n",
+                   taskId, activeRole->roleId, committedConsumedCount,
+                   consumedItemInfoLen);
         }
         action = "commit";
         evidence = "JianghuOL.CBE:0x01047CFC+0x0104726C(case4)+0x01046EDA";

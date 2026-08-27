@@ -301,8 +301,8 @@ static u32 g_vm_net_mock_role_service_state_replace_index = 0;
 static bool g_vm_net_mock_role_service_tables_checked = false;
 static bool g_vm_net_mock_role_service_tables_valid = false;
 
-static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
-                                    u32 *result_out);
+bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
+                             u32 *result_out);
 static bool vm_net_mock_shop_admin_db_load(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 static const vm_net_mock_equipment_catalog_item *
@@ -1933,6 +1933,19 @@ static const vm_net_mock_shop_catalog_item *vm_net_mock_find_shop_catalog_item(u
             return &g_vm_net_mock_shop_catalog[i];
     }
     return NULL;
+}
+
+bool vm_net_mock_shop_catalog_item_exists(u32 itemId)
+{
+    return vm_net_mock_find_shop_catalog_item(itemId) != NULL;
+}
+
+const char *vm_net_mock_shop_catalog_item_name(u32 itemId)
+{
+    const vm_net_mock_shop_catalog_item *item =
+        vm_net_mock_find_shop_catalog_item(itemId);
+
+    return item != NULL ? item->name : NULL;
 }
 
 /* A Battle Insight full-bag conversion may only affect the rolled reward.
@@ -4428,8 +4441,8 @@ typedef struct
     u16 seq;
 } vm_net_mock_battle_item_use_request;
 
-static bool vm_net_mock_get_object_number_field(const u8 *payload, u32 payloadLen,
-                                                const char *field, u32 *value)
+bool vm_net_mock_get_object_number_field(const u8 *payload, u32 payloadLen,
+                                         const char *field, u32 *value)
 {
     u32 value32 = 0;
     u16 value16 = 0;
@@ -6952,19 +6965,7 @@ static bool vm_net_mock_append_chest_open_reward15_object(
  * not reinterpret an existing stack as a second physical category-15 slot.
  * A mailbox can contain multiple attachments, so retain the wire's `total`
  * list rather than emitting one modal reward object per attachment. */
-enum
-{
-    VM_NET_MOCK_REWARD15_MAX_ROWS = 12,
-    VM_NET_MOCK_REWARD15_ITEMINFO_MAX_BYTES = 4096
-};
-
-typedef struct
-{
-    const vm_net_mock_backpack_item_state *item;
-    u32 acquiredCount;
-} vm_net_mock_reward15_item_row;
-
-static bool vm_net_mock_append_backpack_reward15_object(
+bool vm_net_mock_append_backpack_reward15_object(
     u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
     const vm_net_mock_reward15_item_row *rows, u8 rowCount)
 {

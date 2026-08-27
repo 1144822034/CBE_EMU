@@ -7,6 +7,7 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <time.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
@@ -16,16 +17,12 @@
 #include <signal.h>
 #endif
 
-#include "main.h"
 #include "gifDecode.h"
+#include "server/mock_server.h"
 #define STBI_ONLY_PNG
 #define STBI_NO_STDIO
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
-#define VM_SCHED_MAX_NET_TASKS 8
-#define VM_SCHED_MAX_TIMERS 20
-#define VM_SCHED_FRAME_MS 100u
 
 /*
  * A service crash used to leave only the shell's "Segmentation fault" text,
@@ -47,10 +44,10 @@ typedef struct
 
 static vm_server_crash_protocol_context g_vm_server_crash_protocol_context;
 
-static void vm_server_crash_note_protocol(const char *stage, u32 clientId,
-                                          u8 wtKind, u8 wtSubtype,
-                                          u32 requestLen, u32 responseLen,
-                                          const char *source)
+void vm_server_crash_note_protocol(const char *stage, u32 clientId,
+                                   u8 wtKind, u8 wtSubtype,
+                                   u32 requestLen, u32 responseLen,
+                                   const char *source)
 {
     vm_server_crash_protocol_context *context =
         &g_vm_server_crash_protocol_context;
@@ -67,7 +64,7 @@ static void vm_server_crash_note_protocol(const char *stage, u32 clientId,
              source ? source : "-");
 }
 
-static void vm_server_crash_note_protocol_stage(const char *stage)
+void vm_server_crash_note_protocol_stage(const char *stage)
 {
     vm_server_crash_protocol_context *context =
         &g_vm_server_crash_protocol_context;
@@ -334,62 +331,9 @@ static void vm_server_install_crash_reporter(void)
                : "logs/crashes");
 }
 
-typedef struct
-{
-    u8 hasSceneTarget;
-    u8 sceneSubtype;
-    u8 sceneCompleteAfterCallback;
-    u8 updateComplete;
-    u8 hasHangupBattleStart;
-    u8 hangupBattleStartDirect;
-    u8 hangupResponseObjectCount;
-    u8 hangupResponseParsedCount;
-    u8 reserved0;
-    u16 sceneX;
-    u16 sceneY;
-    u32 hangupResponseSequence;
-    u32 hangupResponseLength;
-    char scene[64];
-    char updateName[64];
-} vm_net_remote_observation;
-
-typedef struct
-{
-    u8 active;
-    u8 fired;
-    u8 downloadSnapshotValid;
-    u8 downloadSnapshotState;
-    u16 delayTicks;
-    u32 eventType;
-    u32 r0;
-    u32 r1;
-    u32 r2;
-    u32 callback;
-    u32 context;
-    u8 downloadSnapshot[0x60];
-    vm_net_remote_observation remoteObservation;
-} vm_net_task;
-
-typedef struct
-{
-    u8 active;
-    u32 connectId;
-    u32 callback;
-    u32 context;
-} vm_net_channel;
-
-typedef struct
-{
-    u8 active;
-    u16 handle;
-    u32 remainingTicks;
-    u32 callback;
-    u32 context;
-} vm_timer_task;
-
 /* The headless service has no guest test harness.  Its trace helper writes
  * regular host diagnostics without touching emulated state. */
-static void vm_autotest_note(const char *fmt, ...)
+void vm_autotest_note(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
@@ -397,80 +341,77 @@ static void vm_autotest_note(const char *fmt, ...)
     va_end(args);
 }
 
-static u8 g_mockServiceOnly = 1;
-static u8 g_mockServiceWarnedUnavailable = 0;
-static char g_mockServiceHost[64] = "127.0.0.1";
-static char g_mockServiceBindHost[64] = "0.0.0.0";
-static char g_mockAdminBindHost[64] = "0.0.0.0";
-static u32 g_mockServiceClientId = 0;
-static u16 g_mockServicePort = 19090;
-static u16 g_mockAdminPort = 19091;
-static u32 g_schedulerTick = 0;
-static vm_net_task g_netTasks[VM_SCHED_MAX_NET_TASKS];
-static vm_net_channel g_netChannels[VM_SCHED_MAX_NET_TASKS];
-static int g_netTaskDispatchDepth = 0;
-static int g_netTaskDispatchSlot = -1;
-static vm_timer_task g_timerTasks[VM_SCHED_MAX_TIMERS];
-static u32 g_schedulerStartTicks = 0;
-static u32 g_nextNetConnectId = 1;
-static u8 g_netMockResponse[131072];
-static u32 g_netMockResponseLen = 0;
-static u32 g_netMockResponseOffset = 0;
-static u32 g_netMockResponseVmPtr = 0;
-static bool g_netMockSplitProbe = false;
-static u8 g_netMockUpdateDelivered = 0;
-static u32 g_netMockEnterGameOffset = 0;
-static u32 g_netMockEnterGameChecksum = 0;
-static u8 g_netBusinessSendReadyDeferred = 0;
-static u8 g_netBusinessSendReadyRerun = 0;
-static u8 g_netBusinessSendReadyPostVm = 0;
-static u8 g_loginTail42AllocPending = 0;
-static u8 g_loginTail42FlushPending = 0;
-static u32 g_netUpLinkData = 0;
-static u32 g_netDownLinkData = 0;
-static u32 g_netCurrentObject = 0;
-static u8 g_netLastHandledValid = 0;
-static u32 g_netLastHandledResponseLen = 0;
-static char g_netLastHandledSource[64];
-static char g_netLastHandledSummary[512];
+u8 g_mockServiceOnly = 1;
+u8 g_mockServiceWarnedUnavailable = 0;
+char g_mockServiceHost[64] = "127.0.0.1";
+char g_mockServiceBindHost[64] = "0.0.0.0";
+char g_mockAdminBindHost[64] = "0.0.0.0";
+u32 g_mockServiceClientId = 0;
+u16 g_mockServicePort = 19090;
+u16 g_mockAdminPort = 19091;
+u32 g_schedulerTick = 0;
+vm_net_task g_netTasks[VM_SCHED_MAX_NET_TASKS];
+vm_net_channel g_netChannels[VM_SCHED_MAX_NET_TASKS];
+int g_netTaskDispatchDepth = 0;
+int g_netTaskDispatchSlot = -1;
+vm_timer_task g_timerTasks[VM_SCHED_MAX_TIMERS];
+u32 g_schedulerStartTicks = 0;
+u32 g_nextNetConnectId = 1;
+u8 g_netMockResponse[131072];
+u32 g_netMockResponseLen = 0;
+u32 g_netMockResponseOffset = 0;
+u32 g_netMockResponseVmPtr = 0;
+bool g_netMockSplitProbe = false;
+u8 g_netMockUpdateDelivered = 0;
+u32 g_netMockEnterGameOffset = 0;
+u32 g_netMockEnterGameChecksum = 0;
+u8 g_netBusinessSendReadyDeferred = 0;
+u8 g_netBusinessSendReadyRerun = 0;
+u8 g_netBusinessSendReadyPostVm = 0;
+u8 g_loginTail42AllocPending = 0;
+u8 g_loginTail42FlushPending = 0;
+u32 g_netUpLinkData = 0;
+u32 g_netDownLinkData = 0;
+u32 g_netCurrentObject = 0;
+u8 g_netLastHandledValid = 0;
+u32 g_netLastHandledResponseLen = 0;
+char g_netLastHandledSource[64];
+char g_netLastHandledSummary[512];
 
-static bool g_vm_net_mock_pending_scene_save_valid = false;
-static char g_vm_net_mock_pending_scene_save_scene[64];
-static char g_vm_net_mock_pending_scene_save_reason[64];
-static u16 g_vm_net_mock_pending_scene_save_x = 0;
-static u16 g_vm_net_mock_pending_scene_save_y = 0;
+bool g_vm_net_mock_pending_scene_save_valid = false;
+char g_vm_net_mock_pending_scene_save_scene[64];
+char g_vm_net_mock_pending_scene_save_reason[64];
+u16 g_vm_net_mock_pending_scene_save_x = 0;
+u16 g_vm_net_mock_pending_scene_save_y = 0;
 
 /* Authoritative battle session state.  It was formerly declared alongside
  * the emulator only because both programs shared main.c. */
-static u32 g_mockBattleOperateSessionSerial = 0;
-static u32 g_mockBattleOperateTurnCounter = 0;
+u32 g_mockBattleOperateSessionSerial = 0;
+u32 g_mockBattleOperateTurnCounter = 0;
 u8 g_mockBattleOperateSessionArmed = 0;
-static u8 g_vm_net_mock_battle_auto_enabled = 0;
-static u8 g_vm_net_mock_battle_auto_last_operation_valid = 0;
-static u32 g_vm_net_mock_battle_auto_last_operation_role_id = 0;
-static u32 g_vm_net_mock_battle_auto_last_operation_index = 0;
-static u32 g_vm_net_mock_battle_auto_last_operation_operate = 0;
-static u8 g_vm_net_mock_battle_auto_replay_inflight = 0;
-static u8 g_vm_net_mock_battle_action6_emitted_count = 0;
-static u32 g_vm_net_mock_battle_terminal_close_not_before_tick = 0;
-static u8 g_mockBattleOperateSessionFinished = 0;
-static u8 g_mockBattlePendingEnemyTurn = 0;
-static u8 g_mockBattleAwaitingSettlement = 0;
-static u8 g_mockBattleSceneMonsterStartActive = 0;
-static u32 g_mockBattleRoleHpCurrent = 0;
-static u32 g_mockBattleRoleHpMax = 0;
-static u32 g_mockBattleRoleMpCurrent = 0;
-static u32 g_mockBattleRoleMpMax = 0;
-static u8 g_mockBattleEnemyCountCurrent = 1;
-static u32 g_mockBattleEnemyHpSlots[3] = {0, 0, 0};
-static u32 g_mockBattleEnemyHpMaxSlots[3] = {0, 0, 0};
-static u32 g_mockBattleEnemyHpCurrent = 0;
-static u32 g_mockBattleEnemyHpMax = 0;
+u8 g_vm_net_mock_battle_auto_enabled = 0;
+u8 g_vm_net_mock_battle_auto_last_operation_valid = 0;
+u32 g_vm_net_mock_battle_auto_last_operation_role_id = 0;
+u32 g_vm_net_mock_battle_auto_last_operation_index = 0;
+u32 g_vm_net_mock_battle_auto_last_operation_operate = 0;
+u8 g_vm_net_mock_battle_auto_replay_inflight = 0;
+u8 g_vm_net_mock_battle_action6_emitted_count = 0;
+u32 g_vm_net_mock_battle_terminal_close_not_before_tick = 0;
+u8 g_mockBattleOperateSessionFinished = 0;
+u8 g_mockBattlePendingEnemyTurn = 0;
+u8 g_mockBattleAwaitingSettlement = 0;
+u8 g_mockBattleSceneMonsterStartActive = 0;
+u32 g_mockBattleRoleHpCurrent = 0;
+u32 g_mockBattleRoleHpMax = 0;
+u32 g_mockBattleRoleMpCurrent = 0;
+u32 g_mockBattleRoleMpMax = 0;
+u8 g_mockBattleEnemyCountCurrent = 1;
+u32 g_mockBattleEnemyHpSlots[3] = {0, 0, 0};
+u32 g_mockBattleEnemyHpMaxSlots[3] = {0, 0, 0};
+u32 g_mockBattleEnemyHpCurrent = 0;
+u32 g_mockBattleEnemyHpMax = 0;
 
-static bool vm_net_mock_append_battle_terminal_case11_object(
-    u8 *out, u32 outCap, u32 *pos);
-
-static u32 scheduler_get_tick_ms(void)
+u32 scheduler_get_tick_ms(void)
 {
     static uint64_t startMs = 0;
     uint64_t nowMs = 0;
@@ -555,7 +496,9 @@ static void vm_mock_service_init_config(int argc, char *args[])
            g_mockAdminBindHost, g_mockAdminPort);
 }
 
+#ifdef CBE_SERVER_TEST_INCLUDE_IMPLEMENTATION
 #include "server/mock-server.c"
+#endif
 
 int main(int argc, char *args[])
 {
@@ -584,7 +527,7 @@ int main(int argc, char *args[])
         {
             snprintf(resourceCandidate, sizeof(resourceCandidate), "%s%s",
                      resourceRoot, suffixes[i]);
-            if (vm_net_mock_set_resource_dir(resourceCandidate))
+            if (vm_mock_service_set_resource_dir(resourceCandidate))
             {
                 resourceReady = true;
                 break;
@@ -600,7 +543,7 @@ int main(int argc, char *args[])
         for (u32 i = 0;
              i < sizeof(relativeCandidates) / sizeof(relativeCandidates[0]); ++i)
         {
-            if (vm_net_mock_set_resource_dir(relativeCandidates[i]))
+            if (vm_mock_service_set_resource_dir(relativeCandidates[i]))
             {
                 resourceReady = true;
                 break;
@@ -616,12 +559,11 @@ int main(int argc, char *args[])
         return -1;
     }
     printf("[info][mock-service] resource_root=%s source=%s\n",
-           vm_net_mock_resource_dir(),
+           vm_mock_service_resource_dir(),
            resourceRoot && resourceRoot[0] ? "configured" : "auto");
     vm_mock_service_init_config(argc, args);
     printf("[info][mock-service] starting server-only bind=%s:%u admin=%s:%u\n",
            g_mockServiceBindHost, g_mockServicePort,
            g_mockAdminBindHost, g_mockAdminPort);
-    return vm_net_mock_service_run_forever(g_mockServiceBindHost,
-                                           g_mockServicePort);
+    return vm_mock_service_run(g_mockServiceBindHost, g_mockServicePort);
 }

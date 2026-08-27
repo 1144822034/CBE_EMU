@@ -1,12 +1,10 @@
+#include "mock_server.h"
+
 enum
 {
-    VM_NET_MOCK_MAIL_REWARD_MAX = 12,
     VM_NET_MOCK_MAILBOX_PAGE_ITEMS = 5,
     VM_NET_MOCK_MAILBOX_LIST_MAX = 64
 };
-
-static bool vm_net_mock_npc_service_context_has(
-    const vm_mock_service_npc_context *context, u16 serviceKind);
 
 typedef struct
 {
@@ -28,15 +26,6 @@ typedef struct
     u32 count;
 } vm_net_mock_mail_reward_item;
 
-/* Keep the durable attachment delta, rather than its post-claim stack total,
- * for the native incremental item-manager response. */
-typedef struct
-{
-    u32 itemId;
-    u16 seq;
-    u32 count;
-} vm_net_mock_mail_claimed_item;
-
 typedef struct
 {
     u32 mailId;
@@ -52,26 +41,22 @@ typedef struct
 
 typedef struct
 {
-    char dialog[512];
-    char optionNames[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
-    char optionDescriptions[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][192];
-    u32 optionValues[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
-    u8 optionCount;
-    const char *action;
-    u32 result;
-    u32 page;
-    vm_net_mock_mail_claimed_item claimedItems[VM_NET_MOCK_MAIL_REWARD_MAX];
-    u8 claimedItemCount;
-} vm_net_mock_mailbox_dialog;
-
-typedef struct
-{
     u32 claimState;
     u32 mailStatus;
     bool found;
     bool invalid;
 } vm_net_mock_mail_claim_lock;
 
+typedef struct
+{
+    bool active;
+    /* The recipient row is account-scoped.  roleId binds its mail transition
+     * to the exact role snapshot committed by the persistence module. */
+    u32 roleId;
+    u32 mailId;
+} vm_net_mock_mail_claim_transaction;
+
+static vm_net_mock_mail_claim_transaction g_vm_net_mock_mail_claim_transaction;
 static bool g_vm_net_mock_mailbox_schema_prepared = false;
 
 static bool vm_net_mock_mailbox_legacy_recipient_table_exists(
@@ -96,7 +81,7 @@ static bool vm_net_mock_mailbox_legacy_recipient_table_exists(
     return true;
 }
 
-static bool vm_net_mock_mailbox_prepare_schema(void)
+bool vm_net_mock_mailbox_prepare_schema(void)
 {
     bool legacyRecipientsExist = false;
 
@@ -192,7 +177,7 @@ static bool vm_net_mock_mail_claim_lock_row(
 /* Called by vm_net_mock_role_db_save_relational immediately before COMMIT.
  * The account recipient transition and the selected role/backpack snapshot
  * therefore have one database outcome. */
-static bool vm_net_mock_mail_claim_commit_in_transaction(u32 scopedRoleId)
+bool vm_net_mock_mail_claim_commit_in_transaction(u32 scopedRoleId)
 {
     vm_net_mock_mail_claim_lock lock;
     char accountHex[129];
@@ -307,7 +292,7 @@ static bool vm_net_mock_mailbox_item_row_callback(
     if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &item->itemId) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &item->count) ||
         item->itemId == 0 || item->count == 0 ||
-        vm_net_mock_find_shop_catalog_item(item->itemId) == NULL)
+        !vm_net_mock_shop_catalog_item_exists(item->itemId))
     {
         detail->invalid = true;
         return true;
@@ -382,10 +367,10 @@ static void vm_net_mock_mailbox_append_attachments(
         return;
     for (u8 i = 0; i < detail->itemCount && used < outCap; ++i)
     {
-        const vm_net_mock_shop_catalog_item *catalog =
-            vm_net_mock_find_shop_catalog_item(detail->items[i].itemId);
+        const char *catalogName =
+            vm_net_mock_shop_catalog_item_name(detail->items[i].itemId);
         int written = snprintf(out + used, outCap - used, "\n%s x%u",
-                               catalog != NULL ? catalog->name : "?",
+                               catalogName != NULL ? catalogName : "?",
                                detail->items[i].count);
         if (written < 0 || (u32)written >= outCap - used)
         {
@@ -485,7 +470,7 @@ static bool vm_net_mock_mailbox_claim(vm_net_mock_role_state *role,
     return true;
 }
 
-static bool vm_net_mock_mailbox_build_dialog(
+bool vm_net_mock_mailbox_build_dialog(
     vm_net_mock_role_state *role,
     const vm_mock_service_npc_context *serviceContext,
     u32 operation, u32 value, vm_net_mock_mailbox_dialog *view)

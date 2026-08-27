@@ -65,10 +65,10 @@ typedef struct
     u32 hpMax;
     u32 mp;
     u32 mpMax;
-    const char *roleName;
-    const char *titleText;
-    const char *titleBadge;
-    const char *stateText;
+    char roleName[32];
+    char titleText[32];
+    char titleBadge[32];
+    char stateText[16];
     vm_mock_service_client_session *session;
 } vm_net_mock_scene_role_seed;
 
@@ -154,16 +154,19 @@ static u32 vm_net_mock_scene_role_actor_id_for_session(const vm_mock_service_cli
                                                        const vm_net_mock_role_state *activeRole)
 {
     u32 actorId = 0;
+    vm_mock_service_online_session_view view;
     if (session == NULL)
         return 0;
-    actorId = session->onlineRoleId;
+    if (!vm_mock_service_session_get_online_view(session, &view))
+        return 0;
+    actorId = view.onlineRoleId;
     if (actorId != 0 &&
         (activeRole == NULL || actorId != activeRole->roleId) &&
         !vm_net_mock_scene_role_actor_id_in_use(seeds, count, actorId))
     {
         return actorId;
     }
-    actorId = 0x6A000000u | (session->clientId & 0x00FFFFFFu);
+    actorId = 0x6A000000u | (view.clientId & 0x00FFFFFFu);
     while (actorId == 0 ||
            (activeRole != NULL && actorId == activeRole->roleId) ||
            vm_net_mock_scene_role_actor_id_in_use(seeds, count, actorId))
@@ -190,7 +193,8 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
     u16 baseX = vm_net_mock_scene_spawn_x();
     u16 baseY = vm_net_mock_scene_spawn_y();
     vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
-    vm_mock_service_client_session *session = NULL;
+    vm_mock_service_client_session *sessions[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    vm_mock_service_online_session_view views[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
 
     if (seeds == NULL || seedCap == 0)
         return 0;
@@ -205,36 +209,34 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
     if (!vm_net_mock_scene_name_is_safe(scene))
         return 0;
 
-    session = g_vm_mock_service_client_sessions;
-    while (session != NULL && count < seedCap)
+    count = (u8)vm_mock_service_collect_visible_session_views(
+        scene, vm_mock_service_active_client_id(), views, sessions,
+        SDL_min(seedCap, VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX));
+    for (u8 i = 0; i < count; ++i)
     {
-        if (session->clientId != 0 &&
-            session->clientId != g_vm_mock_service_active_client_id &&
-            vm_mock_service_session_scene_is_visible(session, scene))
-        {
-            seeds[count].actorId = vm_net_mock_scene_role_actor_id_for_session(session,
-                                                                               seeds,
-                                                                               count,
-                                                                               activeRole);
-            seeds[count].x = session->sceneVisibleX ? session->sceneVisibleX :
-                             vm_net_mock_offset_coord(baseX, offsets[count].dx);
-            seeds[count].y = session->sceneVisibleY ? session->sceneVisibleY :
-                             vm_net_mock_offset_coord(baseY, offsets[count].dy);
-            seeds[count].job = session->onlineJob ? session->onlineJob : 1;
-            seeds[count].sex = session->onlineSex <= 1 ? session->onlineSex : 0;
-            seeds[count].level = session->onlineLevel ? session->onlineLevel : 1;
-            seeds[count].hp = session->onlineHp;
-            seeds[count].hpMax = session->onlineHpMax;
-            seeds[count].mp = session->onlineMp;
-            seeds[count].mpMax = session->onlineMpMax;
-            seeds[count].roleName = session->onlineRoleName[0] ? session->onlineRoleName : "Player";
-            seeds[count].titleText = session->onlineRoleTitle[0] ? session->onlineRoleTitle : "";
-            seeds[count].titleBadge = session->onlineRoleTitleBadge[0] ? session->onlineRoleTitleBadge : "";
-            seeds[count].stateText = "Online";
-            seeds[count].session = session;
-            ++count;
-        }
-        session = session->next;
+        const vm_mock_service_online_session_view *view = &views[i];
+
+        seeds[i].actorId = vm_net_mock_scene_role_actor_id_for_session(
+            sessions[i], seeds, i, activeRole);
+        seeds[i].x = view->sceneVisibleX ? view->sceneVisibleX :
+                     vm_net_mock_offset_coord(baseX, offsets[i].dx);
+        seeds[i].y = view->sceneVisibleY ? view->sceneVisibleY :
+                     vm_net_mock_offset_coord(baseY, offsets[i].dy);
+        seeds[i].job = view->onlineJob ? view->onlineJob : 1;
+        seeds[i].sex = view->onlineSex <= 1 ? view->onlineSex : 0;
+        seeds[i].level = view->onlineLevel ? view->onlineLevel : 1;
+        seeds[i].hp = view->onlineHp;
+        seeds[i].hpMax = view->onlineHpMax;
+        seeds[i].mp = view->onlineMp;
+        seeds[i].mpMax = view->onlineMpMax;
+        snprintf(seeds[i].roleName, sizeof(seeds[i].roleName), "%s",
+                 view->onlineRoleName[0] ? view->onlineRoleName : "Player");
+        snprintf(seeds[i].titleText, sizeof(seeds[i].titleText), "%s",
+                 view->onlineRoleTitle);
+        snprintf(seeds[i].titleBadge, sizeof(seeds[i].titleBadge), "%s",
+                 view->onlineRoleTitleBadge);
+        snprintf(seeds[i].stateText, sizeof(seeds[i].stateText), "%s", "Online");
+        seeds[i].session = sessions[i];
     }
     return count;
 }
@@ -275,15 +277,15 @@ static bool vm_net_mock_build_scene_list_otherinfo_blob(const char *scene,
             !vm_net_mock_seq_put_u8(otherInfo, otherInfoCap, &otherInfoLen,
                                     (u8)(seed->sex + 1)) ||
             !vm_net_mock_seq_put_string(otherInfo, otherInfoCap, &otherInfoLen,
-                                        seed->roleName ? seed->roleName : "Player") ||
+                                        seed->roleName[0] ? seed->roleName : "Player") ||
             !vm_net_mock_seq_put_u8(otherInfo, otherInfoCap, &otherInfoLen,
                                     (u8)(seed->x / 16u)) ||
             !vm_net_mock_seq_put_u8(otherInfo, otherInfoCap, &otherInfoLen,
                                     (u8)(seed->y / 16u)) ||
             !vm_net_mock_seq_put_string(otherInfo, otherInfoCap, &otherInfoLen,
-                                        seed->titleText ? seed->titleText : "") ||
+                                        seed->titleText[0] ? seed->titleText : "") ||
             !vm_net_mock_seq_put_string(otherInfo, otherInfoCap, &otherInfoLen,
-                                        seed->titleBadge ? seed->titleBadge : "") ||
+                                        seed->titleBadge[0] ? seed->titleBadge : "") ||
             !vm_net_mock_seq_put_i16(otherInfo, otherInfoCap, &otherInfoLen, seed->x) ||
             !vm_net_mock_seq_put_i16(otherInfo, otherInfoCap, &otherInfoLen, seed->y))
         {
@@ -324,7 +326,7 @@ static bool vm_net_mock_build_scene_room_roles_blob(const char *scene,
                                         vm_net_mock_role_job_name_ascii(seeds[i].job)) ||
             !vm_net_mock_seq_put_string(rolesInfo, rolesInfoCap, &rolesInfoLen, levelText) ||
             !vm_net_mock_seq_put_string(rolesInfo, rolesInfoCap, &rolesInfoLen,
-                                        seeds[i].stateText ? seeds[i].stateText : "Nearby"))
+                                        seeds[i].stateText[0] ? seeds[i].stateText : "Nearby"))
         {
             return false;
         }
@@ -374,27 +376,6 @@ static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 
     return true;
 }
 
-static vm_mock_service_client_session *vm_mock_service_find_online_friend_session(
-    const vm_mock_service_friend_record *record)
-{
-    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
-
-    if (record == NULL)
-        return NULL;
-    while (session != NULL)
-    {
-        if (session->roleOnline && session->onlinePresenceValid &&
-            vm_mock_service_session_presence_is_recent(session) &&
-            session->onlineRoleId == record->targetRoleId &&
-            strcmp(session->accountId, record->targetAccountId) == 0)
-        {
-            return session;
-        }
-        session = session->next;
-    }
-    return NULL;
-}
-
 static bool vm_net_mock_find_nearby_role_seed_by_actor_id(
     const char *scene, u32 actorId, vm_net_mock_scene_role_seed *seedOut)
 {
@@ -427,7 +408,7 @@ static bool vm_net_mock_find_friend_role_seed_by_role_id(
     u32 roleId, vm_net_mock_scene_role_seed *seedOut)
 {
     vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
-    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    const char *ownerAccountId = vm_mock_service_active_account_id();
 
     if (seedOut)
         memset(seedOut, 0, sizeof(*seedOut));
@@ -437,46 +418,43 @@ static bool vm_net_mock_find_friend_role_seed_by_role_id(
         return false;
     }
 
-    vm_mock_service_friend_db_load();
-    if (!g_vm_mock_service_friend_db_valid)
-        return false;
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
-    {
-        const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
-        vm_mock_service_client_session *onlineSession = NULL;
-        vm_net_mock_scene_role_seed seed;
+    vm_mock_service_friend_record record;
+    vm_mock_service_client_session *onlineSession = NULL;
+    vm_mock_service_online_session_view onlineView;
+    vm_net_mock_scene_role_seed seed;
 
-        if (record->ownerRoleId != ownerRole->roleId ||
-            record->targetRoleId != roleId ||
-            strcmp(record->ownerAccountId, ownerAccountId) != 0)
-        {
-            continue;
-        }
-        memset(&seed, 0, sizeof(seed));
-        onlineSession = vm_mock_service_find_online_friend_session(record);
-        seed.actorId = record->targetRoleId;
-        seed.x = onlineSession ? onlineSession->onlineX : 0;
-        seed.y = onlineSession ? onlineSession->onlineY : 0;
-        seed.job = onlineSession && onlineSession->onlineJob ?
-                   onlineSession->onlineJob : (record->targetJob ? record->targetJob : 1);
-        seed.sex = onlineSession && onlineSession->onlineSex <= 1 ?
-                   onlineSession->onlineSex : (record->targetSex <= 1 ? record->targetSex : 0);
-        seed.level = onlineSession && onlineSession->onlineLevel ?
-                     onlineSession->onlineLevel : (u16)(record->targetLevel ? record->targetLevel : 1);
-        seed.hp = onlineSession ? onlineSession->onlineHp : 0;
-        seed.hpMax = onlineSession ? onlineSession->onlineHpMax : 0;
-        seed.mp = onlineSession ? onlineSession->onlineMp : 0;
-        seed.mpMax = onlineSession ? onlineSession->onlineMpMax : 0;
-        seed.roleName = onlineSession && onlineSession->onlineRoleName[0] ?
-                        onlineSession->onlineRoleName :
-                        (record->targetRoleName[0] ? record->targetRoleName : "Player");
-        seed.stateText = onlineSession ? "Online" : "Offline";
-        seed.session = onlineSession;
-        if (seedOut)
-            *seedOut = seed;
-        return true;
-    }
-    return false;
+    if (!vm_mock_service_friend_record_find(ownerRole->roleId, ownerAccountId,
+                                             roleId, &record))
+        return false;
+
+    memset(&seed, 0, sizeof(seed));
+    onlineSession = vm_mock_service_find_online_friend_session(&record);
+    bool online = onlineSession != NULL &&
+                  vm_mock_service_session_get_online_view(onlineSession,
+                                                          &onlineView);
+    seed.actorId = record.targetRoleId;
+    seed.x = online ? onlineView.onlineX : 0;
+    seed.y = online ? onlineView.onlineY : 0;
+    seed.job = online && onlineView.onlineJob ?
+               onlineView.onlineJob : (record.targetJob ? record.targetJob : 1);
+    seed.sex = online && onlineView.onlineSex <= 1 ?
+               onlineView.onlineSex : (record.targetSex <= 1 ? record.targetSex : 0);
+    seed.level = online && onlineView.onlineLevel ?
+                 onlineView.onlineLevel : (u16)(record.targetLevel ? record.targetLevel : 1);
+    seed.hp = online ? onlineView.onlineHp : 0;
+    seed.hpMax = online ? onlineView.onlineHpMax : 0;
+    seed.mp = online ? onlineView.onlineMp : 0;
+    seed.mpMax = online ? onlineView.onlineMpMax : 0;
+    snprintf(seed.roleName, sizeof(seed.roleName), "%s",
+             online && onlineView.onlineRoleName[0] ?
+                 onlineView.onlineRoleName :
+                 (record.targetRoleName[0] ? record.targetRoleName : "Player"));
+    snprintf(seed.stateText, sizeof(seed.stateText), "%s",
+             online ? "Online" : "Offline");
+    seed.session = onlineSession;
+    if (seedOut)
+        *seedOut = seed;
+    return true;
 }
 
 static bool vm_net_mock_open_server_data_resource(const char *name,
@@ -503,7 +481,7 @@ static bool vm_net_mock_open_server_data_resource(const char *name,
         return false;
     }
 
-    if (g_vm_net_mock_resource_dir[0] != 0 &&
+    if (vm_mock_service_resource_dir()[0] != 0 &&
         vm_net_mock_build_configured_resource_path(name, candidate,
                                                    sizeof(candidate)))
     {
@@ -545,45 +523,39 @@ static bool vm_net_mock_open_server_data_resource(const char *name,
 static bool vm_net_mock_find_online_role_seed_by_role_id(
     u32 roleId, vm_net_mock_scene_role_seed *seedOut)
 {
-    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+    vm_mock_service_client_session *session = NULL;
+    vm_mock_service_online_session_view view;
 
     if (seedOut)
         memset(seedOut, 0, sizeof(*seedOut));
     if (roleId == 0)
         return false;
+    session = vm_mock_service_find_online_session_by_role_id(roleId);
+    if (session == NULL || !vm_mock_service_session_get_online_view(session, &view))
+        return false;
 
-    while (session != NULL)
+    if (seedOut)
     {
-        if (session->roleOnline && session->onlinePresenceValid &&
-            vm_mock_service_session_presence_is_recent(session) &&
-            session->onlineRoleId == roleId)
-        {
-            if (seedOut)
-            {
-                seedOut->actorId = roleId;
-                seedOut->x = session->onlineX;
-                seedOut->y = session->onlineY;
-                seedOut->job = session->onlineJob ? session->onlineJob : 1;
-                seedOut->sex = session->onlineSex <= 1 ? session->onlineSex : 0;
-                seedOut->level = session->onlineLevel ? session->onlineLevel : 1;
-                seedOut->hp = session->onlineHp;
-                seedOut->hpMax = session->onlineHpMax;
-                seedOut->mp = session->onlineMp;
-                seedOut->mpMax = session->onlineMpMax;
-                seedOut->roleName = session->onlineRoleName[0] ?
-                                    session->onlineRoleName : "Player";
-                seedOut->titleText = session->onlineRoleTitle[0] ?
-                                     session->onlineRoleTitle : "";
-                seedOut->titleBadge = session->onlineRoleTitleBadge[0] ?
-                                      session->onlineRoleTitleBadge : "";
-                seedOut->stateText = "Online";
-                seedOut->session = session;
-            }
-            return true;
-        }
-        session = session->next;
+        seedOut->actorId = roleId;
+        seedOut->x = view.onlineX;
+        seedOut->y = view.onlineY;
+        seedOut->job = view.onlineJob ? view.onlineJob : 1;
+        seedOut->sex = view.onlineSex <= 1 ? view.onlineSex : 0;
+        seedOut->level = view.onlineLevel ? view.onlineLevel : 1;
+        seedOut->hp = view.onlineHp;
+        seedOut->hpMax = view.onlineHpMax;
+        seedOut->mp = view.onlineMp;
+        seedOut->mpMax = view.onlineMpMax;
+        snprintf(seedOut->roleName, sizeof(seedOut->roleName), "%s",
+                 view.onlineRoleName[0] ? view.onlineRoleName : "Player");
+        snprintf(seedOut->titleText, sizeof(seedOut->titleText), "%s",
+                 view.onlineRoleTitle);
+        snprintf(seedOut->titleBadge, sizeof(seedOut->titleBadge), "%s",
+                 view.onlineRoleTitleBadge);
+        snprintf(seedOut->stateText, sizeof(seedOut->stateText), "%s", "Online");
+        seedOut->session = session;
     }
-    return false;
+    return true;
 }
 
 static bool vm_net_mock_find_player_info_seed_by_actor_id(
@@ -635,8 +607,9 @@ static bool vm_net_mock_find_player_info_seed_by_actor_id(
         seedOut->hpMax = activeRole->hpMax;
         seedOut->mp = activeRole->mp;
         seedOut->mpMax = activeRole->mpMax;
-        seedOut->roleName = activeRole->name[0] ? activeRole->name : "Player";
-        seedOut->stateText = "Online";
+        snprintf(seedOut->roleName, sizeof(seedOut->roleName), "%s",
+                 activeRole->name[0] ? activeRole->name : "Player");
+        snprintf(seedOut->stateText, sizeof(seedOut->stateText), "%s", "Online");
         seedOut->session = activeSession;
     }
     if (scopeOut)
@@ -801,7 +774,7 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     /* The CBE renders the strings as GBK.  Keep fixed labels as explicit GBK
      * bytes so they remain Chinese regardless of the host compiler's source
      * encoding; roleName itself is already the role DB's GBK display name. */
-    displayName = targetSeed.roleName && targetSeed.roleName[0] &&
+    displayName = targetSeed.roleName[0] &&
                   strcmp(targetSeed.roleName, "Player") != 0 ?
                   targetSeed.roleName : "\xcf\xc0\xbf\xcd"; /* GBK: 侠客 */
     switch (targetSeed.job)
@@ -819,7 +792,8 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     }
     sexName = targetSeed.sex == 1 ? "\xc5\xae" : "\xc4\xd0"; /* GBK: 女 / 男 */
     if (targetSeed.session != NULL &&
-        vm_net_mock_guild_find_membership_for_account(targetSeed.session->accountId,
+        vm_net_mock_guild_find_membership_for_account(
+            vm_mock_service_session_account_id(targetSeed.session),
                                                        targetSeed.actorId,
                                                        &guild, NULL) &&
         guild.guildName[0] != 0)
@@ -857,7 +831,7 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     printf("[info][network] mock_player_info actor=%u scope=%s name=%s level=%u scene=%s playerinfo_len=%u resp=%u evidence=JianghuOL.CBE:0x0101A5AA+0x010211A8\n",
            actorId,
            targetScope,
-           targetSeed.roleName ? targetSeed.roleName : "Player",
+           targetSeed.roleName[0] ? targetSeed.roleName : "Player",
            targetSeed.level,
            scene ? scene : "-",
            playerInfoLen,
@@ -875,6 +849,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
     u32 *blobLenOut, u8 *rowCountOut)
 {
     const vm_mock_service_client_session *session = NULL;
+    vm_mock_service_online_session_view view;
     u32 pos = 0;
     u8 rowCount = 0;
 
@@ -886,9 +861,11 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
         return false;
 
     session = targetSeed->session;
-    for (u8 slot = 0; session != NULL && slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    bool haveSessionView = session != NULL &&
+                           vm_mock_service_session_get_online_view(session, &view);
+    for (u8 slot = 0; haveSessionView && slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
     {
-        u32 itemId = session->onlineEquippedItemIds[slot];
+        u32 itemId = view.onlineEquippedItemIds[slot];
 
         /* The client opens its local equip.dsh for each row.  Do not emit an
          * unknown id that would leave its visual/slot lookup uninitialized. */
@@ -898,10 +875,10 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
             !vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
             !vm_net_mock_seq_put_item_common_extra(
                 out, outCap, &pos, itemId,
-                (u8)SDL_min(session->onlineEquippedEnhanceLevels[slot],
+                (u8)SDL_min(view.onlineEquippedEnhanceLevels[slot],
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
                 vm_net_mock_item_common_extra_enhance_cap(itemId),
-                &session->onlineEquippedEnhanceAffixes[slot]))
+                &view.onlineEquippedEnhanceAffixes[slot]))
         {
             return false;
         }
@@ -978,7 +955,7 @@ static u32 vm_net_mock_build_nearby_equip_view_response(const u8 *request, u32 r
         !vm_net_mock_put_object_u16(out, outCap, &pos, "level",
                                     targetSeed.level ? targetSeed.level : 1) ||
         !vm_net_mock_put_object_string(out, outCap, &pos, "name",
-                                       targetSeed.roleName ? targetSeed.roleName : "Player") ||
+                                       targetSeed.roleName[0] ? targetSeed.roleName : "Player") ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "work", workVisualVariant) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "sex", sexVisualGroup) ||
         !vm_net_mock_put_object_raw(out, outCap, &pos, "equipinfo",
@@ -991,7 +968,7 @@ static u32 vm_net_mock_build_nearby_equip_view_response(const u8 *request, u32 r
     printf("[info][network] mock_nearby_equip_view actor=%u scope=%s name=%s level=%u job=%u sex=%u work=%u sex_group=%u scene=%s entries=%u equipinfo_len=%u resp=%u evidence=JianghuOL.CBE:0x0101A2B6+0x010216D6+0x01020C1A\n",
            actorId,
            targetScope,
-           targetSeed.roleName ? targetSeed.roleName : "Player",
+           targetSeed.roleName[0] ? targetSeed.roleName : "Player",
            targetSeed.level,
            targetSeed.job,
            targetSeed.sex,
@@ -1017,7 +994,7 @@ static u32 vm_net_mock_build_nearby_social_action_ack_response(
     vm_net_mock_scene_role_seed targetSeed;
     vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
-    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *sourceAccountId = vm_mock_service_active_account_id();
     const char *scene = vm_net_mock_current_scene_name();
     const char *targetScope = "nearby";
     u32 actorId = 0;
@@ -1045,7 +1022,7 @@ static u32 vm_net_mock_build_nearby_social_action_ack_response(
            action ? action : "action",
            actorId,
            targetScope,
-           targetSeed.roleName ? targetSeed.roleName : "Player",
+           targetSeed.roleName[0] ? targetSeed.roleName : "Player",
            scene ? scene : "-",
            queued ? 1u : 0u,
            pos);
@@ -1076,9 +1053,10 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
 {
     vm_net_mock_scene_role_seed targetSeed;
     vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
-    vm_mock_service_team *sourceTeam = NULL;
+    vm_mock_service_online_session_view sourceView;
+    vm_mock_service_online_session_view targetView;
     vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
-    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *sourceAccountId = vm_mock_service_active_account_id();
     const char *scene = vm_net_mock_current_scene_name();
     const char *targetScope = "nearby";
     const char *reason = "invalid";
@@ -1087,6 +1065,8 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
     bool queued = false;
 
     memset(&targetSeed, 0, sizeof(targetSeed));
+    memset(&sourceView, 0, sizeof(sourceView));
+    memset(&targetView, 0, sizeof(targetView));
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_nearby_team_invite_request(request, requestLen, &actorId) ||
         (!vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
@@ -1096,33 +1076,36 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
         return 0;
     }
     if (sourceSession != NULL && sourceRole != NULL && targetSeed.session != NULL &&
-        sourceSession->clientId != targetSeed.session->clientId)
+        vm_mock_service_session_get_online_view(sourceSession, &sourceView) &&
+        vm_mock_service_session_get_online_view(targetSeed.session, &targetView) &&
+        sourceView.clientId != targetView.clientId)
     {
         /* A nearby row supplies its observer-scoped scene actor id; a friend
          * row supplies the persistent role id and may point to another scene.
          * Both narrow resolvers already bind the request id to an authorized
          * online session, so do not compare the transport id with the target's
          * persistent id again. */
-        sourceTeam = vm_mock_service_team_find_for_client(sourceSession->clientId);
-        if (sourceTeam != NULL && !vm_mock_service_team_is_leader(sourceTeam, sourceSession->clientId))
+        switch (vm_mock_service_team_validate_invitation(sourceSession,
+                                                         targetSeed.session))
         {
+        case VM_MOCK_SERVICE_TEAM_INVITE_NOT_LEADER:
             reason = "not-leader";
-        }
-        else if (sourceTeam != NULL &&
-                 sourceTeam->memberCount >= VM_MOCK_SERVICE_TEAM_MEMBER_MAX)
-        {
+            break;
+        case VM_MOCK_SERVICE_TEAM_INVITE_FULL:
             reason = "team-full";
-        }
-        else if (vm_mock_service_team_find_for_client(targetSeed.session->clientId) != NULL)
-        {
+            break;
+        case VM_MOCK_SERVICE_TEAM_INVITE_TARGET_IN_TEAM:
             reason = "target-in-team";
-        }
-        else
-        {
+            break;
+        case VM_MOCK_SERVICE_TEAM_INVITE_ALLOWED:
             queued = vm_mock_service_session_enqueue_social_notice(
                 targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE, 0,
                 sourceSession, sourceRole, sourceAccountId);
             reason = queued ? "queued" : "notice-queue-full";
+            break;
+        default:
+            reason = "target-unavailable";
+            break;
         }
     }
     else
@@ -1137,10 +1120,10 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
     printf("[info][network] mock_team_invite actor=%u scope=%s source=%08x/%u target=%08x/%u queued=%u reason=%s resp=%u evidence=JianghuOL.CBE:0x0101BEF4+0x01011F3A(subtype2)\n",
            actorId,
            targetScope,
-           sourceSession ? sourceSession->clientId : 0,
+           sourceView.clientId,
            sourceRole ? sourceRole->roleId : 0,
-           targetSeed.session ? targetSeed.session->clientId : 0,
-           targetSeed.session ? targetSeed.session->onlineRoleId : 0,
+           targetView.clientId,
+           targetView.onlineRoleId,
            queued ? 1u : 0u, reason, pos);
     return pos;
 }
@@ -1177,67 +1160,15 @@ static bool vm_net_mock_is_team_invite_reply_request(const u8 *request, u32 requ
     return true;
 }
 
-static void vm_mock_service_team_enqueue_member_join_for_peers(
-    const vm_mock_service_team *team, u32 exceptClientA, u32 exceptClientB,
-    const vm_mock_service_client_session *joinedMember)
-{
-    if (team == NULL || !team->active || joinedMember == NULL)
-        return;
-    for (u8 member = 0; member < team->memberCount; ++member)
-    {
-        vm_mock_service_client_session *peer =
-            vm_mock_service_find_client_session(team->memberClientIds[member]);
-        if (peer != NULL && peer->clientId != exceptClientA && peer->clientId != exceptClientB)
-        {
-            (void)vm_mock_service_session_enqueue_social_notice(
-                peer, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN, 0,
-                joinedMember, NULL, joinedMember->accountId);
-        }
-    }
-}
-
-/* A successful 1/5/3 reply gives the accepting client its own bootstrap row
- * and the leader row. Existing non-leader members still need native 5/5
- * deltas, otherwise the third member's client never learns about them. */
-static u8 vm_mock_service_team_enqueue_existing_members_for_joiner(
-    const vm_mock_service_team *team,
-    const vm_mock_service_client_session *leader,
-    vm_mock_service_client_session *joiner)
-{
-    u8 queued = 0;
-
-    if (team == NULL || !team->active || leader == NULL || joiner == NULL ||
-        !vm_mock_service_team_contains_client(team, leader->clientId) ||
-        !vm_mock_service_team_contains_client(team, joiner->clientId))
-    {
-        return 0;
-    }
-    for (u8 member = 0; member < team->memberCount; ++member)
-    {
-        vm_mock_service_client_session *existing =
-            vm_mock_service_find_client_session(team->memberClientIds[member]);
-
-        if (existing == NULL || existing->clientId == leader->clientId ||
-            existing->clientId == joiner->clientId)
-        {
-            continue;
-        }
-        if (vm_mock_service_session_enqueue_social_notice(
-                joiner, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN, 0,
-                existing, NULL, existing->accountId))
-        {
-            ++queued;
-        }
-    }
-    return queued;
-}
-
 static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 requestLen,
                                                          u8 *out, u32 outCap)
 {
     vm_mock_service_client_session *responder = vm_mock_service_get_active_client_session();
     vm_mock_service_client_session *source = NULL;
-    vm_mock_service_team *team = NULL;
+    vm_mock_service_online_session_view responderView;
+    vm_mock_service_online_session_view sourceView;
+    vm_mock_service_team_join_result teamJoin;
+    vm_mock_service_team_invite_reply_context inviteReply;
     vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
     u32 sourceWireId = 0;
     u32 pos = 5;
@@ -1249,65 +1180,58 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     bool sourceMemberJoinQueued = false;
     u8 joinerExistingMembersQueued = 0;
 
+    memset(&responderView, 0, sizeof(responderView));
+    memset(&sourceView, 0, sizeof(sourceView));
+    memset(&teamJoin, 0, sizeof(teamJoin));
+    memset(&inviteReply, 0, sizeof(inviteReply));
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_team_invite_reply_request(request, requestLen, &sourceWireId, &result))
     {
         return 0;
     }
-    if (responder == NULL || responderRole == NULL || !responder->teamInviteReplyActive ||
-        responder->teamInviteSourceWireId != sourceWireId)
+    if (responder == NULL || responderRole == NULL ||
+        !vm_mock_service_session_get_online_view(responder, &responderView) ||
+        !vm_mock_service_session_get_team_invite_reply_context(responder, &inviteReply) ||
+        !inviteReply.active || inviteReply.sourceWireId != sourceWireId)
     {
         /* This remains a narrow 1/5/3 acknowledgement, but make a stale or
          * mismatched confirmation observable instead of falling through to a
          * generic unhandled-packet assertion. */
         vm_net_mock_finish_wt_packet(out, pos, 0);
         printf("[warn][network] mock_team_invite_reply_reject target=%08x id=%u result=%u pending=%u pending_source=%u reason=stale-or-id-mismatch\n",
-               responder ? responder->clientId : 0, sourceWireId, result,
-               responder && responder->teamInviteReplyActive ? 1u : 0u,
-               responder ? responder->teamInviteSourceWireId : 0);
+               responderView.clientId, sourceWireId, result,
+               inviteReply.active ? 1u : 0u, inviteReply.sourceWireId);
         return pos;
     }
-    source = vm_mock_service_find_client_session(responder->teamInviteSourceClientId);
-    if (result == 1 && source != NULL && source->roleOnline &&
-        source->clientId != responder->clientId &&
-        vm_mock_service_team_find_for_client(responder->clientId) == NULL)
+    source = vm_mock_service_find_client_session(inviteReply.sourceClientId);
+    if (source != NULL)
+        (void)vm_mock_service_session_get_online_view(source, &sourceView);
+    if (result == 1 &&
+        vm_mock_service_team_accept_invitation(source, responder, &teamJoin))
     {
-        team = vm_mock_service_team_find_for_client(source->clientId);
-        if (team == NULL)
-            team = vm_mock_service_team_create(source);
-        if (team != NULL && vm_mock_service_team_is_leader(team, source->clientId) &&
-            vm_mock_service_team_add_member(team, responder))
-        {
-            accepted = true;
-            vm_mock_service_team_enqueue_member_join_for_peers(
-                team, source->clientId, responder->clientId, responder);
-            joinerExistingMembersQueued =
-                vm_mock_service_team_enqueue_existing_members_for_joiner(
-                    team, source, responder);
-        }
+        accepted = true;
+        joinerExistingMembersQueued = teamJoin.existingMembersQueued;
     }
 
     if (source != NULL)
     {
         sourceNotified = vm_mock_service_session_enqueue_social_notice(
             source, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT, accepted ? 1 : 0,
-            responder, responderRole, g_vm_mock_service_active_account_id);
+            responder, responderRole, vm_mock_service_active_account_id());
         if (accepted)
         {
             sourceMemberJoinQueued = vm_mock_service_session_enqueue_social_notice(
                 source, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN, 0,
-                responder, responderRole, g_vm_mock_service_active_account_id);
+                responder, responderRole, vm_mock_service_active_account_id());
         }
     }
-    responder->teamInviteReplyActive = false;
-    responder->teamInviteSourceClientId = 0;
-    responder->teamInviteSourceWireId = 0;
+    vm_mock_service_session_clear_team_invite_reply_context(responder);
 
     /* The joiner already has its self roster row from the login 5/10 request.
      * A successful subtype 3 still requires a complete parser payload, but it
      * contributes exactly the leader row.  The first subtype-3 row is the
      * native leader assignment, so do not duplicate the joiner in this list. */
-    if (accepted && team != NULL)
+    if (accepted)
     {
         if (!vm_net_mock_append_team_joiner_leader_roster_object(out, outCap, &pos,
                                                                  responder, source))
@@ -1327,12 +1251,12 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     objectCount = 1;
     vm_net_mock_finish_wt_packet(out, pos, (u8)objectCount);
     printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u queued_join=%u queued_existing_for_joiner=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-leader-delta)+0x01011F3A(subtype5-member-delta)\n",
-           source ? source->clientId : 0, sourceWireId,
-           responder->clientId, responderRole->roleId,
+           sourceView.clientId, sourceWireId,
+           responderView.clientId, responderRole->roleId,
            result, accepted ? 1u : 0u, sourceNotified ? 1u : 0u,
            sourceMemberJoinQueued ? 1u : 0u, joinerExistingMembersQueued,
            accepted ? "inline-5/3-leader-delta" : "none",
-           team ? team->memberCount : 0, pos);
+           teamJoin.memberCount, pos);
     return pos;
 }
 
@@ -1352,18 +1276,22 @@ static u32 vm_net_mock_build_team_leave_response(const u8 *request, u32 requestL
                                                   u8 *out, u32 outCap)
 {
     vm_mock_service_client_session *leaver = vm_mock_service_get_active_client_session();
+    vm_mock_service_online_session_view leaverView;
     u32 pos = 5;
     u32 objectStart = 0;
     bool removed = false;
 
+    memset(&leaverView, 0, sizeof(leaverView));
     if (out == NULL || outCap < pos || !vm_net_mock_is_team_leave_request(request, requestLen))
         return 0;
-    if (leaver != NULL && leaver->onlineRoleId != 0)
+    if (leaver != NULL)
+        (void)vm_mock_service_session_get_online_view(leaver, &leaverView);
+    if (leaverView.onlineRoleId != 0)
         removed = vm_mock_service_team_remove_member(leaver, "leave-request");
     if (removed)
     {
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 5, 7, &objectStart) ||
-            !vm_net_mock_put_object_u32(out, outCap, &pos, "id", leaver->onlineRoleId))
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "id", leaverView.onlineRoleId))
         {
             return 0;
         }
@@ -1375,102 +1303,9 @@ static u32 vm_net_mock_build_team_leave_response(const u8 *request, u32 requestL
         vm_net_mock_finish_wt_packet(out, pos, 0);
     }
     printf("[info][network] mock_team_leave client=%08x role=%u removed=%u resp=%u evidence=JianghuOL.CBE:0x01011F3A(subtype7)\n",
-           leaver ? leaver->clientId : 0, leaver ? leaver->onlineRoleId : 0,
+           leaverView.clientId, leaverView.onlineRoleId,
            removed ? 1u : 0u, pos);
     return pos;
-}
-
-static vm_mock_service_duel *vm_mock_service_duel_begin_ex(
-    vm_mock_service_client_session *inviter,
-    vm_mock_service_client_session *responder,
-    bool requireSameScene, u32 arenaRoomId)
-{
-    vm_mock_service_duel *slot = NULL;
-    vm_mock_service_team *inviterTeam = NULL;
-    vm_mock_service_team *responderTeam = NULL;
-
-    if (inviter == NULL || responder == NULL || inviter == responder ||
-        inviter->clientId == 0 || responder->clientId == 0 ||
-        !inviter->roleOnline || !responder->roleOnline ||
-        inviter->onlineRoleId == 0 || responder->onlineRoleId == 0 ||
-        !inviter->sceneVisibleReady || !responder->sceneVisibleReady ||
-        inviter->sceneVisiblePending || responder->sceneVisiblePending ||
-        (requireSameScene &&
-         !vm_mock_service_session_scene_is_visible(responder,
-                                                   inviter->sceneVisibleScene)) ||
-        vm_mock_service_duel_find_for_client(inviter->clientId, NULL) != NULL ||
-        vm_mock_service_duel_find_for_client(responder->clientId, NULL) != NULL)
-    {
-        return NULL;
-    }
-    inviterTeam = vm_mock_service_team_find_for_client(inviter->clientId);
-    responderTeam = vm_mock_service_team_find_for_client(responder->clientId);
-    if ((inviterTeam != NULL && inviterTeam->battleActive) ||
-        (responderTeam != NULL && responderTeam->battleActive))
-    {
-        return NULL;
-    }
-    for (u32 i = 0; i < VM_MOCK_SERVICE_DUEL_MAX; ++i)
-    {
-        if (!g_vm_mock_service_duels[i].active)
-        {
-            slot = &g_vm_mock_service_duels[i];
-            break;
-        }
-    }
-    if (slot == NULL)
-        return NULL;
-
-    memset(slot, 0, sizeof(*slot));
-    slot->active = true;
-    slot->serial = ++g_vm_mock_service_duel_serial;
-    if (slot->serial == 0)
-        slot->serial = ++g_vm_mock_service_duel_serial;
-    slot->clientIds[0] = inviter->clientId;
-    slot->clientIds[1] = responder->clientId;
-    slot->arenaRoomId = arenaRoomId;
-    snprintf(slot->scene, sizeof(slot->scene), "%s", inviter->sceneVisibleScene);
-    slot->hpMax[0] = inviter->onlineHpMax ? inviter->onlineHpMax : 1;
-    slot->hpMax[1] = responder->onlineHpMax ? responder->onlineHpMax : 1;
-    slot->hp[0] = inviter->onlineHp ?
-        vm_net_mock_min_u32(inviter->onlineHp, slot->hpMax[0]) : slot->hpMax[0];
-    slot->hp[1] = responder->onlineHp ?
-        vm_net_mock_min_u32(responder->onlineHp, slot->hpMax[1]) : slot->hpMax[1];
-    slot->mpMax[0] = inviter->onlineMpMax;
-    slot->mpMax[1] = responder->onlineMpMax;
-    slot->mp[0] = vm_net_mock_min_u32(inviter->onlineMp, slot->mpMax[0]);
-    slot->mp[1] = vm_net_mock_min_u32(responder->onlineMp, slot->mpMax[1]);
-    slot->startPendingMask = 3;
-    slot->roundSerial = 1;
-    printf("[info][mock-service] duel_begin serial=%u mode=%s arena_room=%u "
-           "inviter=%08x/%u responder=%08x/%u scene=%s hp=%u/%u,%u/%u "
-           "mp=%u/%u,%u/%u\n",
-           slot->serial,
-           arenaRoomId != 0 ? "arena" : "spar", arenaRoomId,
-           inviter->clientId, inviter->onlineRoleId,
-           responder->clientId, responder->onlineRoleId,
-           slot->scene,
-           slot->hp[0], slot->hpMax[0], slot->hp[1], slot->hpMax[1],
-           slot->mp[0], slot->mpMax[0], slot->mp[1], slot->mpMax[1]);
-    return slot;
-}
-
-static vm_mock_service_duel *vm_mock_service_duel_begin(
-    vm_mock_service_client_session *inviter,
-    vm_mock_service_client_session *responder)
-{
-    if (inviter == NULL || responder == NULL)
-        return NULL;
-    return vm_mock_service_duel_begin_ex(inviter, responder, true, 0);
-}
-
-static vm_mock_service_duel *vm_mock_service_arena_duel_begin(
-    vm_mock_service_client_session *challenger,
-    vm_mock_service_client_session *opponent, u32 roomId)
-{
-    if (roomId == 0)
-        return NULL;
-    return vm_mock_service_duel_begin_ex(challenger, opponent, false, roomId);
 }
 
 /* Append the native 1/4/10 start object to an already-open WT packet.
@@ -1607,7 +1442,7 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
     vm_net_mock_scene_role_seed targetSeed;
     vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
-    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *sourceAccountId = vm_mock_service_active_account_id();
     const char *scene = vm_net_mock_current_scene_name();
     u32 actorId = 0;
     u32 pos = 5;
@@ -1765,7 +1600,7 @@ static u32 vm_net_mock_build_spar_invite_reply_response(
         sourceNotified = vm_mock_service_session_enqueue_social_notice(
             source, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT,
             accepted ? 1 : 2, responder, responderRole,
-            g_vm_mock_service_active_account_id);
+            vm_mock_service_active_account_id());
     }
     if (accepted && !readyIncluded)
     {
@@ -1893,7 +1728,7 @@ static u32 vm_net_mock_build_friend_add_response(const u8 *request, u32 requestL
     vm_net_mock_scene_role_seed targetSeed;
     vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
-    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    const char *ownerAccountId = vm_mock_service_active_account_id();
     const char *scene = vm_net_mock_current_scene_name();
     u32 actorId = 0;
     u32 pos = 5;
@@ -1974,7 +1809,7 @@ static u32 vm_net_mock_build_friend_invite_reply_response(const u8 *request, u32
     vm_mock_service_client_session *responderSession = vm_mock_service_get_active_client_session();
     vm_mock_service_client_session *sourceSession = NULL;
     vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
-    const char *responderAccountId = g_vm_mock_service_active_account_id;
+    const char *responderAccountId = vm_mock_service_active_account_id();
     u32 sourceRoleId = 0;
     u32 pos = 5;
     u8 result = 0;
@@ -2073,7 +1908,7 @@ static u32 vm_net_mock_build_trade_invite_reply_response(const u8 *request, u32 
     vm_mock_service_client_session *sourceSession = NULL;
     vm_mock_service_trade *trade = NULL;
     vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
-    const char *responderAccountId = g_vm_mock_service_active_account_id;
+    const char *responderAccountId = vm_mock_service_active_account_id();
     u32 sourceRoleId = 0;
     u32 pos = 5;
     u32 objectStart = 0;
@@ -3311,110 +3146,10 @@ static const char *vm_net_mock_guild_rank_default_title(u8 memberRank)
 
 static u8 vm_net_mock_guild_member_online(const vm_net_mock_guild_member_record *member)
 {
-    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
     if (member == NULL)
         return 0;
-    while (session != NULL)
-    {
-        if (session->roleOnline && session->onlineRoleId == member->roleId &&
-            strcmp(session->accountId, member->accountId) == 0)
-        {
-            return 1;
-        }
-        session = session->next;
-    }
-    return 0;
-}
-
-/* Guild application approval is persisted immediately, but an already-online
- * applicant still has the old actor+104 guild id in the CBE until it receives
- * the native 10/36 status update.  Queue that packet for the applicant's next
- * ordinary scene-sync poll; offline roles will obtain the same state from the
- * persisted actorinfo during their next login. */
-static bool vm_mock_service_enqueue_guild_application_notice(
-    const vm_net_mock_guild_application_record *application,
-    const vm_net_mock_guild_record *guild,
-    u8 actionType,
-    const vm_net_mock_role_state *requester)
-{
-    vm_mock_service_client_session *target = g_vm_mock_service_client_sessions;
-    vm_mock_service_client_session *source = vm_mock_service_get_active_client_session();
-    vm_mock_service_social_notice *slot = NULL;
-    u8 noticeType = actionType == 1
-                        ? VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED
-                        : VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED;
-
-    if (application == NULL || guild == NULL || guild->guildId == 0 ||
-        application->roleId == 0 || application->accountId[0] == 0 ||
-        (actionType != 1 && actionType != 2))
-    {
-        return false;
-    }
-    while (target != NULL)
-    {
-        if (target->roleOnline && target->onlinePresenceValid &&
-            vm_mock_service_session_presence_is_recent(target) &&
-            target->onlineRoleId == application->roleId &&
-            strcmp(target->accountId, application->accountId) == 0)
-        {
-            break;
-        }
-        target = target->next;
-    }
-    if (target == NULL)
-    {
-        printf("[info][mock-service] guild_application_notice_queue "
-               "target=%s/%u action=%s guild=%u queued=0 reason=target-offline\n",
-               application->accountId, application->roleId,
-               vm_mock_service_social_notice_name(noticeType), guild->guildId);
-        return false;
-    }
-
-    for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
-    {
-        vm_mock_service_social_notice *entry = &target->socialNotices[i];
-        if ((entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED ||
-             entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED) &&
-            entry->guildId == guild->guildId)
-        {
-            slot = entry;
-            break;
-        }
-        if (slot == NULL && entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE)
-            slot = entry;
-    }
-    if (slot == NULL)
-    {
-        printf("[warn][mock-service] guild_application_notice_queue "
-               "target=%08x/%u action=%s guild=%u queued=0 reason=queue-full\n",
-               target->clientId, application->roleId,
-               vm_mock_service_social_notice_name(noticeType), guild->guildId);
-        return false;
-    }
-
-    memset(slot, 0, sizeof(*slot));
-    slot->type = noticeType;
-    slot->result = actionType;
-    slot->sourceClientId = source ? source->clientId : 0;
-    slot->sourceRoleId = requester ? requester->roleId : 0;
-    slot->sourceLevel = (u16)(requester && requester->level ? requester->level : 1);
-    slot->sourceJob = requester && requester->job ? requester->job : 1;
-    slot->sourceSex = requester && requester->sex <= 1 ? requester->sex : 0;
-    snprintf(slot->sourceAccountId, sizeof(slot->sourceAccountId), "%s",
-             g_vm_mock_service_active_account_id ?
-                 g_vm_mock_service_active_account_id : "");
-    snprintf(slot->sourceName, sizeof(slot->sourceName), "%s",
-             requester && requester->name[0] ? requester->name : "Guild");
-    slot->guildId = guild->guildId;
-    slot->guildStatus = actionType == 1 ? 3 : 0;
-    snprintf(slot->guildName, sizeof(slot->guildName), "%s", guild->guildName);
-    slot->queuedTick = g_schedulerTick;
-    printf("[info][mock-service] guild_application_notice_queue "
-           "target=%08x/%u action=%s guild=%u name=%s status=%u queued=1\n",
-           target->clientId, application->roleId,
-           vm_mock_service_social_notice_name(noticeType), guild->guildId,
-           guild->guildName, slot->guildStatus);
-    return true;
+    return vm_mock_service_is_role_online_by_role_account(
+        member->roleId, member->accountId) ? 1 : 0;
 }
 
 static u32 vm_net_mock_build_guild_member_page_response(const u8 *request, u32 requestLen,
@@ -4887,17 +4622,17 @@ static u8 vm_net_mock_apply_guild_rank_action(
         }
         accountLen = vm_mock_mysql_bounded_strlen(target.accountId,
                                                    sizeof(target.accountId));
-        requesterAccountLen = g_vm_mock_service_active_account_id != NULL ?
-            vm_mock_mysql_bounded_strlen(g_vm_mock_service_active_account_id, 64) : 0;
+        requesterAccountLen = vm_mock_service_active_account_id() != NULL ?
+            vm_mock_mysql_bounded_strlen(vm_mock_service_active_account_id(), 64) : 0;
         roleNameLen = vm_mock_mysql_bounded_strlen(target.roleName,
                                                     sizeof(target.roleName));
         if (accountLen == 0 || accountLen >= sizeof(target.accountId) ||
-            g_vm_mock_service_active_account_id == NULL || requesterAccountLen == 0 ||
+            vm_mock_service_active_account_id() == NULL || requesterAccountLen == 0 ||
             requesterAccountLen >= 64 ||
             roleNameLen == 0 || roleNameLen >= sizeof(target.roleName) ||
             vm_mysql_hex_encode(target.accountId, accountLen,
                                 accountHex, sizeof(accountHex)) == 0 ||
-            vm_mysql_hex_encode(g_vm_mock_service_active_account_id,
+            vm_mysql_hex_encode(vm_mock_service_active_account_id(),
                                 requesterAccountLen, requesterAccountHex,
                                 sizeof(requesterAccountHex)) == 0 ||
             vm_mysql_hex_encode(target.roleName, roleNameLen,

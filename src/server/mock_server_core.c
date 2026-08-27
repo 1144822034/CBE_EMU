@@ -170,7 +170,7 @@ static bool vm_net_mock_request_has_empty_field(const u8 *request, u32 requestLe
     return false;
 }
 
-static bool vm_net_mock_get_object_u8_field(const u8 *request, u32 requestLen, const char *field, u8 *value)
+bool vm_net_mock_get_object_u8_field(const u8 *request, u32 requestLen, const char *field, u8 *value)
 {
     u32 fieldLen = (u32)strlen(field);
     if (fieldLen == 0 || fieldLen > 0xff || requestLen < fieldLen + 5)
@@ -232,7 +232,7 @@ static bool vm_net_mock_get_object_u16_field(const u8 *request, u32 requestLen, 
     return false;
 }
 
-static bool vm_net_mock_get_object_u32_field(const u8 *request, u32 requestLen, const char *field, u32 *value)
+bool vm_net_mock_get_object_u32_field(const u8 *request, u32 requestLen, const char *field, u32 *value)
 {
     u32 fieldLen = (u32)strlen(field);
     if (fieldLen == 0 || fieldLen > 0xff || requestLen < fieldLen + 8)
@@ -361,16 +361,7 @@ static bool vm_net_mock_get_object_string_field(const u8 *request, u32 requestLe
     return false;
 }
 
-typedef struct
-{
-    u8 major;
-    u8 kind;
-    u8 subtype;
-    const u8 *payload;
-    u16 payloadLen;
-} vm_net_mock_request_object;
-
-static bool vm_net_mock_next_request_object(const u8 *request, u32 requestLen, u32 *offset, vm_net_mock_request_object *object)
+bool vm_net_mock_next_request_object(const u8 *request, u32 requestLen, u32 *offset, vm_net_mock_request_object *object)
 {
     if (request == NULL || offset == NULL || *offset < 4 || *offset + 5 > requestLen)
         return false;
@@ -4653,7 +4644,7 @@ static bool vm_net_mock_put_object_entry(u8 *out, u32 outCap, u32 *pos, const ch
            vm_net_mock_put_bytes(out, outCap, pos, value, valueLen);
 }
 
-static bool vm_net_mock_put_object_u8(u8 *out, u32 outCap, u32 *pos, const char *name, u8 value)
+bool vm_net_mock_put_object_u8(u8 *out, u32 outCap, u32 *pos, const char *name, u8 value)
 {
     u8 encoded[] = {0x00, 0x01, value};
     return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
@@ -4670,7 +4661,7 @@ static bool vm_net_mock_put_object_u16(u8 *out, u32 outCap, u32 *pos, const char
     return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
 }
 
-static bool vm_net_mock_put_object_u32(u8 *out, u32 outCap, u32 *pos, const char *name, u32 value)
+bool vm_net_mock_put_object_u32(u8 *out, u32 outCap, u32 *pos, const char *name, u32 value)
 {
     u8 encoded[] = {0x00, 0x04, (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value};
     return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
@@ -4689,12 +4680,12 @@ static bool vm_net_mock_put_object_blob(u8 *out, u32 outCap, u32 *pos, const cha
            vm_net_mock_put_bytes(out, outCap, pos, data, dataLen);
 }
 
-static bool vm_net_mock_put_object_raw(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *data, u16 dataLen)
+bool vm_net_mock_put_object_raw(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *data, u16 dataLen)
 {
     return vm_net_mock_put_object_entry(out, outCap, pos, name, data, dataLen);
 }
 
-static bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const char *name, const char *value)
+bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const char *name, const char *value)
 {
     return vm_net_mock_put_object_blob(out, outCap, pos, name, (const u8 *)value, (u16)strlen(value));
 }
@@ -4714,7 +4705,7 @@ static bool vm_net_mock_put_object_cstring(u8 *out, u32 outCap, u32 *pos,
                                        (u16)(valueLen + 1));
 }
 
-static bool vm_net_mock_begin_wt_object(u8 *out, u32 outCap, u32 *pos, u8 major, u8 kind, u8 subtype, u32 *objectStart)
+bool vm_net_mock_begin_wt_object(u8 *out, u32 outCap, u32 *pos, u8 major, u8 kind, u8 subtype, u32 *objectStart)
 {
     if (*pos + 6 > outCap)
         return false;
@@ -4729,14 +4720,14 @@ static bool vm_net_mock_begin_wt_object(u8 *out, u32 outCap, u32 *pos, u8 major,
     return true;
 }
 
-static void vm_net_mock_finish_wt_object(u8 *out, u32 objectStart, u32 pos)
+void vm_net_mock_finish_wt_object(u8 *out, u32 objectStart, u32 pos)
 {
     u32 objectLen = pos - objectStart;
     out[objectStart + 4] = (u8)(objectLen >> 8);
     out[objectStart + 5] = (u8)objectLen;
 }
 
-static void vm_net_mock_finish_wt_packet(u8 *out, u32 pos, u8 objectCount)
+void vm_net_mock_finish_wt_packet(u8 *out, u32 pos, u8 objectCount)
 {
     out[0] = 'W';
     out[1] = 'T';
@@ -5537,7 +5528,7 @@ static bool vm_net_mock_is_update_manifest_chunk_request(const u8 *request, u32 
            vm_net_mock_request_contains(request, requestLen, "client");
 }
 
-static bool vm_net_mock_seq_put_u32(u8 *out, u32 outCap, u32 *pos, u32 value)
+bool vm_net_mock_seq_put_u32(u8 *out, u32 outCap, u32 *pos, u32 value)
 {
     return vm_net_mock_put_u8(out, outCap, pos, 0) &&
            vm_net_mock_put_u8(out, outCap, pos, 4) &&
@@ -5553,7 +5544,7 @@ static bool vm_net_mock_seq_put_u24(u8 *out, u32 outCap, u32 *pos, u32 value)
            vm_net_mock_put_u8(out, outCap, pos, (u8)value);
 }
 
-static bool vm_net_mock_seq_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value)
+bool vm_net_mock_seq_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value)
 {
     return vm_net_mock_put_u8(out, outCap, pos, 0) &&
            vm_net_mock_put_u8(out, outCap, pos, 1) &&
@@ -5567,14 +5558,14 @@ static bool vm_net_mock_seq_put_i16(u8 *out, u32 outCap, u32 *pos, u16 value)
            vm_net_mock_put_be16(out, outCap, pos, value);
 }
 
-static bool vm_net_mock_seq_put_string(u8 *out, u32 outCap, u32 *pos, const char *value)
+bool vm_net_mock_seq_put_string(u8 *out, u32 outCap, u32 *pos, const char *value)
 {
     u16 len = value ? (u16)(strlen(value) + 1) : 1;
     return vm_net_mock_put_be16(out, outCap, pos, len) &&
            vm_net_mock_put_bytes(out, outCap, pos, value ? value : "", len);
 }
 
-static bool vm_net_mock_seq_put_string_list(
+bool vm_net_mock_seq_put_string_list(
     u8 *out, u32 outCap, u32 *pos, const char *const *values, u32 count)
 {
     u32 i = 0;
@@ -5625,7 +5616,6 @@ enum
      * same complete representation so an existing grid object is never left
      * with stale enhancement values. */
     VM_NET_MOCK_ITEM_COMMON_EXTRA_BASE_BYTES = 11,
-    VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES = 76,
     /* HandleItemGridResponse (30/21) constructs the live backpack instance.
      * It therefore carries the same complete item-extra block as 17/1 and
      * 7/7, rather than a compact zero-attribute seed. */
@@ -5642,7 +5632,6 @@ enum
         3 + VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
         VM_NET_MOCK_BACKPACK_LIST_ITEMINFO_ROW_BYTES,
     VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
-    VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
     VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS = 40,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID = 800,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
@@ -5696,11 +5685,9 @@ enum
     VM_NET_MOCK_ROLE_DB_EXP_CURVE_V7_VERSION = 14,
     VM_NET_MOCK_ROLE_DB_EXP_CURVE_V8_VERSION = 15,
     VM_NET_MOCK_ROLE_DB_VERSION = 16,
-    VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
     VM_NET_MOCK_ROLE_LEVEL_CAP = 70,
-    VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
     /* 1/7/7 type=1 starts with a u8 row count. Match the configurable
      * monster-drop catalog instead of retaining its former eight-row UI
      * limit, while remaining comfortably inside one WT response object. */
@@ -5758,9 +5745,6 @@ enum
         VM_NET_MOCK_ITEMINFO_U32_BYTES +
         VM_NET_MOCK_ITEMINFO_I16_BYTES +
         VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
-    VM_NET_MOCK_NEARBY_EQUIPINFO_MAX_BYTES =
-        VM_NET_MOCK_EQUIP_SLOT_COUNT *
-        VM_NET_MOCK_NEARBY_EQUIPINFO_ROW_BYTES,
     VM_NET_MOCK_BATTLE_DROP_ITEMINFO_MAX_BYTES =
         VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES +
         VM_NET_MOCK_BATTLE_DROP_RESULT_MAX *
@@ -5796,14 +5780,6 @@ enum
     VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT = 5,
     VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE = 6,
     VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER = 7,
-    /* The arena is a parser-backed task-hall service.  It is deliberately a
-     * first-class NPC service instead of a disguised instance or spar action:
-     * its client requests are the independently decoded 1/30/7, 1/30/8 and
-     * 1/30/11 room protocol. */
-    VM_NET_MOCK_NPC_KIND_ARENA_MASTER = 8,
-    /* The mailbox stays inside ParseNPCDialogData's proven action=1 contract;
-     * only its server-owned nested values are new. */
-    VM_NET_MOCK_NPC_KIND_MAILBOX = 9,
     /* Instance transport and guard challenge are separate NPC-dialog
      * services.  The latter is emitted as client-native action=13 so it can
      * start the configured live scene battle without an intermediate menu. */
@@ -5818,8 +5794,7 @@ enum
      * Tasks and direct NPC services share this one client-owned list. */
     VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS = 10,
     VM_NET_MOCK_NPC_SERVICE_OPTION_MAX = VM_NET_MOCK_NPC_KIND_MAX,
-    VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32,
-    VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS = 7
+    VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32
 };
 
 /* A configured NPC service is only an already parser-backed action=1 service.
@@ -5868,8 +5843,6 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 /* The native task-hall has two mutually exclusive initial modes.  Keep their
  * service values separate so one NPC dialog can expose both actions without
  * ever composing 30/4 (create) and 30/3 (challenge list) in one response. */
-#define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE 0xef000001u
-#define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CHALLENGE 0xef000002u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA        VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE
 /* A merchant click first returns another regular action=1 NPC dialog.  Only
  * its one-shot confirm option may mutate the role; cancel returns to the
@@ -5879,13 +5852,8 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE 0xf2000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE 0xf3000000u
 #define VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE 0xf4000000u
-#define VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX_BASE 0xf5000000u
-#define VM_NET_MOCK_NPC_SERVICE_OPEN_MAIL_BASE    0xf6000000u
-#define VM_NET_MOCK_NPC_SERVICE_CLAIM_MAIL_BASE   0xf7000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE 0xf8000000u
 #define VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE 0xf9000000u
-#define VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX      0xf5000001u
-#define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
 #define VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR 0xfeu
@@ -5897,18 +5865,6 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 #define VM_NET_MOCK_CRYSTAL_SYNTHESIS_INPUT_ITEM_FIRST 900u
 #define VM_NET_MOCK_CRYSTAL_SYNTHESIS_INPUT_ITEM_LAST 915u
 
-typedef struct
-{
-    bool active;
-    /* The recipient row is account-scoped.  roleId only binds the reward to
-     * the role snapshot being saved so another role cannot reuse this in-memory
-     * transaction context. */
-    u32 roleId;
-    u32 mailId;
-} vm_net_mock_mail_claim_transaction;
-
-static vm_net_mock_mail_claim_transaction g_vm_net_mock_mail_claim_transaction;
-static bool vm_net_mock_mail_claim_commit_in_transaction(u32 scopedRoleId);
 /* Equipment resale is deliberately a low-value copper sink/source.  Both the
  * explicit recovery NPC and Battle Insight's full-bag conversion of the
  * unreceived drop consume this one authoritative percentage. */
@@ -5932,63 +5888,6 @@ typedef struct
     u16 enhanceLevel;
     u32 count;
 } vm_net_mock_backpack_item_state_v5;
-
-/* A stage attribute is an owned equipment-instance roll, not a property of
- * the catalogue row.  The client supports four threshold rows (+4/+8/+12/
- * +16); zero is the explicit "not unlocked" representation. */
-typedef struct
-{
-    u8 type[4];
-    u16 value[4];
-} vm_net_mock_equipment_enhance_affix_state;
-
-typedef struct
-{
-    u32 itemId;
-    u16 seq;
-    u16 enhanceLevel;
-    u16 durability;
-    u16 durabilityMax;
-    u32 count;
-    /* Each stage owns one rolled fixed-value attribute.  A zero type/value
-     * means the corresponding +4/+8/+12/+16 stage has not been unlocked. */
-    vm_net_mock_equipment_enhance_affix_state enhanceAffixes;
-} vm_net_mock_backpack_item_state;
-
-typedef struct
-{
-    u32 itemId;
-    u16 enhanceLevel;
-    u16 durability;
-    u16 durabilityMax;
-    vm_net_mock_equipment_enhance_affix_state enhanceAffixes;
-} vm_net_mock_equipped_item_state;
-
-typedef struct
-{
-    u32 roleId;
-    char name[32];
-    u8 job;
-    u8 sex;
-    u8 backpackCapacity;
-    u8 reserved0;
-    u32 level;
-    u32 exp;
-    u32 hp;
-    u32 hpMax;
-    u32 mp;
-    u32 mpMax;
-    u32 money;
-    u32 wcoin;
-    char scene[64];
-    u16 x;
-    u16 y;
-    u8 backpackItemCount;
-    u8 designationId;
-    u16 nextBackpackSeq;
-    vm_net_mock_equipped_item_state equippedItems[VM_NET_MOCK_EQUIP_SLOT_COUNT];
-    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
-} vm_net_mock_role_state;
 
 /* Timed special-item effects are intentionally kept outside the binary role
  * snapshot.  They have independent expiry semantics and must survive a
@@ -6279,8 +6178,6 @@ typedef struct
 #define VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS 1000000
 #define VM_MOCK_SERVICE_ACCOUNT_DB_INITIAL_CAPACITY 64
 #define VM_MOCK_SERVICE_FRIEND_DB_VERSION 1
-#define VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS 256
-
 typedef struct
 {
     char username[64];
@@ -6306,79 +6203,7 @@ typedef struct
     u32 accountCount;
 } vm_mock_service_account_db_legacy_header;
 
-typedef struct
-{
-    char ownerAccountId[64];
-    u32 ownerRoleId;
-    char targetAccountId[64];
-    u32 targetRoleId;
-    char targetRoleName[32];
-    u32 friendDegree;
-    u32 targetLevel;
-    u8 targetJob;
-    u8 targetSex;
-    u16 reserved0;
-} vm_mock_service_friend_record;
-
-typedef struct
-{
-    char magic[4];
-    u32 version;
-    u32 recordCount;
-    vm_mock_service_friend_record records[VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS];
-} vm_mock_service_friend_db_file;
-
-static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_wcoin_balance(const vm_net_mock_role_state *role);
-
-enum
-{
-    VM_NET_MOCK_GUILD_PAGE_MAX = 32,
-    VM_NET_MOCK_GUILD_NAME_SIZE = 32,
-    VM_NET_MOCK_GUILD_ROLE_NAME_SIZE = 32,
-    VM_NET_MOCK_GUILD_TEXT_SIZE = 128,
-    VM_NET_MOCK_GUILD_NOTICE_MAX_BYTES = 60,
-    VM_NET_MOCK_GUILD_POSITION_COUNT = 2
-};
-
-typedef struct
-{
-    u32 guildId;
-    u32 guildLevel;
-    u32 minimumLevel;
-    u32 memberCount;
-    u32 memberLimit;
-    u32 guildMoney;
-    u32 prosperity;
-    u32 actionPower;
-    u32 researchPower;
-    u32 construction;
-    char guildName[VM_NET_MOCK_GUILD_NAME_SIZE];
-    char leaderName[VM_NET_MOCK_GUILD_ROLE_NAME_SIZE];
-    char currentConstruction[VM_NET_MOCK_GUILD_TEXT_SIZE];
-    char notice[VM_NET_MOCK_GUILD_TEXT_SIZE];
-} vm_net_mock_guild_record;
-
-typedef struct
-{
-    u32 roleId;
-    u32 level;
-    u8 memberRank;
-    u8 online;
-    char accountId[64];
-    char roleName[VM_NET_MOCK_GUILD_ROLE_NAME_SIZE];
-    char memberTitle[VM_NET_MOCK_GUILD_ROLE_NAME_SIZE];
-} vm_net_mock_guild_member_record;
-
-typedef struct
-{
-    u32 roleId;
-    u32 level;
-    u8 job;
-    u8 sex;
-    char accountId[64];
-    char roleName[VM_NET_MOCK_GUILD_ROLE_NAME_SIZE];
-} vm_net_mock_guild_application_record;
 
 static bool vm_net_mock_guild_find_role_membership(u32 roleId,
                                                     vm_net_mock_guild_record *guildOut,
@@ -6468,13 +6293,11 @@ typedef struct
     u8 goldEnabled;
 } vm_net_mock_practise_info;
 
-static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_level_start_exp(u32 level);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
-static bool vm_net_mock_role_db_save(const char *reason);
 static bool vm_net_mock_practise_get_info(vm_net_mock_role_state *role,
                                           vm_net_mock_practise_info *infoOut);
 static u32 vm_net_mock_build_practise_help19_response(const u8 *request,
@@ -6498,14 +6321,9 @@ static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
 /* `energy`/`energymax` is a client-owned role cache which is refreshed by
  * 2/13, battle 4/7, and task 6/4.  Every one of those paths must read the
  * same durable vitality row; none may substitute a presentation constant. */
-static bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
-                                          u32 *currentOut, u32 *maxOut);
 /* Activity features with an evidence-backed vitality cost must use this
  * transaction helper instead of changing a display cache or borrowing HP/MP.
  * On rejection it returns the authoritative unchanged snapshot. */
-static bool vm_net_mock_vitality_consume(vm_net_mock_role_state *role,
-                                         u32 amount, u32 *currentOut,
-                                         u32 *maxOut);
 static void vm_net_mock_offline_exp_mark_offline(const char *accountId,
                                                   u32 roleId);
 static bool vm_net_mock_offline_exp_settle(vm_net_mock_role_state *role,
@@ -6531,12 +6349,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                         const char *reason);
 /* Multi-item transactions such as chest opening must compose consume/add
  * operations against one projected role and persist only the final snapshot. */
-static bool vm_net_mock_role_add_backpack_item_to_role_in_memory(
-    vm_net_mock_role_state *role, u32 itemId, u32 count, u16 *seqOut);
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut);
-static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
-                                                                            u32 itemId,
-                                                                            u16 seq);
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item_by_effect(vm_net_mock_role_state *role,
                                                                                       u32 hp,
                                                                                       u32 mp,

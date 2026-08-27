@@ -11,6 +11,9 @@
  * must observe the same source of truth.
  */
 
+#include "mock_server.h"
+#include "../mysql-client.h"
+
 enum
 {
     VM_NET_MOCK_RANKING_TYPE_LEVEL = 0,
@@ -337,10 +340,10 @@ static bool vm_net_mock_is_ranking_page_request(const u8 *request,
     return true;
 }
 
-static u32 vm_net_mock_build_ranking_page_response(const u8 *request,
-                                                    u32 requestLen,
-                                                    u8 *out,
-                                                    u32 outCap)
+u32 vm_net_mock_build_ranking_page_response(const u8 *request,
+                                             u32 requestLen,
+                                             u8 *out,
+                                             u32 outCap)
 {
     static const char *const columnPrefix[] = {
         "\xc5\xc5\xc3\xfb", /* GBK: 排名 */
@@ -361,7 +364,7 @@ static u32 vm_net_mock_build_ranking_page_response(const u8 *request,
     u32 pos = 5;
     u8 rankingType = 0;
     u8 pageIndex = 0;
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 activeRoleId = vm_net_mock_active_role_id();
 
     memset(rows, 0, sizeof(rows));
     if (out == NULL || outCap < pos ||
@@ -371,11 +374,11 @@ static u32 vm_net_mock_build_ranking_page_response(const u8 *request,
         !vm_net_mock_ranking_query_rows(rankingType, pageIndex, rows,
                                         VM_NET_MOCK_RANKING_PAGE_ROWS, &rowCount) ||
         !vm_net_mock_ranking_query_my_order(rankingType,
-                                            role ? role->roleId : 0, &myOrder))
+                                            activeRoleId, &myOrder))
     {
         printf("[error][network] mock_ranking_page_query_failed type=%u page=%u "
                "role=%u error=%s\n",
-               rankingType, pageIndex, role ? role->roleId : 0, vm_mysql_last_error());
+               rankingType, pageIndex, activeRoleId, vm_mysql_last_error());
         return 0;
     }
 

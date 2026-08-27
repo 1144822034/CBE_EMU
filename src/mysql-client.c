@@ -78,6 +78,25 @@ static uint32_t vm_mysql_rotl32(uint32_t value, unsigned int bits)
     return (value << bits) | (value >> (32u - bits));
 }
 
+bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
+                             uint32_t *result_out)
+{
+    uint64_t result = 0;
+
+    if (value == NULL || value_len == 0 || result_out == NULL)
+        return false;
+    for (size_t i = 0; i < value_len; ++i)
+    {
+        if (value[i] < '0' || value[i] > '9')
+            return false;
+        result = result * 10u + (uint32_t)(value[i] - '0');
+        if (result > UINT32_MAX)
+            return false;
+    }
+    *result_out = (uint32_t)result;
+    return true;
+}
+
 static void vm_mysql_sha1_transform(vm_mysql_sha1_context *context, const uint8_t block[64])
 {
     uint32_t words[80];

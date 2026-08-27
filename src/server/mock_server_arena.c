@@ -1,3 +1,5 @@
+#include "mock_server.h"
+
 /*
  * Native 比武擂台大厅 support.
  *
@@ -79,21 +81,7 @@ static bool vm_net_mock_arena_request_object(const u8 *request, u32 requestLen,
 static vm_mock_service_client_session *
 vm_net_mock_arena_find_online_session(u32 roleId)
 {
-    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
-
-    if (roleId == 0)
-        return NULL;
-    while (session != NULL)
-    {
-        if (session->roleOnline && session->onlinePresenceValid &&
-            vm_mock_service_session_presence_is_recent(session) &&
-            session->onlineRoleId == roleId)
-        {
-            return session;
-        }
-        session = session->next;
-    }
-    return NULL;
+    return vm_mock_service_find_online_session_by_role_id(roleId);
 }
 
 /* Arena rooms are a live activity, just like team membership.  Do not leave
@@ -113,17 +101,19 @@ static void vm_net_mock_arena_prune_rooms(void)
             vm_net_mock_arena_room_member *member = &room->members[readIndex];
             vm_mock_service_client_session *session =
                 vm_net_mock_arena_find_online_session(member->roleId);
+            vm_mock_service_online_session_view sessionView;
 
-            if (session == NULL)
+            if (session == NULL ||
+                !vm_mock_service_session_get_online_view(session, &sessionView))
                 continue;
             if (writeIndex != readIndex)
                 room->members[writeIndex] = room->members[readIndex];
-            room->members[writeIndex].job = session->onlineJob;
-            room->members[writeIndex].level = session->onlineLevel;
-            if (session->onlineRoleName[0] != 0)
+            room->members[writeIndex].job = sessionView.onlineJob;
+            room->members[writeIndex].level = sessionView.onlineLevel;
+            if (sessionView.onlineRoleName[0] != 0)
                 snprintf(room->members[writeIndex].name,
                          sizeof(room->members[writeIndex].name), "%s",
-                         session->onlineRoleName);
+                         sessionView.onlineRoleName);
             ++writeIndex;
         }
         room->memberCount = writeIndex;
@@ -252,7 +242,7 @@ static vm_mock_service_duel *vm_net_mock_arena_begin_duel(
         return NULL;
     duel = vm_mock_service_arena_duel_begin(challenger, opponent, room->roomId);
     if (duel != NULL)
-        room->activeDuelSerial = duel->serial;
+        room->activeDuelSerial = vm_mock_service_duel_serial(duel);
     return duel;
 }
 
@@ -263,6 +253,8 @@ static bool vm_net_mock_arena_queue_opponent_challenge(
     const char *challengerAccountId)
 {
     vm_mock_service_client_session *opponent = NULL;
+    vm_mock_service_online_session_view challengerView;
+    vm_mock_service_online_session_view opponentView;
     int challengerIndex = -1;
 
     if (room == NULL || challenger == NULL || challengerRole == NULL ||
@@ -276,8 +268,10 @@ static bool vm_net_mock_arena_queue_opponent_challenge(
         return false;
     opponent = vm_net_mock_arena_find_online_session(
         room->members[1 - challengerIndex].roleId);
-    if (opponent == NULL || opponent->clientId == challenger->clientId ||
-        !opponent->sceneVisibleReady)
+    if (!vm_mock_service_session_get_online_view(challenger, &challengerView) ||
+        !vm_mock_service_session_get_online_view(opponent, &opponentView) ||
+        opponentView.clientId == challengerView.clientId ||
+        !opponentView.sceneVisibleReady)
     {
         return false;
     }
@@ -285,9 +279,8 @@ static bool vm_net_mock_arena_queue_opponent_challenge(
      * Its parser displays 30/9 and replies with 30/10 {agree}; emitting the
      * nearby-player 4/15 invitation here opens an unrelated "切磋" dialog and
      * diverts the reply into the ordinary spar state machine. */
-    return vm_mock_service_session_enqueue_social_notice(
-        opponent, VM_MOCK_SERVICE_SOCIAL_NOTICE_ARENA_CHALLENGE, 0, challenger,
-        challengerRole, challengerAccountId);
+    return vm_mock_service_session_enqueue_arena_challenge_notice(
+        opponent, challenger, challengerRole, challengerAccountId);
 }
 
 static bool vm_net_mock_arena_is_confirm_request(const u8 *request,
@@ -389,17 +382,19 @@ static bool vm_net_mock_arena_append_prepare_scene_confirm_objects(
  * scene owns the callback.  This reproduces the proven instance-challenge
  * order (26/0 -> 30/9 -> 30/10 {agree} -> 4/10), instead of treating a
  * room-list confirmation as a battle-entry event. */
-static u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
+u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
     u8 *out, u32 outCap, vm_mock_service_client_session *observer)
 {
     vm_net_mock_arena_room *room = NULL;
+    vm_mock_service_online_session_view observerView;
     u32 pos = 5;
 
-    if (out == NULL || observer == NULL || !observer->roleOnline ||
-        observer->onlineRoleId == 0 ||
-        !observer->arenaChallengeInitiatorPromptPending ||
-        observer->arenaChallengeReplyActive || !observer->sceneVisibleReady ||
-        observer->sceneVisiblePending)
+    if (out == NULL || observer == NULL ||
+        !vm_mock_service_session_get_online_view(observer, &observerView) ||
+        !observerView.roleOnline || observerView.onlineRoleId == 0 ||
+        !observerView.arenaChallengeInitiatorPromptPending ||
+        observerView.arenaChallengeReplyActive ||
+        !observerView.sceneVisibleReady || observerView.sceneVisiblePending)
     {
         return 0;
     }
@@ -409,7 +404,7 @@ static u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
         vm_net_mock_arena_room *candidate = &g_vm_net_mock_arena_rooms[i];
 
         if (candidate->active && candidate->challengePending &&
-            candidate->challengeRoleId == observer->onlineRoleId &&
+            candidate->challengeRoleId == observerView.onlineRoleId &&
             candidate->challengeOpponentRoleId == 0 &&
             candidate->activeDuelSerial == 0)
         {
@@ -419,20 +414,21 @@ static u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
     }
     if (room == NULL)
     {
-        observer->arenaChallengeInitiatorPromptPending = false;
+        vm_mock_service_session_set_arena_challenge_state(
+            observer, false, observerView.arenaChallengeReplyActive,
+            observerView.arenaChallengeSourceRoleId);
         return 0;
     }
     if (!vm_net_mock_arena_append_challenge_prompt_object(
-            out, outCap, &pos, room, observer->onlineRoleId))
+            out, outCap, &pos, room, observerView.onlineRoleId))
     {
         return 0;
     }
     vm_net_mock_finish_wt_packet(out, pos, 2);
-    observer->arenaChallengeInitiatorPromptPending = false;
-    observer->arenaChallengeReplyActive = true;
-    observer->arenaChallengeSourceRoleId = observer->onlineRoleId;
+    vm_mock_service_session_set_arena_challenge_state(
+        observer, false, true, observerView.onlineRoleId);
     printf("[info][mock-service] arena_initiator_challenge_notice_deliver observer=%08x room=%u role=%u stage=scene-native-prompt resp=%u\n",
-           observer->clientId, room->roomId, observer->onlineRoleId, pos);
+           observerView.clientId, room->roomId, observerView.onlineRoleId, pos);
     return pos;
 }
 
@@ -440,7 +436,7 @@ static u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
  * terminal packets.  This is the only point at which an arena round is
  * counted as complete, so stale polls and one-sided disconnects cannot make
  * a room silently advance or close. */
-static void vm_net_mock_arena_on_duel_released(u32 roomId, u32 duelSerial)
+void vm_net_mock_arena_on_duel_released(u32 roomId, u32 duelSerial)
 {
     vm_net_mock_arena_room *room = vm_net_mock_arena_find_room(roomId);
 
@@ -469,7 +465,7 @@ static vm_net_mock_arena_room *vm_net_mock_arena_allocate_room(void)
     return NULL;
 }
 
-static void vm_net_mock_arena_remove_role(u32 roleId, const char *reason)
+void vm_net_mock_arena_remove_role(u32 roleId, const char *reason)
 {
     if (roleId == 0)
         return;
@@ -796,6 +792,7 @@ static bool vm_net_mock_arena_create_room(vm_net_mock_role_state *role,
                                           const char **reasonOut)
 {
     vm_net_mock_arena_room *room = NULL;
+    vm_mock_service_online_session_view sessionView;
     u32 vitalityCost = 0;
 
     if (roomIdOut)
@@ -808,7 +805,8 @@ static bool vm_net_mock_arena_create_room(vm_net_mock_role_state *role,
         *reasonOut = "invalid-request";
     if (role == NULL || session == NULL || role->roleId == 0 ||
         type > 1 || turns == 0 || turns > VM_NET_MOCK_ARENA_MAX_TURNS ||
-        !vm_net_mock_arena_award_step_is_valid(award))
+        !vm_net_mock_arena_award_step_is_valid(award) ||
+        !vm_mock_service_session_get_online_view(session, &sessionView))
     {
         return false;
     }
@@ -858,10 +856,10 @@ static bool vm_net_mock_arena_create_room(vm_net_mock_role_state *role,
     room->memberCount = 1;
     room->createdTick = g_schedulerTick;
     room->members[0].roleId = role->roleId;
-    room->members[0].job = session->onlineJob;
-    room->members[0].level = session->onlineLevel;
+    room->members[0].job = sessionView.onlineJob;
+    room->members[0].level = sessionView.onlineLevel;
     snprintf(room->members[0].name, sizeof(room->members[0].name), "%s",
-             session->onlineRoleName[0] ? session->onlineRoleName : role->name);
+             sessionView.onlineRoleName[0] ? sessionView.onlineRoleName : role->name);
     if (roomIdOut)
         *roomIdOut = room->roomId;
     if (reasonOut)
@@ -873,7 +871,10 @@ static bool vm_net_mock_arena_join_room(vm_net_mock_arena_room *room,
                                         const vm_net_mock_role_state *role,
                                         const vm_mock_service_client_session *session)
 {
-    if (room == NULL || !room->active || role == NULL || session == NULL)
+    vm_mock_service_online_session_view sessionView;
+
+    if (room == NULL || !room->active || role == NULL || session == NULL ||
+        !vm_mock_service_session_get_online_view(session, &sessionView))
         return false;
     for (u8 i = 0; i < room->memberCount; ++i)
     {
@@ -883,23 +884,24 @@ static bool vm_net_mock_arena_join_room(vm_net_mock_arena_room *room,
     if (room->memberCount >= VM_NET_MOCK_ARENA_ROOM_MEMBER_MAX)
         return false;
     room->members[room->memberCount].roleId = role->roleId;
-    room->members[room->memberCount].job = session->onlineJob;
-    room->members[room->memberCount].level = session->onlineLevel;
+    room->members[room->memberCount].job = sessionView.onlineJob;
+    room->members[room->memberCount].level = sessionView.onlineLevel;
     snprintf(room->members[room->memberCount].name,
              sizeof(room->members[room->memberCount].name), "%s",
-             session->onlineRoleName[0] ? session->onlineRoleName : role->name);
+             sessionView.onlineRoleName[0] ? sessionView.onlineRoleName : role->name);
     ++room->memberCount;
     return true;
 }
 
 /* Returns non-zero only for the precise, context-authorised arena traffic.
  * Generic scene channel packets remain available to their existing handlers. */
-static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
-                                            u8 *out, u32 outCap)
+u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
+                                     u8 *out, u32 outCap)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
+    vm_mock_service_online_session_view sessionView;
     u32 serviceValue = 0;
     vm_net_mock_request_object object;
     u32 roomId = 0;
@@ -914,7 +916,8 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
     const char *action = NULL;
     const char *createReason = NULL;
 
-    if (role == NULL || session == NULL || out == NULL || outCap < pos)
+    if (role == NULL || session == NULL || out == NULL || outCap < pos ||
+        !vm_mock_service_session_get_online_view(session, &sessionView))
         return 0;
     if (vm_net_mock_is_npc_service_dialog_request(request, requestLen,
                                                    &serviceValue))
@@ -1104,9 +1107,8 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
             room->challengeRoleId = role->roleId;
             room->challengeOpponentRoleId = 0;
             room->challengeTick = g_schedulerTick;
-            session->arenaChallengeInitiatorPromptPending = true;
-            session->arenaChallengeReplyActive = false;
-            session->arenaChallengeSourceRoleId = 0;
+            vm_mock_service_session_set_arena_challenge_state(
+                session, true, false, 0);
             objectCount = 2;
             action = "challenge-prepare-scene-prompt";
         }
@@ -1130,8 +1132,8 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
             if (candidate->active && candidate->challengePending &&
                 candidate->challengeRoleId == role->roleId &&
                 candidate->challengeOpponentRoleId == 0 &&
-                session->arenaChallengeReplyActive &&
-                session->arenaChallengeSourceRoleId == role->roleId)
+                sessionView.arenaChallengeReplyActive &&
+                sessionView.arenaChallengeSourceRoleId == role->roleId)
             {
                 room = candidate;
                 isInitiator = true;
@@ -1140,8 +1142,8 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
             if (candidate->active && candidate->challengePending &&
                 candidate->challengeRoleId != role->roleId &&
                 candidate->challengeOpponentRoleId == role->roleId &&
-                session->arenaChallengeReplyActive &&
-                session->arenaChallengeSourceRoleId == candidate->challengeRoleId)
+                sessionView.arenaChallengeReplyActive &&
+                sessionView.arenaChallengeSourceRoleId == candidate->challengeRoleId)
             {
                 room = candidate;
                 break;
@@ -1159,8 +1161,9 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
                     out, outCap, &pos))
                 return 0;
             objectCount = 1;
-            session->arenaChallengeReplyActive = false;
-            session->arenaChallengeSourceRoleId = 0;
+            vm_mock_service_session_set_arena_challenge_state(
+                session, sessionView.arenaChallengeInitiatorPromptPending,
+                false, 0);
             if (agree != 0)
             {
                 vm_net_mock_arena_clear_challenge(room);
@@ -1169,7 +1172,7 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
             else
             {
                 opponentPromptQueued = vm_net_mock_arena_queue_opponent_challenge(
-                    room, session, role, g_vm_mock_service_active_account_id);
+                    room, session, role, vm_mock_service_active_account_id());
                 if (opponentPromptQueued)
                 {
                     int challengerIndex = vm_net_mock_arena_member_index(
@@ -1198,8 +1201,9 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
                 return 0;
             }
             objectCount = 1;
-            session->arenaChallengeReplyActive = false;
-            session->arenaChallengeSourceRoleId = 0;
+            vm_mock_service_session_set_arena_challenge_state(
+                session, sessionView.arenaChallengeInitiatorPromptPending,
+                false, 0);
             if (agree != 0)
             {
                 vm_net_mock_arena_clear_challenge(room);

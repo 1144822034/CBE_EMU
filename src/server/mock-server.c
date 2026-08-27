@@ -1,13 +1,18 @@
 /*
  * Jianghu OL mock service aggregation unit.
  *
- * The server retains one C translation unit because its protocol handlers share
- * deliberate `static` state and forward declarations.  Business code lives in
- * the smaller adjacent fragments below; their order is the former source order
- * and is therefore part of the server's initialization/dispatch contract.
+ * The protocol aggregation is compiled independently from server_main.c.
+ * Feature fragments still share deliberate `static` state and forward
+ * declarations; those will be split only after their ownership boundaries are
+ * made explicit.
  */
 
+#include "mock_server.h"
+
 #include "mock_server_core.c"
+
+static bool vm_net_mock_append_battle_terminal_case11_object(
+    u8 *out, u32 outCap, u32 *pos);
 
 /* The scene-runtime stream owns its 16/3 context and catalog objects, but an
  * explicitly independent companion can still use the generic one-object
@@ -36,16 +41,6 @@ static bool vm_mock_service_active_transient_instance_update_position(
     const char *scene, u16 x, u16 y, const char *reason);
 static void vm_mock_service_active_transient_instance_clear_if_departing(
     const char *scene, const char *reason);
-
-/* Arena rooms are transient online activity state, like team membership.  The
- * session module calls this during offline teardown while the role identity
- * is still available; the implementation lives with the arena protocol. */
-static void vm_net_mock_arena_remove_role(u32 roleId, const char *reason);
-
-/* A duel is released only after both clients consumed its terminal packets.
- * Arena owns the room-level round count, so it receives that precise battle
- * lifecycle edge rather than guessing completion from a scene poll. */
-static void vm_net_mock_arena_on_duel_released(u32 roomId, u32 duelSerial);
 
 /* The canonical monster identity set is built from the shipped SCE2 combat
  * nodes after their parser is available.  Role persistence owns the default
@@ -118,7 +113,9 @@ static bool vm_mock_admin_operation_log_record(
 
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 #include "mock_server_ranking.c"
+#endif
 
 /* Death recovery owns the role mutation in mock_server_equipment_npc.c, while
  * the nearest safe local scene or town fallback is derived from sMap/wMap topology and SCE
@@ -138,7 +135,9 @@ static bool vm_net_mock_is_short_wt_control_packet(
     const u8 *request, u32 requestLen, u8 kind, u8 subtype);
 
 #include "mock_server_equipment_npc.c"
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 #include "mock_server_mailbox.c"
+#endif
 #include "mock_server_scene_task.c"
 #include "mock_server_scene_sync.c"
 #include "mock_server_guild.c"
@@ -154,15 +153,26 @@ static bool vm_net_mock_duel_on_scene_default_event(void);
 static u32 vm_net_mock_build_pending_scene_hangup_battle_response(
     u8 *out, u32 outCap, vm_mock_service_client_session *observer);
 
-/* The task-hall room confirmation itself cannot arm the in-game module's
- * native 30/9 -> 30/10 battle-entry edge.  Arena owns the room lease; social
- * owns the scene-sync poll that delivers this strictly scene-owned prompt. */
-static u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
-    u8 *out, u32 outCap, vm_mock_service_client_session *observer);
-
 #include "mock_server_social.c"
 #include "mock_server_battle.c"
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 #include "mock_server_arena.c"
+#endif
 #include "mock_server_interaction_login.c"
 #include "mock_server_dispatch.c"
 #include "mock_server_transport.c"
+
+bool vm_mock_service_set_resource_dir(const char *resourceDir)
+{
+    return vm_net_mock_set_resource_dir(resourceDir);
+}
+
+const char *vm_mock_service_resource_dir(void)
+{
+    return vm_net_mock_resource_dir();
+}
+
+int vm_mock_service_run(const char *bindHost, u16 port)
+{
+    return vm_net_mock_service_run_forever(bindHost, port);
+}

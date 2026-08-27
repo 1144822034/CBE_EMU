@@ -8,7 +8,7 @@
 #include <string.h>
 
 #define main cbe_server_program_main
-#include "../src/main.c"
+#include "../src/server_main.c"
 #undef main
 
 static bool read_object_field(const u8 *packet, u32 packetLen, u32 *offset,

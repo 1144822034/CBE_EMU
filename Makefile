@@ -22,6 +22,24 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_dispatch.c \
 	src/server/mock_server_transport.c
 
+# Modules with explicit interfaces that are linked as their own server
+# objects.  Add new source files here only after their aggregation include is
+# guarded by CBE_SERVER_SPLIT_OBJECTS and every cross-module dependency is
+# declared in mock_server.h.
+MOCK_SERVER_SPLIT_SOURCES := \
+	src/server/mock_server_arena.c \
+	src/server/mock_server_mailbox.c \
+	src/server/mock_server_ranking.c
+
+# Regression programs include server_main.c directly, so they must rebuild
+# whenever its standalone-service boundary changes as well.
+MOCK_SERVER_FRAGMENTS += src/server/mock_server.h
+
+# Sources that are still textually aggregated into mock-server.c.  Independently
+# linked modules stay in MOCK_SERVER_FRAGMENTS for the direct-include regression
+# harness, but must not force the aggregation object to rebuild.
+MOCK_SERVER_AGGREGATE_FRAGMENTS := $(filter-out src/server/mock-server.c $(MOCK_SERVER_SPLIT_SOURCES),$(MOCK_SERVER_FRAGMENTS))
+
 CLIENT_SOURCES := \
 	src/gifDecode.c \
 	src/cbeParser.c \
@@ -39,7 +57,9 @@ SERVER_SOURCES := \
 	src/mystd.c \
 	src/mysql-client.c \
 	src/md5.c \
-	src/server_main.c
+	src/server_main.c \
+	src/server/mock-server.c \
+	$(MOCK_SERVER_SPLIT_SOURCES)
 
 ifeq ($(OS),Windows_NT)
 CLIENT_OBJDIR := obj/client
@@ -63,7 +83,10 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression admin-role-timed-item-effect-regression registration-email-contract-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression first-login-equipment-attribute-bootstrap-regression equipment-enhancement-bootstrap-split-regression equipment-enhancement-bootstrap-delivery-regression startup-sce-direct-enter-test-gate-regression npc-crystal-synthesis-regression battle-insight-followup-regression battle-insight-status-regression timed-item-status-icon-regression clean
+.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression admin-role-timed-item-effect-regression registration-email-contract-regression mailbox-claim-backpack-refresh-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression first-login-equipment-attribute-bootstrap-regression equipment-enhancement-bootstrap-split-regression equipment-enhancement-bootstrap-delivery-regression startup-sce-direct-enter-test-gate-regression npc-crystal-synthesis-regression battle-insight-followup-regression battle-insight-status-regression timed-item-status-icon-regression task-delivery-item-consumption-regression clean
+
+$(SERVER_OBJDIR)/%-regression.exe: SERVER_CPPFLAGS += -DCBE_SERVER_TEST_INCLUDE_IMPLEMENTATION
+$(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
 
 all: build
 build: client server
@@ -95,6 +118,11 @@ $(SERVER_OBJDIR)/battle-insight-status-regression.exe: scripts/battle-insight-st
 direct-scene-challenge-progress-regression: $(SERVER_OBJDIR)/direct-scene-challenge-progress-regression.exe
 
 $(SERVER_OBJDIR)/direct-scene-challenge-progress-regression.exe: scripts/direct-scene-challenge-progress-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+task-delivery-item-consumption-regression: $(SERVER_OBJDIR)/task-delivery-item-consumption-regression.exe
+
+$(SERVER_OBJDIR)/task-delivery-item-consumption-regression.exe: scripts/task-delivery-item-consumption-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 content-update-manifest-regression: $(SERVER_OBJDIR)/content-update-manifest-regression.exe
@@ -152,6 +180,11 @@ registration-email-contract-regression: $(SERVER_OBJDIR)/registration-email-cont
 $(SERVER_OBJDIR)/registration-email-contract-regression.exe: scripts/registration-email-contract-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/web_admin_server.c src/web_registration.inc.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
+mailbox-claim-backpack-refresh-regression: $(SERVER_OBJDIR)/mailbox-claim-backpack-refresh-regression.exe
+
+$(SERVER_OBJDIR)/mailbox-claim-backpack-refresh-regression.exe: scripts/mailbox-claim-backpack-refresh-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
 battle-primary-stat-uncap-regression: $(SERVER_OBJDIR)/battle-primary-stat-uncap-regression.exe
 
 $(SERVER_OBJDIR)/battle-primary-stat-uncap-regression.exe: scripts/battle-primary-stat-uncap-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
@@ -194,15 +227,21 @@ $(SERVER_OBJDIR)/startup-sce-direct-enter-test-gate-regression.exe: scripts/star
 
 $(CLIENT_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
-$(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
-	src/web_payment.inc.c src/web_registration.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/web_admin_global_rewards.inc.c \
-	src/web_admin_designations.inc.c \
-	src/mysql-client.h src/config.h
+$(SERVER_OBJDIR)/server_main.o: src/server_main.c src/server/mock_server.h \
+	src/main.h src/gifDecode.h src/md5.h src/config.h
+$(SERVER_OBJDIR)/server/mock-server.o: src/server/mock-server.c src/server/mock_server.h \
+	$(MOCK_SERVER_AGGREGATE_FRAGMENTS) src/web_admin_server.c src/web_payment.inc.c \
+	src/web_registration.inc.c src/web_admin_monsters.inc.c src/web_admin_chests.inc.c \
+	src/web_admin_global_rewards.inc.c src/web_admin_designations.inc.c \
+	src/mysql-client.h src/md5.h src/config.h
+$(patsubst src/%.c,$(SERVER_OBJDIR)/%.o,$(MOCK_SERVER_SPLIT_SOURCES)): \
+	src/server/mock_server.h src/mysql-client.h src/config.h
 
 $(CLIENT_OBJDIR)/%.o: src/%.c | $(CLIENT_OBJDIR)
+	mkdir -p "$(@D)"
 	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) -c $< -o $@
 $(SERVER_OBJDIR)/%.o: src/%.c | $(SERVER_OBJDIR)
+	mkdir -p "$(@D)"
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) -c $< -o $@
 
 $(CLIENT_OBJDIR)/resource.o: resource.rc | $(CLIENT_OBJDIR)
@@ -237,7 +276,9 @@ LDFLAGS += -Wl,--gc-sections
 SERVER_CFLAGS := $(CFLAGS)
 SERVER_LDLIBS := -lpthread -lm
 
-.PHONY: all build server boundary-check registration-email-contract-regression clean
+.PHONY: all build server boundary-check registration-email-contract-regression mailbox-claim-backpack-refresh-regression clean
+$(SERVER_OBJDIR)/%-regression: SERVER_CPPFLAGS += -DCBE_SERVER_TEST_INCLUDE_IMPLEMENTATION
+$(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
 all: build
 build: server
 server: $(SERVER_TARGET)
@@ -249,13 +290,23 @@ registration-email-contract-regression: $(SERVER_OBJDIR)/registration-email-cont
 $(SERVER_OBJDIR)/registration-email-contract-regression: scripts/registration-email-contract-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/web_admin_server.c src/web_registration.inc.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
-$(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
-	src/web_payment.inc.c src/web_registration.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/web_admin_global_rewards.inc.c \
-	src/web_admin_designations.inc.c \
-	src/mysql-client.h src/config.h
+mailbox-claim-backpack-refresh-regression: $(SERVER_OBJDIR)/mailbox-claim-backpack-refresh-regression
+
+$(SERVER_OBJDIR)/mailbox-claim-backpack-refresh-regression: scripts/mailbox-claim-backpack-refresh-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+$(SERVER_OBJDIR)/server_main.o: src/server_main.c src/server/mock_server.h \
+	src/main.h src/gifDecode.h src/md5.h src/config.h
+$(SERVER_OBJDIR)/server/mock-server.o: src/server/mock-server.c src/server/mock_server.h \
+	$(MOCK_SERVER_AGGREGATE_FRAGMENTS) src/web_admin_server.c src/web_payment.inc.c \
+	src/web_registration.inc.c src/web_admin_monsters.inc.c src/web_admin_chests.inc.c \
+	src/web_admin_global_rewards.inc.c src/web_admin_designations.inc.c \
+	src/mysql-client.h src/md5.h src/config.h
+$(patsubst src/%.c,$(SERVER_OBJDIR)/%.o,$(MOCK_SERVER_SPLIT_SOURCES)): \
+	src/server/mock_server.h src/mysql-client.h src/config.h
 
 $(SERVER_OBJDIR)/%.o: src/%.c | $(SERVER_OBJDIR)
+	mkdir -p "$(@D)"
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) -c $< -o $@
 $(SERVER_OBJDIR):
 	mkdir -p "$(SERVER_OBJDIR)"

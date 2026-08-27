@@ -254,23 +254,6 @@ static bool vm_mock_mysql_copy_text(char *destination,
     return true;
 }
 
-static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len, u32 *result_out)
-{
-    uint64_t result = 0;
-    if (value == NULL || value_len == 0 || result_out == NULL)
-        return false;
-    for (size_t i = 0; i < value_len; ++i)
-    {
-        if (value[i] < '0' || value[i] > '9')
-            return false;
-        result = result * 10u + (u32)(value[i] - '0');
-        if (result > 0xffffffffu)
-            return false;
-    }
-    *result_out = (u32)result;
-    return true;
-}
-
 static bool vm_mock_mysql_parse_u64(const char *value, size_t value_len,
                                     uint64_t *result_out)
 {
@@ -1646,6 +1629,38 @@ static vm_mock_service_friend_record *vm_mock_service_friend_db_find(
     return vm_mock_service_friend_db_find_in(&g_vm_mock_service_friend_db,
                                              ownerAccountId, ownerRoleId,
                                              targetAccountId, targetRoleId);
+}
+
+bool vm_mock_service_friend_record_find(
+    u32 ownerRoleId, const char *ownerAccountId, u32 targetRoleId,
+    vm_mock_service_friend_record *recordOut)
+{
+    if (recordOut)
+        memset(recordOut, 0, sizeof(*recordOut));
+    if (ownerRoleId == 0 || targetRoleId == 0 || ownerAccountId == NULL ||
+        ownerAccountId[0] == 0)
+    {
+        return false;
+    }
+
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid)
+        return false;
+
+    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+    {
+        const vm_mock_service_friend_record *record =
+            &g_vm_mock_service_friend_db.records[i];
+        if (record->ownerRoleId == ownerRoleId &&
+            record->targetRoleId == targetRoleId &&
+            strcmp(record->ownerAccountId, ownerAccountId) == 0)
+        {
+            if (recordOut)
+                *recordOut = *record;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool vm_mock_service_friend_db_upsert_one(
@@ -8878,7 +8893,7 @@ static u32 vm_net_mock_role_db_repair_duplicate_default_names(void)
     return repairCount;
 }
 
-static bool vm_net_mock_mysql_account_hex(char account_hex[129])
+bool vm_net_mock_mysql_account_hex(char account_hex[129])
 {
     const char *account_id = g_vm_mock_service_active_account_id;
     size_t account_len = vm_mock_mysql_bounded_strlen(account_id, 64);
@@ -10778,17 +10793,10 @@ static bool vm_net_mock_role_db_load_mysql_payload_backup(
     return true;
 }
 
-typedef struct
-{
-    u32 value;
-    bool found;
-    bool invalid;
-} vm_mock_mysql_u32_context;
-
-static bool vm_mock_mysql_single_u32_row(void *context_value,
-                                         unsigned int column_count,
-                                         const char *const *values,
-                                         const size_t *lengths)
+bool vm_mock_mysql_single_u32_row(void *context_value,
+                                  unsigned int column_count,
+                                  const char *const *values,
+                                  const size_t *lengths)
 {
     vm_mock_mysql_u32_context *context = (vm_mock_mysql_u32_context *)context_value;
     if (context == NULL || context->found || column_count != 1 ||
@@ -11523,7 +11531,7 @@ failed:
     return false;
 }
 
-static bool vm_net_mock_role_db_save(const char *reason)
+bool vm_net_mock_role_db_save(const char *reason)
 {
     return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false,
                                                 NULL, NULL, NULL, NULL);
@@ -12569,8 +12577,8 @@ static bool vm_net_mock_vitality_load_row(void *contextValue,
  * it, rather than letting the first 聚元丹 create an artificial empty row and
  * consume itself immediately.  Once present, the row is the sole authority;
  * this helper never normalizes, replenishes, or otherwise changes it. */
-static bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
-                                          u32 *currentOut, u32 *maxOut)
+bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
+                                   u32 *currentOut, u32 *maxOut)
 {
     char accountHex[129];
     char query[768];
@@ -12615,9 +12623,9 @@ static bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
  * decrement durable before the feature publishes its success response; a
  * failed/insufficient request leaves the same snapshot available to explain
  * the rejection. */
-static bool vm_net_mock_vitality_consume(vm_net_mock_role_state *role,
-                                         u32 amount, u32 *currentOut,
-                                         u32 *maxOut)
+bool vm_net_mock_vitality_consume(vm_net_mock_role_state *role,
+                                  u32 amount, u32 *currentOut,
+                                  u32 *maxOut)
 {
     char accountHex[129];
     char query[768];
@@ -13824,7 +13832,7 @@ static void vm_net_mock_role_db_load(void)
                      g_vm_net_mock_role_db.activeRoleId);
 }
 
-static vm_net_mock_role_state *vm_net_mock_active_role(void)
+vm_net_mock_role_state *vm_net_mock_active_role(void)
 {
     vm_net_mock_role_db_load();
     if (!g_vm_net_mock_role_db_valid || g_vm_net_mock_role_db.roleCount == 0)
@@ -13836,6 +13844,12 @@ static vm_net_mock_role_state *vm_net_mock_active_role(void)
     }
     g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
     return &g_vm_net_mock_role_db.roles[0];
+}
+
+u32 vm_net_mock_active_role_id(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    return role ? role->roleId : 0;
 }
 
 static bool vm_net_mock_parse_u32_strict(const char *text, u32 *valueOut)
@@ -14554,7 +14568,7 @@ static bool vm_net_mock_role_recover_overlevel_equipment(
  * several calls to this helper and commit exactly one complete role snapshot.
  * Callers that only add one item must use the persistent wrapper below.
  */
-static bool vm_net_mock_role_add_backpack_item_to_role_in_memory(
+bool vm_net_mock_role_add_backpack_item_to_role_in_memory(
     vm_net_mock_role_state *role, u32 itemId, u32 count, u16 *seqOut)
 {
     const vm_net_mock_item_effect_catalog_item *effect = NULL;
@@ -14780,9 +14794,9 @@ static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOu
         vm_net_mock_active_role(), itemId, count, seqOut, NULL);
 }
 
-static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
-                                                                            u32 itemId,
-                                                                            u16 seq)
+vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
+                                                                      u32 itemId,
+                                                                      u16 seq)
 {
     u8 itemCount = 0;
 
