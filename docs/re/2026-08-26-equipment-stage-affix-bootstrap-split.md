@@ -2,7 +2,10 @@
 
 Date: 2026-08-26
 
-Status: temporary legacy compatibility fallback active.  The server has restored compact `30/21` rows for all clients; the newer client-side split remains in source, pending a proved per-connection capability negotiation.
+> 2026-08-27 superseded：客户端不得按登录 WT 内容拆包或合成第二个 event-7；已装备
+> `7/7 type=2/type=3` 登录路径也已移除，因为它触发 `TimerControl_ProcessItem` 后导致
+> InGame 断言。保留本记录的 parser-pool 历史证据，但不再将宿主拆分视为兼容策略。当前
+> 规则见 [登录已装备物品误走 7/7 type=2 的 InGame 断言](2026-08-27-login-equipped-item-operation-assert.md)。
 
 ## 当前临时兼容策略
 

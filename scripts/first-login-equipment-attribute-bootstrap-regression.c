@@ -1,12 +1,15 @@
 /*
- * Deterministic server-only regression for the first-login equipment seed.
+ * Deterministic server-only regression for the first-login equipment boundary.
  *
  * It neither starts a listener nor connects to MySQL.  A role with one normal
- * backpack row and durable HP/MP-raising equipment must receive the existing
- * 30/21 -> 7/7(type=2) initializers in the first 5/10 + 7/7(type=1)
- * bootstrap response.  The title 1/1/6 + 1/1/15 acknowledgement must not
- * consume that one-shot; a repeated group poll must not duplicate it, and a
- * new role select must re-arm it for the new client-side item manager.
+ * backpack row and durable HP/MP-raising equipment receives a 30/21 backpack
+ * snapshot in the first 5/10 + 7/7(type=1) bootstrap response.  The title
+ * 1/1/6 + 1/1/15 acknowledgement must not consume that one-shot; a repeated
+ * group poll must not duplicate it, and a new role select must re-arm it.
+ *
+ * Worn equipment must not be serialized as 7/7(type=2/type=3): those are
+ * item-operation messages, not a login initializer.  The durable role's
+ * derived vitals remain authoritative through actorinfo.
  */
 
 #include <stdio.h>
@@ -346,22 +349,10 @@ static bool equip_vital_bonus_pair(vm_net_mock_role_state *role)
     return false;
 }
 
-static int assert_group_equipment_seed(const u8 *packet, u32 length,
-                                       u32 expectedRoleId, bool expectSeed,
-                                       bool expectType3Completion)
+static int assert_group_login_bootstrap(const u8 *packet, u32 length,
+                                        u32 expectedRoleId, bool expectSeed)
 {
-    const u8 *equipmentPayload = NULL;
-    const u8 *itemInfo = NULL;
-    const u8 *completionPayload = NULL;
-    const u8 *completionItemInfo = NULL;
-    u16 equipmentPayloadLen = 0;
-    u16 itemInfoLen = 0;
-    u16 completionPayloadLen = 0;
-    u16 completionItemInfoLen = 0;
-    u8 equipmentType = 0;
     u8 gridIndex = 0xff;
-    u8 equipmentIndex = 0xff;
-    u8 completionIndex = 0xff;
     u8 major = 0;
     u8 kind = 0;
     u8 subtype = 0;
@@ -380,6 +371,7 @@ static int assert_group_equipment_seed(const u8 *packet, u32 length,
     {
         const u8 *payload = NULL;
         u16 payloadLen = 0;
+        u8 type = 0;
 
         if (!response_object_at(packet, length, index, &major, &kind,
                                 &subtype, &payload, &payloadLen))
@@ -397,77 +389,27 @@ static int assert_group_equipment_seed(const u8 *packet, u32 length,
             gridIndex = index;
         }
         if (major == 1 && kind == 7 && subtype == 7 &&
-            vm_net_mock_get_object_u8_field(payload, payloadLen, "type",
-                                             &equipmentType) &&
-            equipmentType == 2)
+            vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &type) &&
+            (type == 2 || type == 3))
         {
-            if (equipmentIndex != 0xff)
-            {
-                fputs("group bootstrap duplicated the equipped-item stream\n", stderr);
-                return 1;
-            }
-            equipmentIndex = index;
-            equipmentPayload = payload;
-            equipmentPayloadLen = payloadLen;
-        }
-        if (major == 1 && kind == 7 && subtype == 7 &&
-            vm_net_mock_get_object_u8_field(payload, payloadLen, "type",
-                                             &equipmentType) &&
-            equipmentType == 3)
-        {
-            if (completionIndex != 0xff)
-            {
-                fputs("group bootstrap duplicated the type-3 completion\n", stderr);
-                return 1;
-            }
-            completionIndex = index;
-            completionPayload = payload;
-            completionPayloadLen = payloadLen;
+            fprintf(stderr,
+                    "group bootstrap emitted item-operation 7/7 type=%u\n",
+                    type);
+            return 1;
         }
     }
     if (!expectSeed)
     {
-        if (gridIndex != 0xff || equipmentIndex != 0xff ||
-            completionIndex != 0xff)
+        if (gridIndex != 0xff)
         {
-            fputs("repeated group bootstrap replayed the equipment seed\n", stderr);
+            fputs("repeated group bootstrap replayed the backpack grid\n", stderr);
             return 1;
         }
         return 0;
     }
-    if (gridIndex == 0xff || equipmentIndex == 0xff ||
-        gridIndex >= equipmentIndex ||
-        !vm_net_mock_get_object_entry_bytes(equipmentPayload,
-                                            equipmentPayloadLen, "iteminfo",
-                                            &itemInfo, &itemInfoLen) ||
-        /* The temporary compact 30/21 fallback must not also compact worn
-         * equipment.  This fixture has exactly two worn rows, each with the
-         * four persisted +4/+8/+12/+16 stage entries. */
-        itemInfo == NULL || itemInfoLen != 161 || itemInfo[0] != 0 ||
-        itemInfo[1] != 1 || itemInfo[2] != 2 ||
-        itemInfo[27] != 0 || itemInfo[28] != 1 || itemInfo[29] != 4 ||
-        itemInfo[106] != 0 || itemInfo[107] != 1 || itemInfo[108] != 4)
+    if (gridIndex == 0xff)
     {
-        fputs("group bootstrap lacks full stage plans for worn equipment\n",
-              stderr);
-        return 1;
-    }
-    if (!expectType3Completion && completionIndex != 0xff)
-    {
-        fputs("repeated group bootstrap unexpectedly replayed type-3 completion\n",
-              stderr);
-        return 1;
-    }
-    if (expectType3Completion &&
-        (completionIndex == 0xff || completionIndex != equipmentIndex + 1 ||
-         !vm_net_mock_get_object_entry_bytes(completionPayload,
-                                             completionPayloadLen, "iteminfo",
-                                             &completionItemInfo,
-                                             &completionItemInfoLen) ||
-         completionItemInfo == NULL || completionItemInfoLen != 1 ||
-         completionItemInfo[0] != 0))
-    {
-        fputs("type-3 completion is absent, unordered, or non-empty\n", stderr);
+        fputs("group bootstrap lacks the one-shot backpack grid\n", stderr);
         return 1;
     }
     return 0;
@@ -648,15 +590,13 @@ int main(void)
 
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
-    if (assert_group_equipment_seed(response, responseLen, roleId, true,
-                                    true) != 0 ||
+    if (assert_group_login_bootstrap(response, responseLen, roleId, true) != 0 ||
         assert_grid_legacy_compact_plan(response, responseLen) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
-    if (assert_group_equipment_seed(response, responseLen, roleId, false,
-                                    false) != 0)
+    if (assert_group_login_bootstrap(response, responseLen, roleId, false) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_title_role_select_response(
@@ -667,10 +607,9 @@ int main(void)
 
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
-    if (assert_group_equipment_seed(response, responseLen, roleId, true,
-                                    true) != 0)
+    if (assert_group_login_bootstrap(response, responseLen, roleId, true) != 0)
         return 1;
 
-    printf("first-login legacy compact bootstrap regression passed type3_completion=1\n");
+    printf("first-login bootstrap regression passed no_item_operation_equipment=1\n");
     return 0;
 }

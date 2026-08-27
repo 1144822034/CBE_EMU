@@ -1,5 +1,11 @@
 # 首次登录装备属性种子时序
 
+> 2026-08-27 修正：本记录中把登录已装备行编码为 `1/7/7 type=2`、再用
+> `type=3` 收尾的结论已被 player-3 的 `MMORPG_Screen_InGame.c:913` 断言否定。
+> `type=2` 会让 `1001` 进入 `TimerControl_ProcessItem`，不是可安全的登录装备
+> initializer；相应的服务端对象和宿主拆包均已移除。当前生效的边界和未决协议见
+> [登录已装备物品误走 7/7 type=2 的 InGame 断言](2026-08-27-login-equipped-item-operation-assert.md)。
+
 Date: 2026-08-20
 
 Status: corrected lifecycle implementation; deterministic packet regression passed; player-3 runtime root cause confirmed; battle-return recomputation observed; normal login-time refresh contract still under investigation

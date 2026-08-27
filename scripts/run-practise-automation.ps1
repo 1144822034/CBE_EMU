@@ -57,10 +57,10 @@ $serverResourceRoot = Join-Path $runDir 'server-resource'
 Copy-Item -LiteralPath $resourceRoot -Destination $serverResourceRoot -Recurse
 $database = 'jh_online_autotest_' + ([Guid]::NewGuid().ToString('N'))
 @{ scenario = 'practise-v1'; database = $database; service_port = $ServicePort; admin_port = $AdminPort;
-   max_steps = 14; total_timeout_seconds = 20; step_timeout_seconds = 10;
+   max_steps = 16; total_timeout_seconds = 20; step_timeout_seconds = 10;
    trigger_rule = 'once'; max_repetitions = 1;
-   failure_conditions = @('non-WT response', 'wrong subtype/field contract', 'non-atomic pill state', 'wrong timer/exp settlement');
-   input = @('WT 1/7/18', 'WT 1/7/21 opengold=1', 'WT 1/7/16 itemseq=62001', 'offline 15m fixture') } |
+   failure_conditions = @('non-WT response', 'wrong subtype/field contract', 'missing 1/7/17 native completion', 'non-atomic pill state', 'wrong timer/exp settlement');
+   input = @('WT 1/7/18', 'WT 1/7/21 opengold=1', 'WT 1/7/16 itemseq=62001', 'WT 1/7/17 usenum:u32(2),itemseq:u16', 'offline 15m fixture') } |
     ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $runDir 'run-context.json') -Encoding utf8
 
 $php = $env:CBE_AUTOMATION_PHP

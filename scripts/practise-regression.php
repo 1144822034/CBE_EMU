@@ -179,7 +179,7 @@ if ($mode === 'setup') {
         $pdo->prepare('INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,scene,pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq) VALUES(?,?,0,?,1,1,40,1,0,120,120,100,100,0,0,?,220,440,1,0,62000)')
             ->execute([$account, $role, 'PractiseFixture', $scene]);
         $pdo->prepare('INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,durability,durability_max) VALUES(?,?,?,?,?,?,0,0,0)')
-            ->execute([$account, $role, 0, 827, 62001, 2]);
+            ->execute([$account, $role, 0, 827, 62001, 3]);
         $pdo->commit();
         echo "practise fixture seeded\n";
     } catch (Throwable $error) { $pdo->rollBack(); throw $error; }
@@ -223,11 +223,42 @@ if (field_u8($gold, 7, 18, 'isgold') !== 1 || field_u32($gold, 7, 18, 'todaylast
 }
 
 $pill = call_service($port, $client, wt(7, 16, u16('itemseq', 62001)));
-if (field_u8($pill, 7, 16, 'result') !== 1 || field_u32($pill, 7, 16, 'maxnum') !== 60) {
-    throw new RuntimeException('827 did not atomically credit one hour of training time');
+if (field_u8($pill, 7, 16, 'result') !== 1 || field_u32($pill, 7, 16, 'maxnum') !== 3) {
+    throw new RuntimeException('827 1/7/16 did not return the native quantity upper bound');
 }
 $count = (int)$pdo->query("SELECT item_count FROM account_role_backpack WHERE account_id='codex_practise' AND role_id=870101 AND item_seq=62001")->fetchColumn();
-if ($count !== 1) throw new RuntimeException('827 backpack deduction did not persist');
+if ($count !== 3) throw new RuntimeException('827 1/7/16 mutated the backpack before user confirmation');
+
+/* The CBE sends this separate native completion request after a successful
+ * 7/16 reply (and its ordinary 2/10 actor refresh).  It is not a second
+ * UI-only acknowledgement: 0x0102C032 puts the selected count in `usenum`,
+ * and 0x0102C104 needs result/useinfo/pcimg to finish the original progress
+ * state and emit its own event 100.  The observed exact 38-byte layout is
+ * usenum:tagged-u32,itemseq:tagged-u16. */
+$nativePillCompletionRequest = wt(7, 17,
+    u32('usenum', 2) . u16('itemseq', 62001));
+if (strlen($nativePillCompletionRequest) !== 38) {
+    throw new RuntimeException('1/7/17 fixture no longer matches the observed 38-byte 827 completion request');
+}
+$completion = call_service($port, $client, $nativePillCompletionRequest);
+if (field_u8($completion, 7, 17, 'result') !== 1 ||
+    field_string($completion, 7, 17, 'useinfo') === '' ||
+    field_u8($completion, 7, 17, 'pcimg') !== 1) {
+    throw new RuntimeException('1/7/17 did not return the native quantity-2 827 completion contract');
+}
+$count = (int)$pdo->query("SELECT item_count FROM account_role_backpack WHERE account_id='codex_practise' AND role_id=870101 AND item_seq=62001")->fetchColumn();
+$availableMinutes = (int)$pdo->query("SELECT available_minutes FROM account_role_practise WHERE account_id='codex_practise' AND role_id=870101")->fetchColumn();
+if ($count !== 1 || $availableMinutes !== 120) {
+    throw new RuntimeException('1/7/17 quantity-2 commit did not atomically debit two pills and credit 120 minutes');
+}
+/* Transport retries must replay the same completion only; they must not debit
+ * two more items or grant another two hours. */
+$completionRetry = call_service($port, $client, $nativePillCompletionRequest);
+if (field_u8($completionRetry, 7, 17, 'result') !== 1 ||
+    (int)$pdo->query("SELECT item_count FROM account_role_backpack WHERE account_id='codex_practise' AND role_id=870101 AND item_seq=62001")->fetchColumn() !== 1 ||
+    (int)$pdo->query("SELECT available_minutes FROM account_role_practise WHERE account_id='codex_practise' AND role_id=870101")->fetchColumn() !== 120) {
+    throw new RuntimeException('1/7/17 quantity-2 retry was not idempotent after the committed 827 debit');
+}
 
 /* This is an isolated-fixture clock setup, not a success assertion by itself:
  * the following 7/18 must actually perform the server's offline settlement. */
@@ -237,7 +268,7 @@ if (field_u32($settled, 7, 18, 'todaypastmin') !== 15 ||
     field_u32($settled, 7, 18, 'getexp') !== 240 ||
     field_u32($settled, 7, 18, 'todaylasthour') !== 3 ||
     field_u32($settled, 7, 18, 'todaylastmin') !== 45 ||
-    field_u32($settled, 7, 18, 'alllasthour') !== 0 ||
+    field_u32($settled, 7, 18, 'alllasthour') !== 1 ||
     field_u32($settled, 7, 18, 'alllastmin') !== 45) {
     throw new RuntimeException('offline settlement did not produce the 15-minute golden-practise contract');
 }
@@ -271,4 +302,4 @@ if (field_u8($fullBank, 7, 16, 'result') !== 2 ||
     (int)$pdo->query("SELECT item_count FROM account_role_backpack WHERE account_id='codex_practise' AND role_id=870101 AND item_seq=62001")->fetchColumn() !== 1) {
     throw new RuntimeException('100-hour cultivation bank did not reject 827 while preserving its stack');
 }
-echo "practise regression passed: 7/18 -> 7/19 -> 7/21 -> 7/16 -> offline settle (15m, 240 exp)\n";
+echo "practise regression passed: 7/18 -> 7/19 -> 7/21 -> 7/16 -> 7/17 -> offline settle (15m, 240 exp)\n";

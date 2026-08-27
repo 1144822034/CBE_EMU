@@ -2847,7 +2847,10 @@ enum
     VM_MOCK_SERVICE_NPC_TRANSACTION_BUY = 1,
     VM_MOCK_SERVICE_NPC_TRANSACTION_SELL = 2,
     VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN = 3,
-    VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET = 4
+    VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET = 4,
+    /* A blacksmith synthesis reserves the selected source crystal and the
+     * fixed material count until its immediate action-1 confirmation. */
+    VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS = 5
 };
 
 /* A 26/1 action=1 request only carries a private menu value.  Retain the
@@ -2922,6 +2925,14 @@ typedef struct vm_mock_service_client_session
     u16 shopSceneReturnPostEnterY;
     bool taskPromptRefreshPending;
     char taskPromptRefreshScene[64];
+    /* 827's 7/16 response opens the quantity path.  Its separate 7/17
+     * request carries the confirmed count, so retain the selected stack,
+     * authorized maximum, and an exact committed count for retry replay. */
+    bool practisePill17FollowupActive;
+    u16 practisePill17FollowupSeq;
+    u32 practisePill17FollowupRoleId;
+    u32 practisePill17FollowupMaxUse;
+    u32 practisePill17FollowupCommittedUse;
     bool lastMoveinfoValid;
     u16 lastMoveinfoLen;
     u8 lastMoveinfoFormat;
@@ -3504,6 +3515,105 @@ static vm_mock_service_client_session *vm_mock_service_get_active_client_session
     if (g_vm_mock_service_active_client_id == 0)
         return NULL;
     return vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
+}
+
+static void vm_mock_service_arm_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 maxUse)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || role == NULL || role->roleId == 0 || itemSeq == 0 ||
+        maxUse == 0)
+        return;
+    session->practisePill17FollowupActive = true;
+    session->practisePill17FollowupSeq = itemSeq;
+    session->practisePill17FollowupRoleId = role->roleId;
+    session->practisePill17FollowupMaxUse = maxUse;
+    session->practisePill17FollowupCommittedUse = 0;
+    printf("[info][mock-service] practise_pill17_arm client=%08x role=%u seq=%u max_use=%u source=1/7/16-preflight\n",
+           session->clientId, role->roleId, (u32)itemSeq, maxUse);
+}
+
+static void vm_mock_service_clear_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->practisePill17FollowupActive ||
+        (role != NULL && role->roleId != 0 &&
+         session->practisePill17FollowupRoleId != role->roleId) ||
+        (itemSeq != 0 && session->practisePill17FollowupSeq != itemSeq))
+    {
+        return;
+    }
+    printf("[info][mock-service] practise_pill17_clear client=%08x role=%u seq=%u reason=%s\n",
+           session->clientId, session->practisePill17FollowupRoleId,
+           (u32)session->practisePill17FollowupSeq, reason ? reason : "-");
+    session->practisePill17FollowupActive = false;
+    session->practisePill17FollowupSeq = 0;
+    session->practisePill17FollowupRoleId = 0;
+    session->practisePill17FollowupMaxUse = 0;
+    session->practisePill17FollowupCommittedUse = 0;
+}
+
+static bool vm_mock_service_practise_pill17_followup_matches(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum,
+    bool *replayOut, bool *rejectedOut)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (replayOut != NULL)
+        *replayOut = false;
+    if (rejectedOut != NULL)
+        *rejectedOut = false;
+    if (session == NULL || role == NULL || role->roleId == 0 || itemSeq == 0 ||
+        useNum == 0 || !session->practisePill17FollowupActive ||
+        session->practisePill17FollowupRoleId != role->roleId ||
+        session->practisePill17FollowupSeq != itemSeq)
+    {
+        return false;
+    }
+    if (session->practisePill17FollowupCommittedUse != 0)
+    {
+        if (session->practisePill17FollowupCommittedUse == useNum)
+        {
+            if (replayOut != NULL)
+                *replayOut = true;
+        }
+        else if (rejectedOut != NULL)
+        {
+            *rejectedOut = true;
+        }
+        return true;
+    }
+    if (useNum > session->practisePill17FollowupMaxUse &&
+        rejectedOut != NULL)
+    {
+        *rejectedOut = true;
+    }
+    return true;
+}
+
+static void vm_mock_service_commit_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || role == NULL || role->roleId == 0 || itemSeq == 0 ||
+        useNum == 0 || !session->practisePill17FollowupActive ||
+        session->practisePill17FollowupRoleId != role->roleId ||
+        session->practisePill17FollowupSeq != itemSeq ||
+        session->practisePill17FollowupCommittedUse != 0)
+    {
+        return;
+    }
+    session->practisePill17FollowupCommittedUse = useNum;
+    printf("[info][mock-service] practise_pill17_commit client=%08x role=%u seq=%u usenum=%u\n",
+           session->clientId, role->roleId, (u32)itemSeq, useNum);
 }
 
 static const char *vm_mock_service_active_transient_instance_scene(void)
@@ -5521,6 +5631,11 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->shopSceneReturnPostEnterY = 0;
     session->taskPromptRefreshPending = false;
     session->taskPromptRefreshScene[0] = 0;
+    session->practisePill17FollowupActive = false;
+    session->practisePill17FollowupSeq = 0;
+    session->practisePill17FollowupRoleId = 0;
+    session->practisePill17FollowupMaxUse = 0;
+    session->practisePill17FollowupCommittedUse = 0;
     memset(session->socialNotices, 0, sizeof(session->socialNotices));
     memset(session->chatNotices, 0, sizeof(session->chatNotices));
     session->chatNoticeHead = 0;
@@ -6485,7 +6600,7 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
      * using the active-role-only position fast path. */
     if (!vm_net_mock_role_db_save_relational(
             "admin-reset-selected-scene", NULL, NULL, 0, true, NULL, NULL,
-            NULL))
+            NULL, NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);
@@ -6565,6 +6680,38 @@ static bool vm_mock_service_account_add_wcoin(const char *accountId,
     return true;
 }
 
+static bool vm_mock_service_account_remove_wcoin(const char *accountId,
+                                                 u32 amount,
+                                                 const char **messageOut)
+{
+    u32 before = 0;
+    u32 after = 0;
+    bool insufficient = false;
+
+    if (messageOut)
+        *messageOut = NULL;
+    if (accountId == NULL || accountId[0] == 0 || amount == 0)
+    {
+        if (messageOut)
+            *messageOut = "账号或 W 币数量无效";
+        return false;
+    }
+    if (!vm_mock_service_account_wallet_debit(accountId, amount, &before, &after,
+                                              &insufficient))
+    {
+        if (messageOut)
+            *messageOut = insufficient ? "账号 W 币余额不足"
+                                      : "账号 W 币钱包写入失败";
+        return false;
+    }
+    printf("[info][mock-service] account_wcoin_remove user=%s scope=account remove=%u before=%u after=%u\n",
+           accountId,
+           amount,
+           before,
+           after);
+    return true;
+}
+
 static bool vm_mock_service_account_add_role_money(const char *accountId,
                                                    const char *roleSelector,
                                                    u32 amount,
@@ -6599,7 +6746,7 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
      * select an arbitrary role by id, so commit the complete account snapshot
      * or a non-active character silently loses its updated balance. */
     if (!vm_net_mock_role_db_save_relational("admin-money-add", NULL, NULL,
-                                             0, true, NULL, NULL, NULL))
+                                             0, true, NULL, NULL, NULL, NULL))
     {
         role->money = before;
         vm_mock_service_account_capture(state);
@@ -6832,7 +6979,8 @@ static bool vm_mock_service_account_set_role_level(const char *accountId,
     }
     targetExp = role->exp;
     if (!vm_net_mock_role_db_save_relational("admin-set-role-level", NULL,
-                                             NULL, 0, true, NULL, NULL, NULL))
+                                             NULL, 0, true, NULL, NULL, NULL,
+                                             NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);
@@ -6955,7 +7103,7 @@ static bool vm_mock_service_account_set_equipped_enhance_level(
     vm_net_mock_role_sync_derived_vitals(role);
     if (!vm_net_mock_role_db_save_relational(
             "admin-set-equipped-enhance", NULL, NULL, 0, true, NULL, NULL,
-            NULL))
+            NULL, NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);
@@ -7069,6 +7217,7 @@ static bool vm_mock_service_account_remove_role_backpack_item(
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_backpack_item_state *item = NULL;
     vm_net_mock_role_state before;
+    vm_net_mock_enhancement_removal_authorization enhancementRemoval;
     char roleSelector[32];
     u32 removedCount = 0;
 
@@ -7076,6 +7225,7 @@ static bool vm_mock_service_account_remove_role_backpack_item(
         *removedCountOut = 0;
     if (messageOut)
         *messageOut = "删除物品失败";
+    memset(&enhancementRemoval, 0, sizeof(enhancementRemoval));
     if (accountId == NULL || accountId[0] == 0 || roleId == 0 || itemId == 0 ||
         itemSeq == 0)
     {
@@ -7110,6 +7260,14 @@ static bool vm_mock_service_account_remove_role_backpack_item(
 
     before = *role;
     removedCount = item->count;
+    if (item->enhanceLevel != 0)
+    {
+        /* The exact account/role/item/sequence tuple above has already been
+         * checked against the loaded durable instance.  Pass only this
+         * deletion's enhancement loss to the full-snapshot safeguard. */
+        enhancementRemoval.enhancedRows = 1;
+        enhancementRemoval.enhancementLevelSum = item->enhanceLevel;
+    }
     memset(item, 0, sizeof(*item));
     vm_net_mock_role_normalize_backpack(role);
 
@@ -7117,7 +7275,8 @@ static bool vm_mock_service_account_remove_role_backpack_item(
      * persists activeRoleId, so use the relational full snapshot transaction
      * and keep the account's active role unchanged. */
     if (!vm_net_mock_role_db_save_relational("account-backpack-delete", NULL,
-                                             NULL, 0, true, NULL, NULL, NULL))
+                                             NULL, 0, true, NULL, NULL, NULL,
+                                             &enhancementRemoval))
     {
         *role = before;
         vm_mock_service_account_capture(state);

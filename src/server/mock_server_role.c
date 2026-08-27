@@ -10892,6 +10892,16 @@ static bool vm_net_mock_offline_exp_schema_prepare(void)
 static void vm_mock_service_account_wallet_sync_cached_balance(
     const char *account_id, u32 balance);
 
+/* A full account snapshot normally may not reduce its enhanced-instance
+ * aggregate: that protects against stale or incomplete caches replacing the
+ * durable backpack.  The account backpack delete service is the sole caller
+ * that can authorize one precise, already-verified instance removal. */
+typedef struct
+{
+    u32 enhancedRows;
+    u32 enhancementLevelSum;
+} vm_net_mock_enhancement_removal_authorization;
+
 static bool vm_net_mock_role_db_save_relational(const char *reason,
                                                  const u32 *old_ids,
                                                  const u32 *new_ids,
@@ -10899,7 +10909,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
                                                  bool full_snapshot,
                                                  const vm_net_mock_role_item_effect *timed_effect,
                                                  vm_net_mock_account_wallet_debit *wallet_debit,
-                                                 const vm_net_mock_offline_exp_settlement_update *offline_exp_update)
+                                                 const vm_net_mock_offline_exp_settlement_update *offline_exp_update,
+                                                 const vm_net_mock_enhancement_removal_authorization *enhancement_removal)
 {
     const char *account_id = g_vm_mock_service_active_account_id;
     char account_hex[129];
@@ -10915,6 +10926,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     u32 projected_enhanced_rows = 0;
     u32 persisted_enhanced_level_sum = 0;
     u32 projected_enhanced_level_sum = 0;
+    u32 authorized_enhanced_rows = 0;
+    u32 authorized_enhancement_level_sum = 0;
     mysql_error[0] = 0;
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
@@ -10930,6 +10943,21 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
          !vm_net_mock_offline_exp_schema_prepare()))
     {
         return false;
+    }
+    if (enhancement_removal != NULL)
+    {
+        authorized_enhanced_rows = enhancement_removal->enhancedRows;
+        authorized_enhancement_level_sum =
+            enhancement_removal->enhancementLevelSum;
+        /* This authorization represents one exact backpack instance, not a
+         * generic permission for full snapshots to lose enhancement state. */
+        if (authorized_enhanced_rows > 1 ||
+            authorized_enhancement_level_sum > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL ||
+            (authorized_enhanced_rows == 0 &&
+             authorized_enhancement_level_sum != 0))
+        {
+            return false;
+        }
     }
     memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
     g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
@@ -10975,8 +11003,9 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     transaction_started = true;
     /* A full snapshot replaces every instance row for the account.  Never let
      * a stale or partially migrated in-memory image silently reduce persisted
-     * enhancement state.  Legitimate role deletion is the one operation whose
-     * contract is to remove that state, so it is explicitly exempt. */
+     * enhancement state.  Role deletion and an exact backpack-instance
+     * deletion are the only contracts that can declare the corresponding
+     * reduction in advance. */
     if (full_snapshot &&
         (reason == NULL || strcmp(reason, "role-delete") != 0))
     {
@@ -11031,8 +11060,12 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
                      vm_mysql_last_error());
             goto failed;
         }
-        if (projected_enhanced_rows < persisted_enhanced_rows ||
-            projected_enhanced_level_sum < persisted_enhanced_level_sum)
+        if ((projected_enhanced_rows < persisted_enhanced_rows &&
+             persisted_enhanced_rows - projected_enhanced_rows >
+                 authorized_enhanced_rows) ||
+            (projected_enhanced_level_sum < persisted_enhanced_level_sum &&
+             persisted_enhanced_level_sum - projected_enhanced_level_sum >
+                 authorized_enhancement_level_sum))
         {
             snprintf(mysql_error, sizeof(mysql_error),
                      "enhancement state regression blocked persisted_rows=%u "
@@ -11493,7 +11526,7 @@ failed:
 static bool vm_net_mock_role_db_save(const char *reason)
 {
     return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false,
-                                                NULL, NULL, NULL);
+                                                NULL, NULL, NULL, NULL);
 }
 
 /* W 币属于账号钱包。场景类收费也必须经同一事务入口提交，不能先改内存余额再尝试
@@ -11513,7 +11546,7 @@ static bool vm_net_mock_account_wallet_debit_exact(const char *reason,
     walletDebit.expectedBalance = expectedBalance;
     walletDebit.debit = debit;
     if (!vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false,
-                                             NULL, &walletDebit, NULL))
+                                             NULL, &walletDebit, NULL, NULL))
     {
         return false;
     }
@@ -12016,12 +12049,79 @@ static void vm_net_mock_practise_mark_offline(const char *accountId,
     }
 }
 
+/* 7/16 contains only the selected 827 stack.  The CBE stores this result as
+ * the quantity control's upper bound and later sends the chosen count in
+ * 7/17.usenum, so this phase must prove the exact maximum without consuming
+ * anything.  The commit routine below repeats all checks under row locks. */
+static bool vm_net_mock_practise_pill_max_usable(vm_net_mock_role_state *role,
+                                                 u16 itemSeq, u32 *maxUseOut)
+{
+    char accountHex[129];
+    char query[1280];
+    vm_net_mock_backpack_item_state *sourceItem = NULL;
+    vm_mock_mysql_practise_state_context state;
+    vm_mock_mysql_practise_u32_context databaseItemCount;
+    u32 capacityCount = 0;
+    u32 maxUse = 0;
+    bool transactionStarted = false;
+
+    if (maxUseOut != NULL)
+        *maxUseOut = 0;
+    if (role == NULL || role->roleId == 0 || itemSeq == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_practise_prepare_schema() ||
+        !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
+    {
+        return false;
+    }
+    sourceItem = vm_net_mock_role_find_backpack_item(role, 827, itemSeq);
+    if (sourceItem == NULL || sourceItem->count == 0)
+        return false;
+    if (!vm_mysql_exec("START TRANSACTION"))
+        return false;
+    transactionStarted = true;
+    if (!vm_net_mock_practise_read_locked(accountHex, role->roleId, &state) ||
+        state.availableMinutes > VM_NET_MOCK_PRACTISE_MAX_MINUTES)
+        goto failed;
+    memset(&databaseItemCount, 0, sizeof(databaseItemCount));
+    snprintf(query, sizeof(query),
+             "SELECT item_count FROM account_role_backpack WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND item_id=827 "
+             "AND item_seq=%u FOR UPDATE",
+             accountHex, role->roleId, itemSeq);
+    if (!vm_mysql_query(query, vm_mock_mysql_practise_u32_row,
+                        &databaseItemCount) || !databaseItemCount.found ||
+        databaseItemCount.invalid ||
+        databaseItemCount.value != sourceItem->count)
+    {
+        goto failed;
+    }
+    capacityCount = (VM_NET_MOCK_PRACTISE_MAX_MINUTES -
+                     state.availableMinutes) /
+                    VM_NET_MOCK_PRACTISE_PILL_MINUTES;
+    maxUse = databaseItemCount.value < capacityCount ?
+             databaseItemCount.value : capacityCount;
+    if (maxUse > 0xffffu)
+        maxUse = 0xffffu;
+    if (maxUse == 0 || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    if (maxUseOut != NULL)
+        *maxUseOut = maxUse;
+    return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    return false;
+}
+
 /* 827 is a true one-hour bank deposit, not a generic consumable.  The exact
- * backpack row and the companion training row are locked and committed in one
- * transaction; otherwise a crash between the two writes could delete a pill
- * without crediting its hour (or grant an hour for a retained pill). */
+ * backpack row and companion training row are locked and committed together;
+ * the user-confirmed 7/17.usenum decides both the debit and credited hours. */
 static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
-                                          u16 itemSeq, u32 *remainingOut)
+                                          u16 itemSeq, u32 useCount,
+                                          u32 *remainingOut)
 {
     char accountHex[129];
     char query[1280];
@@ -12036,7 +12136,7 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
 
     if (remainingOut)
         *remainingOut = 0;
-    if (role == NULL || role->roleId == 0 || itemSeq == 0 ||
+    if (role == NULL || role->roleId == 0 || itemSeq == 0 || useCount == 0 ||
         !vm_net_mock_mysql_account_hex(accountHex) ||
         !vm_net_mock_practise_prepare_schema() ||
         !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
@@ -12044,11 +12144,12 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
         return false;
     }
     sourceItem = vm_net_mock_role_find_backpack_item(role, 827, itemSeq);
-    if (sourceItem == NULL || sourceItem->count == 0)
+    if (sourceItem == NULL || sourceItem->count < useCount)
         return false;
     expectedItemCount = sourceItem->count;
     projected = *role;
-    if (!vm_net_mock_role_consume_backpack_item(&projected, 827, itemSeq, 1,
+    if (!vm_net_mock_role_consume_backpack_item(&projected, 827, itemSeq,
+                                                 useCount,
                                                  &remaining))
     {
         return false;
@@ -12058,8 +12159,10 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
         goto failed;
     transactionStarted = true;
     if (!vm_net_mock_practise_read_locked(accountHex, role->roleId, &state) ||
-        state.availableMinutes >
-            VM_NET_MOCK_PRACTISE_MAX_MINUTES - VM_NET_MOCK_PRACTISE_PILL_MINUTES)
+        state.availableMinutes > VM_NET_MOCK_PRACTISE_MAX_MINUTES ||
+        useCount > (VM_NET_MOCK_PRACTISE_MAX_MINUTES -
+                    state.availableMinutes) /
+                   VM_NET_MOCK_PRACTISE_PILL_MINUTES)
     {
         goto failed;
     }
@@ -12075,7 +12178,9 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
     {
         goto failed;
     }
-    if (databaseItemCount.value == 1)
+    if (databaseItemCount.value < useCount)
+        goto failed;
+    if (databaseItemCount.value == useCount)
     {
         snprintf(query, sizeof(query),
                  "DELETE FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) "
@@ -12085,14 +12190,15 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
     else
     {
         snprintf(query, sizeof(query),
-                 "UPDATE account_role_backpack SET item_count=item_count-1 "
+                 "UPDATE account_role_backpack SET item_count=item_count-%u "
                  "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u "
                  "AND item_id=827 AND item_seq=%u AND item_count=%u",
-                 accountHex, role->roleId, itemSeq, databaseItemCount.value);
+                 useCount, accountHex, role->roleId, itemSeq,
+                 databaseItemCount.value);
     }
     if (!vm_mysql_exec(query))
         goto failed;
-    state.availableMinutes += VM_NET_MOCK_PRACTISE_PILL_MINUTES;
+    state.availableMinutes += useCount * VM_NET_MOCK_PRACTISE_PILL_MINUTES;
     if (!vm_net_mock_practise_update_locked(accountHex, role->roleId, &state))
         goto failed;
     snprintf(query, sizeof(query),
@@ -12105,8 +12211,8 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
     *role = projected;
     if (remainingOut)
         *remainingOut = state.availableMinutes;
-    printf("[info][network] mock_practise_pill role=%u seq=%u item_remaining=%u practise_minutes=%u action=committed\n",
-           role->roleId, itemSeq, remaining, state.availableMinutes);
+    printf("[info][network] mock_practise_pill role=%u seq=%u usenum=%u item_remaining=%u practise_minutes=%u action=committed\n",
+           role->roleId, itemSeq, useCount, remaining, state.availableMinutes);
     return true;
 
 failed:
@@ -12366,7 +12472,7 @@ static bool vm_net_mock_offline_exp_settle(vm_net_mock_role_state *role,
     update.expectedOfflineStartedUnix = state.offlineStartedUnix;
     update.remainingMinutes = remainingMinutes;
     if (!vm_net_mock_role_db_save_relational("offline-exp-settle", NULL, NULL,
-                                             0, false, NULL, NULL, &update))
+                                             0, false, NULL, NULL, &update, NULL))
     {
         *role = before;
         return false;
@@ -12782,6 +12888,14 @@ static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     return effect.expiresUnix != 0 ? effect.multiplier : 0;
 }
 
+static u8 vm_net_mock_role_active_battle_insight_flag(void)
+{
+    return vm_net_mock_role_active_battle_exp_bonus_percent(
+               vm_net_mock_active_role()) != 0
+               ? 1
+               : 0;
+}
+
 /* Monster rewards use a role-scoped, China-local calendar day.  The counter
  * is intentionally independent from one hangup session so reconnecting,
  * reopening hangup, or switching scenes cannot manufacture a fresh reward
@@ -13000,12 +13114,26 @@ static bool vm_net_mock_role_active_timed_combat_bonus_percent(
     return true;
 }
 
+static u8 vm_net_mock_role_active_timed_combat_flag(void)
+{
+    u32 attackPercent = 0;
+    u32 defensePercent = 0;
+
+    if (!vm_net_mock_role_active_timed_combat_bonus_percent(
+            vm_net_mock_active_role(), &attackPercent, &defensePercent))
+    {
+        return 0;
+    }
+    return attackPercent != 0 || defensePercent != 0 ? 1 : 0;
+}
+
 /* The backpack decrement and the timed effect belong to one durable action.
  * The row is only changed in memory before the relational transaction has
  * committed; on any failure restore the exact previous role state so a retry
  * cannot lose an item or create an unbacked effect. */
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
+    u32 count,
     const vm_net_mock_role_item_effect *effect, u32 durationSeconds,
     u32 *remainingOut, const char *reason)
 {
@@ -13017,7 +13145,7 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
 
     if (remainingOut)
         *remainingOut = 0;
-    if (role == NULL || effect == NULL || effect->itemId != itemId ||
+    if (role == NULL || effect == NULL || effect->itemId != itemId || count == 0 ||
         durationSeconds == 0 || !vm_net_mock_role_item_effect_is_valid(effect))
     {
         return false;
@@ -13067,11 +13195,11 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     }
 
     before = *role;
-    if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1, &remaining))
+    if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, count, &remaining))
         return false;
     if (!vm_net_mock_role_db_save_relational(
             reason ? reason : "special-item-use", NULL, NULL, 0, false,
-            &effective, NULL, NULL))
+            &effective, NULL, NULL, NULL))
     {
         *role = before;
         printf("[error][mock-service] special_item_persist_failed account=%s role=%u item=%u seq=%u kind=%u error=%s\n",
@@ -13669,7 +13797,8 @@ static void vm_net_mock_role_db_load(void)
         if (!vm_net_mock_role_db_save_relational(saveReason,
                                                  migratedOldIds,
                                                  migratedNewIds,
-                                                 migratedIdCount, true, NULL, NULL, NULL))
+                                                 migratedIdCount, true, NULL, NULL, NULL,
+                                                 NULL))
         {
             g_vm_net_mock_role_db_valid = false;
             return;
@@ -13842,6 +13971,64 @@ failed:
     return false;
 }
 
+/* Keep administrative debits at the account-wallet authority instead of
+ * touching a role-shaped compatibility cache.  The FOR UPDATE read holds the
+ * same row lock used by credits, so a concurrent store/instance payment
+ * cannot make an approved debit underflow the durable balance. */
+static bool vm_mock_service_account_wallet_debit(const char *account_id,
+                                                 u32 amount,
+                                                 u32 *before_out,
+                                                 u32 *after_out,
+                                                 bool *insufficient_out)
+{
+    char account_hex[129];
+    char query[512];
+    u32 before = 0;
+    u32 after = 0;
+    bool transaction = false;
+
+    if (before_out)
+        *before_out = 0;
+    if (after_out)
+        *after_out = 0;
+    if (insufficient_out)
+        *insufficient_out = false;
+    if (account_id == NULL || account_id[0] == 0 || amount == 0 ||
+        vm_mysql_hex_encode(account_id, strlen(account_id), account_hex,
+                            sizeof(account_hex)) == 0 ||
+        !vm_mysql_exec("START TRANSACTION"))
+    {
+        return false;
+    }
+    transaction = true;
+    if (!vm_mock_service_account_wallet_read(account_id, true, &before))
+        goto failed;
+    if (before < amount)
+    {
+        if (insufficient_out)
+            *insufficient_out = true;
+        goto failed;
+    }
+    after = before - amount;
+    snprintf(query, sizeof(query),
+             "UPDATE account_wallets SET wcoin=%u WHERE account_id=CAST(X'%s' AS CHAR)",
+             after, account_hex);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transaction = false;
+    vm_mock_service_account_wallet_sync_cached_balance(account_id, after);
+    if (before_out)
+        *before_out = before;
+    if (after_out)
+        *after_out = after;
+    return true;
+
+failed:
+    if (transaction)
+        (void)vm_mysql_exec("ROLLBACK");
+    return false;
+}
+
 static bool vm_net_mock_select_active_role(u32 roleId)
 {
     vm_net_mock_role_db_load();
@@ -13994,7 +14181,7 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
     if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true,
-                                             NULL, NULL, NULL))
+                                             NULL, NULL, NULL, NULL))
     {
         --g_vm_net_mock_role_db.roleCount;
         memset(role, 0, sizeof(*role));
@@ -14065,7 +14252,7 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
     }
 
     if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true,
-                                             NULL, NULL, NULL))
+                                             NULL, NULL, NULL, NULL))
     {
         g_vm_net_mock_role_db = before;
         if (roleCountOut)

@@ -22,7 +22,7 @@ int main(void)
     role.roleId = 37;
     vm_mock_admin_text_init(&page, rendered, sizeof(rendered));
     vm_mock_admin_render_role_operation_modal(&page, "role.ops", &role,
-                                              "操作测试角色", NULL, 0);
+                                              "操作测试角色", NULL, true, NULL, 0);
     vm_mock_admin_render_scene_picker_modal(&page);
     if (page.truncated ||
         strstr(rendered,

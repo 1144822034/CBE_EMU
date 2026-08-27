@@ -80,6 +80,75 @@ fail:
     return false;
 }
 
+static bool vm_mock_admin_online_player_count_contract_ok(void)
+{
+    vm_mock_service_client_session first;
+    vm_mock_service_client_session second;
+    vm_mock_service_client_session offline;
+    vm_mock_service_client_session unbound;
+    vm_mock_service_client_session *saved = g_vm_mock_service_client_sessions;
+    bool ok = false;
+
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    memset(&offline, 0, sizeof(offline));
+    memset(&unbound, 0, sizeof(unbound));
+    snprintf(first.accountId, sizeof(first.accountId), "online.alpha");
+    first.roleOnline = true;
+    first.onlineRoleId = 101;
+    snprintf(second.accountId, sizeof(second.accountId), "online.beta");
+    second.roleOnline = true;
+    second.onlineRoleId = 102;
+    snprintf(offline.accountId, sizeof(offline.accountId), "offline.gamma");
+    offline.onlineRoleId = 103;
+    unbound.roleOnline = true;
+    unbound.onlineRoleId = 104;
+    first.next = &second;
+    second.next = &offline;
+    offline.next = &unbound;
+    g_vm_mock_service_client_sessions = &first;
+    ok = vm_mock_admin_online_player_count() == 2 &&
+         vm_mock_admin_account_is_online("online.alpha") &&
+         vm_mock_admin_account_is_online("online.beta") &&
+         !vm_mock_admin_account_is_online("offline.gamma") &&
+         !vm_mock_admin_account_is_online("");
+    g_vm_mock_service_client_sessions = saved;
+    return ok;
+}
+
+static bool vm_mock_admin_wcoin_debit_contract_ok(void)
+{
+    char filterSql[768];
+    char filterQuery[512];
+    u32 filter = vm_mock_admin_operation_log_action_filter_from_query(
+        "type=add-wcoin&type=remove-wcoin&type=spend-wcoin-shop");
+
+    if (filter == 0 ||
+        !vm_mock_admin_operation_log_build_filter("audit-target", filter,
+                                                  filterSql,
+                                                  sizeof(filterSql)))
+    {
+        return false;
+    }
+    vm_mock_admin_operation_log_append_action_filter_query(
+        filter, filterQuery, sizeof(filterQuery));
+
+    return strcmp(vm_mock_admin_operation_log_action_label("add-wcoin"),
+                  "增加 W 币") == 0 &&
+           strcmp(vm_mock_admin_operation_log_action_label("remove-wcoin"),
+                  "减少 W 币") == 0 &&
+           !vm_mock_admin_operation_log_is_game_action("remove-wcoin") &&
+           vm_mock_admin_operation_log_is_wcoin_debit("remove-wcoin") &&
+           vm_mock_admin_operation_log_is_wcoin_debit("spend-wcoin-shop") &&
+           !vm_mock_admin_operation_log_is_wcoin_debit("add-wcoin") &&
+           strstr(filterSql, "action_code='add-wcoin'") != NULL &&
+           strstr(filterSql, "action_code='remove-wcoin'") != NULL &&
+           strstr(filterSql, "action_code='spend-wcoin-shop'") != NULL &&
+           strstr(filterQuery, "&amp;type=add-wcoin") != NULL &&
+           strstr(filterQuery, "&amp;type=remove-wcoin") != NULL &&
+           strstr(filterQuery, "&amp;type=spend-wcoin-shop") != NULL;
+}
+
 int main(int argc, char **argv)
 {
     const char requestHeader[] =
@@ -177,6 +246,42 @@ int main(int argc, char **argv)
     u32 dropBatchItemId = 0;
     u32 rewardRecipientCount = 0;
     u32 serviceOptionCount = 0;
+    vm_mock_admin_role_timed_effect_list roleTimedEffects;
+    bool onlinePlayerStatContract = false;
+    bool onlinePlayerScriptContract = false;
+    bool wcoinDebitContract = false;
+
+    onlinePlayerStatContract = vm_mock_admin_online_player_count_contract_ok();
+    onlinePlayerScriptContract =
+        strstr(g_vm_mock_admin_script, "const setupOnlinePlayerStat") != NULL &&
+        strstr(g_vm_mock_admin_script, "data-online-player-count") != NULL &&
+        strstr(g_vm_mock_admin_script, "online-players") != NULL &&
+        strcmp(VM_MOCK_ADMIN_ONLINE_PLAYER_STATS_PATH,
+               VM_MOCK_ADMIN_BASE_PATH "/online-players") == 0;
+    if (!onlinePlayerStatContract || !onlinePlayerScriptContract)
+    {
+        fprintf(stderr,
+                "online-player administration statistic contract violated count=%u script=%u\n",
+                onlinePlayerStatContract ? 1u : 0u,
+                onlinePlayerScriptContract ? 1u : 0u);
+        return 1;
+    }
+    wcoinDebitContract = vm_mock_admin_wcoin_debit_contract_ok();
+    if (!wcoinDebitContract)
+    {
+        fprintf(stderr, "admin W-coin debit contract violated\n");
+        return 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--online-player-stat-only") == 0)
+    {
+        printf("online-player administration statistic regression passed\n");
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "--account-wcoin-debit-only") == 0)
+    {
+        printf("account W-coin debit administration regression passed\n");
+        return 0;
+    }
 
     if (!vm_mock_admin_open_loopback_pair(&proxyServer, &proxyClient) ||
         !vm_mock_admin_dispatch_request(proxyServer, proxyRequest,
@@ -215,13 +320,19 @@ int main(int argc, char **argv)
     roleOperationFixture.backpackItems[1].enhanceLevel = 9;
     roleOperationFixture.backpackItems[1].durability = 48;
     roleOperationFixture.backpackItems[1].durabilityMax = 50;
+    memset(&roleTimedEffects, 0, sizeof(roleTimedEffects));
+    roleTimedEffects.count = 1;
+    roleTimedEffects.rows[0].kind = VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT;
+    roleTimedEffects.rows[0].itemId = 828;
+    roleTimedEffects.rows[0].multiplier = 20;
+    roleTimedEffects.rows[0].expiresUnix = 4294967295u;
     memset(renderedRoleOperations, 0, sizeof(renderedRoleOperations));
     vm_mock_admin_text_init(&renderedRoleOperationsPage,
                             renderedRoleOperations,
                             sizeof(renderedRoleOperations));
     vm_mock_admin_render_role_operation_modal(
         &renderedRoleOperationsPage, "role.ops", &roleOperationFixture,
-        "操作测试角色", NULL, 0);
+        "操作测试角色", &roleTimedEffects, true, NULL, 0);
     if (renderedRoleOperationsPage.truncated ||
         strstr(renderedRoleOperations,
                "data-role-operation-tab=\"profile\"") == NULL ||
@@ -229,6 +340,12 @@ int main(int argc, char **argv)
                "data-role-operation-pane=\"items\"") == NULL ||
         strstr(renderedRoleOperations,
                "data-role-operation-pane=\"equipment\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-role-operation-tab=\"timed-effects\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-role-operation-pane=\"timed-effects\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "data-role-timed-effect-list") == NULL ||
         strstr(renderedRoleOperations,
                "data-role-operation-tab=\"backpack\"") == NULL ||
         strstr(renderedRoleOperations,
@@ -247,6 +364,10 @@ int main(int argc, char **argv)
                "name=\"action\" value=\"grant-item\"") == NULL ||
         strstr(renderedRoleOperations,
                "name=\"action\" value=\"remove-role-backpack-item\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "name=\"action\" value=\"remove-role-timed-item-effect\"") == NULL ||
+        strstr(renderedRoleOperations,
+               "生效中的时效道具") == NULL ||
         strstr(renderedRoleOperations,
                "name=\"action\" value=\"reset-role-selected-scene\"") == NULL ||
         strstr(renderedRoleOperations,
@@ -915,6 +1036,8 @@ int main(int argc, char **argv)
         strstr(g_vm_mock_admin_script, "const roleOperationOpen") == NULL ||
         strstr(g_vm_mock_admin_script,
                "itemPicker&&!itemPicker.hidden") == NULL ||
+        strstr(g_vm_mock_admin_script, "state.pending") == NULL ||
+        strstr(g_vm_mock_admin_script, "state.restore") == NULL ||
         strstr(g_vm_mock_admin_script, "data-admin-confirm") == NULL ||
         strstr(g_vm_mock_admin_script, "setupRoleOperationModal();") == NULL)
     {
@@ -960,10 +1083,15 @@ int main(int argc, char **argv)
                    "remove-role-backpack-item"),
                "删除背包物品") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label(
+                   "remove-role-timed-item-effect"),
+               "移除时效道具效果") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label(
                    "set-equipped-enhance-level"),
                "设置穿戴装备强化等级") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("add-money"),
                "增加普通钱币") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("remove-wcoin"),
+               "减少 W 币") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("grant-item"),
                "发放物品/装备") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("player-trade"),
@@ -979,7 +1107,8 @@ int main(int argc, char **argv)
     }
     operationFilter = vm_mock_admin_operation_log_action_filter_from_query(
         "type=add-money&type=player-trade&type=discard-equipment"
-        "&type=recycle-equipment&type=spend-wcoin-shop&type=spend-wcoin-instance");
+        "&type=recycle-equipment&type=remove-wcoin&type=spend-wcoin-shop"
+        "&type=spend-wcoin-instance");
     if (operationFilter == 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("player-trade"),
                "玩家交易") != 0 ||
@@ -987,6 +1116,8 @@ int main(int argc, char **argv)
                "丢弃装备") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("recycle-equipment"),
                "装备回收") != 0 ||
+        strcmp(vm_mock_admin_operation_log_action_label("remove-wcoin"),
+               "减少 W 币") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("spend-wcoin-shop"),
                "游戏内商城消费 W 币") != 0 ||
         strcmp(vm_mock_admin_operation_log_action_label("spend-wcoin-instance"),
@@ -999,6 +1130,7 @@ int main(int argc, char **argv)
         strstr(operationFilterSql, "action_code='player-trade'") == NULL ||
         strstr(operationFilterSql, "action_code='discard-equipment'") == NULL ||
         strstr(operationFilterSql, "action_code='recycle-equipment'") == NULL ||
+        strstr(operationFilterSql, "action_code='remove-wcoin'") == NULL ||
         strstr(operationFilterSql, "action_code='spend-wcoin-shop'") == NULL ||
         strstr(operationFilterSql, "action_code='spend-wcoin-instance'") == NULL)
     {
@@ -1012,6 +1144,7 @@ int main(int argc, char **argv)
         strstr(operationFilterQuery, "&amp;type=player-trade") == NULL ||
         strstr(operationFilterQuery, "&amp;type=discard-equipment") == NULL ||
         strstr(operationFilterQuery, "&amp;type=recycle-equipment") == NULL ||
+        strstr(operationFilterQuery, "&amp;type=remove-wcoin") == NULL ||
         strstr(operationFilterQuery, "&amp;type=spend-wcoin-shop") == NULL ||
         strstr(operationFilterQuery, "&amp;type=spend-wcoin-instance") == NULL)
     {

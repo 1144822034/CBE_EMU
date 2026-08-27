@@ -2709,7 +2709,7 @@ static bool vm_net_mock_shop_commit_purchase(const char *reason,
     debit.expectedBalance = wcoin_before;
     debit.debit = cost;
     if (!vm_net_mock_role_db_save_relational(
-            reason, NULL, NULL, 0, false, NULL, &debit, NULL))
+            reason, NULL, NULL, 0, false, NULL, &debit, NULL, NULL))
     {
         return false;
     }
@@ -3946,6 +3946,11 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
     u8 actorInfo[512];
     u32 actorInfoLen = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_scene_timed_item_status timedStatus =
+        vm_net_mock_scene_timed_item_status_for_active_effects(
+            vm_net_mock_role_active_timed_combat_flag(),
+            vm_net_mock_role_active_exp_card_flag(),
+            vm_net_mock_role_active_battle_insight_flag());
     u32 totalExp = role ? role->exp : 0;
     u32 curExp = vm_net_mock_role_next_level_start_exp(totalExp);
     u32 lastExp = vm_net_mock_role_last_level_exp(totalExp);
@@ -3966,7 +3971,8 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "revivetype", 0))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "ruffianflag", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "ruffianflag",
+                                   timedStatus.ruffianflag))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "type", 0))
         return false;
@@ -3974,12 +3980,14 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
     {
         if (!vm_net_mock_put_object_u8(out, outCap, pos, "practiseflag", 0))
             return false;
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "pcimg", 0))
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "pcimg",
+                                       timedStatus.pcimg))
             return false;
         if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard",
-                                       vm_net_mock_role_active_exp_card_flag()))
+                                       timedStatus.expcard))
             return false;
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expbook", 0))
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expbook",
+                                       timedStatus.expbook))
             return false;
         if (!vm_net_mock_put_object_string(out, outCap, pos, "practiseinfo", ""))
             return false;
@@ -4846,7 +4854,14 @@ static bool vm_net_mock_append_game_type_response_object(
     }
     else if (requestType == 2)
     {
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "pcimg", 0))
+        /* JianghuOL.CBE:net_handle_misc_player_fields(1/7/20) writes this
+         * byte straight into the shared badge cache.  Zero displays the
+         * legacy fixed ep_icon.gif (“修”); it is not an inactive sentinel. */
+        if (!vm_net_mock_put_object_u8(
+                out, outCap, pos, "pcimg",
+                vm_net_mock_scene_timed_item_status_for_active_effects(
+                    false, false, false)
+                    .pcimg))
             return false;
     }
     else if (requestType == 3)

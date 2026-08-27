@@ -22,30 +22,14 @@ BattleScreen，不能作为远程延迟的兜底。
 此前客户端提供过一个只读确认渲染状态、再经模拟器硬件输入队列发送一次按下/释放的
 临时辅助。该辅助不属于固件协议，不能作为挂机跨战的产品实现。
 
-## 旧辅助处理
+## 旧辅助已移除（2026-08-27）
 
-`vm_hangup_auto_confirm_init()` 现在默认关闭。只有显式设置
-`CBE_HANGUP_AUTO_CONFIRM=1` 或 `--hangup-auto-confirm` 时，才允许测试环境使用一次
-硬件输入辅助；`0`、`off`、`false` 和未设置均不会下发输入。
+宿主侧的奖励自动点击实现及其命令行／环境开关已经删除。客户端不再检查 `4/7`
+状态或渲染帧后替用户排入触摸事件，也不根据下行对象推动 `25/5`。历史日志中出现的
+`reward_auto_confirm_*` 仅代表当时的取证，不能作为当前行为或回归条件。
 
-辅助仍必须满足既有条件才生效：已识别的场景挂机 `4/5 + 4/11(type=1)`、收到本场
-`4/7`、渲染后只读确认 phase=7/result=1、下一 scheduler tick 发送一次按下并在
-80 ms 后释放。服务端不修改响应字节、不伪造 `25/5`、不提前构造下一场 `4/5`。
-
-它仍可用于回归旧路径，但不再用于证明原生挂机续战。
-
-## 历史辅助验证
-
-- `make -j2` 通过并重新链接 `bin/main.exe`。
-- 显式开启时日志应出现：
-
-  ```text
-  [info][hangup] reward_auto_confirm enabled mode=hardware-input-after-rendered-4/7 source=environment
-  ```
-
-- 远程挂机终局应依次出现 `reward_auto_confirm_rendered`、
-  `reward_auto_confirm_input press/release`、客户端上行 `25/5`，随后服务端记录
-  `scene_hangup_round_complete`，再由 scene poll 建立下一场。
+奖励面板应由用户输入，或由下文的固件原生 `25/2 -> 25/5` 退出链路关闭；服务端仍只
+在收到客户端实际发送的 `25/5` 后才通过 scene poll 创建下一场。
 
 ## 固件原生挂机复核（2026-08-17）
 
@@ -124,12 +108,12 @@ BattleScene 的 `BattleAutoAction_TimerTick(0x2952)` 发送 `4/12`，从而自�
 `4/5 + 4/11 { result=1,type=1 }`，并固定 arm 服务端对客户端原生 `4/12` 的回放状态。
 这消除了远程服务进程因环境变量被设置为 `0` 而让新场次无法自动出招的可能。
 
-`make -j2` 已通过，且源码、脚本和文档中不存在该变量的残留引用。新的隔离场景
-`hangup-native-auto-exit-v1` 显式设置 `CBE_HANGUP_AUTO_CONFIRM=0`，并要求以下全部证据：
+`make -j2` 已通过，且源码和运行器中不存在该变量的残留引用。隔离场景
+`hangup-native-auto-exit-v1` 不再配置任何宿主确认输入，并要求以下全部证据：
 
 1. 终局响应在最后 `4/6` 与 `4/7` 后实际收到 `25/2 {result=1,type=1}`，且执行 `mmBattle:0x8996`。
 2. 最终结算后执行 `mmBattle:0x5E92`，由客户端实际发送 `25/5`；不得执行手动
-   入口 `0x60C8`，也不得出现宿主 `reward_auto_confirm_input`。
+   入口 `0x60C8`。
 3. 服务端记录 `scene_hangup_round_complete`，随后 scene poll 发送新的
    `4/5 + 4/11`；下一场终局才会再次发送 `25/2`，客户端再次通过 `0x66CC` 并收到下一场 `4/6`。
 

@@ -11,8 +11,8 @@ mock_friend_db_mysql_load records=256
 [info][mock-admin] shop_item_db_load rows=1516 skipped=1
 mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.dsh
 [info][network] mock_equip_catalog total=1485 source=equip.dsh
-[info][mock-admin] task_catalog_db_load rows=19 overridden=14 custom=5 skipped=0 reward_rows=10 reward_tasks=4 reward_skipped=0 scene_target_rows=0 scene_target_skipped=0
-[info][network] mock_task_catalog source=task.dsh+mysql rows=138 declared_rows=138 path=../web/fs/JHOnlineData/task.dsh
+[info][mock-admin] task_catalog_db_load rows=20 overridden=14 custom=6 skipped=0 reward_rows=10 reward_tasks=4 reward_skipped=0 scene_target_rows=0 scene_target_skipped=0
+[info][network] mock_task_catalog source=task.dsh+mysql rows=139 declared_rows=138 path=../web/fs/JHOnlineData/task.dsh
 [info][network] mock_xse_validate script=task0.xse strings=17 task_refs=2 direct_dialogs=5 offer_len=0 completed_len=0 idle_len=75
 [info][network] mock_xse_validate script=04临安胡斐.xse strings=11 task_refs=1 direct_dialogs=4 offer_len=72 completed_len=44 idle_len=48
 [info][network] mock_xse_validate script=06野猪林林冲.xse strings=19 task_refs=2 direct_dialogs=7 offer_len=0 completed_len=0 idle_len=60
@@ -27,23 +27,172 @@ mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.
 [warn][mock-admin] monster_catalog_scene_battle_drafts action=skip error=MySQL query attempted from an active result callback
 [info][network] mock_monster_catalog base=80 scenes=196 spawns=478 scene_added=12 drafts_added=0 rejected=0 total=92 source=SCE2-kind3+task-kill-labels+scene-battle-drafts
 [error][mock-admin] dynamic_npc_instance_target_unresolved scene=c04临安府_05.sce actor=30001 target_scene=36节日庆典_01.sce enemy=3000 action=skip-row reason=direct-challenge-requires-enabled-scene-battle-monster-or-instance-catalog-target direct_scene_target_exists=0 source=parent-load-query
-[info][mock-admin] dynamic_npc_db_load rows=37 skipped=1 quarantined=0 migrated=0 parent_migrated=0
+[info][mock-admin] dynamic_npc_db_load rows=38 skipped=1 quarantined=0 migrated=0 parent_migrated=0
 [info][network] mock_scene_npc_exact_validate scene=c00蓬莱仙岛_01.sce rows=2 total=2 guojing=0 policy=exact-scene-only
 [info][network] mock_scene_npc_service_validate scene=00蓬莱仙岛_02.sce rows=3 total=3 blacksmith=1 monkey=1 test_task_npc=0 policy=production-catalog-only
 [info][mock-service] listening=127.0.0.1:19090
 [info][mock-admin] listening=http://0.0.0.0:19091/
 [info][mock-service] concurrency pool=game workers=4 queue=128 state_model=serialized-legacy-context
 [info][mock-service] concurrency pool=admin workers=2 queue=128 state_model=serialized-legacy-context
-[info][mock-admin] request pool=admin worker=1 sequence=1 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=328
-[info][mock-admin] request pool=admin worker=2 sequence=2 result=1 queue_wait_ms=0 state_wait_ms=328 process_ms=0
-[info][admin] login_success account=1144822034 failed_attempts_reset=1
-[info][mock-service] equipment_instance_schema_prepare storage=relational
+mock_role_db_mysql_load_failed account=- storage=relational error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=0 error=no MySQL error detail
 [info][mock-admin] designation_config_load rows=27
+[error][mock-service] battle_insight_state_read_failed account=- role=0 error=no MySQL error detail
+[info][network] mock_content_client_state client=b5540e04 release=0/0 pending=0 source=WT18/9
+[info][network] mock_update_version request=18/9 result=0x00 identity=f197ad82 source=delivery-ledger configured=0/0/0/0 content=id:0 protocol_code:0 manifest_crc:0 files:0 client_content=0/0 action=current
+net_send connect=0 wt=18/9 len=137 source=builtin-version resp=63
+[info][network] mock_update_version request=18/5 result=0x00 identity=9291d25e source=delivery-ledger configured=0/0/0/0 content=id:0 protocol_code:0 manifest_crc:0 files:0 client_content=0/0 action=current
+net_send connect=0 wt=18/5 len=70 source=builtin-update-version-catalog resp=23
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=0 error=no MySQL error detail
+net_send connect=0 wt=99/1 len=9 source=builtin-short-63-1-empty-ack resp=5
+[info][mock-service] account_cache_acquire account=1144822034 entries=1 reason=session-login
+[info][mock-service] session_bind client=b5540e04 account=1144822034 displaced=0
+[info][mock-service] equipment_instance_schema_prepare storage=relational
 [info][network] mock_item_effect_catalog total=230 source=item.dsh
-mock_role_db_mysql_load account=07060707 source=relational roles=1 active=10438
-[info][mock-service] account_state_release account=07060707 reason=admin-management-close
-[info][mock-admin] request pool=admin worker=2 sequence=6 result=1 queue_wait_ms=0 state_wait_ms=46 process_ms=16
-[info][mock-admin] request pool=admin worker=1 sequence=7 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=109
-mock_role_db_mysql_load account=915174634 source=relational roles=2 active=10377
-[info][mock-service] account_state_release account=915174634 reason=admin-management-close
-[info][mock-admin] request pool=admin worker=2 sequence=10 result=1 queue_wait_ms=0 state_wait_ms=47 process_ms=16
+mock_role_db_mysql_load account=1144822034 source=relational roles=2 active=10093
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+[info][network] login_server_catalog_load rows=1 enabled=1 skipped=0 source=mysql
+[info][network] mock_login_alt12_server_list result=1 servernum=1 issued=0 user=- resp=141
+net_send connect=0 wt=1/12 len=106 source=builtin-login resp=141
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+net_send connect=0 wt=1/16 len=9 source=builtin-title-rolelist-wait-server-select resp=23
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+net_send connect=0 wt=1/4 len=41 source=builtin-title-server-select resp=232
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+[info][network] mock_backpack_grid_reseed role=10093 reason=title-role-select next=group-type1-30/21 evidence=JianghuOL.CBE:0x01039952
+mock_title_role_select requested=10093 selected=1 active=10093 name_len=4 actorinfo_len=239 response=1/1/6+1/1/15 evidence=mmTitle:0x39FC/0x1B9C/0x53EC
+net_send connect=0 wt=1/6 len=25 source=builtin-title-role-select resp=457
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+[info][network] mock_team_member_row observer=b5540e04 member=b5540e04/10093 wire=10093 sex_group=2 job_index=0 online=0 hp=961/961 mp=553/553 wire_order=hp-mp-hpmax-mpmax
+[info][network] mock_team_solo_groupinfo observer=b5540e04 role=10093 groupinfo_len=44 lifecycle=login-self-roster
+[info][network] mock_backpack_grid role=10093 kind=30 subtype=21 gridnum=30 stored_rows=30 iteminfo_len=810
+mock_backpack_grid role=10093 kind=30 subtype=21 gridnum=30 stored_rows=30 iteminfo_len=810 evidence=JianghuOL:0x1039952+mmShop:sub_9DE
+[info][network] mock_backpack_reservoir_seed role=10093 rows=2 info_len=23 response=7/11 evidence=JianghuOL.CBE:0x1033544
+mock_backpack_reservoir_seed role=10093 rows=2 info_len=23 response=7/11 evidence=JianghuOL.CBE:0x1033544
+net_send connect=0 wt=5/10 len=35 source=builtin-group-type1 resp=1118
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+net_send connect=0 wt=7/7 len=19 source=builtin-game-type resp=34
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+net_send connect=0 wt=7/7 len=19 source=builtin-game-type resp=36
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+[info][network] mock_scene_npc_catalog scene=c04临安府_01.sce source=service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=3 truncated=0 npcinfo_len=250 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
+[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=c04临安府_01.sce npcNum=3 npcInfoLen=250
+[info][mock-service] task_prompt_refresh_arm client=b5540e04 scene=c04临安府_01.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
+[info][network] mock_scene_npc_seed phase=startup-scene-followup-immediate scene=c04临安府_01.sce source=27/11-catalog npcnum=3 npcinfo_len=250 once=1 evidence=JianghuOL.CBE:0x01037998
+[info][mock-service] scene_npc_lifecycle_seed client=b5540e04 scene=c04临安府_01.sce phase=startup-scene-followup-immediate npcnum=3 objects=1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998
+[info][network] mock_role_service_load account=1144822034 role=10093 skills=1 durability_source=role-instance invalid=0
+[info][network] mock_skill_catalog total=74 source=skill.dsh
+mock_role_skills role=10093 role_job=1 raw_job=0 job_name=Tianji level=30 learned=1 ids=1 evidence=JianghuOL.CBE:0x1010594/0x103550E skill.dsh
+[info][network] mock_backpack_items role=10093 capacity=30 rows=30 stored_rows=30 iteminfo_len=513 layout=bootstrap-compact
+mock_backpack_items role=10093 capacity=30 rows=30 stored_rows=30 iteminfo_len=513 layout=bootstrap-compact evidence=mmGame:0x418C+mmShop:sub_9DE
+[info][network] mock_task_list role=10093 tasknum=1 persisted_active=1 taskinfo_len=85 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
+[info][network] mock_task_candidates role=10093 scene=c04临安府_01.sce tasknum=1 taskinfo_len=37 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[debug][mock-service] movement_rate_reset client=b5540e04 reason=scene-ready
+[info][mock-service] session_online client=b5540e04 account=1144822034 role=10093 name=小黑 scene=c04临安府_01.sce pos=(237,200) reason=scene-task-subset-followup
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=1
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10881 bytes=44 source_bytes=44 truncated=0 depth=2
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=3
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=4
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10881 bytes=44 source_bytes=44 truncated=0 depth=5
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=6
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=7
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=8
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=9
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=10
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=11
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=12
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=13
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=14
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=15
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=16
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=17
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=18
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=19
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=20
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=21
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=40 source_bytes=40 truncated=0 depth=22
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=23
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10377 bytes=42 source_bytes=42 truncated=0 depth=24
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10650 bytes=46 source_bytes=46 truncated=0 depth=25
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10655 bytes=40 source_bytes=40 truncated=0 depth=26
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10655 bytes=40 source_bytes=40 truncated=0 depth=27
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10655 bytes=40 source_bytes=40 truncated=0 depth=28
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10881 bytes=44 source_bytes=44 truncated=0 depth=29
+[info][mock-service] chat_notice_queue target=b5540e04 type=world source=00000000/10881 bytes=44 source_bytes=44 truncated=0 depth=30
+[info][mock-service] world_chat_history_queue target=b5540e04 queued=30 skipped=0 limit=30
+[info][mock-service] chat_notice_queue target=b5540e04 type=system source=00000000/0 bytes=16 source_bytes=16 truncated=0 depth=31
+[info][mock-service] scene_ready client=b5540e04 account=1144822034 scene=c04临安府_01.sce pos=(237,200) reason=scene-task-subset-followup
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=0
+[info][mock-service] scene_ready_messages client=b5540e04 scene=c04临安府_01.sce objects=1 reason=scene-task-subset-followup delivery=same-scene-completion evidence=JianghuOL.CBE:0x01012FB4+0x010126C6
+[debug][mock-service] movement_rate_reset client=b5540e04 reason=scene-pending
+[info][mock-service] scene_pending client=b5540e04 account=1144822034 scene=c04临安府_01.sce pos=(237,200) reason=scene-target-remember
+[info][network] mock_scene_target_remember serial=1 scene=c04临安府_01.sce pos=(237,200) exit=0
+[debug][mock-service] movement_rate_reset client=b5540e04 reason=scene-ready
+[info][mock-service] scene_ready client=b5540e04 account=1144822034 scene=c04临安府_01.sce pos=(237,200) reason=scene-target-complete
+[info][network] mock_scene_target_direct_completed scene=c04临安府_01.sce pos=(237,200) exit=0 reason=scene-startup-followup-complete
+[debug][mock-service] role_position_save_skip role=10093 scene=c04临安府_01.sce pos=(237,200) reason=scene-startup-followup-complete unchanged=1
+[info][network] mock_scene_startup_followup_complete scene=c04临安府_01.sce pos=(237,200) source=scene-task-subset-followup objects=10 resp=1290 action=no-second-scene-enter
+mock_scene_startup_followup_complete scene=c04临安府_01.sce pos=(237,200) source=scene-task-subset-followup objects=10 response=no-scene-pos-reenter evidence=JianghuOL.CBE:0x010137CA+0x010396D6
+net_send connect=0 wt=12/1 len=54 source=builtin-scene-task-subset-followup resp=1290
+[info][network] mock_task_list role=10093 tasknum=1 persisted_active=1 taskinfo_len=85 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
+[info][network] mock_task_candidates role=10093 scene=c04临安府_01.sce tasknum=1 taskinfo_len=37 persisted=5 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][mock-service] task_prompt_refresh_deliver client=b5540e04 scene=c04临安府_01.sce objects=2 evidence=JianghuOL.CBE:0x0104726C(cases1,14)->0x01017C6C
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10881 bytes=44 age_ticks=0
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=0
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=0
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10881 bytes=44 age_ticks=0
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=40 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10377 bytes=42 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10650 bytes=46 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10655 bytes=40 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10655 bytes=40 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10655 bytes=40 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10881 bytes=44 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=world source=00000000/10881 bytes=44 age_ticks=16
+[info][mock-service] chat_notice_deliver observer=b5540e04 type=system source=00000000/0 bytes=16 age_ticks=16
+[info][network] mock_moveinfo_source pos=(237,224) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(237,184) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(237,148) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_npc_dialog actor=20091 index=0 name=马汉 script=04临安马汉.xse scene=c04临安府_01.sce catalog_match=1 legacy_service_kind=0 scene_entity_kind=0 native=0 service_configured=1 service_count=0 service_mask=00000000 direct_challenge=0 task_options=0 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=0 xse_dialogs=2 dialog_len=28 objects=1 resp=61 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)
+mock_npc_dialog actor=20091 index=0 catalog_match=1 dialog_len=28 response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8
+net_send connect=0 wt=26/1 len=30 source=builtin-npc-dialog resp=61
+[info][network] mock_moveinfo_source pos=(261,148) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+net_send connect=0 wt=25/5 len=9 source=builtin-scene-default-event resp=23
+[info][network] mock_moveinfo_source pos=(261,188) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(261,228) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[info][network] mock_moveinfo_source pos=(261,236) reason=moveinfo-upload-timeline scene=c04临安府_01.sce
+net_send connect=0 wt=2/1 len=32 source=builtin-actor-moveinfo-ack resp=11
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+[info][network] mock_practise_pill role=10093 seq=70 item_remaining=5 practise_minutes=420 action=committed
+[info][mock-service] practise_pill17_arm client=b5540e04 role=10093 seq=70 source=1/7/16-success
+[info][network] mock_practise_pill16 role=10093 seq=70 success=1 practise_minutes=420 response=70 evidence=item.dsh:827+JianghuOL.CBE:0x0102355E+0x0102615A
+net_send connect=0 wt=7/16 len=23 source=builtin-practise-pill16 resp=70
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+net_send connect=0 wt=2/10 len=19 source=builtin-actor-other-only10 resp=40
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10093 error=no MySQL error detail
+[info][network] mock_practise_pill17_followup role=10093 seq=70 usenum=1 result=1 pcimg=1 response=65 evidence=runtime:1/7/16->1/2/10->1/7/17+JianghuOL.CBE:0x0102C104
+mock_practise_pill17_followup role=10093 seq=70 usenum=1 result=1 pcimg=1 response=65 evidence=runtime:1/7/16->1/2/10->1/7/17+JianghuOL.CBE:0x0102C104

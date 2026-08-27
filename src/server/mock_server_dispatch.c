@@ -893,6 +893,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_battle_insight_status_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-battle-insight-status", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_timed_special_item_use_response(
         request, requestLen, out, outCap);
     if (hookedLen)
@@ -902,11 +911,29 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_battle_insight_followup_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-battle-insight-followup", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_practise_pill16_response(request, requestLen,
                                                            out, outCap);
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-practise-pill16", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_practise_pill17_followup_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-pill17-followup", request,
                                   requestLen, hookedLen);
         return hookedLen;
     }

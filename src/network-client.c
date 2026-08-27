@@ -31,49 +31,8 @@ enum
     VM_CLIENT_SOCKET_TIMEOUT_MS = 5000,
     VM_CLIENT_REQUEST_MAX = 512,
     VM_CLIENT_QUEUE_MAX = 64,
-    VM_CLIENT_FOLLOWUP_MAX = 65536,
-    VM_CLIENT_COMPLETED_SCENE_REUSE_TICKS = 120
+    VM_CLIENT_FOLLOWUP_MAX = 65536
 };
-
-typedef struct
-{
-    char scene[64];
-    u16 x;
-    u16 y;
-    u32 exitId;
-    u8 mapType;
-    bool hasSceEntry;
-    bool needsSceneDownload;
-} vm_net_mock_scene_change_target;
-
-/* Scene-target state is produced by the embedded response builders on the
- * desktop server.  A remote-only client never builds those responses. */
-static vm_net_mock_scene_change_target g_vm_net_mock_last_scene_change_target;
-static bool g_vm_net_mock_last_scene_change_target_valid = false;
-static u32 g_vm_net_mock_last_scene_change_target_serial = 0;
-static vm_net_mock_scene_change_target
-    g_vm_client_last_completed_scene_change_target;
-static bool g_vm_client_last_completed_scene_change_target_valid = false;
-static u32 g_vm_client_last_completed_scene_change_tick = 0;
-static u32 g_vm_client_completed_scene_target_serial = 0;
-static bool g_vm_client_update_completed_reenter_pending = false;
-static char g_vm_client_update_completed_name[64];
-
-static bool vm_net_mock_scene_names_equal_exact(const char *a, const char *b)
-{
-    return a != NULL && b != NULL && a[0] != 0 && strcmp(a, b) == 0;
-}
-
-static bool vm_net_mock_consume_update_completed_scene_reenter(
-    const vm_net_mock_scene_change_target *target);
-static u32 vm_net_mock_apply_remote_observation(
-    const vm_net_remote_observation *observation);
-static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial);
-
-static bool vm_net_mock_should_rearm_send_ready(void)
-{
-    return false;
-}
 
 /* These emulator helpers historically lived in mock-server.c because that
  * file was included into main.c.  Client-only builds still need them for
@@ -131,38 +90,6 @@ static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
     return responsePtr;
 }
 
-/* A split login bootstrap is one logical response.  Give both parser frames
- * one guest allocation so a second allocation failure cannot leave the first
- * frame queued on its own. */
-static bool vm_net_mock_sync_buffer_pair_to_vm(const u8 *first, u32 firstLen,
-                                               const u8 *second, u32 secondLen,
-                                               u32 *firstPtrOut,
-                                               u32 *secondPtrOut)
-{
-    u32 combinedPtr = 0;
-
-    if (firstPtrOut != NULL)
-        *firstPtrOut = 0;
-    if (secondPtrOut != NULL)
-        *secondPtrOut = 0;
-    if (first == NULL || second == NULL || firstLen == 0 || secondLen == 0 ||
-        firstLen > 0xffffffffu - secondLen || firstPtrOut == NULL ||
-        secondPtrOut == NULL)
-    {
-        return false;
-    }
-    combinedPtr = vm_malloc(firstLen + secondLen);
-    if (combinedPtr == 0 ||
-        uc_mem_write(MTK, combinedPtr, first, firstLen) != UC_ERR_OK ||
-        uc_mem_write(MTK, combinedPtr + firstLen, second, secondLen) != UC_ERR_OK)
-    {
-        return false;
-    }
-    *firstPtrOut = combinedPtr;
-    *secondPtrOut = combinedPtr + firstLen;
-    return true;
-}
-
 typedef struct
 {
     u8 major;
@@ -193,321 +120,6 @@ static bool vm_client_next_wt_object(const u8 *packet, u32 packetLen,
     }
     *offset = start + objectLen;
     return true;
-}
-
-static bool vm_client_wt_object_field(const vm_client_wt_object *object,
-                                      const char *field,
-                                      const u8 **encoded,
-                                      u16 *encodedLen)
-{
-    u32 pos = 0;
-    u32 fieldLen = field ? (u32)strlen(field) : 0;
-
-    if (encoded != NULL)
-        *encoded = NULL;
-    if (encodedLen != NULL)
-        *encodedLen = 0;
-    if (object == NULL || object->payload == NULL || fieldLen == 0 ||
-        fieldLen > 0xff)
-    {
-        return false;
-    }
-    while (pos < object->payloadLen)
-    {
-        u32 nameLen = object->payload[pos++];
-        u16 valueLen = 0;
-
-        if (nameLen > object->payloadLen - pos ||
-            object->payloadLen - pos - nameLen < 2)
-        {
-            return false;
-        }
-        if (nameLen == fieldLen &&
-            memcmp(object->payload + pos, field, fieldLen) == 0)
-        {
-            pos += nameLen;
-            valueLen = (u16)(((u16)object->payload[pos] << 8) |
-                             object->payload[pos + 1]);
-            pos += 2;
-            if (valueLen > object->payloadLen - pos)
-                return false;
-            if (encoded != NULL)
-                *encoded = object->payload + pos;
-            if (encodedLen != NULL)
-                *encodedLen = valueLen;
-            return true;
-        }
-        pos += nameLen;
-        valueLen = (u16)(((u16)object->payload[pos] << 8) |
-                         object->payload[pos + 1]);
-        pos += 2;
-        if (valueLen > object->payloadLen - pos)
-            return false;
-        pos += valueLen;
-    }
-    return false;
-}
-
-static bool vm_client_wt_object_u32(const vm_client_wt_object *object,
-                                    const char *field, u32 *value)
-{
-    const u8 *encoded = NULL;
-    u16 encodedLen = 0;
-    const u8 *bytes = NULL;
-
-    if (!vm_client_wt_object_field(object, field, &encoded, &encodedLen))
-        return false;
-    if (encodedLen == 7 && encoded[0] == 6 && encoded[1] == 0 &&
-        encoded[2] == 4)
-    {
-        bytes = encoded + 3;
-    }
-    else if (encodedLen == 5 && encoded[0] == 4)
-    {
-        bytes = encoded + 1;
-    }
-    else
-    {
-        return false;
-    }
-    if (value != NULL)
-    {
-        *value = ((u32)bytes[0] << 24) | ((u32)bytes[1] << 16) |
-                 ((u32)bytes[2] << 8) | bytes[3];
-    }
-    return true;
-}
-
-static bool vm_client_wt_object_wrapped_bytes(
-    const vm_client_wt_object *object, const char *field,
-    const u8 **value, u16 *valueLen)
-{
-    const u8 *encoded = NULL;
-    u16 encodedLen = 0;
-    u16 innerLen = 0;
-
-    if (value != NULL)
-        *value = NULL;
-    if (valueLen != NULL)
-        *valueLen = 0;
-    if (!vm_client_wt_object_field(object, field, &encoded, &encodedLen) ||
-        encodedLen < 2)
-    {
-        return false;
-    }
-    innerLen = (u16)(((u16)encoded[0] << 8) | encoded[1]);
-    if ((u32)innerLen + 2u != encodedLen)
-        return false;
-    if (value != NULL)
-        *value = encoded + 2;
-    if (valueLen != NULL)
-        *valueLen = innerLen;
-    return true;
-}
-
-static bool vm_client_wt_object_string(const vm_client_wt_object *object,
-                                       const char *field, char *value,
-                                       size_t valueCap)
-{
-    const u8 *text = NULL;
-    u16 textLen = 0;
-    size_t copyLen = 0;
-
-    if (value == NULL || valueCap == 0)
-        return false;
-    value[0] = 0;
-    if (!vm_client_wt_object_wrapped_bytes(object, field, &text, &textLen))
-        return false;
-    copyLen = SDL_min((size_t)textLen, valueCap - 1);
-    while (copyLen > 0 && text[copyLen - 1] == 0)
-        --copyLen;
-    memcpy(value, text, copyLen);
-    value[copyLen] = 0;
-    return value[0] != 0;
-}
-
-static bool vm_client_wt_object_posinfo(const vm_client_wt_object *object,
-                                        u16 *x, u16 *y)
-{
-    const u8 *encoded = NULL;
-    u16 encodedLen = 0;
-
-    if (!vm_client_wt_object_field(object, "posinfo", &encoded,
-                                   &encodedLen) ||
-        encodedLen != 8 || encoded[0] != 0 || encoded[1] != 2 ||
-        encoded[4] != 0 || encoded[5] != 2)
-    {
-        return false;
-    }
-    if (x != NULL)
-        *x = (u16)(((u16)encoded[2] << 8) | encoded[3]);
-    if (y != NULL)
-        *y = (u16)(((u16)encoded[6] << 8) | encoded[7]);
-    return true;
-}
-
-static void vm_client_snapshot_completed_scene_target(u32 serial)
-{
-    if (!g_vm_net_mock_last_scene_change_target_valid || serial == 0 ||
-        serial != g_vm_net_mock_last_scene_change_target_serial)
-    {
-        return;
-    }
-    g_vm_client_last_completed_scene_change_target =
-        g_vm_net_mock_last_scene_change_target;
-    g_vm_client_last_completed_scene_change_target.needsSceneDownload = false;
-    g_vm_client_last_completed_scene_change_target_valid = true;
-    g_vm_client_last_completed_scene_change_tick = g_schedulerTick;
-    g_vm_client_completed_scene_target_serial = serial;
-}
-
-static bool vm_net_mock_consume_update_completed_scene_reenter(
-    const vm_net_mock_scene_change_target *target)
-{
-    bool matches = false;
-
-    if (!g_vm_client_update_completed_reenter_pending)
-        return false;
-    matches = target != NULL && target->scene[0] != 0 &&
-              g_vm_client_update_completed_name[0] != 0 &&
-              vm_net_mock_scene_names_equal_exact(
-                  target->scene, g_vm_client_update_completed_name);
-    g_vm_client_update_completed_reenter_pending = false;
-    if (!matches)
-    {
-        printf("[warn][screen] remote_update_reenter_rejected file=%s "
-               "scene=%s reason=resource-target-mismatch\n",
-               g_vm_client_update_completed_name,
-               target ? target->scene : "");
-        return false;
-    }
-    printf("[info][screen] screen_mgr allow-update-reenter scene=%s "
-           "pos=(%u,%u) exit=%u file=%s source=remote-WT18/7\n",
-           target->scene, target->x, target->y, target->exitId,
-           g_vm_client_update_completed_name);
-    vm_autotest_note("screen_mgr allow-update-reenter scene=%s pos=(%u,%u) "
-                     "exit=%u file=%s source=remote-WT18/7\n",
-                     target->scene, target->x, target->y, target->exitId,
-                     g_vm_client_update_completed_name);
-    return true;
-}
-
-static u32 vm_net_mock_apply_remote_observation(
-    const vm_net_remote_observation *observation)
-{
-    u32 clearAfterCallbackSerial = 0;
-    bool restoredCompletedTarget = false;
-
-    if (observation == NULL)
-        return 0;
-    if (observation->hasSceneTarget && observation->scene[0] != 0)
-    {
-        vm_net_mock_scene_change_target target;
-
-        memset(&target, 0, sizeof(target));
-        snprintf(target.scene, sizeof(target.scene), "%s",
-                 observation->scene);
-        target.x = observation->sceneX;
-        target.y = observation->sceneY;
-        target.mapType = 2;
-        target.hasSceEntry = true;
-        g_vm_client_update_completed_reenter_pending = false;
-        g_vm_client_update_completed_name[0] = 0;
-        g_vm_client_last_completed_scene_change_target_valid = false;
-        g_vm_client_completed_scene_target_serial = 0;
-        g_vm_net_mock_last_scene_change_target = target;
-        g_vm_net_mock_last_scene_change_target_valid = true;
-        ++g_vm_net_mock_last_scene_change_target_serial;
-        if (g_vm_net_mock_last_scene_change_target_serial == 0)
-            g_vm_net_mock_last_scene_change_target_serial = 1;
-        printf("[info][screen] remote_scene_target_apply serial=%u subtype=%u "
-               "scene=%s pos=(%u,%u) evidence=WT30/%u-before-callback\n",
-               g_vm_net_mock_last_scene_change_target_serial,
-               observation->sceneSubtype, target.scene, target.x, target.y,
-               observation->sceneSubtype);
-    }
-    if (observation->sceneCompleteAfterCallback &&
-        g_vm_net_mock_last_scene_change_target_valid &&
-        (observation->scene[0] == 0 ||
-         vm_net_mock_scene_names_equal_exact(
-             observation->scene,
-             g_vm_net_mock_last_scene_change_target.scene)))
-    {
-        clearAfterCallbackSerial =
-            g_vm_net_mock_last_scene_change_target_serial;
-        vm_client_snapshot_completed_scene_target(clearAfterCallbackSerial);
-        printf("[info][screen] remote_scene_target_complete_pending serial=%u "
-               "scene=%s action=clear-after-own-callback evidence=WT30/2\n",
-               clearAfterCallbackSerial,
-               g_vm_net_mock_last_scene_change_target.scene);
-    }
-    if (observation->updateComplete && observation->updateName[0] != 0)
-    {
-        if (!g_vm_net_mock_last_scene_change_target_valid &&
-            g_vm_client_last_completed_scene_change_target_valid &&
-            g_vm_client_completed_scene_target_serial != 0 &&
-            g_schedulerTick - g_vm_client_last_completed_scene_change_tick <
-                VM_CLIENT_COMPLETED_SCENE_REUSE_TICKS &&
-            vm_net_mock_scene_names_equal_exact(
-                g_vm_client_last_completed_scene_change_target.scene,
-                observation->updateName))
-        {
-            g_vm_net_mock_last_scene_change_target =
-                g_vm_client_last_completed_scene_change_target;
-            g_vm_net_mock_last_scene_change_target_valid = true;
-            g_vm_net_mock_last_scene_change_target_serial =
-                g_vm_client_completed_scene_target_serial;
-            g_vm_client_last_completed_scene_change_tick = g_schedulerTick;
-            restoredCompletedTarget = true;
-            printf("[info][screen] remote_scene_target_restore serial=%u "
-                   "scene=%s file=%s reason=resource-completion-callback\n",
-                   g_vm_net_mock_last_scene_change_target_serial,
-                   g_vm_net_mock_last_scene_change_target.scene,
-                   observation->updateName);
-        }
-        if (g_vm_net_mock_last_scene_change_target_valid &&
-            vm_net_mock_scene_names_equal_exact(
-                g_vm_net_mock_last_scene_change_target.scene,
-                observation->updateName))
-        {
-            snprintf(g_vm_client_update_completed_name,
-                     sizeof(g_vm_client_update_completed_name), "%s",
-                     observation->updateName);
-            g_vm_client_update_completed_reenter_pending = true;
-            if (restoredCompletedTarget)
-            {
-                clearAfterCallbackSerial =
-                    g_vm_net_mock_last_scene_change_target_serial;
-            }
-            printf("[info][screen] remote_update_complete_apply file=%s "
-                   "serial=%u action=arm-one-scene-reenter "
-                   "before-callback\n",
-                   observation->updateName,
-                   g_vm_net_mock_last_scene_change_target_serial);
-        }
-        else
-        {
-            printf("[warn][screen] remote_update_complete_unbound file=%s "
-                   "action=no-scene-reenter reason=no-matching-recent-target\n",
-                   observation->updateName);
-        }
-    }
-    return clearAfterCallbackSerial;
-}
-
-static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial)
-{
-    if (sceneTargetSerial == 0 ||
-        !g_vm_net_mock_last_scene_change_target_valid ||
-        sceneTargetSerial != g_vm_net_mock_last_scene_change_target_serial)
-    {
-        return;
-    }
-    printf("[info][screen] remote_scene_target_complete serial=%u scene=%s "
-           "action=cleared-after-own-callback\n",
-           sceneTargetSerial,
-           g_vm_net_mock_last_scene_change_target.scene);
-    g_vm_net_mock_last_scene_change_target_valid = false;
 }
 
 static void vm_client_finish_wt_packet(u8 *packet, u32 len, u8 objectCount)
@@ -648,178 +260,6 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
         *followupLen = followPos;
     if (kindOut != NULL)
         *kindOut = followupKind;
-    return true;
-}
-
-static bool vm_client_wt_object_tagged_u8(const vm_client_wt_object *object,
-                                          const char *field, u8 *valueOut)
-{
-    const u8 *encoded = NULL;
-    u16 encodedLen = 0;
-
-    if (!vm_client_wt_object_field(object, field, &encoded, &encodedLen) ||
-        encodedLen != 3 || encoded[0] != 0 || encoded[1] != 1)
-    {
-        return false;
-    }
-    if (valueOut != NULL)
-        *valueOut = encoded[2];
-    return true;
-}
-
-/*
- * HandleItemGridResponse(30/21) constructs the client-owned backpack
- * instances.  Its equipment rows must contain the complete +4/+8/+12/+16
- * plan because 29/3 later updates only current/max enhancement.  A large
- * group/type-1 login reply cannot carry that grid beside all of its other
- * state: event_packet_init(10,19) exhausts the fixed parser pool before the
- * CBE reaches any business object.
- *
- * Preserve the server's response objects and their bootstrap order, but use
- * the existing normal event-7 queue as two parser transactions.  The first
- * frame retains group/type-1 state; the second starts with 30/21 and then
- * preserves optional reservoir rows and the paired equipment type-2/type-3
- * initialization.  This is deliberately narrow to the exact group bootstrap
- * shape, never a general-purpose packet splitter.
- */
-static bool vm_client_extract_login_backpack_bootstrap_followup(
-    u8 *response, u32 *responseLen, u8 *followup, u32 followupCap,
-    u32 *followupLen)
-{
-    u32 offset = 5;
-    u32 primaryPos = 5;
-    u32 followPos = 5;
-    u32 originalLen = 0;
-    u8 primaryCount = 0;
-    u8 followCount = 0;
-    u8 seenCount = 0;
-    u8 gridIndex = 0xff;
-    u8 reservoirIndex = 0xff;
-    u8 equipmentIndex = 0xff;
-    u8 completionIndex = 0xff;
-    bool haveGroup = false;
-    bool haveType1 = false;
-    vm_client_wt_object object;
-
-    if (followupLen != NULL)
-        *followupLen = 0;
-    if (response == NULL || responseLen == NULL || *responseLen < 11 ||
-        response[0] != 'W' || response[1] != 'T' || followup == NULL ||
-        followupCap < 5)
-    {
-        return false;
-    }
-    originalLen = *responseLen;
-
-    while (offset + 6 <= originalLen &&
-           vm_client_next_wt_object(response, originalLen, &offset, &object))
-    {
-        u8 type = 0;
-
-        if (object.major == 1 && object.kind == 5 && object.subtype == 10)
-            haveGroup = true;
-        if (object.major == 1 && object.kind == 10 && object.subtype == 26)
-            haveType1 = true;
-        if (object.major == 1 && object.kind == 30 && object.subtype == 21)
-        {
-            if (gridIndex != 0xff)
-                return false;
-            gridIndex = seenCount;
-        }
-        else if (object.major == 1 && object.kind == 7 && object.subtype == 11)
-        {
-            if (reservoirIndex != 0xff)
-                return false;
-            reservoirIndex = seenCount;
-        }
-        else if (object.major == 1 && object.kind == 7 && object.subtype == 7 &&
-                 vm_client_wt_object_tagged_u8(&object, "type", &type))
-        {
-            if (type == 2)
-            {
-                if (equipmentIndex != 0xff)
-                    return false;
-                equipmentIndex = seenCount;
-            }
-            else if (type == 3)
-            {
-                if (completionIndex != 0xff)
-                    return false;
-                completionIndex = seenCount;
-            }
-        }
-        ++seenCount;
-    }
-    if (offset != originalLen || seenCount != response[4] || !haveGroup ||
-        !haveType1 || gridIndex == 0xff ||
-        ((equipmentIndex == 0xff) != (completionIndex == 0xff)) ||
-        (reservoirIndex != 0xff && reservoirIndex <= gridIndex) ||
-        (equipmentIndex != 0xff && equipmentIndex <= gridIndex) ||
-        (completionIndex != 0xff &&
-         (completionIndex != equipmentIndex + 1u ||
-          (reservoirIndex != 0xff && completionIndex <= reservoirIndex))))
-    {
-        return false;
-    }
-
-    offset = 5;
-    while (offset + 6 <= originalLen)
-    {
-        u32 start = offset;
-        u32 objectLen;
-        u8 type = 0;
-        bool isFollowup = false;
-
-        if (!vm_client_next_wt_object(response, originalLen, &offset, &object))
-            return false;
-        objectLen = offset - start;
-        if (object.major == 1 && object.kind == 30 && object.subtype == 21)
-        {
-            isFollowup = true;
-        }
-        else if (object.major == 1 && object.kind == 7 && object.subtype == 11)
-        {
-            isFollowup = true;
-        }
-        else if (object.major == 1 && object.kind == 7 && object.subtype == 7 &&
-                 vm_client_wt_object_tagged_u8(&object, "type", &type) &&
-                 (type == 2 || type == 3))
-        {
-            isFollowup = true;
-        }
-
-        if (isFollowup)
-        {
-            if (followPos + objectLen > followupCap || followCount == 0xff)
-                return false;
-            memcpy(followup + followPos, response + start, objectLen);
-            followPos += objectLen;
-            ++followCount;
-        }
-        else
-        {
-            memmove(response + primaryPos, response + start, objectLen);
-            primaryPos += objectLen;
-            ++primaryCount;
-        }
-    }
-    if (followCount == 0 || primaryCount == 0)
-        return false;
-
-    vm_client_finish_wt_packet(response, primaryPos, primaryCount);
-    vm_client_finish_wt_packet(followup, followPos, followCount);
-    *responseLen = primaryPos;
-    if (followupLen != NULL)
-        *followupLen = followPos;
-    printf("[info][network] remote_login_backpack_bootstrap_split original=%u "
-           "primary=%u followup=%u order=30/21+7/11+7/7(type2,type3) "
-           "delivery=event7-then-event7 evidence=JianghuOL.CBE:0x01039952+"
-           "0x01028726\n",
-           originalLen, primaryPos, followPos);
-    vm_autotest_note("remote_login_backpack_bootstrap_split original=%u "
-                     "primary=%u followup=%u order=30/21+7/11+7/7(type2,type3) "
-                     "evidence=JianghuOL.CBE:0x01039952+0x01028726\n",
-                     originalLen, primaryPos, followPos);
     return true;
 }
 
@@ -1051,8 +491,7 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
                                      bool *closeAfterData,
                                      u8 *followup, u32 followupCap,
                                      u32 *followupLen,
-                                     bool *followupNextSchedulerTick,
-                                     bool *followupAtomicDelivery)
+                                     bool *followupNextSchedulerTick)
 {
     u8 header[VM_CLIENT_FRAME_SIZE];
     u8 meta[16];
@@ -1070,8 +509,6 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
         *followupLen = 0;
     if (followupNextSchedulerTick != NULL)
         *followupNextSchedulerTick = false;
-    if (followupAtomicDelivery != NULL)
-        *followupAtomicDelivery = false;
     if (request == NULL || requestLen == 0 || response == NULL || metaLen == 0)
         return false;
 
@@ -1090,16 +527,7 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
         !vm_client_extract_item_followup(response, responseLen, followup,
                                          followupCap, followupLen, NULL))
     {
-        if (vm_client_extract_login_backpack_bootstrap_followup(
-                response, responseLen, followup, followupCap, followupLen))
-        {
-            /* The second bootstrap frame remains eligible in this scheduler
-             * tick, after the group/type-1 acknowledgement already queued by
-             * the same completion. */
-            if (followupAtomicDelivery != NULL)
-                *followupAtomicDelivery = true;
-        }
-        else if (vm_client_extract_action13_battle_followup(
+        if (vm_client_extract_action13_battle_followup(
                      response, responseLen, followup, followupCap,
                      followupLen) &&
                  followupNextSchedulerTick != NULL)
@@ -1197,12 +625,6 @@ typedef struct vm_client_completion
     bool success;
     bool closeAfterData;
     bool followupNextSchedulerTick;
-    bool followupAtomicDelivery;
-    bool followupSharesResponse;
-    u16 deliveryRetryCount;
-    bool requestIsUpdateChunk;
-    u32 updateChunkStart;
-    char updateChunkName[64];
     u8 *response;
     u8 *followup;
 } vm_client_completion;
@@ -1233,78 +655,8 @@ static void vm_client_free_completion(vm_client_completion *completion)
     if (completion == NULL)
         return;
     free(completion->response);
-    if (!completion->followupSharesResponse)
-        free(completion->followup);
+    free(completion->followup);
     free(completion);
-}
-
-/* Keep an undelivered split bootstrap ahead of later responses.  Its server
- * counterpart has already advanced the one-bootstrap guard, so freeing this
- * host-owned copy would turn a transient local resource shortage into a
- * permanently incomplete client inventory for this login. */
-static bool vm_client_requeue_completion_front(vm_client_completion *completion)
-{
-    bool accepted = false;
-
-    if (completion == NULL)
-        return false;
-    pthread_mutex_lock(&g_vmClientAsync.mutex);
-    if (!g_vmClientAsync.stopRequested &&
-        completion->generation == g_vmClientAsync.generation)
-    {
-        completion->next = g_vmClientAsync.completionHead;
-        g_vmClientAsync.completionHead = completion;
-        if (g_vmClientAsync.completionTail == NULL)
-            g_vmClientAsync.completionTail = completion;
-        accepted = true;
-    }
-    pthread_mutex_unlock(&g_vmClientAsync.mutex);
-    return accepted;
-}
-
-static bool vm_client_capture_update_chunk_request(
-    const u8 *request, u32 requestLen, u32 *startOut,
-    char *nameOut, size_t nameOutCap)
-{
-    u32 packetLen = 0;
-    u32 offset = 4;
-
-    if (startOut != NULL)
-        *startOut = 0;
-    if (nameOut != NULL && nameOutCap != 0)
-        nameOut[0] = 0;
-    if (request == NULL || requestLen < 9 || request[0] != 'W' ||
-        request[1] != 'T')
-    {
-        return false;
-    }
-    packetLen = ((u32)request[2] << 8) | request[3];
-    if (packetLen < 9 || packetLen > requestLen)
-        return false;
-    while (offset + 5 <= packetLen)
-    {
-        u16 objectLen = (u16)(((u16)request[offset + 3] << 8) |
-                              request[offset + 4]);
-        vm_client_wt_object object;
-
-        if (objectLen < 5 || offset + objectLen > packetLen)
-            return false;
-        memset(&object, 0, sizeof(object));
-        object.major = request[offset];
-        object.kind = request[offset + 1];
-        object.subtype = request[offset + 2];
-        object.payload = request + offset + 5;
-        object.payloadLen = (u16)(objectLen - 5);
-        if (object.major == 1 && object.kind == 18 && object.subtype == 7)
-        {
-            (void)vm_client_wt_object_u32(&object, "start", startOut);
-            (void)vm_client_wt_object_string(&object, "name", nameOut,
-                                             nameOutCap);
-            return true;
-        }
-        offset += objectLen;
-    }
-    return false;
 }
 
 static void *vm_client_worker_main(void *unused)
@@ -1321,7 +673,6 @@ static void *vm_client_worker_main(void *unused)
         u32 followupLen = 0;
         bool closeAfterData = false;
         bool followupNextSchedulerTick = false;
-        bool followupAtomicDelivery = false;
         bool success;
 
         pthread_mutex_lock(&g_vmClientAsync.mutex);
@@ -1361,16 +712,6 @@ static void *vm_client_worker_main(void *unused)
         completion->connectId = job->connectId;
         completion->kind = job->kind;
         completion->eventType = 7;
-        if (job->kind == VM_CLIENT_JOB_DATA &&
-            vm_client_capture_update_chunk_request(
-                job->request, job->requestLen,
-                &completion->updateChunkStart,
-                completion->updateChunkName,
-                sizeof(completion->updateChunkName)))
-        {
-            completion->requestIsUpdateChunk = true;
-        }
-
         if (job->kind == VM_CLIENT_JOB_SCENE_POLL)
         {
             success = vm_client_remote_poll(responseScratch, sizeof(g_netMockResponse),
@@ -1384,8 +725,7 @@ static void *vm_client_worker_main(void *unused)
                                                &closeAfterData,
                                                followupScratch, VM_CLIENT_FOLLOWUP_MAX,
                                                &followupLen,
-                                               &followupNextSchedulerTick,
-                                               &followupAtomicDelivery);
+                                               &followupNextSchedulerTick);
         }
         completion->workerDoneMs = SDL_GetTicks();
         completion->success = success;
@@ -1394,30 +734,7 @@ static void *vm_client_worker_main(void *unused)
         completion->responseLen = responseLen;
         completion->followupLen = followupLen;
         completion->followupNextSchedulerTick = followupNextSchedulerTick;
-        completion->followupAtomicDelivery = followupAtomicDelivery;
-        if (success && responseLen != 0 && followupAtomicDelivery)
-        {
-            if (followupLen == 0 || responseLen > 0xffffffffu - followupLen)
-            {
-                completion->success = false;
-            }
-            else
-            {
-                completion->response = (u8 *)malloc(responseLen + followupLen);
-                if (completion->response != NULL)
-                {
-                    memcpy(completion->response, responseScratch, responseLen);
-                    completion->followup = completion->response + responseLen;
-                    completion->followupSharesResponse = true;
-                    memcpy(completion->followup, followupScratch, followupLen);
-                }
-                else
-                {
-                    completion->success = false;
-                }
-            }
-        }
-        else if (success && responseLen != 0)
+        if (success && responseLen != 0)
         {
             completion->response = (u8 *)malloc(responseLen);
             if (completion->response != NULL)
@@ -1425,8 +742,7 @@ static void *vm_client_worker_main(void *unused)
             else
                 completion->success = false;
         }
-        if (completion->success && followupLen != 0 &&
-            !completion->followupSharesResponse)
+        if (completion->success && followupLen != 0)
         {
             completion->followup = (u8 *)malloc(followupLen);
             if (completion->followup != NULL)
@@ -1517,102 +833,31 @@ static bool vm_client_enqueue(vm_client_job_kind kind, u32 connectId,
     return true;
 }
 
-/* Capture scene lifecycle facts from the exact downlink packet.  The state is
- * attached to that scheduler event and applied only immediately before its
- * guest callback, preserving response order when multiple TCP jobs finish in
- * one emulator frame. */
-static void vm_client_capture_remote_scene_observation(
-    const vm_client_completion *completion,
-    vm_net_remote_observation *observation)
+static bool vm_client_remote_observation_needs_attach(
+    const vm_net_remote_observation *observation)
 {
-    const u8 *packet = NULL;
-    u32 packetLen = 0;
-    u32 offset = 5;
-    u8 parsedCount = 0;
+    return observation != NULL && observation->hasHangupBattleStart;
+}
 
-    if (completion == NULL || observation == NULL ||
-        completion->eventType != 7 || completion->response == NULL ||
-        completion->responseLen < 5)
+/* Hangup parser tracing is opt-in diagnostics only.  The event still uses the
+ * callback/context the CBE registered; this metadata never selects or changes
+ * the callback. */
+static bool vm_client_attach_remote_observation(
+    u32 eventType, u32 responsePtr, u32 callback, u32 context,
+    const vm_net_remote_observation *observation, const char *delivery)
+{
+    if (!vm_client_remote_observation_needs_attach(observation))
+        return true;
+    if (scheduler_attach_net_remote_observation(eventType, responsePtr,
+                                                callback, context,
+                                                observation))
     {
-        return;
+        return true;
     }
-    packet = completion->response;
-    packetLen = ((u32)packet[2] << 8) | packet[3];
-    if (packet[0] != 'W' || packet[1] != 'T' || packetLen < 5 ||
-        packetLen > completion->responseLen)
-    {
-        return;
-    }
-    while (parsedCount < packet[4])
-    {
-        vm_client_wt_object object;
-
-        if (!vm_client_next_wt_object(packet, packetLen, &offset, &object))
-            return;
-        if (object.major == 1 && object.kind == 30 &&
-            (object.subtype == 1 || object.subtype == 2))
-        {
-            char scene[64];
-            u16 x = 0;
-            u16 y = 0;
-            bool haveScene = vm_client_wt_object_string(
-                &object, "scene", scene, sizeof(scene));
-            bool havePos = vm_client_wt_object_posinfo(&object, &x, &y);
-
-            if (haveScene && havePos)
-            {
-                observation->hasSceneTarget = 1;
-                observation->sceneSubtype = object.subtype;
-                observation->sceneX = x;
-                observation->sceneY = y;
-                snprintf(observation->scene, sizeof(observation->scene),
-                         "%s", scene);
-            }
-            if (object.subtype == 2)
-            {
-                observation->sceneCompleteAfterCallback = 1;
-                if (haveScene)
-                {
-                    snprintf(observation->scene,
-                             sizeof(observation->scene), "%s", scene);
-                }
-            }
-        }
-        if (completion->requestIsUpdateChunk && object.major == 1 &&
-            object.kind == 18 && object.subtype == 7)
-        {
-            const u8 *chunk = NULL;
-            u16 chunkLen = 0;
-            u32 totalSize = 0;
-            char payloadName[64];
-
-            payloadName[0] = 0;
-            if (vm_client_wt_object_u32(&object, "totalsize", &totalSize) &&
-                vm_client_wt_object_wrapped_bytes(
-                    &object, "data", &chunk, &chunkLen) &&
-                totalSize != 0 && chunkLen != 0 &&
-                completion->updateChunkStart <= totalSize &&
-                chunkLen <= totalSize - completion->updateChunkStart &&
-                completion->updateChunkStart + chunkLen >= totalSize)
-            {
-                if (!vm_client_wt_object_string(
-                        &object, "name", payloadName,
-                        sizeof(payloadName)))
-                {
-                    snprintf(payloadName, sizeof(payloadName), "%s",
-                             completion->updateChunkName);
-                }
-                if (payloadName[0] != 0)
-                {
-                    observation->updateComplete = 1;
-                    snprintf(observation->updateName,
-                             sizeof(observation->updateName), "%s",
-                             payloadName);
-                }
-            }
-        }
-        ++parsedCount;
-    }
+    printf("[warn][screen] remote_observation_attach_failed event=%u "
+           "response=%08x delivery=%s action=no-early-global-mutation\n",
+           eventType, responsePtr, delivery ? delivery : "unknown");
+    return false;
 }
 
 /*
@@ -1738,78 +983,6 @@ static void vm_client_capture_hangup_battle_start_response(
     observation->hangupResponseLength = completion->responseLen;
 }
 
-static bool vm_client_queue_login_bootstrap_frames(
-    const vm_client_completion *completion, const vm_net_channel *channel,
-    u32 *primaryPtrOut, u32 *followupPtrOut, const char **failureOut)
-{
-    u32 primaryPtr = 0;
-    u32 followupPtr = 0;
-
-    if (primaryPtrOut != NULL)
-        *primaryPtrOut = 0;
-    if (followupPtrOut != NULL)
-        *followupPtrOut = 0;
-    if (failureOut != NULL)
-        *failureOut = "invalid";
-    if (completion == NULL || channel == NULL || completion->eventType != 7 ||
-        completion->response == NULL || completion->responseLen == 0 ||
-        completion->followup == NULL || completion->followupLen == 0)
-    {
-        return false;
-    }
-    if (!scheduler_has_free_net_task_slots(2))
-    {
-        if (failureOut != NULL)
-            *failureOut = "net-queue";
-        return false;
-    }
-    if (!vm_net_mock_sync_buffer_pair_to_vm(
-            completion->response, completion->responseLen,
-            completion->followup, completion->followupLen,
-            &primaryPtr, &followupPtr))
-    {
-        if (failureOut != NULL)
-            *failureOut = "vm-buffer";
-        return false;
-    }
-    if (!scheduler_queue_net_event_pair_atomic(
-            completion->eventType, primaryPtr, completion->responseLen,
-            completion->responseLen, 7, followupPtr, completion->followupLen,
-            completion->followupLen, channel->callback, channel->context))
-    {
-        if (failureOut != NULL)
-            *failureOut = "scheduler-invariant";
-        return false;
-    }
-    if (primaryPtrOut != NULL)
-        *primaryPtrOut = primaryPtr;
-    if (followupPtrOut != NULL)
-        *followupPtrOut = followupPtr;
-    if (failureOut != NULL)
-        *failureOut = NULL;
-    return true;
-}
-
-static bool vm_client_retry_login_bootstrap_delivery(
-    vm_client_completion *completion, const char *reason)
-{
-    u16 retry = 0;
-
-    if (completion == NULL)
-        return false;
-    if (completion->deliveryRetryCount != 0xffffu)
-        ++completion->deliveryRetryCount;
-    retry = completion->deliveryRetryCount;
-    if (retry == 1 || (retry % 32u) == 0)
-    {
-        printf("[warn][network] remote_login_backpack_bootstrap_retry seq=%u "
-               "attempt=%u reason=%s primary=%u followup=%u action=retain-both\n",
-               completion->sequence, retry, reason ? reason : "unknown",
-               completion->responseLen, completion->followupLen);
-    }
-    return vm_client_requeue_completion_front(completion);
-}
-
 static void vm_net_mock_async_drain_completions(void)
 {
     static u32 failureLogCount = 0;
@@ -1821,8 +994,7 @@ static void vm_net_mock_async_drain_completions(void)
         u32 generation;
         u32 responsePtr;
         u32 nowMs;
-        bool bootstrapAtomicDelivery;
-        const char *bootstrapDeliveryFailure = NULL;
+        bool responseQueued = false;
 
         memset(&remoteObservation, 0, sizeof(remoteObservation));
         pthread_mutex_lock(&g_vmClientAsync.mutex);
@@ -1868,39 +1040,12 @@ static void vm_net_mock_async_drain_completions(void)
             vm_client_free_completion(completion);
             continue;
         }
-        bootstrapAtomicDelivery = completion->followupAtomicDelivery;
-        if (bootstrapAtomicDelivery)
+        responsePtr = vm_net_mock_sync_buffer_to_vm(completion->response,
+                                                    completion->responseLen);
+        if (responsePtr == 0)
         {
-            if (!vm_client_queue_login_bootstrap_frames(
-                    completion, channel, &responsePtr, NULL,
-                    &bootstrapDeliveryFailure))
-            {
-                if (vm_client_retry_login_bootstrap_delivery(
-                        completion, bootstrapDeliveryFailure))
-                {
-                    /* The service already consumed its one-bootstrap guard.
-                     * Hold the exact pair locally and block later responses
-                     * until both normal event-7 frames can be accepted. */
-                    break;
-                }
-                printf("[error][network] remote_login_backpack_bootstrap_drop "
-                       "seq=%u reason=%s action=async-reset\n",
-                       completion->sequence,
-                       bootstrapDeliveryFailure ? bootstrapDeliveryFailure :
-                                                   "unknown");
-                vm_client_free_completion(completion);
-                continue;
-            }
-        }
-        else
-        {
-            responsePtr = vm_net_mock_sync_buffer_to_vm(completion->response,
-                                                        completion->responseLen);
-            if (responsePtr == 0)
-            {
-                vm_client_free_completion(completion);
-                continue;
-            }
+            vm_client_free_completion(completion);
+            continue;
         }
         if (completion->responseLen <= sizeof(g_netMockResponse))
         {
@@ -1908,14 +1053,17 @@ static void vm_net_mock_async_drain_completions(void)
             g_netMockResponseLen = completion->responseLen;
             g_netMockResponseOffset = 0;
         }
-        vm_client_capture_remote_scene_observation(completion,
-                                                   &remoteObservation);
         vm_client_capture_hangup_battle_start_response(completion,
                                                        &remoteObservation);
         vm_hangup_vital_forensics_capture_response(
             completion->response, completion->responseLen,
             completion->eventType, completion->sequence,
             responsePtr, channel->callback);
+        vm_battle_insight_forensics_capture_response(
+            completion->response, completion->responseLen,
+            completion->eventType, completion->sequence,
+            responsePtr, channel->callback, channel->context,
+            completion->connectId);
         /* Scenario automation observes the exact downlink packet before it is
          * copied to guest RAM.  It never changes bytes, queues, callbacks or
          * scheduler ordering. */
@@ -1929,28 +1077,14 @@ static void vm_net_mock_async_drain_completions(void)
                                                completion->sequence,
                                                completion->connectId);
         g_netDownLinkData += completion->responseLen;
-        if (bootstrapAtomicDelivery)
+        responseQueued = scheduler_queue_net_event(
+            completion->eventType, responsePtr, completion->responseLen,
+            completion->responseLen, channel->callback, channel->context);
+        if (responseQueued)
         {
-            g_netDownLinkData += completion->followupLen;
-            printf("[info][network] remote_login_backpack_bootstrap_queue "
-                   "seq=%u primary=%u followup=%u delivery=atomic-event7-pair\n",
-                   completion->sequence, completion->responseLen,
-                   completion->followupLen);
-        }
-        else
-        {
-            (void)scheduler_queue_net_event(
-                completion->eventType, responsePtr, completion->responseLen,
-                completion->responseLen, channel->callback, channel->context);
-        }
-        if (remoteObservation.hasSceneTarget ||
-            remoteObservation.sceneCompleteAfterCallback ||
-            remoteObservation.updateComplete ||
-            remoteObservation.hasHangupBattleStart)
-        {
-            (void)scheduler_attach_net_remote_observation(
+            (void)vm_client_attach_remote_observation(
                 completion->eventType, responsePtr, channel->callback,
-                channel->context, &remoteObservation);
+                channel->context, &remoteObservation, "primary");
         }
         if (remoteObservation.hasHangupBattleStart)
         {
@@ -1974,16 +1108,18 @@ static void vm_net_mock_async_drain_completions(void)
                completion->workerStartMs - completion->enqueueMs,
                completion->workerDoneMs - completion->workerStartMs,
                nowMs - completion->workerDoneMs);
-        if (!bootstrapAtomicDelivery && completion->followupLen != 0 &&
-            completion->followup != NULL)
+        if (completion->followupLen != 0 && completion->followup != NULL)
         {
             u32 followupPtr = vm_net_mock_sync_buffer_to_vm(completion->followup,
                                                             completion->followupLen);
             if (followupPtr != 0)
             {
-                scheduler_queue_net_event(7, followupPtr, completion->followupLen,
-                                          completion->followupLen,
-                                          channel->callback, channel->context);
+                bool followupQueued;
+
+                followupQueued = scheduler_queue_net_event(
+                    7, followupPtr, completion->followupLen,
+                    completion->followupLen, channel->callback,
+                    channel->context);
                 if (completion->followupNextSchedulerTick)
                 {
                     bool deferred = scheduler_defer_net_event_to_next_tick(
@@ -2066,10 +1202,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     if (uc_mem_read(MTK, dataPtr, request, readLen) != UC_ERR_OK)
         return;
     vm_shop_return_forensics_note_uplink(request, readLen, connectId);
-    /* Read-only observation for the opt-in scene-hangup reward confirmer.
-     * It recognises the client-owned 25/5 emitted after a real input event;
-     * request bytes and transport queue remain unchanged. */
-    vm_hangup_auto_confirm_note_uplink(request, readLen);
+    vm_automation_note_uplink(request, readLen);
     if (!vm_client_enqueue(VM_CLIENT_JOB_DATA, connectId, request, readLen))
     {
         printf("[warn][network] client queue full connect=%u len=%u\n",

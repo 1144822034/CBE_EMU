@@ -86,6 +86,19 @@ static bool vm_net_mock_actor_scene_node_reserve(
 static void vm_mock_service_mark_backpack_bootstrap_npc_reseed_pending(
     const char *source);
 
+/* Item 827's 1/7/16 reply only supplies the native quantity upper bound.
+ * The CBE sends the user's confirmed count in 1/7/17, which is the durable
+ * commit boundary.  The session layer owns that narrow authorization edge. */
+static void vm_mock_service_arm_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 maxUse);
+static void vm_mock_service_clear_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, const char *reason);
+static bool vm_mock_service_practise_pill17_followup_matches(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum,
+    bool *replayOut, bool *rejectedOut);
+static void vm_mock_service_commit_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum);
+
 /* Chest configuration belongs to the catalog, while durable world-chat
  * storage and live delivery belong to the social service.  A successful
  * chest opening calls this narrow bridge only after the role mutation has

@@ -69,21 +69,97 @@ alllasthour, alllastmin, isgold
 离线奖励。到达等级经验上限时，仍消耗已经经过的有效修炼分钟，但只记录实际能
 写入角色 EXP 上限内的经验。
 
-`1/7/16 {itemseq}` 的修炼丹使用会锁定背包实例和修炼行，在同一个 MySQL
-事务中扣除一颗并增加 60 分钟。银行已满时回 `7/16 {result=2}`，保留实例；
-成功时回客户端已证实的 `result,maxnum,iteminfo`，由客户端原生刷新背包并关闭
-等待界面。不会由通用 `7/1` 冒充成功。
+`1/7/16 {itemseq}` 是修炼丹的数量预检：它锁定背包实例和修炼行，但不改变
+任何持久化状态，成功时以 `maxnum=min(该堆数量, 剩余分钟容量/60)` 返回原生数量
+控件的上限。银行已满时回 `7/16 {result=2}`，保留实例；成功回的字段是客户端已
+证实的 `result,maxnum,iteminfo`。真正的扣除和加时只能在下节的 `1/7/17`
+确认请求中完成，不能由通用 `7/1` 冒充成功。
+
+## 2026-08-27：827 使用后的原生收尾 `1/7/17`
+
+最初的玩家复现中，首次协议偏离不是绘制或宿主事件顺序，而是成功 `1/7/16` 后的
+下一个客户端请求没有 handler：
+
+```
+mock_practise_pill16 role=10093 seq=70 success=1 max_use=1 action=preflight
+net_send ... wt=7/16 ... source=builtin-practise-pill16
+net_send ... wt=2/10 ... source=builtin-actor-other-only10
+unhandled wt=7/17 len=38 objects=1 first=1/7/17:29
+```
+
+原始记录位于 `bin/server_out.txt`；其中 `2/10` 是原生 `7/16` 成功回调自行发出
+的普通角色刷新，不能用它代替 `7/17`。IDA 的
+`JianghuOL.CBE:0x0102C104` (`HandleItemUseResponse`) 只在收到
+`1/7/(17|34|4)` 时进入这个独立分支。对 `17`，它严格读取：
+
+| 响应字段 | 编码 | 客户端用途 |
+| --- | --- | --- |
+| `result` | tagged `u8` | `1` 才继续原生成功收尾 |
+| `useinfo` | 普通 WT string | 复制至本地提示文本 |
+| `pcimg` | tagged `u8` | 更新本地固定状态图片标志 |
+
+在 `result=1` 后，该 CBE 函数发送其自身的 event `100` 并调用原有 UI 收尾路径；
+服务端没有发送额外 push、没有写客户端状态，也没有改变 callback 或 event 顺序。
+
+请求的运行时长度为 38 字节，且单对象载荷为 29 字节；原始字节为：
+
+```
+57 54 00 26 01 07 11 00 22
+06 75 73 65 6E 75 6D 00 06 00 04 00 00 00 01
+07 69 74 65 6D 73 65 71 00 04 00 02 00 46
+```
+
+这份原始包只是数量 1 的一次实例：字段契约是
+`usenum:tagged-u32(玩家选择的数量)` 和 `itemseq:tagged-u16(70)`，而不是
+`usenum` 恒等于 1。该收尾请求不带物品 ID；专用 handler 要求同一 client session、role
+和这个 `itemseq` 已刚刚成功完成 827 `7/16` 数量预检，因而不会把其他 `7/17` 泛化成
+物品使用。
+
+数量 2 的人工复现暴露了旧实现的第二个首个偏离点：旧 detector 错误要求
+`usenum==1`，因此 `7/17` 没有获得回包，原生等待条不能收尾；即使仅放宽该 detector，
+旧的 `7/16` 也已经只扣了一颗、只加了一小时，仍会违反数量语义。
+
+用 `ida_multi_mcp` 只读反查得到完整的客户端责任链：
+
+- `JianghuOL.CBE:0x0102355E` (`SendItemUseRequest`) 对 827 的 `7/16` 只写
+  `itemseq`；
+- `JianghuOL.CBE:0x01025AE6` (`HandleShopBuyItem`, case 16) 从回包读 `maxnum`
+  并写入数量控件上限；
+- `JianghuOL.CBE:0x0102C032` (`HandleBattleActionInput`) 从该控件的当前值写
+  `7/17.usenum`，所以数量 2 是客户端已支持、由玩家确认的正常请求；
+- `JianghuOL.CBE:0x0102C104` (`HandleItemUseResponse`) 对成功 `7/17` 严格读取
+  `result,useinfo,pcimg`，发送 CBE 自己的 event `100` 后走原始 UI 收尾。
+
+服务端据此保存一次临时的 `7/16 -> 7/17` session/role/itemseq/max-use 授权：`7/17`
+在同一 MySQL 事务中再次锁定行、核实 `usenum<=max-use`、扣除恰好 `usenum` 颗并增加
+`usenum*60` 分钟。只有同一数量的传输重传重放成功回包，不会再次扣除或加时；不同数量
+的重传或超过上限的数量回 `result=2`。失败 `7/16`、session offline 和其他 `7/17`
+都不会被通用物品处理器吞掉。
+
+回包使用 `pcimg=1`，与现有场景实时徽标的“无固定修炼图片”语义一致：827 增加的是
+持久化离线修炼时间，并不会立即获得场景左上角的“修”状态。成功 `useinfo` 为 GBK
+“修炼时间增加 N 小时。”，其中 `N` 就是原始 `usenum`。
+
+同日的运行复测还留下了一个实现层反证：服务端已记录
+`practise_pill17_arm`，却仍把完全相同的 38 字节包记为 unhandled。这排除了“旧
+服务未加载”的可能。原因先是误用了仅适合响应对象的 `u8/u16` accessor，随后又把
+字段名错误推测为 `type/id/seq`。只读 raw probe 确认上述 `usenum/itemseq` 包装后，
+现已改为 `vm_net_mock_get_object_tagged_number_entry`，仍限制为确切长度、字段值域和会话
+事务边界，未放宽为通用 `7/17`；该 probe 已移除。
 
 ## 修改点
 
 - `src/server/mock_server_interaction_login.c`：真实 `7/18` 字段生成和严格
   `7/19(type=0)` 帮助、`7/21(opengold)` detector/response。
-- `src/server/mock_server_role.c`：持久化 schema、离线边界、日上限、经验结算
-  与 827 的跨背包事务。
+- `src/server/mock_server_role.c`：持久化 schema、离线边界、日上限、经验结算，
+  以及 827 的只读数量预检和按 `7/17.usenum` 提交的跨背包事务。
 - `src/server/mock_server_equipment_npc.c`：正常 session offline 生命周期标记
   修炼起点。
 - `src/server/mock_server_catalog.c` 与 `src/server/mock_server_dispatch.c`：827
-  专用 handler 在历史 unresolved fallback 之前执行。
+  的 `7/16` 数量预检和仅匹配其成功会话边界的 `7/17` 原生确认 handler，都在历史
+  unresolved fallback 之前执行。
+- `src/server/mock_server_equipment_npc.c`：保存并在 offline 时清理
+  827 `7/16 -> 7/17` 的临时 session/role/seq 授权边界；不持久化为角色状态。
 
 ## 自动化回归
 
@@ -96,13 +172,20 @@ $env:CBE_AUTOMATION_MYSQL_PASSWORD='123456'
 
 场景 ID 为 `practise-v1`。它使用隔离端口 `19200/19201`、随机
 `jh_online_autotest_<guid>` schema 和独立资源副本，不启动或控制桌面客户端。
-场景最多 14 步、总超时 20 秒、单步超时 10 秒，只运行一次；所有 WT 包、服务端
+场景最多 16 步、总超时 20 秒、单步超时 10 秒，只运行一次；所有 WT 包、服务端
 日志和状态断言写入 `artifacts/automation/<run-id>/`。
 
-最近一次通过证据：
+`7/17` 的精确 `usenum/itemseq` 契约已加入场景：夹具以三颗 827 开始，先断言
+`7/16.maxnum=3` 且没有突变，再发送数量 2 的原生 38 字节 `7/17`，断言恰好留下
+一颗、增加 120 分钟、返回 `result,useinfo,pcimg`，并验证相同重传不重复扣除。随后
+继续验证离线结算。2026-08-27 本地已通过 PHP 语法检查和完整服务端独立链接校验；
+隔离 MySQL 凭据在该环境中未配置，因此尚未把这次新增断言标记为已运行通过。
+
+旧基线通过证据（新增 `7/17` 断言前）：
 `artifacts/automation/practise-v1-20260808T083926143Z-14552/`。
-它断言：初始普通模式的 8 小时显示、原生 19 字节 `7/19.helpinfo`、原生 23 字节 `7/21` 设定回调、827 的原子
-扣除/加时、黄金离线 15 分钟得到 240 经验、恢复普通模式后的等级快照速率，以及
+它断言：初始普通模式的 8 小时显示、原生 19 字节 `7/19.helpinfo`、原生 23 字节
+`7/21` 设定回调、827 的原子扣除/加时、黄金离线 15 分钟得到 240 经验、恢复普通
+模式后的等级快照速率，以及
 100 小时上限拒绝时背包实例不被删除。
 
 帮助包另有不依赖角色资料的场景 `practise-help19-v1`：

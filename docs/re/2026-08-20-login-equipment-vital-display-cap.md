@@ -1,5 +1,10 @@
 # 登录后装备 HP/MP 当前值按裸装上限显示
 
+> 2026-08-27 修正：本文关于 `30/21 -> 7/7(type=2) -> 7/7(type=3)` 保持为
+> 首登重建顺序的描述已失效。完整派生 HP/MP 仍由登录 `actorinfo` 承载；已装备实例的
+> 首登对象仍是 `unresolved`，不得复用 item-operation `7/7`。见
+> [登录已装备物品误走 7/7 type=2 的 InGame 断言](2026-08-27-login-equipped-item-operation-assert.md)。
+
 ## 触发条件
 
 角色已经穿戴会增加最大 HP、MP 的装备，使用恢复道具使 HP/MP 回满后重新登录。人物属性页

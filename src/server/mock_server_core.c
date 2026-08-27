@@ -5808,7 +5808,12 @@ enum
      * services.  The latter is emitted as client-native action=13 so it can
      * start the configured live scene battle without an intermediate menu. */
     VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE = 10,
-    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_INSTANCE_CHALLENGE,
+    /* The item resource names crystal fragments and each of the sixteen
+     * crystal tiers as blacksmith-synthesizable.  The 3:1 recipe itself is a
+     * server policy requested for this mock service; it is not inferred from
+     * the client binary. */
+    VM_NET_MOCK_NPC_KIND_CRYSTAL_SYNTHESIS = 11,
+    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_CRYSTAL_SYNTHESIS,
     /* ParseNPCDialogData stores action rows in ten fixed 64-byte entries.
      * Tasks and direct NPC services share this one client-owned list. */
     VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS = 10,
@@ -5877,6 +5882,8 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX_BASE 0xf5000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_MAIL_BASE    0xf6000000u
 #define VM_NET_MOCK_NPC_SERVICE_CLAIM_MAIL_BASE   0xf7000000u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE 0xf8000000u
+#define VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE 0xf9000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_MAILBOX      0xf5000001u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
@@ -5884,6 +5891,11 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR 0xfeu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
 #define VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS 5u
+#define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_PAGE_ITEMS 5u
+#define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MATERIAL_COUNT 3u
+#define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT 10u
+#define VM_NET_MOCK_CRYSTAL_SYNTHESIS_INPUT_ITEM_FIRST 900u
+#define VM_NET_MOCK_CRYSTAL_SYNTHESIS_INPUT_ITEM_LAST 915u
 
 typedef struct
 {
@@ -6004,6 +6016,31 @@ typedef struct
     u32 multiplier;
     u32 expiresUnix;
 } vm_net_mock_role_item_effect;
+
+/* The scene client owns the bitmap rendering.  The service only projects the
+ * three durable effect states into the exact fields its existing 1/1/6
+ * parser reads.  `pcimg` is inverted by that parser: zero draws the legacy
+ * fixed \"修\" badge, so a role with no separate PC image must receive one. */
+typedef struct
+{
+    u8 pcimg;
+    u8 ruffianflag;
+    u8 expcard;
+    u8 expbook;
+} vm_net_mock_scene_timed_item_status;
+
+static vm_net_mock_scene_timed_item_status
+vm_net_mock_scene_timed_item_status_for_active_effects(
+    bool timedCombatActive, bool expCardActive, bool battleInsightActive)
+{
+    vm_net_mock_scene_timed_item_status status;
+
+    status.pcimg = 1;
+    status.ruffianflag = timedCombatActive ? 1 : 0;
+    status.expcard = expCardActive ? 1 : 0;
+    status.expbook = battleInsightActive ? 1 : 0;
+    return status;
+}
 
 typedef struct
 {
@@ -6445,8 +6482,11 @@ static u32 vm_net_mock_build_practise_help19_response(const u8 *request,
                                                       u8 *out, u32 outCap);
 static bool vm_net_mock_practise_set_gold(vm_net_mock_role_state *role,
                                           bool goldEnabled);
+static bool vm_net_mock_practise_pill_max_usable(vm_net_mock_role_state *role,
+                                                 u16 itemSeq, u32 *maxUseOut);
 static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
-                                          u16 itemSeq, u32 *remainingOut);
+                                          u16 itemSeq, u32 useCount,
+                                          u32 *remainingOut);
 static void vm_net_mock_practise_mark_offline(const char *accountId,
                                               u32 roleId);
 /* 聚元丹的“活力”不属于角色 HP/MP，也不应伪装成二者之一。它和离线
@@ -6514,23 +6554,33 @@ static bool vm_net_mock_append_backpack_item_count11_object(
     u32 remaining);
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
+    u32 count,
     const vm_net_mock_role_item_effect *effect, u32 durationSeconds,
     u32 *remainingOut, const char *reason);
+static bool vm_net_mock_role_get_active_timed_item_effect(
+    const vm_net_mock_role_state *role, u8 kind,
+    vm_net_mock_role_item_effect *effectOut);
 static u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     const vm_net_mock_role_state *role);
+static u8 vm_net_mock_role_active_battle_insight_flag(void);
 /* Fills the final combat-stat percentage bonuses currently active for this
  * role.  These effects only alter authoritative battle calculations; there
  * is no parser evidence for treating them as a permanent ActorInfo rewrite. */
 static bool vm_net_mock_role_active_timed_combat_bonus_percent(
     const vm_net_mock_role_state *role, u32 *attackPercentOut,
     u32 *defensePercentOut);
+static u8 vm_net_mock_role_active_timed_combat_flag(void);
 static u8 vm_net_mock_role_active_exp_card_flag(void);
 static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
                                                       u32 requestLen,
                                                       u8 *out, u32 outCap);
+static u32 vm_net_mock_build_battle_insight_status_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_timed_special_item_use_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+static u32 vm_net_mock_build_battle_insight_followup_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_vitality_pill33_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
