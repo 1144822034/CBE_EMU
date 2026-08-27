@@ -945,6 +945,10 @@ static u32 vm_mock_service_broadcast_world_chat_live(const char *sourceName,
                                                      const char *message);
 static void vm_net_mock_equipment_enhance_maybe_world_announce(u32 itemId,
                                                               u16 newLevel);
+static u32 vm_net_mock_marriage_world_buff_multiplier(void);
+static void vm_mock_service_marriage_celebrate_and_arm_world_buff(
+    const char *nameA,
+    const char *nameB);
 
 static u32 vm_net_mock_build_equipment_enhance_response(
     const u8 *request,
@@ -2049,11 +2053,11 @@ static u32 vm_net_mock_build_crystal_combine_response(const u8 *request,
             reason = "consume-failed";
         }
         else if (!vm_net_mock_role_add_backpack_item_to_role(
-                     role, destItemId, 1, 0, &destSeq, "crystal-combine", NULL))
+                     role, destItemId, 1, 0, &destSeq, "crystal-combine", NULL, 0))
         {
             /* Should be rare after pre-check; restore 3 source crystals. */
             (void)vm_net_mock_role_add_backpack_item_to_role(
-                role, srcItemId, 3, 0, NULL, "crystal-combine-rollback", NULL);
+                role, srcItemId, 3, 0, NULL, "crystal-combine-rollback", NULL, 0);
             result = 3;
             reason = "grant-failed";
             srcRemaining = srcRemaining + 3;
@@ -2192,11 +2196,11 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
         }
         else if (!vm_net_mock_role_add_backpack_item_to_role(
                      role, destItemId, 1, 0, &destSeq,
-                     "crystal-fragment-combine", NULL))
+                     "crystal-fragment-combine", NULL, 0))
         {
             (void)vm_net_mock_role_add_backpack_item_to_role(
                 role, srcItemId, cost, 0, NULL,
-                "crystal-fragment-combine-rollback", NULL);
+                "crystal-fragment-combine-rollback", NULL, 0);
             result = 3;
             reason = "grant-failed";
             srcRemaining = srcRemaining + cost;
@@ -2374,11 +2378,11 @@ static u32 vm_net_mock_build_dream_badge_combine_response(
         }
         else if (!vm_net_mock_role_add_backpack_item_to_role(
                      role, destItemId, 1, 0, &destSeq,
-                     "dream-badge-combine", NULL))
+                     "dream-badge-combine", NULL, 0))
         {
             (void)vm_net_mock_role_add_backpack_item_to_role(
                 role, srcItemId, cost, 0, NULL,
-                "dream-badge-combine-rollback", NULL);
+                "dream-badge-combine-rollback", NULL, 0);
             result = 3;
             reason = "grant-failed";
             srcRemaining = srcRemaining + cost;
@@ -2750,12 +2754,18 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
             rewardExp = vm_net_mock_add_capped_u32(
                 rewardExp, bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
         }
+        {
+            u32 marriageMult = vm_net_mock_marriage_world_buff_multiplier();
+            if (marriageMult > 1u)
+                rewardExp = vm_net_mock_mul_capped_u32(rewardExp, marriageMult);
+        }
     }
     if (rewardExp != baseRewardExp)
     {
-        printf("[info][network] mock_battle_exp_modifier enemy=%u role=%u base_exp=%u card_multiplier=%u insight_bonus_percent=%u reward_exp=%u\n",
+        printf("[info][network] mock_battle_exp_modifier enemy=%u role=%u base_exp=%u card_multiplier=%u insight_bonus_percent=%u marriage_mult=%u reward_exp=%u\n",
                g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
                baseRewardExp, expCardMultiplier, battleInsightBonusPercent,
+               vm_net_mock_marriage_world_buff_multiplier(),
                rewardExp);
     }
     memset(configuredDrops, 0, sizeof(configuredDrops));
@@ -2897,6 +2907,12 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                 rolledDropCount = grantedCount;
                 if (gate->isTaskMaterial && grantedCount > gate->remaining)
                     grantedCount = gate->remaining;
+                {
+                    u32 marriageMult = vm_net_mock_marriage_world_buff_multiplier();
+                    if (marriageMult > 1u && grantedCount > 0)
+                        grantedCount =
+                            vm_net_mock_mul_capped_u32(grantedCount, marriageMult);
+                }
             }
             printf("[info][network] mock_battle_drop_gate enemy=%u role=%u "
                    "slot=%u item=%u rate=%u mode=%s task_material=%u "
@@ -3104,6 +3120,11 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
                 vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
                                            vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
                 vm_net_mock_battle_enemy_count_current());
+            {
+                u32 marriageMult = vm_net_mock_marriage_world_buff_multiplier();
+                if (marriageMult > 1u)
+                    rewardGold = vm_net_mock_mul_capped_u32(rewardGold, marriageMult);
+            }
         }
     }
     roleMp = vm_net_mock_battle_apply_mp_recovery_once(role, roleMp, recoverMp,
@@ -4104,6 +4125,7 @@ typedef struct vm_mock_service_client_session
     u32 onlineEqChenghaoId;
     u32 onlineEqWingId;
     u32 onlineEqMountId;
+    char onlineGuildName[VM_NET_MOCK_GUILD_NAME_SIZE];
     struct
     {
         bool valid;
@@ -4111,6 +4133,7 @@ typedef struct vm_mock_service_client_session
         u32 eqChenghao;
         u32 eqWing;
         u32 eqMount;
+        char guildName[VM_NET_MOCK_GUILD_NAME_SIZE];
     } cosmeticNotices[64];
     /* Admin unlock / grant: next poll delivers fresh 31/2 for this session. */
     bool cosmeticsStatePushPending;
@@ -4667,6 +4690,7 @@ typedef struct
     u32 memberClientIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     bool battleActive;
     u32 battleSerial;
+    u32 intimacyRewardedSerial;
     u32 battleLeaderClientId;
     u32 battleEnemyId;
     u32 battleSceneMonsterIndex;
@@ -7928,6 +7952,74 @@ static void vm_net_mock_equipment_enhance_maybe_world_announce(u32 itemId,
     printf("[info][network] mock_enhance_world_announce item=%u level=%u "
            "player=%s recipients=%u evidence=1/3/3-type0-world enhance>=8\n",
            itemId, (u32)newLevel, playerName, recipients);
+}
+
+/* Server-wide marriage celebration buff: 2x wild battle rewards for 3 hours. */
+enum
+{
+    VM_MOCK_MARRIAGE_WORLD_BUFF_SECONDS = 3u * 60u * 60u,
+    VM_MOCK_MARRIAGE_WORLD_BUFF_MULT = 2u,
+    VM_MOCK_MARRIAGE_WORLD_ANNOUNCE_TIMES = 3u
+};
+
+static u32 g_vm_mock_marriage_world_buff_expires_unix = 0;
+
+static u32 vm_net_mock_marriage_world_buff_multiplier(void)
+{
+    u32 now = (u32)time(NULL);
+
+    if (g_vm_mock_marriage_world_buff_expires_unix == 0)
+        return 1u;
+    if (now >= g_vm_mock_marriage_world_buff_expires_unix)
+    {
+        g_vm_mock_marriage_world_buff_expires_unix = 0;
+        return 1u;
+    }
+    return VM_MOCK_MARRIAGE_WORLD_BUFF_MULT;
+}
+
+static void vm_mock_service_marriage_celebrate_and_arm_world_buff(
+    const char *nameA,
+    const char *nameB)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    char message[96];
+    const char *a = (nameA != NULL && nameA[0] != 0) ? nameA : "Player";
+    const char *b = (nameB != NULL && nameB[0] != 0) ? nameB : "Player";
+    u32 now = (u32)time(NULL);
+    u32 recipients = 0;
+    u32 i = 0;
+    int wrote = 0;
+
+    g_vm_mock_marriage_world_buff_expires_unix =
+        now + VM_MOCK_MARRIAGE_WORLD_BUFF_SECONDS;
+
+    /* 恭喜{A}和{B}喜结连理 */
+    memset(message, 0, sizeof(message));
+    wrote = snprintf(
+        message, sizeof(message),
+        "\xb9\xa7\xcf\xb2%s\xba\xcd%s\xcf\xb2\xbd\xe1\xc1\xac\xc0\xed",
+        a, b);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(message))
+    {
+        memset(message, 0, sizeof(message));
+        wrote = snprintf(
+            message, sizeof(message),
+            "\xb9\xa7\xcf\xb2\xcf\xb2\xbd\xe1\xc1\xac\xc0\xed"); /* 恭喜喜结连理 */
+    }
+    if (wrote > 0 && (size_t)wrote < sizeof(message))
+    {
+        for (i = 0; i < VM_MOCK_MARRIAGE_WORLD_ANNOUNCE_TIMES; ++i)
+            recipients +=
+                vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
+    }
+
+    printf("[info][mock-service] marriage_world_buff armed expires=%u mult=%u "
+           "a=%s b=%s recipients=%u announce_times=%u "
+           "evidence=marry-ok-world-3x+battle-reward-2x-3h\n",
+           g_vm_mock_marriage_world_buff_expires_unix,
+           VM_MOCK_MARRIAGE_WORLD_BUFF_MULT, a, b, recipients,
+           VM_MOCK_MARRIAGE_WORLD_ANNOUNCE_TIMES);
 }
 
 static bool vm_net_mock_gold_chest_reward_warrants_world_announce(u32 itemId)
@@ -12102,7 +12194,7 @@ static bool vm_mock_service_account_grant_role_item(const char *accountId,
     existing = vm_net_mock_role_find_backpack_item(role, itemId, 0);
     before = existing ? existing->count : 0;
     if (!vm_net_mock_role_add_backpack_item_to_role(role, itemId, count, 0, &seq,
-                                                     "admin-item-grant", NULL))
+                                                     "admin-item-grant", NULL, 0))
     {
         if (messageOut)
             *messageOut = "角色背包已满，无法加入新物品";

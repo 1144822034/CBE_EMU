@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Guild hub: list / detail / members / applications (CBE softkey lists).
  */
 import { Container, Graphics } from "pixi.js";

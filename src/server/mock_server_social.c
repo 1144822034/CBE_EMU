@@ -104,6 +104,8 @@ static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 request
     vm_mock_service_friend_db_load();
     if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0)
     {
+        vm_mock_service_friend_intimacy_decay_owner(ownerAccountId,
+                                                    ownerRole->roleId);
         if (!vm_mock_service_friend_db_mysql_count_owner(ownerAccountId, ownerRole->roleId,
                                                          &totalFriends))
         {

@@ -7036,7 +7036,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return pos;
     }
     if (!vm_net_mock_role_add_backpack_item_to_role(
-            role, rewardItemId, 1, 0, &rewardSeq, "chest-open", NULL))
+            role, rewardItemId, 1, 0, &rewardSeq, "chest-open", NULL, 0))
     {
         *role = before;
         result = 4;
@@ -7419,7 +7419,7 @@ static u32 vm_net_mock_build_chest_open_batch_response(const u8 *request,
                                                      NULL) ||
             !vm_net_mock_role_add_backpack_item_to_role(role, rewardItemId, 1, 0,
                                                         &rewardSeq,
-                                                        "chest-open-batch", NULL))
+                                                        "chest-open-batch", NULL, 0))
         {
             *role = before;
             result = 4;

@@ -11,7 +11,105 @@ export type GifRgba = {
   /** Original RGB565 with pitch padding (for map blit). */
   rgb565: Uint16Array;
   pitch: number;
+  /** `raster` = plain PNG/JPEG (PixiJS redesign sheets); default LKV2. */
+  sourceKind?: "lkv2" | "raster";
 };
+
+/** PixiJS-only: accept stock PNG/JPEG/WebP (and similar) without LKV2 wrap. */
+export function isRasterImageMagic(data: Uint8Array): boolean {
+  if (data.length >= 8 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {
+    return true; // PNG
+  }
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return true; // JPEG
+  }
+  if (
+    data.length >= 12 &&
+    data[0] === 0x52 &&
+    data[1] === 0x49 &&
+    data[2] === 0x46 &&
+    data[3] === 0x46 &&
+    data[8] === 0x57 &&
+    data[9] === 0x45 &&
+    data[10] === 0x42 &&
+    data[11] === 0x50
+  ) {
+    return true; // RIFF WEBP
+  }
+  return false;
+}
+
+function packRgb565(r: number, g: number, b: number): number {
+  return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+/** Build GifRgba from RGBA8888; near-black optional key → transparent. */
+export function rgbaToGifRgba(
+  width: number,
+  height: number,
+  rgba: Uint8ClampedArray,
+  opts?: { keyNearBlack?: number; sourceKind?: "lkv2" | "raster" },
+): GifRgba {
+  const key = opts?.keyNearBlack ?? 0;
+  const out = new Uint8ClampedArray(width * height * 4);
+  const pad = (4 - (width & 3)) & 3;
+  const pitch = width + pad;
+  const rgb565 = new Uint16Array(pitch * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      let r = rgba[i]!;
+      let g = rgba[i + 1]!;
+      let b = rgba[i + 2]!;
+      let a = rgba[i + 3]!;
+      if (key > 0 && a > 0 && r + g + b < key) a = 0;
+      out[i] = r;
+      out[i + 1] = g;
+      out[i + 2] = b;
+      out[i + 3] = a;
+      rgb565[y * pitch + x] = a < 16 ? 0 : packRgb565(r, g, b);
+    }
+  }
+  return {
+    width,
+    height,
+    rgba: out,
+    rgb565,
+    pitch,
+    sourceKind: opts?.sourceKind ?? "lkv2",
+  };
+}
+
+/**
+ * Decode browser-decodable raster bytes (PNG/JPEG/WebP) into GifRgba.
+ * Used by PixiJS when art is dropped in as a normal image instead of LKV2.
+ */
+export async function decodeRasterImageBytes(
+  data: Uint8Array,
+  opts?: { keyNearBlack?: number },
+): Promise<GifRgba> {
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  const blob = new Blob([copy]);
+  const bmp = await createImageBitmap(blob);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("gif: no 2d context for raster decode");
+    ctx.drawImage(bmp, 0, 0);
+    const img = ctx.getImageData(0, 0, bmp.width, bmp.height);
+    return rgbaToGifRgba(
+      bmp.width,
+      bmp.height,
+      new Uint8ClampedArray(img.data),
+      { ...opts, sourceKind: "raster" },
+    );
+  } finally {
+    bmp.close();
+  }
+}
 
 class LzwReader {
   private gif: Uint8Array;
@@ -261,5 +359,5 @@ export function decodeLkv2Gif(data: Uint8Array): GifRgba {
     }
   }
 
-  return { width: imgWidth, height: imgHeight, rgba, rgb565, pitch };
+  return { width: imgWidth, height: imgHeight, rgba, rgb565, pitch, sourceKind: "lkv2" };
 }

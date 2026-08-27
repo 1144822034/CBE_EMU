@@ -4859,6 +4859,10 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_ARENA_LEAVE               0xf6000002u
 #define VM_NET_MOCK_NPC_SERVICE_ARENA_RANK                0xf6000003u
 #define VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER               0xf6000004u
+/* 南宣门月老：缔结姻缘（亲密度>=3000 且同场景未婚好友）. */
+#define VM_NET_MOCK_NPC_SERVICE_MARRY                    0xf6000005u
+#define VM_NET_MOCK_MARRY_MIN_DEGREE                     3000u
+#define VM_NET_MOCK_YUELAO_ACTOR_ID                      20093u
 /* ParseNPCDialogData main-text paint uses #0xc8 including NUL. */
 #define VM_NET_MOCK_NPC_DIALOG_MAIN_TEXT_BYTES            199u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
@@ -5010,6 +5014,20 @@ static bool vm_net_mock_enhance_wash_decode(const char *text, size_t textLen,
     return true;
 }
 
+static bool vm_net_mock_enhance_wash_is_empty(const vm_net_mock_enhance_wash_state *wash)
+{
+    u8 i;
+
+    if (wash == NULL)
+        return true;
+    for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+    {
+        if (wash->slots[i].washed != 0)
+            return false;
+    }
+    return true;
+}
+
 static u8 vm_net_mock_enhance_unlock_for_index(u8 index)
 {
     return (u8)((index + 1u) * 4u);
@@ -5034,6 +5052,8 @@ typedef struct
     u16 seq;
     u16 enhanceLevel;
     u32 count;
+    /* Per-equipment instance id; disambiguates same item_id+level on restore. */
+    u32 enhanceInstanceId;
     vm_net_mock_enhance_wash_state enhanceWash;
 } vm_net_mock_backpack_item_state;
 
@@ -5075,6 +5095,7 @@ typedef struct
     u8 designationId;
     u8 reservedBagMeta;
     u16 nextBackpackSeq;
+    u32 nextEnhanceInstanceId;
     /* Pixi 比武连杀文字称号 id30–40；bit0=敌将讨伐 … bit10=天下无敌。 */
     u32 arenaDesignationMask;
     /* 特殊永久称号 id41–45；bit0=圣诞骑士 … bit4=勇者王；只置位不清除。 */
@@ -5091,9 +5112,14 @@ typedef struct
     u32 equippedChenghaoId;
     u32 equippedWingId;
     u32 equippedMountId;
+    /* Marriage (Pixi); 0 / empty = unmarried. Persisted on account_roles. */
+    u32 spouseRoleId;
+    char spouseAccountId[64];
+    char spouseName[32];
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     /* Parallel to equippedItemIds; lost on unequip if not persisted here. */
     u16 equippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    u32 equippedEnhanceInstanceIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_enhance_wash_state equippedEnhanceWash[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
@@ -5476,7 +5502,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                         u16 enhanceLevel,
                                                         u16 *seqOut,
                                                         const char *reason,
-                                                        const vm_net_mock_enhance_wash_state *wash);
+                                                        const vm_net_mock_enhance_wash_state *wash,
+                                                        u32 enhanceInstanceId);
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut);
 static bool vm_net_mock_role_add_backpack_item_enhanced(u32 itemId, u32 count,
                                                         u16 enhanceLevel,

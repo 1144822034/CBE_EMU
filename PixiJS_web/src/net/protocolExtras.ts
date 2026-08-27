@@ -2975,6 +2975,8 @@ export type CharacterStats = {
   title: string;
   job: number;
   spouse: string;
+  /** Married partner role id; 0 = unmarried. */
+  spouseRoleId: number;
   guild: string;
   hp: number;
   hpMax: number;
@@ -3218,7 +3220,7 @@ export function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): B
 }
 
 /** Prefer the attr list that carries wash markers / more milestone rows. */
-function preferEnhanceAttrs(
+export function preferEnhanceAttrs(
   a?: BagEnhanceAttr[],
   b?: BagEnhanceAttr[],
 ): BagEnhanceAttr[] | undefined {
@@ -3269,7 +3271,13 @@ export function mergeBagItemUpdateDeltas(
         count: (prev.count >>> 0) + (u.count >>> 0),
       });
     } else {
-      map.set(u.seq, u);
+      const attrs = preferEnhanceAttrs(u.enhanceAttrs, prev?.enhanceAttrs);
+      map.set(u.seq, {
+        ...prev,
+        ...u,
+        enhance: u.enhance || prev?.enhance || 0,
+        ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
+      });
     }
   }
   return [...map.values()];
@@ -3553,6 +3561,7 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
     title: fieldStringNamed(obj, "title"),
     job: fieldU32(obj, "job"),
     spouse: fieldStringNamed(obj, "spouse") || "无",
+    spouseRoleId: fieldU32(obj, "spouseRoleId"),
     guild: fieldStringNamed(obj, "guild") || "无帮派",
     hp: fieldU32(obj, "hp"),
     hpMax: fieldU32(obj, "hpMax"),
@@ -3893,6 +3902,8 @@ export type CosmeticsPeer = {
   eqChenghao: number;
   eqWing: number;
   eqMount: number;
+  /** Peer guild name for nameplate「门派-xxx」; empty = none. */
+  guild: string;
 };
 
 function parseCsvIds(raw: string): number[] {
@@ -3970,7 +3981,27 @@ export function parseCosmeticsPeerUpdates(packet: WtPacket): CosmeticsPeer[] {
       eqChenghao: fieldU32(obj, "eqChenghao"),
       eqWing: fieldU32(obj, "eqWing"),
       eqMount: fieldU32(obj, "eqMount"),
+      guild: fieldStringNamed(obj, "guild"),
     });
   }
   return out;
+}
+
+/* ---------- Pixi marriage 1/32 (spouse teleport) ---------- */
+
+export function buildSpouseTeleportRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 32, 1);
+  return b.finish();
+}
+
+export function parseSpouseTeleportAck(
+  packet: WtPacket,
+): { result: number; tip: string } | null {
+  const obj = packet.objects.find((o) => o.kind === 32 && o.subtype === 2);
+  if (!obj) return null;
+  return {
+    result: fieldU32(obj, "result"),
+    tip: fieldStringNamed(obj, "tip"),
+  };
 }

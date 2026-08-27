@@ -130,6 +130,8 @@ CREATE TABLE IF NOT EXISTS `friendships` (
   `target_level` INT UNSIGNED NOT NULL DEFAULT 1,
   `target_job` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `target_sex` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `last_team_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `last_decay_at` TIMESTAMP NULL DEFAULT NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`owner_account_id`, `owner_role_id`, `target_account_id`, `target_role_id`),
@@ -187,6 +189,9 @@ CREATE TABLE IF NOT EXISTS `account_roles` (
   `designation_id` TINYINT UNSIGNED NOT NULL,
   `arena_designation_mask` INT UNSIGNED NOT NULL DEFAULT 0,
   `next_backpack_seq` SMALLINT UNSIGNED NOT NULL,
+  `spouse_role_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `spouse_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
+  `spouse_name` VARBINARY(32) NOT NULL DEFAULT '',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`, `role_id`),
@@ -203,6 +208,7 @@ CREATE TABLE IF NOT EXISTS `account_role_equipment` (
   `slot_index` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `item_instance_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_role`
@@ -247,6 +253,7 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
   `item_seq` SMALLINT UNSIGNED NOT NULL,
   `item_count` INT UNSIGNED NOT NULL COMMENT '普通物品为堆叠数；802/803 为剩余 HP/MP 储量',
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `item_instance_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_backpack_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
@@ -255,6 +262,21 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
     REFERENCES `account_roles` (`account_id`, `role_id`)
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+-- Last wash snapshot keyed by item_instance_id (legacy bag_seq fallback).
+CREATE TABLE IF NOT EXISTS `account_role_enhance_wash_record` (
+  `role_id` INT UNSIGNED NOT NULL,
+  `item_instance_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `bag_seq` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `item_id` INT UNSIGNED NOT NULL,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
+  `unlock_level` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `washed_unix` INT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`role_id`, `bag_seq`),
+  KEY `idx_role_item_instance` (`role_id`, `item_instance_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Dialog-driven player warehouse (mall pass 834). Not the unresolved native 钱庄.
 CREATE TABLE IF NOT EXISTS `account_role_warehouse` (
@@ -769,6 +791,7 @@ CREATE TABLE IF NOT EXISTS `server_auction_listings` (
   `item_id` INT UNSIGNED NOT NULL,
   `item_count` INT UNSIGNED NOT NULL DEFAULT 1,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `item_instance_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   `start_price` INT UNSIGNED NOT NULL DEFAULT 0,
   `current_price` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -811,6 +834,7 @@ CREATE TABLE IF NOT EXISTS `server_auction_claims` (
   `item_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `item_count` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `item_instance_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   `money_amount` INT UNSIGNED NOT NULL DEFAULT 0,
   `wcoin_amount` INT UNSIGNED NOT NULL DEFAULT 0,

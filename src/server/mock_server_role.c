@@ -1860,6 +1860,183 @@ static bool vm_mock_service_friend_db_mysql_list_owner_page(
     return true;
 }
 
+static bool vm_net_mock_role_ensure_intimacy_marriage_columns(void);
+
+static void vm_mock_service_friend_intimacy_bump_pair(
+    const char *accountA, u32 roleA,
+    const char *accountB, u32 roleB)
+{
+    char hexA[129];
+    char hexB[129];
+    char query[768];
+    size_t lenA;
+    size_t lenB;
+
+    if (accountA == NULL || accountB == NULL || roleA == 0 || roleB == 0 ||
+        roleA == roleB)
+        return;
+    lenA = vm_mock_mysql_bounded_strlen(accountA, 64);
+    lenB = vm_mock_mysql_bounded_strlen(accountB, 64);
+    if (lenA == 0 || lenB == 0 || lenA >= 64 || lenB >= 64 ||
+        vm_mysql_hex_encode(accountA, lenA, hexA, sizeof(hexA)) == 0 ||
+        vm_mysql_hex_encode(accountB, lenB, hexB, sizeof(hexB)) == 0)
+        return;
+    snprintf(query, sizeof(query),
+             "UPDATE friendships SET friend_degree=friend_degree+1,"
+             "last_team_at=CURRENT_TIMESTAMP "
+             "WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
+             "AND target_account_id=CAST(X'%s' AS CHAR) AND target_role_id=%u",
+             hexA, roleA, hexB, roleB);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[warn][mock-service] intimacy_bump failed a=%s/%u b=%s/%u err=%s\n",
+               accountA, roleA, accountB, roleB, vm_mysql_last_error());
+        return;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE friendships SET friend_degree=friend_degree+1,"
+             "last_team_at=CURRENT_TIMESTAMP "
+             "WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
+             "AND target_account_id=CAST(X'%s' AS CHAR) AND target_role_id=%u",
+             hexB, roleB, hexA, roleA);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[warn][mock-service] intimacy_bump reverse failed a=%s/%u b=%s/%u "
+               "err=%s\n",
+               accountB, roleB, accountA, roleA, vm_mysql_last_error());
+    }
+}
+
+/* Decay: if no team for >=3 days and last decay also >=3 days (or never), -10. */
+static void vm_mock_service_friend_intimacy_decay_owner(const char *ownerAccountId,
+                                                        u32 ownerRoleId)
+{
+    char owner_hex[129];
+    char query[1024];
+    size_t owner_len;
+
+    if (ownerAccountId == NULL || ownerAccountId[0] == 0 || ownerRoleId == 0)
+        return;
+    if (!vm_net_mock_role_ensure_intimacy_marriage_columns())
+        return;
+    owner_len = vm_mock_mysql_bounded_strlen(ownerAccountId, 64);
+    if (owner_len == 0 || owner_len >= 64 ||
+        vm_mysql_hex_encode(ownerAccountId, owner_len, owner_hex, sizeof(owner_hex)) == 0)
+        return;
+    snprintf(query, sizeof(query),
+             "UPDATE friendships SET "
+             "friend_degree=IF(friend_degree>=10,friend_degree-10,0),"
+             "last_decay_at=CURRENT_TIMESTAMP "
+             "WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
+             "AND last_team_at <= (NOW() - INTERVAL 3 DAY) "
+             "AND (last_decay_at IS NULL OR last_decay_at <= (NOW() - INTERVAL 3 DAY))",
+             owner_hex, ownerRoleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[warn][mock-service] intimacy_decay failed owner=%s/%u err=%s\n",
+               ownerAccountId, ownerRoleId, vm_mysql_last_error());
+        return;
+    }
+    printf("[info][mock-service] intimacy_decay owner=%s/%u evidence=3day-no-team\n",
+           ownerAccountId, ownerRoleId);
+}
+
+static bool vm_mock_service_marriage_persist_pair(
+    const char *accountA, u32 roleA, const char *nameA,
+    const char *accountB, u32 roleB, const char *nameB,
+    char *errOut, size_t errCap)
+{
+    char hexA[129];
+    char hexB[129];
+    char nameAHex[65];
+    char nameBHex[65];
+    char query[1024];
+    size_t lenA;
+    size_t lenB;
+    size_t nA;
+    size_t nB;
+
+    if (errOut && errCap)
+        errOut[0] = 0;
+    if (accountA == NULL || accountB == NULL || roleA == 0 || roleB == 0 ||
+        nameA == NULL || nameB == NULL)
+    {
+        if (errOut && errCap)
+            snprintf(errOut, errCap, "bad-args");
+        return false;
+    }
+    lenA = vm_mock_mysql_bounded_strlen(accountA, 64);
+    lenB = vm_mock_mysql_bounded_strlen(accountB, 64);
+    nA = vm_mock_mysql_bounded_strlen(nameA, 32);
+    nB = vm_mock_mysql_bounded_strlen(nameB, 32);
+    if (lenA == 0 || lenB == 0 ||
+        vm_mysql_hex_encode(accountA, lenA, hexA, sizeof(hexA)) == 0 ||
+        vm_mysql_hex_encode(accountB, lenB, hexB, sizeof(hexB)) == 0 ||
+        (nA && vm_mysql_hex_encode(nameA, nA, nameAHex, sizeof(nameAHex)) == 0) ||
+        (nB && vm_mysql_hex_encode(nameB, nB, nameBHex, sizeof(nameBHex)) == 0))
+    {
+        if (errOut && errCap)
+            snprintf(errOut, errCap, "hex");
+        return false;
+    }
+    if (!nA)
+        nameAHex[0] = 0;
+    if (!nB)
+        nameBHex[0] = 0;
+    if (!vm_net_mock_role_ensure_intimacy_marriage_columns())
+    {
+        if (errOut && errCap)
+            snprintf(errOut, errCap, "schema");
+        return false;
+    }
+    {
+        vm_mock_mysql_authority_count_context cnt;
+        memset(&cnt, 0, sizeof(cnt));
+        snprintf(query, sizeof(query),
+                 "SELECT COUNT(*) FROM account_roles WHERE "
+                 "((account_id=CAST(X'%s' AS CHAR) AND role_id=%u) OR "
+                 "(account_id=CAST(X'%s' AS CHAR) AND role_id=%u)) "
+                 "AND spouse_role_id<>0",
+                 hexA, roleA, hexB, roleB);
+        if (!vm_mysql_query(query, vm_mock_mysql_authority_count_row, &cnt) ||
+            cnt.invalid || !cnt.found)
+        {
+            if (errOut && errCap)
+                snprintf(errOut, errCap, "query");
+            return false;
+        }
+        if (cnt.value > 0)
+        {
+            if (errOut && errCap)
+                snprintf(errOut, errCap, "already-married");
+            return false;
+        }
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_roles SET spouse_role_id=%u,"
+             "spouse_account_id=CAST(X'%s' AS CHAR),spouse_name=X'%s' "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             roleB, hexB, nameBHex, hexA, roleA);
+    if (!vm_mysql_exec(query))
+    {
+        if (errOut && errCap)
+            snprintf(errOut, errCap, "%s", vm_mysql_last_error());
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_roles SET spouse_role_id=%u,"
+             "spouse_account_id=CAST(X'%s' AS CHAR),spouse_name=X'%s' "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             roleA, hexA, nameAHex, hexB, roleB);
+    if (!vm_mysql_exec(query))
+    {
+        if (errOut && errCap)
+            snprintf(errOut, errCap, "%s", vm_mysql_last_error());
+        return false;
+    }
+    return true;
+}
+
 static bool vm_mock_service_friend_db_mysql_find_owner_target(
     const char *ownerAccountId, u32 ownerRoleId, u32 targetRoleId,
     vm_mock_service_friend_record *recordOut)
@@ -3281,9 +3458,14 @@ static u32 vm_net_mock_role_guild_info(const vm_net_mock_role_state *role,
 
 static const char *vm_net_mock_role_spouse_name(const vm_net_mock_role_state *role)
 {
-    (void)role;
-    return vm_net_mock_env_str("CBE_ACTOR_SPOUSE_NAME",
-                               "\xce\xde"); /* GBK: wu */
+    const char *envName;
+
+    if (role != NULL && role->spouseRoleId != 0 && role->spouseName[0] != 0)
+        return role->spouseName;
+    envName = vm_net_mock_env_str("CBE_ACTOR_SPOUSE_NAME", NULL);
+    if (envName != NULL && envName[0] != 0)
+        return envName;
+    return "\xce\xde"; /* GBK: 无 */
 }
 
 static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
@@ -3809,6 +3991,8 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
                                        role->name[0] ? role->name : "") ||
         !vm_net_mock_put_object_string(out, outCap, &pos, "title", title) ||
         !vm_net_mock_put_object_string(out, outCap, &pos, "spouse", spouse) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "spouseRoleId",
+                                    role->spouseRoleId) ||
         !vm_net_mock_put_object_string(out, outCap, &pos, "guild", guildName) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "level", stats.level) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "job", stats.job) ||
@@ -7228,6 +7412,62 @@ typedef struct
     u32 rows;
 } vm_mock_mysql_cosmetics_load_context;
 
+typedef struct
+{
+    vm_net_mock_role_db_file *database;
+    bool invalid;
+} vm_mock_mysql_spouse_load_context;
+
+static bool vm_mock_mysql_role_spouse_row(void *context_value,
+                                          unsigned int column_count,
+                                          const char *const *values,
+                                          const size_t *lengths)
+{
+    vm_mock_mysql_spouse_load_context *context =
+        (vm_mock_mysql_spouse_load_context *)context_value;
+    u32 roleId = 0;
+    u32 spouseRoleId = 0;
+    vm_net_mock_role_state *role;
+    size_t name_len = 0;
+    size_t acct_len = 0;
+
+    if (context == NULL || context->database == NULL || column_count != 4 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &roleId) || roleId == 0)
+    {
+        if (context)
+            context->invalid = true;
+        return true;
+    }
+    role = vm_mock_mysql_find_loaded_role(context->database, roleId);
+    if (role == NULL)
+    {
+        context->invalid = true;
+        return true;
+    }
+    role->spouseRoleId = 0;
+    role->spouseAccountId[0] = 0;
+    role->spouseName[0] = 0;
+    (void)vm_mock_mysql_parse_u32(values[1], lengths[1], &spouseRoleId);
+    role->spouseRoleId = spouseRoleId;
+    if (values[2] != NULL && lengths[2] > 0)
+    {
+        acct_len = lengths[2] < sizeof(role->spouseAccountId) - 1
+                       ? lengths[2]
+                       : sizeof(role->spouseAccountId) - 1;
+        memcpy(role->spouseAccountId, values[2], acct_len);
+        role->spouseAccountId[acct_len] = 0;
+    }
+    if (values[3] != NULL && lengths[3] > 0)
+    {
+        if (!vm_mysql_hex_decode(values[3], lengths[3], role->spouseName,
+                                 sizeof(role->spouseName) - 1, &name_len))
+            role->spouseName[0] = 0;
+        else
+            role->spouseName[name_len] = 0;
+    }
+    return true;
+}
+
 static bool vm_mock_mysql_role_cosmetics_row(void *context_value,
                                              unsigned int column_count,
                                              const char *const *values,
@@ -7404,7 +7644,8 @@ static bool vm_mock_mysql_role_equipment_row(void *context_value,
     u32 item_id = 0;
     u32 enhance_level = 0;
     if (context == NULL || context->database == NULL ||
-        (column_count != 3 && column_count != 4 && column_count != 5) ||
+        (column_count != 3 && column_count != 4 && column_count != 5 &&
+         column_count != 6) ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &role_id) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &slot_index) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &item_id) ||
@@ -7431,10 +7672,20 @@ static bool vm_mock_mysql_role_equipment_row(void *context_value,
     }
     role->equippedItemIds[slot_index] = item_id;
     role->equippedEnhanceLevels[slot_index] = (u16)enhance_level;
+    role->equippedEnhanceInstanceIds[slot_index] = 0;
     vm_net_mock_enhance_wash_clear(&role->equippedEnhanceWash[slot_index]);
-    if (column_count >= 5 && values[4] != NULL)
+    if (column_count == 5 && values[4] != NULL)
         (void)vm_net_mock_enhance_wash_decode(values[4], lengths[4],
                                               &role->equippedEnhanceWash[slot_index]);
+    if (column_count >= 6)
+    {
+        if (values[4] != NULL)
+            (void)vm_mock_mysql_parse_u32(values[4], lengths[4],
+                                          &role->equippedEnhanceInstanceIds[slot_index]);
+        if (values[5] != NULL)
+            (void)vm_net_mock_enhance_wash_decode(values[5], lengths[5],
+                                                  &role->equippedEnhanceWash[slot_index]);
+    }
     return true;
 }
 
@@ -7451,7 +7702,7 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
     u32 item_count = 0;
     u32 enhance_level = 0;
     if (context == NULL || context->database == NULL ||
-        (column_count != 6 && column_count != 7) ||
+        (column_count != 6 && column_count != 7 && column_count != 8) ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &role_id) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &slot_index) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &item_id) ||
@@ -7474,11 +7725,21 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
     role->backpackItems[slot_index].itemId = item_id;
     role->backpackItems[slot_index].seq = (u16)item_seq;
     role->backpackItems[slot_index].enhanceLevel = (u16)enhance_level;
+    role->backpackItems[slot_index].enhanceInstanceId = 0;
     role->backpackItems[slot_index].count = item_count;
     vm_net_mock_enhance_wash_clear(&role->backpackItems[slot_index].enhanceWash);
     if (column_count == 7 && values[6] != NULL)
         (void)vm_net_mock_enhance_wash_decode(
             values[6], lengths[6], &role->backpackItems[slot_index].enhanceWash);
+    if (column_count >= 8)
+    {
+        if (values[6] != NULL)
+            (void)vm_mock_mysql_parse_u32(values[6], lengths[6],
+                                          &role->backpackItems[slot_index].enhanceInstanceId);
+        if (values[7] != NULL)
+            (void)vm_net_mock_enhance_wash_decode(
+                values[7], lengths[7], &role->backpackItems[slot_index].enhanceWash);
+    }
     return true;
 }
 
@@ -7579,7 +7840,19 @@ static bool vm_net_mock_role_equipment_ensure_enhance_column(void)
             "ADD COLUMN enhance_wash VARCHAR(96) NOT NULL DEFAULT "
             "'0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0' "
             "AFTER enhance_level",
-            "backpack_enhance_wash_column"))
+            "backpack_enhance_wash_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_equipment", "item_instance_id",
+            "ALTER TABLE account_role_equipment "
+            "ADD COLUMN item_instance_id INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER enhance_level",
+            "equipment_item_instance_id_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_backpack", "item_instance_id",
+            "ALTER TABLE account_role_backpack "
+            "ADD COLUMN item_instance_id INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER enhance_level",
+            "backpack_item_instance_id_column"))
     {
         ok = false;
         return false;
@@ -7771,6 +8044,58 @@ static bool vm_net_mock_role_ensure_pixi_cosmetics_columns(void)
     return true;
 }
 
+static bool vm_net_mock_role_ensure_intimacy_marriage_columns(void)
+{
+    static bool ensured = false;
+    static bool ok = false;
+
+    if (ensured)
+        return ok;
+    ensured = true;
+    if (!vm_net_mock_role_ensure_pixi_cosmetics_columns())
+    {
+        ok = false;
+        return false;
+    }
+    if (!vm_net_mock_role_table_ensure_column(
+            "friendships", "last_team_at",
+            "ALTER TABLE friendships "
+            "ADD COLUMN last_team_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "AFTER target_sex",
+            "friendships_last_team_at_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "friendships", "last_decay_at",
+            "ALTER TABLE friendships "
+            "ADD COLUMN last_decay_at TIMESTAMP NULL DEFAULT NULL "
+            "AFTER last_team_at",
+            "friendships_last_decay_at_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "spouse_role_id",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN spouse_role_id INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER equipped_mount_id",
+            "role_spouse_role_id_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "spouse_account_id",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN spouse_account_id VARCHAR(63) CHARACTER SET ascii "
+            "COLLATE ascii_bin NOT NULL DEFAULT '' "
+            "AFTER spouse_role_id",
+            "role_spouse_account_id_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "spouse_name",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN spouse_name VARBINARY(32) NOT NULL DEFAULT '' "
+            "AFTER spouse_account_id",
+            "role_spouse_name_column"))
+    {
+        ok = false;
+        return false;
+    }
+    ok = true;
+    return true;
+}
+
 static bool vm_net_mock_role_is_red_name(const vm_net_mock_role_state *role)
 {
     return role != NULL &&
@@ -7870,6 +8195,9 @@ static bool vm_net_mock_enhance_wash_sql_text(
 
 static bool g_vm_net_mock_role_db_format_upgraded;
 
+static void vm_net_mock_role_finalize_loaded_enhance_instances(
+    vm_net_mock_role_state *role);
+
 static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
 {
     char account_hex[129];
@@ -7920,18 +8248,34 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
             cosCtx.invalid)
             return false;
     }
+    {
+        vm_mock_mysql_spouse_load_context spCtx;
+        memset(&spCtx, 0, sizeof(spCtx));
+        spCtx.database = &g_vm_net_mock_role_db;
+        snprintf(query, sizeof(query),
+                 "SELECT role_id,spouse_role_id,IFNULL(spouse_account_id,''),"
+                 "HEX(IFNULL(spouse_name,'')) FROM account_roles "
+                 "WHERE account_id=CAST(X'%s' AS CHAR)",
+                 account_hex);
+        if (!vm_mysql_query(query, vm_mock_mysql_role_spouse_row, &spCtx) ||
+            spCtx.invalid)
+            return false;
+    }
     if (!vm_net_mock_role_equipment_ensure_enhance_column())
         return false;
     snprintf(query, sizeof(query),
-             "SELECT role_id,slot_index,item_id,enhance_level,enhance_wash FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
+             "SELECT role_id,slot_index,item_id,enhance_level,item_instance_id,enhance_wash FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_equipment_row, &context) || context.invalid)
         return false;
     snprintf(query, sizeof(query),
-             "SELECT role_id,slot_index,item_id,item_seq,item_count,enhance_level,enhance_wash FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
+             "SELECT role_id,slot_index,item_id,item_seq,item_count,enhance_level,item_instance_id,enhance_wash FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_backpack_row, &context) || context.invalid)
         return false;
+    for (u32 roleIndex = 0; roleIndex < context.database->roleCount; ++roleIndex)
+        vm_net_mock_role_finalize_loaded_enhance_instances(
+            &context.database->roles[roleIndex]);
     if (found_out)
         *found_out = true;
     return true;
@@ -8341,7 +8685,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
 
     size_t bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
-        "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id,enhance_level,enhance_wash) VALUES");
+        "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id,enhance_level,item_instance_id,enhance_wash) VALUES");
     u32 bulk_rows = 0;
     for (u32 i = 0; i < db->roleCount; ++i)
     {
@@ -8359,9 +8703,10 @@ static bool vm_net_mock_role_db_save_relational_ex(
             (void)vm_net_mock_enhance_wash_sql_text(&role->equippedEnhanceWash[slot],
                                                     washText, sizeof(washText));
             int written = snprintf(bulk_query + bulk_len, bulk_capacity - bulk_len,
-                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,'%s')",
+                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,'%s')",
                                    bulk_rows ? "," : "", account_hex, role->roleId,
-                                   slot, role->equippedItemIds[slot], enhance, washText);
+                                   slot, role->equippedItemIds[slot], enhance,
+                                   role->equippedEnhanceInstanceIds[slot], washText);
             if (written < 0 || (size_t)written >= bulk_capacity - bulk_len)
             {
                 snprintf(mysql_error, sizeof(mysql_error), "equipment query too large");
@@ -8379,7 +8724,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
 
     bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
-        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,enhance_wash) VALUES");
+        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,item_instance_id,enhance_wash) VALUES");
     bulk_rows = 0;
     for (u32 i = 0; i < db->roleCount; ++i)
     {
@@ -8396,10 +8741,11 @@ static bool vm_net_mock_role_db_save_relational_ex(
             (void)vm_net_mock_enhance_wash_sql_text(&item->enhanceWash, washText,
                                                     sizeof(washText));
             int written = snprintf(bulk_query + bulk_len, bulk_capacity - bulk_len,
-                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s')",
+                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,'%s')",
                                    bulk_rows ? "," : "", account_hex, role->roleId,
                                    slot, item->itemId, item->seq, item->count,
-                                   item->enhanceLevel, washText);
+                                   item->enhanceLevel, item->enhanceInstanceId,
+                                   washText);
             if (written < 0 || (size_t)written >= bulk_capacity - bulk_len)
             {
                 snprintf(mysql_error, sizeof(mysql_error), "backpack query too large");
@@ -10923,7 +11269,8 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
             addCount = 1;
         if (!vm_net_mock_role_add_backpack_item_to_role(
                 role, moved.itemId, addCount, moved.enhanceLevel, &addedSeq,
-                "warehouse-retrieve-bag", &moved.enhanceWash))
+                "warehouse-retrieve-bag", &moved.enhanceWash,
+                moved.enhanceInstanceId))
         {
             *warehouse = beforeWarehouse;
             if (reasonOut)
@@ -11114,13 +11461,93 @@ static bool vm_net_mock_role_grant_flask_reservoir_points(
     return true;
 }
 
+static u32 vm_net_mock_role_alloc_enhance_instance_id(vm_net_mock_role_state *role)
+{
+    u32 id = 0;
+
+    if (role == NULL)
+        return 0;
+    id = role->nextEnhanceInstanceId;
+    if (id == 0)
+        id = 1;
+    role->nextEnhanceInstanceId = id + 1;
+    if (role->nextEnhanceInstanceId == 0)
+        role->nextEnhanceInstanceId = 1;
+    return id;
+}
+
+static u32 vm_net_mock_role_ensure_equipment_instance_id(vm_net_mock_role_state *role,
+                                                           u32 existingId,
+                                                           u32 itemId)
+{
+    if (role == NULL || vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
+        return 0;
+    if (existingId != 0)
+        return existingId;
+    return vm_net_mock_role_alloc_enhance_instance_id(role);
+}
+
+static void vm_net_mock_role_refresh_enhance_instance_counter(
+    vm_net_mock_role_state *role)
+{
+    u32 maxId = 0;
+    u32 i = 0;
+
+    if (role == NULL)
+        return;
+    for (i = 0; i < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++i)
+    {
+        if (role->backpackItems[i].enhanceInstanceId > maxId)
+            maxId = role->backpackItems[i].enhanceInstanceId;
+    }
+    for (i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
+    {
+        if (role->equippedEnhanceInstanceIds[i] > maxId)
+            maxId = role->equippedEnhanceInstanceIds[i];
+    }
+    role->nextEnhanceInstanceId = maxId + 1;
+    if (role->nextEnhanceInstanceId == 0)
+        role->nextEnhanceInstanceId = 1;
+}
+
+static void vm_net_mock_role_finalize_loaded_enhance_instances(
+    vm_net_mock_role_state *role)
+{
+    u32 i = 0;
+    u32 itemCount = 0;
+
+    if (role == NULL)
+        return;
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (i = 0; i < itemCount && i < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++i)
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (item->itemId == 0 || item->count == 0)
+            continue;
+        item->enhanceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+            role, item->enhanceInstanceId, item->itemId);
+    }
+    for (i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
+    {
+        if (role->equippedItemIds[i] == 0)
+            continue;
+        role->equippedEnhanceInstanceIds[i] =
+            vm_net_mock_role_ensure_equipment_instance_id(
+                role, role->equippedEnhanceInstanceIds[i],
+                role->equippedItemIds[i]);
+    }
+    vm_net_mock_role_refresh_enhance_instance_counter(role);
+}
+
 static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
                                                         u32 itemId,
                                                         u32 count,
                                                         u16 enhanceLevel,
                                                         u16 *seqOut,
                                                         const char *reason,
-                                                        const vm_net_mock_enhance_wash_state *wash)
+                                                        const vm_net_mock_enhance_wash_state *wash,
+                                                        u32 enhanceInstanceId)
 {
     const vm_net_mock_item_effect_catalog_item *effect = NULL;
     u32 reservoirCapacity = 0;
@@ -11284,6 +11711,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
             item->count = 1;
             item->enhanceLevel = clampedEnhance;
+            item->enhanceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+                role, enhanceInstanceId, itemId);
             if (wash != NULL)
                 vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
             if (firstSeq == 0)
@@ -11346,7 +11775,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut)
 {
     return vm_net_mock_role_add_backpack_item_to_role(
-        vm_net_mock_active_role(), itemId, count, 0, seqOut, NULL, NULL);
+        vm_net_mock_active_role(), itemId, count, 0, seqOut, NULL, NULL, 0);
 }
 
 static bool vm_net_mock_role_add_backpack_item_enhanced(u32 itemId, u32 count,
@@ -11356,7 +11785,7 @@ static bool vm_net_mock_role_add_backpack_item_enhanced(u32 itemId, u32 count,
 {
     return vm_net_mock_role_add_backpack_item_to_role(
         vm_net_mock_active_role(), itemId, count, enhanceLevel, seqOut, NULL,
-        wash);
+        wash, 0);
 }
 
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
@@ -11630,11 +12059,21 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
     {
         u16 newEnhance = item->enhanceLevel;
         u16 oldEnhance = role->equippedEnhanceLevels[slot];
+        u32 newInstanceId = item->enhanceInstanceId;
+        u32 oldInstanceId = role->equippedEnhanceInstanceIds[slot];
         vm_net_mock_enhance_wash_state newWash;
         vm_net_mock_enhance_wash_state oldWash;
 
         vm_net_mock_enhance_wash_copy(&newWash, &item->enhanceWash);
         vm_net_mock_enhance_wash_copy(&oldWash, &role->equippedEnhanceWash[slot]);
+        newInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+            role, newInstanceId, itemId);
+        vm_net_mock_enhance_wash_coalesce_from_record(
+            role->roleId, newInstanceId, itemId, item->enhanceLevel, seq,
+            &newWash);
+        vm_net_mock_enhance_wash_coalesce_from_record(
+            role->roleId, oldInstanceId, role->equippedItemIds[slot],
+            role->equippedEnhanceLevels[slot], 0, &oldWash);
         if (newEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             newEnhance = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         if (oldEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
@@ -11648,19 +12087,23 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
         }
         role->equippedItemIds[slot] = itemId;
         role->equippedEnhanceLevels[slot] = newEnhance;
+        role->equippedEnhanceInstanceIds[slot] = newInstanceId;
         vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot], &newWash);
         if (oldItemId != 0)
         {
             u16 oldSeq = 0;
-            if (!vm_net_mock_role_add_backpack_item_enhanced(oldItemId, 1, oldEnhance,
-                                                             &oldSeq, &oldWash))
+            if (!vm_net_mock_role_add_backpack_item_to_role(
+                    role, oldItemId, 1, oldEnhance, &oldSeq, NULL, &oldWash,
+                    oldInstanceId))
             {
                 role->equippedItemIds[slot] = oldItemId;
                 role->equippedEnhanceLevels[slot] = oldEnhance;
+                role->equippedEnhanceInstanceIds[slot] = oldInstanceId;
                 vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot],
                                               &oldWash);
-                (void)vm_net_mock_role_add_backpack_item_enhanced(itemId, 1, newEnhance,
-                                                                   NULL, &newWash);
+                (void)vm_net_mock_role_add_backpack_item_to_role(
+                    role, itemId, 1, newEnhance, NULL, NULL, &newWash,
+                    newInstanceId);
                 if (reasonOut)
                     *reasonOut = "old-return-failed";
                 return false;

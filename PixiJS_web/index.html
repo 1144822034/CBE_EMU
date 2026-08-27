@@ -76,15 +76,21 @@
       #stage {
         flex: 1;
         min-height: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        /* LCD is absolutely centered — avoid flex+transform compositor races. */
+        display: block;
         background: #05070a;
         position: relative;
+        overflow: hidden;
       }
-      /* Size set by fitPhoneWrap() to exact 240:400 — no side letterbox */
+      /*
+       * Size set by fitPhoneWrap() to exact 240:400 — no side letterbox.
+       * left/top 50% + translate(-50%,-50%) is the stable center (see imeShell).
+       */
       #phone-wrap {
-        position: relative;
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
         margin: 0;
         border: 0;
         border-radius: 0;
@@ -93,16 +99,17 @@
         overflow: hidden;
         width: 240px;
         height: 400px;
-        flex-shrink: 0;
       }
       #phone-wrap canvas {
+        position: absolute;
+        inset: 0;
         display: block;
         width: 100% !important;
         height: 100% !important;
         image-rendering: pixelated;
         image-rendering: crisp-edges;
       }
-      /* Top-right: toggle HTML D-pad / softkey chrome */
+      /* Top-right of LCD (inside #phone-wrap so it tracks recover shifts) */
       #touch-chrome-toggle {
         position: absolute;
         top: 8px;
@@ -395,13 +402,14 @@
   <body>
     <div id="app">
       <div id="stage">
-        <div id="phone-wrap"></div>
-        <button
-          type="button"
-          id="touch-chrome-toggle"
-          aria-label="隐藏或显示方向键"
-          title="隐藏方向键（保留左软/OK/右软）"
-        ></button>
+        <div id="phone-wrap">
+          <button
+            type="button"
+            id="touch-chrome-toggle"
+            aria-label="隐藏或显示方向键"
+            title="隐藏方向键（保留左软/OK/右软）"
+          ></button>
+        </div>
       </div>
       <div id="touch-bar">
         <button type="button" class="sk" id="sk-left" disabled>左软</button>

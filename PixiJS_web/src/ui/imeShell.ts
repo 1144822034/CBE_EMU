@@ -7,16 +7,46 @@
  *   *before* the keyboard resizes the WebView / 100dvh.
  * - Never shrink an existing lock (keyboard race / adjustResize).
  * - `.ime-open` CSS collapses D-pad to 左软|OK|右软 and pins #app to --ime-layout-h.
+ * - `#phone-wrap` is absolutely centered with `translate(-50%, -50%)`. IME pan
+ *   and recover must restore that centering transform — clearing to "" lets
+ *   Chromium/WebView compositor layers stay shifted after GL restore.
  */
 let activeCount = 0;
 let lockedCssW = 0;
 let lockedCssH = 0;
 let onViewport: (() => void) | null = null;
 
+/** Stable #phone-wrap centering (absolute left/top 50% + this transform). */
+export const SHELL_WRAP_CENTER_TRANSFORM = "translate(-50%, -50%)";
+
 export type ImeShellLock = {
   /** CSS pixel size of #phone-wrap while IME is open (0 = not locked). */
   width: number;
   height: number;
+};
+
+export type ShellViewportSnapshot = {
+  scrollX: number;
+  scrollY: number;
+  vvOffsetLeft: number;
+  vvOffsetTop: number;
+  vvWidth: number;
+  vvHeight: number;
+  wrapTransform: string;
+  wrapW: number;
+  wrapH: number;
+  wrapLeft: number;
+  wrapTop: number;
+  stageW: number;
+  stageH: number;
+  stageLeft: number;
+  stageTop: number;
+  padL: number;
+  padR: number;
+  padT: number;
+  padB: number;
+  misaligned: boolean;
+  imeActive: boolean;
 };
 
 export function imeShellIsActive(): boolean {
@@ -131,19 +161,53 @@ function clearLayoutHeight(): void {
   document.documentElement.style.removeProperty("--ime-layout-h");
 }
 
-function clearViewportOffset(): void {
+function applyWrapTransform(ox: number, oy: number): void {
   const wrap = document.getElementById("phone-wrap");
-  if (wrap) wrap.style.transform = "";
+  if (!wrap) return;
+  if (ox !== 0 || oy !== 0) {
+    wrap.style.transform = `translate(calc(-50% - ${ox}px), calc(-50% - ${oy}px))`;
+  } else {
+    wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
+  }
+}
+
+function clearViewportOffset(): void {
+  applyWrapTransform(0, 0);
   const app = document.getElementById("app");
-  if (app) app.style.transform = "";
+  if (app) {
+    app.style.transform = "";
+    /* ime-open uses CSS position:fixed — wipe any leftover inline pin. */
+    if (activeCount <= 0) {
+      app.style.position = "";
+      app.style.top = "";
+      app.style.left = "";
+      app.style.width = "";
+      app.style.height = "";
+      app.style.maxHeight = "";
+    }
+  }
 }
 
 /**
  * Undo WebView adjustPan / visualViewport / IME translate residue.
- * Black-screen GL recover used to skip this → LCD content stayed shifted
- * toward the top-left and the HUD corner was clipped.
+ * Black-screen GL recover used to skip this → LCD stayed shifted toward
+ * top-left; stage letterbox + fixed #touch-chrome-toggle looked like the
+ * top-right "covered" the game.
  */
 export function resetShellViewportLayout(): void {
+  try {
+    const ae = document.activeElement;
+    if (
+      ae &&
+      ae !== document.body &&
+      ae !== document.documentElement &&
+      typeof (ae as HTMLElement).blur === "function"
+    ) {
+      (ae as HTMLElement).blur();
+    }
+  } catch {
+    /* ignore */
+  }
   clearViewportOffset();
   try {
     window.scrollTo(0, 0);
@@ -171,7 +235,84 @@ export function resetShellViewportLayout(): void {
     clearLayoutHeight();
     document.getElementById("app")?.classList.remove("ime-open");
     document.documentElement.classList.remove("ime-open");
+    lockedCssW = 0;
+    lockedCssH = 0;
+    wireViewport(false);
   }
+}
+
+/** Layout/compositor forensics for black-screen recover shift. */
+export function shellViewportSnapshot(): ShellViewportSnapshot {
+  const wrap = document.getElementById("phone-wrap");
+  const stage = document.getElementById("stage");
+  const vv = window.visualViewport;
+  const wr = wrap?.getBoundingClientRect();
+  const sr = stage?.getBoundingClientRect();
+  const padL = wr && sr ? wr.left - sr.left : 0;
+  const padR = wr && sr ? sr.right - wr.right : 0;
+  const padT = wr && sr ? wr.top - sr.top : 0;
+  const padB = wr && sr ? sr.bottom - wr.bottom : 0;
+  const misaligned =
+    !!wr &&
+    !!sr &&
+    (Math.abs(padL - padR) > 3 ||
+      Math.abs(padT - padB) > 3 ||
+      wr.left < sr.left - 2 ||
+      wr.top < sr.top - 2);
+  return {
+    scrollX: window.scrollX || 0,
+    scrollY: window.scrollY || 0,
+    vvOffsetLeft: vv?.offsetLeft || 0,
+    vvOffsetTop: vv?.offsetTop || 0,
+    vvWidth: vv?.width || 0,
+    vvHeight: vv?.height || 0,
+    wrapTransform: wrap?.style.transform || "",
+    wrapW: wrap?.clientWidth || 0,
+    wrapH: wrap?.clientHeight || 0,
+    wrapLeft: wr?.left || 0,
+    wrapTop: wr?.top || 0,
+    stageW: stage?.clientWidth || 0,
+    stageH: stage?.clientHeight || 0,
+    stageLeft: sr?.left || 0,
+    stageTop: sr?.top || 0,
+    padL,
+    padR,
+    padT,
+    padB,
+    misaligned,
+    imeActive: activeCount > 0,
+  };
+}
+
+/**
+ * After GL restore, Chromium sometimes keeps a shifted compositor layer even
+ * when layout math is correct. Bounce transform + canvas display to repaint.
+ */
+export function kickShellCompositor(): void {
+  const wrap = document.getElementById("phone-wrap");
+  if (!wrap) return;
+  const center = SHELL_WRAP_CENTER_TRANSFORM;
+  wrap.style.transform = `${center} translateZ(0)`;
+  void wrap.offsetHeight;
+  applyWrapTransform(0, 0);
+  const canvas = wrap.querySelector("canvas") as HTMLElement | null;
+  if (canvas) {
+    const prev = canvas.style.display;
+    canvas.style.display = "none";
+    void canvas.offsetHeight;
+    canvas.style.display = prev || "";
+  }
+}
+
+/**
+ * Reset + compositor kick; returns true when geometry was (or still is) skewed.
+ */
+export function repairShellViewportAlignment(): boolean {
+  const before = shellViewportSnapshot();
+  resetShellViewportLayout();
+  kickShellCompositor();
+  const after = shellViewportSnapshot();
+  return before.misaligned || after.misaligned;
 }
 
 function wireViewport(on: boolean): void {
@@ -179,15 +320,14 @@ function wireViewport(on: boolean): void {
   if (!vv) return;
   if (on && !onViewport) {
     onViewport = () => {
-      if (activeCount <= 0) return;
+      if (activeCount <= 0) {
+        applyWrapTransform(0, 0);
+        return;
+      }
       /* Keep layout viewport fixed; nudge wrap so focused field stays on-screen. */
       const ox = vv.offsetLeft || 0;
       const oy = vv.offsetTop || 0;
-      const wrap = document.getElementById("phone-wrap");
-      if (wrap) {
-        wrap.style.transform =
-          ox !== 0 || oy !== 0 ? `translate(${-ox}px, ${-oy}px)` : "";
-      }
+      applyWrapTransform(ox, oy);
       window.scrollTo(0, 0);
     };
     vv.addEventListener("resize", onViewport);
@@ -197,5 +337,6 @@ function wireViewport(on: boolean): void {
     vv.removeEventListener("resize", onViewport);
     vv.removeEventListener("scroll", onViewport);
     onViewport = null;
+    applyWrapTransform(0, 0);
   }
 }

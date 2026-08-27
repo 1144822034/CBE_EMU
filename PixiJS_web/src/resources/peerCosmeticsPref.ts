@@ -1,5 +1,6 @@
 /**
- * Client-only: show/hide nearby players' wings / mounts / animated titles.
+ * Client-only: show/hide nearby players' wings / mounts / animated titles,
+ * and pick e_deity sheet (on → e_deity.png, off → stock e_deity.gif).
  * Does not change server cosmetics or local self overlays.
  */
 

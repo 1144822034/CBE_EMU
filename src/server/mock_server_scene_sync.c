@@ -3824,6 +3824,8 @@ static const char *vm_net_mock_npc_dialog_text(u32 actorId)
         return "\xc7\xb0\xc3\xe6\xca\xc7\xbb\xca\xb9\xac\xd6\xd8\xb5\xd8\xa3\xa1";
     case 20092: /* 胡斐：04临安胡斐.xse 的常态对白 */
         return "\xc8\xcb\xd4\xda\xbd\xad\xba\xfe\xc6\xae\xa3\xac\xc4\xc4\xc4\xdc\xb2\xbb\xb0\xa4\xb5\xb6\xa3\xbf\xb0\xa4\xb5\xb6\xb2\xbb\xd3\xc3\xc5\xc2\xa3\xac\xbc\xd7\xba\xf1\xc8\xcb\xb2\xbb\xb9\xd2\xa3\xa1";
+    case VM_NET_MOCK_YUELAO_ACTOR_ID: /* 月老 @ 南宣门 */
+        return "\xd3\xd0\xd4\xb5\xc7\xa7\xc0\xef\xc0\xb4\xcf\xe0\xbb\xe1\xa3\xac\xc7\xd7\xc3\xdc\xb6\xc8\xc2\xfa\xc8\xfd\xc7\xa7\xbf\xc9\xd4\xda\xb4\xcb\xb5\xde\xbd\xe1\xd2\xf6\xd4\xb5\xa1\xa3";
     default:
         return "\xc9\xd9\xcf\xc0\xa3\xac\xd3\xd0\xca\xb2\xc3\xb4\xca\xc2\xc2\xf0\xa3\xbf"; /* 少侠，有什么事吗？ */
     }
@@ -4529,6 +4531,22 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                     "\xd1\xba\xbd\xf0\xb6\xd4\xbe\xf6"; /* 押金对决 */
                 serviceOptionValues[serviceOptionCount] =
                     VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER;
+                serviceOptionCount += 1;
+            }
+        }
+        /* 月老：缔结姻缘 */
+        if (matchedSeed->actorId == VM_NET_MOCK_YUELAO_ACTOR_ID ||
+            (matchedSeed->displayName[0] &&
+             strcmp(matchedSeed->displayName, "\xd4\xc2\xc0\xcf") == 0))
+        {
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xb5\xde\xbd\xe1\xd2\xf6\xd4\xb5"; /* 缔结姻缘 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xc7\xa3\xba\xec\xcf\xdf\xbd\xe1\xc1\xbc\xd4\xb5"; /* 牵红线结良缘 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_MARRY;
                 serviceOptionCount += 1;
             }
         }
@@ -7779,6 +7797,152 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         optionValues[optionCount] = 0;
         ++optionCount;
     }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_MARRY)
+    {
+        vm_mock_service_client_session *self =
+            vm_mock_service_get_active_client_session();
+        vm_mock_service_team *team =
+            self ? vm_mock_service_team_find_for_client(self->clientId) : NULL;
+        vm_mock_service_client_session *partner = NULL;
+        vm_net_mock_role_state *selfRole = role;
+        vm_net_mock_role_state *partnerRole = NULL;
+        vm_mock_service_friend_record frec;
+        char err[128];
+        u8 mi;
+        const char *sceneSelf =
+            self && self->sceneVisibleScene[0] ? self->sceneVisibleScene
+                                               : (selfRole ? selfRole->scene : "");
+        bool southGate =
+            sceneSelf &&
+            (strstr(sceneSelf, "\xc1\xd9\xb0\xb2\xb8\xae_01") != NULL ||
+             strstr(sceneSelf, "临安府_01") != NULL);
+
+        action = "marry";
+        dialogText =
+            "\xcc\xf5\xbc\xfe\xb2\xbb\xd7\xe3\xa3\xba\xd0\xe8\xc7\xd7\xc3\xdc"
+            "\xb6\xc8\x33\x30\x30\x30\xc7\xd2\xcb\xab\xb7\xbd\xcd\xac\xd4\xda"
+            "\xc4\xcf\xd0\xfb\xc3\xc5\xce\xb4\xbb\xe9"; /* fallback refuse */
+        if (self == NULL || selfRole == NULL || self->onlineRoleId == 0)
+        {
+            /* keep refuse */
+        }
+        else if (selfRole->spouseRoleId != 0)
+        {
+            dialogText = "\xc4\xe3\xd2\xd1\xbe\xad\xbb\xe9\xc5\xe4\xa1\xa3"; /* 你已经婚配。 */
+        }
+        else if (!southGate)
+        {
+            dialogText =
+                "\xc7\xeb\xc7\xb0\xcd\xf9\xc4\xcf\xd0\xfb\xc3\xc5\xd4\xc2\xc0\xcf"
+                "\xb4\xa6\xa1\xa3"; /* 请前往南宣门月老处。 */
+        }
+        else if (team == NULL || team->memberCount < 2)
+        {
+            dialogText =
+                "\xc7\xeb\xd3\xeb\xd0\xc4\xd2\xc7\xba\xc3\xd3\xd1\xd7\xe9\xb6\xd3"
+                "\xba\xf3\xc0\xb4\xd5\xd2\xd4\xc2\xc0\xcf"; /* 请与心仪好友组队后来找月老 */
+        }
+        else
+        {
+            for (mi = 0; mi < team->memberCount; ++mi)
+            {
+                vm_mock_service_client_session *cand =
+                    vm_mock_service_find_client_session(team->memberClientIds[mi]);
+                const char *candScene;
+                if (cand == NULL || cand->clientId == self->clientId ||
+                    cand->onlineRoleId == 0)
+                    continue;
+                candScene = cand->sceneVisibleScene[0] ? cand->sceneVisibleScene
+                                                       : cand->onlineScene;
+                if (candScene == NULL ||
+                    (strstr(candScene, "\xc1\xd9\xb0\xb2\xb8\xae_01") == NULL &&
+                     strstr(candScene, "临安府_01") == NULL))
+                    continue;
+                if (!vm_mock_service_friend_db_mysql_find_owner_target(
+                        self->accountId, self->onlineRoleId, cand->onlineRoleId,
+                        &frec) ||
+                    frec.friendDegree < VM_NET_MOCK_MARRY_MIN_DEGREE)
+                    continue;
+                partner = cand;
+                break;
+            }
+            if (partner == NULL)
+            {
+                dialogText =
+                    "\xcc\xf5\xbc\xfe\xb2\xbb\xd7\xe3\xa3\xba\xd0\xe8\xc7\xd7\xc3\xdc"
+                    "\xb6\xc8\x33\x30\x30\x30\xc7\xd2\xcb\xab\xb7\xbd\xcd\xac\xd4\xda"
+                    "\xc4\xcf\xd0\xfb\xc3\xc5\xce\xb4\xbb\xe9";
+            }
+            else
+            {
+                /* Resolve partner role from their account DB if same process. */
+                for (mi = 0; mi < g_vm_net_mock_role_db.roleCount; ++mi)
+                {
+                    if (g_vm_net_mock_role_db.roles[mi].roleId == partner->onlineRoleId)
+                    {
+                        partnerRole = &g_vm_net_mock_role_db.roles[mi];
+                        break;
+                    }
+                }
+                if (partnerRole == NULL)
+                {
+                    /* Load from online name only; persist still works. */
+                }
+                if (partnerRole != NULL && partnerRole->spouseRoleId != 0)
+                {
+                    dialogText =
+                        "\xb6\xd4\xb7\xbd\xd2\xd1\xbe\xad\xbb\xe9\xc5\xe4\xa1\xa3"; /* 对方已经婚配。 */
+                    partner = NULL;
+                }
+                else if (!vm_mock_service_marriage_persist_pair(
+                             self->accountId, self->onlineRoleId,
+                             selfRole->name[0] ? selfRole->name
+                                               : self->onlineRoleName,
+                             partner->accountId, partner->onlineRoleId,
+                             partner->onlineRoleName[0] ? partner->onlineRoleName
+                                                        : "Player",
+                             err, sizeof(err)))
+                {
+                    dialogText =
+                        "\xb5\xde\xbd\xe1\xd2\xf6\xd4\xb5\xca\xa7\xb0\xdc\xa1\xa3"; /* 缔结姻缘失败。 */
+                    partner = NULL;
+                }
+                else
+                {
+                    selfRole->spouseRoleId = partner->onlineRoleId;
+                    snprintf(selfRole->spouseAccountId,
+                             sizeof(selfRole->spouseAccountId), "%s",
+                             partner->accountId);
+                    snprintf(selfRole->spouseName, sizeof(selfRole->spouseName),
+                             "%s",
+                             partner->onlineRoleName[0] ? partner->onlineRoleName
+                                                        : "Player");
+                    if (partnerRole != NULL)
+                    {
+                        partnerRole->spouseRoleId = self->onlineRoleId;
+                        snprintf(partnerRole->spouseAccountId,
+                                 sizeof(partnerRole->spouseAccountId), "%s",
+                                 self->accountId);
+                        snprintf(partnerRole->spouseName,
+                                 sizeof(partnerRole->spouseName), "%s",
+                                 selfRole->name);
+                    }
+                    dialogText =
+                        "\xba\xec\xc2\xeb\xcf\xdf\xd2\xd1\xc7\xa7\xa3\xac\xb5\xde"
+                        "\xbd\xe1\xd2\xf6\xd4\xb5\xb3\xc9\xb9\xa6\xa1\xa3"; /* 红绳已牵，缔结姻缘成功。 */
+                    action = "marry-ok";
+                    vm_mock_service_marriage_celebrate_and_arm_world_buff(
+                        selfRole->name[0] ? selfRole->name : self->onlineRoleName,
+                        partner->onlineRoleName[0] ? partner->onlineRoleName
+                                                   : "Player");
+                }
+            }
+        }
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
     else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
@@ -9105,7 +9269,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                  role, buyItem->itemId, 1, 0, &backpackAddSeq,
                                  buyItem->isEquip ? "coolmall-equip-buy"
                                                   : "coolmall-item-buy",
-                                 NULL))
+                                 NULL, 0))
                     {
                         dialogText =
                             "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3";
@@ -9427,7 +9591,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         role, buyItem->itemId, 1, 0, &backpackAddSeq,
                         buyItem->isEquip ? "npc-equipment-buy"
                                          : "npc-medicine-buy",
-                        NULL))
+                        NULL, 0))
                 {
                     if (payWcoin)
                         role->wcoin += buyItem->price;

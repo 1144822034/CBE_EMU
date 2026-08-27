@@ -4225,6 +4225,21 @@ static u32 vm_net_mock_append_builtin_scene_npcinfo_seeds(
         seeds[count++] = seed;
     }
 
+    /* 月老：第 4 显示名槽（RegisterDisplayName 上限 4）. */
+    if (count < seedCap)
+    {
+        memset(&seed, 0, sizeof(seed));
+        seed.actorId = VM_NET_MOCK_YUELAO_ACTOR_ID;
+        seed.x = 200;
+        seed.y = 200;
+        snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_man1.actor");
+        snprintf(seed.displayName, sizeof(seed.displayName), "%s",
+                 "\xd4\xc2\xc0\xcf"); /* 月老 */
+        snprintf(seed.scriptName, sizeof(seed.scriptName), "%s",
+                 "\x30\x34\xc1\xd9\xb0\xb2\xba\xfa\xec\xb3\x2e\x78\x73\x65");
+        seeds[count++] = seed;
+    }
+
     return count;
 }
 

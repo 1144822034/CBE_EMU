@@ -1,5 +1,10 @@
 import { unwrapResource } from "./lzss";
-import { decodeLkv2Gif, type GifRgba } from "./lkv2Gif";
+import {
+  decodeLkv2Gif,
+  decodeRasterImageBytes,
+  isRasterImageMagic,
+  type GifRgba,
+} from "./lkv2Gif";
 import {
   parseSce2,
   parseSceCombatSpawns,
@@ -20,6 +25,7 @@ import { sceneAssetCandidates } from "../net/protocol";
 import { jhOnlineDataUrl, publicAssetUrl } from "./publicUrl";
 import {
   downloadNamedResourceViaWt,
+  isLocalRasterRedesign,
   namedResourceContentVersion,
   resourceWireName,
   wantsLiveResourceSync,
@@ -66,7 +72,7 @@ export function shouldVersionCheckResource(name: string): boolean {
   const leaf = name.split(/[/\\]/).pop() || name;
   const lower = leaf.toLowerCase();
   if (lower.endsWith(".sce") || lower.endsWith(".map")) return true;
-  if (/^e_.+\.(actor|gif)$/i.test(leaf)) return true;
+  if (/^e_.+\.(actor|gif|png)$/i.test(leaf)) return true;
   if (!leaf.includes(".")) return true;
   return false;
 }
@@ -185,6 +191,10 @@ async function syncLiveResource(
   local: Uint8Array | null,
 ): Promise<Uint8Array | null> {
   if (!resourceExchange || !wantsLiveResourceSync(name)) return null;
+  // Keep PixiJS redesign PNG/JPEG art; do not let stock LKV2 WT18/7 clobber it.
+  if (isLocalRasterRedesign(local)) {
+    return local;
+  }
   const wire = resourceWireName(name);
   const localVer = local
     ? namedResourceContentVersion(wire, local)
@@ -319,7 +329,16 @@ export async function loadGif(
   name: string,
   opts?: FetchResourceOpts,
 ): Promise<GifRgba> {
-  const payload = await loadDecodedPayload(name, opts);
+  const raw = await fetchResourceBytes(name, opts);
+  // PixiJS accepts plain PNG/JPEG/WebP dropped in as *.gif (no LKV2).
+  if (isRasterImageMagic(raw)) {
+    // Only punch true sheet background (not black hair / dark outlines).
+    return decodeRasterImageBytes(raw, { keyNearBlack: 18 });
+  }
+  const payload = unwrapResource(raw);
+  if (isRasterImageMagic(payload)) {
+    return decodeRasterImageBytes(payload, { keyNearBlack: 18 });
+  }
   return decodeLkv2Gif(payload);
 }
 

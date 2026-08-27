@@ -4147,10 +4147,10 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
             if (reward->itemId && reward->itemCount)
                 (void)vm_net_mock_role_add_backpack_item_to_role(
                     role, reward->itemId, reward->itemCount, 0, &seq,
-                    "arena-claim-item", NULL);
+                    "arena-claim-item", NULL, 0);
             if (reward->equipId)
                 (void)vm_net_mock_role_add_backpack_item_to_role(
-                    role, reward->equipId, 1, 0, &seq, "arena-claim-equip", NULL);
+                    role, reward->equipId, 1, 0, &seq, "arena-claim-equip", NULL, 0);
             p->claimed = 1;
             (void)vm_mock_arena_persist_score(p);
             result = 1;

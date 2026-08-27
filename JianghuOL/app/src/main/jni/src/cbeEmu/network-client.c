@@ -919,7 +919,8 @@ static void vm_client_finish_wt_packet(u8 *packet, u32 len, u8 objectCount)
 static bool vm_client_wt_object_is_cbe_unsupported(
     const vm_client_response_object *object)
 {
-    return object != NULL && object->major == 1 && object->kind == 31;
+    return object != NULL && object->major == 1 &&
+           (object->kind == 31 || object->kind == 32);
 }
 
 static bool vm_client_strip_cbe_unsupported_objects(u8 **packet, u32 *packetLen);

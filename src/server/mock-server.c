@@ -149,6 +149,7 @@ static u32 vm_net_mock_build_enmity_protocol_response(const u8 *request,
 #include "mock_server_auction.c"
 #include "mock_server_enmity.c"
 #include "mock_server_social.c"
+#include "mock_server_marriage.c"
 #include "mock_server_battle.c"
 #include "mock_server_interaction_login.c"
 #include "mock_server_dispatch.c"

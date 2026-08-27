@@ -177,6 +177,7 @@ import {
   parseFlaskReservoirUpdates,
   applyFlaskReservoirsToBag,
   preserveFlaskReservoirAcrossBagRefresh,
+  preferEnhanceAttrs,
   bagVisibleStackCount,
   parseItemEquipResult,
   parseWornEquipmentSnapshot,
@@ -214,9 +215,11 @@ import {
   parseQuickRepairConfirm,
   buildCosmeticsQueryRequest,
   buildCosmeticsEquipRequest,
+  buildSpouseTeleportRequest,
   parseCosmeticsState,
   parseCosmeticsEquipResult,
   parseCosmeticsPeerUpdates,
+  parseSpouseTeleportAck,
   COSMETIC_KIND_CHENGHAO,
   COSMETIC_KIND_WING,
   COSMETIC_KIND_MOUNT,
@@ -292,6 +295,7 @@ import {
 import { decodeWtPacket, type WtPacket } from "../net/wt";
 import {
   type BagItem,
+  type BagEnhanceAttr,
   type BattleActionUpdate,
   type CharacterStats,
   type DesignationPage,
@@ -655,6 +659,8 @@ export class GameSession {
    * by the destination bag seq until the next bag merge applies it.
    */
   private pendingBagEquipDurability = new Map<number, number>();
+  /** Unequip/swap: preserve washed milestone attrs until bag refresh merges. */
+  private pendingBagEquipEnhance = new Map<number, BagEnhanceAttr[]>();
   mallState: MallState | null = null;
   characterStats: CharacterStats | null = null;
   inBattle = false;
@@ -854,6 +860,7 @@ export class GameSession {
     this.bagItems = [];
     this.wornItems = [];
     this.pendingBagEquipDurability.clear();
+    this.pendingBagEquipEnhance.clear();
     this.learnedSkillIds = [];
     this.learnedSkills = [];
     this.characterStats = null;
@@ -3312,20 +3319,41 @@ export class GameSession {
     }
   }
 
-  /** Merge bag-equip durability: pending unequip/swap → prior seq → wire (1). */
+  /** Merge bag-equip durability + washed attrs after unequip/swap/wire refresh. */
   private applyBagEquipDurability(it: BagItem, prev?: BagItem): BagItem {
     if (it.kind !== "equip") return it;
+    let next = it;
     const pending = this.pendingBagEquipDurability.get(it.seq);
     if (pending != null) {
       this.pendingBagEquipDurability.delete(it.seq);
-      return { ...it, count: 1, durability: pending >>> 0 };
+      next = { ...next, count: 1, durability: pending >>> 0 };
+    } else if (prev?.kind === "equip" && prev.durability != null) {
+      next = { ...next, count: 1, durability: prev.durability >>> 0 };
+    } else if (next.durability != null) {
+      next = { ...next, count: 1 };
+    } else {
+      next = { ...next, count: 1, durability: 1 };
     }
-    if (prev?.kind === "equip" && prev.durability != null) {
-      return { ...it, count: 1, durability: prev.durability >>> 0 };
+    const pendingAttrs = this.pendingBagEquipEnhance.get(it.seq);
+    if (pendingAttrs?.length) {
+      this.pendingBagEquipEnhance.delete(it.seq);
+      const attrs = preferEnhanceAttrs(next.enhanceAttrs, pendingAttrs);
+      next = {
+        ...next,
+        enhance: next.enhance || prev?.enhance || 0,
+        ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
+      };
+    } else if (prev?.kind === "equip") {
+      const attrs = preferEnhanceAttrs(next.enhanceAttrs, prev.enhanceAttrs);
+      if (attrs && attrs.length) {
+        next = {
+          ...next,
+          enhance: next.enhance || prev.enhance || 0,
+          enhanceAttrs: attrs,
+        };
+      }
     }
-    if (it.durability != null) return { ...it, count: 1 };
-    // Login / fresh grant: server wire count = 1 → current durability 1.
-    return { ...it, count: 1, durability: 1 };
+    return next;
   }
 
   /** Pixi 装备信息：每次打开拉 1/7/22 → 7/7 type=2 当前穿戴. */
@@ -3962,6 +3990,9 @@ export class GameSession {
             ? worn.durability
             : (lookupItemSync(worn.itemId)?.durabilityMax ?? 0);
         this.pendingBagEquipDurability.set(eq.seq, dur >>> 0);
+        if (worn.enhanceAttrs?.length) {
+          this.pendingBagEquipEnhance.set(eq.seq, worn.enhanceAttrs);
+        }
       }
     }
     this.handleBodies(bodies);
@@ -3978,6 +4009,9 @@ export class GameSession {
           ? worn.durability
           : (lookupItemSync(worn.itemId)?.durabilityMax ?? 0);
       this.pendingBagEquipDurability.set(bagSeq, dur >>> 0);
+      if (worn.enhanceAttrs?.length) {
+        this.pendingBagEquipEnhance.set(bagSeq, worn.enhanceAttrs);
+      }
     }
     const bodies = await this.transport.exchange(
       0,
@@ -4720,11 +4754,38 @@ export class GameSession {
     const p = Math.max(1, page | 0);
     this.friendPage = p;
     const index = (p - 1) * FRIEND_PAGE_SIZE;
+    /* Refresh spouseRoleId so friend list can mark 配偶. */
+    if (!this.characterStats || !(this.characterStats.spouseRoleId > 0)) {
+      try {
+        await this.openCharacterStats();
+      } catch {
+        /* optional */
+      }
+    }
     const bodies = await this.transport.exchange(
       0,
       buildFriendPageRequest(index, FRIEND_PAGE_SIZE),
     );
     this.handleBodies(bodies);
+  }
+
+  /** Warp to spouse (WT 1/32/1). Server returns scene-enter or 32/2 fail tip. */
+  async spouseTeleport(): Promise<{ ok: boolean; tip: string }> {
+    if (!this.transport) return { ok: false, tip: "未连接服务器" };
+    const bodies = await this.transport.exchange(0, buildSpouseTeleportRequest());
+    let tip = "";
+    let fail = false;
+    for (const body of bodies) {
+      const packet = ingestPacket(body);
+      if (!packet) continue;
+      const ack = parseSpouseTeleportAck(packet);
+      if (ack) {
+        tip = ack.tip || (ack.result === 1 ? "" : "传送失败");
+        if (ack.result !== 1) fail = true;
+      }
+    }
+    this.handleBodies(bodies);
+    return { ok: !fail, tip };
   }
 
   async openEnmity(dir = 0, page = 1): Promise<void> {
@@ -5490,11 +5551,15 @@ export class GameSession {
 
       const friendPage = parseFriendPage(packet);
       if (friendPage) {
-        this.friends = friendPage.friends;
+        const spouseId = this.characterStats?.spouseRoleId ?? 0;
+        this.friends = friendPage.friends.map((f) => ({
+          ...f,
+          isSpouse: spouseId > 0 && f.id === spouseId,
+        }));
         this.friendAllPages = Math.max(1, friendPage.allpgs | 0);
         if (this.friendPage > this.friendAllPages)
           this.friendPage = this.friendAllPages;
-        this.cb.onFriends?.(friendPage.friends);
+        this.cb.onFriends?.(this.friends);
       }
 
       const enmityPage = parseEnmityPage(packet);
@@ -5851,7 +5916,10 @@ export class GameSession {
         const updates = parseBagItemUpdates(packet);
         if (updates.length) {
           for (const u of updates) {
-            if (u.count <= 0) this.pendingBagEquipDurability.delete(u.seq);
+            if (u.count <= 0) {
+              this.pendingBagEquipDurability.delete(u.seq);
+              this.pendingBagEquipEnhance.delete(u.seq);
+            }
           }
           const merged = mergeBagItemUpdateDeltas(this.bagItems, updates);
           this.bagItems = merged.map((u) => {
@@ -5907,6 +5975,11 @@ export class GameSession {
         this.gold = stats.money >>> 0;
         this.pkPoints = stats.pkPoints >>> 0;
         if (stats.level > 0) this.level = stats.level;
+        {
+          const g = (stats.guild || "").replace(/\0+$/g, "").trim();
+          if (g && g !== "无" && g !== "无帮派") this.guildName = g;
+          else if (g === "无" || g === "无帮派") this.guildName = "";
+        }
         this.cb.onCharacterStats?.(stats);
       }
 
@@ -5991,19 +6064,26 @@ export class GameSession {
           continue;
         }
         const id = peerCos.actorId >>> 0;
+        const guildTrim = (peerCos.guild || "").replace(/\0+$/g, "").trim();
         const allZero =
-          !(peerCos.eqChenghao || peerCos.eqWing || peerCos.eqMount);
+          !(peerCos.eqChenghao || peerCos.eqWing || peerCos.eqMount || guildTrim);
         const prev = this.scenePeerCosmeticsById.get(id);
         /*
          * Visibility enqueue can race before onlineEq* is mirrored → empty
          * 31/5. Caching that would wipe a later real notice on peer rebuild.
          * Keep empty only when we already had a notice (true unequip).
+         * Guild-only notices are non-empty for nameplate「门派-xxx」.
          */
         if (allZero && !prev) {
           continue;
         }
-        this.scenePeerCosmeticsById.set(id, peerCos);
-        this.cb.onCosmeticsPeer?.(peerCos);
+        /* Stale eq-only 31/5 must not erase a known guild line. */
+        const merged: CosmeticsPeer = {
+          ...peerCos,
+          guild: guildTrim || (allZero ? "" : prev?.guild || ""),
+        };
+        this.scenePeerCosmeticsById.set(id, merged);
+        this.cb.onCosmeticsPeer?.(merged);
       }
 
       const ranking = parseRankingBoard(packet);

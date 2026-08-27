@@ -11363,6 +11363,51 @@ static void vm_net_mock_battle_note_victory_settlement(const char *reason)
     g_mockBattleAutoFlagPendingArmed = 0;
     g_mockBattleAutoFlagPendingNotBeforeMs = 0;
     vm_net_mock_battle_settlement_exit_arm(reason);
+    /* Friend intimacy: only team wild PvE victories (not spar/duel/arena). */
+    if (reason != NULL && strncmp(reason, "team-battle", 11) == 0)
+    {
+        vm_mock_service_client_session *session =
+            vm_mock_service_get_active_client_session();
+        vm_mock_service_team *team =
+            session ? vm_mock_service_team_find_for_client(session->clientId)
+                    : NULL;
+        u8 i;
+        u8 j;
+        if (team != NULL && team->active && team->memberCount >= 2 &&
+            !(team->battleSerial != 0 &&
+              team->intimacyRewardedSerial == team->battleSerial))
+        {
+            for (i = 0; i < team->memberCount; ++i)
+            {
+                vm_mock_service_client_session *a =
+                    vm_mock_service_find_client_session(team->memberClientIds[i]);
+                if (a == NULL || a->accountId[0] == 0 || a->onlineRoleId == 0)
+                    continue;
+                for (j = (u8)(i + 1u); j < team->memberCount; ++j)
+                {
+                    vm_mock_service_client_session *b =
+                        vm_mock_service_find_client_session(
+                            team->memberClientIds[j]);
+                    vm_mock_service_friend_record rec;
+                    if (b == NULL || b->accountId[0] == 0 || b->onlineRoleId == 0)
+                        continue;
+                    if (!vm_mock_service_friend_db_mysql_find_owner_target(
+                            a->accountId, a->onlineRoleId, b->onlineRoleId,
+                            &rec))
+                        continue;
+                    vm_mock_service_friend_intimacy_bump_pair(
+                        a->accountId, a->onlineRoleId, b->accountId,
+                        b->onlineRoleId);
+                    printf("[info][mock-service] intimacy_bump +1 a=%u b=%u "
+                           "was=%u reason=%s\n",
+                           a->onlineRoleId, b->onlineRoleId, rec.friendDegree,
+                           reason);
+                }
+            }
+            team->intimacyRewardedSerial =
+                team->battleSerial ? team->battleSerial : 1;
+        }
+    }
 }
 
 static void vm_net_mock_hangup_loop_schedule_next(const char *reason)

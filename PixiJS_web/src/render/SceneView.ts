@@ -2,7 +2,7 @@ import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
 import type { LoadedScene } from "../resources/loader";
 import { formatMonsterMapName } from "../resources/monsterLevels";
 import { ActorLayer } from "../game/ActorLayer";
-import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE } from "../ui/constants";
+import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale } from "../ui/constants";
 import { BitmapLabel } from "../ui/BitmapLabel";
 import { sceneAssetCandidates } from "../net/protocol";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
@@ -151,6 +151,9 @@ export class SceneView {
   private titleBadge = new Container();
   private titleSpr: Sprite | null = null;
   private titleTextLabel: BitmapLabel | null = null;
+  /** 「门派-xxx」above title; hidden when empty / 无帮派. */
+  private guildLabel = new BitmapLabel();
+  private lastGuildLine = "";
   private nameLabel = new BitmapLabel();
   private lastName = "";
   private lastTitleGif: string | null = null;
@@ -228,9 +231,11 @@ export class SceneView {
       .fill({ color: 0xffe08a })
       .stroke({ width: 1, color: 0x5a4010 });
     this.titleBadge.zIndex = 5;
+    this.guildLabel.zIndex = 6;
+    this.guildLabel.visible = false;
     this.nameLabel.zIndex = 4;
     this.nameLabel.pivot.set(0, 0);
-    /* Depth: sparkles 0 → mount 0.5 → wing-behind 1 → body 2 → wing-back 3 → name 4 → title 5 */
+    /* Depth: sparkles 0 → mount 0.5 → wing-behind 1 → body 2 → wing-back 3 → name 4 → title 5 → guild 6 */
     this.plus16Sparkles.root.zIndex = 0;
     this.mountOverlay.root.zIndex = 0.5;
     this.wingOverlay.root.zIndex = 1;
@@ -242,6 +247,7 @@ export class SceneView {
       this.playerFallback,
       this.titleBadge,
       this.nameLabel,
+      this.guildLabel,
     );
     // Portals join world feet-Y sort with player/decor (not a flat z=10000 layer).
     this.world.addChild(this.player);
@@ -854,12 +860,55 @@ export class SceneView {
       : 0;
     const lift = bodyH + mountExtra;
     this.nameLabel.position.set(-Math.floor(this.nameLabel.width / 2), -lift - nameH);
+    let topY = this.nameLabel.y;
     if (this.titleBadge.visible) {
       this.titleBadge.position.set(0, this.nameLabel.y - 2);
       if (this.titleTextLabel) {
         this.titleTextLabel.position.set(0, 0);
       }
+      const titleH =
+        this.chenghaoOverlay.root.parent === this.titleBadge
+          ? this.chenghaoOverlay.root.height || 12
+          : this.titleSpr?.height || this.titleTextLabel?.height || 12;
+      topY = this.titleBadge.y - titleH;
     }
+    if (this.guildLabel.visible) {
+      const guildH = this.guildLabel.height || 12;
+      this.guildLabel.position.set(
+        -Math.floor(this.guildLabel.width / 2),
+        topY - 2 - guildH,
+      );
+    }
+  }
+
+  /**
+   * Show「门派-xxx」above the designation/title stack. Empty / 无帮派 hides it.
+   */
+  async setPlayerGuild(guildName: string): Promise<void> {
+    const raw = (guildName || "").replace(/\0+$/g, "").trim();
+    let line = "";
+    if (raw.startsWith("门派-")) line = raw.slice(0, 12);
+    else if (raw && raw !== "无" && raw !== "无帮派") line = `门派-${raw.slice(0, 8)}`;
+    if (!line) {
+      this.lastGuildLine = "";
+      this.guildLabel.visible = false;
+      this.layoutNameplate();
+      return;
+    }
+    if (line === this.lastGuildLine && this.guildLabel.visible) {
+      this.layoutNameplate();
+      return;
+    }
+    this.lastGuildLine = line;
+    await this.guildLabel.setText(line, 0x88eeff, {
+      uc3: true,
+      smooth: false,
+      outline: true,
+      outlineThin: true,
+    });
+    this.guildLabel.scale.set(NAMEPLATE_SCALE);
+    this.guildLabel.visible = true;
+    this.layoutNameplate();
   }
 
   private applyPlayerFrame(force = false): void {
@@ -907,8 +956,8 @@ export class SceneView {
       this.playerSprite.zIndex = 2;
     }
     this.playerSprite.scale.set(
-      composed.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
-      ACTOR_DISPLAY_SCALE,
+      actorSpriteScale(composed.artScale, !!composed.flipX).x,
+      actorSpriteScale(composed.artScale, !!composed.flipX).y,
     );
     this.wingOverlay.setBodyDisplayHeight(this.playerSprite.height);
     this.wingOverlay.setFacing(this.playerDir);

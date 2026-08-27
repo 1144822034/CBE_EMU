@@ -65,6 +65,7 @@ export type SocialRow = {
   id: number;
   name: string;
   subtitle?: string;
+  isSpouse?: boolean;
 };
 
 export type SocialAction =
@@ -85,7 +86,8 @@ export type SocialAction =
   | "friend_hub_tab"
   | "enmity_dir_tab"
   | "hunt_order"
-  | "list_page";
+  | "list_page"
+  | "spouse_teleport";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
 
@@ -219,8 +221,11 @@ export class SocialPanel extends Container {
     this.listPages = Math.max(1, allpgs | 0);
     this.rows = friends.map((f) => ({
       id: f.id,
-      name: f.name,
-      subtitle: `${f.online ? "在线" : "离线"} 亲密度${f.degree}`,
+      name: f.isSpouse ? `${f.name}〔配偶〕` : f.name,
+      subtitle: `${f.online ? "在线" : "离线"} 亲密度${f.degree}${
+        f.isSpouse ? " 配偶" : ""
+      }`,
+      isSpouse: !!f.isSpouse,
     }));
     this.enterList();
   }
@@ -654,7 +659,7 @@ export class SocialPanel extends Container {
     if (this.kind === "nearby" || this.kind === "friends") {
       const row = this.rows[this.listCursor];
       if (!row || row.id === 0) return ["返回"];
-      return [
+      const actions = [
         "玩家信息",
         "查看装备",
         "组队邀请",
@@ -663,8 +668,12 @@ export class SocialPanel extends Container {
         "发起私聊",
         "切磋",
         "入帮",
-        "返回",
       ];
+      if (this.kind === "friends" && row.isSpouse) {
+        actions.splice(2, 0, "传送到身边");
+      }
+      actions.push("返回");
+      return actions;
     }
     if (this.kind === "enmity") {
       const row = this.rows[this.listCursor];
@@ -1272,6 +1281,8 @@ function labelToAction(label: string): SocialAction {
       return "spar";
     case "入帮":
       return "guild_invite";
+    case "传送到身边":
+      return "spouse_teleport";
     case "离队":
       return "leave_team";
     case "刷新":

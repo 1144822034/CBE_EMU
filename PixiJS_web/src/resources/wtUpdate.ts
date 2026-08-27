@@ -50,6 +50,16 @@ export function wantsLiveResourceSync(assetName: string): boolean {
   return false;
 }
 
+/** Local PixiJS redesign PNG/JPEG must not be overwritten by stock LKV2 via WT18/7. */
+export function isLocalRasterRedesign(bytes: Uint8Array | null | undefined): boolean {
+  if (!bytes || bytes.length < 8) return false;
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return true;
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
+  return false;
+}
+
 function signedByteSum(data: Uint8Array, len: number): number {
   let sum = 0;
   const n = Math.min(len, data.length);

@@ -11,6 +11,15 @@ export const LCD_HEIGHT = 400;
  */
 export const ACTOR_DISPLAY_SCALE = 0.8;
 
+/** Compensate hi-res actor sheets (`ComposedFrame.artScale`). */
+export function actorSpriteScale(
+  artScale = 1,
+  flipX = false,
+): { x: number; y: number } {
+  const s = ACTOR_DISPLAY_SCALE / Math.max(1, artScale);
+  return { x: flipX ? -s : s, y: s };
+}
+
 /** Over-head nameplates track actor scale (map + battle unit names). */
 export const NAMEPLATE_SCALE = ACTOR_DISPLAY_SCALE;
 

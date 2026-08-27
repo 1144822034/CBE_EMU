@@ -6,6 +6,7 @@ import {
   loadGif,
   shouldVersionCheckResource,
 } from "./loader";
+import { isPeerCosmeticsVisible } from "./peerCosmeticsPref";
 
 export type ActorRect = {
   left: number;
@@ -39,6 +40,52 @@ export type ParsedActor = {
 
 export type LoadedActor = ParsedActor & {
   images: (GifRgba | null)[];
+  /**
+   * PixiJS hi-res / redesign sheets: draw with
+   * `ACTOR_DISPLAY_SCALE / artScale` so on-screen size stays native.
+   * Native LKV2 actors keep artScale=1 and original rect stacking.
+   */
+  artScale?: number;
+  /**
+   * `rects` = stock CBE crop/stack (default).
+   * `poses` = redesign PNG sheet whose layout ≠ .actor rects — use whole poses.
+   */
+  sheetMode?: "rects" | "poses";
+  /**
+   * Hi-res e_deity redesign: body/attack are full poses baked into rect2/rect0.
+   * Do NOT stack stock sword/FX fragment rects (they are LKV2 part layout).
+   */
+  deityHiRes?: boolean;
+  /**
+   * When sheet is v34-style pose layout (not stock UV×N packed), crop bodies and
+   * overlays from these absolute boxes instead of scaled .actor rects.
+   */
+  deityPoseLayout?: DeityPoseLayout;
+  /** Detected full-body poses on a redesign sheet (imageIndex 0). */
+  poseAtlas?: ActorPoseAtlas;
+};
+
+/** Absolute sheet crops for e_deity pose-layout atlas (idle/attack/sword/FX). */
+export type DeityPoseLayout = {
+  idle: ActorPoseBox;
+  action: ActorPoseBox;
+  sword: ActorPoseBox;
+  /** Two attack FX frames (alternate; stock rect3/rect4 intent). */
+  fxFrames: [ActorPoseBox, ActorPoseBox];
+};
+
+export type ActorPoseBox = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
+
+export type ActorPoseAtlas = {
+  idle: ActorPoseBox;
+  /** Idle breath / bob cycle (sorted left→right). Falls back to [idle]. */
+  idleFrames: ActorPoseBox[];
+  action: ActorPoseBox;
 };
 
 export type ComposedFrame = {
@@ -50,6 +97,8 @@ export type ComposedFrame = {
   originY: number;
   /** Horizontal mirror for map left/right when actor only stores one side. */
   flipX?: boolean;
+  /** See LoadedActor.artScale — propagated for sprite scale compensation. */
+  artScale?: number;
 };
 
 /**
@@ -145,13 +194,46 @@ type ActorCacheEntry = {
 
 const actorCache = new Map<string, ActorCacheEntry>();
 
+/** Stock LKV2 sheet vs hi-res redesign PNG — follows client「特效」pref. */
+export function deitySheetVariant(): "png" | "gif" {
+  return isPeerCosmeticsVisible() ? "png" : "gif";
+}
+
+function isDeityActorName(name: string): boolean {
+  return /e_deity/i.test(name);
+}
+
+function actorCacheKey(name: string): string {
+  const base = name.toLowerCase();
+  return isDeityActorName(base) ? `${base}#${deitySheetVariant()}` : base;
+}
+
+/**
+ * e_deity.actor still lists e_deity.gif; when特效 on, load e_deity.png instead.
+ * Falls back to gif if png is missing.
+ */
+function resolveActorImageName(imageName: string): string {
+  if (!/^e_deity\.gif$/i.test(imageName)) return imageName;
+  return deitySheetVariant() === "png" ? "e_deity.png" : "e_deity.gif";
+}
+
 export function invalidateActorCache(name?: string): void {
-  if (name) actorCache.delete(name.toLowerCase());
-  else actorCache.clear();
+  if (!name) {
+    actorCache.clear();
+    return;
+  }
+  const lower = name.toLowerCase();
+  if (isDeityActorName(lower)) {
+    for (const k of [...actorCache.keys()]) {
+      if (k === lower || k.startsWith(`${lower}#`)) actorCache.delete(k);
+    }
+    return;
+  }
+  actorCache.delete(lower);
 }
 
 export async function loadActor(name: string): Promise<LoadedActor> {
-  const key = name.toLowerCase();
+  const key = actorCacheKey(name);
   const revalidate = shouldVersionCheckResource(name);
   // Probe+fetch first so stamp is current before deciding cache reuse.
   const payload = await loadDecodedPayload(name, { revalidate });
@@ -169,20 +251,1614 @@ export async function loadActor(name: string): Promise<LoadedActor> {
     const parsed = parseActorPayload(payload, name);
     const images = await Promise.all(
       parsed.imageNames.map(async (gif) => {
+        const resolved = resolveActorImageName(gif);
         try {
-          return await loadGif(gif, {
-            revalidate: shouldVersionCheckResource(gif),
+          return await loadGif(resolved, {
+            revalidate: shouldVersionCheckResource(resolved),
           });
         } catch (e) {
+          if (resolved !== gif) {
+            console.warn(
+              "[actor] deity png failed, falling back to gif",
+              name,
+              resolved,
+              e,
+            );
+            try {
+              return await loadGif(gif, {
+                revalidate: shouldVersionCheckResource(gif),
+              });
+            } catch (e2) {
+              console.warn("[actor] gif failed", name, gif, e2);
+              return null;
+            }
+          }
           console.warn("[actor] gif failed", name, gif, e);
           return null;
         }
       }),
     );
-    return { ...parsed, images };
+    const loaded: LoadedActor = { ...parsed, images };
+    finalizeActorSheet(loaded);
+    return loaded;
   })();
   actorCache.set(key, { stamp, promise });
   return promise;
+}
+
+/**
+ * Detect integer hi-res multiplier vs stock actor UV (e_deity = 89×114).
+ */
+function detectHiResSheetScale(
+  img: GifRgba,
+  maxR: number,
+  maxB: number,
+): number {
+  const candidates: Array<[number, number]> = [
+    [89, 114],
+    [maxR, maxB],
+  ];
+  for (const [nw, nh] of candidates) {
+    if (nw <= 0 || nh <= 0) continue;
+    const sx = img.width / nw;
+    const sy = img.height / nh;
+    if (sx < 1.35 || sy < 1.35) continue;
+    const s = Math.round((sx + sy) / 2);
+    if (s < 2) continue;
+    if (Math.abs(sx - s) > s * 0.2 || Math.abs(sy - s) > s * 0.2) continue;
+    return s;
+  }
+  const sx = img.width / maxR;
+  const sy = img.height / maxB;
+  if (sx >= 1.35 && sy >= 1.35) {
+    const s = Math.round((sx + sy) / 2);
+    if (s >= 2) return s;
+  }
+  return 1;
+}
+
+/**
+ * e_deity sheet: stock 89×114 UV at 10× on a larger canvas (e.g. 1024×1536).
+ * Generic detectHiResSheetScale averages width/height ratios and can pick 12×,
+ * pushing rect10 past the image edge — sword/FX compose returns null.
+ */
+function detectDeityHiResScale(img: GifRgba, maxR: number, maxB: number): number {
+  const stockScale = 10;
+  if (maxR * stockScale <= img.width && maxB * stockScale <= img.height) {
+    return stockScale;
+  }
+  return detectHiResSheetScale(img, maxR, maxB);
+}
+
+/**
+ * True when sheet is stock-UV packed (rect10 zone holds the glowing sword).
+ * False for v34 pose layout (idle|attack top, sword mid-right, FX bottom) —
+ * stock UV×10 would crop dress scraps there.
+ */
+function isDeityStockUvPackedSheet(img: GifRgba): boolean {
+  // Exact packed canvas from pack_deity_stock_layout.py
+  if (img.width === 890 && img.height === 1140) return true;
+  // Stock UV×10 rect10 = (630,460)-(860,710)
+  const x0 = 630;
+  const y0 = 460;
+  const x1 = Math.min(img.width, 860);
+  const y1 = Math.min(img.height, 710);
+  if (x1 - x0 < 40 || y1 - y0 < 40) return false;
+  let blue = 0;
+  let opaque = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * img.width + x) * 4;
+      const a = img.rgba[i + 3]!;
+      if (a < 40) continue;
+      opaque++;
+      const r = img.rgba[i]!;
+      const g = img.rgba[i + 1]!;
+      const b = img.rgba[i + 2]!;
+      if (b > r + 30 && b > g + 15) blue++;
+    }
+  }
+  // Packed sword slot is mostly transparent with cyan blade; dress scrap is white.
+  return opaque > 500 && blue > opaque * 0.12;
+}
+
+/**
+ * Detect v34-style e_deity pose sheet: idle TL, attack TR, sword mid-right, FX bottom.
+ * Does not modify the atlas — only records crop boxes.
+ */
+function detectDeityPoseLayout(img: GifRgba): DeityPoseLayout | null {
+  const midX = Math.floor(img.width / 2);
+  const midY = Math.floor(img.height * 0.52);
+  const idle = largestOpaqueComponent(img, 0, 0, midX, midY);
+  const action = largestOpaqueComponent(img, midX, 0, img.width, midY);
+  if (!idle || !action) return null;
+  trimPoseBox(img, idle);
+  trimPoseBox(img, action);
+
+  // Sword sits mid-right below attack torso band.
+  const sword = largestOpaqueComponent(
+    img,
+    Math.floor(img.width * 0.45),
+    Math.floor(img.height * 0.42),
+    img.width,
+    Math.floor(img.height * 0.72),
+  );
+  // FX band along bottom — split into two frames (stock rect3/rect4).
+  const fxBand = largestOpaqueComponent(
+    img,
+    0,
+    Math.floor(img.height * 0.66),
+    img.width,
+    img.height,
+  );
+  if (!sword || !fxBand) return null;
+  trimPoseBox(img, sword);
+  trimPoseBox(img, fxBand);
+
+  const fxMid = Math.floor((fxBand.left + fxBand.right) / 2);
+  const fxA =
+    largestOpaqueComponent(img, fxBand.left, fxBand.top, fxMid, fxBand.bottom) ??
+    ({
+      left: fxBand.left,
+      top: fxBand.top,
+      right: fxMid,
+      bottom: fxBand.bottom,
+    } as ActorPoseBox);
+  const fxB =
+    largestOpaqueComponent(img, fxMid, fxBand.top, fxBand.right, fxBand.bottom) ??
+    ({
+      left: fxMid,
+      top: fxBand.top,
+      right: fxBand.right,
+      bottom: fxBand.bottom,
+    } as ActorPoseBox);
+  trimPoseBox(img, fxA);
+  trimPoseBox(img, fxB);
+
+  const idleH = idle.bottom - idle.top;
+  const swordH = sword.bottom - sword.top;
+  const fxAH = fxA.bottom - fxA.top;
+  const fxBH = fxB.bottom - fxB.top;
+  if (idleH < img.height * 0.25) return null;
+  if (swordH > idleH * 0.85 || swordH < 40) return null;
+  if (fxAH < 40 || fxBH < 40) return null;
+
+  return { idle, action, sword, fxFrames: [fxA, fxB] };
+}
+
+/** Scale .actor rects + part offsets to match a hi-res sheet (keeps CBE stack order). */
+function scaleActorRectsToHiRes(actor: LoadedActor, scale: number): void {
+  if (scale < 2) return;
+  for (const r of actor.rects) {
+    r.left = Math.round(r.left * scale);
+    r.top = Math.round(r.top * scale);
+    r.right = Math.round(r.right * scale);
+    r.bottom = Math.round(r.bottom * scale);
+  }
+  for (const anim of actor.animations) {
+    for (const part of anim.parts) {
+      for (const f of part.frames) {
+        f.offsetX = Math.round(f.offsetX * scale);
+        f.offsetY = Math.round(f.offsetY * scale);
+      }
+    }
+  }
+}
+
+function isDeityActor(actor: LoadedActor): boolean {
+  return (
+    /e_deity/i.test(actor.name) ||
+    actor.imageNames.some((n) => /e_deity\.gif/i.test(n))
+  );
+}
+
+/**
+ * Grow hi-res e_deity body/attack crops to cover feet + sword tip that extend
+ * past stock 89×114 UV (AI layout keeps the same packing fractions but paints
+ * full limbs past the original clip).
+ */
+function expandDeityHiResRects(actor: LoadedActor, img: GifRgba): void {
+  // Stock: rect2 idle body (0,0)-(41,61), rect0 attack (41,0)-(85,46).
+  const body = actor.rects[2];
+  const atk = actor.rects[0];
+  if (!body || !atk) return;
+
+  // Packed hi-res sheet matches stock rect2/rect0/rect3/rect4 UV — keep scaled
+  // .actor rects (growing/shrinking picked up debris or clipped limbs).
+  if (atk.left < body.right) atk.left = body.right;
+}
+
+/** Tighten composed RGBA to opaque bounds (feet flush to texture bottom). */
+function tightenComposedOpaque(frame: ComposedFrame): ComposedFrame {
+  const { width: w, height: h, rgba } = frame;
+  let minX = w;
+  let minY = h;
+  let maxX = 0;
+  let maxY = 0;
+  let found = false;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (rgba[(y * w + x) * 4 + 3]! < 40) continue;
+      found = true;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x + 1 > maxX) maxX = x + 1;
+      if (y + 1 > maxY) maxY = y + 1;
+    }
+  }
+  if (!found) return frame;
+  const tw = maxX - minX;
+  const th = maxY - minY;
+  if (tw <= 0 || th <= 0 || (tw === w && th === h)) return frame;
+  const out = new Uint8ClampedArray(tw * th * 4);
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      const si = ((minY + y) * w + (minX + x)) * 4;
+      const di = (y * tw + x) * 4;
+      out[di] = rgba[si]!;
+      out[di + 1] = rgba[si + 1]!;
+      out[di + 2] = rgba[si + 2]!;
+      out[di + 3] = rgba[si + 3]!;
+    }
+  }
+  return {
+    width: tw,
+    height: th,
+    rgba: out,
+    originX: frame.originX + minX,
+    originY: frame.originY + minY,
+    artScale: frame.artScale,
+    flipX: frame.flipX,
+  };
+}
+
+/**
+ * Decide sheet compose mode.
+ * - Stock LKV2 / native-sized art → `rects` (unchanged .actor crops).
+ * - Hi-res raster matching stock UV grid → scale rects, keep `rects` stack.
+ * - e_deity hi-res redesign → scaled rects + deityHiRes (body/attack only).
+ * - Redesign raster with alien layout → `poses` (whole-body crops).
+ */
+export function finalizeActorSheet(actor: LoadedActor): void {
+  actor.sheetMode = "rects";
+  actor.artScale = 1;
+  actor.poseAtlas = undefined;
+  actor.deityHiRes = false;
+  actor.deityPoseLayout = undefined;
+
+  let maxR = 0;
+  let maxB = 0;
+  for (const r of actor.rects) {
+    if (r.imageIndex !== 0) continue;
+    maxR = Math.max(maxR, r.right);
+    maxB = Math.max(maxB, r.bottom);
+  }
+  const img = actor.images[0];
+  if (!img || maxR <= 0 || maxB <= 0) return;
+
+  const deity = isDeityActor(actor);
+
+  if (img.sourceKind === "raster") {
+    // v34 / alien pose layout: never scale stock UV — that crops dress as "sword".
+    if (deity && !isDeityStockUvPackedSheet(img)) {
+      const layout = detectDeityPoseLayout(img);
+      if (layout) {
+        actor.deityHiRes = true;
+        actor.deityPoseLayout = layout;
+        actor.poseAtlas = {
+          idle: layout.idle,
+          idleFrames: [layout.idle],
+          action: layout.action,
+        };
+        const idleH = layout.idle.bottom - layout.idle.top;
+        actor.artScale = Math.max(1, idleH / 60);
+        applyDeityDisplayScale(actor);
+        console.info(
+          `[actor] sheetMode=poseLayout deityHiRes ${actor.name} artScale=${actor.artScale.toFixed(2)} idle=${layout.idle.right - layout.idle.left}x${idleH} sword=${layout.sword.right - layout.sword.left}x${layout.sword.bottom - layout.sword.top}`,
+        );
+        return;
+      }
+    }
+
+    const scale = deity
+      ? detectDeityHiResScale(img, maxR, maxB)
+      : detectHiResSheetScale(img, maxR, maxB);
+    if (scale >= 2) {
+      scaleActorRectsToHiRes(actor, scale);
+      if (deity) {
+        expandDeityHiResRects(actor, img);
+        actor.deityHiRes = true;
+        // 10× sheet: /2 ≈ x10 on-screen.
+        actor.artScale = Math.max(1, scale / 2);
+        applyDeityDisplayScale(actor);
+        console.info(
+          `[actor] sheetMode=rects deityHiRes ${actor.name} scale=${scale} artScale=${actor.artScale.toFixed(2)} body=${actor.rects[2]?.right}x${actor.rects[2]?.bottom} atk=${actor.rects[0]?.right}x${actor.rects[0]?.bottom}`,
+        );
+        return;
+      }
+      actor.artScale = scale;
+      console.info(
+        `[actor] sheetMode=rects hi-res ${actor.name} scale=${scale} artScale=${actor.artScale.toFixed(2)}`,
+      );
+      return;
+    }
+    if (deity) {
+      console.warn(
+        "[actor] e_deity hi-res scale detect failed — keeping stock rects",
+        img.width,
+        img.height,
+      );
+      return;
+    }
+  }
+
+  const oversized = img.width > maxR * 1.35 || img.height > maxB * 1.35;
+  if (!oversized) return;
+
+  const atlas = detectPoseAtlas(img);
+  if (!atlas) {
+    console.warn("[actor] pose atlas detect failed", actor.name, img.width, img.height);
+    return;
+  }
+  actor.sheetMode = "poses";
+  actor.poseAtlas = atlas;
+  const idleH = atlas.idle.bottom - atlas.idle.top;
+  const baseArt = Math.max(1, idleH / 60);
+  actor.artScale = baseArt;
+  console.info(
+    `[actor] sheetMode=poses ${actor.name} artScale=${actor.artScale.toFixed(2)} idle=${atlas.idle.right - atlas.idle.left}x${idleH} action=${atlas.action.right - atlas.action.left}x${atlas.action.bottom - atlas.action.top}`,
+  );
+}
+
+/** Opaque bounding box inside [x0,x1)×[y0,y1). */
+function opaqueBounds(
+  img: GifRgba,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  minAlpha = 40,
+): ActorPoseBox | null {
+  let left = x1;
+  let top = y1;
+  let right = x0;
+  let bottom = y0;
+  let found = false;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      if (img.rgba[(y * img.width + x) * 4 + 3]! < minAlpha) continue;
+      found = true;
+      if (x < left) left = x;
+      if (y < top) top = y;
+      if (x + 1 > right) right = x + 1;
+      if (y + 1 > bottom) bottom = y + 1;
+    }
+  }
+  if (!found) return null;
+  const w = right - left;
+  const h = bottom - top;
+  if (w < 8 || h < 16) return null;
+  return { left, top, right, bottom };
+}
+
+/**
+ * Redesign sheets — prefer classic e_deity packed layout (idle TL / attack TR),
+ * matching stock .actor UV regions on the 89×114 sheet. Fall back to 3-col idle.
+ */
+export function detectPoseAtlas(img: GifRgba): ActorPoseAtlas | null {
+  const classic = detectClassicDeityAtlas(img);
+  if (classic) return classic;
+
+  const midY = Math.floor(img.height * 0.52);
+  const idleCols = 3;
+  const pad = Math.max(2, Math.floor(img.width * 0.006));
+
+  const bandContent: Array<{ band: number; box: ActorPoseBox }> = [];
+  for (let i = 0; i < idleCols; i++) {
+    const x0 = Math.floor((img.width * i) / idleCols);
+    const x1 = Math.floor((img.width * (i + 1)) / idleCols);
+    const box = largestOpaqueComponent(
+      img,
+      x0 + (i === 0 ? 0 : pad),
+      0,
+      x1 - (i === idleCols - 1 ? 0 : pad),
+      midY,
+    );
+    if (!box) continue;
+    box.left = Math.max(box.left, x0);
+    box.right = Math.min(box.right, x1);
+    if (box.right - box.left < 16 || box.bottom - box.top < 32) continue;
+    trimPoseBox(img, box);
+    bandContent.push({ band: i, box });
+  }
+
+  if (bandContent.length < 1) {
+    const midX = Math.floor(img.width / 2);
+    const idle = largestOpaqueComponent(img, 0, 0, midX, midY);
+    const action = largestOpaqueComponent(img, midX, 0, img.width, midY);
+    if (!idle || !action) return null;
+    trimPoseBox(img, idle);
+    trimPoseBox(img, action);
+    return { idle, idleFrames: [idle], action };
+  }
+
+  let top = bandContent[0]!.box.top;
+  let bottom = bandContent[0]!.box.bottom;
+  for (const { box } of bandContent) {
+    top = Math.min(top, box.top);
+    bottom = Math.max(bottom, box.bottom);
+  }
+
+  // Fixed equal cells — same W/H and same foot line for every breath frame
+  const idleFrames: ActorPoseBox[] = bandContent.map(({ band }) => {
+    const x0 = Math.floor((img.width * band) / idleCols);
+    const x1 = Math.floor((img.width * (band + 1)) / idleCols);
+    return { left: x0, top, right: x1, bottom };
+  });
+
+  // Bottom: flood from left-half seeds into full bottom so sword can extend right,
+  // without swallowing the disconnected spare idle on the right.
+  let action = connectedFromSeedBand(
+    img,
+    0,
+    midY,
+    Math.floor(img.width * 0.48),
+    img.height,
+    0,
+    midY,
+    img.width,
+    img.height,
+  );
+  if (action) {
+    // Do not aggressive-trim — sword tip columns are sparse.
+  } else {
+    action = idleFrames[idleFrames.length - 1]!;
+  }
+
+  return { idle: idleFrames[0]!, idleFrames, action };
+}
+
+/**
+ * Stock e_deity.gif layout (89×114): idle body ≈(0,0)-(41,61), attack ≈(41,0)-(85,46),
+ * FX below y≈61. Hi-res redesigns keep the same relative packing.
+ */
+function detectClassicDeityAtlas(img: GifRgba): ActorPoseAtlas | null {
+  // Match original UV fractions on the sheet.
+  const midX = Math.floor((img.width * 41) / 89);
+  const idleBottom = Math.floor((img.height * 61) / 114);
+  const atkBottom = Math.floor((img.height * 50) / 114);
+
+  const idle = largestOpaqueComponent(img, 0, 0, midX, idleBottom);
+  const action = largestOpaqueComponent(img, midX, 0, img.width, atkBottom);
+  if (!idle || !action) return null;
+
+  const idleH = idle.bottom - idle.top;
+  const atkH = action.bottom - action.top;
+  // Require both to be substantial full-body-ish crops (not tiny FX).
+  if (idleH < img.height * 0.22 || atkH < img.height * 0.18) return null;
+  // Heights should be in the same ballpark (original idle taller than attack crop).
+  if (atkH > idleH * 1.35 || idleH > atkH * 2.2) return null;
+
+  trimPoseBox(img, idle);
+  // Attack may include sword extending right — grow from seed without hard mid clamp.
+  let actionFull = connectedFromSeedBand(
+    img,
+    midX,
+    0,
+    img.width,
+    atkBottom,
+    midX,
+    0,
+    img.width,
+    Math.floor(img.height * 0.55),
+  );
+  if (!actionFull) actionFull = action;
+  trimPoseBox(img, actionFull);
+
+  // Single idle frame — playback breath uses applyChestBob (matches stock flap,
+  // avoids multi-frame sword pop from inconsistent AI idle copies).
+  return { idle, idleFrames: [idle], action: actionFull };
+}
+
+/**
+ * Grow a connected opaque component starting only from seeds inside the seed
+ * window, but allowing expansion into the expand window (e.g. sword past mid).
+ */
+function connectedFromSeedBand(
+  img: GifRgba,
+  seedX0: number,
+  seedY0: number,
+  seedX1: number,
+  seedY1: number,
+  expX0: number,
+  expY0: number,
+  expX1: number,
+  expY1: number,
+  minAlpha = 40,
+): ActorPoseBox | null {
+  const w = expX1 - expX0;
+  const h = expY1 - expY0;
+  if (w <= 0 || h <= 0) return null;
+  const seen = new Uint8Array(w * h);
+  const qx = new Int32Array(w * h);
+  const qy = new Int32Array(w * h);
+  const idx = (x: number, y: number) => (y - expY0) * w + (x - expX0);
+  const opaque = (x: number, y: number) =>
+    img.rgba[(y * img.width + x) * 4 + 3]! >= minAlpha;
+
+  let head = 0;
+  let tail = 0;
+  for (let y = seedY0; y < seedY1; y++) {
+    for (let x = seedX0; x < seedX1; x++) {
+      if (x < expX0 || y < expY0 || x >= expX1 || y >= expY1) continue;
+      if (!opaque(x, y)) continue;
+      const si = idx(x, y);
+      if (seen[si]) continue;
+      seen[si] = 1;
+      qx[tail] = x;
+      qy[tail] = y;
+      tail++;
+    }
+  }
+  if (tail === 0) return null;
+
+  let left = expX1;
+  let top = expY1;
+  let right = expX0;
+  let bottom = expY0;
+  let area = 0;
+  while (head < tail) {
+    const cx = qx[head]!;
+    const cy = qy[head]!;
+    head++;
+    area++;
+    if (cx < left) left = cx;
+    if (cy < top) top = cy;
+    if (cx + 1 > right) right = cx + 1;
+    if (cy + 1 > bottom) bottom = cy + 1;
+    for (const [nx, ny] of [
+      [cx + 1, cy],
+      [cx - 1, cy],
+      [cx, cy + 1],
+      [cx, cy - 1],
+    ] as Array<[number, number]>) {
+      if (nx < expX0 || ny < expY0 || nx >= expX1 || ny >= expY1) continue;
+      const ni = idx(nx, ny);
+      if (seen[ni] || !opaque(nx, ny)) continue;
+      seen[ni] = 1;
+      qx[tail] = nx;
+      qy[tail] = ny;
+      tail++;
+    }
+  }
+  if (area < 400 || right - left < 16 || bottom - top < 32) return null;
+  return { left, top, right, bottom };
+}
+
+/** All significant 4-connected opaque blobs in window, largest-first then keep. */
+function allOpaqueComponents(
+  img: GifRgba,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  minAlpha = 40,
+): ActorPoseBox[] {
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w <= 0 || h <= 0) return [];
+  const seen = new Uint8Array(w * h);
+  const qx = new Int32Array(w * h);
+  const qy = new Int32Array(w * h);
+  const out: Array<ActorPoseBox & { area: number }> = [];
+  const idx = (x: number, y: number) => (y - y0) * w + (x - x0);
+  const opaque = (x: number, y: number) =>
+    img.rgba[(y * img.width + x) * 4 + 3]! >= minAlpha;
+
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const si = idx(x, y);
+      if (seen[si] || !opaque(x, y)) continue;
+      let head = 0;
+      let tail = 0;
+      qx[tail] = x;
+      qy[tail] = y;
+      tail++;
+      seen[si] = 1;
+      let left = x;
+      let top = y;
+      let right = x + 1;
+      let bottom = y + 1;
+      let area = 0;
+      while (head < tail) {
+        const cx = qx[head]!;
+        const cy = qy[head]!;
+        head++;
+        area++;
+        if (cx < left) left = cx;
+        if (cy < top) top = cy;
+        if (cx + 1 > right) right = cx + 1;
+        if (cy + 1 > bottom) bottom = cy + 1;
+        for (const [nx, ny] of [
+          [cx + 1, cy],
+          [cx - 1, cy],
+          [cx, cy + 1],
+          [cx, cy - 1],
+        ] as Array<[number, number]>) {
+          if (nx < x0 || ny < y0 || nx >= x1 || ny >= y1) continue;
+          const ni = idx(nx, ny);
+          if (seen[ni] || !opaque(nx, ny)) continue;
+          seen[ni] = 1;
+          qx[tail] = nx;
+          qy[tail] = ny;
+          tail++;
+        }
+      }
+      if (area >= 400) out.push({ left, top, right, bottom, area });
+    }
+  }
+  out.sort((a, b) => b.area - a.area);
+  // Keep top blobs that don't heavily overlap (separate frames)
+  const kept: ActorPoseBox[] = [];
+  for (const b of out) {
+    const overlaps = kept.some((k) => {
+      const ix = Math.max(0, Math.min(b.right, k.right) - Math.max(b.left, k.left));
+      const iy = Math.max(0, Math.min(b.bottom, k.bottom) - Math.max(b.top, k.top));
+      const inter = ix * iy;
+      const smaller = Math.min(
+        (b.right - b.left) * (b.bottom - b.top),
+        (k.right - k.left) * (k.bottom - k.top),
+      );
+      return inter > smaller * 0.35;
+    });
+    if (!overlaps) kept.push({ left: b.left, top: b.top, right: b.right, bottom: b.bottom });
+    if (kept.length >= 6) break;
+  }
+  return kept;
+}
+
+/** Largest 4-connected opaque blob inside the search window. */
+function largestOpaqueComponent(
+  img: GifRgba,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  minAlpha = 40,
+): ActorPoseBox | null {
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w <= 0 || h <= 0) return null;
+  const seen = new Uint8Array(w * h);
+  const qx = new Int32Array(w * h);
+  const qy = new Int32Array(w * h);
+
+  let best: ActorPoseBox | null = null;
+  let bestArea = 0;
+
+  const idx = (x: number, y: number) => (y - y0) * w + (x - x0);
+  const opaque = (x: number, y: number) =>
+    img.rgba[(y * img.width + x) * 4 + 3]! >= minAlpha;
+
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const si = idx(x, y);
+      if (seen[si] || !opaque(x, y)) continue;
+      let head = 0;
+      let tail = 0;
+      qx[tail] = x;
+      qy[tail] = y;
+      tail++;
+      seen[si] = 1;
+      let left = x;
+      let top = y;
+      let right = x + 1;
+      let bottom = y + 1;
+      let area = 0;
+      while (head < tail) {
+        const cx = qx[head]!;
+        const cy = qy[head]!;
+        head++;
+        area++;
+        if (cx < left) left = cx;
+        if (cy < top) top = cy;
+        if (cx + 1 > right) right = cx + 1;
+        if (cy + 1 > bottom) bottom = cy + 1;
+        const nbs: Array<[number, number]> = [
+          [cx + 1, cy],
+          [cx - 1, cy],
+          [cx, cy + 1],
+          [cx, cy - 1],
+        ];
+        for (const [nx, ny] of nbs) {
+          if (nx < x0 || ny < y0 || nx >= x1 || ny >= y1) continue;
+          const ni = idx(nx, ny);
+          if (seen[ni] || !opaque(nx, ny)) continue;
+          seen[ni] = 1;
+          qx[tail] = nx;
+          qy[tail] = ny;
+          tail++;
+        }
+      }
+      if (area > bestArea && right - left >= 8 && bottom - top >= 16) {
+        bestArea = area;
+        best = { left, top, right, bottom };
+      }
+    }
+  }
+  return best;
+}
+
+/** Shrink box while outer columns/rows are nearly empty (kills seam slivers). */
+function trimPoseBox(img: GifRgba, box: ActorPoseBox, minAlpha = 40): void {
+  const colHits = (x: number) => {
+    let n = 0;
+    for (let y = box.top; y < box.bottom; y++) {
+      if (img.rgba[(y * img.width + x) * 4 + 3]! >= minAlpha) n++;
+    }
+    return n;
+  };
+  const rowHits = (y: number) => {
+    let n = 0;
+    for (let x = box.left; x < box.right; x++) {
+      if (img.rgba[(y * img.width + x) * 4 + 3]! >= minAlpha) n++;
+    }
+    return n;
+  };
+  const minCol = Math.max(2, Math.floor((box.bottom - box.top) * 0.02));
+  const minRow = Math.max(2, Math.floor((box.right - box.left) * 0.02));
+  while (box.right - box.left > 16 && colHits(box.right - 1) <= minCol) box.right--;
+  while (box.right - box.left > 16 && colHits(box.left) <= minCol) box.left++;
+  while (box.bottom - box.top > 16 && rowHits(box.bottom - 1) <= minRow) box.bottom--;
+  while (box.bottom - box.top > 16 && rowHits(box.top) <= minRow) box.top++;
+}
+
+/**
+ * Like opaqueBounds, but after finding dense body rows, stop when content
+ * thins out (ignore sparse lower FX / spare sword pixels).
+ */
+function opaqueBoundsGapAware(
+  img: GifRgba,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  minAlpha = 40,
+  /** Rows with fewer opaque pixels than this are "thin" (FX fringe). */
+  thinHits = 70,
+  gapRows = 10,
+): ActorPoseBox | null {
+  let left = x1;
+  let top = y1;
+  let right = x0;
+  let bottom = y0;
+  let seenDense = false;
+  let thinRun = 0;
+  for (let y = y0; y < y1; y++) {
+    let rowHits = 0;
+    let rowLeft = x1;
+    let rowRight = x0;
+    for (let x = x0; x < x1; x++) {
+      if (img.rgba[(y * img.width + x) * 4 + 3]! < minAlpha) continue;
+      rowHits++;
+      if (x < rowLeft) rowLeft = x;
+      if (x + 1 > rowRight) rowRight = x + 1;
+    }
+    if (rowHits === 0) {
+      if (seenDense) {
+        thinRun++;
+        if (thinRun >= gapRows) break;
+      }
+      continue;
+    }
+    const dense = rowHits >= thinHits;
+    if (!dense) {
+      if (seenDense) {
+        thinRun++;
+        if (thinRun >= gapRows) break;
+        // still include a little fringe while counting thin run
+        bottom = y + 1;
+        if (rowLeft < left) left = rowLeft;
+        if (rowRight > right) right = rowRight;
+      }
+      continue;
+    }
+    thinRun = 0;
+    seenDense = true;
+    if (y < top) top = y;
+    bottom = y + 1;
+    if (rowLeft < left) left = rowLeft;
+    if (rowRight > right) right = rowRight;
+  }
+  if (!seenDense) return null;
+  const w = right - left;
+  const h = bottom - top;
+  if (w < 8 || h < 16) return null;
+  return { left, top, right, bottom };
+}
+
+function cropPoseBox(
+  actor: LoadedActor,
+  box: ActorPoseBox,
+  flipX = false,
+  /** Align content into fixed cell — idle uses torso-X to avoid sword sway. */
+  stabilize = false,
+): ComposedFrame | null {
+  const img = actor.images[0];
+  if (!img) return null;
+  const w = box.right - box.left;
+  const h = box.bottom - box.top;
+  if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return null;
+
+  let srcLeft = box.left;
+  let srcTop = box.top;
+  let srcRight = box.right;
+  let srcBottom = box.bottom;
+  // Horizontal anchor: prefer torso mass center (not feet/sword tip).
+  let anchorX = (box.left + box.right) / 2;
+
+  if (stabilize) {
+    let cL = srcRight;
+    let cT = srcBottom;
+    let cR = srcLeft;
+    let cB = srcTop;
+    let found = false;
+    for (let y = box.top; y < box.bottom; y++) {
+      for (let x = box.left; x < box.right; x++) {
+        if (img.rgba[(y * img.width + x) * 4 + 3]! < 40) continue;
+        found = true;
+        if (x < cL) cL = x;
+        if (y < cT) cT = y;
+        if (x + 1 > cR) cR = x + 1;
+        if (y + 1 > cB) cB = y + 1;
+      }
+    }
+    if (found) {
+      srcLeft = cL;
+      srcTop = cT;
+      srcRight = cR;
+      srcBottom = cB;
+      const ch0 = cB - cT;
+      const cw0 = cR - cL;
+      // Mid-torso band: densest horizontal mass = body, not sword/ribbons.
+      const y0 = cT + Math.floor(ch0 * 0.28);
+      const y1 = cT + Math.floor(ch0 * 0.62);
+      const colHits = new Int32Array(cw0);
+      for (let y = y0; y < y1; y++) {
+        for (let x = cL; x < cR; x++) {
+          if (img.rgba[(y * img.width + x) * 4 + 3]! < 40) continue;
+          colHits[x - cL]!++;
+        }
+      }
+      let peak = 0;
+      for (let i = 0; i < cw0; i++) {
+        if (colHits[i]! > peak) peak = colHits[i]!;
+      }
+      const minHits = Math.max(2, Math.floor(peak * 0.35));
+      let sumX = 0;
+      let n = 0;
+      for (let i = 0; i < cw0; i++) {
+        if (colHits[i]! < minHits) continue;
+        sumX += (cL + i + 0.5) * colHits[i]!;
+        n += colHits[i]!;
+      }
+      if (n > 0) {
+        anchorX = sumX / n;
+      } else {
+        anchorX = (cL + cR) / 2;
+      }
+    }
+  }
+
+  const cw = srcRight - srcLeft;
+  const ch = srcBottom - srcTop;
+  let destX = stabilize ? Math.round(w / 2 - (anchorX - srcLeft)) : 0;
+  let destY = stabilize ? h - ch : 0;
+  // Stabilize can push limbs/sword past box edges — grow canvas instead of clip.
+  let outW = w;
+  let outH = h;
+  if (stabilize) {
+    const padL = Math.max(0, -destX);
+    const padR = Math.max(0, destX + cw - w) + 2;
+    const padT = Math.max(0, -destY);
+    const padB = Math.max(0, destY + ch - h);
+    if (padL || padR || padT || padB) {
+      destX += padL;
+      destY += padT;
+      outW = w + padL + padR;
+      outH = h + padT + padB;
+    }
+  }
+
+  const rgba = new Uint8ClampedArray(outW * outH * 4);
+  // Place torso center on canvas center-X; feet on canvas bottom
+
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const sx = srcLeft + x;
+      const si = ((srcTop + y) * img.width + sx) * 4;
+      const dx = destX + x;
+      const dy = destY + y;
+      if (dx < 0 || dy < 0 || dx >= outW || dy >= outH) continue;
+      const di = (dy * outW + dx) * 4;
+      rgba[di] = img.rgba[si]!;
+      rgba[di + 1] = img.rgba[si + 1]!;
+      rgba[di + 2] = img.rgba[si + 2]!;
+      rgba[di + 3] = img.rgba[si + 3]!;
+    }
+  }
+
+  if (flipX) {
+    for (let y = 0; y < outH; y++) {
+      let lo = y * outW;
+      let hi = lo + outW - 1;
+      while (lo < hi) {
+        const i0 = lo * 4;
+        const i1 = hi * 4;
+        for (let k = 0; k < 4; k++) {
+          const t = rgba[i0 + k]!;
+          rgba[i0 + k] = rgba[i1 + k]!;
+          rgba[i1 + k] = t;
+        }
+        lo++;
+        hi--;
+      }
+    }
+  }
+
+  return {
+    width: outW,
+    height: outH,
+    rgba,
+    originX: -Math.floor(outW / 2),
+    originY: -outH,
+    artScale: actor.artScale ?? 1,
+  };
+}
+
+/** Map/battle poses for redesign sheets that do not share .actor UV layout. */
+export function composePoseSheetFrame(
+  actor: LoadedActor,
+  kind: "idle" | "action",
+  flipX = false,
+  phase = 0,
+): ComposedFrame | null {
+  if (kind === "action") {
+    const box = actor.poseAtlas?.action;
+    if (!box) return null;
+    const frame = cropPoseBox(actor, box, flipX, true);
+    if (!frame) return null;
+    // Match on-screen body size to idle (attack art is often a smaller crop).
+    const idleBox = actor.poseAtlas?.idle;
+    if (idleBox) {
+      const idleH = idleBox.bottom - idleBox.top;
+      if (idleH > 0 && frame.height > 0 && Math.abs(frame.height - idleH) > 2) {
+        return scaleComposedNearest(frame, idleH / frame.height);
+      }
+    }
+    return frame;
+  }
+
+  // Idle: cycle pre-drawn breath frames when present; else single body + chest bob
+  // (classic e_deity layout — matches stock .actor flap without multi-frame sword pop).
+  const frames =
+    actor.poseAtlas?.idleFrames?.length
+      ? actor.poseAtlas.idleFrames
+      : actor.poseAtlas?.idle
+        ? [actor.poseAtlas.idle]
+        : [];
+  if (!frames.length) return null;
+  const n = frames.length;
+  let fi: number;
+  if (n >= 3) {
+    const seq = [0, 1, 2, 1];
+    fi = seq[((phase % seq.length) + seq.length) % seq.length]!;
+    if (fi >= n) fi = n - 1;
+  } else {
+    fi = ((phase % n) + n) % n;
+  }
+  const base = cropPoseBox(actor, frames[fi]!, false, true);
+  if (!base) return null;
+  const frame = n < 3 ? applyChestBob(base, phase) : base;
+  if (flipX) mirrorComposedX(frame);
+  return frame;
+}
+
+/**
+ * Hi-res e_deity redesign: stock .actor stacks LKV2 sword/FX fragments that do
+ * not align with the baked full-body idle (rect2) / attack (rect0) art.
+ * Idle = rect2 body + stock sword rects + chest bob; attack = rect0 + FX 3/4.
+ */
+/** Hand sword layer only — rect6/7 are stock foot/sleeve scraps, not sword on baked body. */
+const DEITY_IDLE_SWORD_RECTS = new Set([10]);
+
+/** Hand anchor on baked rect2 body (pixels, body-local). */
+const DEITY_IDLE_SWORD_HAND_X = 100;
+const DEITY_IDLE_SWORD_HAND_Y = 300;
+/** Hilt pivot inside rect10 crop (pixels, layer-local). */
+const DEITY_IDLE_SWORD_HILT_X = 185;
+const DEITY_IDLE_SWORD_HILT_Y = 120;
+/** Fine-tune sword vs hand after anchor (does not move body). */
+const DEITY_IDLE_SWORD_NUDGE_X = -98;
+const DEITY_IDLE_SWORD_NUDGE_Y = 10;
+/** Shift body + sword right together (less left overflow past map edge). */
+const DEITY_IDLE_SHIFT_X = 120;
+/** Base side pad; left grows / right shrinks by SHIFT_X. */
+const DEITY_IDLE_PAD_BASE = 240;
+/** Idle sword scale (body unchanged). */
+const DEITY_SWORD_SCALE = 0.46;
+/** Attack FX scale (rect3/rect4 only; body rect0 unchanged). */
+const DEITY_FX_SCALE = 0.46;
+/** Attack FX horizontal nudge (pose-layout compose; + = right). */
+const DEITY_FX_NUDGE_X = 48;
+/** On-screen size multiplier for e_deity (sprite scale ∝ 1/artScale). */
+const DEITY_DISPLAY_SCALE: number = 1.8;
+/** Extra right margin on attack — lunge + sword tip after torso stabilize. */
+const DEITY_ATTACK_PAD_RIGHT = 0;
+/** Attack body scale (pose-layout compose only; 1 = native crop size). */
+const DEITY_ATTACK_SCALE: number = 0.8;
+/** Attack crop box left offset (+ = right). */
+const DEITY_ATTACK_CROP_X: number = -60;
+/** Attack crop box width delta (+ = wider, − = narrower). */
+const DEITY_ATTACK_CROP_W: number = 60;
+
+function adjustDeityAttackCropBox(
+  box: ActorPoseBox,
+  imgWidth: number,
+): ActorPoseBox {
+  const baseW = box.right - box.left;
+  const left = Math.max(0, box.left + DEITY_ATTACK_CROP_X);
+  const width = Math.max(16, baseW + DEITY_ATTACK_CROP_W);
+  const right = Math.min(imgWidth, left + width);
+  return {
+    left,
+    top: box.top,
+    right: Math.max(left + 16, right),
+    bottom: box.bottom,
+  };
+}
+
+function applyDeityDisplayScale(actor: LoadedActor): void {
+  if (DEITY_DISPLAY_SCALE === 1) return;
+  actor.artScale = Math.max(1, (actor.artScale ?? 1) / DEITY_DISPLAY_SCALE);
+}
+
+/** Add transparent margin; keeps feet-bottom + horizontal-center anchor. */
+function padComposedFrame(
+  frame: ComposedFrame,
+  padLeft: number,
+  padRight: number,
+  padTop: number,
+  padBottom: number,
+): ComposedFrame {
+  if (!padLeft && !padRight && !padTop && !padBottom) return frame;
+  const width = frame.width + padLeft + padRight;
+  const height = frame.height + padTop + padBottom;
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  blitLayerOnto(rgba, width, height, frame, padLeft, padTop);
+  return {
+    width,
+    height,
+    rgba,
+    originX: -Math.floor(width / 2),
+    originY: -height,
+    artScale: frame.artScale,
+    flipX: frame.flipX,
+  };
+}
+
+function blitLayerOnto(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  layer: ComposedFrame,
+  destX: number,
+  destY: number,
+): void {
+  const baseX = Math.round(destX);
+  const baseY = Math.round(destY);
+  for (let y = 0; y < layer.height; y++) {
+    for (let x = 0; x < layer.width; x++) {
+      const si = (y * layer.width + x) * 4;
+      const a = layer.rgba[si + 3]!;
+      if (a === 0) continue;
+      const sx = baseX + x;
+      const sy = baseY + y;
+      if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+      const di = (sy * width + sx) * 4;
+      rgba[di] = layer.rgba[si]!;
+      rgba[di + 1] = layer.rgba[si + 1]!;
+      rgba[di + 2] = layer.rgba[si + 2]!;
+      rgba[di + 3] = a;
+    }
+  }
+}
+
+/** Shrink/grow layer RGBA (nearest, top-left anchor). */
+function scaleLayerNearest(layer: ComposedFrame, scale: number): ComposedFrame {
+  if (scale >= 0.999) return layer;
+  const sw = layer.width;
+  const sh = layer.height;
+  const dw = Math.max(1, Math.round(sw * scale));
+  const dh = Math.max(1, Math.round(sh * scale));
+  const rgba = new Uint8ClampedArray(dw * dh * 4);
+  for (let y = 0; y < dh; y++) {
+    const sy = Math.min(sh - 1, Math.floor((y + 0.5) / scale));
+    for (let x = 0; x < dw; x++) {
+      const sx = Math.min(sw - 1, Math.floor((x + 0.5) / scale));
+      const si = (sy * sw + sx) * 4;
+      const di = (y * dw + x) * 4;
+      rgba[di] = layer.rgba[si]!;
+      rgba[di + 1] = layer.rgba[si + 1]!;
+      rgba[di + 2] = layer.rgba[si + 2]!;
+      rgba[di + 3] = layer.rgba[si + 3]!;
+    }
+  }
+  return {
+    width: dw,
+    height: dh,
+    rgba,
+    originX: layer.originX,
+    originY: layer.originY,
+    artScale: layer.artScale,
+    flipX: layer.flipX,
+  };
+}
+
+/** Blit layer scaled around a pivot; pivot stays at (destX+pivotX, destY+pivotY). */
+function blitLayerScaledOnto(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  layer: ComposedFrame,
+  destX: number,
+  destY: number,
+  scale: number,
+  pivotX: number,
+  pivotY: number,
+): void {
+  if (scale >= 0.999) {
+    blitLayerOnto(rgba, width, height, layer, destX, destY);
+    return;
+  }
+  const scaled = scaleLayerNearest(layer, scale);
+  blitLayerOnto(
+    rgba,
+    width,
+    height,
+    scaled,
+    Math.round(destX + pivotX * (1 - scale)),
+    Math.round(destY + pivotY * (1 - scale)),
+  );
+}
+
+/**
+ * Idle body (rect2) + sword on a fixed canvas. SHIFT_X moves body and sword
+ * together; sprite anchor stays 0.5,1 so the actor draws slightly right on map.
+ */
+function composeDeityIdleStacked(
+  actor: LoadedActor,
+  frames: ActorFrame[],
+  phase = 0,
+): ComposedFrame | null {
+  const bodyFrame = frames.find((f) => f.rectIndex === 2);
+  if (!bodyFrame) return null;
+  const body = composeActorFrame(actor, bodyFrame);
+  if (!body) return null;
+
+  const originX = bodyFrame.offsetX;
+  const originY = bodyFrame.offsetY;
+  const padLeft = DEITY_IDLE_PAD_BASE + DEITY_IDLE_SHIFT_X;
+  const padRight = DEITY_IDLE_PAD_BASE - DEITY_IDLE_SHIFT_X;
+  const width = body.width + padLeft + padRight;
+  const height = body.height;
+  const bodyX = padLeft;
+  const bodyY = 0;
+
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  // Chest bob on body only — doing it after sword stacks would erase the sword.
+  const bodyBob = applyChestBob(
+    {
+      width: body.width,
+      height: body.height,
+      rgba: new Uint8ClampedArray(body.rgba),
+      originX: body.originX,
+      originY: body.originY,
+      artScale: body.artScale,
+    },
+    phase,
+  );
+  blitLayerOnto(rgba, width, height, bodyBob, bodyX, bodyY);
+
+  for (const frame of frames) {
+    if (frame.rectIndex === 2 || !DEITY_IDLE_SWORD_RECTS.has(frame.rectIndex)) {
+      continue;
+    }
+    const layer = composeActorFrame(actor, frame);
+    if (!layer) continue;
+    const dx =
+      bodyX +
+      DEITY_IDLE_SWORD_HAND_X -
+      DEITY_IDLE_SWORD_HILT_X +
+      DEITY_IDLE_SWORD_NUDGE_X;
+    const dy =
+      bodyY +
+      DEITY_IDLE_SWORD_HAND_Y -
+      DEITY_IDLE_SWORD_HILT_Y +
+      DEITY_IDLE_SWORD_NUDGE_Y;
+    blitLayerScaledOnto(
+      rgba,
+      width,
+      height,
+      layer,
+      dx,
+      dy,
+      DEITY_SWORD_SCALE,
+      DEITY_IDLE_SWORD_HILT_X,
+      DEITY_IDLE_SWORD_HILT_Y,
+    );
+  }
+
+  return {
+    width,
+    height,
+    rgba,
+    originX,
+    originY,
+    artScale: actor.artScale ?? 1,
+  };
+}
+
+/** Attack body (rect0) + scaled FX (rect3/rect4). Canvas bbox uses full stock layout. */
+function composeDeityAttackStacked(
+  actor: LoadedActor,
+  frames: ActorFrame[],
+): ComposedFrame | null {
+  const fxRects = new Set([3, 4]);
+  type Layer = { frame: ActorFrame; layer: ComposedFrame; rect: ActorRect };
+  const layers: Layer[] = [];
+  for (const frame of frames) {
+    const rect = actor.rects[frame.rectIndex];
+    if (!rect) continue;
+    const layer = composeActorFrame(actor, frame);
+    if (!layer) continue;
+    const w = rect.right - rect.left;
+    const h = rect.bottom - rect.top;
+    if (w <= 0 || h <= 0) continue;
+    layers.push({ frame, layer, rect });
+  }
+  if (!layers.length) return null;
+
+  // Full unscaled bounds — shrinking FX must not shrink the output texture.
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const { frame, rect } of layers) {
+    const w = rect.right - rect.left;
+    const h = rect.bottom - rect.top;
+    minX = Math.min(minX, frame.offsetX);
+    minY = Math.min(minY, frame.offsetY);
+    maxX = Math.max(maxX, frame.offsetX + w);
+    maxY = Math.max(maxY, frame.offsetY + h);
+  }
+  if (!(maxX > minX && maxY > minY)) return null;
+  const width = maxX - minX;
+  const height = maxY - minY;
+  if (width > 2048 || height > 2048) return null;
+
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  // Body first, FX on top (stock part order).
+  const sorted = [...layers].sort((a, b) => {
+    const ao = fxRects.has(a.frame.rectIndex) ? 1 : 0;
+    const bo = fxRects.has(b.frame.rectIndex) ? 1 : 0;
+    return ao - bo;
+  });
+  for (const { frame, layer } of sorted) {
+    const scale = fxRects.has(frame.rectIndex) ? DEITY_FX_SCALE : 1;
+    const destX = frame.offsetX - minX;
+    const destY = frame.offsetY - minY;
+    // Center pivot — bottom pivot pulled scaled glow off visible area.
+    const pivotX = layer.width / 2;
+    const pivotY = layer.height / 2;
+    blitLayerScaledOnto(
+      rgba,
+      width,
+      height,
+      layer,
+      destX,
+      destY,
+      scale,
+      pivotX,
+      pivotY,
+    );
+  }
+  return {
+    width,
+    height,
+    rgba,
+    originX: minX,
+    originY: minY,
+    artScale: actor.artScale ?? 1,
+  };
+}
+
+function composeDeityHiResFrame(
+  actor: LoadedActor,
+  kind: "idle" | "action",
+  flipX = false,
+  phase = 0,
+): ComposedFrame | null {
+  if (actor.deityPoseLayout) {
+    const frame = composeDeityPoseLayoutFrame(actor, kind, phase);
+    if (!frame) return null;
+    if (flipX) {
+      mirrorComposedX(frame);
+      frame.flipX = true;
+    }
+    return frame;
+  }
+
+  if (kind === "idle") {
+    const standAnim = actor.animations[0];
+    const part = standAnim?.parts[0];
+    // Body + hand sword only — skip head/dot/foot/sleeve scraps (rect1/6/7/8/9/11/12).
+    const keep = new Set([2, 10]);
+    if (part?.frames.length) {
+      const filtered = part.frames.filter((f) => keep.has(f.rectIndex));
+      const stacked = composeDeityIdleStacked(actor, filtered, phase);
+      if (stacked) {
+        if (flipX) {
+          mirrorComposedX(stacked);
+          stacked.flipX = true;
+        }
+        return stacked;
+      }
+    }
+    const bodyFrame =
+      standAnim?.parts[0]?.frames.find((f) => f.rectIndex === 2) ??
+      ({
+        rectIndex: 2,
+        offsetX: 0,
+        offsetY: -(actor.rects[2]?.bottom ?? 60),
+      } as ActorFrame);
+    const base = composeActorFrame(actor, bodyFrame);
+    if (!base) return null;
+    const frame = tightenComposedOpaque(applyChestBob(base, phase));
+    if (flipX) {
+      mirrorComposedX(frame);
+      frame.flipX = true;
+    }
+    return frame;
+  }
+
+  // Attack body only — no FX overlay (rect3/rect4 skipped).
+  const atkAnim = actor.animations[1];
+  const atkFrame =
+    atkAnim?.parts[2]?.frames.find((f) => f.rectIndex === 0) ??
+    atkAnim?.parts[0]?.frames.find((f) => f.rectIndex === 0) ??
+    ({
+      rectIndex: 0,
+      offsetX: 0,
+      offsetY: -(actor.rects[0]?.bottom ?? 46),
+    } as ActorFrame);
+  const base = composeActorFrame(actor, atkFrame);
+  if (!base) return null;
+  const frame = tightenComposedOpaque(base);
+  if (flipX) {
+    mirrorComposedX(frame);
+    frame.flipX = true;
+  }
+  return frame;
+}
+
+/**
+ * Compose from v34 pose-layout boxes (idle/attack/sword/FX). Atlas untouched.
+ */
+function composeDeityPoseLayoutFrame(
+  actor: LoadedActor,
+  kind: "idle" | "action",
+  phase = 0,
+): ComposedFrame | null {
+  const layout = actor.deityPoseLayout;
+  if (!layout) return null;
+
+  if (kind === "action") {
+    // Attack body only — no FX overlay.
+    const img = actor.images[0];
+    if (!img) return null;
+    const attackBox = adjustDeityAttackCropBox(layout.action, img.width);
+    let frame = cropPoseBox(actor, attackBox, false, true);
+    if (!frame) return null;
+    if (Math.abs(DEITY_ATTACK_SCALE - 1) > 0.001) {
+      frame = scaleComposedNearest(frame, DEITY_ATTACK_SCALE);
+    }
+    return padComposedFrame(frame, 0, DEITY_ATTACK_PAD_RIGHT, 0, 0);
+  }
+
+  const body = cropPoseBox(actor, layout.idle, false, true);
+  if (!body) return null;
+  const bodyBob = applyChestBob(
+    {
+      width: body.width,
+      height: body.height,
+      rgba: new Uint8ClampedArray(body.rgba),
+      originX: body.originX,
+      originY: body.originY,
+      artScale: body.artScale,
+    },
+    phase,
+  );
+  const sword = cropPoseBox(actor, layout.sword, false, false);
+  if (!sword) {
+    return {
+      ...bodyBob,
+      originX: -Math.floor(bodyBob.width / 2),
+      originY: -bodyBob.height,
+      artScale: actor.artScale ?? 1,
+    };
+  }
+
+  const padLeft = DEITY_IDLE_PAD_BASE + DEITY_IDLE_SHIFT_X;
+  const padRight = Math.max(40, DEITY_IDLE_PAD_BASE - DEITY_IDLE_SHIFT_X);
+  const width = bodyBob.width + padLeft + padRight;
+  const height = bodyBob.height;
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  blitLayerOnto(rgba, width, height, bodyBob, padLeft, 0);
+
+  // Hand on idle body (fractions of stabilized crop); hilt near sword pommel.
+  const handX = bodyBob.width * 0.28;
+  const handY = bodyBob.height * 0.48;
+  const hiltX = sword.width * 0.72;
+  const hiltY = sword.height * 0.28;
+  const dx = padLeft + handX - hiltX + DEITY_IDLE_SWORD_NUDGE_X;
+  const dy = handY - hiltY + DEITY_IDLE_SWORD_NUDGE_Y;
+  blitLayerScaledOnto(
+    rgba,
+    width,
+    height,
+    sword,
+    dx,
+    dy,
+    DEITY_SWORD_SCALE,
+    hiltX,
+    hiltY,
+  );
+
+  return {
+    width,
+    height,
+    rgba,
+    originX: -Math.floor(width / 2),
+    originY: -height,
+    artScale: actor.artScale ?? 1,
+  };
+}
+
+/** Larger chest bob on a single idle body — phase ping-pong. */
+function applyChestBob(frame: ComposedFrame, phase: number): ComposedFrame {
+  const w = frame.width;
+  const h = frame.height;
+  const src = frame.rgba;
+  const out = new Uint8ClampedArray(src);
+
+  // Locate bust from opaque pixels in upper-torso band (not fixed 30–70% —
+  // off-center art previously only moved one breast).
+  const y0 = Math.floor(h * 0.24);
+  const y1 = Math.floor(h * 0.52);
+  if (y1 - y0 < 8) return frame;
+
+  let sumX = 0;
+  let n = 0;
+  let minX = w;
+  let maxX = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = 0; x < w; x++) {
+      if (src[(y * w + x) * 4 + 3]! < 40) continue;
+      sumX += x;
+      n++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+    }
+  }
+  if (n < 20) return frame;
+
+  const cx = sumX / n;
+  // Cover full bust: prefer detected torso span, clamped away from sleeve tips.
+  const span = Math.max(maxX - minX + 1, Math.floor(w * 0.35));
+  let x0 = Math.floor(cx - span * 0.42);
+  let x1 = Math.ceil(cx + span * 0.42);
+  x0 = Math.max(0, Math.min(x0, w - 8));
+  x1 = Math.max(x0 + 8, Math.min(w, x1));
+
+  const amp = Math.max(1, Math.round(h * 0.0035));
+  const offsets = [-amp, 0, amp, 0];
+  const shift = offsets[((phase % offsets.length) + offsets.length) % offsets.length]!;
+  if (shift === 0) return { ...frame, rgba: out };
+
+  // Soft horizontal falloff at edges so sleeves don't shear.
+  const edge = Math.max(3, Math.floor((x1 - x0) * 0.12));
+  for (let y = y0; y < y1; y++) {
+    const sy = Math.min(y1 - 1, Math.max(y0, y - shift));
+    for (let x = x0; x < x1; x++) {
+      const dl = x - x0;
+      const dr = x1 - 1 - x;
+      const soft = Math.min(dl, dr, edge);
+      // Fully remap interior; near edges blend with original.
+      const si = (sy * w + x) * 4;
+      const oi = (y * w + x) * 4;
+      const di = oi;
+      if (soft >= edge) {
+        out[di] = src[si]!;
+        out[di + 1] = src[si + 1]!;
+        out[di + 2] = src[si + 2]!;
+        out[di + 3] = src[si + 3]!;
+      } else {
+        const t = soft / edge;
+        out[di] = Math.round(src[oi]! * (1 - t) + src[si]! * t);
+        out[di + 1] = Math.round(src[oi + 1]! * (1 - t) + src[si + 1]! * t);
+        out[di + 2] = Math.round(src[oi + 2]! * (1 - t) + src[si + 2]! * t);
+        out[di + 3] = Math.round(src[oi + 3]! * (1 - t) + src[si + 3]! * t);
+      }
+    }
+  }
+  return { ...frame, rgba: out };
+}
+
+function mirrorComposedX(frame: ComposedFrame): void {
+  const { width: w, height: h, rgba } = frame;
+  for (let y = 0; y < h; y++) {
+    let lo = y * w;
+    let hi = lo + w - 1;
+    while (lo < hi) {
+      const i0 = lo * 4;
+      const i1 = hi * 4;
+      for (let k = 0; k < 4; k++) {
+        const t = rgba[i0 + k]!;
+        rgba[i0 + k] = rgba[i1 + k]!;
+        rgba[i1 + k] = t;
+      }
+      lo++;
+      hi--;
+    }
+  }
+}
+
+function scaleComposedNearest(frame: ComposedFrame, scale: number): ComposedFrame {
+  const sw = frame.width;
+  const sh = frame.height;
+  const dw = Math.max(1, Math.round(sw * scale));
+  const dh = Math.max(1, Math.round(sh * scale));
+  if (dw > 2048 || dh > 2048) return frame;
+  const rgba = new Uint8ClampedArray(dw * dh * 4);
+  for (let y = 0; y < dh; y++) {
+    const sy = Math.min(sh - 1, Math.floor((y + 0.5) / scale));
+    for (let x = 0; x < dw; x++) {
+      const sx = Math.min(sw - 1, Math.floor((x + 0.5) / scale));
+      const si = (sy * sw + sx) * 4;
+      const di = (y * dw + x) * 4;
+      rgba[di] = frame.rgba[si]!;
+      rgba[di + 1] = frame.rgba[si + 1]!;
+      rgba[di + 2] = frame.rgba[si + 2]!;
+      rgba[di + 3] = frame.rgba[si + 3]!;
+    }
+  }
+  return {
+    width: dw,
+    height: dh,
+    rgba,
+    originX: -Math.floor(dw / 2),
+    originY: -dh,
+    artScale: frame.artScale,
+    flipX: frame.flipX,
+  };
+}
+
+/**
+ * @deprecated Alias — rect scaling lives in finalizeActorSheet.
+ */
+export function applyActorArtScale(actor: LoadedActor): void {
+  finalizeActorSheet(actor);
 }
 
 /** First animation with any frames. */
@@ -245,7 +1921,7 @@ export function composeActorFrame(
   if (!image) return null;
   const w = rect.right - rect.left;
   const h = rect.bottom - rect.top;
-  if (w <= 0 || h <= 0 || w > 512 || h > 512) return null;
+  if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return null;
   if (rect.left < 0 || rect.top < 0 || rect.right > image.width || rect.bottom > image.height) {
     return null;
   }
@@ -267,6 +1943,7 @@ export function composeActorFrame(
     rgba,
     originX: frame.offsetX,
     originY: frame.offsetY,
+    artScale: actor.artScale ?? 1,
   };
 }
 
@@ -313,7 +1990,7 @@ export function composeAnimationFrame(
   if (!(maxX > minX && maxY > minY)) return null;
   const width = maxX - minX;
   const height = maxY - minY;
-  if (width > 512 || height > 512) return null;
+  if (width > 2048 || height > 2048) return null;
 
   const rgba = new Uint8ClampedArray(width * height * 4);
   for (const { frame, rect } of layers) {
@@ -346,7 +2023,7 @@ export function composeAnimationFrame(
       }
     }
   }
-  return { width, height, rgba, originX: minX, originY: minY };
+  return { width, height, rgba, originX: minX, originY: minY, artScale: actor.artScale ?? 1 };
 }
 
 export function composeActorFrameIndex(
@@ -431,7 +2108,7 @@ export function composeActorPartKeyframe(
       }
     }
   }
-  return { width, height, rgba, originX, originY };
+  return { width, height, rgba, originX, originY, artScale: actor.artScale ?? 1 };
 }
 
 export function actorPartKeyframeCount(actor: ParsedActor, animIndex = 0): number {
@@ -494,7 +2171,7 @@ export function composePartStacked(
   }
   const width = maxX - minX;
   const height = maxY - minY;
-  if (!(width > 0 && height > 0) || width > 512 || height > 512) return null;
+  if (!(width > 0 && height > 0) || width > 2048 || height > 2048) return null;
 
   const rgba = new Uint8ClampedArray(width * height * 4);
   for (const { frame, rect } of layers) {
@@ -525,7 +2202,7 @@ export function composePartStacked(
       }
     }
   }
-  return { width, height, rgba, originX: minX, originY: minY };
+  return { width, height, rgba, originX: minX, originY: minY, artScale: actor.artScale ?? 1 };
 }
 
 /** Average layer count — walk poses have more pieces than stand. */
@@ -815,6 +2492,26 @@ export function composeMapActor(
   moving: boolean,
   phase: number,
 ): ComposedFrame | null {
+  // Redesign PNG sheets: whole idle/action poses — never stack stock .actor rects.
+  if (actor.sheetMode === "poses" && actor.poseAtlas) {
+    const dir = ((cbeDir - 1) % 4 + 4) % 4;
+    const flipX = dir === 3; // left
+    // Map idle uses breath cycle via phase; action is battle-only.
+    void moving;
+    return (
+      composePoseSheetFrame(actor, "idle", flipX, phase) ||
+      composePoseSheetFrame(actor, "action", flipX, phase)
+    );
+  }
+
+  // Hi-res e_deity: baked body/attack poses — skip LKV2 fragment stack.
+  if (actor.deityHiRes) {
+    const dir = ((cbeDir - 1) % 4 + 4) % 4;
+    const flipX = dir === 3;
+    void moving;
+    return composeDeityHiResFrame(actor, "idle", flipX, phase);
+  }
+
   const plan = planMapAnims(actor);
   if (!plan.partCount && !actor.animations[0]?.parts.length) {
     return composeActorFrameIndex(actor, phase);
@@ -1194,6 +2891,30 @@ export function composeBattlePose(
   pose: BattlePose,
   phase: number,
 ): ComposedFrame | null {
+  if (actor.sheetMode === "poses" && actor.poseAtlas) {
+    const flipX = !facingRight;
+    if (pose === "attack" || pose === "cast" || pose === "hit") {
+      return (
+        composePoseSheetFrame(actor, "action", flipX, phase) ||
+        composePoseSheetFrame(actor, "idle", flipX, phase)
+      );
+    }
+    // idle / death: breath cycle on idle frames
+    return composePoseSheetFrame(actor, "idle", flipX, phase);
+  }
+
+  // Hi-res e_deity: attack/cast use action pose; hit stays on idle (no attack frame).
+  if (actor.deityHiRes) {
+    const flipX = !facingRight;
+    if (pose === "attack" || pose === "cast") {
+      return (
+        composeDeityHiResFrame(actor, "action", flipX, phase) ||
+        composeDeityHiResFrame(actor, "idle", flipX, phase)
+      );
+    }
+    return composeDeityHiResFrame(actor, "idle", flipX, phase);
+  }
+
   const plan = planMapAnims(actor);
   const cbeDir = facingRight ? 2 : 4;
 

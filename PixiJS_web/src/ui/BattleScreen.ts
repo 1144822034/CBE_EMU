@@ -1,6 +1,7 @@
 import { Container, Graphics, Sprite, Texture } from "pixi.js";
 import {
   ACTOR_DISPLAY_SCALE,
+  actorSpriteScale,
   CBE,
   LCD_HEIGHT,
   LCD_WIDTH,
@@ -179,6 +180,8 @@ type UnitView = {
   sprite: Sprite | null;
   side: BattleSide;
   loaded: LoadedActor | null;
+  /** Resource used for loadActor (for FX sheet reload). */
+  actorName: string;
   /** true = face right (monsters on left). */
   facingRight: boolean;
   phase: number;
@@ -832,6 +835,23 @@ export class BattleScreen extends Container {
     this.fxHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.refreshAutoBannerVisibility();
+  }
+
+  /** Reload e_deity units after client「屏蔽/显示特效」swaps gif ↔ png. */
+  async refreshDeitySheetForFxPref(): Promise<void> {
+    if (!this.visible || !this.units.length) return;
+    for (const u of this.units) {
+      if (!u.actorName || !/e_deity/i.test(u.actorName)) continue;
+      try {
+        const loaded = await loadActor(u.actorName);
+        if (!this.visible || !u.root.parent) continue;
+        u.loaded = loaded;
+        u.phase = 0;
+        this.paintUnitSprite(u);
+      } catch (e) {
+        console.warn("[battle] deity sheet reload failed", u.actorName, e);
+      }
+    }
   }
 
   /**
@@ -1761,6 +1781,7 @@ export class BattleScreen extends Container {
       sprite: null,
       side,
       loaded: null,
+      actorName,
       facingRight,
       phase: 0,
       homeX: x,
@@ -1791,8 +1812,8 @@ export class BattleScreen extends Container {
       this.poseTexKey.set(spr, key);
       spr.anchor.set(0.5, 1);
       spr.scale.set(
-        frame.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
-        ACTOR_DISPLAY_SCALE,
+        actorSpriteScale(frame.artScale, !!frame.flipX).x,
+        actorSpriteScale(frame.artScale, !!frame.flipX).y,
       );
       root.addChildAt(spr, 1);
       view.sprite = spr;
@@ -1822,8 +1843,8 @@ export class BattleScreen extends Container {
     }
     u.sprite.anchor.set(0.5, 1);
     u.sprite.scale.set(
-      frame.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
-      ACTOR_DISPLAY_SCALE,
+      actorSpriteScale(frame.artScale, !!frame.flipX).x,
+      actorSpriteScale(frame.artScale, !!frame.flipX).y,
     );
     if (u.pose === "hit") {
       u.sprite.tint = 0xff8080;

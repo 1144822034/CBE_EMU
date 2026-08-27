@@ -95,7 +95,11 @@ import {
   imeShellClearLockSize,
   imeShellIsActive,
   imeShellLockedSize,
+  kickShellCompositor,
+  repairShellViewportAlignment,
   resetShellViewportLayout,
+  SHELL_WRAP_CENTER_TRANSFORM,
+  shellViewportSnapshot,
 } from "./ui/imeShell";
 import { dismissOverlayIme } from "./ui/dismissOverlayIme";
 import type { RoleRow } from "./net/protocol";
@@ -549,7 +553,7 @@ async function main(): Promise<void> {
       if (floor) imeShellAdoptLock(floor.width, floor.height);
       fitPhoneWrap();
     } else {
-      wrap.style.transform = "";
+      wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
       fitPhoneWrap();
@@ -597,6 +601,13 @@ async function main(): Promise<void> {
     Math.min(LCD_RESOLUTION_CAP, Math.max(1, bootScale)),
   );
   wrap.appendChild(app.canvas);
+  // Keep chrome toggle above the canvas (append order + z-index).
+  if (touchChromeToggle && touchChromeToggle.parentElement !== wrap) {
+    wrap.appendChild(touchChromeToggle);
+  } else if (touchChromeToggle) {
+    wrap.appendChild(touchChromeToggle);
+  }
+  wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
 
   const shell = new PhoneShell(app);
   const touch = new TouchControls();
@@ -1563,6 +1574,10 @@ async function main(): Promise<void> {
           isRedNamePk(session.pkPoints),
         );
       }
+      /* Cache may be empty until 1/1/21; apply then refresh. */
+      void view.setPlayerGuild(
+        session.guildName || session.characterStats?.guild || "",
+      );
       // Same-town role switch: showScene skips marker clear on identical map —
       // force catalog/peer refresh so role A's NPCs/players do not linger.
       view.actors.clearPeers();
@@ -1591,6 +1606,8 @@ async function main(): Promise<void> {
         if (board.mine?.needConfirm) view.setLeiBlink(true);
       });
       void session.syncCosmetics();
+      /* Authoritative guild for self nameplate「门派-xxx」(1/1/21). */
+      void session.openCharacterStats();
     },
     onPlayerPos: (x, y) => {
       view.setPlayerPos(x, y);
@@ -1615,6 +1632,7 @@ async function main(): Promise<void> {
           cos.eqChenghao,
           cos.eqWing,
           cos.eqMount,
+          cos.guild || "",
         );
       }
     },
@@ -1627,6 +1645,7 @@ async function main(): Promise<void> {
         peer.eqChenghao,
         peer.eqWing,
         peer.eqMount,
+        peer.guild || "",
       );
     },
     onPeerMoves: (moves) => view.actors.applyPeerMoves(moves),
@@ -1646,6 +1665,7 @@ async function main(): Promise<void> {
             cos.eqChenghao,
             cos.eqWing,
             cos.eqMount,
+            cos.guild || "",
           );
         }
       }
@@ -1832,6 +1852,9 @@ async function main(): Promise<void> {
         hud.pushChat(`[帮]${u.membershipNotice.info}`);
         setChromeStatus(u.membershipNotice.info, u.membershipNotice.type !== 1);
         if (guildUi.visible) guildUi.showTip(u.membershipNotice.info);
+        if (u.membershipNotice.type === 1 && u.membershipNotice.guildName) {
+          void view.setPlayerGuild(u.membershipNotice.guildName);
+        }
       }
       if (u.applyResult) {
         hud.pushChat(`[帮]${u.applyResult.tip}`);
@@ -1844,6 +1867,7 @@ async function main(): Promise<void> {
         if (u.leaveResult.result === 1) {
           guildUi.openHub(false, "无帮派");
           showPhase("guild");
+          void view.setPlayerGuild("");
         }
         if (guildUi.visible) guildUi.showTip(u.leaveResult.tip);
       }
@@ -1863,6 +1887,12 @@ async function main(): Promise<void> {
         guildUi.showDetail(u.detail, fromList);
         showPhase("guild");
         setChromeStatus(`帮派 ${u.detail.guildName}`);
+        if (
+          (u.detail.guildId >>> 0) === (session.guildId >>> 0) ||
+          session.inGuild
+        ) {
+          void view.setPlayerGuild(u.detail.guildName);
+        }
       }
       if (u.members) {
         guildUi.setMembers(
@@ -2456,6 +2486,7 @@ async function main(): Promise<void> {
         session.roleTitleGif,
         isRedNamePk(stats.pkPoints),
       );
+      void view.setPlayerGuild(stats.guild || session.guildName || "");
     },
     onHangup: (msg) => {
       hud.pushChat(`[挂] ${msg}`);
@@ -3419,9 +3450,12 @@ async function main(): Promise<void> {
     if (leaf === "peer_fx") {
       const on = togglePeerCosmeticsVisible();
       view.actors.refreshPeerCosmeticsVisibility();
+      void battle.refreshDeitySheetForFxPref();
       showPhase("world");
-      showGameTip(on ? "已显示附近特效" : "已屏蔽附近特效");
-      setChromeStatus(on ? "附近翅/骑/称号：显示" : "附近翅/骑/称号：屏蔽");
+      showGameTip(on ? "已显示特效" : "已屏蔽特效");
+      setChromeStatus(
+        on ? "特效开：翅/骑/称号 + e_deity.png" : "特效关：翅/骑/称号隐藏 + e_deity.gif",
+      );
       return;
     }
     setChromeStatus(`菜单: ${label}`);

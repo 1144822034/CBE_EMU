@@ -705,6 +705,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_marriage32_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-pixi-marriage32", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     /* Leave-guild reuses 10/22 {id=roleId}, so split it before the ordinary
      * 10/22 {id=guildId} detail request. */
     hookedLen = vm_net_mock_build_guild_leave_response(request, requestLen, out, outCap);

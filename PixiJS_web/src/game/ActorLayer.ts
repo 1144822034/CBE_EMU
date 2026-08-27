@@ -2,7 +2,7 @@ import { Container, Graphics, Sprite, type Texture } from "pixi.js";
 import type { NpcActor, PeerActor } from "../net/protocol";
 import { isRedNamePk } from "../net/protocol";
 import { BitmapLabel } from "../ui/BitmapLabel";
-import { ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE } from "../ui/constants";
+import { ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale } from "../ui/constants";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
 import { tryLoadUiTexture } from "../ui/UiAssets";
 import {
@@ -140,6 +140,9 @@ type Marker = {
   eqChenghao: number;
   eqWing: number;
   eqMount: number;
+  /** Peer guild line for nameplate「门派-xxx」. */
+  guildName: string;
+  guildLabel: BitmapLabel | null;
   /** NPC quest mark from fuhao.actor (submit/accept/incomplete). */
   questMark: Sprite | null;
   questPrompt: NpcTaskPromptType | 0;
@@ -237,7 +240,7 @@ export class ActorLayer {
    */
   private pendingPeerCosmetics = new Map<
     number,
-    { eqChenghao: number; eqWing: number; eqMount: number }
+    { eqChenghao: number; eqWing: number; eqMount: number; guild: string }
   >();
   private viewerX = 0;
   private viewerY = 0;
@@ -505,9 +508,11 @@ export class ActorLayer {
     eqChenghao: number,
     eqWing: number,
     eqMount: number,
+    guild = "",
   ): void {
     const id = actorId >>> 0;
-    const allZero = !(eqChenghao || eqWing || eqMount);
+    const guildTrim = (guild || "").replace(/\0+$/g, "").trim();
+    const allZero = !(eqChenghao || eqWing || eqMount || guildTrim);
     const prev = this.pendingPeerCosmetics.get(id);
     if (allZero && !prev) {
       /* Match GameSession: ignore empty first notice. */
@@ -517,6 +522,8 @@ export class ActorLayer {
       eqChenghao: eqChenghao >>> 0,
       eqWing: eqWing >>> 0,
       eqMount: eqMount >>> 0,
+      /* Keep prior guild if this notice omitted it (eq-only refresh). */
+      guild: guildTrim || (allZero ? "" : prev?.guild || ""),
     });
     this.paintPeerCosmetics(id);
   }
@@ -532,17 +539,37 @@ export class ActorLayer {
     m.eqChenghao = pending.eqChenghao;
     m.eqWing = pending.eqWing;
     m.eqMount = pending.eqMount;
+    m.guildName = pending.guild || "";
     this.applyPeerCosmeticsVisual(m);
+    void this.refreshPeerGuild(m);
   }
 
   /**
    * Re-apply peer wing/mount/title after client「屏蔽/显示特效」toggles.
    * Stored eq* ids are kept; overlays only mount when preference is on.
+   * Also reloads e_deity sheet (gif stock ↔ png hi-res).
    */
   refreshPeerCosmeticsVisibility(): void {
     for (const m of this.markers.values()) {
       if (m.kind !== "peer") continue;
       this.applyPeerCosmeticsVisual(m);
+    }
+    void this.reloadDeityMarkersForFxPref();
+  }
+
+  /** Swap e_deity.gif ↔ e_deity.png for map markers when特效 pref changes. */
+  async reloadDeityMarkersForFxPref(): Promise<void> {
+    for (const m of this.markers.values()) {
+      if (!m.actorName || !/e_deity/i.test(m.actorName)) continue;
+      try {
+        const loaded = await loadActor(m.actorName);
+        if (this.markers.get(m.id) !== m) continue;
+        m.loaded = loaded;
+        m.phase = 0;
+        this.applyFrame(m);
+      } catch (e) {
+        console.warn("[actor-layer] deity sheet reload failed", m.actorName, e);
+      }
     }
   }
 
@@ -993,6 +1020,8 @@ export class ActorLayer {
         eqChenghao: 0,
         eqWing: 0,
         eqMount: 0,
+        guildName: "",
+        guildLabel: null,
         questMark: null,
         questPrompt: 0,
         questMarkGen: 0,
@@ -1342,13 +1371,52 @@ export class ActorLayer {
     let topY = m.label.y;
     if (m.titleBadge.visible) {
       m.titleBadge.position.set(0, m.label.y - 2);
-      topY =
-        m.titleBadge.y -
-        (m.titleSpr?.height || m.titleTextLabel?.height || 12);
+      const titleH =
+        m.chenghao?.root.parent === m.titleBadge
+          ? m.chenghao.root.height || 12
+          : m.titleSpr?.height || m.titleTextLabel?.height || 12;
+      topY = m.titleBadge.y - titleH;
+    }
+    if (m.guildLabel?.visible) {
+      const guildH = m.guildLabel.height || 12;
+      m.guildLabel.position.set(
+        -Math.floor(m.guildLabel.width / 2),
+        topY - 2 - guildH,
+      );
+      topY = m.guildLabel.y;
     }
     if (m.questMark) {
       m.questMark.position.set(0, topY - 1);
     }
+  }
+
+  private async refreshPeerGuild(m: Marker): Promise<void> {
+    if (m.kind !== "peer") return;
+    const raw = (m.guildName || "").replace(/\0+$/g, "").trim();
+    let line = "";
+    if (raw.startsWith("门派-")) line = raw.slice(0, 12);
+    else if (raw && raw !== "无" && raw !== "无帮派") line = `门派-${raw.slice(0, 8)}`;
+    if (!line) {
+      if (m.guildLabel) {
+        m.guildLabel.visible = false;
+      }
+      this.layoutNameplate(m);
+      return;
+    }
+    if (!m.guildLabel) {
+      m.guildLabel = new BitmapLabel();
+      m.guildLabel.zIndex = 4;
+      m.root.addChild(m.guildLabel);
+    }
+    await m.guildLabel.setText(line, 0x88eeff, {
+      uc3: true,
+      smooth: false,
+      outline: true,
+      outlineThin: true,
+    });
+    m.guildLabel.scale.set(NAMEPLATE_SCALE);
+    m.guildLabel.visible = true;
+    this.layoutNameplate(m);
   }
 
   private applyFrame(m: Marker): void {
@@ -1400,8 +1468,8 @@ export class ActorLayer {
       m.sprite.texture = tex;
     }
     m.sprite.scale.set(
-      composed.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
-      ACTOR_DISPLAY_SCALE,
+      actorSpriteScale(composed.artScale, !!composed.flipX).x,
+      actorSpriteScale(composed.artScale, !!composed.flipX).y,
     );
     if (m.kind === "peer") {
       m.sprite.y = m.eqMount ? -MOUNT_BODY_LIFT : 0;

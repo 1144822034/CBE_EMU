@@ -225,6 +225,8 @@ export type FriendRow = {
   online: boolean;
   degree: number;
   job: number;
+  /** True when this friend is the local player's spouse. */
+  isSpouse?: boolean;
 };
 
 export type FriendPage = {
