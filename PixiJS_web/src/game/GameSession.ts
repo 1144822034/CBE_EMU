@@ -292,6 +292,13 @@ import {
   type AuctionOpResult,
   type AuctionStatus,
 } from "../net/protocolAuction";
+import {
+  buildLadderStartRequest,
+  buildLadderStatusRequest,
+  parseLadderStartResult,
+  parseLadderStatus,
+  type LadderStatus,
+} from "../net/protocolLadder";
 import { decodeWtPacket, type WtPacket } from "../net/wt";
 import {
   type BagItem,
@@ -2387,6 +2394,38 @@ export class GameSession {
     const bodies = await this.transport.exchange(0, buildArenaLeaveRequest());
     this.handleBodies(bodies);
     this.clearArenaHud("leave-arena");
+  }
+
+  async fetchLadderStatus(): Promise<LadderStatus | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildLadderStatusRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const st = parseLadderStatus(decodeWtPacket(body));
+        if (st) return st;
+      } catch {
+        /* skip */
+      }
+    }
+    return null;
+  }
+
+  async startLadderChallenge(): Promise<{ ok: boolean; tip: string }> {
+    if (!this.transport) return { ok: false, tip: "未连接" };
+    const bodies = await this.transport.exchange(0, buildLadderStartRequest());
+    this.handleBodies(bodies);
+    if (this.inBattle) return { ok: true, tip: "" };
+    for (const body of bodies) {
+      try {
+        const r = parseLadderStartResult(decodeWtPacket(body));
+        if (r.tip) return { ok: false, tip: r.tip.replace(/\0+$/g, "") };
+        if (!r.ok) return { ok: false, tip: "挑战失败" };
+      } catch {
+        /* skip */
+      }
+    }
+    return { ok: false, tip: "挑战失败" };
   }
 
   /**

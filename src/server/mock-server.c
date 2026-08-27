@@ -107,6 +107,22 @@ static void vm_mock_service_team_battle_note_roster_disconnect(
 #include "mock_server_recovered_helpers.inc"
 #include "mock_server_scene_task.c"
 
+/* World boss + ladder (after scene_task combat spawn helpers). */
+static void vm_mock_world_boss_tick(void);
+bool vm_mock_world_boss_try_claim_encounter(const char *scene, u32 wireId,
+                                            u32 posx, u32 posy,
+                                            u32 *enemyIdOut);
+void vm_mock_world_boss_on_battle_end(bool victory);
+static u32 vm_net_mock_build_ladder_protocol_response(const u8 *request,
+                                                      u32 requestLen, u8 *out,
+                                                      u32 outCap);
+bool vm_mock_ladder_battle_is_active(void);
+u32 vm_mock_ladder_damage_scale_percent(void);
+void vm_mock_ladder_on_battle_end(bool victory);
+
+#include "mock_server_world_boss.c"
+#include "mock_server_ladder.c"
+
 /* Pixi arena (defined in mock_server_arena.c after guild). */
 static bool vm_mock_arena_npc_offers_entry(const char *npcName);
 static bool vm_mock_arena_wager_npc_offers(const char *npcName);

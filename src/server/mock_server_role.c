@@ -12136,3 +12136,44 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
     (void)remaining;
     return true;
 }
+
+u32 vm_net_mock_copy_outdoor_field_scenes(char scenes[][64], u32 cap)
+{
+    u32 total = vm_net_mock_load_auto_monster_catalog();
+    u32 count = 0;
+
+    if (scenes == NULL || cap == 0)
+        return 0;
+    for (u32 i = 0; i < total && count < cap; ++i)
+    {
+        const vm_net_mock_auto_monster_catalog_item *item =
+            &g_vm_net_mock_auto_monster_catalog[i];
+        if (item->scene[0] == 0 ||
+            vm_net_mock_scene_is_city_hangup_forbidden(item->scene))
+            continue;
+        snprintf(scenes[count], 64, "%s", item->scene);
+        ++count;
+    }
+    return count;
+}
+
+bool vm_net_mock_pick_scene_spawn_xy(const char *scene, u16 *xOut, u16 *yOut)
+{
+    u16 x = 120;
+    u16 y = 120;
+    u16 entryId = 0;
+
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    if (vm_net_mock_get_scene_reasonable_spawn_from_sce(scene, &x, &y, &entryId))
+        vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+    if (x == 0)
+        x = 120;
+    if (y == 0)
+        y = 120;
+    if (xOut)
+        *xOut = x;
+    if (yOut)
+        *yOut = y;
+    return true;
+}

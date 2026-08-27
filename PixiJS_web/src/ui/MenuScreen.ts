@@ -40,6 +40,7 @@ export type MenuLeaf =
   | "friends"
   | "chat"
   | "rank"
+  | "ladder"
   | "unstuck"
   | "leave_game"
   | "leave_team"
@@ -82,6 +83,7 @@ const ROOT: MenuNode[] = [
       { label: "好友列表", leaf: "friends" },
       { label: "聊天信息", leaf: "chat" },
       { label: "排行榜", leaf: "rank" },
+      { label: "天梯挑战", leaf: "ladder" },
     ],
   },
   { label: "帮派家族", leaf: "guild" },

@@ -57,6 +57,7 @@ import type {
 import { ArenaHud } from "./ui/ArenaHud";
 import { ArenaPanel } from "./ui/ArenaPanel";
 import { WagerPanel } from "./ui/WagerPanel";
+import { LadderPanel } from "./ui/LadderPanel";
 import { AuctionPanel } from "./ui/AuctionPanel";
 import {
   EntertainmentPanel,
@@ -650,6 +651,7 @@ async function main(): Promise<void> {
   const arenaHud = new ArenaHud();
   const arenaPanel = new ArenaPanel();
   const wagerPanel = new WagerPanel();
+  const ladderPanel = new LadderPanel();
   const auctionPanel = new AuctionPanel();
   const entertainPanel = new EntertainmentPanel();
   const entertainWeb = new EntertainmentWebLayer();
@@ -698,6 +700,7 @@ async function main(): Promise<void> {
   arenaHud.visible = false;
   arenaPanel.visible = false;
   wagerPanel.visible = false;
+  ladderPanel.visible = false;
   auctionPanel.visible = false;
   entertainPanel.visible = false;
   wingPanel.visible = false;
@@ -737,6 +740,7 @@ async function main(): Promise<void> {
     arenaHud,
     arenaPanel,
     wagerPanel,
+    ladderPanel,
     auctionPanel,
     entertainPanel,
     wingPanel,
@@ -754,6 +758,7 @@ async function main(): Promise<void> {
   /* World overlays above NPC dialog / approach so taps cannot leak through. */
   arenaPanel.zIndex = 55;
   wagerPanel.zIndex = 55;
+  ladderPanel.zIndex = 55;
   auctionPanel.zIndex = 55;
   entertainPanel.zIndex = 56;
   wingPanel.zIndex = 56;
@@ -770,6 +775,7 @@ async function main(): Promise<void> {
       worldMap,
       auctionPanel,
       wagerPanel,
+      ladderPanel,
       arenaPanel,
       enhanceUi,
     washUi,
@@ -808,6 +814,7 @@ async function main(): Promise<void> {
       auctionPanel.visible ||
       arenaPanel.visible ||
       wagerPanel.visible ||
+      ladderPanel.visible ||
       entertainPanel.visible ||
       wingPanel.visible ||
       mountPanel.visible ||
@@ -1160,6 +1167,40 @@ async function main(): Promise<void> {
     }
   };
 
+  const openLadderPanel = async () => {
+    dialog.hide();
+    closeApproach(false);
+    const status = await session.fetchLadderStatus();
+    dialog.hide();
+    closeApproach(false);
+    ladderPanel.open(status);
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(ladderPanel.softkeys());
+    setChromeStatus("天梯挑战");
+    if (!status) ladderPanel.showTip("天梯状态获取失败");
+  };
+  ladderPanel.onAction = (action) => {
+    if (action === "close") {
+      ladderPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    if (action === "challenge") {
+      void session.startLadderChallenge().then((r) => {
+        if (r.ok) {
+          ladderPanel.close();
+          syncWorldWalkInput();
+          if (session.inBattle) showPhase("battle");
+          return;
+        }
+        ladderPanel.showTip(r.tip || "挑战失败");
+        shell.setSoftkeys(ladderPanel.softkeys());
+      });
+    }
+  };
+
   const showPhase = (p: Phase) => {
     phase = p;
     title.visible = p === "splash" || p === "login" || p === "register" || p === "servers";
@@ -1239,6 +1280,7 @@ async function main(): Promise<void> {
       approach.hide();
       if (auctionPanel.visible) auctionPanel.close();
       if (wagerPanel.visible) wagerPanel.close();
+      if (ladderPanel.visible) ladderPanel.close();
       if (entertainPanel.visible) entertainPanel.close();
       if (wingPanel.visible) wingPanel.close();
       if (mountPanel.visible) mountPanel.close();
@@ -2557,6 +2599,7 @@ async function main(): Promise<void> {
     closeApproach(false);
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     entertainPanel.open();
@@ -2663,6 +2706,7 @@ async function main(): Promise<void> {
     closeApproach(false);
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
@@ -2707,6 +2751,7 @@ async function main(): Promise<void> {
     closeApproach(false);
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (mountPanel.visible) mountPanel.close();
@@ -2759,6 +2804,7 @@ async function main(): Promise<void> {
     closeApproach(false);
     if (auctionPanel.visible) auctionPanel.close();
     if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
@@ -3356,6 +3402,10 @@ async function main(): Promise<void> {
         });
         showGameTip(`排行榜 · ${page.tabs[page.type] ?? "等级榜"}`);
       });
+      return;
+    }
+    if (leaf === "ladder") {
+      void openLadderPanel();
       return;
     }
     if (leaf === "guild") {
@@ -4958,7 +5008,7 @@ dialog.hide();
   hud.onHome = () => cycleMapUi();
   hud.onChat = () => {
     if (phase !== "world" || session.inBattle) return;
-    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible) return;
+    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible) return;
     showPhase("chat");
     chatPanel.open(hud.getChatEntries());
     setChromeStatus("聊天 · 点输入框打字 · ←→切换频道");
@@ -5136,6 +5186,16 @@ dialog.hide();
         }
         return;
       }
+      if (ladderPanel.visible) {
+        if (which === "left") ladderPanel.confirm();
+        if (which === "right") {
+          if (ladderPanel.dismissTipOnSoftRight()) return;
+          ladderPanel.close();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
       if (approach.open) {
         if (which === "left") approach.confirm();
         if (which === "right") approach.cancel();
@@ -5244,6 +5304,10 @@ dialog.hide();
     if (phase === "world" && auctionPanel.visible) {
       auctionPanel.confirm();
       shell.setSoftkeys(auctionPanel.softkeys());
+      return;
+    }
+    if (phase === "world" && ladderPanel.visible) {
+      ladderPanel.confirm();
       return;
     }
     if (phase === "world" && arenaPanel.visible) {
@@ -6253,6 +6317,7 @@ dialog.hide();
         else if (mountPanel.visible) shell.setSoftkeys(mountPanel.softkeys());
         else if (auctionPanel.visible) shell.setSoftkeys(auctionPanel.softkeys());
         else if (wagerPanel.visible) shell.setSoftkeys(wagerPanel.softkeys());
+        else if (ladderPanel.visible) shell.setSoftkeys(ladderPanel.softkeys());
         else if (arenaPanel.visible) shell.setSoftkeys(arenaPanel.softkeys());
         else shell.setSoftkeys({ left: "菜单", right: "菜单" });
       } else if (phase === "menu") {

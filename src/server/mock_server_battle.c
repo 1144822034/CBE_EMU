@@ -1099,6 +1099,9 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
     if (vm_net_mock_env_u32("CBE_BATTLE_BOSS_SKILL", 1) == 0)
     {
         damage = vm_net_mock_battle_enemy_damage_to_role(enemyId, roleHpCurrent);
+        if (vm_mock_ladder_battle_is_active())
+            damage = vm_net_mock_mul_capped_u32(
+                damage, vm_mock_ladder_damage_scale_percent()) / 100u;
         return damage;
     }
     if (!vm_net_mock_monster_casts_active_skill(enemyId))
@@ -3238,6 +3241,8 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                 vm_net_mock_battle_post_exit_settle_clear("battle-item-use-death");
                 vm_net_mock_battle_save_completed_current_role_state(
                     "battle-item-use-death");
+                vm_mock_world_boss_on_battle_end(false);
+                vm_mock_ladder_on_battle_end(false);
                 vm_mock_service_session_arm_battle_revival_confirm_for_death(
                     "battle-item-use-death");
                 vm_net_mock_hangup_loop_clear("battle-item-use-death");
@@ -11363,6 +11368,8 @@ static void vm_net_mock_battle_note_victory_settlement(const char *reason)
     g_mockBattleAutoFlagPendingArmed = 0;
     g_mockBattleAutoFlagPendingNotBeforeMs = 0;
     vm_net_mock_battle_settlement_exit_arm(reason);
+    vm_mock_world_boss_on_battle_end(true);
+    vm_mock_ladder_on_battle_end(true);
     /* Friend intimacy: only team wild PvE victories (not spar/duel/arena). */
     if (reason != NULL && strncmp(reason, "team-battle", 11) == 0)
     {
@@ -14230,6 +14237,14 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                 remapScene, wireEnemyId, posx, posy);
         else
             requestedEnemyId = wireEnemyId;
+        if (!forceNonSceneStart)
+        {
+            u32 bossEnemyId = 0;
+            if (vm_mock_world_boss_try_claim_encounter(remapScene, wireEnemyId,
+                                                       posx, posy, &bossEnemyId) &&
+                bossEnemyId != 0)
+                requestedEnemyId = bossEnemyId;
+        }
         if (!forceNonSceneStart && wireEnemyId != 0 && requestedEnemyId == 0)
         {
             /* GBK: 刷怪绑定失败，已拒绝按线号开战。 */

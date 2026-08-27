@@ -6306,6 +6306,16 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
 static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
                                               const char *action,
                                               const char *body);
+static void vm_mock_admin_render_world_boss_page(char *response, size_t responseCap,
+                                                 const char *query);
+static void vm_mock_admin_handle_world_boss_action(vm_mock_service_socket client,
+                                                   const char *action,
+                                                   const char *body);
+static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
+                                             const char *query);
+static void vm_mock_admin_handle_ladder_action(vm_mock_service_socket client,
+                                               const char *action,
+                                               const char *body);
 
 static void vm_mock_admin_render_mapedit_page(char *response,
                                               size_t responseCap,
@@ -6382,6 +6392,16 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "arena") == 0)
     {
         vm_mock_admin_render_arena_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "worldboss") == 0)
+    {
+        vm_mock_admin_render_world_boss_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "ladder") == 0)
+    {
+        vm_mock_admin_render_ladder_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "servers") == 0)
@@ -7251,6 +7271,8 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
 #include "web_admin_enhance.inc.c"
 #include "web_admin_combat.inc.c"
 #include "web_admin_arena.inc.c"
+#include "web_admin_world_boss.inc.c"
+#include "web_admin_ladder.inc.c"
 
 static bool vm_mock_admin_utf8_to_gbk_task_text(const char *utf8,
                                                 char *gbk,
@@ -9407,6 +9429,17 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_arena_action(client, action, body);
         return;
     }
+    if (strcmp(action, "save-world-boss-config") == 0)
+    {
+        vm_mock_admin_handle_world_boss_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-ladder-config") == 0 ||
+        strcmp(action, "save-ladder-reward") == 0)
+    {
+        vm_mock_admin_handle_ladder_action(client, action, body);
+        return;
+    }
     if (strcmp(action, "save-login-server") == 0 ||
         strcmp(action, "create-login-server") == 0 ||
         strcmp(action, "delete-login-server") == 0)
@@ -10187,7 +10220,7 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             else if (createMessage &&
                      strcmp(createMessage, "daily registration limit reached") == 0)
             {
-                err = "今日全服注册名额已满（每天最多 3 个），请明天再试";
+                err = "今日全服注册名额已满,gmQQ:958421665";
             }
             else if (createMessage &&
                      strcmp(createMessage, "account db unavailable") == 0)

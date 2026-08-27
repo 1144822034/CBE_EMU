@@ -10795,3 +10795,163 @@ static u32 vm_net_mock_build_ranking_board23_response(const u8 *request, u32 req
     return pos;
 }
 
+/*
+ * Runtime combat spawn inject/remove for hourly world boss (non-admin path).
+ * Loads existing SCE kind=3 rows, splices one boss row, publishes WT18/7.
+ */
+static bool vm_net_mock_runtime_combat_spawn_list(
+    const char *scene, vm_net_mock_sce_combat_spawn *spawns, u32 cap, u32 *countOut)
+{
+    u8 *data = NULL;
+    vm_net_mock_sce_combat_spawn_located *located = NULL;
+    u32 len = 0;
+    u32 count = 0;
+
+    if (countOut)
+        *countOut = 0;
+    if (scene == NULL || scene[0] == 0 || spawns == NULL || cap == 0)
+        return false;
+    data = (u8 *)malloc(VM_NET_MOCK_SCE_EDIT_DECODE_MAX);
+    located = (vm_net_mock_sce_combat_spawn_located *)calloc(
+        VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX, sizeof(*located));
+    if (data == NULL || located == NULL)
+    {
+        free(data);
+        free(located);
+        return false;
+    }
+    len = vm_net_mock_load_scene_resource(scene, data, VM_NET_MOCK_SCE_EDIT_DECODE_MAX);
+    if (len == 0 || vm_net_mock_scene_payload_start(data, len) == 0)
+    {
+        free(data);
+        free(located);
+        return false;
+    }
+    count = vm_net_mock_sce_combat_spawn_locate_in(
+        data, len, located, VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX, NULL);
+    if (count > cap)
+        count = cap;
+    for (u32 i = 0; i < count; ++i)
+        spawns[i] = located[i].spawn;
+    if (countOut)
+        *countOut = count;
+    free(data);
+    free(located);
+    return true;
+}
+
+bool vm_net_mock_runtime_inject_combat_spawn(
+    const char *scene, u16 x, u16 y, u32 monsterId,
+    u32 *wireIdOut, u32 *indexOut, const char **errorOut)
+{
+    vm_net_mock_sce_combat_spawn spawns[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
+    vm_net_mock_sce_combat_spawn bossSpawn;
+    u32 existing = 0;
+    u32 spawnCount = 0;
+    const char *saveError = NULL;
+    bool foundPos = false;
+
+    if (wireIdOut)
+        *wireIdOut = 0;
+    if (indexOut)
+        *indexOut = 0;
+    if (errorOut)
+        *errorOut = "world-boss-spawn-failed";
+    if (scene == NULL || scene[0] == 0 || monsterId == 0 || x == 0 || y == 0)
+        return false;
+    memset(spawns, 0, sizeof(spawns));
+    (void)vm_net_mock_runtime_combat_spawn_list(scene, spawns,
+                                                VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX,
+                                                &existing);
+    memset(&bossSpawn, 0, sizeof(bossSpawn));
+    bossSpawn.x = x;
+    bossSpawn.y = y;
+    bossSpawn.actorId = monsterId;
+    spawnCount = existing;
+    if (spawnCount >= VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX)
+        spawnCount = VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX - 1u;
+    for (u32 i = 0; i < existing; ++i)
+    {
+        if (spawns[i].x == x && spawns[i].y == y)
+        {
+            spawns[i] = bossSpawn;
+            foundPos = true;
+            break;
+        }
+    }
+    if (!foundPos)
+    {
+        spawns[spawnCount] = bossSpawn;
+        ++spawnCount;
+    }
+    else
+        spawnCount = existing;
+    if (!vm_net_mock_sce_combat_spawn_admin_save_all(scene, spawns, spawnCount,
+                                                     &saveError))
+    {
+        if (errorOut)
+            *errorOut = saveError ? saveError : "world-boss-spawn-save-failed";
+        return false;
+    }
+    {
+        u32 wireLookup = vm_net_mock_sce_combat_spawn_wire_for_real(scene, monsterId);
+        u32 idx = 0;
+        u32 px = x;
+        u32 py = y;
+        if (wireLookup == 0)
+            wireLookup = monsterId;
+        if (vm_net_mock_select_sce_combat_spawn(scene, wireLookup, &idx, &px, &py))
+        {
+            if (indexOut)
+                *indexOut = idx;
+        }
+        else if (indexOut)
+            *indexOut = 0;
+        if (wireIdOut)
+            *wireIdOut = wireLookup;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+bool vm_net_mock_runtime_remove_combat_spawn_at(
+    const char *scene, u16 x, u16 y, const char **errorOut)
+{
+    vm_net_mock_sce_combat_spawn spawns[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
+    vm_net_mock_sce_combat_spawn kept[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
+    u32 existing = 0;
+    u32 keptCount = 0;
+    const char *saveError = NULL;
+
+    if (errorOut)
+        *errorOut = "world-boss-despawn-failed";
+    if (scene == NULL || scene[0] == 0 || x == 0 || y == 0)
+        return false;
+    memset(spawns, 0, sizeof(spawns));
+    memset(kept, 0, sizeof(kept));
+    if (!vm_net_mock_runtime_combat_spawn_list(scene, spawns,
+                                               VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX,
+                                               &existing))
+    {
+        existing = 0;
+    }
+    for (u32 i = 0; i < existing; ++i)
+    {
+        if (spawns[i].x == x && spawns[i].y == y)
+            continue;
+        if (keptCount < VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX)
+            kept[keptCount++] = spawns[i];
+    }
+    if (!vm_net_mock_sce_combat_spawn_admin_save_all(scene, kept, keptCount,
+                                                     &saveError))
+    {
+        if (errorOut)
+            *errorOut = saveError ? saveError : "world-boss-despawn-save-failed";
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
