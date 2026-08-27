@@ -13198,16 +13198,15 @@ static bool vm_net_mock_append_teleport_stone_map_confirm_object(u8 *out, u32 ou
         return false;
     /*
      * JianghuOL:0x010357E0 dispatches 16/4 to HandleItemUseConfirm
-     * (0x010190A8). result=0 retains the client's normal confirmation and
-     * world-map teardown path, while `value` is the count later passed to
-     * ConsumeInventoryItem(0x01018F66).  A zero count keeps that native
-     * callback chain (and its 16/2 + 16/3 scene-exit requests) without
-     * looking for or consuming item 800.  This makes map teleport-stone
-     * movement free; the in-scene 16/2 direct-entry route was already free.
+     * (0x010190A8). result=0 opens the normal confirmation dialog, and `value`
+     * is both the displayed teleport-stone cost and the count later passed to
+     * ConsumeInventoryItem(0x01018F66). A single map transfer costs one item
+     * 800. If the client has no stone, ConsumeInventoryItem follows its normal
+     * "not enough, purchase?" branch before emitting 16/2 and 16/3.
      */
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 0) ||
         !vm_net_mock_put_object_u32(out, outCap, pos, "value",
-                                    VM_NET_MOCK_MAP_TELEPORT_STONE_COST))
+                                    VM_NET_MOCK_TELEPORT_STONE_COST))
     {
         return false;
     }
@@ -13273,13 +13272,13 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
     printf("[info][network] mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_key=smap-exact scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u resp=%u\n",
            curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
            target.scene, target.x, target.y,
-           (u32)VM_NET_MOCK_MAP_TELEPORT_STONE_COST,
+           (u32)VM_NET_MOCK_TELEPORT_STONE_COST,
            source ? source : "-", posSource ? posSource : "-",
            target.needsSceneDownload ? 1u : 0u, pos);
-    vm_autotest_note("mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_key=smap-exact scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u evidence=JianghuOL:0x010357E0/0x010190A8/0x01018F66/0x0103130A/0x0103581E policy=zero-cost-no-item-use negative=direct-30/1-stale-map-controller+extensionless-smap-miss\n",
+    vm_autotest_note("mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_key=smap-exact scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u evidence=JianghuOL:0x010357E0/0x010190A8/0x01018F66/0x0103130A/0x0103581E negative=value0-wrong-cost+direct-30/1-stale-map-controller+extensionless-smap-miss\n",
                       curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
                       target.scene, target.x, target.y,
-                      (u32)VM_NET_MOCK_MAP_TELEPORT_STONE_COST,
+                      (u32)VM_NET_MOCK_TELEPORT_STONE_COST,
                       source ? source : "-", posSource ? posSource : "-",
                       target.needsSceneDownload ? 1u : 0u);
     return pos;

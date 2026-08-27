@@ -3114,6 +3114,20 @@ static bool vm_net_mock_task_role_has_required_items(
     return true;
 }
 
+/* A task becomes submittable only when both protocol progress slots are done
+ * and every item that its 6/4 commit will consume is still present.  This
+ * makes a no-slot task with a given item a normal logistics hand-in rather
+ * than inventing an unsupported requirement_type=3. */
+static bool vm_net_mock_task_delivery_is_ready(
+    vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
+    u8 progress1, u8 progress2)
+{
+    return role != NULL && task != NULL &&
+           progress1 >= task->requirementCount1 &&
+           progress2 >= task->requirementCount2 &&
+           vm_net_mock_task_role_has_required_items(role, task);
+}
+
 static bool vm_net_mock_task_backpack_can_receive(
     vm_net_mock_role_state *role, u32 itemId, u32 count,
     const vm_net_mock_task_definition *consumedByTask)
@@ -4360,13 +4374,11 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
 
             if (task == NULL)
                 continue;
-            requirementsDone =
-                progress1 >= task->requirementCount1 &&
-                progress2 >= task->requirementCount2;
+            requirementsDone = vm_net_mock_task_delivery_is_ready(
+                activeRole, task, progress1, progress2);
             /* A completion marker in this XSE means the clicked actor owns the
-             * delivery branch. For talk-only tasks both required counts are
-             * zero; combat/item tasks transition only after persisted progress
-             * reaches task.dsh's two thresholds. */
+             * delivery branch. A logistics task has both progress thresholds
+             * at zero, but its given item remains a required hand-in. */
             if (state == 1 && ref->completed && requirementsDone &&
                 vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
             {
@@ -4428,9 +4440,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                     break;
                 }
             }
-            requirementsDone =
-                persisted->progress1 >= task->requirementCount1 &&
-                persisted->progress2 >= task->requirementCount2;
+            requirementsDone = vm_net_mock_task_delivery_is_ready(
+                activeRole, task, persisted->progress1, persisted->progress2);
             if (state == 1 && requirementsDone &&
                 vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
             {
@@ -4518,8 +4529,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
         {
             if (deliveryMatches && state == 1 &&
-                progress1 >= task->requirementCount1 &&
-                progress2 >= task->requirementCount2 &&
+                vm_net_mock_task_delivery_is_ready(activeRole, task, progress1,
+                                                    progress2) &&
                 vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
             {
                 state = 2;
@@ -5365,6 +5376,132 @@ static bool vm_net_mock_append_backpack_item_count11_object(
     }
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     ++*objectCount;
+    return true;
+}
+
+/* A 6/11 accept callback does not rebuild the backpack page.  Compare the
+ * durable pre-grant snapshot with the persisted role so every affected stack
+ * reaches the CBE item manager through its native incremental reward path.
+ * The following 7/11 rows then establish the authoritative total for both a
+ * fresh row and an already-visible partial stack. */
+static bool vm_net_mock_append_task_accept_backpack_refresh(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
+    const vm_net_mock_role_state *before,
+    vm_net_mock_role_state *after,
+    const vm_net_mock_task_definition *task)
+{
+    vm_net_mock_reward15_item_row rows[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    u8 rowCount = 0;
+    u32 granted = 0;
+    u8 afterCount = 0;
+
+    if (task == NULL || task->givenItemId == 0 || task->givenItemCount == 0)
+        return true;
+    if (out == NULL || pos == NULL || objectCount == NULL || before == NULL ||
+        after == NULL)
+    {
+        return false;
+    }
+    memset(rows, 0, sizeof(rows));
+    afterCount = vm_net_mock_role_backpack_count(after);
+    for (u8 i = 0; i < afterCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *item = &after->backpackItems[i];
+        u32 priorCount = 0;
+
+        if (item->itemId != task->givenItemId || item->seq == 0 ||
+            item->count == 0)
+        {
+            continue;
+        }
+        for (u8 prior = 0;
+             prior < vm_net_mock_role_backpack_count(before); ++prior)
+        {
+            const vm_net_mock_backpack_item_state *priorItem =
+                &before->backpackItems[prior];
+
+            if (priorItem->seq == item->seq)
+            {
+                priorCount = priorItem->count;
+                break;
+            }
+        }
+        if (item->count <= priorCount || rowCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS ||
+            0xffffffffu - granted < item->count - priorCount)
+        {
+            if (item->count <= priorCount)
+                continue;
+            return false;
+        }
+        rows[rowCount].item = item;
+        rows[rowCount].acquiredCount = item->count - priorCount;
+        granted += rows[rowCount].acquiredCount;
+        ++rowCount;
+    }
+    if (rowCount == 0 || granted != task->givenItemCount)
+        return false;
+
+    for (u8 start = 0; start < rowCount;)
+    {
+        u8 batchCount = rowCount - start;
+
+        if (batchCount > VM_NET_MOCK_REWARD15_MAX_ROWS)
+            batchCount = VM_NET_MOCK_REWARD15_MAX_ROWS;
+        if (!vm_net_mock_append_backpack_reward15_object(
+                out, outCap, pos, objectCount, &rows[start], batchCount))
+        {
+            return false;
+        }
+        start = (u8)(start + batchCount);
+    }
+    for (u8 i = 0; i < rowCount; ++i)
+    {
+        if (!vm_net_mock_append_backpack_item_count11_object(
+                out, outCap, pos, objectCount, rows[i].item->seq,
+                rows[i].item->itemId, rows[i].item->count))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Case 4's task-local iteminfo is still required for the task callback, but
+ * an already-open backpack component owns its visible rows through 7/11.
+ * Mirror the persisted case-4 remainders through that independent,
+ * sequence-keyed client path; zero remains the client's native delete value. */
+static bool vm_net_mock_append_task_submit_backpack_refresh(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
+    const vm_net_mock_task_definition *task,
+    const u16 consumedSeqs[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    const u8 consumedRemainings[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX],
+    u8 consumedCount)
+{
+    u32 itemIds[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u32 itemCounts[VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX];
+    u8 itemCount = 0;
+
+    if (consumedCount == 0)
+        return true;
+    if (out == NULL || pos == NULL || objectCount == NULL || task == NULL ||
+        consumedSeqs == NULL || consumedRemainings == NULL ||
+        consumedCount > VM_NET_MOCK_TASK_CONSUMED_ITEM_MAX ||
+        !vm_net_mock_task_collect_consumed_items(
+            task, itemIds, itemCounts, &itemCount) ||
+        itemCount != consumedCount)
+    {
+        return false;
+    }
+    for (u8 i = 0; i < consumedCount; ++i)
+    {
+        if (consumedSeqs[i] == 0 || itemIds[i] == 0 || itemCounts[i] == 0 ||
+            !vm_net_mock_append_backpack_item_count11_object(
+                out, outCap, pos, objectCount, consumedSeqs[i], itemIds[i],
+                consumedRemainings[i]))
+        {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -8464,7 +8601,9 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     bool taskAcceptOfferStillAvailable = false;
     bool taskAcceptNeedsCandidateRefresh = false;
     bool taskAcceptNeedsScenePromptRefresh = false;
+    bool taskAcceptNeedsBackpackRefresh = false;
     bool taskAcceptOfferContext = false;
+    vm_net_mock_role_state taskAcceptBackpackBefore;
     const vm_net_mock_task_definition *taskDefinition = NULL;
     char detailText[256];
     char destinationText[128];
@@ -8583,6 +8722,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     memset(destinationText, 0, sizeof(destinationText));
     memset(promptReceiver, 0, sizeof(promptReceiver));
     memset(taskAcceptFailureInfo, 0, sizeof(taskAcceptFailureInfo));
+    memset(&taskAcceptBackpackBefore, 0, sizeof(taskAcceptBackpackBefore));
 
     if (hasProgressStateTail)
     {
@@ -9062,14 +9202,25 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                          ? 0
                          : 1;
             if (result == 0 && taskDefinition != NULL &&
-                !vm_net_mock_task_grant_accept_item(activeRole, taskDefinition))
+                taskDefinition->givenItemId != 0 &&
+                taskDefinition->givenItemCount != 0)
             {
-                if (replacingCompletedState)
-                    (void)vm_net_mock_task_state_restore(activeRole->roleId,
-                                                         previousState);
+                taskAcceptBackpackBefore = *activeRole;
+                if (!vm_net_mock_task_grant_accept_item(activeRole,
+                                                        taskDefinition))
+                {
+                    if (replacingCompletedState)
+                        (void)vm_net_mock_task_state_restore(activeRole->roleId,
+                                                             previousState);
+                    else
+                        (void)vm_net_mock_task_delete(activeRole->roleId,
+                                                      taskId);
+                    result = 1;
+                }
                 else
-                    (void)vm_net_mock_task_delete(activeRole->roleId, taskId);
-                result = 1;
+                {
+                    taskAcceptNeedsBackpackRefresh = true;
+                }
             }
             if (result == 0 &&
                 (!vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) ||
@@ -9157,6 +9308,27 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
             return 0;
         responseObjectCount += 1;
+    }
+    if (object.subtype == 4 && result == 1 &&
+        !vm_net_mock_append_task_submit_backpack_refresh(
+            out, outCap, &pos, &responseObjectCount, taskDefinition,
+            committedConsumedSeqs, committedConsumedRemainings,
+            committedConsumedCount))
+    {
+        return 0;
+    }
+    if (object.subtype == 4 && result == 1 && committedConsumedCount != 0)
+    {
+        printf("[info][network] mock_task_submit_backpack_refresh task=%u role=%u rows=%u response=7/11 evidence=JianghuOL.CBE:0x01033544\n",
+               taskId, activeRole ? activeRole->roleId : 0,
+               committedConsumedCount);
+    }
+    if (taskAcceptNeedsBackpackRefresh &&
+        !vm_net_mock_append_task_accept_backpack_refresh(
+            out, outCap, &pos, &responseObjectCount,
+            &taskAcceptBackpackBefore, activeRole, taskDefinition))
+    {
+        return 0;
     }
     if (taskAcceptNeedsScenePromptRefresh)
     {

@@ -130,6 +130,11 @@ task-delivery-item-consumption-regression: $(SERVER_OBJDIR)/task-delivery-item-c
 $(SERVER_OBJDIR)/task-delivery-item-consumption-regression.exe: scripts/task-delivery-item-consumption-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
+task-logistics-delivery-readiness-regression: $(SERVER_OBJDIR)/task-logistics-delivery-readiness-regression.exe
+
+$(SERVER_OBJDIR)/task-logistics-delivery-readiness-regression.exe: scripts/task-logistics-delivery-readiness-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
 content-update-manifest-regression: $(SERVER_OBJDIR)/content-update-manifest-regression.exe
 
 $(SERVER_OBJDIR)/content-update-manifest-regression.exe: scripts/content-update-manifest-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)

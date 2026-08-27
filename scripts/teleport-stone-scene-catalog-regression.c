@@ -93,34 +93,6 @@ static bool build_map_transfer_request(u32 curId, u32 objId, u8 *out,
     return true;
 }
 
-static bool build_confirmed_exit_without_item_request(u32 exitId, u8 *out,
-                                                      u32 outCap, u32 *outLen)
-{
-    u32 pos = 4;
-    u32 objectStart = 0;
-
-    if (outLen)
-        *outLen = 0;
-    if (out == NULL || outLen == NULL || outCap < pos ||
-        !begin_request_object(out, outCap, &pos, 0x10, 2, &objectStart) ||
-        !vm_net_mock_put_object_u32(out, outCap, &pos, "exitID", exitId) ||
-        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 3))
-    {
-        return false;
-    }
-    finish_request_object(out, objectStart, pos);
-    if (!begin_request_object(out, outCap, &pos, 0x10, 3, &objectStart) ||
-        !vm_net_mock_put_object_u32(out, outCap, &pos, "exitID", exitId) ||
-        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 3))
-    {
-        return false;
-    }
-    finish_request_object(out, objectStart, pos);
-    finish_request_packet(out, pos);
-    *outLen = pos;
-    return true;
-}
-
 int main(void)
 {
     static const char taiyiScene[] =
@@ -134,14 +106,12 @@ int main(void)
     u8 exitInfo[4096];
     u8 request[128];
     u8 mapRequest[128];
-    u8 mapExitRequest[128];
     u8 response[4096];
     u32 destinationCount = 0;
     u32 exitInfoLen = 0;
     u32 exitInfoCount = 0;
     u32 requestLen = 0;
     u32 mapRequestLen = 0;
-    u32 mapExitRequestLen = 0;
     u32 responseLen = 0;
     u32 responseOffset = 5;
     u16 taiyiStoneX = 0;
@@ -279,9 +249,9 @@ int main(void)
         return fail("free scene-stone entry unexpectedly returned an item cost");
     }
 
-    /* The world-map 16/4 confirmation must stay in the native map-controller
-     * path, but it must require zero item-800 instances.  The in-memory role
-     * above intentionally has an empty backpack. */
+    /* The world-map 16/4 confirmation stays in the native map-controller
+     * path and must request exactly one item-800 instance.  The CBE's
+     * confirmation callback consumes it through its normal 7/1 request. */
     if (!build_map_transfer_request(1, 4, mapRequest, sizeof(mapRequest),
                                     &mapRequestLen))
     {
@@ -310,32 +280,15 @@ int main(void)
         responseResultLen != 6 || responseResult[0] != 0 ||
         responseResult[1] != 4 || responseResult[2] != 0 ||
         responseResult[3] != 0 || responseResult[4] != 0 ||
-        responseResult[5] != 0)
+        responseResult[5] != 1)
     {
-        return fail("map-stone confirmation did not declare a zero item cost");
+        return fail("map-stone confirmation did not declare a one-stone cost");
     }
     if (!g_vm_net_mock_teleport_stone_confirm_target_valid ||
         g_vm_net_mock_teleport_stone_deferred_enter_valid ||
         g_vm_net_mock_teleport_stone_confirm_target.exitId == 0)
     {
-        return fail("free map-stone confirmation did not retain its target");
-    }
-
-    /* With value=0, the native client confirms using only 16/2 + 16/3.  A
-     * 7/1 item-use object would mean that an item stack was still required. */
-    if (!build_confirmed_exit_without_item_request(
-            g_vm_net_mock_teleport_stone_confirm_target.exitId,
-            mapExitRequest, sizeof(mapExitRequest), &mapExitRequestLen))
-    {
-        return fail("unable to construct free map-stone confirmed exit request");
-    }
-    responseLen = vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
-        mapExitRequest, mapExitRequestLen, response, sizeof(response));
-    if (responseLen != 5 || response[4] != 0 ||
-        g_vm_net_mock_teleport_stone_confirm_target_valid ||
-        !g_vm_net_mock_teleport_stone_deferred_enter_valid)
-    {
-        return fail("free map-stone exit unexpectedly required an item acknowledgement");
+        return fail("one-stone map confirmation did not retain its target");
     }
 
     printf("teleport-stone-scene-catalog regression passed: "
