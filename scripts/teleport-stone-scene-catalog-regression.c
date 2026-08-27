@@ -10,7 +10,7 @@
 #include <string.h>
 
 #define main cbe_server_program_main
-#include "../src/main.c"
+#include "../src/server_main.c"
 #undef main
 
 static int fail(const char *message)
@@ -51,17 +51,6 @@ static void finish_request_packet(u8 *out, u32 pos)
     out[3] = (u8)pos;
 }
 
-static bool append_empty_request_object(u8 *out, u32 outCap, u32 *pos,
-                                        u8 kind, u8 subtype)
-{
-    u32 objectStart = 0;
-
-    if (!begin_request_object(out, outCap, pos, kind, subtype, &objectStart))
-        return false;
-    finish_request_object(out, objectStart, *pos);
-    return true;
-}
-
 static bool build_exit_select_request(u32 exitId, u8 *out, u32 outCap,
                                       u32 *outLen)
 {
@@ -83,72 +72,53 @@ static bool build_exit_select_request(u32 exitId, u8 *out, u32 outCap,
     return true;
 }
 
-/* The scene-stone selection's observed first direct-entry follow-up has no
- * 16/3 current-X ACK; it asks only for the NPC and skill-book catalogs. */
-static bool build_scene_stone_direct_catalog_request(u8 *out, u32 outCap,
-                                                     u32 *outLen)
-{
-    u32 pos = 4;
-
-    if (outLen)
-        *outLen = 0;
-    if (out == NULL || outLen == NULL ||
-        !append_empty_request_object(out, outCap, &pos, 0x1b, 11) ||
-        !append_empty_request_object(out, outCap, &pos, 7, 42))
-    {
-        return false;
-    }
-    finish_request_packet(out, pos);
-    *outLen = pos;
-    return true;
-}
-
-static bool build_scene_resource_completion_request(u8 *out, u32 outCap,
-                                                    u32 *outLen)
+static bool build_map_transfer_request(u32 curId, u32 objId, u8 *out,
+                                       u32 outCap, u32 *outLen)
 {
     u32 pos = 4;
     u32 objectStart = 0;
 
     if (outLen)
         *outLen = 0;
-    if (out == NULL || outLen == NULL ||
-        !append_empty_request_object(out, outCap, &pos, 6, 1) ||
-        !append_empty_request_object(out, outCap, &pos, 6, 13) ||
-        !append_empty_request_object(out, outCap, &pos, 6, 14) ||
-        !begin_request_object(out, outCap, &pos, 2, 10, &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, &pos, "Type", 101))
+    if (out == NULL || outLen == NULL || outCap < pos ||
+        !begin_request_object(out, outCap, &pos, 0x10, 4, &objectStart) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "curid", curId) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "objid", objId))
     {
         return false;
     }
     finish_request_object(out, objectStart, pos);
-    if (!append_empty_request_object(out, outCap, &pos, 0x19, 5))
-        return false;
     finish_request_packet(out, pos);
     *outLen = pos;
     return true;
 }
 
-static bool response_has_object(const u8 *packet, u32 packetLen,
-                                u8 kind, u8 subtype)
+static bool build_confirmed_exit_without_item_request(u32 exitId, u8 *out,
+                                                      u32 outCap, u32 *outLen)
 {
-    vm_net_mock_response_object object;
-    u32 offset = 5;
+    u32 pos = 4;
+    u32 objectStart = 0;
 
-    if (packet == NULL || packetLen < 5 || packet[0] != 'W' ||
-        packet[1] != 'T')
+    if (outLen)
+        *outLen = 0;
+    if (out == NULL || outLen == NULL || outCap < pos ||
+        !begin_request_object(out, outCap, &pos, 0x10, 2, &objectStart) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "exitID", exitId) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 3))
     {
         return false;
     }
-    while (vm_net_mock_next_response_object(packet, packetLen, &offset,
-                                             &object))
+    finish_request_object(out, objectStart, pos);
+    if (!begin_request_object(out, outCap, &pos, 0x10, 3, &objectStart) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "exitID", exitId) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 3))
     {
-        if (object.major == 1 && object.kind == kind &&
-            object.subtype == subtype)
-        {
-            return true;
-        }
+        return false;
     }
-    return false;
+    finish_request_object(out, objectStart, pos);
+    finish_request_packet(out, pos);
+    *outLen = pos;
+    return true;
 }
 
 int main(void)
@@ -163,15 +133,15 @@ int main(void)
     vm_net_mock_response_object responseObject;
     u8 exitInfo[4096];
     u8 request[128];
-    u8 runtimeFollowup[128];
-    u8 resourceFollowup[128];
+    u8 mapRequest[128];
+    u8 mapExitRequest[128];
     u8 response[4096];
     u32 destinationCount = 0;
     u32 exitInfoLen = 0;
     u32 exitInfoCount = 0;
     u32 requestLen = 0;
-    u32 runtimeFollowupLen = 0;
-    u32 resourceFollowupLen = 0;
+    u32 mapRequestLen = 0;
+    u32 mapExitRequestLen = 0;
     u32 responseLen = 0;
     u32 responseOffset = 5;
     u16 taiyiStoneX = 0;
@@ -309,56 +279,63 @@ int main(void)
         return fail("free scene-stone entry unexpectedly returned an item cost");
     }
 
-    /* This regression owns the wire hand-off, not the database-backed dynamic
-     * NPC catalog. A matching already-seeded catalog makes 27/11 take its
-     * production empty-repeat branch while still proving that the complete
-     * runtime stream is recognized and 7/42 is served. */
-    g_vm_net_mock_scene_moveinfo_npc_seeded = true;
-    snprintf(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
-             sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene), "%s",
-             taiyiScene);
-    g_vm_net_mock_scene_moveinfo_npc_pending = false;
-    g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] = 0;
-
-    if (!g_vm_net_mock_teleport_stone_direct_enter_pending ||
-        !g_vm_net_mock_last_scene_change_target_valid ||
-        g_vm_net_mock_last_scene_change_target.sceneCompletionSent)
+    /* The world-map 16/4 confirmation must stay in the native map-controller
+     * path, but it must require zero item-800 instances.  The in-memory role
+     * above intentionally has an empty backpack. */
+    if (!build_map_transfer_request(1, 4, mapRequest, sizeof(mapRequest),
+                                    &mapRequestLen))
     {
-        return fail("scene-stone direct entry did not keep its target pending");
+        return fail("unable to construct a 16/4 map-stone request");
+    }
+    responseLen = vm_net_mock_build_teleport_stone_map_transfer_response(
+        mapRequest, mapRequestLen, response, sizeof(response));
+    responseOffset = 5;
+    if (responseLen < 5 || response[4] != 1 ||
+        !vm_net_mock_next_response_object(response, responseLen,
+                                          &responseOffset, &responseObject) ||
+        responseOffset != responseLen || responseObject.major != 1 ||
+        responseObject.kind != 0x10 || responseObject.subtype != 4)
+    {
+        return fail("map-stone confirmation did not return one valid 16/4 object");
+    }
+    if (!vm_net_mock_response_object_field(&responseObject, "result",
+                                           &responseResult, &responseResultLen) ||
+        responseResultLen != 3 || responseResult[0] != 0 ||
+        responseResult[1] != 1 || responseResult[2] != 0)
+    {
+        return fail("map-stone confirmation did not retain native result=0");
+    }
+    if (!vm_net_mock_response_object_field(&responseObject, "value",
+                                           &responseResult, &responseResultLen) ||
+        responseResultLen != 6 || responseResult[0] != 0 ||
+        responseResult[1] != 4 || responseResult[2] != 0 ||
+        responseResult[3] != 0 || responseResult[4] != 0 ||
+        responseResult[5] != 0)
+    {
+        return fail("map-stone confirmation did not declare a zero item cost");
+    }
+    if (!g_vm_net_mock_teleport_stone_confirm_target_valid ||
+        g_vm_net_mock_teleport_stone_deferred_enter_valid ||
+        g_vm_net_mock_teleport_stone_confirm_target.exitId == 0)
+    {
+        return fail("free map-stone confirmation did not retain its target");
     }
 
-    if (!build_scene_stone_direct_catalog_request(runtimeFollowup,
-                                                  sizeof(runtimeFollowup),
-                                                  &runtimeFollowupLen))
+    /* With value=0, the native client confirms using only 16/2 + 16/3.  A
+     * 7/1 item-use object would mean that an item stack was still required. */
+    if (!build_confirmed_exit_without_item_request(
+            g_vm_net_mock_teleport_stone_confirm_target.exitId,
+            mapExitRequest, sizeof(mapExitRequest), &mapExitRequestLen))
     {
-        return fail("unable to construct scene-stone direct catalog request");
+        return fail("unable to construct free map-stone confirmed exit request");
     }
-    responseLen = vm_net_mock_build_teleport_stone_selected_direct_catalog_response(
-        runtimeFollowup, runtimeFollowupLen, response, sizeof(response));
-    if (responseLen < 5 || response[4] != 2 ||
-        !response_has_object(response, responseLen, 0x1b, 11) ||
-        !response_has_object(response, responseLen, 7, 42) ||
-        !g_vm_net_mock_teleport_stone_direct_enter_pending ||
-        !g_vm_net_mock_last_scene_change_target_valid)
+    responseLen = vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
+        mapExitRequest, mapExitRequestLen, response, sizeof(response));
+    if (responseLen != 5 || response[4] != 0 ||
+        g_vm_net_mock_teleport_stone_confirm_target_valid ||
+        !g_vm_net_mock_teleport_stone_deferred_enter_valid)
     {
-        return fail("scene-stone direct entry did not continue its catalog sync");
-    }
-
-    if (!build_scene_resource_completion_request(resourceFollowup,
-                                                 sizeof(resourceFollowup),
-                                                 &resourceFollowupLen) ||
-        resourceFollowupLen != 39)
-    {
-        return fail("unable to construct scene-stone resource completion request");
-    }
-    responseLen = vm_net_mock_build_scene_resource_followup_response(
-        resourceFollowup, resourceFollowupLen, response, sizeof(response));
-    if (responseLen < 5 || !response_has_object(response, responseLen,
-                                                0x1e, 2) ||
-        g_vm_net_mock_teleport_stone_direct_enter_pending ||
-        g_vm_net_mock_last_scene_change_target_valid)
-    {
-        return fail("scene-stone resource completion did not close once");
+        return fail("free map-stone exit unexpectedly required an item acknowledgement");
     }
 
     printf("teleport-stone-scene-catalog regression passed: "

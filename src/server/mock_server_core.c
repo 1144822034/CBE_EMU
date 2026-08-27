@@ -5654,7 +5654,10 @@ enum
     VM_NET_MOCK_AUTO_MONSTER_CATALOG_MAX_ITEMS = 128,
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
     VM_NET_MOCK_SKILL_NAME_BYTES = 24,
+    /* Task transport still uses the legacy item-confirmation contract.  Map
+     * teleport-stone movement has its own explicit zero-cost policy below. */
     VM_NET_MOCK_TELEPORT_STONE_COST = 1,
+    VM_NET_MOCK_MAP_TELEPORT_STONE_COST = 0,
     VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
     VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,
     VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
