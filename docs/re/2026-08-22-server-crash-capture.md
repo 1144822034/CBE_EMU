@@ -32,9 +32,10 @@ Windows `.log` 包含异常码、异常地址、宿主寄存器、调用栈地�
 
 Linux 服务额外忽略 `SIGPIPE`，并让服务端 socket 发送使用 `MSG_NOSIGNAL`：已经断开
 的游戏、后台、支付或 MySQL 对端会使发送函数返回失败，由现有调用方记录并关闭该连接，
-而不会直接终止整个服务。`SIGTERM`、`SIGINT`、`SIGHUP` 与 `SIGQUIT` 也会在重新触发
-默认退出前写出同样的终止报告。`SIGKILL` 和内核 OOM kill 无法由进程捕获；遇到这两类
-停止必须一并保留 systemd journal 与内核日志。
+而不会直接终止整个服务。`SIGTERM`、`SIGINT` 现在走正常的监听停止与 worker 排空，不再
+生成崩溃报告；细节见 `2026-08-28-linux-graceful-shutdown.md`。`SIGHUP` 与 `SIGQUIT`
+仍会在重新触发默认退出前写出终止报告。`SIGKILL` 和内核 OOM kill 无法由进程捕获；遇到
+这两类停止必须一并保留 systemd journal 与内核日志。
 
 ## 协议关联边界
 

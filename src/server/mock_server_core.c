@@ -2125,7 +2125,10 @@ static bool vm_net_mock_update_catalog_save(const char **errorOut)
             *errorOut = "更新配置写入失败";
         return false;
     }
+#ifdef _WIN32
+    /* Windows rename() cannot replace an existing destination. */
     remove(path);
+#endif
     if (rename(tempPath, path) != 0)
     {
         remove(tempPath);
@@ -3097,7 +3100,10 @@ static bool vm_net_mock_update_delivery_save(const char **errorOut)
             *errorOut = "更新下发记录写入失败";
         return false;
     }
+#ifdef _WIN32
+    /* Windows rename() cannot replace an existing destination. */
     remove(path);
+#endif
     if (rename(tempPath, path) != 0)
     {
         remove(tempPath);

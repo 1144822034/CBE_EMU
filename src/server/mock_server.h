@@ -28,6 +28,35 @@
 extern uc_engine *MTK;
 extern u32 Global_R9;
 
+/* Linux termination signals are owned by the standalone service entry.  The
+ * listener polls this read-only request state; it must not let SIGINT/SIGTERM
+ * interrupt a worker while that worker owns a MySQL transaction. */
+#ifdef CBE_SERVER_ONLY
+bool vm_server_shutdown_requested(void);
+int vm_server_shutdown_signal_number(void);
+bool vm_server_shutdown_block_for_workers(void);
+void vm_server_shutdown_restore_listener_mask(void);
+#else
+static inline bool vm_server_shutdown_requested(void)
+{
+    return false;
+}
+
+static inline int vm_server_shutdown_signal_number(void)
+{
+    return 0;
+}
+
+static inline bool vm_server_shutdown_block_for_workers(void)
+{
+    return false;
+}
+
+static inline void vm_server_shutdown_restore_listener_mask(void)
+{
+}
+#endif
+
 /*
  * The standalone listener and the protocol implementation deliberately share
  * only this platform/runtime boundary.  Feature modules remain private to the

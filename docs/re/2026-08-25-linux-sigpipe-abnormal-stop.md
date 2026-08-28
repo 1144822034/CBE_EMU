@@ -31,9 +31,9 @@ MySQL 发送路径同样使用普通 `send()`，因此只在游戏 socket 层增
    发送（包括 MySQL）改为常规 `EPIPE`/失败返回，而不是终止服务。
 2. 服务端 CBMS/HTTP 发送额外传递 `MSG_NOSIGNAL`，即使该发送函数在未安装全局信号
    策略的环境复用，也不会重新引入退出路径。
-3. `SIGTERM`、`SIGINT`、`SIGHUP` 与 `SIGQUIT` 现在与致命信号一样先写出 Linux
-   终止报告，再恢复默认退出动作。`SIGKILL`、OOM kill 仍不可捕获，必须查
-   `journalctl`/内核日志。
+3. 当时 `SIGTERM`、`SIGINT`、`SIGHUP` 与 `SIGQUIT` 也沿用致命信号的取证退出动作。
+   后续已将 `SIGTERM`、`SIGINT` 改为监听停止与 worker 排空；`SIGHUP`、`SIGQUIT` 仍
+   保持取证退出。`SIGKILL`、OOM kill 仍不可捕获，必须查 `journalctl`/内核日志。
 
 ## 验证边界
 

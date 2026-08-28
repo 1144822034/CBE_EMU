@@ -2283,7 +2283,7 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
         if (pool->stopRequested && pool->queuedJobs == 0)
         {
             pthread_mutex_unlock(&pool->mutex);
-            return NULL;
+            break;
         }
         if (pool->queuedJobs == 0 && keepaliveDue)
         {
@@ -2375,6 +2375,12 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
         vm_mock_service_socket_close(job.socket);
         vm_mock_service_login_ip_set_source(NULL);
     }
+    /* The MySQL client is deliberately thread-local.  At this point the
+     * worker has completed every admitted request, so closing its connection
+     * can only release idle server resources; no in-flight transaction is
+     * abandoned by the normal shutdown path. */
+    vm_mysql_close();
+    return NULL;
 }
 
 static bool vm_mock_service_worker_pool_start(vm_mock_service_worker_pool *pool,
@@ -2437,7 +2443,24 @@ static bool vm_mock_service_worker_pool_start(vm_mock_service_worker_pool *pool,
     return true;
 }
 
-static void vm_mock_service_worker_pool_stop(vm_mock_service_worker_pool *pool)
+static void vm_mock_service_worker_pool_finalize(vm_mock_service_worker_pool *pool)
+{
+    if (pool == NULL || !pool->initialized)
+        return;
+    for (u32 i = 0; i < pool->workerCount; ++i)
+    {
+        pthread_join(pool->workers[i].thread, NULL);
+        free(pool->workers[i].requestBuffer);
+        free(pool->workers[i].responseBuffer);
+    }
+    pthread_cond_destroy(&pool->condition);
+    pthread_mutex_destroy(&pool->mutex);
+    memset(pool, 0, sizeof(*pool));
+}
+
+/* Startup failures have no admitted game work, but retain this aborting
+ * variant for that boundary rather than using the production stop path. */
+static void vm_mock_service_worker_pool_abort(vm_mock_service_worker_pool *pool)
 {
     if (pool == NULL || !pool->initialized)
         return;
@@ -2451,15 +2474,26 @@ static void vm_mock_service_worker_pool_stop(vm_mock_service_worker_pool *pool)
     pool->queuedJobs = 0;
     pthread_cond_broadcast(&pool->condition);
     pthread_mutex_unlock(&pool->mutex);
-    for (u32 i = 0; i < pool->workerCount; ++i)
-    {
-        pthread_join(pool->workers[i].thread, NULL);
-        free(pool->workers[i].requestBuffer);
-        free(pool->workers[i].responseBuffer);
-    }
-    pthread_cond_destroy(&pool->condition);
-    pthread_mutex_destroy(&pool->mutex);
-    memset(pool, 0, sizeof(*pool));
+    vm_mock_service_worker_pool_finalize(pool);
+}
+
+/* A clean service stop happens only after listeners and pre-protocol ingress
+ * have been closed.  Keep complete, admitted frames in FIFO order so each
+ * request reaches its existing transaction and response path exactly once. */
+static void vm_mock_service_worker_pool_drain(vm_mock_service_worker_pool *pool)
+{
+    u32 queuedJobs = 0;
+
+    if (pool == NULL || !pool->initialized)
+        return;
+    pthread_mutex_lock(&pool->mutex);
+    pool->stopRequested = true;
+    queuedJobs = pool->queuedJobs;
+    pthread_cond_broadcast(&pool->condition);
+    pthread_mutex_unlock(&pool->mutex);
+    printf("[info][mock-service] shutdown_drain pool=%s queued=%u action=wait-workers\n",
+           pool->name ? pool->name : "-", queuedJobs);
+    vm_mock_service_worker_pool_finalize(pool);
 }
 
 static bool vm_mock_service_worker_pool_enqueue(vm_mock_service_worker_pool *pool,
@@ -2967,6 +3001,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     u32 acceptedGameLogCount = 0;
     u32 acceptedAdminLogCount = 0;
     bool legacyAccountMigration = false;
+    bool workerSignalMaskBlocked = false;
     const char *activeDatabase = getenv("CBE_MYSQL_DATABASE");
 
     if (!vm_net_mock_service_ensure_resource_root())
@@ -3081,6 +3116,19 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             printf("[info][mock-admin] listening=http://%s:%u/\n",
                    g_mockAdminBindHost, g_mockAdminPort);
     }
+    /* All workers inherit this blocked mask.  Only the listener restores its
+     * mask after construction, so a terminal signal cannot interrupt a
+     * worker in the middle of a MySQL command or response send. */
+    workerSignalMaskBlocked = vm_server_shutdown_block_for_workers();
+#ifndef _WIN32
+    if (!workerSignalMaskBlocked)
+    {
+        printf("[error][mock-service] graceful_shutdown unavailable reason=worker-signal-mask\n");
+        vm_mock_service_socket_close(adminSocket);
+        vm_mock_service_socket_close(serverSocket);
+        return -1;
+    }
+#endif
     if (!vm_mock_service_worker_pool_start(
             &g_vmMockServiceWorkerPool,
             vm_mock_service_worker_count_from_environment(), "game"))
@@ -3088,6 +3136,8 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
         printf("[error][mock-service] game worker pool start failed\n");
         vm_mock_service_socket_close(adminSocket);
         vm_mock_service_socket_close(serverSocket);
+        if (workerSignalMaskBlocked)
+            vm_server_shutdown_restore_listener_mask();
         return -1;
     }
     if (adminSocket != VM_MOCK_SERVICE_INVALID_SOCKET)
@@ -3097,12 +3147,16 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                 vm_mock_admin_worker_count_from_environment(), "admin"))
         {
             printf("[error][mock-admin] worker pool start failed\n");
-            vm_mock_service_worker_pool_stop(&g_vmMockServiceWorkerPool);
+            vm_mock_service_worker_pool_abort(&g_vmMockServiceWorkerPool);
             vm_mock_service_socket_close(adminSocket);
             vm_mock_service_socket_close(serverSocket);
+            if (workerSignalMaskBlocked)
+                vm_server_shutdown_restore_listener_mask();
             return -1;
         }
     }
+    if (workerSignalMaskBlocked)
+        vm_server_shutdown_restore_listener_mask();
     vm_mock_service_ingress_init(&gameIngress);
     memset(&ingressDropLogs, 0, sizeof(ingressDropLogs));
     fflush(stdout);
@@ -3124,6 +3178,9 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
 #endif
         fd_set readSet;
         struct timeval timeout;
+
+        if (vm_server_shutdown_requested())
+            break;
 
         FD_ZERO(&readSet);
         FD_SET(serverSocket, &readSet);
@@ -3154,7 +3211,11 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
         selectRc = select(maxReadSocket + 1, &readSet, NULL, NULL, &timeout);
 #endif
         if (selectRc < 0)
+        {
+            if (vm_server_shutdown_requested())
+                break;
             continue;
+        }
 
         nowMs = scheduler_get_tick_ms();
         for (u32 i = 0; i < VM_MOCK_SERVICE_INGRESS_MAX; ++i)
@@ -3168,6 +3229,12 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                 selectRc > 0 && FD_ISSET(entry->socket, &readSet));
         }
         vm_mock_service_ingress_drop_log_flush_due(&ingressDropLogs, nowMs);
+
+        /* Do not accept a new client after a signal.  Frames already in a
+         * worker queue remain eligible for the drain below; unframed ingress
+         * never crossed a business or persistence boundary. */
+        if (vm_server_shutdown_requested())
+            break;
 
         if (selectRc > 0 && FD_ISSET(serverSocket, &readSet))
         {
@@ -3240,6 +3307,27 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             }
         }
     }
+
+    printf("[info][mock-service] shutdown_requested signal=%d action=stop-listeners\n",
+           vm_server_shutdown_signal_number());
+    vm_mock_service_socket_close(serverSocket);
+    vm_mock_service_socket_close(adminSocket);
+    for (u32 i = 0; i < VM_MOCK_SERVICE_INGRESS_MAX; ++i)
+        vm_mock_service_ingress_clear(&gameIngress.entries[i]);
+    vm_mock_service_ingress_drop_log_flush_due(&ingressDropLogs,
+                                                scheduler_get_tick_ms());
+
+    /* No socket can enqueue work after the listener has closed.  Draining
+     * preserves the normal handler-owned transaction/response path instead
+     * of synthesizing a disconnect, replaying a callback, or writing cache
+     * state directly. */
+    vm_mock_service_worker_pool_drain(&g_vmMockServiceWorkerPool);
+    vm_mock_service_worker_pool_drain(&g_vmMockAdminWorkerPool);
+    vm_mysql_close();
+    printf("[info][mock-service] shutdown_complete signal=%d action=clean-exit\n",
+           vm_server_shutdown_signal_number());
+    fflush(stdout);
+    return 0;
 }
 
 enum

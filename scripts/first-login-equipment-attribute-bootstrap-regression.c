@@ -130,6 +130,32 @@ static bool build_backpack_open_request(u8 *out, u32 outCap, u32 *lengthOut)
     return true;
 }
 
+/* JianghuOL.CBE scene_runtime_init_and_sync() emits this exact compact
+ * follow-up after the scene screen has entered.  It is distinct from the
+ * larger scene-resource request: all three objects have empty payloads. */
+static bool build_compact_scene_resource_followup_request(
+    u8 *out, u32 outCap, u32 *lengthOut)
+{
+    u32 pos = 4;
+    u32 objectStart = 0;
+
+    if (out == NULL || lengthOut == NULL ||
+        !begin_request_object(out, outCap, &pos, 12, 1, &objectStart))
+    {
+        return false;
+    }
+    finish_request_object(out, objectStart, pos);
+    if (!begin_request_object(out, outCap, &pos, 7, 42, &objectStart))
+        return false;
+    finish_request_object(out, objectStart, pos);
+    if (!begin_request_object(out, outCap, &pos, 25, 5, &objectStart))
+        return false;
+    finish_request_object(out, objectStart, pos);
+    finish_request_packet(out, pos);
+    *lengthOut = pos;
+    return true;
+}
+
 static bool response_object_at(const u8 *packet, u32 length, u8 index,
                                u8 *majorOut, u8 *kindOut, u8 *subtypeOut,
                                const u8 **payloadOut, u16 *payloadLenOut)
@@ -892,6 +918,113 @@ static int assert_backpack_open_full_stage_plan(
     return 0;
 }
 
+/* The latest player-1 trace reached scene entry with 61 client-grid rows.
+ * Reproduce that packet volume after the native type-2/type-3 equipment
+ * bootstrap has completed, then prove the CBE's compact scene follow-up is
+ * answered by its exact four-object contract instead of being dropped. */
+static bool populate_compact_scene_61_row_backpack(
+    vm_net_mock_role_state *role,
+    const vm_net_mock_equipment_catalog_item *equipment)
+{
+    const u8 kRowCount = 61;
+
+    if (role == NULL || equipment == NULL || role->backpackItemCount > kRowCount)
+        return false;
+    role->backpackCapacity = 64;
+    for (u8 index = role->backpackItemCount; index < kRowCount; ++index)
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[index];
+
+        memset(item, 0, sizeof(*item));
+        item->itemId = equipment->itemId;
+        item->seq = (u16)(index + 1u);
+        item->count = 1;
+        if (!vm_net_mock_equipment_enhancement_ensure_affixes(
+                equipment, 0, &item->enhanceAffixes,
+                role->roleId ^ equipment->itemId ^
+                    ((u32)item->seq * 0x9e3779b9u)))
+        {
+            return false;
+        }
+    }
+    role->backpackItemCount = kRowCount;
+    role->nextBackpackSeq = (u16)(kRowCount + 1u);
+    return true;
+}
+
+static int assert_compact_scene_followup_with_full_backpack(u8 expectedRows)
+{
+    u8 request[32];
+    u8 response[16384];
+    const u8 *itemsPayload = NULL;
+    const u8 *itemInfo = NULL;
+    u16 itemsPayloadLen = 0;
+    u16 itemInfoLen = 0;
+    u32 requestLen = 0;
+    u32 responseLen = 0;
+    u8 itemRows = 0;
+    static const u8 expectedKinds[4] = {12, 7, 17, 25};
+    static const u8 expectedSubtypes[4] = {1, 42, 1, 5};
+
+    if (!build_compact_scene_resource_followup_request(
+            request, sizeof(request), &requestLen) || requestLen != 19)
+    {
+        fputs("could not construct compact scene follow-up request\n", stderr);
+        return 1;
+    }
+
+    g_netLastHandledValid = 0;
+    g_netLastHandledSource[0] = 0;
+    responseLen = vm_net_mock_build_response(request, requestLen,
+                                             response, sizeof(response));
+    if (responseLen == 0 || response[4] != 4 || !g_netLastHandledValid ||
+        strcmp(g_netLastHandledSource,
+               "builtin-scene-compact-skill-default") != 0)
+    {
+        fprintf(stderr,
+                "compact scene follow-up was not answered: len=%u objects=%u source=%s\n",
+                responseLen, responseLen ? response[4] : 0,
+                g_netLastHandledValid ? g_netLastHandledSource : "-");
+        return 1;
+    }
+    for (u8 index = 0; index < response[4]; ++index)
+    {
+        u8 major = 0;
+        u8 kind = 0;
+        u8 subtype = 0;
+        const u8 *payload = NULL;
+        u16 payloadLen = 0;
+
+        if (!response_object_at(response, responseLen, index, &major, &kind,
+                                &subtype, &payload, &payloadLen) ||
+            major != 1 || kind != expectedKinds[index] ||
+            subtype != expectedSubtypes[index])
+        {
+            fputs("compact scene follow-up changed its response contract\n", stderr);
+            return 1;
+        }
+        if (kind == 17)
+        {
+            itemsPayload = payload;
+            itemsPayloadLen = payloadLen;
+        }
+    }
+    if (itemsPayload == NULL ||
+        !vm_net_mock_get_object_entry_bytes(itemsPayload, itemsPayloadLen,
+                                            "iteminfo", &itemInfo,
+                                            &itemInfoLen) ||
+        itemInfo == NULL || itemInfoLen == 0 ||
+        !read_iteminfo_u8(itemInfo, itemInfoLen, &(u32){0}, &itemRows) ||
+        itemRows != expectedRows)
+    {
+        fprintf(stderr,
+                "compact scene follow-up omitted its full backpack: rows=%u expected=%u bytes=%u\n",
+                itemRows, expectedRows, itemInfoLen);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     const u32 roleId = 910001;
@@ -1074,6 +1207,14 @@ int main(void)
                                                    roleId) != 0)
     {
         fputs("native type-3 request did not finish the equipment stream\n",
+              stderr);
+        return 1;
+    }
+
+    if (!populate_compact_scene_61_row_backpack(role, backpackEquipment) ||
+        assert_compact_scene_followup_with_full_backpack(61) != 0)
+    {
+        fputs("compact scene follow-up failed after a full login backpack\n",
               stderr);
         return 1;
     }

@@ -44,6 +44,104 @@ typedef struct
 
 static vm_server_crash_protocol_context g_vm_server_crash_protocol_context;
 
+#ifndef _WIN32
+/*
+ * SIGINT/SIGTERM are an operator request to stop accepting work, not a crash.
+ * Keep this handler strictly async-signal-safe: worker threads inherit a
+ * blocked mask, so only the listener thread can observe this state and leave
+ * select()/the accept loop at a defined transport boundary.
+ */
+static volatile sig_atomic_t g_vm_server_shutdown_requested = 0;
+static volatile sig_atomic_t g_vm_server_shutdown_signal = 0;
+static sigset_t g_vm_server_worker_signal_previous_mask;
+static bool g_vm_server_worker_signal_mask_active = false;
+
+static void vm_server_posix_shutdown_signal_handler(int signalNumber)
+{
+    /* A second Ctrl+C/SIGTERM is an explicit force-stop.  Its use forfeits
+     * the queue-drain guarantee, but avoids trapping an operator forever. */
+    if (g_vm_server_shutdown_requested)
+        _Exit(128 + signalNumber);
+    g_vm_server_shutdown_signal = signalNumber;
+    g_vm_server_shutdown_requested = 1;
+}
+
+bool vm_server_shutdown_requested(void)
+{
+    return g_vm_server_shutdown_requested != 0;
+}
+
+int vm_server_shutdown_signal_number(void)
+{
+    return (int)g_vm_server_shutdown_signal;
+}
+
+bool vm_server_shutdown_block_for_workers(void)
+{
+    sigset_t blocked;
+
+    if (g_vm_server_worker_signal_mask_active)
+        return false;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGINT);
+    sigaddset(&blocked, SIGTERM);
+    if (pthread_sigmask(SIG_BLOCK, &blocked,
+                        &g_vm_server_worker_signal_previous_mask) != 0)
+    {
+        return false;
+    }
+    g_vm_server_worker_signal_mask_active = true;
+    return true;
+}
+
+void vm_server_shutdown_restore_listener_mask(void)
+{
+    if (!g_vm_server_worker_signal_mask_active)
+        return;
+    (void)pthread_sigmask(SIG_SETMASK,
+                          &g_vm_server_worker_signal_previous_mask, NULL);
+    g_vm_server_worker_signal_mask_active = false;
+}
+
+static void vm_server_install_shutdown_signal_handlers(void)
+{
+    const int shutdownSignals[] = {SIGTERM, SIGINT};
+    struct sigaction action;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = vm_server_posix_shutdown_signal_handler;
+    /* Do not use SA_RESTART: the listener must promptly re-check the stop
+     * flag after select() is interrupted. */
+    action.sa_flags = 0;
+    sigemptyset(&action.sa_mask);
+    for (u32 i = 0; i < sizeof(shutdownSignals) / sizeof(shutdownSignals[0]); ++i)
+        (void)sigaction(shutdownSignals[i], &action, NULL);
+}
+#else
+bool vm_server_shutdown_requested(void)
+{
+    return false;
+}
+
+int vm_server_shutdown_signal_number(void)
+{
+    return 0;
+}
+
+bool vm_server_shutdown_block_for_workers(void)
+{
+    return false;
+}
+
+void vm_server_shutdown_restore_listener_mask(void)
+{
+}
+
+static void vm_server_install_shutdown_signal_handlers(void)
+{
+}
+#endif
+
 void vm_server_crash_note_protocol(const char *stage, u32 clientId,
                                    u8 wtKind, u8 wtSubtype,
                                    u32 requestLen, u32 responseLen,
@@ -293,7 +391,6 @@ static void vm_server_install_crash_reporter(void)
 #ifdef SIGBUS
                                 SIGBUS,
 #endif
-                                SIGTERM, SIGINT,
 #ifdef SIGHUP
                                 SIGHUP,
 #endif
@@ -510,6 +607,7 @@ int main(int argc, char *args[])
     setvbuf(stdout, NULL, _IOFBF, 262144);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_server_install_crash_reporter();
+    vm_server_install_shutdown_signal_handlers();
     originalCwd[0] = 0;
     resourceCandidate[0] = 0;
     (void)getcwd(originalCwd, sizeof(originalCwd));

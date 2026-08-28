@@ -2,12 +2,17 @@
 
 bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *data, u32 len)
 {
-    if (out == NULL || pos == NULL || data == NULL || *pos > outCap ||
-        len > outCap - *pos)
+    /* A zero-length WT field has no byte source.  The aggregate server helper
+     * already accepts that representation; keep the independently linked
+     * production helper identical so `7/42 { booksinfo=[] }` remains a valid
+     * scene-start object.  Non-empty writes still require real source data. */
+    if (out == NULL || pos == NULL || *pos > outCap || len > outCap - *pos ||
+        (len != 0 && data == NULL))
     {
         return false;
     }
-    memcpy(out + *pos, data, len);
+    if (len != 0)
+        memcpy(out + *pos, data, len);
     *pos += len;
     return true;
 }
