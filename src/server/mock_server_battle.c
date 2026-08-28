@@ -5372,6 +5372,66 @@ static bool vm_net_mock_append_battle_auto_flask_counts_object(
     return true;
 }
 
+/* JianghuOL.CBE:HandleItemOperationResponse(0x01033544), subtype 7/11,
+ * resolves every `info` row through the live item manager by sequence.  For
+ * category 15 it writes the supplied value to item+272, the durable
+ * equipment-current field; it does not create an item or take the ordinary
+ * backpack-count path.  The equipped-instance bootstrap assigns the same
+ * stable slot+1 sequences, so emit an absolute row for every usable slot
+ * after the terminal wear has committed. */
+static bool vm_net_mock_append_battle_equipment_durability_counts_object(
+    u8 *out, u32 outCap, u32 *pos, bool *appendedOut, u8 *rowCountOut)
+{
+    u8 info[3 + VM_NET_MOCK_EQUIP_SLOT_COUNT * 10];
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 infoLen = 0;
+    u32 objectStart = 0;
+    u8 rowCount = 0;
+
+    if (appendedOut != NULL)
+        *appendedOut = false;
+    if (rowCountOut != NULL)
+        *rowCountOut = 0;
+    if (out == NULL || pos == NULL || role == NULL)
+        return false;
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        if (vm_net_mock_role_equipment_slot_is_usable(role, slot))
+            ++rowCount;
+    }
+    if (rowCount == 0)
+        return true;
+    if (!vm_net_mock_seq_put_u8(info, sizeof(info), &infoLen, rowCount))
+        return false;
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        const vm_net_mock_equipped_item_state *item = &role->equippedItems[slot];
+
+        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot))
+            continue;
+        if (!vm_net_mock_seq_put_i16(info, sizeof(info), &infoLen,
+                                     (u16)(slot + 1)) ||
+            !vm_net_mock_seq_put_u32(info, sizeof(info), &infoLen,
+                                     item->durability))
+        {
+            return false;
+        }
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 11,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "info", info,
+                                    (u16)infoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (appendedOut != NULL)
+        *appendedOut = true;
+    if (rowCountOut != NULL)
+        *rowCountOut = rowCount;
+    return true;
+}
+
 /* BattleMenu_SelectOption(0x5F78) enables the native auto UI after a 4/11
  * acknowledgement.  The overlay owns its 1000 ms cadence and sends 4/12;
  * retain the duration only for terminal action-display ordering, where a
@@ -5866,6 +5926,8 @@ static bool vm_net_mock_append_battle_terminal_status_objects(
 {
     vm_net_mock_battle_auto_flask_result autoFlask;
     bool appendedCounts = false;
+    bool appendedDurability = false;
+    u8 durabilityRowCount = 0;
     bool statusAppended = false;
 
     if (out == NULL || pos == NULL || objectCount == NULL || *objectCount == 0xff)
@@ -5915,6 +5977,25 @@ static bool vm_net_mock_append_battle_terminal_status_objects(
      * while the service-state serial guard keeps repeated terminal delivery
      * idempotent. */
     vm_net_mock_role_service_apply_battle_wear(vm_net_mock_active_role());
+    if (!vm_net_mock_append_battle_equipment_durability_counts_object(
+            out, outCap, pos, &appendedDurability, &durabilityRowCount))
+    {
+        return false;
+    }
+    if (appendedDurability)
+    {
+        vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+        if (*objectCount == 0xff)
+            return false;
+        ++*objectCount;
+        printf("[info][network] mock_battle_equipment_durability_refresh role=%u battle=%u rows=%u response=4/7+7/11 evidence=JianghuOL.CBE:0x01033544@0x010372C-0x0103740\n",
+               role ? role->roleId : 0, g_mockBattleOperateSessionSerial,
+               durabilityRowCount);
+        vm_autotest_note("mock_battle_equipment_durability_refresh role=%u battle=%u rows=%u response=4/7+7/11 evidence=JianghuOL.CBE:0x01033544@0x010372C-0x0103740\n",
+                         role ? role->roleId : 0, g_mockBattleOperateSessionSerial,
+                         durabilityRowCount);
+    }
     return true;
 }
 
