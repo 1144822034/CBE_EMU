@@ -3592,7 +3592,6 @@ static u32 vm_net_mock_actor_resource_index(u8 actorJob, u8 actorSex)
     return (u32)(actorJob - 1u) * 2u + (u32)actorSex;
 }
 
-static bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *data, u32 len);
 static bool vm_net_mock_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value);
 static u8 vm_net_mock_env_u8(const char *name, u8 fallback);
 static const char *vm_net_mock_env_str(const char *name, const char *fallback);
@@ -4595,7 +4594,8 @@ static u32 vm_net_mock_build_response_from_rules(const u8 *request, u32 requestL
     return 0;
 }
 
-static bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *data, u32 len)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *data, u32 len)
 {
     if (*pos + len > outCap)
         return false;
@@ -4604,23 +4604,28 @@ static bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *dat
     *pos += len;
     return true;
 }
+#endif
 
 static bool vm_net_mock_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value)
 {
     return vm_net_mock_put_bytes(out, outCap, pos, &value, 1);
 }
 
-static bool vm_net_mock_put_be16(u8 *out, u32 outCap, u32 *pos, u16 value)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+bool vm_net_mock_put_be16(u8 *out, u32 outCap, u32 *pos, u16 value)
 {
     u8 bytes[2] = {(u8)(value >> 8), (u8)value};
     return vm_net_mock_put_bytes(out, outCap, pos, bytes, sizeof(bytes));
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 bool vm_net_mock_put_be32(u8 *out, u32 outCap, u32 *pos, u32 value)
 {
     u8 bytes[4] = {(u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value};
     return vm_net_mock_put_bytes(out, outCap, pos, bytes, sizeof(bytes));
 }
+#endif
 
 static bool vm_net_mock_put_name(u8 *out, u32 outCap, u32 *pos, const char *name)
 {
@@ -4710,6 +4715,7 @@ bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const char *na
  * byte.  A few legacy handlers instead pass GetString() straight to libc-like
  * `%s` formatting.  Those fields must retain the protocol's blob wrapper but
  * include a terminal NUL in its inner payload. */
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 bool vm_net_mock_put_object_cstring(u8 *out, u32 outCap, u32 *pos,
                                     const char *name, const char *value)
 {
@@ -4720,6 +4726,7 @@ bool vm_net_mock_put_object_cstring(u8 *out, u32 outCap, u32 *pos,
                                        (const u8 *)(value ? value : ""),
                                        (u16)(valueLen + 1));
 }
+#endif
 
 bool vm_net_mock_begin_wt_object(u8 *out, u32 outCap, u32 *pos, u8 major, u8 kind, u8 subtype, u32 *objectStart)
 {
@@ -5574,13 +5581,16 @@ bool vm_net_mock_seq_put_i16(u8 *out, u32 outCap, u32 *pos, u16 value)
            vm_net_mock_put_be16(out, outCap, pos, value);
 }
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 bool vm_net_mock_seq_put_string(u8 *out, u32 outCap, u32 *pos, const char *value)
 {
     u16 len = value ? (u16)(strlen(value) + 1) : 1;
     return vm_net_mock_put_be16(out, outCap, pos, len) &&
            vm_net_mock_put_bytes(out, outCap, pos, value ? value : "", len);
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 bool vm_net_mock_seq_put_string_list(
     u8 *out, u32 outCap, u32 *pos, const char *const *values, u32 count)
 {
@@ -5592,8 +5602,10 @@ bool vm_net_mock_seq_put_string_list(
     }
     return true;
 }
+#endif
 
-static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
 {
     u32 pos = 0;
     if (!vm_net_mock_seq_put_i16(out, outCap, &pos, x))
@@ -5602,6 +5614,7 @@ static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
         return 0;
     return pos;
 }
+#endif
 
 static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos);
@@ -6371,10 +6384,6 @@ static u8 vm_net_mock_role_active_exp_card_flag(void);
 static u32 vm_net_mock_build_timed_special_item_use_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_battle_insight_followup_response(
-    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
-static u32 vm_net_mock_build_training_book_response(
-    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
-static u32 vm_net_mock_build_unresolved_special_item_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role);
 static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp);

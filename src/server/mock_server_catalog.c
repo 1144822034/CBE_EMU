@@ -1,4 +1,4 @@
-static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
+u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
 {
     u32 count = 0;
     if (role == NULL)
@@ -6513,10 +6513,11 @@ u32 vm_net_mock_build_vitality_pill33_response(
 }
 #endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* 921 is the actual sequence-owned transfer item.  CBE case 40 consumes the
  * currently selected row only for result=0 and then calls HandleLevelUpResponse,
  * so all status fields must be from the same committed role snapshot. */
-static u32 vm_net_mock_build_training_book_response(
+u32 vm_net_mock_build_training_book_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     vm_net_mock_role_state *role = NULL;
@@ -6605,12 +6606,91 @@ static u32 vm_net_mock_build_training_book_response(
            currentLevel, success ? 1u : 0u, remaining, pos);
     return pos;
 }
+#endif
 
+bool vm_mock_service_training_book_use(
+    u16 itemSeq, vm_mock_service_training_book_use_view *viewOut)
+{
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_state before;
+    vm_net_mock_training_book_record book;
+    u32 currentLevel = 0;
+    u32 beforeExp = 0;
+    u32 remaining = 0;
+    bool success = false;
+    const char *bookInfo =
+        "\xB1\xB3\xB0\xFC\xD6\xD0\xB5\xC4\xCC\xEC\xCA\xE9\xB2\xBB\xB4\xE6\xD4\xDA\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 背包中的天书不存在，未使用。 */
+
+    if (viewOut == NULL)
+        return false;
+    memset(viewOut, 0, sizeof(*viewOut));
+    viewOut->bookInfo = bookInfo;
+
+    role = vm_net_mock_active_role();
+    if (role != NULL)
+        viewOut->roleId = role->roleId;
+    memset(&book, 0, sizeof(book));
+    if (role != NULL &&
+        vm_net_mock_training_book_load_active_instance(role, itemSeq, &book))
+    {
+        currentLevel = vm_net_mock_role_level_from_exp(role->exp);
+        viewOut->bookLevel = book.level;
+        viewOut->bookExperience = book.experience;
+        viewOut->recipientLevel = currentLevel;
+        if (book.level == 0 || book.level > VM_NET_MOCK_ROLE_LEVEL_CAP ||
+            book.experience == 0 ||
+            book.experience < vm_net_mock_role_level_start_exp(book.level))
+        {
+            bookInfo = "\xCC\xEC\xCA\xE9\xBE\xAD\xD1\xE9\xCE\xDE\xD0\xA7\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 天书经验无效，未使用。 */
+        }
+        else if (currentLevel >= VM_NET_MOCK_ROLE_LEVEL_CAP ||
+                 book.level <= currentLevel)
+        {
+            bookInfo = "\xCC\xEC\xCA\xE9\xB5\xC8\xBC\xB6\xB1\xD8\xD0\xEB\xB8\xDF\xD3\xDA\xB5\xB1\xC7\xB0\xB5\xC8\xBC\xB6\xA1\xA3"; /* 天书等级必须高于当前等级。 */
+        }
+        else
+        {
+            before = *role;
+            beforeExp = role->exp;
+            if (vm_net_mock_role_consume_backpack_item(role, 921, itemSeq, 1,
+                                                        &remaining))
+            {
+                (void)vm_net_mock_role_add_exp(role, book.experience);
+                if (role->exp > beforeExp &&
+                    vm_net_mock_role_db_save("training-book-use"))
+                {
+                    success = true;
+                    bookInfo = "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xCA\xB9\xD3\xC3\xB3\xC9\xB9\xA6\xA1\xA3"; /* 修炼天书使用成功。 */
+                }
+                else
+                {
+                    *role = before;
+                    bookInfo = "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xCA\xB9\xD3\xC3\xCA\xA7\xB0\xDC\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 修炼天书使用失败，未使用。 */
+                }
+            }
+        }
+    }
+
+    viewOut->success = success;
+    viewOut->bookInfo = bookInfo;
+    viewOut->itemRemaining = remaining;
+    if (success && role != NULL)
+    {
+        viewOut->exp = role->exp;
+        viewOut->level = role->level;
+        viewOut->lastExp = vm_net_mock_role_last_level_exp(role->exp);
+        viewOut->nextLevelExp = vm_net_mock_role_next_level_start_exp(role->exp);
+        viewOut->percentExp = vm_net_mock_role_exp_percent(role->exp);
+    }
+    return true;
+}
+
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* Description-only book reads stay separate from the consuming 7/40 transfer
  * transaction.  7/35 is the static template text; 7/38 reads a concrete 921
  * instance.  The use packets 7/16, 7/33 and 7/40 are handled by their own
  * durable builders above and must never fall back here. */
-static u32 vm_net_mock_build_unresolved_special_item_response(
+u32 vm_net_mock_build_unresolved_special_item_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u16 requestedSeq = 0;
@@ -6691,8 +6771,45 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
     }
     return pos;
 }
+#endif
 
-static u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const char *hint)
+bool vm_mock_service_training_book_description(
+    u8 subtype, u16 itemSeq,
+    vm_mock_service_training_book_description_view *viewOut)
+{
+    const char *bookInfo =
+        "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xD7\xCA\xC1\xCF\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_training_book_record trainingBook;
+
+    if (viewOut == NULL || (subtype != 35 && subtype != 38))
+        return false;
+    memset(viewOut, 0, sizeof(*viewOut));
+
+    if (subtype == 38)
+    {
+        role = vm_net_mock_active_role();
+        if (role != NULL)
+            viewOut->roleId = role->roleId;
+        memset(&trainingBook, 0, sizeof(trainingBook));
+        if (vm_net_mock_training_book_load_active_instance(role, itemSeq,
+                                                           &trainingBook))
+        {
+            bookInfo = trainingBook.description;
+            viewOut->trainingBookLoaded = true;
+        }
+    }
+    else
+    {
+        bookInfo = g_vm_net_mock_training_book_default_description;
+    }
+    snprintf(viewOut->bookInfo, sizeof(viewOut->bookInfo), "%s",
+             bookInfo ? bookInfo : "");
+    return true;
+}
+
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const char *hint)
 {
     u32 pos = 5;
     u32 objectStart = 0;
@@ -6710,7 +6827,7 @@ static u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const c
     return pos;
 }
 
-static bool vm_net_mock_append_item_use_success_notice_object(
+bool vm_net_mock_append_item_use_success_notice_object(
     u8 *out, u32 outCap, u32 *pos, u8 *objectCount, const char *msg)
 {
     u32 objectStart = 0;
@@ -6730,13 +6847,15 @@ static bool vm_net_mock_append_item_use_success_notice_object(
     ++*objectCount;
     return true;
 }
+#endif
 
 /* 7/11 is an in-place quantity stream, not a single-row acknowledgement.
  * A role can legitimately have several physical rows for one stackable item
  * after prior grants (for example 9+10).  Updating only the selected seq makes
  * the UI show 9 and leaves the other rows stale.  Emit every surviving row,
  * plus the selected seq at zero when that row was consumed completely. */
-static bool vm_net_mock_build_item_use_count_rows_blob(
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+bool vm_net_mock_build_item_use_count_rows_blob(
     u8 *out, u32 outCap, const vm_net_mock_role_state *role,
     u32 itemId, u16 selectedSeq, u32 selectedRemaining, u32 *blobLenOut)
 {
@@ -6776,6 +6895,7 @@ static bool vm_net_mock_build_item_use_count_rows_blob(
     *blobLenOut = pos;
     return rowCount != 0;
 }
+#endif
 
 typedef struct
 {

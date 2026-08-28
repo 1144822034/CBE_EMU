@@ -410,3 +410,37 @@ u32 vm_net_mock_build_practise_help19_response(const u8 *request,
            pos);
     return pos;
 }
+
+bool vm_net_mock_is_login_tail_skill_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen != 14 || request[0] != 'W' ||
+        request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 0x0c || object.subtype != 1 ||
+        object.payloadLen != 0 ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 7 || object.subtype != 42 ||
+        object.payloadLen != 0)
+    {
+        return false;
+    }
+    return offset == requestLen;
+}
+
+u32 vm_net_mock_build_login_tail_skill_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (outCap < pos ||
+        !vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos,
+                                                      &objectCount, false))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}

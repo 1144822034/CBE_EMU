@@ -9,6 +9,7 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_core.c \
 	src/server/mock_server_catalog.c \
 	src/server/mock_server_mailbox.c \
+	src/server/mock_server_packet_fields.c \
 	src/server/mock_server_role.c \
 	src/server/mock_server_ranking.c \
 	src/server/mock_server_equipment_npc.c \
@@ -16,11 +17,12 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_scene_sync.c \
 	src/server/mock_server_guild.c \
 	src/server/mock_server_interaction_control.c \
-	src/server/mock_server_login_tail_skill.c \
+	src/server/mock_server_item_response.c \
 	src/server/mock_server_social.c \
 	src/server/mock_server_social_guild.c \
 	src/server/mock_server_social_friends.c \
 	src/server/mock_server_timed_status.c \
+	src/server/mock_server_training_book.c \
 	src/server/mock_server_battle.c \
 	src/server/mock_server_arena.c \
 	src/server/mock_server_battle_death.c \
@@ -37,12 +39,14 @@ MOCK_SERVER_SPLIT_SOURCES := \
 	src/server/mock_server_battle_death.c \
 	src/server/mock_server_guild.c \
 	src/server/mock_server_interaction_control.c \
-	src/server/mock_server_login_tail_skill.c \
+	src/server/mock_server_item_response.c \
 	src/server/mock_server_mailbox.c \
+	src/server/mock_server_packet_fields.c \
 	src/server/mock_server_ranking.c \
 	src/server/mock_server_social_guild.c \
 	src/server/mock_server_social_friends.c \
-	src/server/mock_server_timed_status.c
+	src/server/mock_server_timed_status.c \
+	src/server/mock_server_training_book.c
 
 # Regression programs include server_main.c directly, so they must rebuild
 # whenever its standalone-service boundary changes as well.

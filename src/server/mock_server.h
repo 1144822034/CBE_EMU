@@ -656,10 +656,14 @@ void vm_net_mock_finish_wt_object(u8 *out, u32 objectStart, u32 pos);
 void vm_net_mock_finish_wt_packet(u8 *out, u32 pos, u8 objectCount);
 bool vm_net_mock_seq_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value);
 bool vm_net_mock_seq_put_u32(u8 *out, u32 outCap, u32 *pos, u32 value);
+bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos,
+                           const void *data, u32 len);
+bool vm_net_mock_put_be16(u8 *out, u32 outCap, u32 *pos, u16 value);
 bool vm_net_mock_seq_put_string(u8 *out, u32 outCap, u32 *pos,
                                 const char *value);
 bool vm_net_mock_seq_put_string_list(u8 *out, u32 outCap, u32 *pos,
                                      const char *const *values, u32 count);
+u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y);
 bool vm_net_mock_mysql_account_hex(char account_hex[129]);
 bool vm_mock_service_friend_record_find(u32 ownerRoleId,
                                         const char *ownerAccountId,
@@ -1082,6 +1086,45 @@ u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
                                                u32 requestLen,
                                                u8 *out, u32 outCap);
 u32 vm_net_mock_build_battle_insight_status_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap,
+                                             const char *hint);
+bool vm_net_mock_append_item_use_success_notice_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, const char *msg);
+u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role);
+bool vm_net_mock_build_item_use_count_rows_blob(
+    u8 *out, u32 outCap, const vm_net_mock_role_state *role, u32 itemId,
+    u16 selectedSeq, u32 selectedRemaining, u32 *blobLenOut);
+typedef struct
+{
+    bool success;
+    u32 roleId;
+    u32 bookLevel;
+    u32 bookExperience;
+    u32 recipientLevel;
+    u32 itemRemaining;
+    u32 exp;
+    u32 level;
+    u32 lastExp;
+    u32 nextLevelExp;
+    u32 percentExp;
+    const char *bookInfo;
+} vm_mock_service_training_book_use_view;
+bool vm_mock_service_training_book_use(
+    u16 itemSeq, vm_mock_service_training_book_use_view *viewOut);
+u32 vm_net_mock_build_training_book_response(const u8 *request,
+                                             u32 requestLen, u8 *out,
+                                             u32 outCap);
+typedef struct
+{
+    bool trainingBookLoaded;
+    u32 roleId;
+    char bookInfo[201];
+} vm_mock_service_training_book_description_view;
+bool vm_mock_service_training_book_description(
+    u8 subtype, u16 itemSeq,
+    vm_mock_service_training_book_description_view *viewOut);
+u32 vm_net_mock_build_unresolved_special_item_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 u32 vm_net_mock_build_ranking_page_response(const u8 *request,
                                              u32 requestLen, u8 *out,
