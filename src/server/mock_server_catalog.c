@@ -4083,7 +4083,8 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
 
 static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
                                                          const vm_net_mock_role_state *role,
-                                                         u32 *blobLenOut, u32 *gridCountOut)
+                                                         u32 *blobLenOut, u32 *gridCountOut,
+                                                         bool includeAllStageAttrs)
 {
     u32 pos = 0;
     u8 itemCount = vm_net_mock_role_backpack_count(role);
@@ -4105,17 +4106,23 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
-        /* The selected-role reply shares old Android's fixed parser pool
-         * with group state.  One persisted +4 row gives every equipment
-         * instance its first grey stage while adding just one attribute row;
-         * sending the complete four-stage plan here is known to exhaust that
-         * pool for a full backpack. */
-        if (!vm_net_mock_seq_put_item_first_stage_extra(
-                out, outCap, &pos, item->itemId,
-                (u8)SDL_min(item->enhanceLevel,
-                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                vm_net_mock_item_common_extra_enhance_cap(item->itemId),
-                &item->enhanceAffixes))
+        /* The selected-role group response shares an old fixed parser pool
+         * with scene state.  Its compact form carries just +4.  A later,
+         * client-requested type-2 reply has its own small object budget and
+         * is allowed to create the complete durable stage plan. */
+        if (includeAllStageAttrs
+                ? !vm_net_mock_seq_put_item_common_extra(
+                      out, outCap, &pos, item->itemId,
+                      (u8)SDL_min(item->enhanceLevel,
+                                  VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                      vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                      &item->enhanceAffixes)
+                : !vm_net_mock_seq_put_item_first_stage_extra(
+                      out, outCap, &pos, item->itemId,
+                      (u8)SDL_min(item->enhanceLevel,
+                                  VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                      vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                      &item->enhanceAffixes))
             return false;
     }
     *blobLenOut = pos;
@@ -7844,7 +7851,7 @@ static bool vm_net_mock_append_shop17_items_object(u8 *out, u32 outCap, u32 *pos
 }
 
 static bool vm_net_mock_append_backpack_grid_object_ex(
-    u8 *out, u32 outCap, u32 *pos, bool allowEmpty)
+    u8 *out, u32 outCap, u32 *pos, bool allowEmpty, bool includeAllStageAttrs)
 {
     u32 objectStart = 0;
     u8 itemInfo[VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES];
@@ -7855,8 +7862,9 @@ static bool vm_net_mock_append_backpack_grid_object_ex(
     if (out == NULL || pos == NULL)
         return false;
     memset(itemInfo, 0, sizeof(itemInfo));
-    if (!vm_net_mock_build_backpack_grid_iteminfo_blob(itemInfo, sizeof(itemInfo), role,
-                                                      &itemInfoLen, &gridCount))
+    if (!vm_net_mock_build_backpack_grid_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), role, &itemInfoLen, &gridCount,
+            includeAllStageAttrs))
         return false;
     /* A bootstrap with no rows is intentionally suppressed because the
      * client has not created its item manager yet.  A post-mutation refresh
@@ -7876,28 +7884,42 @@ static bool vm_net_mock_append_backpack_grid_object_ex(
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
-    printf("[info][network] mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u stored_rows=%u iteminfo_len=%u\n",
+    printf("[info][network] mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u stored_rows=%u iteminfo_len=%u attrs=%s\n",
            role ? role->roleId : 0,
            gridCount,
            vm_net_mock_role_backpack_count(role),
-           itemInfoLen);
-    vm_autotest_note("mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u stored_rows=%u iteminfo_len=%u evidence=JianghuOL:0x1039952+mmShop:sub_9DE\n",
+           itemInfoLen,
+           includeAllStageAttrs ? "full" : "first-stage");
+    vm_autotest_note("mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u stored_rows=%u iteminfo_len=%u attrs=%s evidence=JianghuOL:0x1039952+mmShop:sub_9DE\n",
                      role ? role->roleId : 0,
                      gridCount,
                      vm_net_mock_role_backpack_count(role),
-                     itemInfoLen);
+                     itemInfoLen,
+                     includeAllStageAttrs ? "full" : "first-stage");
     return true;
 }
 
 static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos)
 {
-    return vm_net_mock_append_backpack_grid_object_ex(out, outCap, pos, false);
+    return vm_net_mock_append_backpack_grid_object_ex(out, outCap, pos, false,
+                                                       false);
+}
+
+/* Only the bounded type-2 login reply calls this form.  It is intentionally
+ * not reused by the ordinary 17/1 refresh path: 30/21 owns the live item
+ * manager and can safely construct its complete primary instances there. */
+static bool vm_net_mock_append_backpack_grid_full_bootstrap_object(
+    u8 *out, u32 outCap, u32 *pos)
+{
+    return vm_net_mock_append_backpack_grid_object_ex(out, outCap, pos, false,
+                                                       true);
 }
 
 static bool vm_net_mock_append_backpack_grid_refresh_object(
     u8 *out, u32 outCap, u32 *pos)
 {
-    return vm_net_mock_append_backpack_grid_object_ex(out, outCap, pos, true);
+    return vm_net_mock_append_backpack_grid_object_ex(out, outCap, pos, true,
+                                                       false);
 }
 
 static bool vm_net_mock_append_backpack_reservoir_counts_object(
@@ -8042,6 +8064,13 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
     }
     if (g_netMockBackpackGridSeededRoleId != role->roleId)
     {
+        /* The CBE itself immediately sends 7/7 type=2 and then type=3 after
+         * this group request.  Defer the heavy primary-item construction to
+         * those natural request boundaries; no host event is split, replayed
+         * or synthesized. */
+        if (vm_mock_service_backpack_full_bootstrap_arm(role->roleId))
+            return true;
+
         bool appendedReservoirCounts = false;
         u8 equipmentRows = 0;
 
@@ -8075,6 +8104,68 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
         }
         g_netMockBackpackGridSeededRoleId = role->roleId;
     }
+    return true;
+}
+
+/* The type-2 request is generated by the login CBE after its group/type-1
+ * reply.  Its response is small enough for a complete 30/21 snapshot, unlike
+ * the crowded group reply. */
+static bool vm_net_mock_append_deferred_full_backpack_grid_objects(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    bool appendedReservoirCounts = false;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || role == NULL ||
+        !vm_mock_service_backpack_full_bootstrap_matches(role->roleId, 1))
+    {
+        return false;
+    }
+    if (vm_net_mock_role_backpack_client_grid_count(role) == 0)
+        return true;
+    if (!vm_net_mock_append_backpack_grid_full_bootstrap_object(out, outCap, pos))
+        return false;
+    *objectCount = (u8)(*objectCount + 1);
+    if (!vm_net_mock_append_backpack_reservoir_counts_object(
+            out, outCap, pos, &appendedReservoirCounts))
+    {
+        return false;
+    }
+    if (appendedReservoirCounts)
+        *objectCount = (u8)(*objectCount + 1);
+    return true;
+}
+
+/* The type-3 request terminates the CBE's native login-equipment stream.
+ * Keep the full type-2 rows and its required empty type-3 completion beside
+ * that request only, then mark this one session/role bootstrap complete. */
+static bool vm_net_mock_append_deferred_equipment_login_objects(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 equipmentRows = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || role == NULL ||
+        !vm_mock_service_backpack_full_bootstrap_matches(role->roleId, 2))
+    {
+        return false;
+    }
+    if (!vm_net_mock_append_equipment_login_object(out, outCap, pos,
+                                                    &equipmentRows))
+    {
+        return false;
+    }
+    if (equipmentRows != 0)
+    {
+        *objectCount = (u8)(*objectCount + 1);
+        if (!vm_net_mock_append_equipment_login_type3_completion_object(
+                out, outCap, pos, equipmentRows))
+        {
+            return false;
+        }
+        *objectCount = (u8)(*objectCount + 1);
+    }
+    g_netMockBackpackGridSeededRoleId = role->roleId;
     return true;
 }
 

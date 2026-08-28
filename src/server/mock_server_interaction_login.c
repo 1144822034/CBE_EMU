@@ -4893,6 +4893,7 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
     u8 objectCount = 0;
     u8 requestKind = 0;
     u8 requestSubtype = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
 
     if (outCap < pos || request == NULL || requestLen < 8)
         return 0;
@@ -4905,10 +4906,44 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
     else if (requestType == 3)
         responseSub = 32;
 
-    if (!vm_net_mock_append_game_type_response_object(request, requestLen, out, outCap, &pos,
-                                                      requestType, responseType, responseSub))
-        return 0;
-    objectCount += 1;
+    if (requestType == 2 && role != NULL &&
+        vm_mock_service_backpack_full_bootstrap_matches(role->roleId, 1))
+    {
+        if (!vm_net_mock_append_deferred_full_backpack_grid_objects(
+                out, outCap, &pos, &objectCount) ||
+            !vm_net_mock_append_game_type_response_object(
+                request, requestLen, out, outCap, &pos, requestType,
+                responseType, responseSub))
+        {
+            return 0;
+        }
+        objectCount += 1;
+        vm_mock_service_backpack_full_bootstrap_advance(role->roleId, 1);
+    }
+    else if (requestType == 3 && role != NULL &&
+             vm_mock_service_backpack_full_bootstrap_matches(role->roleId, 2))
+    {
+        if (!vm_net_mock_append_deferred_equipment_login_objects(
+                out, outCap, &pos, &objectCount) ||
+            !vm_net_mock_append_game_type_response_object(
+                request, requestLen, out, outCap, &pos, requestType,
+                responseType, responseSub))
+        {
+            return 0;
+        }
+        objectCount += 1;
+        vm_mock_service_backpack_full_bootstrap_complete(role->roleId);
+    }
+    else
+    {
+        if (!vm_net_mock_append_game_type_response_object(
+                request, requestLen, out, outCap, &pos, requestType,
+                responseType, responseSub))
+        {
+            return 0;
+        }
+        objectCount += 1;
+    }
 
     (void)requestKind;
     (void)requestSubtype;

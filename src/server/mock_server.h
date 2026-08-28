@@ -717,6 +717,10 @@ bool vm_net_mock_is_npc_service_dialog_request(
     const u8 *request, u32 requestLen, u32 *serviceValueOut);
 vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
 vm_mock_service_client_session *vm_mock_service_find_client_session(u32 clientId);
+bool vm_mock_service_backpack_full_bootstrap_arm(u32 roleId);
+bool vm_mock_service_backpack_full_bootstrap_matches(u32 roleId, u8 stage);
+void vm_mock_service_backpack_full_bootstrap_advance(u32 roleId, u8 stage);
+void vm_mock_service_backpack_full_bootstrap_complete(u32 roleId);
 const char *vm_mock_service_active_account_id(void);
 bool vm_mock_service_has_active_account(void);
 void vm_mock_service_guild_set_selected(u32 guildId);

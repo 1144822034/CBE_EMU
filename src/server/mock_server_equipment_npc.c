@@ -2858,6 +2858,13 @@ typedef struct vm_mock_service_client_session
 {
     u32 clientId;
     char accountId[64];
+    /* The client sends a real 5/10+7/7(type=1) request followed by separate
+     * 7/7(type=2) and type=3 requests during scene startup.  A full 30/21
+     * cannot share the first response's fixed parser pool, so retain only
+     * this one session/role-bound delivery phase; it never changes client
+     * state or invents an input/request. */
+    u32 backpackFullBootstrapRoleId;
+    u8 backpackFullBootstrapStage;
     bool roleOnline;
     bool onlinePresenceValid;
     u32 onlineRoleId;
@@ -3503,6 +3510,68 @@ vm_mock_service_client_session *vm_mock_service_get_active_client_session(void)
     if (g_vm_mock_service_active_client_id == 0)
         return NULL;
     return vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
+}
+
+bool vm_mock_service_backpack_full_bootstrap_arm(u32 roleId)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || roleId == 0)
+        return false;
+    if (session->backpackFullBootstrapStage != 0 &&
+        session->backpackFullBootstrapRoleId == roleId)
+    {
+        return true;
+    }
+    session->backpackFullBootstrapRoleId = roleId;
+    session->backpackFullBootstrapStage = 1;
+    printf("[info][network] mock_backpack_full_bootstrap_arm client=%08x role=%u "
+           "next=7/7-type2-full-grid\n",
+           session->clientId, roleId);
+    return true;
+}
+
+bool vm_mock_service_backpack_full_bootstrap_matches(u32 roleId, u8 stage)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && roleId != 0 && stage != 0 &&
+           session->backpackFullBootstrapRoleId == roleId &&
+           session->backpackFullBootstrapStage == stage;
+}
+
+void vm_mock_service_backpack_full_bootstrap_advance(u32 roleId, u8 stage)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || roleId == 0 || stage == 0 ||
+        session->backpackFullBootstrapRoleId != roleId ||
+        session->backpackFullBootstrapStage != stage)
+    {
+        return;
+    }
+    session->backpackFullBootstrapStage = (u8)(stage + 1u);
+}
+
+void vm_mock_service_backpack_full_bootstrap_complete(u32 roleId)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || roleId == 0 ||
+        session->backpackFullBootstrapRoleId != roleId ||
+        session->backpackFullBootstrapStage != 2)
+    {
+        return;
+    }
+    printf("[info][network] mock_backpack_full_bootstrap_complete client=%08x role=%u "
+           "frames=group+type2+type3\n",
+           session->clientId, roleId);
+    session->backpackFullBootstrapRoleId = 0;
+    session->backpackFullBootstrapStage = 0;
 }
 
 bool vm_mock_service_session_get_online_view(

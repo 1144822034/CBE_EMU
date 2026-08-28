@@ -2,12 +2,13 @@
  * Deterministic server-only regression for the first-login equipment bootstrap.
  *
  * It neither starts a listener nor connects to MySQL.  A role with one normal
- * backpack row and durable HP/MP-raising equipment receives a 30/21 backpack
- * snapshot followed by full 7/7(type=2) equipped rows and an empty
- * 7/7(type=3) completion in the first 5/10 + 7/7(type=1) bootstrap response.
- * The title 1/1/6 + 1/1/15 acknowledgement must not consume that one-shot;
- * a repeated group poll must not duplicate it, and a new role select must
- * re-arm it.
+ * backpack row and durable HP/MP-raising equipment receives a small group
+ * response, then uses the CBE's own following 7/7(type=2) request to receive
+ * a complete 30/21 backpack snapshot.  Its following 7/7(type=3) request
+ * receives full 7/7(type=2) equipped rows and the empty 7/7(type=3)
+ * completion.  The title 1/1/6 + 1/1/15 acknowledgement must not consume
+ * that one-shot; a repeated group poll must not duplicate it, and a new role
+ * select must re-arm it.
  *
  * The type-2 rows use the fixed equipment-slot sequence namespace and full
  * common equipment attributes; type-3 has exactly one zero byte of iteminfo.
@@ -83,6 +84,43 @@ static bool build_group_type1_request(u8 *out, u32 outCap, u32 *lengthOut)
     finish_request_object(out, objectStart, pos);
     if (!begin_request_object(out, outCap, &pos, 7, 7, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 1))
+    {
+        return false;
+    }
+    finish_request_object(out, objectStart, pos);
+    finish_request_packet(out, pos);
+    *lengthOut = pos;
+    return true;
+}
+
+static bool build_game_type_request(u8 *out, u32 outCap, u8 type,
+                                    u32 *lengthOut)
+{
+    u32 pos = 4;
+    u32 objectStart = 0;
+
+    if (out == NULL || lengthOut == NULL ||
+        !begin_request_object(out, outCap, &pos, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", type))
+    {
+        return false;
+    }
+    finish_request_object(out, objectStart, pos);
+    finish_request_packet(out, pos);
+    *lengthOut = pos;
+    return true;
+}
+
+/* mmGameMstarWqvga.cbm:sub_2434 opens the backpack component with this
+ * single-object request.  It is deliberately not the wider scene-start
+ * compound request that happens to contain a 7/42 object. */
+static bool build_backpack_open_request(u8 *out, u32 outCap, u32 *lengthOut)
+{
+    u32 pos = 4;
+    u32 objectStart = 0;
+
+    if (out == NULL || lengthOut == NULL ||
+        !begin_request_object(out, outCap, &pos, 7, 42, &objectStart))
     {
         return false;
     }
@@ -351,32 +389,18 @@ static bool equip_vital_bonus_pair(vm_net_mock_role_state *role)
     return false;
 }
 
-static int assert_group_login_bootstrap(const u8 *packet, u32 length,
-                                        u32 expectedRoleId, bool expectSeed)
+static int assert_group_login_deferred(const u8 *packet, u32 length,
+                                       u32 expectedRoleId, bool expectDeferred)
 {
-    const u8 *equipmentPayload = NULL;
-    const u8 *equipmentItemInfo = NULL;
-    const u8 *completionPayload = NULL;
-    const u8 *completionItemInfo = NULL;
-    u16 equipmentPayloadLen = 0;
-    u16 equipmentItemInfoLen = 0;
-    u16 completionPayloadLen = 0;
-    u16 completionItemInfoLen = 0;
-    u8 gridIndex = 0xff;
-    u8 equipmentIndex = 0xff;
-    u8 completionIndex = 0xff;
     u8 major = 0;
     u8 kind = 0;
     u8 subtype = 0;
 
-    if (packet == NULL || length < 5 || packet[4] < 2 ||
-        g_netMockBackpackGridSeededRoleId != expectedRoleId)
+    if (packet == NULL || length < 5 || packet[4] < 2)
     {
         fprintf(stderr,
-                "group bootstrap has invalid response or lifecycle state: "
-                "len=%u objects=%u seeded=%u expected=%u\n",
-                length, packet ? packet[4] : 0,
-                g_netMockBackpackGridSeededRoleId, expectedRoleId);
+                "group bootstrap has invalid response: len=%u objects=%u\n",
+                length, packet ? packet[4] : 0);
         return 1;
     }
     for (u8 index = 0; index < packet[4]; ++index)
@@ -393,75 +417,41 @@ static int assert_group_login_bootstrap(const u8 *packet, u32 length,
         }
         if (major == 1 && kind == 30 && subtype == 21)
         {
-            if (gridIndex != 0xff)
-            {
-                fputs("group bootstrap duplicated the backpack grid\n", stderr);
-                return 1;
-            }
-            gridIndex = index;
+            fputs("group bootstrap unexpectedly carried 30/21\n", stderr);
+            return 1;
         }
         if (major == 1 && kind == 7 && subtype == 7 &&
             vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &type) &&
-            type == 2)
+            (type == 2 || type == 3))
         {
-            if (equipmentIndex != 0xff)
-            {
-                fputs("group bootstrap duplicated the equipped-item stream\n", stderr);
-                return 1;
-            }
-            equipmentIndex = index;
-            equipmentPayload = payload;
-            equipmentPayloadLen = payloadLen;
-        }
-        if (major == 1 && kind == 7 && subtype == 7 &&
-            vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &type) &&
-            type == 3)
-        {
-            if (completionIndex != 0xff)
-            {
-                fputs("group bootstrap duplicated the type-3 completion\n", stderr);
-                return 1;
-            }
-            completionIndex = index;
-            completionPayload = payload;
-            completionPayloadLen = payloadLen;
+            fputs("group bootstrap unexpectedly carried login equipment rows\n",
+                  stderr);
+            return 1;
         }
     }
-    if (!expectSeed)
+    if (expectDeferred)
     {
-        if (gridIndex != 0xff || equipmentIndex != 0xff || completionIndex != 0xff)
+        if (g_netMockBackpackGridSeededRoleId == expectedRoleId ||
+            !vm_mock_service_backpack_full_bootstrap_matches(expectedRoleId, 1))
         {
-            fputs("repeated group bootstrap replayed the equipment seed\n", stderr);
+            fputs("group bootstrap did not arm its per-client type-2 phase\n",
+                  stderr);
             return 1;
         }
         return 0;
     }
-    if (gridIndex == 0xff || equipmentIndex == 0xff || completionIndex == 0xff ||
-        gridIndex >= equipmentIndex || completionIndex != equipmentIndex + 1 ||
-        !vm_net_mock_get_object_entry_bytes(equipmentPayload,
-                                            equipmentPayloadLen, "iteminfo",
-                                            &equipmentItemInfo,
-                                            &equipmentItemInfoLen) ||
-        equipmentItemInfo == NULL || equipmentItemInfoLen != 161 ||
-        equipmentItemInfo[0] != 0 || equipmentItemInfo[1] != 1 ||
-        equipmentItemInfo[2] != 2 || equipmentItemInfo[27] != 0 ||
-        equipmentItemInfo[28] != 1 || equipmentItemInfo[29] != 4 ||
-        equipmentItemInfo[106] != 0 || equipmentItemInfo[107] != 1 ||
-        equipmentItemInfo[108] != 4 ||
-        !vm_net_mock_get_object_entry_bytes(completionPayload,
-                                            completionPayloadLen, "iteminfo",
-                                            &completionItemInfo,
-                                            &completionItemInfoLen) ||
-        completionItemInfo == NULL || completionItemInfoLen != 1 ||
-        completionItemInfo[0] != 0)
+    if (g_netMockBackpackGridSeededRoleId != expectedRoleId ||
+        vm_mock_service_backpack_full_bootstrap_matches(expectedRoleId, 1) ||
+        vm_mock_service_backpack_full_bootstrap_matches(expectedRoleId, 2))
     {
-        fputs("group bootstrap lacks the ordered full equipment seed\n", stderr);
+        fputs("completed bootstrap was not retained after the type-3 reply\n",
+              stderr);
         return 1;
     }
     return 0;
 }
 
-static int assert_grid_minimum_stage_plan(
+static int assert_deferred_grid_full_stage_plan(
     const u8 *packet, u32 length,
     const vm_net_mock_backpack_item_state *expectedEquipment)
 {
@@ -483,7 +473,7 @@ static int assert_grid_minimum_stage_plan(
         if (!response_object_at(packet, length, index, &major, &kind,
                                 &subtype, &gridPayload, &gridPayloadLen))
         {
-            fputs("could not parse group bootstrap while locating grid\n", stderr);
+            fputs("could not parse deferred type-2 reply while locating grid\n", stderr);
             return 1;
         }
         if (major == 1 && kind == 30 && subtype == 21)
@@ -494,23 +484,108 @@ static int assert_grid_minimum_stage_plan(
         !vm_net_mock_get_object_entry_bytes(gridPayload, gridPayloadLen,
                                             "iteminfo", &itemInfo,
                                             &itemInfoLen) ||
-        itemInfo == NULL || itemInfoLen != 67 ||
-        /* The normal row remains compact.  The equipment row carries exactly
-         * its durable +4 plan (the typed scalar layout is 3+3+3+4 bytes). */
-        itemInfo[26] != 0 || itemInfo[53] != 1 || itemInfo[56] != 4 ||
-        itemInfo[59] != expectedEquipment->enhanceAffixes.type[0] ||
-        itemInfo[62] != 0 ||
-        (((u16)itemInfo[65] << 8) | itemInfo[66]) !=
-            expectedEquipment->enhanceAffixes.value[0])
+        itemInfo == NULL || itemInfoLen != 106 || itemInfo[26] != 0 ||
+        itemInfo[53] != 4)
     {
         fprintf(stderr,
-                "grid did not preserve the minimum durable +4 plan: "
-                "iteminfo_len=%u attr0=%u attr1=%u threshold=%u type=%u\n",
+                "deferred grid did not preserve the complete durable plan: "
+                "iteminfo_len=%u attr0=%u attr1=%u\n",
                 itemInfoLen,
                 itemInfo != NULL && itemInfoLen > 26 ? itemInfo[26] : 0,
-                itemInfo != NULL && itemInfoLen > 53 ? itemInfo[53] : 0,
-                itemInfo != NULL && itemInfoLen > 56 ? itemInfo[56] : 0,
-                itemInfo != NULL && itemInfoLen > 59 ? itemInfo[59] : 0);
+                itemInfo != NULL && itemInfoLen > 53 ? itemInfo[53] : 0);
+        return 1;
+    }
+    for (u8 stage = 0; stage < 4; ++stage)
+    {
+        u32 offset = 56u + (u32)stage * 13u;
+
+        if (itemInfo[offset] != (u8)((stage + 1u) * 4u) ||
+            itemInfo[offset + 3] != expectedEquipment->enhanceAffixes.type[stage] ||
+            itemInfo[offset + 6] != 0 ||
+            (((u16)itemInfo[offset + 9] << 8) | itemInfo[offset + 10]) !=
+                expectedEquipment->enhanceAffixes.value[stage])
+        {
+            fputs("deferred grid changed a durable stage attribute\n", stderr);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int assert_deferred_equipment_login_completion(const u8 *packet,
+                                                       u32 length,
+                                                       u32 expectedRoleId)
+{
+    const u8 *equipmentPayload = NULL;
+    const u8 *equipmentItemInfo = NULL;
+    const u8 *completionPayload = NULL;
+    const u8 *completionItemInfo = NULL;
+    u16 equipmentPayloadLen = 0;
+    u16 equipmentItemInfoLen = 0;
+    u16 completionPayloadLen = 0;
+    u16 completionItemInfoLen = 0;
+    u8 equipmentIndex = 0xff;
+    u8 completionIndex = 0xff;
+    bool sawStatus = false;
+
+    if (packet == NULL || length < 5)
+        return 1;
+    for (u8 index = 0; index < packet[4]; ++index)
+    {
+        const u8 *payload = NULL;
+        u16 payloadLen = 0;
+        u8 major = 0;
+        u8 kind = 0;
+        u8 subtype = 0;
+        u8 type = 0;
+
+        if (!response_object_at(packet, length, index, &major, &kind, &subtype,
+                                &payload, &payloadLen))
+        {
+            fputs("deferred type-3 reply contains a malformed object\n", stderr);
+            return 1;
+        }
+        if (major == 1 && kind == 7 && subtype == 32)
+            sawStatus = true;
+        if (major == 1 && kind == 7 && subtype == 7 &&
+            vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &type))
+        {
+            if (type == 2)
+            {
+                equipmentIndex = index;
+                equipmentPayload = payload;
+                equipmentPayloadLen = payloadLen;
+            }
+            else if (type == 3)
+            {
+                completionIndex = index;
+                completionPayload = payload;
+                completionPayloadLen = payloadLen;
+            }
+        }
+    }
+    if (!sawStatus || equipmentIndex == 0xff || completionIndex != equipmentIndex + 1 ||
+        !vm_net_mock_get_object_entry_bytes(equipmentPayload,
+                                            equipmentPayloadLen, "iteminfo",
+                                            &equipmentItemInfo,
+                                            &equipmentItemInfoLen) ||
+        equipmentItemInfo == NULL || equipmentItemInfoLen != 161 ||
+        equipmentItemInfo[0] != 0 || equipmentItemInfo[1] != 1 ||
+        equipmentItemInfo[2] != 2 || equipmentItemInfo[27] != 0 ||
+        equipmentItemInfo[28] != 1 || equipmentItemInfo[29] != 4 ||
+        equipmentItemInfo[106] != 0 || equipmentItemInfo[107] != 1 ||
+        equipmentItemInfo[108] != 4 ||
+        !vm_net_mock_get_object_entry_bytes(completionPayload,
+                                            completionPayloadLen, "iteminfo",
+                                            &completionItemInfo,
+                                            &completionItemInfoLen) ||
+        completionItemInfo == NULL || completionItemInfoLen != 1 ||
+        completionItemInfo[0] != 0 ||
+        g_netMockBackpackGridSeededRoleId != expectedRoleId ||
+        vm_mock_service_backpack_full_bootstrap_matches(expectedRoleId, 2))
+    {
+        fputs("deferred type-3 reply lacks the ordered equipment completion\n",
+              stderr);
         return 1;
     }
     return 0;
@@ -527,7 +602,8 @@ static int assert_full_grid_minimum_stage_plan(
         kGridRows = 48,
         kEquipmentRows = 31,
         kCompactRowBytes = 27,
-        kFirstStageRowBytes = 40
+        kFirstStageRowBytes = 40,
+        kFullStageRowBytes = 79
     };
     vm_net_mock_role_state role;
     u8 itemInfo[VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES];
@@ -562,7 +638,8 @@ static int assert_full_grid_minimum_stage_plan(
         }
     }
     if (!vm_net_mock_build_backpack_grid_iteminfo_blob(
-            itemInfo, sizeof(itemInfo), &role, &itemInfoLen, &gridCount) ||
+            itemInfo, sizeof(itemInfo), &role, &itemInfoLen, &gridCount,
+            false) ||
         gridCount != kGridRows ||
         itemInfoLen != kEquipmentRows * kFirstStageRowBytes +
                            (kGridRows - kEquipmentRows) * kCompactRowBytes)
@@ -595,7 +672,224 @@ static int assert_full_grid_minimum_stage_plan(
         }
         pos += rowBytes;
     }
+    if (pos != itemInfoLen)
+        return 1;
+
+    /* The separate type-2 reply uses this complete representation.  Exercise
+     * the historic 48-row / 31-equipment shape so a future serializer change
+     * cannot silently reintroduce the group-frame truncation workaround. */
+    memset(itemInfo, 0, sizeof(itemInfo));
+    if (!vm_net_mock_build_backpack_grid_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), &role, &itemInfoLen, &gridCount,
+            true) ||
+        gridCount != kGridRows ||
+        itemInfoLen != kEquipmentRows * kFullStageRowBytes +
+                           (kGridRows - kEquipmentRows) * kCompactRowBytes)
+    {
+        fprintf(stderr,
+                "full-grid complete-stage layout changed: rows=%u iteminfo_len=%u\n",
+                gridCount, itemInfoLen);
+        return 1;
+    }
+    pos = 0;
+    for (u32 index = 0; index < kGridRows; ++index)
+    {
+        const vm_net_mock_backpack_item_state *item = &role.backpackItems[index];
+        const bool isEquipment = index < kEquipmentRows;
+        const u32 rowBytes = isEquipment ? kFullStageRowBytes :
+                                           kCompactRowBytes;
+
+        if (pos + rowBytes > itemInfoLen ||
+            itemInfo[pos + 26] != (isEquipment ? 4 : 0))
+        {
+            fputs("full-grid complete-stage row has the wrong attribute count\n",
+                  stderr);
+            return 1;
+        }
+        if (isEquipment)
+        {
+            for (u8 stage = 0; stage < 4; ++stage)
+            {
+                u32 attr = pos + 29u + (u32)stage * 13u;
+
+                if (itemInfo[attr] != (u8)((stage + 1u) * 4u) ||
+                    itemInfo[attr + 3] != item->enhanceAffixes.type[stage] ||
+                    itemInfo[attr + 6] != 0 ||
+                    (((u16)itemInfo[attr + 9] << 8) | itemInfo[attr + 10]) !=
+                        item->enhanceAffixes.value[stage])
+                {
+                    fprintf(stderr,
+                            "full-grid row %u changed complete stage %u\n",
+                            index, stage);
+                    return 1;
+                }
+            }
+        }
+        pos += rowBytes;
+    }
     return pos == itemInfoLen ? 0 : 1;
+}
+
+/* 17/1 iteminfo is a sequence of typed scalars, rather than a packed byte
+ * array: numeric values use {0,length,big-endian-value}. */
+static bool read_iteminfo_u8(const u8 *data, u32 dataLen, u32 *pos, u8 *valueOut)
+{
+    if (data == NULL || pos == NULL || *pos + 3 > dataLen ||
+        data[*pos] != 0 || data[*pos + 1] != 1)
+    {
+        return false;
+    }
+    if (valueOut)
+        *valueOut = data[*pos + 2];
+    *pos += 3;
+    return true;
+}
+
+static bool read_iteminfo_u16(const u8 *data, u32 dataLen, u32 *pos, u16 *valueOut)
+{
+    if (data == NULL || pos == NULL || *pos + 4 > dataLen ||
+        data[*pos] != 0 || data[*pos + 1] != 2)
+    {
+        return false;
+    }
+    if (valueOut)
+        *valueOut = (u16)(((u16)data[*pos + 2] << 8) | data[*pos + 3]);
+    *pos += 4;
+    return true;
+}
+
+static bool read_iteminfo_u32(const u8 *data, u32 dataLen, u32 *pos, u32 *valueOut)
+{
+    if (data == NULL || pos == NULL || *pos + 6 > dataLen ||
+        data[*pos] != 0 || data[*pos + 1] != 4)
+    {
+        return false;
+    }
+    if (valueOut)
+    {
+        *valueOut = ((u32)data[*pos + 2] << 24) |
+                    ((u32)data[*pos + 3] << 16) |
+                    ((u32)data[*pos + 4] << 8) |
+                    data[*pos + 5];
+    }
+    *pos += 6;
+    return true;
+}
+
+/* The initial 30/21 response creates the live manager instance and stays
+ * bounded.  The separate, client-requested backpack screen response is the
+ * native full-detail route: 17/1 has just one item list object beside 7/42,
+ * so every durable +4/+8/+12/+16 row can be returned without enlarging the
+ * scene-start packet or changing any CBE behaviour. */
+static int assert_backpack_open_full_stage_plan(
+    const vm_net_mock_backpack_item_state *expectedEquipment)
+{
+    u8 request[32];
+    u8 response[16384];
+    const u8 *itemsPayload = NULL;
+    const u8 *booksPayload = NULL;
+    const u8 *itemInfo = NULL;
+    u16 itemsPayloadLen = 0;
+    u16 booksPayloadLen = 0;
+    u16 itemInfoLen = 0;
+    u32 requestLen = 0;
+    u32 responseLen = 0;
+    u32 pos = 0;
+    u8 major = 0;
+    u8 kind = 0;
+    u8 subtype = 0;
+
+    if (expectedEquipment == NULL || expectedEquipment->itemId == 0 ||
+        !build_backpack_open_request(request, sizeof(request), &requestLen))
+    {
+        fputs("could not construct native backpack-open request\n", stderr);
+        return 1;
+    }
+
+    g_netLastHandledValid = 0;
+    g_netLastHandledSource[0] = 0;
+    responseLen = vm_net_mock_build_response(request, requestLen,
+                                             response, sizeof(response));
+    if (responseLen == 0 || response[4] != 2 ||
+        !g_netLastHandledValid ||
+        strcmp(g_netLastHandledSource, "builtin-backpack-open") != 0 ||
+        !response_object_at(response, responseLen, 0, &major, &kind, &subtype,
+                            &itemsPayload, &itemsPayloadLen) ||
+        major != 1 || kind != 17 || subtype != 1 ||
+        !response_object_at(response, responseLen, 1, &major, &kind, &subtype,
+                            &booksPayload, &booksPayloadLen) ||
+        major != 1 || kind != 7 || subtype != 42 ||
+        !vm_net_mock_get_object_entry_bytes(itemsPayload, itemsPayloadLen,
+                                            "iteminfo", &itemInfo,
+                                            &itemInfoLen) ||
+        itemInfo == NULL || itemInfoLen == 0)
+    {
+        fputs("native backpack-open route did not return 17/1 + 7/42\n", stderr);
+        return 1;
+    }
+
+    /* Fixture order is one normal item plus one unenhanced equipment item.
+     * The latter must nevertheless carry its complete, still-grey plan. */
+    if (!read_iteminfo_u8(itemInfo, itemInfoLen, &pos, &major) || major != 2)
+    {
+        fputs("native backpack-open returned the wrong row count\n", stderr);
+        return 1;
+    }
+    for (u8 row = 0; row < major; ++row)
+    {
+        u32 itemId = 0;
+        u16 ignoredU16 = 0;
+        u8 attrCount = 0;
+
+        if (!read_iteminfo_u32(itemInfo, itemInfoLen, &pos, &itemId) ||
+            !read_iteminfo_u16(itemInfo, itemInfoLen, &pos, &ignoredU16) ||
+            !read_iteminfo_u16(itemInfo, itemInfoLen, &pos, &ignoredU16) ||
+            !read_iteminfo_u8(itemInfo, itemInfoLen, &pos, &attrCount))
+        {
+            fputs("native backpack-open truncated an item row\n", stderr);
+            return 1;
+        }
+        if (itemId != expectedEquipment->itemId)
+        {
+            if (attrCount != 0)
+            {
+                fputs("native backpack-open added attributes to the normal row\n", stderr);
+                return 1;
+            }
+            continue;
+        }
+        if (attrCount != 4)
+        {
+            fputs("native backpack-open omitted the four-stage equipment plan\n", stderr);
+            return 1;
+        }
+        for (u8 stage = 0; stage < attrCount; ++stage)
+        {
+            u8 threshold = 0;
+            u8 type = 0;
+            u8 mode = 0;
+            u16 value = 0;
+
+            if (!read_iteminfo_u8(itemInfo, itemInfoLen, &pos, &threshold) ||
+                !read_iteminfo_u8(itemInfo, itemInfoLen, &pos, &type) ||
+                !read_iteminfo_u8(itemInfo, itemInfoLen, &pos, &mode) ||
+                !read_iteminfo_u16(itemInfo, itemInfoLen, &pos, &value) ||
+                threshold != (u8)((stage + 1u) * 4u) ||
+                type != expectedEquipment->enhanceAffixes.type[stage] ||
+                mode != 0 ||
+                value != expectedEquipment->enhanceAffixes.value[stage])
+            {
+                fputs("native backpack-open changed a durable stage attribute\n", stderr);
+                return 1;
+            }
+        }
+    }
+    if (pos != itemInfoLen)
+    {
+        fputs("native backpack-open iteminfo has trailing bytes\n", stderr);
+        return 1;
+    }
+    return 0;
 }
 
 int main(void)
@@ -608,9 +902,13 @@ int main(void)
     vm_net_mock_player_stats fullStats;
     u8 selectRequest[128];
     u8 groupRequest[128];
+    u8 type2Request[64];
+    u8 type3Request[64];
     u8 response[16384];
     u32 selectRequestLen = 0;
     u32 groupRequestLen = 0;
+    u32 type2RequestLen = 0;
+    u32 type3RequestLen = 0;
     u32 responseLen = 0;
 
     memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
@@ -721,6 +1019,15 @@ int main(void)
               stderr);
         return 1;
     }
+    if (!build_game_type_request(type2Request, sizeof(type2Request), 2,
+                                 &type2RequestLen) ||
+        !build_game_type_request(type3Request, sizeof(type3Request), 3,
+                                 &type3RequestLen))
+    {
+        fputs("could not construct first-login type-2/type-3 requests\n",
+              stderr);
+        return 1;
+    }
     responseLen = vm_net_mock_build_title_role_select_response(
         selectRequest, selectRequestLen, response, sizeof(response));
     if (assert_title_role_select_reply(response, responseLen, roleId,
@@ -729,14 +1036,51 @@ int main(void)
 
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
-    if (assert_group_login_bootstrap(response, responseLen, roleId, true) != 0 ||
-        assert_grid_minimum_stage_plan(response, responseLen,
-                                       &role->backpackItems[1]) != 0)
+    if (assert_group_login_deferred(response, responseLen, roleId, true) != 0)
         return 1;
+
+    /* A duplicate group poll before the client's natural type-2 request must
+     * retain the same pending session phase and must not inject the snapshot. */
+    responseLen = vm_net_mock_build_group_type1_response(
+        groupRequest, groupRequestLen, response, sizeof(response));
+    if (assert_group_login_deferred(response, responseLen, roleId, true) != 0)
+        return 1;
+
+    g_netLastHandledValid = 0;
+    g_netLastHandledSource[0] = 0;
+    responseLen = vm_net_mock_build_response(
+        type2Request, type2RequestLen, response, sizeof(response));
+    if (responseLen == 0 || !g_netLastHandledValid ||
+        strcmp(g_netLastHandledSource, "builtin-game-type") != 0 ||
+        assert_deferred_grid_full_stage_plan(response, responseLen,
+                                             &role->backpackItems[1]) != 0 ||
+        !vm_mock_service_backpack_full_bootstrap_matches(roleId, 2))
+    {
+        fputs("native type-2 request did not receive the full grid snapshot\n",
+              stderr);
+        return 1;
+    }
+
+    if (assert_backpack_open_full_stage_plan(&role->backpackItems[1]) != 0)
+        return 1;
+
+    g_netLastHandledValid = 0;
+    g_netLastHandledSource[0] = 0;
+    responseLen = vm_net_mock_build_response(
+        type3Request, type3RequestLen, response, sizeof(response));
+    if (responseLen == 0 || !g_netLastHandledValid ||
+        strcmp(g_netLastHandledSource, "builtin-game-type") != 0 ||
+        assert_deferred_equipment_login_completion(response, responseLen,
+                                                   roleId) != 0)
+    {
+        fputs("native type-3 request did not finish the equipment stream\n",
+              stderr);
+        return 1;
+    }
 
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
-    if (assert_group_login_bootstrap(response, responseLen, roleId, false) != 0)
+    if (assert_group_login_deferred(response, responseLen, roleId, false) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_title_role_select_response(
@@ -747,7 +1091,7 @@ int main(void)
 
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
-    if (assert_group_login_bootstrap(response, responseLen, roleId, true) != 0)
+    if (assert_group_login_deferred(response, responseLen, roleId, true) != 0)
         return 1;
 
     printf("first-login equipment bootstrap regression passed type3_completion=1\n");
