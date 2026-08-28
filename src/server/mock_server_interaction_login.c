@@ -3804,6 +3804,13 @@ static u32 vm_net_mock_build_role_list_info(u8 *out, u32 outCap)
 static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
 {
     u32 pos = 0;
+    /*
+     * Title 1/1/4 actorinfo must match MySQL authority.  Sticky account_restore
+     * can leave roleDbLoaded=true with an empty heap snapshot while
+     * account_role_state still has rows (observed: lxh001 role_count=3 →
+     * actorinfo count=0 until reload).
+     */
+    g_vm_net_mock_role_db_loaded = false;
     vm_net_mock_role_db_load();
     u32 roleCount = g_vm_net_mock_role_db_valid ? g_vm_net_mock_role_db.roleCount : 0;
     if (roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)

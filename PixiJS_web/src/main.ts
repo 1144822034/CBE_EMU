@@ -58,7 +58,17 @@ import { ArenaHud } from "./ui/ArenaHud";
 import { ArenaPanel } from "./ui/ArenaPanel";
 import { WagerPanel } from "./ui/WagerPanel";
 import { LadderPanel } from "./ui/LadderPanel";
+import { NPC_LADDER_CHALLENGE } from "./net/protocolLadder";
 import { GuessPanel } from "./ui/GuessPanel";
+import { FestivalPanel } from "./ui/FestivalPanel";
+import { YanmenPanel } from "./ui/YanmenPanel";
+import { RingQuestPanel } from "./ui/RingQuestPanel";
+import {
+  NPC_FESTIVAL_EXCHANGE,
+  NPC_RING_QUEST,
+  NPC_YANMEN_EXCHANGE,
+  activityMsgTip,
+} from "./net/protocolActivities";
 import { AuctionPanel } from "./ui/AuctionPanel";
 import {
   EntertainmentPanel,
@@ -119,7 +129,6 @@ import {
 import { isMapHealSkill } from "./resources/skill";
 import { lookupItemSync, warmItemCatalogs } from "./resources/itemCatalog";
 import {
-  installBgmGestureUnlock,
   resumeBgmAfterForeground,
   suspendBgm,
   toggleSoundEnabled,
@@ -129,7 +138,6 @@ import { isPeerCosmeticsVisible, togglePeerCosmeticsVisible } from "./resources/
 import {
   playKillStreakTitle,
   preloadKillStreakSfx,
-  unlockKillStreakSfx,
 } from "./audio/KillStreakSfx";
 
 /** Cap GPU buffer; HTML softkeys stay native DPI regardless. */
@@ -674,6 +682,9 @@ async function main(): Promise<void> {
   const wagerPanel = new WagerPanel();
   const ladderPanel = new LadderPanel();
   const guessPanel = new GuessPanel();
+  const festivalPanel = new FestivalPanel();
+  const yanmenPanel = new YanmenPanel();
+  const ringQuestPanel = new RingQuestPanel();
   const auctionPanel = new AuctionPanel();
   const entertainPanel = new EntertainmentPanel();
   const entertainWeb = new EntertainmentWebLayer();
@@ -724,6 +735,9 @@ async function main(): Promise<void> {
   wagerPanel.visible = false;
   ladderPanel.visible = false;
   guessPanel.visible = false;
+  festivalPanel.visible = false;
+  yanmenPanel.visible = false;
+  ringQuestPanel.visible = false;
   auctionPanel.visible = false;
   entertainPanel.visible = false;
   wingPanel.visible = false;
@@ -765,6 +779,9 @@ async function main(): Promise<void> {
     wagerPanel,
     ladderPanel,
     guessPanel,
+    festivalPanel,
+    yanmenPanel,
+    ringQuestPanel,
     auctionPanel,
     entertainPanel,
     wingPanel,
@@ -784,6 +801,9 @@ async function main(): Promise<void> {
   wagerPanel.zIndex = 55;
   ladderPanel.zIndex = 55;
   guessPanel.zIndex = 55;
+  festivalPanel.zIndex = 55;
+  yanmenPanel.zIndex = 55;
+  ringQuestPanel.zIndex = 55;
   auctionPanel.zIndex = 55;
   entertainPanel.zIndex = 56;
   wingPanel.zIndex = 56;
@@ -802,6 +822,9 @@ async function main(): Promise<void> {
       wagerPanel,
       ladderPanel,
       guessPanel,
+      festivalPanel,
+      yanmenPanel,
+      ringQuestPanel,
       arenaPanel,
       enhanceUi,
     washUi,
@@ -842,6 +865,9 @@ async function main(): Promise<void> {
       wagerPanel.visible ||
       ladderPanel.visible ||
       guessPanel.visible ||
+      festivalPanel.visible ||
+      yanmenPanel.visible ||
+      ringQuestPanel.visible ||
       entertainPanel.visible ||
       wingPanel.visible ||
       mountPanel.visible ||
@@ -1240,6 +1266,12 @@ async function main(): Promise<void> {
     return board;
   };
 
+  const closeActivityPanels = () => {
+    if (festivalPanel.visible) festivalPanel.close();
+    if (yanmenPanel.visible) yanmenPanel.close();
+    if (ringQuestPanel.visible) ringQuestPanel.close();
+  };
+
   const openGuessPanel = async () => {
     dialog.hide();
     closeApproach(false);
@@ -1249,6 +1281,7 @@ async function main(): Promise<void> {
     if (ladderPanel.visible) ladderPanel.close();
     if (guessPanel.visible) guessPanel.close();
     if (arenaPanel.visible) arenaPanel.close();
+    closeActivityPanels();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     guessHistoryPage = 0;
     const board = await session.fetchGuessBoard(0);
@@ -1261,6 +1294,85 @@ async function main(): Promise<void> {
     shell.setSoftkeys(guessPanel.softkeys());
     setChromeStatus("猜猜看");
     if (!board.status) guessPanel.showTip("状态获取失败");
+  };
+
+  const openFestivalPanel = async () => {
+    dialog.hide();
+    closeApproach(false);
+    entertainPanel.close();
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (yanmenPanel.visible) yanmenPanel.close();
+    if (ringQuestPanel.visible) ringQuestPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    const status = await session.fetchActivitiesStatus();
+    dialog.hide();
+    closeApproach(false);
+    festivalPanel.open(status);
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(festivalPanel.softkeys());
+    setChromeStatus("活力兑换");
+    if (!status) festivalPanel.showTip("状态获取失败");
+  };
+
+  const openYanmenPanel = async () => {
+    dialog.hide();
+    closeApproach(false);
+    entertainPanel.close();
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (festivalPanel.visible) festivalPanel.close();
+    if (ringQuestPanel.visible) ringQuestPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    const status = await session.fetchActivitiesStatus();
+    const rows = await session.fetchYanmenExchangeList();
+    dialog.hide();
+    closeApproach(false);
+    yanmenPanel.open(status, rows);
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(yanmenPanel.softkeys());
+    setChromeStatus("材料兑换");
+    if (!status) yanmenPanel.showTip("状态获取失败");
+  };
+
+  const refreshRingQuestPanel = async () => {
+    const status = await session.fetchRingStatus();
+    if (ringQuestPanel.visible) {
+      ringQuestPanel.open(status);
+      shell.setSoftkeys(ringQuestPanel.softkeys());
+    }
+    return status;
+  };
+
+  const openRingQuestPanel = async () => {
+    dialog.hide();
+    closeApproach(false);
+    entertainPanel.close();
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (festivalPanel.visible) festivalPanel.close();
+    if (yanmenPanel.visible) yanmenPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    const status = await session.fetchRingStatus();
+    dialog.hide();
+    closeApproach(false);
+    ringQuestPanel.open(status);
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(ringQuestPanel.softkeys());
+    setChromeStatus("跑环任务");
+    if (!status) ringQuestPanel.showTip("状态获取失败");
   };
 
   guessPanel.onAction = (action, betId) => {
@@ -1320,6 +1432,97 @@ async function main(): Promise<void> {
         await refreshGuessPanel(guessHistoryPage);
         guessPanel.showTip(tip);
         shell.setSoftkeys(guessPanel.softkeys());
+      });
+    }
+  };
+
+  festivalPanel.onAction = (action, exchangeId) => {
+    if (action === "close") {
+      festivalPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus("");
+      return;
+    }
+    if (action === "exchange" && exchangeId != null) {
+      void session.festivalExchange(exchangeId).then(async (r) => {
+        const tip = !r
+          ? "兑换失败"
+          : r.result === 1
+            ? activityMsgTip(r.message, "兑换成功")
+            : activityMsgTip(r.message, "兑换失败");
+        const status = await session.fetchActivitiesStatus();
+        if (festivalPanel.visible) festivalPanel.open(status);
+        festivalPanel.showTip(tip);
+        shell.setSoftkeys(festivalPanel.softkeys());
+      });
+    }
+  };
+
+  yanmenPanel.onAction = (action, exchangeId) => {
+    if (action === "close") {
+      yanmenPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus("");
+      return;
+    }
+    if (action === "exchange" && exchangeId != null) {
+      void session.yanmenExchange(exchangeId).then(async (r) => {
+        const tip = !r
+          ? "兑换失败"
+          : r.result === 1
+            ? activityMsgTip(r.message, "兑换成功")
+            : activityMsgTip(r.message, "兑换失败");
+        const status = await session.fetchActivitiesStatus();
+        const rows = await session.fetchYanmenExchangeList();
+        if (yanmenPanel.visible) yanmenPanel.open(status, rows);
+        yanmenPanel.showTip(tip);
+        shell.setSoftkeys(yanmenPanel.softkeys());
+      });
+    }
+  };
+
+  ringQuestPanel.onAction = (action) => {
+    if (action === "close") {
+      ringQuestPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus("");
+      return;
+    }
+    if (action === "accept") {
+      void session.ringAccept().then(async (st) => {
+        if (st) ringQuestPanel.open(st);
+        else await refreshRingQuestPanel();
+        ringQuestPanel.showTip(st ? "已接取环任务" : "接取失败");
+        shell.setSoftkeys(ringQuestPanel.softkeys());
+      });
+      return;
+    }
+    if (action === "submit") {
+      void session.ringSubmit().then(async (r) => {
+        const tip = !r
+          ? "提交失败"
+          : r.result === 1
+            ? activityMsgTip(r.message, "提交成功")
+            : activityMsgTip(r.message, "提交失败");
+        await refreshRingQuestPanel();
+        ringQuestPanel.showTip(tip);
+        shell.setSoftkeys(ringQuestPanel.softkeys());
+      });
+      return;
+    }
+    if (action === "claim") {
+      void session.ringClaimDaily().then(async (r) => {
+        const tip = !r
+          ? "领取失败"
+          : r.result === 1
+            ? activityMsgTip(r.message, "领取成功")
+            : activityMsgTip(r.message, "领取失败");
+        await refreshRingQuestPanel();
+        ringQuestPanel.showTip(tip);
+        shell.setSoftkeys(ringQuestPanel.softkeys());
       });
     }
   };
@@ -1405,6 +1608,7 @@ async function main(): Promise<void> {
       if (wagerPanel.visible) wagerPanel.close();
       if (ladderPanel.visible) ladderPanel.close();
       if (guessPanel.visible) guessPanel.close();
+      closeActivityPanels();
       if (entertainPanel.visible) entertainPanel.close();
       if (wingPanel.visible) wingPanel.close();
       if (mountPanel.visible) mountPanel.close();
@@ -1535,6 +1739,76 @@ async function main(): Promise<void> {
     }
     await view.showScene(scene, x, y);
   };
+
+  /**
+   * World boss inject/remove mutates live SCE while players stay on the map.
+   * Compose cache would otherwise keep stale kind=3 rows.
+   */
+  let combatSpawnRefreshBusy = false;
+  const parseWbossPos = (
+    text: string,
+  ): { x: number; y: number } | null => {
+    const m =
+      text.match(/pos=\((\d+),(\d+)\)/) ??
+      text.match(/坐标\((\d+),(\d+)\)/);
+    if (!m) return null;
+    return { x: Number(m[1]) | 0, y: Number(m[2]) | 0 };
+  };
+  const isWbossDespawnLine = (text: string) =>
+    text.includes("[WBOSS:despawn]") || text.includes("世界Boss 已刷新");
+  const isWbossSpawnLine = (text: string) =>
+    text.includes("[WBOSS:spawn]") ||
+    (text.includes("【世界BOSS】") && text.includes("已出现"));
+  const dropWorldBossFromMap = (reason: string, text: string) => {
+    const pos = parseWbossPos(text);
+    let n = 0;
+    if (pos) {
+      n = view.actors.removeSceneMonsterPermanent({ x: pos.x, y: pos.y });
+    }
+    session.sceneMonsters = view.actors.liveSceneMonsters();
+    console.info(
+      `[world-boss] map-drop reason=${reason} pos=${pos ? `${pos.x},${pos.y}` : "-"} removed=${n}`,
+    );
+    // Secondary: re-pull SCE; re-drop in case WT18 still served a stale row.
+    void refreshSceneCombatSpawns(reason).then(() => {
+      if (!pos) return;
+      view.actors.removeSceneMonsterPermanent({ x: pos.x, y: pos.y });
+      session.sceneMonsters = view.actors.liveSceneMonsters();
+    });
+  };
+  const refreshSceneCombatSpawns = async (reason: string) => {
+    const name = session.scene || "";
+    if (!name || combatSpawnRefreshBusy) return;
+    if (phase !== "world" && phase !== "battle") return;
+    combatSpawnRefreshBusy = true;
+    try {
+      const scene = await loadSceneMap(name, { forceReload: true });
+      if ((session.scene || "") !== name) return;
+      session.sceneMonsters = (scene.combatSpawns ?? []).map((s, i) => ({
+        actorId: 0x70000000 + i,
+        x: s.x,
+        y: s.y,
+        name: formatMonsterMapName(s.name, s.sceActorId),
+        actorResource: s.mapActorResource,
+        battleActorResource: s.battleActorResource,
+        scriptName: `sce_combat_${s.sceActorId}`,
+        battleActorId: s.sceActorId,
+      }));
+      view.actors.setSceneMonsters(session.sceneMonsters);
+      console.info(
+        `[world-boss] combat-spawn refresh reason=${reason} count=${session.sceneMonsters.length}`,
+      );
+    } catch (e) {
+      console.warn(`[world-boss] combat-spawn refresh failed (${reason})`, e);
+    } finally {
+      combatSpawnRefreshBusy = false;
+    }
+  };
+
+  const isWorldBossMapNotice = (text: string) =>
+    text.includes("[WBOSS:") ||
+    text.includes("【世界BOSS】") ||
+    text.includes("世界Boss 已刷新");
 
   const openTaskList = async () => {
     showPhase("quest");
@@ -2171,6 +2445,31 @@ async function main(): Promise<void> {
       }
     },
     onBattle: (state) => {
+      // Hangup / challenge 4/1 may skip onMonsterCollide — hide map SCE spawn now.
+      {
+        const sm = state.sceneMonster;
+        const pv = session.pendingEncounterVisual;
+        const homeX = sm?.x ?? pv?.x;
+        const homeY = sm?.y ?? pv?.y;
+        const hideId =
+          session.sceneMonsters.find(
+            (n) =>
+              (sm &&
+                ((n.homeX ?? n.x | 0) === (sm.x | 0) &&
+                  (n.homeY ?? n.y | 0) === (sm.y | 0))) ||
+              (pv &&
+                ((n.homeX ?? n.x | 0) === (pv.x | 0) &&
+                  (n.homeY ?? n.y | 0) === (pv.y | 0))),
+          )?.actorId ?? 0;
+        if (hideId >= 0x70000000) {
+          view.actors.suppressSceneMonster(hideId);
+          view.actors.markSuppressedPermanent(hideId);
+        }
+        if (homeX != null && homeY != null) {
+          view.actors.removeSceneMonsterPermanent({ x: homeX, y: homeY });
+          session.sceneMonsters = view.actors.liveSceneMonsters();
+        }
+      }
       // Prefer selectedRoleId — stale activeRole was the first account role and
       // painted the wrong job/sex into battle when multi-role accounts fought.
       const role =
@@ -2535,6 +2834,18 @@ async function main(): Promise<void> {
     },
     onChat: (lines) => {
       for (const line of lines) {
+        if (isWorldBossMapNotice(line.text)) {
+          if (isWbossDespawnLine(line.text) || line.text.includes("[WBOSS:claim]")) {
+            dropWorldBossFromMap(
+              line.text.includes("[WBOSS:claim]") ? "claim" : "despawn",
+              line.text,
+            );
+          } else if (isWbossSpawnLine(line.text)) {
+            void refreshSceneCombatSpawns("spawn");
+          } else {
+            void refreshSceneCombatSpawns("notice");
+          }
+        }
         const hangTip = line.text.includes("已停止挂机")
           ? "已停止挂机"
           : line.text.includes("不能挂机")
@@ -2725,6 +3036,7 @@ async function main(): Promise<void> {
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
     if (guessPanel.visible) guessPanel.close();
+    closeActivityPanels();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     entertainPanel.open();
@@ -2774,9 +3086,14 @@ async function main(): Promise<void> {
   };
   entertainPanel.onClose = () => {
     syncWorldWalkInput();
+    const overlayOpen =
+      guessPanel.visible ||
+      festivalPanel.visible ||
+      yanmenPanel.visible ||
+      ringQuestPanel.visible;
     if (phase === "battle") applyBattleSoftkeys();
-    else if (!guessPanel.visible) shell.setSoftkeys({ left: "菜单", right: "菜单" });
-    if (!guessPanel.visible) {
+    else if (!overlayOpen) shell.setSoftkeys({ left: "菜单", right: "菜单" });
+    if (!overlayOpen) {
       setChromeStatus(entertainWeb.isMinimized() ? entertainMinimizedStatus() : "");
     }
   };
@@ -2849,6 +3166,7 @@ async function main(): Promise<void> {
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
     if (guessPanel.visible) guessPanel.close();
+    closeActivityPanels();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
@@ -2895,6 +3213,7 @@ async function main(): Promise<void> {
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
     if (guessPanel.visible) guessPanel.close();
+    closeActivityPanels();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (mountPanel.visible) mountPanel.close();
@@ -2949,6 +3268,7 @@ async function main(): Promise<void> {
     if (wagerPanel.visible) wagerPanel.close();
     if (ladderPanel.visible) ladderPanel.close();
     if (guessPanel.visible) guessPanel.close();
+    closeActivityPanels();
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
@@ -3008,7 +3328,7 @@ async function main(): Promise<void> {
   view.onNpcTap = (actorId) => {
     // SCE combat markers use high ids — tap starts battle, not 26/1 dialog.
     if (actorId >= 0x70000000) {
-      session.sceneMonsters = view.actors.liveSceneMonsters();
+      session.sceneMonsters = view.actors.seedSceneMonsters();
       engageSceneMonster(actorId);
       void session
         .startBattleNearPlayer(view.playerX, view.playerY, actorId)
@@ -3045,7 +3365,7 @@ async function main(): Promise<void> {
     // Hangup loop owns encounters (same 4/1 path); ignore walk-in while armed.
     if (session.hangupDesired) return;
     closeApproach(false);
-    session.sceneMonsters = view.actors.liveSceneMonsters();
+    session.sceneMonsters = view.actors.seedSceneMonsters();
     setChromeStatus("遭遇怪物！");
     engageSceneMonster(actorId);
     void session
@@ -3242,8 +3562,12 @@ async function main(): Promise<void> {
     touch.releaseAll();
     view.clearHeldKeys();
     view.inputEnabled = true;
-    // Engaged SCE spawn stays hidden; refresh at birth point after 10s.
-    view.actors.armSuppressedRespawns(10_000);
+    // Engaged SCE spawn stays hidden; wild refresh at birth after 10s.
+    // World-boss permanent suppress must not be re-armed.
+    void refreshSceneCombatSpawns("post-battle").then(() => {
+      view.actors.armSuppressedRespawns(10_000);
+      session.sceneMonsters = view.actors.liveSceneMonsters();
+    });
     view.armCollideCooldown(2000);
     showPhase("world");
     // HUD was hidden in battle — re-paint top-left bars with post-fight vitals.
@@ -3546,10 +3870,6 @@ async function main(): Promise<void> {
         });
         showGameTip(`排行榜 · ${page.tabs[page.type] ?? "等级榜"}`);
       });
-      return;
-    }
-    if (leaf === "ladder") {
-      void openLadderPanel();
       return;
     }
     if (leaf === "guild") {
@@ -4906,6 +5226,26 @@ async function main(): Promise<void> {
       void openWagerPanel();
       return;
     }
+    if ((value >>> 0) === NPC_FESTIVAL_EXCHANGE) {
+      dialog.hide();
+      void openFestivalPanel();
+      return;
+    }
+    if ((value >>> 0) === NPC_YANMEN_EXCHANGE) {
+      dialog.hide();
+      void openYanmenPanel();
+      return;
+    }
+    if ((value >>> 0) === NPC_RING_QUEST) {
+      dialog.hide();
+      void openRingQuestPanel();
+      return;
+    }
+    if ((value >>> 0) === NPC_LADDER_CHALLENGE) {
+      dialog.hide();
+      void openLadderPanel();
+      return;
+    }
     if ((value >>> 0) === ARENA_NPC_RANK) {
       dialog.hide();
       void openArenaPanel();
@@ -5027,8 +5367,8 @@ dialog.hide();
       battle.setDeathPromptBag(hasRevivalStone());
       setChromeStatus(
         hasRevivalStone()
-          ? "死亡 · 左键复活石原地满血 / 右键普通复活"
-          : "死亡 · 左键打开商城购买复活石 / 右键普通复活",
+          ? "死亡 · 确定=当前项 / 右键普通复活"
+          : "死亡 · 确定=当前项（默认普通复活）/ 右键普通复活",
       );
       shell.setSoftkeys({
         left: battle.softkeyLeftLabel(),
@@ -5152,7 +5492,7 @@ dialog.hide();
   hud.onHome = () => cycleMapUi();
   hud.onChat = () => {
     if (phase !== "world" || session.inBattle) return;
-    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible || guessPanel.visible) return;
+    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible || guessPanel.visible || festivalPanel.visible || yanmenPanel.visible || ringQuestPanel.visible) return;
     showPhase("chat");
     chatPanel.open(hud.getChatEntries());
     setChromeStatus("聊天 · 点输入框打字 · ←→切换频道");
@@ -5359,6 +5699,36 @@ dialog.hide();
         }
         return;
       }
+      if (festivalPanel.visible || yanmenPanel.visible) {
+        if (which === "left") {
+          if (festivalPanel.visible) festivalPanel.confirm();
+          else yanmenPanel.confirm();
+        }
+        if (which === "right") {
+          if (festivalPanel.visible) {
+            if (festivalPanel.dismissTipOnSoftRight()) return;
+            festivalPanel.onAction?.("close");
+          } else {
+            if (yanmenPanel.dismissTipOnSoftRight()) return;
+            yanmenPanel.onAction?.("close");
+          }
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+          setChromeStatus("");
+        }
+        return;
+      }
+      if (ringQuestPanel.visible) {
+        if (which === "left") ringQuestPanel.confirm();
+        if (which === "right") {
+          if (ringQuestPanel.dismissTipOnSoftRight()) return;
+          ringQuestPanel.onAction?.("close");
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+          setChromeStatus("");
+        }
+        return;
+      }
       if (approach.open) {
         if (which === "left") approach.confirm();
         if (which === "right") approach.cancel();
@@ -5380,11 +5750,7 @@ dialog.hide();
     }
     if (phase === "battle") {
       if (battle.isAwaitingRound()) return;
-      if (which === "left") {
-        // Death: left softkey is always 复活石 (result=1); OK/↑↓ still use cursor.
-        if (battle.isAwaitingDeathPrompt()) battle.chooseDeathRevive(1);
-        else battle.confirm();
-      }
+      if (which === "left") battle.confirm();
       if (which === "right") battle.flee();
       shell.setSoftkeys(
         battle.isAwaitingRound()
@@ -5476,6 +5842,16 @@ dialog.hide();
     if (phase === "world" && guessPanel.visible) {
       guessPanel.confirm();
       shell.setSoftkeys(guessPanel.softkeys());
+      return;
+    }
+    if (phase === "world" && (festivalPanel.visible || yanmenPanel.visible)) {
+      if (festivalPanel.visible) festivalPanel.confirm();
+      else yanmenPanel.confirm();
+      return;
+    }
+    if (phase === "world" && ringQuestPanel.visible) {
+      ringQuestPanel.confirm();
+      shell.setSoftkeys(ringQuestPanel.softkeys());
       return;
     }
     if (phase === "world" && arenaPanel.visible) {
@@ -5620,10 +5996,21 @@ dialog.hide();
     if (phase === "world" && guessPanel.visible) {
       if (!down) return;
       if (dir === "left" || dir === "right") {
-        guessPanel.adjustStake(dir === "left" ? -1 : 1);
+        const d = dir === "left" ? -1 : 1;
+        if (!guessPanel.horizontal(d)) {
+          guessPanel.adjustStake(d);
+        }
         shell.setSoftkeys(guessPanel.softkeys());
       } else {
         guessPanel.move(dir === "up" ? -1 : 1);
+      }
+      return;
+    }
+    if (phase === "world" && (festivalPanel.visible || yanmenPanel.visible)) {
+      if (!down) return;
+      if (dir === "up" || dir === "down") {
+        if (festivalPanel.visible) festivalPanel.move(dir === "up" ? -1 : 1);
+        else yanmenPanel.move(dir === "up" ? -1 : 1);
       }
       return;
     }
@@ -5980,6 +6367,11 @@ dialog.hide();
         (auctionPanel.visible ||
           arenaPanel.visible ||
           wagerPanel.visible ||
+          ladderPanel.visible ||
+          guessPanel.visible ||
+          festivalPanel.visible ||
+          yanmenPanel.visible ||
+          ringQuestPanel.visible ||
           entertainPanel.visible ||
           wingPanel.visible ||
           mountPanel.visible)
@@ -6004,6 +6396,11 @@ dialog.hide();
         (auctionPanel.visible ||
           arenaPanel.visible ||
           wagerPanel.visible ||
+          ladderPanel.visible ||
+          guessPanel.visible ||
+          festivalPanel.visible ||
+          yanmenPanel.visible ||
+          ringQuestPanel.visible ||
           entertainPanel.visible ||
           wingPanel.visible ||
           mountPanel.visible)
@@ -6503,6 +6900,9 @@ dialog.hide();
         else if (wagerPanel.visible) shell.setSoftkeys(wagerPanel.softkeys());
         else if (ladderPanel.visible) shell.setSoftkeys(ladderPanel.softkeys());
         else if (guessPanel.visible) shell.setSoftkeys(guessPanel.softkeys());
+        else if (festivalPanel.visible) shell.setSoftkeys(festivalPanel.softkeys());
+        else if (yanmenPanel.visible) shell.setSoftkeys(yanmenPanel.softkeys());
+        else if (ringQuestPanel.visible) shell.setSoftkeys(ringQuestPanel.softkeys());
         else if (arenaPanel.visible) shell.setSoftkeys(arenaPanel.softkeys());
         else shell.setSoftkeys({ left: "菜单", right: "菜单" });
       } else if (phase === "menu") {
@@ -6757,12 +7157,7 @@ dialog.hide();
     void recoverDisplayAfterForeground("focus");
     void unlockAndResumeBgm();
   });
-  installBgmGestureUnlock();
   preloadKillStreakSfx();
-  const unlockSfx = () => unlockKillStreakSfx();
-  document.addEventListener("pointerdown", unlockSfx, { passive: true });
-  document.addEventListener("touchstart", unlockSfx, { passive: true });
-  document.addEventListener("keydown", unlockSfx);
 
   let glWatchAcc = 0;
   app.ticker.add(() => {

@@ -232,7 +232,7 @@ export class ActorLayer {
    */
   private suppressedScene = new Map<
     number,
-    { seed: NpcActor; respawnAt: number | null }
+    { seed: NpcActor; respawnAt: number | null; permanent?: boolean }
   >();
   /**
    * 31/5 can arrive before the peer marker exists (earlier poll, or before
@@ -330,12 +330,72 @@ export class ActorLayer {
 
   /**
    * After battle ends: arm refresh delay for every engaged SCE spawn.
+   * Skips entries marked permanent (world-boss claim — never map-respawn).
    */
   armSuppressedRespawns(delayMs = 10_000): void {
     const at = performance.now() + Math.max(0, delayMs);
     for (const info of this.suppressedScene.values()) {
+      if (info.permanent) continue;
       if (info.respawnAt == null) info.respawnAt = at;
     }
+  }
+
+  /** Drop a SCE spawn forever (world boss claimed / despawned). */
+  removeSceneMonsterPermanent(match: {
+    actorId?: number;
+    x?: number;
+    y?: number;
+    battleActorId?: number;
+  }): number {
+    let removed = 0;
+    const next = this.sceMonsters.filter((s) => {
+      const byId =
+        match.actorId != null && (s.actorId >>> 0) === (match.actorId >>> 0);
+      const byBattle =
+        match.battleActorId != null &&
+        (s.battleActorId ?? 0) === (match.battleActorId >>> 0);
+      const byPos =
+        match.x != null &&
+        match.y != null &&
+        (s.x | 0) === (match.x | 0) &&
+        (s.y | 0) === (match.y | 0);
+      if (!byId && !byBattle && !byPos) return true;
+      this.suppressedScene.delete(s.actorId);
+      const m = this.markers.get(s.actorId);
+      if (m) {
+        this.destroyMarker(m);
+        this.markers.delete(s.actorId);
+      }
+      removed += 1;
+      return false;
+    });
+    this.sceMonsters = next;
+    // Also clear suppress-only markers at that tile (engaged before list drop).
+    for (const [id, info] of [...this.suppressedScene]) {
+      const seed = info.seed;
+      const byId =
+        match.actorId != null && (id >>> 0) === (match.actorId >>> 0);
+      const byBattle =
+        match.battleActorId != null &&
+        (seed.battleActorId ?? 0) === (match.battleActorId >>> 0);
+      const byPos =
+        match.x != null &&
+        match.y != null &&
+        (seed.x | 0) === (match.x | 0) &&
+        (seed.y | 0) === (match.y | 0);
+      if (!byId && !byBattle && !byPos) continue;
+      this.suppressedScene.delete(id);
+      removed += 1;
+    }
+    return removed;
+  }
+
+  /** Mark engaged spawn as never respawning on this map shell. */
+  markSuppressedPermanent(actorId: number): void {
+    const held = this.suppressedScene.get(actorId);
+    if (!held) return;
+    held.permanent = true;
+    held.respawnAt = null;
   }
 
   /** Drop nearby-player markers only (role switch / same-map re-enter). */
@@ -383,9 +443,22 @@ export class ActorLayer {
       .filter((seed) => !this.suppressedScene.has(seed.actorId))
       .map((seed) => {
         const m = this.markers.get(seed.actorId);
-        if (!m) return seed;
-        return { ...seed, x: m.x | 0, y: m.y | 0 };
+        if (!m) return { ...seed, homeX: seed.x | 0, homeY: seed.y | 0 };
+        return {
+          ...seed,
+          x: m.x | 0,
+          y: m.y | 0,
+          homeX: seed.x | 0,
+          homeY: seed.y | 0,
+        };
       });
+  }
+
+  /** SCE home tiles (not patrol feet) — battle 4/1 pos / world-boss claim. */
+  seedSceneMonsters(): NpcActor[] {
+    return this.sceMonsters.filter(
+      (seed) => !this.suppressedScene.has(seed.actorId),
+    );
   }
 
   /**
@@ -877,6 +950,7 @@ export class ActorLayer {
     if (!this.suppressedScene.size) return;
     const now = performance.now();
     for (const [id, info] of [...this.suppressedScene]) {
+      if (info.permanent) continue;
       if (info.respawnAt == null || now < info.respawnAt) continue;
       this.suppressedScene.delete(id);
       this.respawnSceneMonster(info.seed);

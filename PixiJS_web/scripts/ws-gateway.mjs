@@ -422,11 +422,32 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+
+function reportListenFailure(label, err) {
+  const code = err?.code || "";
+  if (code === "EADDRINUSE") {
+    console.error(
+      `[ws-gateway] ${label} EADDRINUSE ${listenHost}:${listenPort} — ` +
+        "port already in use (another gateway may already be running).",
+    );
+    console.error(
+      `[ws-gateway] Windows: netstat -ano | findstr :${listenPort}`,
+    );
+    console.error(
+      "[ws-gateway] Stop the old gateway/node process, or use the existing listener.",
+    );
+  } else {
+    console.error(`[ws-gateway] ${label}`, err?.message || err);
+  }
+  process.exitCode = 1;
+  setTimeout(() => process.exit(1), 50);
+}
+
 server.on("error", (err) => {
-  console.error("[ws-gateway] http server", err.message || err);
+  reportListenFailure("http server", err);
 });
 wss.on("error", (err) => {
-  console.error("[ws-gateway] wss", err.message || err);
+  reportListenFailure("wss", err);
 });
 server.listen(listenPort, listenHost, () => {
   const tips = lanIpv4s().map((ip) => `ws://${ip}:${listenPort}`);

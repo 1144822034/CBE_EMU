@@ -146,13 +146,3 @@ export function suspendBgm(): void {
   playGen++;
   stopCurrentSources();
 }
-
-/** Install unlock listeners for Android autoplay policy. */
-export function installBgmGestureUnlock(): void {
-  const bump = () => {
-    void unlockAndResumeBgm();
-  };
-  document.addEventListener("pointerdown", bump, { passive: true });
-  document.addEventListener("touchstart", bump, { passive: true });
-  document.addEventListener("keydown", bump);
-}

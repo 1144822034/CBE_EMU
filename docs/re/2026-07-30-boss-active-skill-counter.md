@@ -12,7 +12,7 @@
    actionType=1，`effectIndex` 取自 `skill.dsh` `技能图片`（列 2）。
    默认：无 MySQL 覆盖时 `family=BOSS` 开启；有覆盖时看后台 `cast_skill`
    （见 `2026-07-30-monster-admin-cast-skill.md`）。
-3. 同一回合多怪反击时，仅 lead（strikeIndex=0）可施放技能，避免整排齐放。
+3. 同一回合多怪反击时，每个 `cast_skill` 开启的存活怪均可独立判定施放（按槽位 enemyId 与 strikeIndex 映射）。
 4. 伤害在普攻结果上按倍率放大（默认 165%），不超过当前角色 HP。
 
 ## 修改

@@ -8248,6 +8248,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
             cosCtx.invalid)
             return false;
     }
+    if (!vm_net_mock_role_ensure_intimacy_marriage_columns())
+        return false;
     {
         vm_mock_mysql_spouse_load_context spCtx;
         memset(&spCtx, 0, sizeof(spCtx));

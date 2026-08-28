@@ -1021,22 +1021,54 @@ static u32 vm_net_mock_battle_operate_skill_effect(u32 operate)
  * Reuses skill.dsh effectIndex for type-1 playback; damage is an amplified
  * normal counter strike (hit/dodge/crit already resolved).
  * Play contract: skill damage +200% (300% of NA); when HP < 60% may self-heal
- * once per battle instead of striking.
+ * once per monster slot instead of striking.
+ * jobIndex 0/1/2 = 天机/幻剑/鬼道 (ladder); 0xff = shared pool (generic PvE).
  */
-static u32 vm_net_mock_battle_boss_skill_pick_id(u32 enemyId)
+static u32 vm_net_mock_battle_boss_skill_pick_id(u32 enemyId, u8 jobIndex)
 {
-    /* Offensive rows with non-zero 技能图片 in skill.dsh. */
-    static const u32 kBossSkills[] = {
-        1u,   /* 万剑诛仙 */
-        21u,  /* 雷震八方 */
-        121u, /* 荒魂劫火 */
-        231u, /* 天火熔身 */
-        201u, /* 绯炎术 */
+    /* Offensive rows with non-zero 技能图片; pools match skill.dsh 职业. */
+    static const u32 kTianjiSkills[] = {
+        1u,  /* 万剑诛仙 */
+        21u, /* 雷震八方 */
+        41u, /* 破甲烈刃 */
     };
-    u32 index = (enemyId + g_mockBattleOperateTurnCounter) %
-                (u32)(sizeof(kBossSkills) / sizeof(kBossSkills[0]));
+    static const u32 kHuanjianSkills[] = {
+        101u, /* 风舞刃行 */
+        121u, /* 荒魂劫火 */
+        161u, /* 电闪神兵 */
+    };
+    static const u32 kGuidaoSkills[] = {
+        201u, /* 绯炎幻法 */
+        231u, /* 天火熔身 */
+        251u, /* 五雷天殛 */
+    };
+    /* Mixed fallback for unknown-job multi-monster PvE. */
+    static const u32 kFallbackSkills[] = {
+        1u, 21u, 121u, 231u, 201u,
+    };
+    const u32 *pool = kFallbackSkills;
+    u32 poolCount = (u32)(sizeof(kFallbackSkills) / sizeof(kFallbackSkills[0]));
+    u32 index = 0;
 
-    return kBossSkills[index];
+    if (jobIndex == 0)
+    {
+        pool = kTianjiSkills;
+        poolCount = (u32)(sizeof(kTianjiSkills) / sizeof(kTianjiSkills[0]));
+    }
+    else if (jobIndex == 1)
+    {
+        pool = kHuanjianSkills;
+        poolCount = (u32)(sizeof(kHuanjianSkills) / sizeof(kHuanjianSkills[0]));
+    }
+    else if (jobIndex == 2)
+    {
+        pool = kGuidaoSkills;
+        poolCount = (u32)(sizeof(kGuidaoSkills) / sizeof(kGuidaoSkills[0]));
+    }
+    if (poolCount == 0)
+        return 1u;
+    index = (enemyId + g_mockBattleOperateTurnCounter) % poolCount;
+    return pool[index];
 }
 
 static u32 vm_net_mock_battle_boss_heal_skill_pick_id(void)
@@ -1067,6 +1099,20 @@ static u8 vm_net_mock_battle_live_enemy_index_for_strike(u8 strikeIndex)
     return 0xff;
 }
 
+static bool vm_net_mock_battle_enemy_may_cast_skill(u32 enemyId)
+{
+    if (vm_net_mock_monster_casts_active_skill(enemyId))
+        return true;
+    /* Ladder admin cast_skill covers 92000x rows that are not BOSS family. */
+    if (vm_mock_ladder_battle_is_active())
+    {
+        const vm_mock_ladder_config *cfg = vm_net_mock_ladder_config_get();
+        if (cfg != NULL && cfg->castSkill != 0)
+            return true;
+    }
+    return false;
+}
+
 static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
     u32 enemyId,
     u32 roleHpCurrent,
@@ -1084,6 +1130,7 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
     u32 skillId = 0;
     const vm_net_mock_skill_catalog_item *skill = NULL;
     u8 enemyIndex = 0xff;
+    u8 jobIndex = 0xff;
 
     if (actionTypeOut)
         *actionTypeOut = 0;
@@ -1104,19 +1151,14 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
                 damage, vm_mock_ladder_damage_scale_percent()) / 100u;
         return damage;
     }
-    if (!vm_net_mock_monster_casts_active_skill(enemyId))
-    {
-        damage = vm_net_mock_battle_enemy_damage_to_role(enemyId, roleHpCurrent);
-        return damage;
-    }
-    /* Only the lead living enemy casts; extras keep normal attacks. */
-    if (strikeIndex != 0)
+    if (!vm_net_mock_battle_enemy_may_cast_skill(enemyId))
     {
         damage = vm_net_mock_battle_enemy_damage_to_role(enemyId, roleHpCurrent);
         return damage;
     }
 
     enemyIndex = vm_net_mock_battle_live_enemy_index_for_strike(strikeIndex);
+    jobIndex = vm_net_mock_battle_enemy_job_for_index(enemyIndex);
     /* 封魔/神堂静默 (silenceRounds): same as duel — skills and self-heal are
      * blocked; only a normal-attack counter remains. */
     if (enemyIndex < 3 &&
@@ -1130,9 +1172,10 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
                g_mockBattleEnemyAilments[enemyIndex].silenceRounds, damage);
         return damage;
     }
-    /* Once per OperateSessionSerial (account-scoped via capture/restore). */
+    /* Once per monster slot per OperateSessionSerial. */
     if (enemyIndex < 3 && g_mockBattleOperateSessionSerial != 0 &&
-        g_mockBattleMonsterHealUsedSerial != g_mockBattleOperateSessionSerial &&
+        g_mockBattleMonsterHealUsedSerialSlots[enemyIndex] !=
+            g_mockBattleOperateSessionSerial &&
         g_mockBattleEnemyHpMaxSlots[enemyIndex] != 0 &&
         (uint64_t)g_mockBattleEnemyHpSlots[enemyIndex] * 100ull <
             (uint64_t)g_mockBattleEnemyHpMaxSlots[enemyIndex] * 60ull)
@@ -1141,7 +1184,7 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
         if (chance > 100u)
             chance = 100u;
         roll = (enemyId * 97u + g_mockBattleOperateTurnCounter * 31u +
-                g_mockBattleOperateSessionSerial * 13u) %
+                g_mockBattleOperateSessionSerial * 13u + enemyIndex * 19u) %
                100u;
         if (roll < chance)
         {
@@ -1167,7 +1210,7 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
                 if (g_mockBattleEnemyHpSlots[enemyIndex] > hpMax)
                     g_mockBattleEnemyHpSlots[enemyIndex] = hpMax;
                 vm_net_mock_battle_sync_enemy_hp_totals();
-                g_mockBattleMonsterHealUsedSerial =
+                g_mockBattleMonsterHealUsedSerialSlots[enemyIndex] =
                     g_mockBattleOperateSessionSerial;
                 vm_net_mock_battle_clear_outcome_child_flag();
                 if (actionTypeOut)
@@ -1182,11 +1225,11 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
                     *healAmountOut = healAmount;
                 printf("[info][network] mock_battle_boss_heal enemy=%u skill=%u "
                        "effect=%u heal=%u hp=%u/%u turn=%u chance=%u roll=%u "
-                       "battle_serial=%u evidence=hp<60+once-per-battle-serial+"
+                       "slot=%u battle_serial=%u evidence=hp<60+once-per-slot+"
                        "skill.dsh:生命变化\n",
                        enemyId, skillId, skill->effectIndex, healAmount,
                        g_mockBattleEnemyHpSlots[enemyIndex], hpMax,
-                       g_mockBattleOperateTurnCounter, chance, roll,
+                       g_mockBattleOperateTurnCounter, chance, roll, enemyIndex,
                        g_mockBattleOperateSessionSerial);
                 return 0;
             }
@@ -1204,7 +1247,7 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
     if (chance > 100u)
         chance = 100u;
     roll = (enemyId * 131u + g_mockBattleOperateTurnCounter * 17u +
-            g_mockBattleOperateSessionSerial * 7u) %
+            g_mockBattleOperateSessionSerial * 7u + enemyIndex * 23u) %
            100u;
     /* Also guarantee a cast every 3rd armed turn so bosses feel active. */
     if (roll >= chance && (g_mockBattleOperateTurnCounter % 3u) != 0u)
@@ -1212,7 +1255,7 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
 
     skillId = vm_net_mock_env_u32("CBE_BATTLE_BOSS_SKILL_ID", 0);
     if (skillId == 0)
-        skillId = vm_net_mock_battle_boss_skill_pick_id(enemyId);
+        skillId = vm_net_mock_battle_boss_skill_pick_id(enemyId, jobIndex);
     skill = vm_net_mock_find_skill_catalog_item(skillId);
     if (skill == NULL || skill->effectIndex == 0)
         return damage;
@@ -1255,10 +1298,11 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
     if (skillIdOut)
         *skillIdOut = skillId;
     printf("[info][network] mock_battle_boss_skill enemy=%u skill=%u effect=%u "
-           "damage=%u turn=%u chance=%u roll=%u mult=%u "
-           "evidence=monster-skill-resist-only+skill.dsh:技能图片+200pct\n",
+           "damage=%u turn=%u chance=%u roll=%u mult=%u job=%u slot=%u "
+           "evidence=monster-skill-resist-only+skill.dsh:技能图片+job-pool\n",
            enemyId, skillId, skill->effectIndex, damage,
-           g_mockBattleOperateTurnCounter, chance, roll, mult);
+           g_mockBattleOperateTurnCounter, chance, roll, mult, jobIndex,
+           enemyIndex);
     return damage;
 }
 
@@ -3053,7 +3097,9 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                 bool strikeIsHeal = false;
                 u32 strikeHealAmount = 0;
                 u32 oneCounterDamage = vm_net_mock_battle_apply_enemy_counter_strike(
-                    g_vm_net_mock_battle_enemy_id_current, i, counterActionType,
+                    vm_net_mock_battle_enemy_id_for_index(
+                        vm_net_mock_battle_live_enemy_index_for_strike(i)),
+                    i, counterActionType,
                     type1EffectIndex, &strikeActionType, &strikeEffectIndex, &strikeIsHeal, &strikeHealAmount);
                 u8 oneCounterChildFlag = vm_net_mock_battle_child_flag_with_env(
                     "CBE_BATTLE_COUNTER_CHILD_FLAG",
@@ -3389,6 +3435,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     u8 counterActionTypes[3] = {0, 0, 0};
     u32 counterEffectIndices[3] = {0, 0, 0};
     u8 counterWireCount = 0;
+    u8 counterAppliedCount = 0;
     u8 actionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_ACTION_TYPE", 0);
     u8 firstActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_FIRST_ACTION_TYPE", actionType);
     u8 counterActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTION_TYPE", actionType);
@@ -3547,7 +3594,9 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         bool strikeIsHeal = false;
         u32 strikeHealAmount = 0;
         counterDamageValue = vm_net_mock_battle_apply_enemy_counter_strike(
-            g_vm_net_mock_battle_enemy_id_current, 0, counterActionType, type1EffectIndex,
+            vm_net_mock_battle_enemy_id_for_index(
+                vm_net_mock_battle_live_enemy_index_for_strike(0)),
+            0, counterActionType, type1EffectIndex,
             &strikeActionType, &strikeEffectIndex, &strikeIsHeal, &strikeHealAmount);
         if (strikeActionType == 1)
         {
@@ -3593,8 +3642,11 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                 vm_net_mock_battle_post_exit_settle_clear("battle-pending-enemy-death");
                 vm_net_mock_battle_save_completed_current_role_state(
                     "battle-pending-enemy-death");
+                vm_mock_world_boss_on_battle_end(false);
+                vm_mock_ladder_on_battle_end(false);
                 vm_mock_service_session_arm_battle_revival_confirm_for_death(
                     "battle-pending-enemy-death");
+                vm_net_mock_hangup_loop_clear("battle-pending-enemy-death");
             }
             printf("[info][network] mock_battle_pending_enemy_turn actor=%u target=%u damage=%u enemyhp=%u slots=%u/%u/%u rolehp=%u resp=%u evidence=mmBattle:0x6EB0\n",
                    counterActorWireSlot,
@@ -3674,7 +3726,9 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                 bool strikeIsHeal = false;
                 u32 strikeHealAmount = 0;
                 u32 oneCounterDamage = vm_net_mock_battle_apply_enemy_counter_strike(
-                    g_vm_net_mock_battle_enemy_id_current, i, counterActionType,
+                    vm_net_mock_battle_enemy_id_for_index(
+                        vm_net_mock_battle_live_enemy_index_for_strike(i)),
+                    i, counterActionType,
                     type1EffectIndex, &strikeActionType, &strikeEffectIndex, &strikeIsHeal, &strikeHealAmount);
                 /* Miss (0) still fills the slot so encode emits valueA=0 + 闪躲. */
                 counterDamageValues[i] = oneCounterDamage;
@@ -3687,6 +3741,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                     : vm_net_mock_battle_take_outcome_child_flag();
                 counterDamageValue = vm_net_mock_add_capped_u32(counterDamageValue,
                                                                 oneCounterDamage);
+                counterAppliedCount = (u8)(i + 1);
             }
         }
         if (vm_net_mock_battle_should_age_enemy_ailments_on_action(operateConsumesTurn))
@@ -3730,6 +3785,19 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                           g_mockBattleRoleHpCurrent);
         skillTeamMp = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_MP",
                                           skillMpDelta);
+        skillTeamInfoEnabled = skillTeamRoleId != 0;
+    }
+    else if (g_mockBattleRoleHpCurrent == 0)
+    {
+        /* Plain 普攻 death has no skill teaminfo — attach hp=0 so Pixi can
+         * finish the deferred-vitals round and open the revival prompt. */
+        vm_net_mock_role_state *role = vm_net_mock_active_role();
+        skillTeamRoleId = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_ROLE_ID",
+                                              role ? role->roleId :
+                                                     VM_NET_MOCK_ROLE_DEFAULT_ID);
+        skillTeamHp = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_HP", 0);
+        skillTeamMp = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_MP",
+                                          g_mockBattleRoleMpCurrent);
         skillTeamInfoEnabled = skillTeamRoleId != 0;
     }
     skillCostValueA = vm_net_mock_env_u32("CBE_BATTLE_SKILL_COST_VALUE_A",
@@ -3865,7 +3933,12 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                     if (actionCount < 6)
                         ++actionCount;
                     else
-                        return 0;
+                    {
+                        printf("[warn][network] mock_battle_enemy_death_action_omitted "
+                               "actions=%u evidence=actionnum-cap-6-keep-4/6\n",
+                               actionCount);
+                        break;
+                    }
                     if (!vm_net_mock_append_battle_actioninfo_record(
                             actionInfo, sizeof(actionInfo), &actionInfoLen, deathActionType,
                             deathActionWireSlots[i], 0, 0, 0, 0, 0, 0, 0, 0))
@@ -3890,7 +3963,13 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         }
         if (allowCounterattack)
         {
-            for (u8 i = 0; i < counterWireCount && i < 3; ++i)
+            /* Encode only strikes that were applied.  Reserve one action slot
+             * for the player death record when role HP already hit 0 — aborting
+             * the whole 4/6 here leaves the client stuck in battle. */
+            u8 counterEncodeCap = counterAppliedCount;
+            if (counterEncodeCap > counterWireCount)
+                counterEncodeCap = counterWireCount;
+            for (u8 i = 0; i < counterEncodeCap && i < 3; ++i)
             {
                 u8 strikeActionType = counterActionTypes[i];
                 u32 strikeEffectIndex = counterEffectIndices[i];
@@ -3898,6 +3977,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                                  counterWireSlots[i]);
                 u8 counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_TARGET_WIRE_SLOT",
                                                                   playerSlot);
+                u8 actionCap = (g_mockBattleRoleHpCurrent == 0) ? 5 : 6;
                 if (strikeActionType == 1)
                 {
                     counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_ACTOR_WIRE_SLOT",
@@ -3907,10 +3987,10 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                 }
                 if (counterIsHeal[i])
                     counterTargetWireSlot = counterActorWireSlot;
-                if (actionCount < 6)
+                if (actionCount < actionCap)
                     ++actionCount;
                 else
-                    return 0;
+                    break;
                 if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
                                                                  &actionInfoLen, strikeActionType,
                                                                  counterActorWireSlot, counterTargetWireSlot,
@@ -3937,16 +4017,22 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         if (g_mockBattleRoleHpCurrent == 0)
         {
             if (actionCount < 6)
+            {
                 ++actionCount;
+                deathActionWireSlot = playerSlot;
+                if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                                 &actionInfoLen, deathActionType,
+                                                                 playerSlot, 0, 0,
+                                                                 0, 0, 0, 0, 0, 0))
+                    return 0;
+                ++deathActionCount;
+            }
             else
-                return 0;
-            deathActionWireSlot = playerSlot;
-            if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
-                                                             &actionInfoLen, deathActionType,
-                                                             playerSlot, 0, 0,
-                                                             0, 0, 0, 0, 0, 0))
-                return 0;
-            ++deathActionCount;
+            {
+                printf("[warn][network] mock_battle_player_death_action_omitted "
+                       "actions=%u evidence=actionnum-cap-6-keep-4/6\n",
+                       actionCount);
+            }
         }
         if (battleEndsThisRound &&
             vm_net_mock_battle_all_enemies_defeated() &&
@@ -4028,6 +4114,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         {
             vm_net_mock_battle_save_completed_current_role_state(
                 "battle-operate-death");
+            vm_mock_world_boss_on_battle_end(false);
+            vm_mock_ladder_on_battle_end(false);
             vm_mock_service_session_arm_battle_revival_confirm_for_death(
                 "battle-operate-death");
             g_mockBattleOperateSessionArmed = 0;
@@ -4186,6 +4274,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     u8 counterActionTypes[3] = {0, 0, 0};
     u32 counterEffectIndices[3] = {0, 0, 0};
     u8 counterWireCount = 0;
+    u8 counterAppliedCount = 0;
     u8 actionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_ACTION_TYPE", 0);
     u8 firstActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_FIRST_ACTION_TYPE", actionType);
     u8 counterActionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTION_TYPE", actionType);
@@ -4328,7 +4417,9 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         bool strikeIsHeal = false;
         u32 strikeHealAmount = 0;
         counterDamageValue = vm_net_mock_battle_apply_enemy_counter_strike(
-            g_vm_net_mock_battle_enemy_id_current, 0, counterActionType, type1EffectIndex,
+            vm_net_mock_battle_enemy_id_for_index(
+                vm_net_mock_battle_live_enemy_index_for_strike(0)),
+            0, counterActionType, type1EffectIndex,
             &strikeActionType, &strikeEffectIndex, &strikeIsHeal, &strikeHealAmount);
         if (strikeActionType == 1)
         {
@@ -4376,7 +4467,11 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                     "battle-pending-enemy-fallback-death");
                 vm_net_mock_battle_save_completed_current_role_state(
                     "battle-pending-enemy-fallback-death");
+                vm_mock_world_boss_on_battle_end(false);
+                vm_mock_ladder_on_battle_end(false);
                 vm_mock_service_session_arm_battle_revival_confirm_for_death(
+                    "battle-pending-enemy-fallback-death");
+                vm_net_mock_hangup_loop_clear(
                     "battle-pending-enemy-fallback-death");
             }
             printf("[info][network] mock_battle_pending_enemy_turn actor=%u target=%u damage=%u enemyhp=%u slots=%u/%u/%u rolehp=%u resp=%u evidence=mmBattle:0x6EB0\n",
@@ -4457,7 +4552,9 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                 bool strikeIsHeal = false;
                 u32 strikeHealAmount = 0;
                 u32 oneCounterDamage = vm_net_mock_battle_apply_enemy_counter_strike(
-                    g_vm_net_mock_battle_enemy_id_current, i, counterActionType,
+                    vm_net_mock_battle_enemy_id_for_index(
+                        vm_net_mock_battle_live_enemy_index_for_strike(i)),
+                    i, counterActionType,
                     type1EffectIndex, &strikeActionType, &strikeEffectIndex, &strikeIsHeal, &strikeHealAmount);
                 /* Miss (0) still fills the slot so encode emits valueA=0 + 闪躲. */
                 counterDamageValues[i] = oneCounterDamage;
@@ -4470,6 +4567,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                     : vm_net_mock_battle_take_outcome_child_flag();
                 counterDamageValue = vm_net_mock_add_capped_u32(counterDamageValue,
                                                                 oneCounterDamage);
+                counterAppliedCount = (u8)(i + 1);
             }
         }
         if (vm_net_mock_battle_should_age_enemy_ailments_on_action(operateConsumesTurn))
@@ -4513,6 +4611,17 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                           g_mockBattleRoleHpCurrent);
         skillTeamMp = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_MP",
                                           skillMpDelta);
+        skillTeamInfoEnabled = skillTeamRoleId != 0;
+    }
+    else if (g_mockBattleRoleHpCurrent == 0)
+    {
+        vm_net_mock_role_state *role = vm_net_mock_active_role();
+        skillTeamRoleId = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_ROLE_ID",
+                                              role ? role->roleId :
+                                                     VM_NET_MOCK_ROLE_DEFAULT_ID);
+        skillTeamHp = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_HP", 0);
+        skillTeamMp = vm_net_mock_env_u32("CBE_BATTLE_TEAMINFO_MP",
+                                          g_mockBattleRoleMpCurrent);
         skillTeamInfoEnabled = skillTeamRoleId != 0;
     }
     skillCostValueA = vm_net_mock_env_u32("CBE_BATTLE_SKILL_COST_VALUE_A",
@@ -4641,7 +4750,12 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                     if (actionCount < 6)
                         ++actionCount;
                     else
-                        return 0;
+                    {
+                        printf("[warn][network] mock_battle_enemy_death_action_omitted "
+                               "actions=%u evidence=actionnum-cap-6-keep-4/6-fallback\n",
+                               actionCount);
+                        break;
+                    }
                     if (!vm_net_mock_append_battle_actioninfo_record(
                             actionInfo, sizeof(actionInfo), &actionInfoLen, deathActionType,
                             deathActionWireSlots[i], 0, 0, 0, 0, 0, 0, 0, 0))
@@ -4660,7 +4774,13 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         }
         if (allowCounterattack)
         {
-            for (u8 i = 0; i < counterWireCount && i < 3; ++i)
+            /* Encode only strikes that were applied.  Reserve one action slot
+             * for the player death record when role HP already hit 0 — aborting
+             * the whole 4/6 here leaves the client stuck in battle. */
+            u8 counterEncodeCap = counterAppliedCount;
+            if (counterEncodeCap > counterWireCount)
+                counterEncodeCap = counterWireCount;
+            for (u8 i = 0; i < counterEncodeCap && i < 3; ++i)
             {
                 u8 strikeActionType = counterActionTypes[i];
                 u32 strikeEffectIndex = counterEffectIndices[i];
@@ -4668,6 +4788,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                                  counterWireSlots[i]);
                 u8 counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_TARGET_WIRE_SLOT",
                                                                   playerSlot);
+                u8 actionCap = (g_mockBattleRoleHpCurrent == 0) ? 5 : 6;
                 if (strikeActionType == 1)
                 {
                     counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_TYPE1_COUNTER_ACTOR_WIRE_SLOT",
@@ -4677,10 +4798,10 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                 }
                 if (counterIsHeal[i])
                     counterTargetWireSlot = counterActorWireSlot;
-                if (actionCount < 6)
+                if (actionCount < actionCap)
                     ++actionCount;
                 else
-                    return 0;
+                    break;
                 if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
                                                                  &actionInfoLen, strikeActionType,
                                                                  counterActorWireSlot, counterTargetWireSlot,
@@ -4707,18 +4828,22 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         if (g_mockBattleRoleHpCurrent == 0)
         {
             if (actionCount < 6)
-                ++actionCount;
-            else
-                return 0;
-            deathActionWireSlot = playerSlot;
-            if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
-                                                             &actionInfoLen, deathActionType,
-                                                             playerSlot, 0, 0,
-                                                             0, 0, 0, 0, 0, 0))
             {
-                return 0;
+                ++actionCount;
+                deathActionWireSlot = playerSlot;
+                if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
+                                                                 &actionInfoLen, deathActionType,
+                                                                 playerSlot, 0, 0,
+                                                                 0, 0, 0, 0, 0, 0))
+                    return 0;
+                ++deathActionCount;
             }
-            ++deathActionCount;
+            else
+            {
+                printf("[warn][network] mock_battle_player_death_action_omitted "
+                       "actions=%u evidence=actionnum-cap-6-keep-4/6\n",
+                       actionCount);
+            }
         }
         if (battleEndsThisRound &&
             vm_net_mock_battle_all_enemies_defeated() &&
@@ -4786,6 +4911,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         {
             vm_net_mock_battle_save_completed_current_role_state(
                 "battle-operate-fallback-death");
+            vm_mock_world_boss_on_battle_end(false);
+            vm_mock_ladder_on_battle_end(false);
             vm_mock_service_session_arm_battle_revival_confirm_for_death(
                 "battle-operate-fallback-death");
             g_mockBattleOperateSessionArmed = 0;
@@ -6326,7 +6453,9 @@ static u32 vm_net_mock_build_team_battle_orphan_round_release(
             bool strikeIsHeal = false;
             u32 strikeHealAmount = 0;
             u32 oneCounterDamage = vm_net_mock_battle_apply_enemy_counter_strike(
-                g_vm_net_mock_battle_enemy_id_current, i, counterActionType,
+                vm_net_mock_battle_enemy_id_for_index(
+                    vm_net_mock_battle_live_enemy_index_for_strike(i)),
+                i, counterActionType,
                 type1EffectIndex, &strikeActionType, &strikeEffectIndex, &strikeIsHeal, &strikeHealAmount);
 
             if (strikeActionType == 1)
@@ -7662,10 +7791,15 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", statusPercentExp))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "energy", 100))
-        return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "energymax", 100))
-        return false;
+    {
+        u32 wireEnergy = 100;
+        u32 wireEnergyMax = 100;
+        vm_mock_activities_vitality_wire(role, &wireEnergy, &wireEnergyMax);
+        if (!vm_net_mock_put_object_u32(out, outCap, pos, "energy", wireEnergy))
+            return false;
+        if (!vm_net_mock_put_object_u32(out, outCap, pos, "energymax", wireEnergyMax))
+            return false;
+    }
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "gold", wireGold))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "level", statusLevel))
@@ -7976,7 +8110,10 @@ static bool vm_net_mock_append_battle_revival_status7_object(u8 *out, u32 outCap
     u32 percentExp = vm_net_mock_role_exp_percent(totalExp);
     u32 gold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     u32 level = role ? role->level : 1;
+    u32 wireEnergy = 100;
+    u32 wireEnergyMax = 100;
 
+    vm_mock_activities_vitality_wire(role, &wireEnergy, &wireEnergyMax);
     if (role == NULL || hpRecovery == 0)
         return false;
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart))
@@ -7985,8 +8122,8 @@ static bool vm_net_mock_append_battle_revival_status7_object(u8 *out, u32 outCap
         !vm_net_mock_put_object_u32(out, outCap, pos, "lastexp", lastExp) ||
         !vm_net_mock_put_object_u32(out, outCap, pos, "curexp", nextExp) ||
         !vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", percentExp) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "energy", 100) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "energymax", 100) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "energy", wireEnergy) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "energymax", wireEnergyMax) ||
         !vm_net_mock_put_object_u32(out, outCap, pos, "gold", gold) ||
         !vm_net_mock_put_object_u32(out, outCap, pos, "level", level) ||
         !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
@@ -8922,6 +9059,7 @@ static bool vm_mock_service_duel_resolve_committed_round(
                "resolved=%u next_scale=%u evidence=arena-exp-round\n",
                duel->serial, duel->resolvedRoundCount,
                vm_mock_service_duel_arena_round_scale(duel));
+        vm_mock_activities_arena_round_vitality(duel);
     }
     if (terminal)
     {
@@ -8938,6 +9076,41 @@ static bool vm_mock_service_duel_resolve_committed_round(
         duel->terminalPendingMask = duel->startedMask;
         duel->terminalNotBeforeTick = g_schedulerTick + delayTicks;
         vm_mock_service_duel_arm_both_exits(duel);
+        if (!duel->arenaMode && !duel->wagerMode)
+        {
+            int seat;
+            for (seat = 0; seat < 2; ++seat)
+            {
+                if (duel->hp[seat] != 0)
+                {
+                    int loserSeat = seat == 0 ? 1 : 0;
+                    vm_mock_service_client_session *winnerSession =
+                        vm_mock_service_find_client_session(
+                            duel->clientIds[seat]);
+                    vm_mock_service_client_session *loserSession =
+                        vm_mock_service_find_client_session(
+                            duel->clientIds[loserSeat]);
+                    vm_net_mock_role_state *winnerRole =
+                        winnerSession
+                            ? vm_mock_service_trade_role_for_session(
+                                  winnerSession, NULL)
+                            : NULL;
+                    vm_net_mock_role_state *loserRole =
+                        loserSession
+                            ? vm_mock_service_trade_role_for_session(
+                                  loserSession, NULL)
+                            : NULL;
+                    u8 victimJob =
+                        loserRole ? loserRole->job
+                                  : (u8)(duel->jobIndex[loserSeat] + 1u);
+                    u32 victimLevel = loserRole ? loserRole->level : 1u;
+
+                    vm_mock_activities_on_pvp_kill(winnerRole, victimJob,
+                                                   victimLevel);
+                    break;
+                }
+            }
+        }
         vm_mock_enmity_record_duel_result(duel);
         if (duel->arenaMode)
             vm_mock_arena_on_duel_finished(duel);
@@ -9179,12 +9352,16 @@ static bool vm_net_mock_append_duel_spar_status7_object(
 
         if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart))
             return false;
-        if (!vm_net_mock_put_object_u32(out, outCap, pos, "exp", totalExp) ||
-            !vm_net_mock_put_object_u32(out, outCap, pos, "lastexp", lastExp) ||
-            !vm_net_mock_put_object_u32(out, outCap, pos, "curexp", nextExp) ||
-            !vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", percentExp) ||
-            !vm_net_mock_put_object_u32(out, outCap, pos, "energy", 100) ||
-            !vm_net_mock_put_object_u32(out, outCap, pos, "energymax", 100) ||
+        {
+            u32 wireEnergy = 100;
+            u32 wireEnergyMax = 100;
+            vm_mock_activities_vitality_wire(role, &wireEnergy, &wireEnergyMax);
+            if (!vm_net_mock_put_object_u32(out, outCap, pos, "exp", totalExp) ||
+                !vm_net_mock_put_object_u32(out, outCap, pos, "lastexp", lastExp) ||
+                !vm_net_mock_put_object_u32(out, outCap, pos, "curexp", nextExp) ||
+                !vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", percentExp) ||
+                !vm_net_mock_put_object_u32(out, outCap, pos, "energy", wireEnergy) ||
+                !vm_net_mock_put_object_u32(out, outCap, pos, "energymax", wireEnergyMax) ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "gold", gold) ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "level", level) ||
             !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
@@ -9195,8 +9372,9 @@ static bool vm_net_mock_append_duel_spar_status7_object(
             !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", NULL, 0) ||
             !vm_net_mock_put_object_string(out, outCap, pos, "fdata", fdataGbk) ||
             !vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 0))
-        {
-            return false;
+            {
+                return false;
+            }
         }
         printf("[info][mock-service] duel_settle_fdata observer=%08x dead=%u "
                "exp_penalty=%u money_penalty=%u fdata_bytes=%u text=%s\n",
@@ -10718,7 +10896,8 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
                                                            playerSlot);
             strikeIndex = (u8)actionCount;
             oneCounterDamage = vm_net_mock_battle_apply_enemy_counter_strike(
-                g_vm_net_mock_battle_enemy_id_current, strikeIndex, counterActionType,
+                vm_net_mock_battle_enemy_id_for_index(enemyIndex), strikeIndex,
+                counterActionType,
                 type1EffectIndex, &strikeActionType, &strikeEffectIndex, &strikeIsHeal, &strikeHealAmount);
             if (strikeActionType == 1)
             {
@@ -10793,8 +10972,11 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
     {
         vm_net_mock_battle_save_completed_current_role_state(
             "battle-escape-failed-death");
+        vm_mock_world_boss_on_battle_end(false);
+        vm_mock_ladder_on_battle_end(false);
         vm_mock_service_session_arm_battle_revival_confirm_for_death(
             "battle-escape-failed-death");
+        vm_net_mock_hangup_loop_clear("battle-escape-failed-death");
     }
     else
     {
@@ -11370,6 +11552,21 @@ static void vm_net_mock_battle_note_victory_settlement(const char *reason)
     vm_net_mock_battle_settlement_exit_arm(reason);
     vm_mock_world_boss_on_battle_end(true);
     vm_mock_ladder_on_battle_end(true);
+    {
+        vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
+        vm_mock_service_client_session *session =
+            vm_mock_service_get_active_client_session();
+        const char *scene =
+            session && session->sceneVisibleScene[0] ? session->sceneVisibleScene
+            : (activeRole ? activeRole->scene : "");
+        u32 enemyId = g_vm_net_mock_battle_enemy_id_current;
+        bool isBoss =
+            vm_net_mock_monster_family_for_enemy(enemyId) ==
+            (u8)VM_NET_MOCK_MONSTER_BOSS;
+
+        vm_mock_activities_on_pve_victory(scene, enemyId, isBoss);
+        vm_mock_activities_on_kill_progress(enemyId, isBoss);
+    }
     /* Friend intimacy: only team wild PvE victories (not spar/duel/arena). */
     if (reason != NULL && strncmp(reason, "team-battle", 11) == 0)
     {
@@ -14243,6 +14440,12 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
             if (vm_mock_world_boss_try_claim_encounter(remapScene, wireEnemyId,
                                                        posx, posy, &bossEnemyId) &&
                 bossEnemyId != 0)
+                requestedEnemyId = bossEnemyId;
+            else if (requestedEnemyId != 0 &&
+                     vm_mock_world_boss_try_claim_encounter(
+                         remapScene, requestedEnemyId, posx, posy,
+                         &bossEnemyId) &&
+                     bossEnemyId != 0)
                 requestedEnemyId = bossEnemyId;
         }
         if (!forceNonSceneStart && wireEnemyId != 0 && requestedEnemyId == 0)

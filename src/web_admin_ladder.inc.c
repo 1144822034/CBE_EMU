@@ -51,7 +51,7 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "table{border-collapse:collapse;width:100%%}th,td{padding:8px;border-bottom:1px solid #eee}"
         "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px}"
         "</style></head><body><h1>天梯挑战</h1>"
-        "<p>每日挑战；对手为天机/幻剑/鬼道三人。层数越高属性与伤害越高；每10层发里程碑奖励。</p>"
+        "<p>每日挑战（次数与层数进度均按自然日重置）；对手为天机/幻剑/鬼道三人。层数越高属性与伤害越高；每10层发里程碑奖励。</p>"
         "<nav>"
         "<a class=\"tab\" href=\"/?tab=accounts\">账号</a>"
         "<a class=\"tab\" href=\"/?tab=worldboss\">世界BOSS</a>"
@@ -81,7 +81,7 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "<div><label>每层+HP</label><input name=\"hp_per_floor\" value=\"%u\"></div>"
         "<div><label>每层+攻击</label><input name=\"atk_per_floor\" value=\"%u\"></div>"
         "<div><label>每层+防御</label><input name=\"def_per_floor\" value=\"%u\"></div>"
-        "<div><label>每层伤害+%</label><input name=\"damage_scale\" value=\"%u\"></div>"
+        "<div><label>每层伤害+%%</label><input name=\"damage_scale\" value=\"%u\"></div>"
         "<div><label>怪物放技能</label><select name=\"cast_skill\">"
         "<option value=\"1\"%s>是</option><option value=\"0\"%s>否</option></select></div>"
         "</div><button type=\"submit\">保存配置</button></form></section>",
@@ -144,27 +144,45 @@ static void vm_mock_admin_handle_ladder_action(vm_mock_service_socket client,
         u32 baseHp = 800, baseAtk = 120, baseDef = 80, baseMp = 200;
         u32 hpPf = 150, atkPf = 25, defPf = 15, dmgScale = 5;
         u32 castSkill = 1;
+        char errMsg[384];
 
-        (void)vm_mock_admin_form_u32(body, "enabled", 1u, &enabled);
-        (void)vm_mock_admin_form_u32(body, "daily_limit", 100u, &daily);
-        (void)vm_mock_admin_form_u32(body, "enemy_tianji", 0xffffffffu, &tj);
-        (void)vm_mock_admin_form_u32(body, "enemy_huanjian", 0xffffffffu, &hj);
-        (void)vm_mock_admin_form_u32(body, "enemy_guidao", 0xffffffffu, &gd);
-        (void)vm_mock_admin_form_u32(body, "base_hp", 0xffffffffu, &baseHp);
-        (void)vm_mock_admin_form_u32(body, "base_atk", 0xffffffffu, &baseAtk);
-        (void)vm_mock_admin_form_u32(body, "base_def", 0xffffffffu, &baseDef);
-        (void)vm_mock_admin_form_u32(body, "base_mp", 0xffffffffu, &baseMp);
-        (void)vm_mock_admin_form_u32(body, "hp_per_floor", 0xffffffffu, &hpPf);
-        (void)vm_mock_admin_form_u32(body, "atk_per_floor", 0xffffffffu, &atkPf);
-        (void)vm_mock_admin_form_u32(body, "def_per_floor", 0xffffffffu, &defPf);
-        (void)vm_mock_admin_form_u32(body, "damage_scale", 1000u, &dmgScale);
-        (void)vm_mock_admin_form_u32(body, "cast_skill", 1u, &castSkill);
+        if (!vm_mock_admin_form_u32(body, "enabled", 1u, &enabled) ||
+            !vm_mock_admin_form_u32(body, "daily_limit", 100u, &daily) ||
+            !vm_mock_admin_form_u32(body, "enemy_tianji", 0xffffffffu, &tj) ||
+            !vm_mock_admin_form_u32(body, "enemy_huanjian", 0xffffffffu, &hj) ||
+            !vm_mock_admin_form_u32(body, "enemy_guidao", 0xffffffffu, &gd) ||
+            !vm_mock_admin_form_u32(body, "base_hp", 0xffffffffu, &baseHp) ||
+            !vm_mock_admin_form_u32(body, "base_atk", 0xffffffffu, &baseAtk) ||
+            !vm_mock_admin_form_u32(body, "base_def", 0xffffffffu, &baseDef) ||
+            !vm_mock_admin_form_u32(body, "base_mp", 0xffffffffu, &baseMp) ||
+            !vm_mock_admin_form_u32(body, "hp_per_floor", 0xffffffffu, &hpPf) ||
+            !vm_mock_admin_form_u32(body, "atk_per_floor", 0xffffffffu, &atkPf) ||
+            !vm_mock_admin_form_u32(body, "def_per_floor", 0xffffffffu, &defPf) ||
+            !vm_mock_admin_form_u32(body, "damage_scale", 65535u, &dmgScale) ||
+            !vm_mock_admin_form_u32(body, "cast_skill", 1u, &castSkill))
+        {
+            vm_mock_admin_redirect_ladder(
+                client, "error",
+                "表单数值无效；每层伤害+% 请填写 0-65535 的整数（不要带 % 号）");
+            return;
+        }
         if (vm_mock_ladder_admin_save_config(
                 (u8)enabled, (u16)daily, tj, hj, gd, baseHp, baseAtk, baseDef,
                 baseMp, hpPf, atkPf, defPf, (u16)dmgScale, (u8)castSkill))
+        {
             vm_mock_admin_redirect_ladder(client, "ok", "天梯配置已保存");
-        else
-            vm_mock_admin_redirect_ladder(client, "error", "保存失败");
+            return;
+        }
+        memset(errMsg, 0, sizeof(errMsg));
+        {
+            const char *mysqlErr = vm_mysql_last_error();
+            if (mysqlErr != NULL && mysqlErr[0] != 0 &&
+                strcmp(mysqlErr, "no MySQL error detail") != 0)
+                snprintf(errMsg, sizeof(errMsg), "保存失败：%s", mysqlErr);
+            else
+                snprintf(errMsg, sizeof(errMsg), "%s", "保存失败");
+        }
+        vm_mock_admin_redirect_ladder(client, "error", errMsg);
         return;
     }
     if (strcmp(action, "save-ladder-reward") == 0)

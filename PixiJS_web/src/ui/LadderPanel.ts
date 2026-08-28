@@ -121,7 +121,7 @@ export class LadderPanel extends Container {
     const st = this.status;
     const lines = [
       st?.enabled ? "状态：已开启" : "状态：未开启",
-      `最高层：${st?.bestFloor ?? 0}`,
+      `今日最高层：${st?.bestFloor ?? 0}`,
       `下一层：${st?.nextFloor ?? 1}`,
       `今日次数：${st?.dailyUsed ?? 0}/${st?.dailyLimit ?? 0}`,
       "对手：天机 / 幻剑 / 鬼道",

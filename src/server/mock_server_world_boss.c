@@ -61,6 +61,23 @@ bool vm_net_mock_runtime_remove_combat_spawn_at(
 u32 vm_net_mock_copy_outdoor_field_scenes(char scenes[][64], u32 cap);
 bool vm_net_mock_pick_scene_spawn_xy(const char *scene, u16 *xOut, u16 *yOut);
 
+static bool vm_mock_world_boss_scene_in_update_catalog(const char *scene)
+{
+    char sceName[72];
+
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    if (vm_net_mock_update_find_named_for_request(scene) != NULL)
+        return true;
+    if (strlen(scene) + 4u < sizeof(sceName))
+    {
+        snprintf(sceName, sizeof(sceName), "%s.sce", scene);
+        if (vm_net_mock_update_find_named_for_request(sceName) != NULL)
+            return true;
+    }
+    return false;
+}
+
 static u32 vm_mock_world_boss_rng_next(void)
 {
     g_vm_mock_world_boss_rng ^= g_vm_mock_world_boss_rng << 13;
@@ -192,15 +209,137 @@ static u32 vm_mock_world_boss_hour_key(time_t now)
     return vm_mock_world_boss_day_ymd(now) * 100u + (u32)tmNow->tm_hour;
 }
 
-static void vm_mock_world_boss_scene_utf8_to_gbk(const char *sceneUtf8,
-                                                 char *gbkOut, size_t gbkCap)
+static bool vm_mock_world_boss_lookup_smap_alias_gbk(const char *scene,
+                                                     char *out, size_t outCap)
 {
-    if (gbkOut == NULL || gbkCap == 0)
+    char path[256];
+    u8 data[16384];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 headerBytes = 0;
+    u32 pos = 0;
+
+    if (out == NULL || outCap == 0 || scene == NULL || scene[0] == 0)
+        return false;
+    out[0] = 0;
+    if (!vm_net_mock_open_server_data_resource("sMap.dsh", ".dsh", NULL, path,
+                                               sizeof(path)))
+        return false;
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (columnCount < 3 || columnCount > 64 || rowCount > 512 ||
+        16u + headerBytes > len)
+        return false;
+    pos = 16u + headerBytes;
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        char rowScene[64];
+        char alias[32];
+
+        memset(rowScene, 0, sizeof(rowScene));
+        memset(alias, 0, sizeof(alias));
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            break;
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            if (col == 1)
+                (void)vm_net_mock_copy_dsh_string_field(rowScene, sizeof(rowScene),
+                                                         value, valueLen);
+            else if (col == 2)
+                (void)vm_net_mock_copy_dsh_string_field(alias, sizeof(alias),
+                                                         value, valueLen);
+            rowPos += valueLen;
+        }
+        pos = rowEnd;
+        if (rowScene[0] == 0 || alias[0] == 0)
+            continue;
+        if (vm_net_mock_scene_names_equal_loose(scene, rowScene))
+        {
+            snprintf(out, outCap, "%s", alias);
+            return out[0] != 0;
+        }
+    }
+    return false;
+}
+
+static void vm_mock_world_boss_resolve_map_label_gbk(const char *scene,
+                                                     char *out, size_t outCap)
+{
+    char fromDb[64];
+    char fromSmap[64];
+    char leaf[64];
+    size_t leafLen = 0;
+
+    if (out == NULL || outCap == 0)
         return;
-    gbkOut[0] = 0;
-    if (sceneUtf8 == NULL || sceneUtf8[0] == 0)
+    out[0] = 0;
+    if (scene == NULL || scene[0] == 0)
         return;
-    utf8_to_gbk((u8 *)sceneUtf8, (u8 *)gbkOut, gbkCap);
+
+    memset(fromDb, 0, sizeof(fromDb));
+    if (vm_net_mock_scene_display_name_load(scene, fromDb, sizeof(fromDb)) &&
+        fromDb[0] != 0)
+    {
+        snprintf(out, outCap, "%s", fromDb);
+        return;
+    }
+
+    memset(fromSmap, 0, sizeof(fromSmap));
+    if (vm_mock_world_boss_lookup_smap_alias_gbk(scene, fromSmap,
+                                                 sizeof(fromSmap)) &&
+        fromSmap[0] != 0)
+    {
+        snprintf(out, outCap, "%s", fromSmap);
+        return;
+    }
+
+    /* Last resort: strip path / .sce / leading ASCII index so chat never
+     * shows a raw resource leaf like 17无情谷_01.sce. */
+    {
+        const char *src = scene;
+        const char *p = NULL;
+        char *dst = leaf;
+
+        for (p = scene; *p != '\0'; ++p)
+        {
+            if (*p == '/' || *p == '\\')
+                src = p + 1;
+        }
+        while (*src == 'c' || *src == 'C' || (*src >= '0' && *src <= '9'))
+            ++src;
+        snprintf(leaf, sizeof(leaf), "%s", src);
+        leafLen = strlen(leaf);
+        if (leafLen > 4 && leaf[leafLen - 4] == '.' &&
+            (leaf[leafLen - 3] == 's' || leaf[leafLen - 3] == 'S') &&
+            (leaf[leafLen - 2] == 'c' || leaf[leafLen - 2] == 'C') &&
+            (leaf[leafLen - 1] == 'e' || leaf[leafLen - 1] == 'E'))
+        {
+            leaf[leafLen - 4] = 0;
+            leafLen -= 4;
+        }
+        /* Drop trailing _NN ordinal when present (ASCII only). */
+        if (leafLen > 3 && leaf[leafLen - 3] == '_' &&
+            leaf[leafLen - 2] >= '0' && leaf[leafLen - 2] <= '9' &&
+            leaf[leafLen - 1] >= '0' && leaf[leafLen - 1] <= '9')
+        {
+            leaf[leafLen - 3] = 0;
+        }
+        (void)dst;
+        snprintf(out, outCap, "%s", leaf[0] ? leaf : scene);
+    }
 }
 
 static void vm_mock_world_boss_broadcast_preview(const char *sceneGbk)
@@ -225,22 +364,25 @@ static void vm_mock_world_boss_broadcast_spawn(const char *sceneGbk, u16 x, u16 
     static const char prefixGbk[] =
         "\xa1\xbe\xca\xc0\xbd\xe7\x42\x4f\x53\x53\xa1\xbf\xd2\xd1\xb3\xf6\xcf\xd6"
         "\xd4\xda\xb5\xd8\xcd\xbc\xa1\xbe";
-    static const char midGbk[] = "\xa1\xbf\xc0\xb4\xd7\xf7\xd3\xce\xcf\xb7\xa3\xa1";
+    /* GBK: 】 */
+    static const char suffixGbk[] = "\xa1\xbf";
     static const char systemNameGbk[] = "\xcf\xb5\xcd\xb3";
 
     if (sceneGbk == NULL || sceneGbk[0] == 0)
         return;
-    snprintf(message, sizeof(message), "%s%s%s pos=(%u,%u)",
-             prefixGbk, sceneGbk, midGbk, (u32)x, (u32)y);
+    snprintf(message, sizeof(message), "%s%s%s pos=(%u,%u)", prefixGbk,
+             sceneGbk, suffixGbk, (u32)x, (u32)y);
     (void)vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
     printf("[info][mock-service] world_boss_spawn scene=%s pos=(%u,%u)\n",
            sceneGbk, (u32)x, (u32)y);
 }
 
-static void vm_mock_world_boss_queue_scene_resync(void)
+static void vm_mock_world_boss_queue_scene_resync_for(const char *scene)
 {
     vm_mock_service_client_session *sess;
 
+    if (scene == NULL || scene[0] == 0)
+        return;
     g_vm_mock_world_boss_resync_count = 0;
     for (sess = g_vm_mock_service_client_sessions; sess != NULL;
          sess = sess->next)
@@ -250,33 +392,75 @@ static void vm_mock_world_boss_queue_scene_resync(void)
                                        : sess->onlineScene;
         if (!sess->roleOnline || sess->onlineRoleId == 0)
             continue;
-        if (vis == NULL || !vm_net_mock_scene_names_equal_loose(
-                               vis, g_vm_mock_world_boss_rt.scene))
+        if (vis == NULL || !vm_net_mock_scene_names_equal_loose(vis, scene))
             continue;
         if (g_vm_mock_world_boss_resync_count >= VM_MOCK_WORLD_BOSS_RESYNC_MAX)
             break;
         g_vm_mock_world_boss_resync_clients[g_vm_mock_world_boss_resync_count++] =
             sess->clientId;
+        /* Pixi refreshes from [WBOSS] chat; CBE/WT18 cold path may also use this. */
         sess->dreamForceColdSceResync = true;
     }
 }
 
-static bool vm_mock_world_boss_pick_scene_and_pos(char *sceneOut, size_t sceneCap,
-                                                  u16 *xOut, u16 *yOut)
+static void vm_mock_world_boss_broadcast_despawn(const char *sceneGbk, u16 x,
+                                                 u16 y)
 {
-    u32 pick = 0;
+    char message[192];
+    /* GBK: 世界Boss 已刷新 */
+    static const char prefixGbk[] =
+        "\xca\xe0\xbd\xe7\x42\x6f\x73\x73\xd2\xd1\xcb\xa2\xd0\xc2\x20";
+    /* GBK:  坐标 */
+    static const char coordGbk[] = " \xd7\xf9\xb1\xea";
+    static const char systemNameGbk[] = "\xcf\xb5\xcd\xb3";
+
+    if (sceneGbk == NULL || sceneGbk[0] == 0)
+        return;
+    snprintf(message, sizeof(message), "%s%s%s(%u,%u)", prefixGbk, sceneGbk,
+             coordGbk, (u32)x, (u32)y);
+    (void)vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
+    printf("[info][mock-service] world_boss_despawn_chat scene=%s pos=(%u,%u)\n",
+           sceneGbk, (u32)x, (u32)y);
+}
+
+static void vm_mock_world_boss_broadcast_marker(const char *markerAscii,
+                                                const char *sceneGbk, u16 x,
+                                                u16 y)
+{
+    char message[192];
+    static const char systemNameGbk[] = "\xcf\xb5\xcd\xb3";
+
+    if (markerAscii == NULL || markerAscii[0] == 0)
+        return;
+    if (sceneGbk != NULL && sceneGbk[0] != 0)
+        snprintf(message, sizeof(message), "%s %s pos=(%u,%u)", markerAscii,
+                 sceneGbk, (u32)x, (u32)y);
+    else
+        snprintf(message, sizeof(message), "%s", markerAscii);
+    (void)vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
+}
+
+static bool vm_mock_world_boss_pick_scene_and_pos_at(
+    u32 outdoorIndex, char *sceneOut, size_t sceneCap, u16 *xOut, u16 *yOut)
+{
     const char *scene = NULL;
     u16 x = 120;
     u16 y = 120;
 
     vm_mock_world_boss_load_outdoor_scenes();
-    if (g_vm_mock_world_boss_outdoor_count == 0)
+    if (g_vm_mock_world_boss_outdoor_count == 0 ||
+        outdoorIndex >= g_vm_mock_world_boss_outdoor_count)
         return false;
-    pick = vm_mock_world_boss_rng_next() % g_vm_mock_world_boss_outdoor_count;
-    scene = g_vm_mock_world_boss_outdoor_scenes[pick];
+    scene = g_vm_mock_world_boss_outdoor_scenes[outdoorIndex];
+    if (scene == NULL || scene[0] == 0)
+        return false;
     if (sceneOut != NULL && sceneCap > 0)
         snprintf(sceneOut, sceneCap, "%s", scene);
     (void)vm_net_mock_pick_scene_spawn_xy(scene, &x, &y);
+    if (x == 0)
+        x = 120;
+    if (y == 0)
+        y = 120;
     if (xOut)
         *xOut = x;
     if (yOut)
@@ -284,29 +468,69 @@ static bool vm_mock_world_boss_pick_scene_and_pos(char *sceneOut, size_t sceneCa
     return true;
 }
 
+static bool vm_mock_world_boss_pick_scene_and_pos(char *sceneOut, size_t sceneCap,
+                                                  u16 *xOut, u16 *yOut)
+{
+    u32 pick = 0;
+
+    vm_mock_world_boss_load_outdoor_scenes();
+    if (g_vm_mock_world_boss_outdoor_count == 0)
+        return false;
+    pick = vm_mock_world_boss_rng_next() % g_vm_mock_world_boss_outdoor_count;
+    return vm_mock_world_boss_pick_scene_and_pos_at(pick, sceneOut, sceneCap,
+                                                     xOut, yOut);
+}
+
 static void vm_mock_world_boss_despawn_active(const char *reason)
 {
     const char *despawnError = NULL;
+    char sceneCopy[64];
+    u16 x = 0;
+    u16 y = 0;
+    char sceneGbk[128];
+    u8 prevStatus = 0;
 
-    if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+    if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE &&
+        g_vm_mock_world_boss_rt.scene[0] == 0)
         return;
-    if (g_vm_mock_world_boss_rt.scene[0] != 0 &&
-        g_vm_mock_world_boss_rt.x != 0 && g_vm_mock_world_boss_rt.y != 0)
+    prevStatus = g_vm_mock_world_boss_rt.status;
+    snprintf(sceneCopy, sizeof(sceneCopy), "%s", g_vm_mock_world_boss_rt.scene);
+    x = g_vm_mock_world_boss_rt.x;
+    y = g_vm_mock_world_boss_rt.y;
+    /* Only ACTIVE rows live in SCE; CLAIMED already removed on encounter. */
+    if (prevStatus == VM_MOCK_WORLD_BOSS_STATUS_ACTIVE && sceneCopy[0] != 0 &&
+        x != 0 && y != 0)
     {
-        (void)vm_net_mock_runtime_remove_combat_spawn_at(
-            g_vm_mock_world_boss_rt.scene, g_vm_mock_world_boss_rt.x,
-            g_vm_mock_world_boss_rt.y, &despawnError);
+        (void)vm_net_mock_runtime_remove_combat_spawn_at(sceneCopy, x, y,
+                                                         &despawnError);
+        vm_mock_world_boss_queue_scene_resync_for(sceneCopy);
+        memset(sceneGbk, 0, sizeof(sceneGbk));
+        vm_mock_world_boss_resolve_map_label_gbk(sceneCopy, sceneGbk,
+                                                 sizeof(sceneGbk));
+        /* ASCII tag for Pixi same-map combat-spawn refresh. */
+        vm_mock_world_boss_broadcast_despawn(sceneGbk, x, y);
     }
-    printf("[info][mock-service] world_boss_despawn reason=%s scene=%s "
-           "pos=(%u,%u) err=%s\n",
-           reason ? reason : "-", g_vm_mock_world_boss_rt.scene,
-           (u32)g_vm_mock_world_boss_rt.x, (u32)g_vm_mock_world_boss_rt.y,
+    else if (prevStatus == VM_MOCK_WORLD_BOSS_STATUS_CLAIMED &&
+             sceneCopy[0] != 0)
+    {
+        /* Map already cleared on claim; still notify clients + resync. */
+        vm_mock_world_boss_queue_scene_resync_for(sceneCopy);
+        memset(sceneGbk, 0, sizeof(sceneGbk));
+        vm_mock_world_boss_resolve_map_label_gbk(sceneCopy, sceneGbk,
+                                                 sizeof(sceneGbk));
+        vm_mock_world_boss_broadcast_despawn(sceneGbk, x, y);
+    }
+    printf("[info][mock-service] world_boss_despawn reason=%s status=%u "
+           "scene=%s pos=(%u,%u) err=%s\n",
+           reason ? reason : "-", (u32)prevStatus, sceneCopy, (u32)x, (u32)y,
            despawnError ? despawnError : "-");
     memset(&g_vm_mock_world_boss_rt, 0, sizeof(g_vm_mock_world_boss_rt));
     g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_IDLE;
+    g_vm_mock_world_boss_reward_pending = false;
 }
 
-static void vm_mock_world_boss_spawn_now(u32 hourKey)
+static bool vm_mock_world_boss_spawn_now(u32 hourKey, bool adminPureRandom,
+                                         const char **errorOut)
 {
     char scene[64];
     u16 x = 0;
@@ -314,43 +538,131 @@ static void vm_mock_world_boss_spawn_now(u32 hourKey)
     u32 wireId = 0;
     u32 spawnIndex = 0;
     const char *spawnError = NULL;
-    char sceneUtf8[128];
+    const char *lastError = "刷BOSS失败";
     char sceneGbk[128];
+    u32 start = 0;
+    u32 tries = 0;
+    u32 maxTries = 0;
+    u32 order[VM_MOCK_WORLD_BOSS_OUTDOOR_MAX];
+    u32 orderCount = 0;
 
-    if (!g_vm_mock_world_boss_config.enabled ||
-        g_vm_mock_world_boss_config.monsterId == 0)
-        return;
-    if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_ACTIVE ||
-        g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_CLAIMED)
-        vm_mock_world_boss_despawn_active("hour-respawn");
-    memset(scene, 0, sizeof(scene));
-    if (!vm_mock_world_boss_pick_scene_and_pos(scene, sizeof(scene), &x, &y))
-        return;
-    if (!vm_net_mock_runtime_inject_combat_spawn(
-            scene, x, y, g_vm_mock_world_boss_config.monsterId, &wireId,
-            &spawnIndex, &spawnError))
+    if (errorOut)
+        *errorOut = lastError;
+    if (!g_vm_mock_world_boss_config.enabled)
     {
-        printf("[error][mock-service] world_boss_spawn_fail scene=%s err=%s\n",
-               scene, spawnError ? spawnError : "-");
-        return;
+        if (errorOut)
+            *errorOut = "世界BOSS未启用";
+        return false;
     }
-    memset(&g_vm_mock_world_boss_rt, 0, sizeof(g_vm_mock_world_boss_rt));
-    g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_ACTIVE;
-    snprintf(g_vm_mock_world_boss_rt.scene, sizeof(g_vm_mock_world_boss_rt.scene),
-             "%s", scene);
-    g_vm_mock_world_boss_rt.x = x;
-    g_vm_mock_world_boss_rt.y = y;
-    g_vm_mock_world_boss_rt.wireId = wireId;
-    g_vm_mock_world_boss_rt.spawnIndex = spawnIndex;
-    g_vm_mock_world_boss_rt.hourKey = hourKey;
-    g_vm_mock_world_boss_rt.spawnUnix = (u32)time(NULL);
-    memset(sceneUtf8, 0, sizeof(sceneUtf8));
-    memset(sceneGbk, 0, sizeof(sceneGbk));
-    vm_net_mock_gbk_label_to_utf8(scene, sceneUtf8, sizeof(sceneUtf8));
-    vm_mock_world_boss_scene_utf8_to_gbk(sceneUtf8[0] ? sceneUtf8 : scene,
-                                         sceneGbk, sizeof(sceneGbk));
-    vm_mock_world_boss_broadcast_spawn(sceneGbk, x, y);
-    vm_mock_world_boss_queue_scene_resync();
+    if (g_vm_mock_world_boss_config.monsterId == 0)
+    {
+        if (errorOut)
+            *errorOut = "请先配置BOSS怪物ID";
+        return false;
+    }
+    /* Clear ACTIVE / CLAIMED / PREVIEW so admin can re-force any time. */
+    if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_IDLE ||
+        g_vm_mock_world_boss_rt.scene[0] != 0)
+        vm_mock_world_boss_despawn_active("respawn");
+
+    vm_mock_world_boss_load_outdoor_scenes();
+    if (g_vm_mock_world_boss_outdoor_count == 0)
+    {
+        if (errorOut)
+            *errorOut = "无可用户外地图";
+        return false;
+    }
+    memset(order, 0, sizeof(order));
+    orderCount = g_vm_mock_world_boss_outdoor_count;
+    if (adminPureRandom)
+    {
+        /* Admin force-spawn: uniform random over the outdoor pool (no catalog bias). */
+        g_vm_mock_world_boss_rng ^=
+            (u32)time(NULL) ^ (u32)(hourKey * 0x9e3779b9u);
+        for (u32 i = 0; i < orderCount; ++i)
+            order[i] = i;
+    }
+    else
+    {
+        orderCount = 0;
+        for (u32 i = 0; i < g_vm_mock_world_boss_outdoor_count; ++i)
+        {
+            if (vm_mock_world_boss_scene_in_update_catalog(
+                    g_vm_mock_world_boss_outdoor_scenes[i]))
+            {
+                if (orderCount < VM_MOCK_WORLD_BOSS_OUTDOOR_MAX)
+                    order[orderCount++] = i;
+            }
+        }
+        for (u32 i = 0; i < g_vm_mock_world_boss_outdoor_count; ++i)
+        {
+            if (vm_mock_world_boss_scene_in_update_catalog(
+                    g_vm_mock_world_boss_outdoor_scenes[i]))
+                continue;
+            if (orderCount < VM_MOCK_WORLD_BOSS_OUTDOOR_MAX)
+                order[orderCount++] = i;
+        }
+    }
+    if (orderCount == 0)
+    {
+        if (errorOut)
+            *errorOut = "无可用户外地图";
+        return false;
+    }
+    start = vm_mock_world_boss_rng_next() % orderCount;
+    maxTries = orderCount;
+    if (maxTries > 12u)
+        maxTries = 12u;
+    for (tries = 0; tries < maxTries; ++tries)
+    {
+        u32 idx = order[(start + tries) % orderCount];
+
+        memset(scene, 0, sizeof(scene));
+        x = 0;
+        y = 0;
+        wireId = 0;
+        spawnIndex = 0;
+        spawnError = NULL;
+        if (!vm_mock_world_boss_pick_scene_and_pos_at(idx, scene, sizeof(scene),
+                                                      &x, &y))
+        {
+            lastError = "户外地图选点失败";
+            continue;
+        }
+        if (!vm_net_mock_runtime_inject_combat_spawn(
+                scene, x, y, g_vm_mock_world_boss_config.monsterId, &wireId,
+                &spawnIndex, &spawnError))
+        {
+            lastError = spawnError ? spawnError : "刷怪点写入失败";
+            printf("[warn][mock-service] world_boss_spawn_retry scene=%s "
+                   "pos=(%u,%u) err=%s try=%u/%u\n",
+                   scene, (u32)x, (u32)y, lastError, tries + 1u, maxTries);
+            continue;
+        }
+        memset(&g_vm_mock_world_boss_rt, 0, sizeof(g_vm_mock_world_boss_rt));
+        g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_ACTIVE;
+        snprintf(g_vm_mock_world_boss_rt.scene,
+                 sizeof(g_vm_mock_world_boss_rt.scene), "%s", scene);
+        g_vm_mock_world_boss_rt.x = x;
+        g_vm_mock_world_boss_rt.y = y;
+        g_vm_mock_world_boss_rt.wireId = wireId;
+        g_vm_mock_world_boss_rt.spawnIndex = spawnIndex;
+        g_vm_mock_world_boss_rt.hourKey = hourKey;
+        g_vm_mock_world_boss_rt.spawnUnix = (u32)time(NULL);
+        memset(sceneGbk, 0, sizeof(sceneGbk));
+        vm_mock_world_boss_resolve_map_label_gbk(scene, sceneGbk,
+                                                  sizeof(sceneGbk));
+        vm_mock_world_boss_broadcast_spawn(sceneGbk, x, y);
+        vm_mock_world_boss_queue_scene_resync_for(scene);
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    printf("[error][mock-service] world_boss_spawn_fail tries=%u err=%s\n",
+           maxTries, lastError ? lastError : "-");
+    if (errorOut)
+        *errorOut = lastError ? lastError : "刷BOSS失败";
+    return false;
 }
 
 static void vm_mock_world_boss_tick(void)
@@ -360,7 +672,6 @@ static void vm_mock_world_boss_tick(void)
     u32 hourKey = 0;
     u16 announceSec = 30;
     char scene[64];
-    char sceneUtf8[128];
     char sceneGbk[128];
 
     vm_mock_world_boss_load_config(false);
@@ -377,7 +688,7 @@ static void vm_mock_world_boss_tick(void)
 
     if (secInHour == 0u && g_vm_mock_world_boss_rt.hourKey != hourKey)
     {
-        vm_mock_world_boss_spawn_now(hourKey);
+        (void)vm_mock_world_boss_spawn_now(hourKey, false, NULL);
         return;
     }
     if (secInHour + announceSec == 3600u &&
@@ -390,11 +701,8 @@ static void vm_mock_world_boss_tick(void)
         g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_PREVIEW;
         snprintf(g_vm_mock_world_boss_rt.scene, sizeof(g_vm_mock_world_boss_rt.scene),
                  "%s", scene);
-        memset(sceneUtf8, 0, sizeof(sceneUtf8));
         memset(sceneGbk, 0, sizeof(sceneGbk));
-        vm_net_mock_gbk_label_to_utf8(scene, sceneUtf8, sizeof(sceneUtf8));
-        vm_mock_world_boss_scene_utf8_to_gbk(sceneUtf8[0] ? sceneUtf8 : scene,
-                                             sceneGbk, sizeof(sceneGbk));
+        vm_mock_world_boss_resolve_map_label_gbk(scene, sceneGbk, sizeof(sceneGbk));
         vm_mock_world_boss_broadcast_preview(sceneGbk);
     }
 }
@@ -403,6 +711,10 @@ bool vm_mock_world_boss_try_claim_encounter(
     const char *scene, u32 wireId, u32 posx, u32 posy, u32 *enemyIdOut)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    bool posHit = false;
+    bool idHit = false;
+    u32 dx = 0;
+    u32 dy = 0;
 
     if (enemyIdOut)
         *enemyIdOut = 0;
@@ -411,36 +723,73 @@ bool vm_mock_world_boss_try_claim_encounter(
     if (scene == NULL || !vm_net_mock_scene_names_equal_loose(
                              scene, g_vm_mock_world_boss_rt.scene))
         return false;
-    if (posx != g_vm_mock_world_boss_rt.x || posy != g_vm_mock_world_boss_rt.y)
-        return false;
-    if (wireId != 0 && wireId != g_vm_mock_world_boss_rt.wireId &&
-        wireId != g_vm_mock_world_boss_config.monsterId)
+    /*
+     * Pixi hangup/collide may upload patrol feet instead of SCE home tiles.
+     * Accept exact home, nearby feet, or wire/monster id on the boss scene.
+     */
+    posHit = (posx == g_vm_mock_world_boss_rt.x &&
+              posy == g_vm_mock_world_boss_rt.y);
+    if (!posHit && posx != 0 && posy != 0)
+    {
+        dx = posx > g_vm_mock_world_boss_rt.x
+                 ? posx - g_vm_mock_world_boss_rt.x
+                 : g_vm_mock_world_boss_rt.x - posx;
+        dy = posy > g_vm_mock_world_boss_rt.y
+                 ? posy - g_vm_mock_world_boss_rt.y
+                 : g_vm_mock_world_boss_rt.y - posy;
+        if (dx <= 96u && dy <= 96u)
+            posHit = true;
+    }
+    idHit = (wireId != 0 &&
+             (wireId == g_vm_mock_world_boss_rt.wireId ||
+              wireId == g_vm_mock_world_boss_config.monsterId));
+    if (!posHit && !idHit)
         return false;
     g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_CLAIMED;
     g_vm_mock_world_boss_rt.claimRoleId = role ? role->roleId : 0;
-  (void)vm_net_mock_runtime_remove_combat_spawn_at(
+    /* Only strip the boss home tile — never wipe every same-species wild row. */
+    (void)vm_net_mock_runtime_remove_combat_spawn_at(
         g_vm_mock_world_boss_rt.scene, g_vm_mock_world_boss_rt.x,
         g_vm_mock_world_boss_rt.y, NULL);
+    vm_mock_world_boss_queue_scene_resync_for(g_vm_mock_world_boss_rt.scene);
+    {
+        char sceneGbk[128];
+
+        memset(sceneGbk, 0, sizeof(sceneGbk));
+        vm_mock_world_boss_resolve_map_label_gbk(g_vm_mock_world_boss_rt.scene,
+                                                  sceneGbk, sizeof(sceneGbk));
+        vm_mock_world_boss_broadcast_marker(
+            "[WBOSS:claim]", sceneGbk, g_vm_mock_world_boss_rt.x,
+            g_vm_mock_world_boss_rt.y);
+    }
     if (enemyIdOut)
         *enemyIdOut = g_vm_mock_world_boss_config.monsterId;
     g_vm_mock_world_boss_reward_pending = true;
     printf("[info][mock-service] world_boss_claim role=%u scene=%s "
-           "pos=(%u,%u) enemy=%u\n",
-           role ? role->roleId : 0, scene, posx, posy,
-           g_vm_mock_world_boss_config.monsterId);
+           "pos=(%u,%u) wire=%u home=(%u,%u) enemy=%u posHit=%u idHit=%u\n",
+           role ? role->roleId : 0, scene, posx, posy, wireId,
+           (u32)g_vm_mock_world_boss_rt.x, (u32)g_vm_mock_world_boss_rt.y,
+           g_vm_mock_world_boss_config.monsterId, posHit ? 1u : 0u,
+           idHit ? 1u : 0u);
     return true;
 }
 
 void vm_mock_world_boss_on_battle_end(bool victory)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    bool wasClaimed =
+        g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_CLAIMED ||
+        g_vm_mock_world_boss_reward_pending;
 
-    if (!g_vm_mock_world_boss_reward_pending)
+    if (!g_vm_mock_world_boss_reward_pending && !wasClaimed)
         return;
     g_vm_mock_world_boss_reward_pending = false;
     if (!victory)
     {
         printf("[info][mock-service] world_boss_battle_end victory=0\n");
+        /* Defeat still ends this hour's claim — map already empty; clear slot. */
+        if (wasClaimed)
+            vm_mock_world_boss_despawn_active("battle-defeat");
         return;
     }
     if (role != NULL)
@@ -509,7 +858,6 @@ static bool vm_mock_world_boss_admin_pick_preview_scene(char *msgOut, size_t msg
 bool vm_mock_world_boss_admin_force_preview(char *msgOut, size_t msgCap)
 {
     char sceneGbk[128];
-    char sceneUtf8[128];
     u32 hourKey = 0;
 
     vm_mock_world_boss_load_config(false);
@@ -524,13 +872,9 @@ bool vm_mock_world_boss_admin_force_preview(char *msgOut, size_t msgCap)
     hourKey = vm_mock_world_boss_hour_key(time(NULL));
     g_vm_mock_world_boss_rt.previewUnix = hourKey;
     g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_PREVIEW;
-    memset(sceneUtf8, 0, sizeof(sceneUtf8));
     memset(sceneGbk, 0, sizeof(sceneGbk));
-    vm_net_mock_gbk_label_to_utf8(g_vm_mock_world_boss_rt.scene, sceneUtf8,
-                                 sizeof(sceneUtf8));
-    vm_mock_world_boss_scene_utf8_to_gbk(
-        sceneUtf8[0] ? sceneUtf8 : g_vm_mock_world_boss_rt.scene, sceneGbk,
-        sizeof(sceneGbk));
+    vm_mock_world_boss_resolve_map_label_gbk(g_vm_mock_world_boss_rt.scene,
+                                              sceneGbk, sizeof(sceneGbk));
     vm_mock_world_boss_broadcast_preview(sceneGbk);
     if (msgOut && msgCap > 0)
         snprintf(msgOut, msgCap, "已发送全服预告");
@@ -539,6 +883,8 @@ bool vm_mock_world_boss_admin_force_preview(char *msgOut, size_t msgCap)
 
 bool vm_mock_world_boss_admin_force_spawn(char *msgOut, size_t msgCap)
 {
+    const char *spawnError = NULL;
+
     vm_mock_world_boss_load_config(false);
     if (!g_vm_mock_world_boss_config.enabled ||
         g_vm_mock_world_boss_config.monsterId == 0)
@@ -547,11 +893,13 @@ bool vm_mock_world_boss_admin_force_spawn(char *msgOut, size_t msgCap)
             snprintf(msgOut, msgCap, "请先启用并配置BOSS怪物ID");
         return false;
     }
-    vm_mock_world_boss_spawn_now(vm_mock_world_boss_hour_key(time(NULL)));
-    if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_ACTIVE)
+    if (!vm_mock_world_boss_spawn_now(vm_mock_world_boss_hour_key(time(NULL)),
+                                       true, &spawnError))
     {
         if (msgOut && msgCap > 0)
-            snprintf(msgOut, msgCap, "刷BOSS失败，检查怪物ID与户外地图");
+            snprintf(msgOut, msgCap, "%s",
+                     spawnError && spawnError[0] ? spawnError
+                                                 : "刷BOSS失败");
         return false;
     }
     if (msgOut && msgCap > 0)

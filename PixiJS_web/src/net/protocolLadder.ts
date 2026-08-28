@@ -24,6 +24,9 @@ function fieldU32(obj: WtObject, name: string): number {
 
 export const LADDER_WT_KIND = 44;
 
+/** NPC dialog option value — matches server VM_NET_MOCK_NPC_SERVICE_LADDER_CHALLENGE. */
+export const NPC_LADDER_CHALLENGE = 0xf7000004;
+
 export type LadderStatus = {
   enabled: boolean;
   dailyLimit: number;

@@ -14,7 +14,7 @@ import {
   GUESS_MAX_GOLD,
   GUESS_MIN_GOLD,
   GUESS_PAGE_SIZE,
-  formatGuessDice,
+  formatGuessDiceWithHints,
   formatGuessRemain,
   formatGuessStakeGold,
   guessChoiceLabel,
@@ -56,6 +56,23 @@ const CHOICE_OPTIONS: { id: number; label: string }[] = [
   { id: GUESS_CHOICE.EVEN, label: "双" },
   { id: GUESS_CHOICE.BAOZI, label: "豹子" },
 ];
+
+/** 押注选项行：大/小、单/双、豹子. */
+const CHOICE_ROW_INDICES: number[][] = [
+  [0, 1],
+  [2, 3],
+  [4],
+];
+
+/** UC3 12px 字模显示高约 14px，行距须大于字高以免与下一行控件重叠. */
+const TEXT_LINE = 16;
+const SECTION_GAP = 6;
+
+function choiceGridPos(cursor: number): { row: number; col: number } {
+  if (cursor <= 1) return { row: 0, col: cursor };
+  if (cursor <= 3) return { row: 1, col: cursor - 2 };
+  return { row: 2, col: 0 };
+}
 
 /**
  * 娱乐「猜猜看」：30 分钟一轮，猜三骰 大/小/单/双/豹子。
@@ -211,14 +228,30 @@ export class GuessPanel extends Container {
 
   move(delta: number): void {
     if (this.tab === "bet") {
-      const n = CHOICE_OPTIONS.length;
-      this.choiceCursor = (this.choiceCursor + delta + n) % n;
+      const { row, col } = choiceGridPos(this.choiceCursor);
+      const rowCount = CHOICE_ROW_INDICES.length;
+      const nextRow = (row + delta + rowCount) % rowCount;
+      const rowIndices = CHOICE_ROW_INDICES[nextRow]!;
+      const nextCol = Math.min(col, rowIndices.length - 1);
+      this.choiceCursor = rowIndices[nextCol]!;
     } else {
       const n = this.history.length;
       if (n <= 0) return;
       this.listCursor = (this.listCursor + delta + n) % n;
     }
     this.redraw();
+  }
+
+  /** ←→ 在同排选项间切换；豹子行返回 false 以便微调押金. */
+  horizontal(delta: number): boolean {
+    if (this.tab !== "bet") return false;
+    const { row, col } = choiceGridPos(this.choiceCursor);
+    const rowIndices = CHOICE_ROW_INDICES[row]!;
+    if (rowIndices.length <= 1) return false;
+    const nextCol = (col + delta + rowIndices.length) % rowIndices.length;
+    this.choiceCursor = rowIndices[nextCol]!;
+    this.redraw();
+    return true;
   }
 
   confirm(): void {
@@ -325,13 +358,13 @@ export class GuessPanel extends Container {
     const st = this.status;
     const { min, max } = this.stakeLimits();
     let cy = y;
-    this.addLabel("背景:天梯时段通过职业数(展示)", x, cy, CBE.inkLabel);
-    cy += 14;
+    this.addLabel("猜猜看天梯时段通过职业数", x, cy, CBE.inkLabel);
+    cy += TEXT_LINE;
     const periodLine = st?.roundDrawn
-      ? `第${st.roundId}期 开${formatGuessDice(st.dice1, st.dice2, st.dice3)}`
+      ? `第${st.roundId}期 开${formatGuessDiceWithHints(st.dice1, st.dice2, st.dice3)}`
       : `第${st?.roundId ?? "?"}期 剩${formatGuessRemain(st?.remainSec ?? 0)}`;
     this.addLabel(periodLine, x, cy, CBE.inkMint);
-    cy += 14;
+    cy += TEXT_LINE;
     if (!st?.roundDrawn) {
       if (st?.bettingOpen) {
         this.addLabel(
@@ -343,29 +376,69 @@ export class GuessPanel extends Container {
       } else {
         this.addLabel("开奖前30秒禁押", x, cy, 0xff8866);
       }
-      cy += 14;
+      cy += TEXT_LINE;
     }
+    cy += 2;
     this.addLabel("选项:", x, cy, CBE.inkLabel);
-    cy += 12;
-    for (let i = 0; i < CHOICE_OPTIONS.length; i++) {
-      const opt = CHOICE_OPTIONS[i]!;
-      const active = i === this.choiceCursor;
-      const rowY = cy + i * 14;
-      this.addLabel(
-        `${active ? ">" : " "} ${opt.label}`,
-        x + 4,
-        rowY,
-        active ? CBE.menuHi : CBE.inkBody,
-      );
-      this.rowHits.push(
-        attachRowPointerHit(this, x, rowY - 2, w - 8, 14, () => {
-          this.choiceCursor = i;
-          this.redraw();
-        }),
-      );
-    }
-    cy += CHOICE_OPTIONS.length * 14 + 4;
+    cy += TEXT_LINE;
+    cy = this.drawChoiceGrid(x, cy, w);
+    cy += SECTION_GAP;
     cy = this.drawStakeKeypad(x, cy, w, bottom, min, max, st);
+  }
+
+  /** 大/小、单/双、豹子 三行选项. */
+  private drawChoiceGrid(x: number, y: number, w: number): number {
+    const rowH = 18;
+    const gapY = 3;
+    const gapX = 6;
+    let cy = y;
+
+    for (let r = 0; r < CHOICE_ROW_INDICES.length; r++) {
+      const indices = CHOICE_ROW_INDICES[r]!;
+      const n = indices.length;
+      const totalGap = gapX * (n - 1);
+      const cellW = Math.floor((w - 8 - totalGap) / n);
+
+      for (let c = 0; c < n; c++) {
+        const idx = indices[c]!;
+        const opt = CHOICE_OPTIONS[idx]!;
+        const active = this.choiceCursor === idx;
+        let cx: number;
+        let cw = cellW;
+        if (n === 1) {
+          cw = Math.min(100, cellW * 2);
+          cx = x + Math.floor((w - cw) / 2);
+        } else {
+          cx = x + 4 + c * (cellW + gapX);
+        }
+        if (active) {
+          this.box
+            .roundRect(cx, cy, cw, rowH, 2)
+            .fill({ color: 0x2a4038 })
+            .stroke({ width: 1, color: CBE.borderBright });
+        } else {
+          this.box
+            .roundRect(cx, cy, cw, rowH, 2)
+            .fill({ color: CBE.bgPanelDark })
+            .stroke({ width: 1, color: CBE.borderDim });
+        }
+        this.addLabelCentered(
+          opt.label,
+          cx + cw / 2,
+          cy + rowH / 2,
+          active ? CBE.menuHi : CBE.inkBody,
+        );
+        const pickIdx = idx;
+        this.rowHits.push(
+          attachRowPointerHit(this, cx, cy, cw, rowH, () => {
+            this.choiceCursor = pickIdx;
+            this.redraw();
+          }),
+        );
+      }
+      cy += rowH + gapY;
+    }
+    return cy;
   }
 
   /**
@@ -382,7 +455,7 @@ export class GuessPanel extends Container {
   ): number {
     let cy = y;
     this.addLabel("押金(金) ←→微调", x, cy, CBE.inkLabel);
-    cy += 12;
+    cy += TEXT_LINE;
     const boxH = 22;
     this.box
       .roundRect(x + 4, cy, w - 8, boxH, 3)
@@ -395,19 +468,19 @@ export class GuessPanel extends Container {
       cy + boxH / 2,
       CBE.inkTipGreen,
     );
-    cy += boxH + 4;
+    cy += boxH + SECTION_GAP;
     this.addLabel(
       `手续费${st?.feePercent ?? 8}% 豹子30倍 其余2倍`,
       x,
       cy,
       CBE.inkLabel,
     );
-    cy += 12;
+    cy += TEXT_LINE + 4;
 
     const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "删", "0", "清"];
     const keyW = 50;
-    const keyH = 18;
-    const gap = 4;
+    const keyH = 17;
+    const gap = 3;
     const gridW = keyW * 3 + gap * 2;
     const startX = x + Math.floor((w - gridW) / 2);
     for (let i = 0; i < keys.length; i++) {
@@ -436,21 +509,25 @@ export class GuessPanel extends Container {
   private drawHistoryBody(x: number, y: number, w: number, bottom: number): void {
     const st = this.status;
     let cy = y;
+    const rowH = 18;
+    const rowStride = rowH + 2;
     if ((st?.pendingClaims ?? 0) > 0) {
       this.addLabel(`待领 ${st!.pendingClaims} 笔`, x, cy, CBE.inkMint);
-      cy += 14;
+      cy += TEXT_LINE;
     }
     if (this.history.length === 0) {
       this.addLabel("(暂无押注记录)", x, cy, CBE.inkLabel);
-      cy += 20;
+      cy += TEXT_LINE;
     } else {
+      let drawn = 0;
       for (let i = 0; i < this.history.length; i++) {
+        const rowY = cy + i * rowStride;
+        if (rowY + rowH > bottom - 24) break;
+        drawn++;
         const row = this.history[i]!;
         const active = i === this.listCursor;
-        const rowY = cy + i * 28;
-        if (rowY + 26 > bottom - 24) break;
         this.box
-          .roundRect(x - 2, rowY, w + 4, 26, 2)
+          .roundRect(x - 2, rowY, w + 4, rowH, 2)
           .fill({ color: active ? 0x2a4038 : CBE.bgPanelDark })
           .stroke({
             width: 1,
@@ -458,7 +535,7 @@ export class GuessPanel extends Container {
           });
         const stake = formatGuessStakeGold(row.stakeCopper);
         const dice = row.roundDrawn
-          ? formatGuessDice(row.dice1, row.dice2, row.dice3)
+          ? formatGuessDiceWithHints(row.dice1, row.dice2, row.dice3)
           : "待开";
         const result = !row.roundDrawn
           ? "等待"
@@ -467,26 +544,22 @@ export class GuessPanel extends Container {
               ? "已领"
               : `中${formatGuessStakeGold(row.payoutCopper)}`
             : "未中";
-        this.addLabel(
-          `#${row.betId} ${guessChoiceLabel(row.choice)} ${stake}`,
-          x + 4,
-          rowY + 4,
-          active ? CBE.ink : CBE.inkBody,
-        );
-        this.addLabel(
-          `${dice} ${result}`,
-          x + 4,
-          rowY + 14,
-          row.win && !row.claimed ? CBE.inkMint : CBE.inkLabel,
-        );
+        const line = `#${row.betId} ${guessChoiceLabel(row.choice)} ${stake} ${dice} ${result}`;
+        const ink =
+          row.win && !row.claimed
+            ? CBE.inkMint
+            : active
+              ? CBE.ink
+              : CBE.inkBody;
+        this.addLabel(line, x + 4, rowY + 2, ink);
         this.rowHits.push(
-          attachRowPointerHit(this, x - 2, rowY, w + 4, 26, () => {
+          attachRowPointerHit(this, x - 2, rowY, w + 4, rowH, () => {
             this.listCursor = i;
             this.redraw();
           }),
         );
       }
-      cy += Math.min(this.history.length, 4) * 28 + 4;
+      cy += drawn * rowStride + SECTION_GAP;
     }
     const pages = this.historyPages();
     if (pages > 1 && cy + 20 < bottom) {

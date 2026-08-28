@@ -98,10 +98,24 @@ static bool vm_mock_ladder_ensure_tables(void)
             "role_id INT UNSIGNED NOT NULL,"
             "day_ymd INT UNSIGNED NOT NULL,"
             "attempt_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "best_floor SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY (account_id,role_id,day_ymd)) ENGINE=InnoDB"))
         return false;
+    /* Existing installs: add columns introduced after first ladder rollout. */
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_ladder_config ADD COLUMN "
+        "damage_scale_per_floor SMALLINT UNSIGNED NOT NULL DEFAULT 5 "
+        "AFTER def_per_floor");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_ladder_config ADD COLUMN "
+        "cast_skill TINYINT UNSIGNED NOT NULL DEFAULT 1 "
+        "AFTER damage_scale_per_floor");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_ladder_daily ADD COLUMN "
+        "best_floor SMALLINT UNSIGNED NOT NULL DEFAULT 0 "
+        "AFTER attempt_count");
     ready = true;
     return true;
 }
@@ -180,6 +194,7 @@ static void vm_mock_ladder_load_config(bool force)
         return;
     (void)vm_mock_ladder_ensure_tables();
     memset(&g_vm_mock_ladder_config, 0, sizeof(g_vm_mock_ladder_config));
+    g_vm_mock_ladder_config.enabled = 1;
     g_vm_mock_ladder_config.dailyLimit = 1;
     g_vm_mock_ladder_config.enemyIdTianji = 920001u;
     g_vm_mock_ladder_config.enemyIdHuanjian = 920002u;
@@ -194,24 +209,40 @@ static void vm_mock_ladder_load_config(bool force)
     g_vm_mock_ladder_config.damageScalePerFloor = 5;
     g_vm_mock_ladder_config.castSkill = 1;
     g_vm_mock_ladder_reward_count = 0;
-    (void)vm_mysql_query(
-        "SELECT enabled,daily_limit,enemy_id_tianji,enemy_id_huanjian,"
-        "enemy_id_guidao,base_hp,base_atk,base_def,base_mp,hp_per_floor,"
-        "atk_per_floor,def_per_floor,damage_scale_per_floor,cast_skill "
-        "FROM server_ladder_config WHERE id=1 LIMIT 1",
-        vm_mock_ladder_config_row, &g_vm_mock_ladder_config);
-    (void)vm_mysql_query(
-        "SELECT floor_milestone,reward_exp,reward_money,reward_item_id,"
-        "reward_item_count FROM server_ladder_rewards "
-        "ORDER BY floor_milestone",
-        vm_mock_ladder_reward_row, NULL);
-    g_vm_mock_ladder_config_loaded = true;
+    /*
+     * Do not mark loaded when MySQL is down / not ready yet — an early admin
+     * page hit or WT 44/1 before connect used to cache defaults for the whole
+     * process lifetime after restart.
+     */
+    if (vm_mysql_query(
+            "SELECT enabled,daily_limit,enemy_id_tianji,enemy_id_huanjian,"
+            "enemy_id_guidao,base_hp,base_atk,base_def,base_mp,hp_per_floor,"
+            "atk_per_floor,def_per_floor,damage_scale_per_floor,cast_skill "
+            "FROM server_ladder_config WHERE id=1 LIMIT 1",
+            vm_mock_ladder_config_row, &g_vm_mock_ladder_config))
+    {
+        (void)vm_mysql_query(
+            "SELECT floor_milestone,reward_exp,reward_money,reward_item_id,"
+            "reward_item_count FROM server_ladder_rewards "
+            "ORDER BY floor_milestone",
+            vm_mock_ladder_reward_row, NULL);
+        g_vm_mock_ladder_config_loaded = true;
+    }
 }
 
 const vm_mock_ladder_config *vm_net_mock_ladder_config_get(void)
 {
     vm_mock_ladder_load_config(false);
     return &g_vm_mock_ladder_config;
+}
+
+bool vm_mock_ladder_npc_offers(const char *npcName)
+{
+    vm_mock_ladder_load_config(false);
+    if (!g_vm_mock_ladder_config.enabled || npcName == NULL || npcName[0] == 0)
+        return false;
+    /* 天梯使者 */
+    return strstr(npcName, "\xcc\xec\xcc\xdd\xca\xb9\xd5\xdf") != NULL;
 }
 
 u32 vm_net_mock_ladder_reward_admin_count(void)
@@ -266,14 +297,16 @@ static u16 vm_mock_ladder_role_best_floor(vm_net_mock_role_state *role)
 {
     char accountHex[160];
     char query[320];
+    u32 dayYmd = vm_mock_ladder_day_ymd();
     u16 best = 0;
 
-    if (role == NULL || !vm_mock_ladder_account_hex(accountHex, sizeof(accountHex)))
+    if (role == NULL || dayYmd == 0 ||
+        !vm_mock_ladder_account_hex(accountHex, sizeof(accountHex)))
         return 0;
     snprintf(query, sizeof(query),
-             "SELECT best_floor FROM server_ladder_progress "
-             "WHERE account_id=UNHEX('%s') AND role_id=%u LIMIT 1",
-             accountHex, role->roleId);
+             "SELECT best_floor FROM server_ladder_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, role->roleId, dayYmd);
     (void)vm_mysql_query(query, vm_mock_ladder_u16_row, &best);
     return best;
 }
@@ -409,9 +442,6 @@ static u32 vm_net_mock_build_ladder_battle_response(u8 *out, u32 outCap)
         roleMaxMp);
     if (battleInfoLen == 0)
         return 0;
-    g_vm_net_mock_battle_enemy_id_current =
-        g_vm_mock_ladder_battle_enemy_ids[0];
-    g_mockBattleEnemyCountCurrent = VM_MOCK_LADDER_JOB_COUNT;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 10,
                                      &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "side", 1) ||
@@ -420,6 +450,14 @@ static u32 vm_net_mock_build_ladder_battle_response(u8 *out, u32 outCap)
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_battle_arm_subtype10_multi_pve_start(
+        roleId, roleHp, roleMaxHp, roleMp, roleMaxMp,
+        g_vm_mock_ladder_battle_enemy_ids[0], VM_MOCK_LADDER_JOB_COUNT,
+        g_vm_mock_ladder_battle_hp, g_vm_mock_ladder_battle_enemy_ids);
+    {
+        static const u8 ladderJobs[3] = {0, 1, 2}; /* 天机/幻剑/鬼道 */
+        vm_net_mock_battle_set_enemy_job_slots(ladderJobs, VM_MOCK_LADDER_JOB_COUNT);
+    }
     printf("[info][mock-service] ladder_battle_start floor=%u enemy=%u/%u/%u "
            "resp=%u\n",
            (u32)g_vm_mock_ladder_battle_floor,
@@ -456,6 +494,8 @@ static u32 vm_net_mock_build_ladder_status_response(u8 *out, u32 outCap)
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u16 best = vm_mock_ladder_role_best_floor(role);
     u16 used = vm_mock_ladder_role_daily_used(role);
+
+    vm_mock_ladder_load_config(false);
     u16 nextFloor = (u16)(best + 1u);
     u32 pos = 5;
     u32 objectStart = 0;
@@ -490,7 +530,7 @@ static u32 vm_net_mock_build_ladder_start_response(u8 *out, u32 outCap)
     u32 objectStart = 0;
     u8 result = 0;
     static const char tipDisabledGbk[] =
-        "\xcc\xec\xcc\xdd\xcc\xf8\xd5\xbd\xce\xb4\xbf\xaa\xc6\xf4"; /* 天梯挑战未开启 */
+        "\xcc\xec\xcc\xdd\xcc\xf4\xd5\xbd\xce\xb4\xbf\xaa\xc6\xf4"; /* 天梯挑战未开启 */
     static const char tipDailyGbk[] =
         "\xbd\xf1\xc8\xd5\xcc\xec\xcc\xdd\xb4\xce\xca\xfd\xd2\xd1\xd3\xc3\xcd\xea"; /* 今日天梯次数已用完 */
     const char *tip = tipDisabledGbk;
@@ -598,15 +638,15 @@ void vm_mock_ladder_on_battle_end(bool victory)
     {
         char accountHex[160];
         char query[512];
+        u32 dayYmd = vm_mock_ladder_day_ymd();
 
-        if (vm_mock_ladder_account_hex(accountHex, sizeof(accountHex)))
+        if (dayYmd != 0 &&
+            vm_mock_ladder_account_hex(accountHex, sizeof(accountHex)))
         {
             snprintf(query, sizeof(query),
-                     "INSERT INTO server_ladder_progress "
-                     "(account_id,role_id,best_floor) VALUES "
-                     "(UNHEX('%s'),%u,%u) "
-                     "ON DUPLICATE KEY UPDATE best_floor=GREATEST(best_floor,%u)",
-                     accountHex, role->roleId, (u32)floor, (u32)floor);
+                     "UPDATE server_ladder_daily SET best_floor=GREATEST(best_floor,%u) "
+                     "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u",
+                     (u32)floor, accountHex, role->roleId, dayYmd);
             (void)vm_mysql_exec(query);
         }
     }

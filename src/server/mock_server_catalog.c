@@ -2400,6 +2400,20 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     }
 }
 
+/* NPC 药品商人货架：仅 HP/MP 恢复类（对齐 Pixi battle 药品过滤），
+ * 排除类别 10 中的经验卡、喇叭、钥匙等非药品消耗品。 */
+static bool vm_net_mock_item_is_npc_medicine(u32 itemId)
+{
+    const vm_net_mock_item_effect_catalog_item *item;
+
+    if (vm_net_mock_item_requires_special_use_protocol(itemId))
+        return false;
+    item = vm_net_mock_find_item_effect_catalog_item(itemId);
+    if (item == NULL || item->category != 10)
+        return false;
+    return item->hp != 0 || item->mp != 0;
+}
+
 static bool vm_net_mock_item_effect_is_usable(const vm_net_mock_item_effect_catalog_item *item)
 {
     if (item == NULL)

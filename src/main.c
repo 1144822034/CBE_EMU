@@ -596,13 +596,15 @@ static u32 g_mockBattleRoleHpMax = 0;
 static u32 g_mockBattleRoleMpCurrent = 0;
 static u32 g_mockBattleRoleMpMax = 0;
 static u8 g_mockBattleEnemyCountCurrent = 1;
+static u32 g_mockBattleEnemyIdSlots[3] = {0, 0, 0};
+/* 0=天机 1=幻剑 2=鬼道; 0xff=unknown (shared offensive pool). */
+static u8 g_mockBattleEnemyJobSlots[3] = {0xff, 0xff, 0xff};
 static u32 g_mockBattleEnemyHpSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpMaxSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpCurrent = 0;
 static u32 g_mockBattleEnemyHpMax = 0;
-/* Set to g_mockBattleOperateSessionSerial when the monster self-heals.
- * Same de-dupe pattern as rewarded/settlement serials; captured per account. */
-static u32 g_mockBattleMonsterHealUsedSerial = 0;
+/* Per-slot: set to OperateSessionSerial when that monster self-heals once. */
+static u32 g_mockBattleMonsterHealUsedSerialSlots[3] = {0, 0, 0};
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static bool vm_host_file_exists(const char *path);

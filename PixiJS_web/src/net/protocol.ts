@@ -32,6 +32,9 @@ export type NpcActor = {
   actorId: number;
   x: number;
   y: number;
+  /** SCE home tile when `x/y` are patrol feet (world-boss claim / 4/1). */
+  homeX?: number;
+  homeY?: number;
   name: string;
   actorResource: string;
   scriptName: string;

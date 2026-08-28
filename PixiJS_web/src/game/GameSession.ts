@@ -311,6 +311,25 @@ import {
   type GuessOpResult,
   type GuessStatus,
 } from "../net/protocolGuess";
+import {
+  activityMsgTip,
+  buildActivitiesStatusRequest,
+  buildFestivalExchangeRequest,
+  buildRingAcceptRequest,
+  buildRingClaimDailyRequest,
+  buildRingStatusRequest,
+  buildRingSubmitRequest,
+  buildYanmenExchangeRequest,
+  buildYanmenListRequest,
+  parseActivitiesStatus,
+  parseActivityOp,
+  parseRingStatus,
+  parseYanmenList,
+  type ActivitiesStatus,
+  type ActivityOpResult,
+  type RingStatus,
+  type YanmenExchangeRow,
+} from "../net/protocolActivities";
 import { decodeWtPacket, type WtPacket } from "../net/wt";
 import {
   type BagItem,
@@ -1640,8 +1659,8 @@ export class GameSession {
       if (encounter) {
         id = encounter.battleActorId ?? encounter.actorId;
         index = id;
-        battleX = encounter.x | 0;
-        battleY = encounter.y | 0;
+        battleX = (encounter.homeX ?? encounter.x) | 0;
+        battleY = (encounter.homeY ?? encounter.y) | 0;
       }
     } else if (id >= 0x70000000) {
       const local = this.sceneMonsters.find((n) => n.actorId === id);
@@ -1649,8 +1668,8 @@ export class GameSession {
       id = local?.battleActorId ?? id;
       index = id;
       if (local) {
-        battleX = local.x | 0;
-        battleY = local.y | 0;
+        battleX = (local.homeX ?? local.x) | 0;
+        battleY = (local.homeY ?? local.y) | 0;
       }
     } else {
       // Catalog / challenge_enemy_id: keep id + catalog actor. Do not borrow
@@ -1661,8 +1680,8 @@ export class GameSession {
       );
       if (local) {
         encounter = local;
-        battleX = local.x | 0;
-        battleY = local.y | 0;
+        battleX = (local.homeX ?? local.x) | 0;
+        battleY = (local.homeY ?? local.y) | 0;
         index = local.battleActorId ?? id;
       } else {
         encounter = null;
@@ -2516,6 +2535,132 @@ export class GameSession {
     for (const body of bodies) {
       try {
         const r = parseGuessOpResult(decodeWtPacket(body), 4);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fetchActivitiesStatus(): Promise<ActivitiesStatus | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildActivitiesStatusRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const st = parseActivitiesStatus(decodeWtPacket(body));
+        if (st) return st;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async festivalExchange(exchangeId: number): Promise<ActivityOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildFestivalExchangeRequest(exchangeId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseActivityOp(decodeWtPacket(body), 46, 2);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fetchYanmenExchangeList(): Promise<YanmenExchangeRow[]> {
+    if (!this.transport) return [];
+    const bodies = await this.transport.exchange(0, buildYanmenListRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const rows = parseYanmenList(decodeWtPacket(body));
+        if (rows.length) return rows;
+      } catch {
+        /* ignore */
+      }
+    }
+    return [];
+  }
+
+  async yanmenExchange(exchangeId: number): Promise<ActivityOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildYanmenExchangeRequest(exchangeId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseActivityOp(decodeWtPacket(body), 46, 4);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fetchRingStatus(): Promise<RingStatus | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildRingStatusRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const st = parseRingStatus(decodeWtPacket(body));
+        if (st) return st;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async ringAccept(): Promise<RingStatus | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildRingAcceptRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const st = parseRingStatus(decodeWtPacket(body));
+        if (st) return st;
+      } catch {
+        /* ignore */
+      }
+    }
+    return this.fetchRingStatus();
+  }
+
+  async ringSubmit(): Promise<ActivityOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildRingSubmitRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseActivityOp(decodeWtPacket(body), 47, 3);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async ringClaimDaily(): Promise<ActivityOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildRingClaimDailyRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseActivityOp(decodeWtPacket(body), 47, 4);
         if (r) return r;
       } catch {
         /* ignore */

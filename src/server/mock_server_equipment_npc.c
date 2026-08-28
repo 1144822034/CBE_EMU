@@ -2496,6 +2496,62 @@ static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart)
     return (u8)(minCount + (vm_net_mock_battle_reward_rand() % (maxCount - minCount + 1)));
 }
 
+static u32 vm_net_mock_battle_enemy_id_for_index(u8 enemyIndex)
+{
+    if (enemyIndex < 3 && g_mockBattleEnemyIdSlots[enemyIndex] != 0)
+        return g_mockBattleEnemyIdSlots[enemyIndex];
+    return g_vm_net_mock_battle_enemy_id_current;
+}
+
+static void vm_net_mock_battle_reset_enemy_id_slots(u32 primaryEnemyId, u8 enemyCount)
+{
+    for (u8 i = 0; i < 3; ++i)
+    {
+        if (i < enemyCount && primaryEnemyId != 0)
+            g_mockBattleEnemyIdSlots[i] = primaryEnemyId;
+        else
+            g_mockBattleEnemyIdSlots[i] = 0;
+        g_mockBattleEnemyJobSlots[i] = 0xff;
+    }
+}
+
+static void vm_net_mock_battle_set_enemy_id_slots(const u32 enemyIdsBySlot[3],
+                                                  u8 enemyCount)
+{
+    u32 fallback = g_vm_net_mock_battle_enemy_id_current;
+
+    for (u8 i = 0; i < 3; ++i)
+    {
+        if (i >= enemyCount)
+            g_mockBattleEnemyIdSlots[i] = 0;
+        else if (enemyIdsBySlot != NULL && enemyIdsBySlot[i] != 0)
+            g_mockBattleEnemyIdSlots[i] = enemyIdsBySlot[i];
+        else if (fallback != 0)
+            g_mockBattleEnemyIdSlots[i] = fallback;
+        else
+            g_mockBattleEnemyIdSlots[i] = 0;
+    }
+}
+
+static void vm_net_mock_battle_set_enemy_job_slots(const u8 jobsBySlot[3],
+                                                   u8 enemyCount)
+{
+    for (u8 i = 0; i < 3; ++i)
+    {
+        if (i < enemyCount && jobsBySlot != NULL && jobsBySlot[i] <= 2)
+            g_mockBattleEnemyJobSlots[i] = jobsBySlot[i];
+        else
+            g_mockBattleEnemyJobSlots[i] = 0xff;
+    }
+}
+
+static u8 vm_net_mock_battle_enemy_job_for_index(u8 enemyIndex)
+{
+    if (enemyIndex < 3)
+        return g_mockBattleEnemyJobSlots[enemyIndex];
+    return 0xff;
+}
+
 static void vm_net_mock_battle_reset_enemy_hp_from_stats(u32 enemyId)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
@@ -2518,7 +2574,109 @@ static void vm_net_mock_battle_reset_enemy_hp_from_stats(u32 enemyId)
             g_mockBattleEnemyHpMaxSlots[i] = 0;
         }
     }
+    vm_net_mock_battle_reset_enemy_id_slots(enemyId, enemyCount);
     vm_net_mock_battle_sync_enemy_hp_totals();
+}
+
+static void vm_net_mock_battle_reset_enemy_hp_from_slot_values(
+    const u32 hpBySlot[3], u8 enemyCount)
+{
+    for (u8 i = 0; i < 3; ++i)
+    {
+        if (i < enemyCount)
+        {
+            u32 hp = hpBySlot[i] != 0 ? hpBySlot[i] : 1u;
+
+            g_mockBattleEnemyHpSlots[i] = hp;
+            g_mockBattleEnemyHpMaxSlots[i] = hp;
+        }
+        else
+        {
+            g_mockBattleEnemyHpSlots[i] = 0;
+            g_mockBattleEnemyHpMaxSlots[i] = 0;
+        }
+    }
+    vm_net_mock_battle_reset_enemy_id_slots(g_vm_net_mock_battle_enemy_id_current,
+                                            enemyCount);
+    vm_net_mock_battle_sync_enemy_hp_totals();
+}
+
+/*
+ * Subtype-10 multi-monster solo PvE (ladder / insight triple).  Mirrors the
+ * hangup battle-start server snapshot so the next 4/2 bundles monster counters.
+ */
+static void vm_net_mock_battle_arm_subtype10_multi_pve_start(
+    u32 roleId, u32 roleHp, u32 roleMaxHp, u32 roleMp, u32 roleMaxMp,
+    u32 primaryEnemyId, u8 enemyCount, const u32 enemyHpBySlot[3],
+    const u32 enemyIdsBySlot[3])
+{
+    if (enemyCount < 1)
+        enemyCount = 1;
+    if (enemyCount > 3)
+        enemyCount = 3;
+
+    g_mockBattleOperateSessionArmed = 1;
+    g_mockBattleOperateSessionFinished = 0;
+    g_mockBattlePendingEnemyTurn = 0;
+    g_mockBattleAwaitingSettlement = 0;
+    g_mockBattleSettlementExitPending = 0;
+    g_mockBattleSettlementExitNotBeforeMs = 0;
+    g_mockBattlePostExitSettlePending = 0;
+    g_mockBattlePostExitSettleNotBeforeMs = 0;
+    g_mockBattleSceneMonsterStartActive = 0;
+    g_mockBattleStartUsesSceneWireMaps = 0;
+    g_mockBattleEnemyCountCurrent = enemyCount;
+    g_mockBattleOperateTurnCounter = 0;
+    memset(&g_vm_net_mock_battle_solo_modifier, 0,
+           sizeof(g_vm_net_mock_battle_solo_modifier));
+    memset(&g_vm_net_mock_battle_active_modifier_current, 0,
+           sizeof(g_vm_net_mock_battle_active_modifier_current));
+    memset(g_mockBattleEnemyAilments, 0, sizeof(g_mockBattleEnemyAilments));
+    g_vm_net_mock_battle_formula_enemy_index = 0xff;
+    ++g_mockBattleOperateSessionSerial;
+    g_mockBattleLastIndex = 0;
+    g_vm_net_mock_battle_rewarded_serial = 0;
+    g_vm_net_mock_battle_rewarded_exp = 0;
+    memset(g_vm_net_mock_battle_rewarded_drops, 0,
+           sizeof(g_vm_net_mock_battle_rewarded_drops));
+    g_vm_net_mock_battle_rewarded_drop_result_count = 0;
+    g_vm_net_mock_battle_settlement_sent_serial = 0;
+    g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
+    g_vm_net_mock_battle_recovered_serial = 0;
+    g_mockBattleSettleWireRecoverHp = 0;
+    g_mockBattleSettleWireRecoverMp = 0;
+    g_vm_net_mock_battle_role_id_current = roleId;
+    g_vm_net_mock_battle_enemy_id_current = primaryEnemyId;
+    g_mockBattleRoleHpCurrent = roleHp;
+    g_mockBattleRoleHpMax = roleMaxHp;
+    if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
+        g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
+    g_mockBattleRoleMpCurrent = roleMp;
+    g_mockBattleRoleMpMax = roleMaxMp;
+    if (g_mockBattleRoleMpMax < g_mockBattleRoleMpCurrent)
+        g_mockBattleRoleMpMax = g_mockBattleRoleMpCurrent;
+    g_mockBattleMonsterHealUsedSerialSlots[0] = 0;
+    g_mockBattleMonsterHealUsedSerialSlots[1] = 0;
+    g_mockBattleMonsterHealUsedSerialSlots[2] = 0;
+    g_vm_net_mock_team_battle_party_count_current = 0;
+    g_vm_net_mock_team_battle_member_count_current = 0;
+    g_vm_net_mock_team_battle_resolve_monsters_current = 0;
+    vm_net_mock_battle_reset_enemy_hp_from_slot_values(enemyHpBySlot, enemyCount);
+    vm_net_mock_battle_set_enemy_id_slots(enemyIdsBySlot, enemyCount);
+    g_mockBattleAutoSuppressNext12 = 0;
+    g_mockBattleAutoClientDriven = 0;
+    g_mockBattleAutoFlagPendingArmed = 0;
+    g_mockBattleAutoFlagPendingNotBeforeMs = 0;
+    g_mockBattleAutoHangupStyleFlagOk = 0;
+    vm_net_mock_hangup_loop_clear("ladder-battle-start");
+    printf("[info][network] mock_ladder_battle_arm role=%u enemy=%u count=%u "
+           "slots=%u/%u/%u rolehp=%u/%u armed=1 "
+           "evidence=subtype10-operate-session\n",
+           roleId, primaryEnemyId, enemyCount,
+           g_mockBattleEnemyHpSlots[0],
+           g_mockBattleEnemyHpSlots[1],
+           g_mockBattleEnemyHpSlots[2],
+           g_mockBattleRoleHpCurrent, g_mockBattleRoleHpMax);
 }
 
 /*
@@ -2536,11 +2694,11 @@ static void vm_net_mock_battle_ensure_multi_enemy_slots_seeded(u32 enemyId)
 
     if (enemyCount <= 1)
         return;
-    if (g_mockBattleEnemyCountCurrent > 1)
-    {
-        g_mockBattleSceneMonsterStartActive = 1;
-        g_mockBattleStartUsesSceneWireMaps = 1;
-    }
+    /*
+     * Wire maps are owned by battle-start (subtype-5 vs subtype-10).  Do not
+     * infer scene maps from enemy count — hangup insight forces enemies=3 on
+     * subtype-10 (player wire 0, monsters 1..N).
+     */
 
     stats = vm_net_mock_monster_stats_for_enemy(enemyId);
     perEnemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
@@ -2558,6 +2716,8 @@ static void vm_net_mock_battle_ensure_multi_enemy_slots_seeded(u32 enemyId)
             continue;
         g_mockBattleEnemyHpSlots[i] = perEnemyHp;
         g_mockBattleEnemyHpMaxSlots[i] = perEnemyMaxHp;
+        if (g_mockBattleEnemyIdSlots[i] == 0)
+            g_mockBattleEnemyIdSlots[i] = enemyId;
         ++filled;
     }
     if (filled != 0)
@@ -3746,7 +3906,7 @@ typedef struct vm_mock_service_account_state
     u16 pendingSceneSaveY;
 
     u32 mockBattleOperateSessionSerial;
-    u32 mockBattleMonsterHealUsedSerial;
+    u32 mockBattleMonsterHealUsedSerialSlots[3];
     u32 mockBattleOperateTurnCounter;
     u8 mockBattleOperateSessionArmed;
     u8 mockBattleAwaitsRevivalConfirm;
@@ -3788,6 +3948,8 @@ typedef struct vm_mock_service_account_state
     u32 mockBattleRoleMpCurrent;
     u32 mockBattleRoleMpMax;
     u8 mockBattleEnemyCountCurrent;
+    u32 mockBattleEnemyIdSlots[3];
+    u8 mockBattleEnemyJobSlots[3];
     u32 mockBattleEnemyHpSlots[3];
     u32 mockBattleEnemyHpMaxSlots[3];
     u32 mockBattleEnemyHpCurrent;
@@ -5064,7 +5226,9 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->pendingSceneSaveY = g_vm_net_mock_pending_scene_save_y;
 
     state->mockBattleOperateSessionSerial = g_mockBattleOperateSessionSerial;
-    state->mockBattleMonsterHealUsedSerial = g_mockBattleMonsterHealUsedSerial;
+    memcpy(state->mockBattleMonsterHealUsedSerialSlots,
+           g_mockBattleMonsterHealUsedSerialSlots,
+           sizeof(state->mockBattleMonsterHealUsedSerialSlots));
     state->mockBattleOperateTurnCounter = g_mockBattleOperateTurnCounter;
     state->mockBattleOperateSessionArmed = g_mockBattleOperateSessionArmed;
     state->mockBattleAwaitsRevivalConfirm = g_mockBattleAwaitsRevivalConfirm;
@@ -5125,6 +5289,10 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->mockBattleRoleMpCurrent = g_mockBattleRoleMpCurrent;
     state->mockBattleRoleMpMax = g_mockBattleRoleMpMax;
     state->mockBattleEnemyCountCurrent = g_mockBattleEnemyCountCurrent;
+    memcpy(state->mockBattleEnemyIdSlots, g_mockBattleEnemyIdSlots,
+           sizeof(state->mockBattleEnemyIdSlots));
+    memcpy(state->mockBattleEnemyJobSlots, g_mockBattleEnemyJobSlots,
+           sizeof(state->mockBattleEnemyJobSlots));
     memcpy(state->mockBattleEnemyHpSlots, g_mockBattleEnemyHpSlots, sizeof(state->mockBattleEnemyHpSlots));
     memcpy(state->mockBattleEnemyHpMaxSlots, g_mockBattleEnemyHpMaxSlots, sizeof(state->mockBattleEnemyHpMaxSlots));
     state->mockBattleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
@@ -5292,7 +5460,9 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
      */
     if (state == g_vm_mock_service_globals_account &&
         state->roleDbLoaded &&
+        state->roleDbValid &&
         g_vm_net_mock_role_db_loaded &&
+        g_vm_net_mock_role_db_valid &&
         g_vm_mock_service_active_account_id != NULL &&
         strcmp(g_vm_mock_service_active_account_id, state->accountId) == 0)
     {
@@ -5334,7 +5504,9 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_pending_scene_save_y = state->pendingSceneSaveY;
 
     g_mockBattleOperateSessionSerial = state->mockBattleOperateSessionSerial;
-    g_mockBattleMonsterHealUsedSerial = state->mockBattleMonsterHealUsedSerial;
+    memcpy(g_mockBattleMonsterHealUsedSerialSlots,
+           state->mockBattleMonsterHealUsedSerialSlots,
+           sizeof(g_mockBattleMonsterHealUsedSerialSlots));
     g_mockBattleOperateTurnCounter = state->mockBattleOperateTurnCounter;
     g_mockBattleOperateSessionArmed = state->mockBattleOperateSessionArmed;
     g_mockBattleAwaitsRevivalConfirm = state->mockBattleAwaitsRevivalConfirm;
@@ -5369,6 +5541,10 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_mockBattleRoleMpCurrent = state->mockBattleRoleMpCurrent;
     g_mockBattleRoleMpMax = state->mockBattleRoleMpMax;
     g_mockBattleEnemyCountCurrent = state->mockBattleEnemyCountCurrent;
+    memcpy(g_mockBattleEnemyIdSlots, state->mockBattleEnemyIdSlots,
+           sizeof(g_mockBattleEnemyIdSlots));
+    memcpy(g_mockBattleEnemyJobSlots, state->mockBattleEnemyJobSlots,
+           sizeof(g_mockBattleEnemyJobSlots));
     memcpy(g_mockBattleEnemyHpSlots, state->mockBattleEnemyHpSlots, sizeof(g_mockBattleEnemyHpSlots));
     memcpy(g_mockBattleEnemyHpMaxSlots, state->mockBattleEnemyHpMaxSlots, sizeof(g_mockBattleEnemyHpMaxSlots));
     g_mockBattleEnemyHpCurrent = state->mockBattleEnemyHpCurrent;

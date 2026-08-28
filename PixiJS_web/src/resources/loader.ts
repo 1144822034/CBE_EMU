@@ -137,6 +137,19 @@ export function invalidateResourceCache(name?: string): void {
   if (!name) sceneComposeCache.clear();
 }
 
+/** Drop composed scene shells so the next loadSceneMap re-parses SCE (world boss). */
+export function invalidateSceneComposeCache(sceneFile?: string): void {
+  if (!sceneFile) {
+    sceneComposeCache.clear();
+    return;
+  }
+  for (const alias of [sceneFile, ...sceneAssetCandidates(sceneFile)]) {
+    sceneComposeCache.delete(sceneComposeKey(alias));
+    cache.delete(alias);
+    if (!alias.toLowerCase().endsWith(".sce")) cache.delete(`${alias}.sce`);
+  }
+}
+
 function cachePut(
   name: string,
   bytes: Uint8Array,
@@ -366,7 +379,12 @@ function sceneComposeKey(sceneFile: string): string {
   return sceneFile.replace(/\\/g, "/").toLowerCase();
 }
 
-export async function loadSceneMap(sceneFile: string): Promise<LoadedScene> {
+export async function loadSceneMap(
+  sceneFile: string,
+  opts?: { forceReload?: boolean },
+): Promise<LoadedScene> {
+  if (opts?.forceReload) invalidateSceneComposeCache(sceneFile);
+
   for (const alias of [sceneFile, ...sceneAssetCandidates(sceneFile)]) {
     const hit = sceneComposeCache.get(sceneComposeKey(alias));
     if (hit) {

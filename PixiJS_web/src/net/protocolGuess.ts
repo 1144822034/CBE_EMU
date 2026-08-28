@@ -114,6 +114,29 @@ export function formatGuessDice(d1: number, d2: number, d3: number): string {
   return `${d1},${d2},${d3}`;
 }
 
+/** 三骰开奖对应 大/小/单/双/豹子（与服务端判定一致）. */
+export function guessDiceOutcomeHints(d1: number, d2: number, d3: number): string {
+  const a = d1 >>> 0;
+  const b = d2 >>> 0;
+  const c = d3 >>> 0;
+  if (!a && !b && !c) return "";
+  if (a === b && b === c) return "豹子";
+  const sum = a + b + c;
+  const tags: string[] = [];
+  if (sum >= 11 && sum <= 17) tags.push("大");
+  else if (sum >= 4 && sum <= 10) tags.push("小");
+  if ((sum & 1) !== 0) tags.push("单");
+  else tags.push("双");
+  return tags.join("");
+}
+
+export function formatGuessDiceWithHints(d1: number, d2: number, d3: number): string {
+  if (!d1 && !d2 && !d3) return "待开";
+  const dice = formatGuessDice(d1, d2, d3);
+  const hints = guessDiceOutcomeHints(d1, d2, d3);
+  return hints ? `${dice}(${hints})` : dice;
+}
+
 export function buildGuessStatusRequest(): Uint8Array {
   const b = new WtBuilder();
   b.object(1, GUESS_WT_KIND, 1);

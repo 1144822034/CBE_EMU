@@ -1663,7 +1663,7 @@ static bool vm_net_mock_build_configured_resource_path(const char *name,
 enum
 {
     VM_NET_MOCK_UPDATE_SLOT_COUNT = 4,
-    VM_NET_MOCK_UPDATE_NAMED_MAX = 128,
+    VM_NET_MOCK_UPDATE_NAMED_MAX = 256,
     VM_NET_MOCK_UPDATE_DELIVERY_MAX = 256,
     VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX = 64,
     VM_NET_MOCK_UPDATE_PAYLOAD_MAX = 1024 * 1024
@@ -2222,6 +2222,32 @@ vm_net_mock_update_find_named(const char *name)
     return NULL;
 }
 
+static vm_net_mock_update_named_config *
+vm_net_mock_update_find_named_for_request(const char *name)
+{
+    static const char *kSuffixes[] = {".sce", ".map", ".actor", ".gif"};
+    vm_net_mock_update_named_config *row = NULL;
+    char extended[320];
+    u32 i = 0;
+
+    row = vm_net_mock_update_find_named(name);
+    if (row != NULL || name == NULL || name[0] == 0 || strchr(name, '.') != NULL)
+        return row;
+
+    for (i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); ++i)
+    {
+        if (snprintf(extended, sizeof(extended), "%s%s", name, kSuffixes[i]) >=
+            (int)sizeof(extended))
+            continue;
+        if (!vm_net_mock_update_name_is_safe(extended))
+            continue;
+        row = vm_net_mock_update_find_named(extended);
+        if (row != NULL)
+            return row;
+    }
+    return NULL;
+}
+
 static bool vm_net_mock_update_admin_save_slot(u8 slot, u16 version,
                                                bool enabled,
                                                const char **errorOut)
@@ -2661,7 +2687,7 @@ static bool vm_net_mock_update_admin_publish_named_files(
             return false;
         }
         ++uniqueCount;
-        if (vm_net_mock_update_find_named(names[i]) == NULL)
+        if (vm_net_mock_update_find_named_for_request(names[i]) == NULL)
             ++missingRows;
     }
     if (g_vm_net_mock_update_named_count + missingRows >
@@ -2669,6 +2695,10 @@ static bool vm_net_mock_update_admin_publish_named_files(
     {
         if (errorOut)
             *errorOut = "具名资源发布项已达到上限";
+        printf("[warn][mock-admin] named_resource_batch_publish_limit "
+               "catalog_rows=%u missing_rows=%u batch=%u max=%u\n",
+               g_vm_net_mock_update_named_count, missingRows, uniqueCount,
+               (u32)VM_NET_MOCK_UPDATE_NAMED_MAX);
         return false;
     }
 
@@ -2690,7 +2720,7 @@ static bool vm_net_mock_update_admin_publish_named_files(
         }
         if (duplicate)
             continue;
-        row = vm_net_mock_update_find_named(names[i]);
+        row = vm_net_mock_update_find_named_for_request(names[i]);
         if (row == NULL)
         {
             row = &g_vm_net_mock_update_named[g_vm_net_mock_update_named_count++];
@@ -3270,32 +3300,6 @@ static u32 vm_net_mock_load_named_update_payload_exact(
     }
 
     return 0;
-}
-
-static vm_net_mock_update_named_config *
-vm_net_mock_update_find_named_for_request(const char *name)
-{
-    static const char *kSuffixes[] = {".sce", ".map", ".actor", ".gif"};
-    vm_net_mock_update_named_config *row = NULL;
-    char extended[320];
-    u32 i = 0;
-
-    row = vm_net_mock_update_find_named(name);
-    if (row != NULL || name == NULL || name[0] == 0 || strchr(name, '.') != NULL)
-        return row;
-
-    for (i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); ++i)
-    {
-        if (snprintf(extended, sizeof(extended), "%s%s", name, kSuffixes[i]) >=
-            (int)sizeof(extended))
-            continue;
-        if (!vm_net_mock_update_name_is_safe(extended))
-            continue;
-        row = vm_net_mock_update_find_named(extended);
-        if (row != NULL)
-            return row;
-    }
-    return NULL;
 }
 
 static u32 vm_net_mock_load_named_update_payload(const char *payloadName,
@@ -4861,6 +4865,11 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER               0xf6000004u
 /* 南宣门月老：缔结姻缘（亲密度>=3000 且同场景未婚好友）. */
 #define VM_NET_MOCK_NPC_SERVICE_MARRY                    0xf6000005u
+/* Pixi 节日使者 / 关隘使者 / 跑环使者 */
+#define VM_NET_MOCK_NPC_SERVICE_FESTIVAL_EXCHANGE        0xf7000001u
+#define VM_NET_MOCK_NPC_SERVICE_YANMEN_EXCHANGE          0xf7000002u
+#define VM_NET_MOCK_NPC_SERVICE_RING_QUEST               0xf7000003u
+#define VM_NET_MOCK_NPC_SERVICE_LADDER_CHALLENGE         0xf7000004u
 #define VM_NET_MOCK_MARRY_MIN_DEGREE                     3000u
 #define VM_NET_MOCK_YUELAO_ACTOR_ID                      20093u
 /* ParseNPCDialogData main-text paint uses #0xc8 including NUL. */

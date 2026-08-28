@@ -10,13 +10,13 @@ let visible = readVisible();
 
 function readVisible(): boolean {
   try {
-    if (typeof localStorage === "undefined") return true;
+    if (typeof localStorage === "undefined") return false;
     const v = localStorage.getItem(LS_KEY);
-    // Default on; only explicit "0" hides.
-    if (v === null) return true;
+    // Default off; only explicit "1" shows.
+    if (v === null) return false;
     return v !== "0";
   } catch {
-    return true;
+    return false;
   }
 }
 

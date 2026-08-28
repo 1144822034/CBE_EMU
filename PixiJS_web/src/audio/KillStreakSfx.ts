@@ -46,6 +46,12 @@ let currentSource: AudioBufferSourceNode | null = null;
 let htmlPlayer: HTMLAudioElement | null = null;
 let pendingTitle: string | null = null;
 let unlocked = false;
+/** HTML autoplay unlock — must not replay kill-streak clips on every gesture. */
+let gestureUnlockDone = false;
+
+/** Minimal silent WAV for HTML autoplay unlock only (never a streak VO clip). */
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
 
 function uniqueUrls(): string[] {
   return [...new Set(Object.values(TITLE_TO_URL))];
@@ -227,37 +233,54 @@ export function preloadKillStreakSfx(): void {
   ensureHtmlPlayer();
 }
 
+function flushPendingKillStreakTitle(): void {
+  if (!pendingTitle) return;
+  const t = pendingTitle;
+  pendingTitle = null;
+  playKillStreakTitle(t);
+}
+
 /**
  * Satisfy autoplay policy. Must be invoked from a real user gesture.
  * Flushes a title that arrived before unlock.
  */
 export function unlockKillStreakSfx(): void {
   kickResume();
+  if (gestureUnlockDone) {
+    unlocked = true;
+    flushPendingKillStreakTitle();
+    return;
+  }
+  gestureUnlockDone = true;
+
   const a = ensureHtmlPlayer();
-  /* Mute-unlock one element; Web Audio path uses AudioContext.resume above. */
+  /* One-shot silent HTML unlock; Web Audio uses AudioContext.resume above. */
   try {
-    const first = uniqueUrls()[0];
-    if (first && !a.src) a.src = first;
     const prev = a.volume;
     a.volume = 0.001;
+    a.src = SILENT_WAV;
     void a
       .play()
       .then(() => {
         a.pause();
-        a.currentTime = 0;
+        try {
+          a.currentTime = 0;
+        } catch {
+          /* ignore */
+        }
         a.volume = prev;
+        a.removeAttribute("src");
+        unlocked = true;
+        flushPendingKillStreakTitle();
       })
       .catch(() => {
         a.volume = prev;
+        unlocked = true;
+        flushPendingKillStreakTitle();
       });
   } catch {
-    /* ignore */
-  }
-  unlocked = true;
-  if (pendingTitle) {
-    const t = pendingTitle;
-    pendingTitle = null;
-    playKillStreakTitle(t);
+    unlocked = true;
+    flushPendingKillStreakTitle();
   }
 }
 

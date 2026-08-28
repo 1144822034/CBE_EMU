@@ -577,11 +577,13 @@ export class BattleScreen extends Container {
   }
 
   /**
-   * Spar 4/10 left uses sexGroup 1..2; PvE subtype-10 fallback is visual0=0.
-   * Flee is not offered in friendly spar.
+   * Spar 4/10 left uses sexGroup 1..2 on a single opponent seat.
+   * PvE subtype-10 (hangup/ladder) may reuse sexGroup bytes for jobIndex
+   * display but has multiple left seats — must not skip the death prompt.
    */
   isSparBattle(): boolean {
     if (!this.state || this.state.subtype !== 10) return false;
+    if (this.state.left.length !== 1) return false;
     const g = this.state.left[0]?.visual0 ?? 0;
     return g >= 1 && g <= 2;
   }
@@ -614,7 +616,7 @@ export class BattleScreen extends Container {
 
   softkeyLeftLabel(): string {
     if (this.awaitingDeathPrompt) {
-      return this.deathPromptHasStone ? "复活石" : "商城";
+      return "确定";
     }
     if (this.awaitingExit) return "继续";
     if (this.hangupActive || this.autoActive) return "";
@@ -760,6 +762,31 @@ export class BattleScreen extends Container {
       this.playbackBusy = false;
       // Ensure final teaminfo MP landed (HP stays on actioninfo deltas only).
       this.applyRightTeaminfo(up.rightHp, /* mpOnly */ true);
+      if (deferVitals) {
+        /* Death rounds attach teaminfo hp=0; actioninfo deltas alone may leave
+         * the local seat alive so beginDeathPrompt never fires. */
+        const local = this.localPlayerSide();
+        if (local) {
+          const tip = up.rightHp.find((h) => h.id === local.id);
+          if (tip?.hp === 0) {
+            local.hp = 0;
+            const view = this.units.find((u) => u.side === local);
+            if (view) view.dead = true;
+          }
+        }
+      }
+      if (deferVitals && !this.isLocalPlayerDead()) {
+        const selfW = this.selfWire();
+        const playerDeathRec = up.actions?.some(
+          (a) => (a.type === 3 || a.type === 4) && a.actorWire === selfW,
+        );
+        if (playerDeathRec) {
+          const local = this.localPlayerSide();
+          if (local) local.hp = 0;
+          const view = this.unitForWire(selfW);
+          if (view) view.dead = true;
+        }
+      }
       if (up.settlement) {
         // 4/7.hp/mp are recovery deltas (flask / settle recover). Apply onto
         // the local seat so world HUD matches post-settle durable vitals.
@@ -1937,7 +1964,13 @@ export class BattleScreen extends Container {
 
   /** Bag may include 801 复活石 (not in battle medicine list). */
   setDeathPromptBag(hasRevivalStone: boolean): void {
+    const hadStone = this.deathPromptHasStone;
     this.deathPromptHasStone = hasRevivalStone;
+    if (this.awaitingDeathPrompt && hasRevivalStone && !hadStone) {
+      this.deathPromptCursor = 0;
+    } else if (this.awaitingDeathPrompt && !hasRevivalStone && hadStone) {
+      this.deathPromptCursor = 1;
+    }
     if (this.awaitingDeathPrompt) this.paintDeathPrompt();
   }
 
@@ -1946,7 +1979,8 @@ export class BattleScreen extends Container {
     this.deathPromptBusy = false;
     this.menuOpen = false;
     this.autoActive = false;
-    this.deathPromptCursor = 0;
+    /* No 801: default to 普通复活 — left softkey/确定 must not open mall. */
+    this.deathPromptCursor = this.deathPromptHasStone ? 0 : 1;
     this.paintDeathPrompt();
     this.refreshAutoBannerVisibility();
     void this.log.setText("你已经死亡", CBE.inkTip, {
@@ -1965,6 +1999,7 @@ export class BattleScreen extends Container {
     this.settlePaintGen += 1;
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    clearPointerHits(this.rowHits);
     const opts = this.deathPromptOptions();
     const h = 80 + opts.length * 18;
     const box = new Graphics();
@@ -1974,11 +2009,11 @@ export class BattleScreen extends Container {
       "你已经死亡",
       this.deathPromptHasStone
         ? "可使用复活石原地满血（无惩罚）"
-        : "无复活石 · 商城购买后可原地复活",
+        : "无复活石 · 可选商城购买或普通",
       ...opts.map((o, i) => `${i === this.deathPromptCursor ? "▶ " : "  "}${o.label}`),
       this.deathPromptHasStone
-        ? "左键复活石 · 右键普通复活"
-        : "左键打开商城 · 右键普通复活",
+        ? "确定=当前项 · 右键普通复活"
+        : "确定=当前项 · 右键普通复活",
     ];
     lines.forEach((t, i) => {
       const lab = new BitmapLabel();
@@ -1992,6 +2027,23 @@ export class BattleScreen extends Container {
         maxWidth: LCD_WIDTH - 64,
       });
       this.settleHost.addChild(lab);
+    });
+    opts.forEach((o, i) => {
+      const rowY = 112 + (2 + i) * 18;
+      this.rowHits.push(
+        attachRowPointerHit(
+          this.settleHost,
+          28,
+          rowY - 1,
+          LCD_WIDTH - 56,
+          17,
+          () => {
+            this.deathPromptCursor = i;
+            this.paintDeathPrompt();
+            this.commitDeathPrompt(o.result);
+          },
+        ),
+      );
     });
   }
 

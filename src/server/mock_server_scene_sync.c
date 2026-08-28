@@ -4281,6 +4281,10 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     if (matchedSeed != NULL &&
         matchedSeed->actorId <= VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
     {
+        const char *npcTalkName = matchedSeed->displayName[0]
+                                      ? matchedSeed->displayName
+                                      : matchedSeed->scriptName;
+        vm_mock_activities_on_npc_talk(npcTalkName);
         u32 serviceMask = vm_net_mock_npc_effective_service_mask(matchedSeed);
         u8 dialogCap = (u8)VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
         u8 usedSlots =
@@ -4534,6 +4538,68 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 serviceOptionCount += 1;
             }
         }
+        /* 节日使者：活力兑换（后台 server_festival_exchange 配置） */
+        if (vm_mock_festival_npc_offers(matchedSeed->displayName[0]
+                                            ? matchedSeed->displayName
+                                            : matchedSeed->scriptName))
+        {
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xbb\xee\xc1\xa6\xb6\xd2\xbb\xbb"; /* 活力兑换 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xbd\xda\xc8\xd5\xca\xb9\xd5\xdf"; /* 节日使者 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_FESTIVAL_EXCHANGE;
+                serviceOptionCount += 1;
+            }
+        }
+        if (vm_mock_yanmen_npc_offers(matchedSeed->displayName[0]
+                                          ? matchedSeed->displayName
+                                          : matchedSeed->scriptName))
+        {
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xb2\xc4\xc1\xcf\xb6\xd2\xbb\xbb"; /* 材料兑换 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xb9\xd8\xb0\xac\xca\xb9\xd5\xdf"; /* 关隘使者 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_YANMEN_EXCHANGE;
+                serviceOptionCount += 1;
+            }
+        }
+        if (vm_mock_ring_npc_offers(matchedSeed->displayName[0]
+                                        ? matchedSeed->displayName
+                                        : matchedSeed->scriptName))
+        {
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xc5\xdc\xbb\xb7\xc8\xce\xce\xf1"; /* 跑环任务 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xc3\xbf\xc8\xd5\xb6\xe0\xbb\xb7\xbd\xb1\xc0\xf8"; /* 每日多环奖励 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_RING_QUEST;
+                serviceOptionCount += 1;
+            }
+        }
+        /* 天梯使者：每日三职业 PvE 挑战 */
+        if (vm_mock_ladder_npc_offers(matchedSeed->displayName[0]
+                                          ? matchedSeed->displayName
+                                          : matchedSeed->scriptName))
+        {
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xcc\xec\xcc\xdd\xcc\xf4\xd5\xbd"; /* 天梯挑战 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xcc\xec\xcc\xdd\xca\xb9\xd5\xdf"; /* 天梯使者 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_LADDER_CHALLENGE;
+                serviceOptionCount += 1;
+            }
+        }
         /* 月老：缔结姻缘 */
         if (matchedSeed->actorId == VM_NET_MOCK_YUELAO_ACTOR_ID ||
             (matchedSeed->displayName[0] &&
@@ -4775,7 +4841,7 @@ static u32 vm_net_mock_npc_shop_selector_for_item(
     if (item == NULL)
         return 0;
     if (!item->isEquip)
-        return item->category == 10
+        return vm_net_mock_item_is_npc_medicine(item->itemId)
                    ? VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR
                    : 0;
     slot = vm_net_mock_equipment_slot_for_category(item->category);
@@ -4793,9 +4859,10 @@ static bool vm_net_mock_npc_shop_item_matches_selector(
         return false;
     if (selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR)
     {
-        /* Category-10 shelf split: 下架 stock stays on the medicine NPC;
-         * 上架 rows are appended to mall 秘宝道具 instead (see shop page 14/5). */
-        return !item->enabled && !item->isEquip && item->category == 10;
+        /* Category-10 shelf split: 下架且为 HP/MP 药品的条目留在药商；
+         * 上架 rows 进 mall 秘宝；经验卡/喇叭等类别 10 非药品不进药商。 */
+        return !item->enabled && !item->isEquip &&
+               vm_net_mock_item_is_npc_medicine(item->itemId);
     }
     if (!(selector >= 1u && selector <= 10u) || !item->isEquip ||
         item->category != selector - 1u ||
@@ -7797,6 +7864,37 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         optionValues[optionCount] = 0;
         ++optionCount;
     }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_FESTIVAL_EXCHANGE)
+    {
+        action = "festival-exchange";
+        dialogText = vm_mock_festival_welcome_text();
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_YANMEN_EXCHANGE)
+    {
+        action = "yanmen-exchange";
+        dialogText =
+            "\xc7\xeb\xb4\xf2\xbf\xaa\xb2\xc4\xc1\xcf\xb6\xd2\xbb\xbb"
+            "\xc3\xe6\xb0\xe5\xa1\xa3"; /* 请打开材料兑换面板。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_RING_QUEST)
+    {
+        action = "ring-quest";
+        dialogText =
+            "\xc7\xeb\xb4\xf2\xbf\xaa\xc5\xdc\xbb\xb7\xc8\xce\xce\xf1"
+            "\xc3\xe6\xb0\xe5\xa1\xa3"; /* 请打开跑环任务面板。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_MARRY)
     {
         vm_mock_service_client_session *self =
@@ -10514,11 +10612,14 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (result == 1)
         {
             u32 totalExp = activeRole->exp;
+            u32 wireEnergy = 100;
+            u32 wireEnergyMax = 100;
+            vm_mock_activities_vitality_wire(activeRole, &wireEnergy, &wireEnergyMax);
             if (!vm_net_mock_build_task_awardinfo(
                     awardInfo, sizeof(awardInfo), &awardInfoLen, activeRole,
                     taskDefinition, committedRewardSeq) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", 100) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", 100) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", wireEnergy) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", wireEnergyMax) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "exp", totalExp) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "level", activeRole->level) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "lastexp",

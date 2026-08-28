@@ -1084,6 +1084,7 @@ static void vm_net_mock_dream_sce_hot_reenter_restore_admin(void)
 
 static bool vm_net_mock_sce_combat_spawn_admin_save_all(
     const char *scene, const vm_net_mock_sce_combat_spawn *spawns, u32 spawnCount,
+    u16 runtimeActorEnsureX, u16 runtimeActorEnsureY, bool runtimeSkipAllActors,
     const char **errorOut)
 {
     u8 *data = NULL;
@@ -1302,20 +1303,33 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
                          "\xc1\xb6\xd3\xfc\xb9\xed\xbb\xf0");
             }
         }
-        if (!vm_net_mock_ensure_actor_resource_published(spawn.actorResource,
-                                                         &actorPublishError) ||
-            (spawn.actorResource2[0] != 0 &&
-             !vm_net_mock_ensure_actor_resource_published(spawn.actorResource2,
-                                                          &actorPublishError)))
         {
-            free(data);
-            free(located);
-            free(block);
-            if (errorOut)
-                *errorOut = actorPublishError ?
-                                actorPublishError :
-                                "地图刷怪 Actor 资源无法发布（请先在怪物管理指定有效 Actor）";
-            return false;
+            bool publishActor = false;
+
+            if (!runtimeSkipAllActors)
+            {
+                if (runtimeActorEnsureX == 0 && runtimeActorEnsureY == 0)
+                    publishActor = true;
+                else if (spawn.x == runtimeActorEnsureX &&
+                         spawn.y == runtimeActorEnsureY)
+                    publishActor = true;
+            }
+            if (publishActor &&
+                (!vm_net_mock_ensure_actor_resource_published(spawn.actorResource,
+                                                              &actorPublishError) ||
+                 (spawn.actorResource2[0] != 0 &&
+                  !vm_net_mock_ensure_actor_resource_published(
+                      spawn.actorResource2, &actorPublishError))))
+            {
+                free(data);
+                free(located);
+                free(block);
+                if (errorOut)
+                    *errorOut = actorPublishError ?
+                                    actorPublishError :
+                                    "地图刷怪 Actor 资源无法发布（请先在怪物管理指定有效 Actor）";
+                return false;
+            }
         }
         recordLen = vm_net_mock_sce_combat_spawn_encode(&spawn, record,
                                                          sizeof(record));
@@ -10887,7 +10901,7 @@ bool vm_net_mock_runtime_inject_combat_spawn(
     else
         spawnCount = existing;
     if (!vm_net_mock_sce_combat_spawn_admin_save_all(scene, spawns, spawnCount,
-                                                     &saveError))
+                                                     x, y, false, &saveError))
     {
         if (errorOut)
             *errorOut = saveError ? saveError : "world-boss-spawn-save-failed";
@@ -10944,7 +10958,57 @@ bool vm_net_mock_runtime_remove_combat_spawn_at(
             kept[keptCount++] = spawns[i];
     }
     if (!vm_net_mock_sce_combat_spawn_admin_save_all(scene, kept, keptCount,
-                                                     &saveError))
+                                                     0, 0, true, &saveError))
+    {
+        if (errorOut)
+            *errorOut = saveError ? saveError : "world-boss-despawn-save-failed";
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+bool vm_net_mock_runtime_remove_combat_spawn_actor(
+    const char *scene, u32 monsterId, const char **errorOut)
+{
+    vm_net_mock_sce_combat_spawn spawns[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
+    vm_net_mock_sce_combat_spawn kept[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
+    u32 existing = 0;
+    u32 keptCount = 0;
+    u32 removed = 0;
+    const char *saveError = NULL;
+
+    if (errorOut)
+        *errorOut = "world-boss-despawn-failed";
+    if (scene == NULL || scene[0] == 0 || monsterId == 0)
+        return false;
+    memset(spawns, 0, sizeof(spawns));
+    memset(kept, 0, sizeof(kept));
+    if (!vm_net_mock_runtime_combat_spawn_list(scene, spawns,
+                                               VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX,
+                                               &existing))
+    {
+        existing = 0;
+    }
+    for (u32 i = 0; i < existing; ++i)
+    {
+        if (spawns[i].actorId == monsterId)
+        {
+            ++removed;
+            continue;
+        }
+        if (keptCount < VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX)
+            kept[keptCount++] = spawns[i];
+    }
+    if (removed == 0)
+    {
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    if (!vm_net_mock_sce_combat_spawn_admin_save_all(scene, kept, keptCount,
+                                                     0, 0, true, &saveError))
     {
         if (errorOut)
             *errorOut = saveError ? saveError : "world-boss-despawn-save-failed";
