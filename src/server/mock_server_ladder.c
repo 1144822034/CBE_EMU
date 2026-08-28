@@ -680,7 +680,7 @@ bool vm_mock_ladder_admin_save_config(
     u32 hpPerFloor, u32 atkPerFloor, u32 defPerFloor, u16 damageScale,
     u8 castSkill)
 {
-    char query[768];
+    char query[1024];
 
     if (!vm_mock_ladder_ensure_tables())
         return false;
