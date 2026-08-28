@@ -1,15 +1,17 @@
 /*
- * Deterministic server-only regression for the first-login equipment boundary.
+ * Deterministic server-only regression for the first-login equipment bootstrap.
  *
  * It neither starts a listener nor connects to MySQL.  A role with one normal
  * backpack row and durable HP/MP-raising equipment receives a 30/21 backpack
- * snapshot in the first 5/10 + 7/7(type=1) bootstrap response.  The title
- * 1/1/6 + 1/1/15 acknowledgement must not consume that one-shot; a repeated
- * group poll must not duplicate it, and a new role select must re-arm it.
+ * snapshot followed by full 7/7(type=2) equipped rows and an empty
+ * 7/7(type=3) completion in the first 5/10 + 7/7(type=1) bootstrap response.
+ * The title 1/1/6 + 1/1/15 acknowledgement must not consume that one-shot;
+ * a repeated group poll must not duplicate it, and a new role select must
+ * re-arm it.
  *
- * Worn equipment must not be serialized as 7/7(type=2/type=3): those are
- * item-operation messages, not a login initializer.  The durable role's
- * derived vitals remain authoritative through actorinfo.
+ * The type-2 rows use the fixed equipment-slot sequence namespace and full
+ * common equipment attributes; type-3 has exactly one zero byte of iteminfo.
+ * The durable role's derived vitals remain authoritative through actorinfo.
  */
 
 #include <stdio.h>
@@ -352,7 +354,17 @@ static bool equip_vital_bonus_pair(vm_net_mock_role_state *role)
 static int assert_group_login_bootstrap(const u8 *packet, u32 length,
                                         u32 expectedRoleId, bool expectSeed)
 {
+    const u8 *equipmentPayload = NULL;
+    const u8 *equipmentItemInfo = NULL;
+    const u8 *completionPayload = NULL;
+    const u8 *completionItemInfo = NULL;
+    u16 equipmentPayloadLen = 0;
+    u16 equipmentItemInfoLen = 0;
+    u16 completionPayloadLen = 0;
+    u16 completionItemInfoLen = 0;
     u8 gridIndex = 0xff;
+    u8 equipmentIndex = 0xff;
+    u8 completionIndex = 0xff;
     u8 major = 0;
     u8 kind = 0;
     u8 subtype = 0;
@@ -390,39 +402,77 @@ static int assert_group_login_bootstrap(const u8 *packet, u32 length,
         }
         if (major == 1 && kind == 7 && subtype == 7 &&
             vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &type) &&
-            (type == 2 || type == 3))
+            type == 2)
         {
-            fprintf(stderr,
-                    "group bootstrap emitted item-operation 7/7 type=%u\n",
-                    type);
-            return 1;
+            if (equipmentIndex != 0xff)
+            {
+                fputs("group bootstrap duplicated the equipped-item stream\n", stderr);
+                return 1;
+            }
+            equipmentIndex = index;
+            equipmentPayload = payload;
+            equipmentPayloadLen = payloadLen;
+        }
+        if (major == 1 && kind == 7 && subtype == 7 &&
+            vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &type) &&
+            type == 3)
+        {
+            if (completionIndex != 0xff)
+            {
+                fputs("group bootstrap duplicated the type-3 completion\n", stderr);
+                return 1;
+            }
+            completionIndex = index;
+            completionPayload = payload;
+            completionPayloadLen = payloadLen;
         }
     }
     if (!expectSeed)
     {
-        if (gridIndex != 0xff)
+        if (gridIndex != 0xff || equipmentIndex != 0xff || completionIndex != 0xff)
         {
-            fputs("repeated group bootstrap replayed the backpack grid\n", stderr);
+            fputs("repeated group bootstrap replayed the equipment seed\n", stderr);
             return 1;
         }
         return 0;
     }
-    if (gridIndex == 0xff)
+    if (gridIndex == 0xff || equipmentIndex == 0xff || completionIndex == 0xff ||
+        gridIndex >= equipmentIndex || completionIndex != equipmentIndex + 1 ||
+        !vm_net_mock_get_object_entry_bytes(equipmentPayload,
+                                            equipmentPayloadLen, "iteminfo",
+                                            &equipmentItemInfo,
+                                            &equipmentItemInfoLen) ||
+        equipmentItemInfo == NULL || equipmentItemInfoLen != 161 ||
+        equipmentItemInfo[0] != 0 || equipmentItemInfo[1] != 1 ||
+        equipmentItemInfo[2] != 2 || equipmentItemInfo[27] != 0 ||
+        equipmentItemInfo[28] != 1 || equipmentItemInfo[29] != 4 ||
+        equipmentItemInfo[106] != 0 || equipmentItemInfo[107] != 1 ||
+        equipmentItemInfo[108] != 4 ||
+        !vm_net_mock_get_object_entry_bytes(completionPayload,
+                                            completionPayloadLen, "iteminfo",
+                                            &completionItemInfo,
+                                            &completionItemInfoLen) ||
+        completionItemInfo == NULL || completionItemInfoLen != 1 ||
+        completionItemInfo[0] != 0)
     {
-        fputs("group bootstrap lacks the one-shot backpack grid\n", stderr);
+        fputs("group bootstrap lacks the ordered full equipment seed\n", stderr);
         return 1;
     }
     return 0;
 }
 
-static int assert_grid_legacy_compact_plan(const u8 *packet, u32 length)
+static int assert_grid_minimum_stage_plan(
+    const u8 *packet, u32 length,
+    const vm_net_mock_backpack_item_state *expectedEquipment)
 {
     const u8 *gridPayload = NULL;
     const u8 *itemInfo = NULL;
     u16 gridPayloadLen = 0;
     u16 itemInfoLen = 0;
 
-    if (packet == NULL || length < 5)
+    if (packet == NULL || length < 5 || expectedEquipment == NULL ||
+        expectedEquipment->enhanceAffixes.type[0] == 0 ||
+        expectedEquipment->enhanceAffixes.value[0] == 0)
         return 1;
     for (u8 index = 0; index < packet[4]; ++index)
     {
@@ -444,21 +494,108 @@ static int assert_grid_legacy_compact_plan(const u8 *packet, u32 length)
         !vm_net_mock_get_object_entry_bytes(gridPayload, gridPayloadLen,
                                             "iteminfo", &itemInfo,
                                             &itemInfoLen) ||
-        itemInfo == NULL || itemInfoLen != 54 ||
-        /* The normal row and the equipment row both use the legacy compact
-         * current/max-enhancement form.  This keeps old Android's combined
-         * group reply under its parser-pool boundary. */
-        itemInfo[26] != 0 || itemInfo[53] != 0)
+        itemInfo == NULL || itemInfoLen != 67 ||
+        /* The normal row remains compact.  The equipment row carries exactly
+         * its durable +4 plan (the typed scalar layout is 3+3+3+4 bytes). */
+        itemInfo[26] != 0 || itemInfo[53] != 1 || itemInfo[56] != 4 ||
+        itemInfo[59] != expectedEquipment->enhanceAffixes.type[0] ||
+        itemInfo[62] != 0 ||
+        (((u16)itemInfo[65] << 8) | itemInfo[66]) !=
+            expectedEquipment->enhanceAffixes.value[0])
     {
         fprintf(stderr,
-                "grid did not preserve the legacy compact item form: "
-                "iteminfo_len=%u attr0=%u attr1=%u\n",
+                "grid did not preserve the minimum durable +4 plan: "
+                "iteminfo_len=%u attr0=%u attr1=%u threshold=%u type=%u\n",
                 itemInfoLen,
                 itemInfo != NULL && itemInfoLen > 26 ? itemInfo[26] : 0,
-                itemInfo != NULL && itemInfoLen > 53 ? itemInfo[53] : 0);
+                itemInfo != NULL && itemInfoLen > 53 ? itemInfo[53] : 0,
+                itemInfo != NULL && itemInfoLen > 56 ? itemInfo[56] : 0,
+                itemInfo != NULL && itemInfoLen > 59 ? itemInfo[59] : 0);
         return 1;
     }
     return 0;
+}
+
+/* The recorded failure shape contains 48 visible rows, 31 of them equipment.
+ * Check the entire maximum historical equipment set rather than inferring
+ * that the two-row login fixture covers every iteration of the serializer. */
+static int assert_full_grid_minimum_stage_plan(
+    const vm_net_mock_equipment_catalog_item *equipment)
+{
+    enum
+    {
+        kGridRows = 48,
+        kEquipmentRows = 31,
+        kCompactRowBytes = 27,
+        kFirstStageRowBytes = 40
+    };
+    vm_net_mock_role_state role;
+    u8 itemInfo[VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES];
+    u32 itemInfoLen = 0;
+    u32 gridCount = 0;
+    u32 pos = 0;
+
+    if (equipment == NULL || equipment->itemId == 0)
+        return 1;
+    memset(&role, 0, sizeof(role));
+    memset(itemInfo, 0, sizeof(itemInfo));
+    role.roleId = 910002;
+    role.backpackCapacity = kGridRows;
+    role.backpackItemCount = kGridRows;
+    role.nextBackpackSeq = kGridRows + 1;
+
+    for (u32 index = 0; index < kGridRows; ++index)
+    {
+        vm_net_mock_backpack_item_state *item = &role.backpackItems[index];
+
+        item->itemId = index < kEquipmentRows ? equipment->itemId : 801;
+        item->seq = (u16)(index + 1);
+        item->count = 1;
+        if (index < kEquipmentRows &&
+            !vm_net_mock_equipment_enhancement_ensure_affixes(
+                equipment, 0, &item->enhanceAffixes,
+                role.roleId ^ item->itemId ^
+                    ((u32)item->seq * 0x9e3779b9u)))
+        {
+            fputs("could not create a full-grid durable +4 plan\n", stderr);
+            return 1;
+        }
+    }
+    if (!vm_net_mock_build_backpack_grid_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), &role, &itemInfoLen, &gridCount) ||
+        gridCount != kGridRows ||
+        itemInfoLen != kEquipmentRows * kFirstStageRowBytes +
+                           (kGridRows - kEquipmentRows) * kCompactRowBytes)
+    {
+        fprintf(stderr,
+                "full-grid minimum-stage layout changed: rows=%u iteminfo_len=%u\n",
+                gridCount, itemInfoLen);
+        return 1;
+    }
+    for (u32 index = 0; index < kGridRows; ++index)
+    {
+        const vm_net_mock_backpack_item_state *item = &role.backpackItems[index];
+        const bool isEquipment = index < kEquipmentRows;
+        const u32 rowBytes = isEquipment ? kFirstStageRowBytes :
+                                           kCompactRowBytes;
+
+        if (pos + rowBytes > itemInfoLen ||
+            itemInfo[pos + 26] != (isEquipment ? 1 : 0) ||
+            (isEquipment &&
+             (itemInfo[pos + 29] != 4 ||
+              itemInfo[pos + 32] != item->enhanceAffixes.type[0] ||
+              itemInfo[pos + 35] != 0 ||
+              (((u16)itemInfo[pos + 38] << 8) | itemInfo[pos + 39]) !=
+                  item->enhanceAffixes.value[0])))
+        {
+            fprintf(stderr,
+                    "full-grid row %u did not retain its minimum +4 plan\n",
+                    index);
+            return 1;
+        }
+        pos += rowBytes;
+    }
+    return pos == itemInfoLen ? 0 : 1;
 }
 
 int main(void)
@@ -520,6 +657,8 @@ int main(void)
         fputs("could not select a catalog equipment item for backpack seed\n", stderr);
         return 1;
     }
+    if (assert_full_grid_minimum_stage_plan(backpackEquipment) != 0)
+        return 1;
     role->backpackItems[1].itemId = backpackEquipment->itemId;
     role->backpackItems[1].seq = 2;
     role->backpackItems[1].count = 1;
@@ -591,7 +730,8 @@ int main(void)
     responseLen = vm_net_mock_build_group_type1_response(
         groupRequest, groupRequestLen, response, sizeof(response));
     if (assert_group_login_bootstrap(response, responseLen, roleId, true) != 0 ||
-        assert_grid_legacy_compact_plan(response, responseLen) != 0)
+        assert_grid_minimum_stage_plan(response, responseLen,
+                                       &role->backpackItems[1]) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_group_type1_response(
@@ -610,6 +750,6 @@ int main(void)
     if (assert_group_login_bootstrap(response, responseLen, roleId, true) != 0)
         return 1;
 
-    printf("first-login bootstrap regression passed no_item_operation_equipment=1\n");
+    printf("first-login equipment bootstrap regression passed type3_completion=1\n");
     return 0;
 }

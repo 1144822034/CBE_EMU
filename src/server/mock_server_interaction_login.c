@@ -1791,6 +1791,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     return pos;
 }
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 static u32 vm_net_mock_build_empty_wt_ack_response(u8 *out, u32 outCap)
 {
     if (outCap < 5)
@@ -1799,9 +1800,9 @@ static u32 vm_net_mock_build_empty_wt_ack_response(u8 *out, u32 outCap)
     return 5;
 }
 
-static u32 vm_net_mock_build_short_wt_control_ack_response(const u8 *request, u32 requestLen,
-                                                           u8 kind, u8 subtype,
-                                                           u8 *out, u32 outCap)
+u32 vm_net_mock_build_short_wt_control_ack_response(const u8 *request, u32 requestLen,
+                                                     u8 kind, u8 subtype,
+                                                     u8 *out, u32 outCap)
 {
     (void)request;
     (void)requestLen;
@@ -1817,8 +1818,10 @@ static u32 vm_net_mock_build_short_wt_control_ack_response(const u8 *request, u3
      */
     return vm_net_mock_build_empty_wt_ack_response(out, outCap);
 }
+#endif
 
-static u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
     u32 objectStart = 0;
@@ -1861,7 +1864,9 @@ static u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_packet(out, pos, 1);
     return pos;
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* JianghuOL.CBE:HandleTradeInput(0x0102C3D6) sends this exact one-object
  * request when the cultivation panel's help action is selected.  The
  * response parser (HandleExpBattleResponse, 0x0102CB46 case 19) reads only
@@ -1887,9 +1892,9 @@ static bool vm_net_mock_is_practise_help19_request(const u8 *request,
     return requestType == 0;
 }
 
-static u32 vm_net_mock_build_practise_help19_response(const u8 *request,
-                                                      u32 requestLen,
-                                                      u8 *out, u32 outCap)
+u32 vm_net_mock_build_practise_help19_response(const u8 *request,
+                                               u32 requestLen,
+                                               u8 *out, u32 outCap)
 {
     u32 pos = 5;
     u32 objectStart = 0;
@@ -1924,8 +1929,7 @@ static u32 vm_net_mock_build_practise_help19_response(const u8 *request,
            pos);
     return pos;
 }
-
-static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen, u8 kind, u8 subtype);
+#endif
 
 static bool vm_net_mock_is_battle_death_prompt_choice_request(const u8 *request, u32 requestLen,
                                                                u32 *choiceOut)
@@ -1954,8 +1958,9 @@ static bool vm_net_mock_is_battle_death_prompt_choice_request(const u8 *request,
     return true;
 }
 
-static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 outCap,
-                                                                 const char *info)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 outCap,
+                                                         const char *info)
 {
     u32 pos = 5;
     u32 objectStart = 0;
@@ -1979,15 +1984,17 @@ static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 out
     vm_net_mock_finish_wt_packet(out, pos, 1);
     return pos;
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* JianghuOL.CBE:HandleExpBattleAction(0x0102C3D6) emits precisely one
  * 1/7/21 object with `opengold` when the cultivation setting is confirmed.
  * HandleExpBattleResponse(0x0102CB46) waits for this matching subtype and
  * reads only `result`; an empty acknowledgement leaves the loading dialog
  * active. */
-static u32 vm_net_mock_build_practise_setting21_response(const u8 *request,
-                                                         u32 requestLen,
-                                                         u8 *out, u32 outCap)
+u32 vm_net_mock_build_practise_setting21_response(const u8 *request,
+                                                  u32 requestLen,
+                                                  u8 *out, u32 outCap)
 {
     vm_net_mock_request_object object;
     vm_net_mock_role_state *role = NULL;
@@ -2022,6 +2029,7 @@ static u32 vm_net_mock_build_practise_setting21_response(const u8 *request,
            role ? role->roleId : 0, openGold, success ? 1u : 0u, pos);
     return pos;
 }
+#endif
 
 static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *request, u32 requestLen,
                                                                     u8 *out, u32 outCap)
@@ -3024,7 +3032,8 @@ static u32 vm_net_mock_build_shop_buy17_response(const u8 *request, u32 requestL
     return pos;
 }
 
-static bool vm_net_mock_is_login_tail_skill_request(const u8 *request, u32 requestLen)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+bool vm_net_mock_is_login_tail_skill_request(const u8 *request, u32 requestLen)
 {
     if (request == NULL || requestLen != 14)
         return false;
@@ -3046,7 +3055,7 @@ static bool vm_net_mock_is_login_tail_skill_request(const u8 *request, u32 reque
     return offset == requestLen;
 }
 
-static u32 vm_net_mock_build_login_tail_skill_response(u8 *out, u32 outCap)
+u32 vm_net_mock_build_login_tail_skill_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
     u8 objectCount = 0;
@@ -3059,8 +3068,10 @@ static u32 vm_net_mock_build_login_tail_skill_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     return pos;
 }
+#endif
 
-static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen, u8 kind, u8 subtype)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen, u8 kind, u8 subtype)
 {
     if (request == NULL || requestLen != 9)
         return false;
@@ -3074,6 +3085,7 @@ static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 reques
            request[7] == 0 &&
            request[8] == 5;
 }
+#endif
 
 static const char *vm_net_mock_actor_resource_name(u8 actorJob, u8 actorSex)
 {

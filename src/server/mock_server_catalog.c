@@ -20,8 +20,7 @@ static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
 static void vm_net_mock_backpack_queue_authoritative_role_list(
     const char *reason)
 {
-    g_netMockShop17ListPending = 0;
-    g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+    vm_net_mock_backpack_arm_authoritative_role_list();
     printf("[info][network] mock_backpack_role_list_pending source=%s shop_pending=0 role_list=1\n",
            reason != NULL ? reason : "mutation");
 }
@@ -183,7 +182,7 @@ static bool vm_net_mock_shop_item_is_secret_treasure(
     return item->category == 14;
 }
 
-typedef struct
+struct vm_net_mock_equipment_catalog_item
 {
     u32 itemId;
     u8 slot;
@@ -200,7 +199,7 @@ typedef struct
      * same source whenever it creates or repairs durable equipment. */
     u16 durabilityMax;
     vm_net_mock_equipment_bonus bonus;
-} vm_net_mock_equipment_catalog_item;
+};
 
 typedef struct
 {
@@ -305,7 +304,7 @@ bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
                              u32 *result_out);
 static bool vm_net_mock_shop_admin_db_load(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
-static const vm_net_mock_equipment_catalog_item *
+const vm_net_mock_equipment_catalog_item *
 vm_net_mock_find_equipment_catalog_item(u32 itemId);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
@@ -2760,7 +2759,7 @@ static u32 vm_net_mock_load_equipment_catalog(void)
     return g_vm_net_mock_equipment_catalog_count;
 }
 
-static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_catalog_item(u32 itemId)
+const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_catalog_item(u32 itemId)
 {
     u32 total = vm_net_mock_load_equipment_catalog();
 
@@ -2782,7 +2781,7 @@ static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_cata
  * stack-count extension.  Keep the cap derived from the same equip.dsh
  * classification that validates actual equipment instances.
  */
-static u8 vm_net_mock_item_common_extra_enhance_cap(u32 itemId)
+u8 vm_net_mock_item_common_extra_enhance_cap(u32 itemId)
 {
     return vm_net_mock_find_equipment_catalog_item(itemId) != NULL
                ? VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL
@@ -3810,12 +3809,12 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
     }
 }
 
-static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
-                                                   u32 *pos,
-                                                   u32 itemId,
-                                                   u8 enhanceLevel,
-                                                   u8 enhanceMaxLevel,
-                                                   const vm_net_mock_equipment_enhance_affix_state *affixes)
+bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
+                                            u32 *pos,
+                                            u32 itemId,
+                                            u8 enhanceLevel,
+                                            u8 enhanceMaxLevel,
+                                            const vm_net_mock_equipment_enhance_affix_state *affixes)
 {
     /*
      * JianghuOL.CBE:ParseEquipAttributes (vtable +2452, 0x010185C2) reads
@@ -3858,6 +3857,47 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
         }
     }
     return true;
+}
+
+/* `30/21` is the first response that creates a live backpack item instance.
+ * Old Android clients cannot accept every +4/+8/+12/+16 row for a full
+ * backpack in their combined login reply, but an attrCount of zero leaves
+ * that instance permanently unable to render even its first grey stage:
+ * later 17/1 and 29/3 responses do not populate its attribute array.
+ *
+ * The durable role-load migration has already repaired and persisted the
+ * four-stage plan before this serializer runs.  This helper merely exposes
+ * its first, +4, row.  It must not call ensure_affixes() or otherwise mutate
+ * role state while building a response.  The complete plan remains on the
+ * detail and equipped-item paths, whose packet budgets are independent of
+ * the combined selected-role bootstrap. */
+static bool vm_net_mock_seq_put_item_first_stage_extra(
+    u8 *out, u32 outCap, u32 *pos, u32 itemId, u8 enhanceLevel,
+    u8 enhanceMaxLevel,
+    const vm_net_mock_equipment_enhance_affix_state *affixes)
+{
+    const vm_net_mock_equipment_catalog_item *equipment =
+        vm_net_mock_find_equipment_catalog_item(itemId);
+    const u8 hasFirstStage = equipment != NULL && affixes != NULL &&
+                             affixes->type[0] != 0 &&
+                             affixes->value[0] != 0;
+
+    if (!vm_net_mock_seq_put_i16(out, outCap, pos, enhanceLevel) ||
+        !vm_net_mock_seq_put_i16(out, outCap, pos, enhanceMaxLevel) ||
+        !vm_net_mock_seq_put_u8(out, outCap, pos, hasFirstStage ? 1 : 0))
+    {
+        return false;
+    }
+    if (!hasFirstStage)
+        return true;
+
+    /* ParseEquipAttributes(0x010185C2): threshold, stat type, mode,
+     * signed i16 value.  The +4 row remains grey below its threshold; at
+     * +4 the existing client activation path consumes the same stable row. */
+    return vm_net_mock_seq_put_u8(out, outCap, pos, 4) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, affixes->type[0]) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, affixes->value[0]);
 }
 
 static bool vm_net_mock_seq_put_item_compact_extra(u8 *out, u32 outCap,
@@ -4065,16 +4105,17 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
-        /* Temporary legacy fallback.  A full stage plan here makes the
-         * first 5/10 group reply exceed old Android clients' fixed parser
-         * pool.  The worn-equipment 7/7(type=2) stream remains on its
-         * complete common-extra path, so existing equipment-slot stage
-         * display is unchanged. */
-        if (!vm_net_mock_seq_put_item_compact_extra(
-                out, outCap, &pos,
+        /* The selected-role reply shares old Android's fixed parser pool
+         * with group state.  One persisted +4 row gives every equipment
+         * instance its first grey stage while adding just one attribute row;
+         * sending the complete four-stage plan here is known to exhaust that
+         * pool for a full backpack. */
+        if (!vm_net_mock_seq_put_item_first_stage_extra(
+                out, outCap, &pos, item->itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                &item->enhanceAffixes))
             return false;
     }
     *blobLenOut = pos;
@@ -4476,7 +4517,7 @@ bool vm_net_mock_get_object_number_field(const u8 *payload, u32 payloadLen,
  * `00 04`; the older scanner mistakes that outer length for an i32 tag and
  * reads sequence 26 as 0x0002001A.  Keep this exact accessor local to the
  * enhancement request contract. */
-static bool vm_net_mock_get_object_tagged_number_entry(
+bool vm_net_mock_get_object_tagged_number_entry(
     const u8 *payload, u32 payloadLen, const char *field, u32 *valueOut)
 {
     const u8 *entry = NULL;
@@ -5447,7 +5488,7 @@ static void vm_net_mock_role_apply_item_effect(vm_net_mock_role_state *role,
     }
 }
 
-static bool vm_net_mock_parse_special_item_seq_request(
+bool vm_net_mock_parse_special_item_seq_request(
     const u8 *request, u32 requestLen, u8 kind, u8 subtype,
     const char *seqField, bool requireOneNum, u16 *seqOut)
 {
@@ -5553,7 +5594,7 @@ vm_net_mock_find_timed_combat_item_spec(u32 itemId)
     return NULL;
 }
 
-static const char *vm_net_mock_special_item_success_info(u32 itemId)
+const char *vm_net_mock_special_item_success_info(u32 itemId)
 {
     /* GBK literals copied from item.dsh descriptions.  The CBE client renders
      * packet strings as GBK, so UTF-8 source literals would be visually wrong. */
@@ -5635,6 +5676,7 @@ static const char *vm_net_mock_battle_insight_quantity_window_info(void)
  * value also marks the client-side exp-card status as fresh; an empty value
  * is paired with 1/7/32 below to clear a card which expired while the player
  * remained online. */
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 static const char *vm_net_mock_exp_card_active_info(u32 multiplier)
 {
     switch (multiplier)
@@ -5667,9 +5709,9 @@ static bool vm_net_mock_is_exp_card_status_request(const u8 *request,
  * experience card.  The response shape is taken directly from
  * net_handle_misc_player_fields and HandleExpInfoResponse: `expinfo` is
  * always present and `expcard` is sent only for the expired branch. */
-static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
-                                                      u32 requestLen,
-                                                      u8 *out, u32 outCap)
+u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
+                                               u32 requestLen,
+                                               u8 *out, u32 outCap)
 {
     u32 multiplier = 1;
     u32 pos = 5;
@@ -5704,7 +5746,9 @@ static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
            multiplier, multiplier > 1 ? 1u : 0u, pos);
     return pos;
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* Clicking the scene's battle-insight badge emits exactly one empty
  * `1/7/36` object. JianghuOL.CBE:0x01011C88 dispatches subtype 36 to
  * 0x01011A1E.  That handler obtains `bookinfo` and passes the returned
@@ -5734,7 +5778,7 @@ static const char *vm_net_mock_battle_insight_status_info(bool active)
     return "\xB5\xB1\xC7\xB0\xCE\xB4\xCA\xB9\xD3\xC3\xD5\xBD\xB6\xB7\xD0\xC4\xB5\xC3\xA1\xA3";
 }
 
-static u32 vm_net_mock_build_battle_insight_status_response(
+u32 vm_net_mock_build_battle_insight_status_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     const bool active = vm_net_mock_role_active_battle_insight_flag() != 0;
@@ -5763,6 +5807,7 @@ static u32 vm_net_mock_build_battle_insight_status_response(
                      active ? 1u : 0u, pos);
     return pos;
 }
+#endif
 
 /*
  * Battle Insight has two real client phases: 25/6 opens the quantity window;
@@ -6238,11 +6283,12 @@ static u32 vm_net_mock_build_battle_insight_followup_response(
     return pos;
 }
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* 827 修炼丹 is backed by the same account/role lifecycle as the practise
  * panel.  7/16 is the native quantity preflight; it must not mutate durable
  * state.  The CBE sends the selected count in the distinct 7/17 request,
  * which owns both the debit and HandleItemUseResponse completion lifecycle. */
-static u32 vm_net_mock_build_practise_pill16_response(
+u32 vm_net_mock_build_practise_pill16_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     vm_net_mock_role_state *role = NULL;
@@ -6285,7 +6331,9 @@ static u32 vm_net_mock_build_practise_pill16_response(
            maxUse, pos);
     return pos;
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* Runtime after 827's successful 1/7/16 reply: the CBE emits exactly one
  * 38-byte 1/7/17 request.  Its 29-byte object payload is fully accounted for
  * by usenum:tagged-u32(the quantity selected by the player) and
@@ -6329,7 +6377,7 @@ static bool vm_net_mock_is_practise_pill17_followup_request(
  * it emits the CBE-owned event 100 and lets the original UI code close the
  * progress state.  `pcimg=1` is the established no-fixed-status-image value;
  * 827 changes stored practise time, not the scene's fixed \"修\" badge. */
-static u32 vm_net_mock_build_practise_pill17_followup_response(
+u32 vm_net_mock_build_practise_pill17_followup_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     vm_net_mock_role_state *role = NULL;
@@ -6395,14 +6443,16 @@ static u32 vm_net_mock_build_practise_pill17_followup_response(
     fflush(stdout);
     return pos;
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 /* 833 聚元丹 uses the same CBE result shell as 827, but its `maxnum` is the
  * current vitality, not a disguised HP/MP amount.  result=1 is emitted only
  * after the exact selected stack and account_role_vitality row committed in
  * one transaction.  HandleShopBuyItem's 7/33 branch does not write the
  * role's energy cache, so a successful operation is followed by the native
  * 2/13 energy update that net_handle_actor_move_info already consumes. */
-static u32 vm_net_mock_build_vitality_pill33_response(
+u32 vm_net_mock_build_vitality_pill33_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     vm_net_mock_role_state *role = NULL;
@@ -6454,6 +6504,7 @@ static u32 vm_net_mock_build_vitality_pill33_response(
            current, maximum, responseObjectCount, pos);
     return pos;
 }
+#endif
 
 /* 921 is the actual sequence-owned transfer item.  CBE case 40 consumes the
  * currently selected row only for result=0 and then calls HandleLevelUpResponse,
@@ -7893,6 +7944,81 @@ static bool vm_net_mock_append_backpack_reservoir_counts_object(
     return true;
 }
 
+/* The selected-role bootstrap has a distinct item-manager contract.  Each
+ * type-2 row is a full, durable equipment instance keyed by its fixed slot
+ * sequence; it is not a reply to a user-initiated 7/8 wear operation.  The
+ * corresponding parser evidence and raw client capture are recorded in
+ * docs/re/2026-08-20-first-login-equipment-attribute-bootstrap.md. */
+static bool vm_net_mock_append_equipment_login_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *rowCountOut)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 itemInfo[1u + VM_NET_MOCK_NEARBY_EQUIPINFO_MAX_BYTES];
+    u32 itemInfoLen = 0;
+    u32 objectStart = 0;
+    u8 rowCount = 0;
+
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (out == NULL || pos == NULL || role == NULL)
+        return false;
+    memset(itemInfo, 0, sizeof(itemInfo));
+    if (!vm_net_mock_build_equipment_login_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), role, &itemInfoLen, &rowCount) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu)
+    {
+        return false;
+    }
+    if (rowCount == 0)
+        return true;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
+                                    itemInfo, (u16)itemInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (rowCountOut)
+        *rowCountOut = rowCount;
+
+    printf("[info][network] mock_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
+           role->roleId, rowCount, itemInfoLen);
+    vm_autotest_note("mock_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
+                     role->roleId, rowCount, itemInfoLen);
+    return true;
+}
+
+/* The empty type-3 object terminates the login equipment stream after all
+ * type-2 rows have been installed.  Its parser path performs the native
+ * scene-status rebuild and clears the shared item notification state; it is
+ * emitted only as part of this one-shot group/type-1 bootstrap. */
+static bool vm_net_mock_append_equipment_login_type3_completion_object(
+    u8 *out, u32 outCap, u32 *pos, u8 equipmentRows)
+{
+    static const u8 emptyItemInfo[] = {0};
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 objectStart = 0;
+
+    if (equipmentRows == 0)
+        return true;
+    if (out == NULL || pos == NULL || role == NULL)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 3) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
+                                    emptyItemInfo, sizeof(emptyItemInfo)))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_login_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
+           role->roleId, equipmentRows);
+    vm_autotest_note("mock_login_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
+                     role->roleId, equipmentRows);
+    return true;
+}
+
 static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -7917,6 +8043,7 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
     if (g_netMockBackpackGridSeededRoleId != role->roleId)
     {
         bool appendedReservoirCounts = false;
+        u8 equipmentRows = 0;
 
         if (vm_net_mock_role_backpack_client_grid_count(role) != 0)
         {
@@ -7931,13 +8058,21 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
             if (appendedReservoirCounts)
                 *objectCount = (u8)(*objectCount + 1);
         }
-        /* 7/7 type=2 is the native current-item operation, not a worn-item
-         * list initializer.  Supplying durable equipment through it makes a
-         * newly selected item flow into TimerControl_ProcessItem; player-3
-         * then asserts in MMORPG_Screen_InGame.c:913.  Login actorinfo already
-         * contains the authoritative derived attributes.  Keep equipped rows
-         * durable on the service and omit them until their real login object
-         * contract is reverse engineered. */
+        if (!vm_net_mock_append_equipment_login_object(
+                out, outCap, pos, &equipmentRows))
+        {
+            return false;
+        }
+        if (equipmentRows != 0)
+        {
+            *objectCount = (u8)(*objectCount + 1);
+            if (!vm_net_mock_append_equipment_login_type3_completion_object(
+                    out, outCap, pos, equipmentRows))
+            {
+                return false;
+            }
+            *objectCount = (u8)(*objectCount + 1);
+        }
         g_netMockBackpackGridSeededRoleId = role->roleId;
     }
     return true;
@@ -8135,7 +8270,7 @@ static bool vm_net_mock_is_scene_moveinfo_npc_seed_request(const char *scene,
     return true;
 }
 
-static bool vm_net_mock_str_ends_with(const char *text, const char *suffix)
+bool vm_net_mock_str_ends_with(const char *text, const char *suffix)
 {
     size_t textLen = text ? strlen(text) : 0;
     size_t suffixLen = suffix ? strlen(suffix) : 0;
@@ -8144,7 +8279,7 @@ static bool vm_net_mock_str_ends_with(const char *text, const char *suffix)
     return strcmp(text + textLen - suffixLen, suffix) == 0;
 }
 
-static bool vm_net_mock_scene_name_has_path_separator(const char *scene)
+bool vm_net_mock_scene_name_has_path_separator(const char *scene)
 {
     if (scene == NULL)
         return true;
@@ -8246,12 +8381,6 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
     }
     return false;
 }
-
-static bool vm_net_mock_open_server_data_resource(const char *name,
-                                                  const char *requiredSuffix,
-                                                  FILE **fpOut,
-                                                  char *pathOut,
-                                                  size_t pathOutCap);
 
 /* Older service builds persisted some role scenes as bare basenames.  This
  * is a one-time data repair, not a request-time alias: only an exact raw row
@@ -8580,7 +8709,7 @@ static bool vm_net_mock_parse_equipment_transfer_request(
     return true;
 }
 
-static bool vm_net_mock_scene_name_is_safe(const char *scene)
+bool vm_net_mock_scene_name_is_safe(const char *scene)
 {
     if (scene == NULL || scene[0] == 0)
         return false;

@@ -13345,7 +13345,7 @@ static bool vm_net_mock_append_team_member_full_row(
     u8 *groupInfo, u32 groupInfoCap, u32 *groupInfoLen,
     const vm_mock_service_client_session *observer,
     const vm_mock_service_client_session *member, bool firstRowInBlob);
-static u32 vm_mock_service_team_member_wire_id(
+u32 vm_mock_service_team_member_wire_id(
     const vm_mock_service_client_session *observer,
     const vm_mock_service_client_session *member);
 
@@ -13389,14 +13389,14 @@ static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos,
     return true;
 }
 
-static u8 vm_mock_service_team_member_job_code(const vm_mock_service_client_session *member)
+u8 vm_mock_service_team_member_job_code(const vm_mock_service_client_session *member)
 {
     if (member == NULL || member->onlineJob < 1 || member->onlineJob > 3)
         return 0;
     return (u8)(member->onlineJob - 1);
 }
 
-static u8 vm_mock_service_team_member_sex_code(const vm_mock_service_client_session *member)
+u8 vm_mock_service_team_member_sex_code(const vm_mock_service_client_session *member)
 {
     return member != NULL && member->onlineSex <= 1 ? (u8)(member->onlineSex + 1) : 1;
 }
@@ -13405,7 +13405,7 @@ static u8 vm_mock_service_team_member_sex_code(const vm_mock_service_client_sess
  * roles use globally unique persistent ids.  Keep the synthetic-id fallback
  * for malformed legacy/imported state so a collision cannot corrupt the
  * observer's own portrait row. */
-static u32 vm_mock_service_team_member_wire_id(
+u32 vm_mock_service_team_member_wire_id(
     const vm_mock_service_client_session *observer,
     const vm_mock_service_client_session *member)
 {
@@ -13550,7 +13550,7 @@ static bool vm_net_mock_append_team_group_info_object(u8 *out, u32 outCap, u32 *
  * 3 uses that first row as the leader id.  Sending the full two-member table
  * here would append a second self row because the client has no replace-list
  * operation in the subtype-3/10 parser. */
-static bool vm_net_mock_append_team_joiner_leader_roster_object(
+bool vm_net_mock_append_team_joiner_leader_roster_object(
     u8 *out, u32 outCap, u32 *pos,
     const vm_mock_service_client_session *joiner,
     const vm_mock_service_client_session *leader)

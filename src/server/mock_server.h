@@ -198,6 +198,18 @@ typedef struct
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
 
+typedef struct
+{
+    u16 todayPastHours;
+    u16 todayPastMinutes;
+    u32 gainedExp;
+    u16 todayRemainingHours;
+    u16 todayRemainingMinutes;
+    u16 allRemainingHours;
+    u16 allRemainingMinutes;
+    u8 goldEnabled;
+} vm_net_mock_practise_info;
+
 /* Durable social and guild rows are value objects shared by their database
  * owner and independently compiled protocol builders.  They deliberately do
  * not expose the live client-session list or its mutable state. */
@@ -277,6 +289,75 @@ typedef struct
 typedef struct vm_mock_service_npc_context vm_mock_service_npc_context;
 typedef struct vm_mock_service_client_session vm_mock_service_client_session;
 typedef struct vm_mock_service_duel vm_mock_service_duel;
+typedef struct vm_mock_service_trade vm_mock_service_trade;
+typedef struct vm_net_mock_equipment_catalog_item
+    vm_net_mock_equipment_catalog_item;
+
+enum
+{
+    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX = 3
+};
+
+/* A scene-visible role snapshot is shared by the scene bootstrap producer and
+ * the social poll encoder.  The session remains opaque at this boundary. */
+typedef struct
+{
+    u32 actorId;
+    u16 x;
+    u16 y;
+    u8 job;
+    u8 sex;
+    u16 level;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    char roleName[32];
+    char titleText[32];
+    char titleBadge[32];
+    char stateText[16];
+    vm_mock_service_client_session *session;
+} vm_net_mock_scene_role_seed;
+
+typedef struct
+{
+    bool valid;
+    u32 roleId;
+    u32 memberRank;
+} vm_net_mock_guild_kick_action;
+
+/* This is a packet-level scene transition value.  Session/account owners may
+ * retain it, while protocol modules may only construct and encode it. */
+typedef struct
+{
+    char scene[64];
+    u16 x;
+    u16 y;
+    u32 exitId;
+    u8 mapType;
+    bool hasSceEntry;
+    bool needsSceneDownload;
+    bool sceneEnterPosinfoSent;
+    bool sceneCompletionSent;
+    bool sceneResourceProbeAcknowledged;
+} vm_net_mock_scene_change_target;
+
+typedef struct
+{
+    u32 serial;
+    u32 peerClientId;
+    u32 observerHp;
+    u32 observerHpMax;
+    u32 observerMp;
+    u32 observerMpMax;
+    u32 peerHp;
+    u32 peerHpMax;
+    u32 peerMp;
+    u32 peerMpMax;
+    u8 observerIndex;
+    bool arenaRoom;
+    char scene[64];
+} vm_mock_service_duel_start_view;
 
 /* A narrow snapshot prevents independently linked activity modules from
  * reaching into the service's owning session list. */
@@ -320,6 +401,13 @@ typedef struct
     u8 existingMembersQueued;
 } vm_mock_service_team_join_result;
 
+enum
+{
+    VM_MOCK_TEAM_BATTLE_BUILD_OPERATE = 1,
+    VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK = 2,
+    VM_MOCK_TEAM_BATTLE_BUILD_ITEM = 3
+};
+
 typedef enum
 {
     VM_MOCK_SERVICE_TEAM_INVITE_ALLOWED = 0,
@@ -335,6 +423,95 @@ typedef struct
     u32 sourceClientId;
     u32 sourceWireId;
 } vm_mock_service_team_invite_reply_context;
+
+typedef struct
+{
+    bool active;
+    u32 sourceClientId;
+    u32 sourceWireId;
+} vm_mock_service_spar_invite_reply_context;
+
+typedef struct
+{
+    bool active;
+    u32 sourceClientId;
+    u32 sourceRoleId;
+} vm_mock_service_friend_invite_reply_context;
+
+typedef struct
+{
+    bool active;
+    u32 sourceClientId;
+    u32 sourceRoleId;
+} vm_mock_service_trade_invite_reply_context;
+
+typedef struct
+{
+    bool active;
+    u32 peerClientId;
+    u32 peerWireId;
+} vm_mock_service_spar_battle_ready_context;
+
+/* This is an immutable protocol value at the guild boundary.  The active
+ * two-party trade slot and all mutations remain private to the session
+ * service. */
+enum
+{
+    VM_MOCK_SERVICE_TRADE_ITEM_MAX = 10
+};
+
+typedef struct
+{
+    u32 itemId;
+    u16 sourceSeq;
+    u16 destinationSeq;
+    u16 enhanceLevel;
+    vm_net_mock_equipment_enhance_affix_state enhanceAffixes;
+    u16 durability;
+    u16 durabilityMax;
+    u32 count;
+} vm_mock_service_trade_item;
+
+typedef struct
+{
+    bool submitted;
+    u8 itemCount;
+    u32 money;
+    vm_mock_service_trade_item items[VM_MOCK_SERVICE_TRADE_ITEM_MAX];
+} vm_mock_service_trade_offer;
+
+typedef enum
+{
+    VM_MOCK_SERVICE_TRADE_SUBMIT_NOT_ACTIVE = 2,
+    VM_MOCK_SERVICE_TRADE_SUBMIT_INVALID = 3,
+    VM_MOCK_SERVICE_TRADE_SUBMIT_ACCEPTED = 1
+} vm_mock_service_trade_submit_status;
+
+typedef struct
+{
+    int side;
+    bool peerOfferPending;
+} vm_mock_service_trade_submit_result;
+
+enum
+{
+    VM_MOCK_SERVICE_TRADE_COMMIT_OK = 1,
+    VM_MOCK_SERVICE_TRADE_COMMIT_INVALID = 2,
+    VM_MOCK_SERVICE_TRADE_COMMIT_BAG_FULL = 3,
+    VM_MOCK_SERVICE_TRADE_COMMIT_STORAGE_FAILED = 4
+};
+
+typedef struct
+{
+    int side;
+    u8 responseSubtype;
+    u8 responseResult;
+    u8 confirmedMask;
+    u8 commitResult;
+    u32 finalMoney;
+    bool releaseAfterDelivery;
+    vm_mock_service_trade_offer receipt;
+} vm_mock_service_trade_confirm_result;
 
 typedef struct
 {
@@ -447,6 +624,11 @@ void vm_server_crash_note_protocol_stage(const char *stage);
 void vm_autotest_note(const char *fmt, ...);
 u32 scheduler_get_tick_ms(void);
 
+void vm_net_mock_followup_response_clear(void);
+void vm_net_mock_backpack_arm_authoritative_role_list(void);
+bool vm_net_mock_backpack_authoritative_role_list_pending(void);
+void vm_net_mock_backpack_complete_authoritative_role_list(void);
+
 bool vm_net_mock_get_object_u8_field(const u8 *request, u32 requestLen,
                                      const char *field, u8 *value);
 bool vm_net_mock_get_object_u32_field(const u8 *request, u32 requestLen,
@@ -465,6 +647,8 @@ bool vm_net_mock_put_object_raw(u8 *out, u32 outCap, u32 *pos,
                                 u16 dataLen);
 bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos,
                                    const char *name, const char *value);
+bool vm_net_mock_put_object_cstring(u8 *out, u32 outCap, u32 *pos,
+                                    const char *name, const char *value);
 bool vm_net_mock_begin_wt_object(u8 *out, u32 outCap, u32 *pos,
                                  u8 major, u8 kind, u8 subtype,
                                  u32 *objectStart);
@@ -481,16 +665,40 @@ bool vm_mock_service_friend_record_find(u32 ownerRoleId,
                                         const char *ownerAccountId,
                                         u32 targetRoleId,
                                         vm_mock_service_friend_record *recordOut);
+u32 vm_mock_service_friend_record_collect(u32 ownerRoleId,
+                                          const char *ownerAccountId,
+                                          vm_mock_service_friend_record *recordsOut,
+                                          u32 recordsCap);
+bool vm_mock_service_friend_db_remove_pair(const char *ownerAccountId,
+                                           u32 ownerRoleId, u32 targetRoleId,
+                                           bool *removedOut);
 bool vm_mock_mysql_single_u32_row(void *contextValue,
                                   unsigned int columnCount,
                                   const char *const *values,
                                   const size_t *lengths);
 bool vm_net_mock_role_db_save(const char *reason);
+bool vm_net_mock_practise_get_info(vm_net_mock_role_state *role,
+                                   vm_net_mock_practise_info *infoOut);
+bool vm_net_mock_practise_set_gold(vm_net_mock_role_state *role,
+                                   bool goldEnabled);
+bool vm_net_mock_practise_pill_max_usable(vm_net_mock_role_state *role,
+                                          u16 itemSeq, u32 *maxUseOut);
+bool vm_net_mock_parse_special_item_seq_request(
+    const u8 *request, u32 requestLen, u8 kind, u8 subtype,
+    const char *seqField, bool requireOneNum, u16 *seqOut);
+bool vm_net_mock_get_object_tagged_number_entry(
+    const u8 *payload, u32 payloadLen, const char *field, u32 *valueOut);
+bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
+                                   u16 itemSeq, u32 useCount,
+                                   u32 *remainingOut);
 bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
                                    u32 *currentOut, u32 *maxOut);
 bool vm_net_mock_vitality_consume(vm_net_mock_role_state *role,
                                   u32 amount, u32 *currentOut,
                                   u32 *maxOut);
+bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
+                                   u16 itemSeq, u32 *currentOut,
+                                   u32 *maxOut);
 bool vm_net_mock_role_add_backpack_item_to_role_in_memory(
     vm_net_mock_role_state *role, u32 itemId, u32 count, u16 *seqOut);
 vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(
@@ -508,8 +716,190 @@ const vm_mock_service_npc_context *vm_net_mock_npc_service_context_get(
 bool vm_net_mock_is_npc_service_dialog_request(
     const u8 *request, u32 requestLen, u32 *serviceValueOut);
 vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
+vm_mock_service_client_session *vm_mock_service_find_client_session(u32 clientId);
 const char *vm_mock_service_active_account_id(void);
+bool vm_mock_service_has_active_account(void);
+void vm_mock_service_guild_set_selected(u32 guildId);
+void vm_mock_service_guild_clear_pending_create(void);
+bool vm_mock_service_guild_set_pending_create_name(const char *name);
+bool vm_mock_service_guild_pending_create_name_matches(const char *name);
 u32 vm_mock_service_active_client_id(void);
+size_t vm_mock_mysql_bounded_strlen(const char *text, size_t capacity);
+bool vm_net_mock_guild_find_member(u32 guildId, u32 roleId,
+                                   vm_net_mock_guild_member_record *memberOut);
+bool vm_net_mock_guild_count(const char *tableAndWhere, u32 *countOut);
+bool vm_net_mock_guild_find_role_membership(u32 roleId,
+                                            vm_net_mock_guild_record *guildOut,
+                                            u8 *rankOut);
+bool vm_net_mock_scene_name_is_safe(const char *scene);
+u16 vm_net_mock_scene_spawn_x(void);
+u16 vm_net_mock_scene_spawn_y(void);
+bool vm_mock_service_friend_db_add_pair(
+    const char *ownerAccountId, u32 ownerRoleId,
+    const char *ownerRoleName, u32 ownerLevel, u8 ownerJob, u8 ownerSex,
+    const char *targetAccountId, u32 targetRoleId,
+    const char *targetRoleName, u32 targetLevel, u8 targetJob, u8 targetSex,
+    bool *createdOut);
+bool vm_mock_service_session_enqueue_social_notice(
+    vm_mock_service_client_session *target, u8 type, u8 result,
+    const vm_mock_service_client_session *source,
+    const vm_net_mock_role_state *sourceRole, const char *sourceAccountId);
+bool vm_mock_service_team_remove_member(vm_mock_service_client_session *leaver,
+                                        const char *reason);
+bool vm_net_mock_append_team_joiner_leader_roster_object(
+    u8 *out, u32 outCap, u32 *pos,
+    const vm_mock_service_client_session *joiner,
+    const vm_mock_service_client_session *leader);
+bool vm_net_mock_build_configured_resource_path(const char *name,
+                                                char *out, size_t outCap);
+bool vm_net_mock_build_scene_npcinfo_blob(
+    const char *scene, u8 *npcInfo, u32 npcInfoCap,
+    u8 *npcNumOut, u32 *npcInfoLenOut);
+const char *vm_net_mock_current_scene_name(void);
+const vm_net_mock_equipment_catalog_item *
+vm_net_mock_find_equipment_catalog_item(u32 itemId);
+FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode);
+bool vm_net_mock_get_object_blob_field(const u8 *request, u32 requestLen,
+                                       const char *field, const u8 **value,
+                                       u16 *valueLen);
+bool vm_net_mock_get_object_string_field(const u8 *request, u32 requestLen,
+                                         const char *field, char *value,
+                                         u32 valueCap);
+bool vm_net_mock_guild_find_by_id(u32 guildId,
+                                  vm_net_mock_guild_record *guildOut);
+bool vm_net_mock_guild_find_membership_for_account(
+    const char *accountId, u32 roleId, vm_net_mock_guild_record *guildOut,
+    u8 *rankOut);
+bool vm_net_mock_guild_find_pending_application(
+    u32 guildId, u32 roleId,
+    vm_net_mock_guild_application_record *applicationOut);
+bool vm_net_mock_guild_mysql_query(const char *sql,
+                                   vm_mysql_row_callback callback,
+                                   void *context);
+bool vm_net_mock_guild_query_applications(
+    u32 guildId, u32 offset, u32 pageSize,
+    vm_net_mock_guild_application_record *rows, u32 rowCapacity,
+    u32 *rowCountOut);
+bool vm_net_mock_guild_query_members(
+    u32 guildId, u32 offset, u32 pageSize,
+    vm_net_mock_guild_member_record *rows, u32 rowCapacity,
+    u32 *rowCountOut);
+bool vm_net_mock_guild_query_records(
+    const char *whereClause, const char *tailClause,
+    vm_net_mock_guild_record *rows, u32 rowCapacity, u32 *rowCountOut);
+u8 vm_net_mock_item_common_extra_enhance_cap(u32 itemId);
+bool vm_net_mock_put_be32(u8 *out, u32 outCap, u32 *pos, u32 value);
+bool vm_net_mock_put_object_blob(u8 *out, u32 outCap, u32 *pos,
+                                 const char *name, const u8 *data,
+                                 u16 dataLen);
+bool vm_net_mock_put_object_entry(u8 *out, u32 outCap, u32 *pos,
+                                  const char *name, const u8 *value,
+                                  u16 valueLen);
+bool vm_net_mock_put_object_u16(u8 *out, u32 outCap, u32 *pos,
+                                const char *name, u16 value);
+u32 vm_net_mock_role_default_weapon_for_job(u32 job);
+bool vm_net_mock_scene_name_has_path_separator(const char *scene);
+bool vm_net_mock_seq_put_i16(u8 *out, u32 outCap, u32 *pos, u16 value);
+bool vm_net_mock_seq_put_item_common_extra(
+    u8 *out, u32 outCap, u32 *pos, u32 itemId, u8 enhanceLevel,
+    u8 enhanceMaxLevel,
+    const vm_net_mock_equipment_enhance_affix_state *affixes);
+bool vm_net_mock_str_ends_with(const char *text, const char *suffix);
+
+/* Guild owns the protocol encoders for scene-presence, social exchanges and
+ * guild state.  Dispatch and scene modules use only these explicit codecs. */
+bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *pos);
+bool vm_net_mock_get_object_entry_field(const u8 *request, u32 requestLen,
+                                        const char *field, const u8 **value,
+                                        u16 *valueLen);
+bool vm_net_mock_build_scene_list_otherinfo_blob(
+    const char *scene, u8 *otherInfo, u32 otherInfoCap,
+    u32 *otherInfoLenOut, u32 *roleCountOut);
+bool vm_net_mock_append_scene_room_roles_object(
+    u8 *out, u32 outCap, u32 *pos, u32 *roleNumOut);
+bool vm_net_mock_find_nearby_role_seed_by_actor_id(
+    const char *scene, u32 actorId, vm_net_mock_scene_role_seed *seedOut);
+bool vm_net_mock_open_server_data_resource(const char *name,
+                                           const char *requiredSuffix,
+                                           FILE **fpOut, char *pathOut,
+                                           size_t pathOutCap);
+u32 vm_net_mock_build_nearby_player_info_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_nearby_equip_view_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_nearby_guild_invite_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_nearby_trade_request_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_nearby_team_invite_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_team_invite_reply_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_team_leave_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_duel_start_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer);
+u32 vm_net_mock_build_nearby_spar_request_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_spar_invite_reply_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_spar_ready_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_friend_add_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_friend_invite_reply_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_trade_invite_reply_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+bool vm_net_mock_append_trade_offer_object(
+    u8 *out, u32 outCap, u32 *pos,
+    const vm_mock_service_trade_offer *offer);
+bool vm_net_mock_append_trade_terminal_object(
+    u8 *out, u32 outCap, u32 *pos, u8 subtype, u8 result, u32 finalMoney,
+    const vm_mock_service_trade_offer *receipt);
+u32 vm_net_mock_build_trade_offer_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_trade_confirm_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_dialog_gate_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_page_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_member_page_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_rank_compat_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_page_compat_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_leave_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_detail_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_create_start_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_create_name_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_create_commit_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_apply_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_application_page_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_application_action_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_slogan_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_rank_action_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u8 vm_net_mock_build_scene_role_seeds(const char *scene,
+                                      vm_net_mock_scene_role_seed *seeds,
+                                      u8 seedCap);
+bool vm_net_mock_parse_guild_kick_action(const u8 *request, u32 requestLen,
+                                         vm_net_mock_guild_kick_action *actionOut);
+u8 vm_net_mock_apply_guild_kick_action(
+    const vm_net_mock_guild_kick_action *action,
+    vm_net_mock_role_state *requester,
+    u32 *guildIdOut, u8 *requesterRankOut, u8 *targetRankOut);
 vm_mock_service_client_session *vm_mock_service_find_online_session_by_role_id(
     u32 roleId);
 vm_mock_service_client_session *vm_mock_service_find_online_session_by_role_account(
@@ -521,6 +911,15 @@ vm_mock_service_client_session *vm_mock_service_find_online_friend_session(
 bool vm_mock_service_session_get_online_view(
     const vm_mock_service_client_session *session,
     vm_mock_service_online_session_view *viewOut);
+void vm_mock_service_arm_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 maxUse);
+void vm_mock_service_clear_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, const char *reason);
+bool vm_mock_service_practise_pill17_followup_matches(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum,
+    bool *replayOut, bool *rejectedOut);
+void vm_mock_service_commit_practise_pill17_followup(
+    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum);
 const char *vm_mock_service_session_account_id(
     const vm_mock_service_client_session *session);
 u32 vm_mock_service_collect_visible_session_views(
@@ -532,6 +931,8 @@ void vm_mock_service_session_set_arena_challenge_state(
     bool replyActive, u32 sourceRoleId);
 bool vm_mock_service_session_presence_is_recent(
     const vm_mock_service_client_session *session);
+bool vm_mock_service_session_scene_is_visible(
+    const vm_mock_service_client_session *session, const char *scene);
 bool vm_mock_service_session_enqueue_arena_challenge_notice(
     vm_mock_service_client_session *target,
     const vm_mock_service_client_session *challenger,
@@ -549,6 +950,51 @@ bool vm_mock_service_session_get_team_invite_reply_context(
     vm_mock_service_team_invite_reply_context *contextOut);
 void vm_mock_service_session_clear_team_invite_reply_context(
     vm_mock_service_client_session *session);
+bool vm_mock_service_session_get_spar_invite_reply_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_spar_invite_reply_context *contextOut);
+void vm_mock_service_session_clear_spar_invite_reply_context(
+    vm_mock_service_client_session *session);
+bool vm_mock_service_session_get_friend_invite_reply_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_friend_invite_reply_context *contextOut);
+void vm_mock_service_session_clear_friend_invite_reply_context(
+    vm_mock_service_client_session *session);
+bool vm_mock_service_session_get_trade_invite_reply_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_trade_invite_reply_context *contextOut);
+void vm_mock_service_session_clear_trade_invite_reply_context(
+    vm_mock_service_client_session *session);
+bool vm_mock_service_trade_begin_pair(
+    vm_mock_service_client_session *first,
+    vm_mock_service_client_session *second);
+void vm_mock_service_trade_abort_pair(
+    vm_mock_service_client_session *first,
+    vm_mock_service_client_session *second);
+vm_mock_service_trade_submit_status vm_mock_service_trade_submit_offer(
+    vm_mock_service_client_session *session,
+    const vm_mock_service_trade_offer *offer, bool offerValid,
+    vm_mock_service_trade_submit_result *resultOut);
+bool vm_mock_service_trade_validate_offer(vm_mock_service_trade_offer *offer,
+                                          vm_net_mock_role_state *role);
+void vm_mock_service_trade_confirm(
+    vm_mock_service_client_session *session, u8 requestResult,
+    vm_mock_service_trade_confirm_result *resultOut);
+void vm_mock_service_trade_release_after_direct_terminal_delivery(
+    vm_mock_service_client_session *session);
+bool vm_mock_service_spar_invite_can_accept(
+    const vm_mock_service_client_session *responder,
+    const vm_mock_service_client_session *source);
+void vm_mock_service_session_set_spar_battle_ready_context(
+    vm_mock_service_client_session *session, u32 peerClientId, u32 peerWireId);
+bool vm_mock_service_session_get_spar_battle_ready_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_spar_battle_ready_context *contextOut);
+void vm_mock_service_session_clear_spar_battle_ready_context(
+    vm_mock_service_client_session *session);
+bool vm_mock_service_spar_battle_ready_source_is_valid(
+    const vm_mock_service_client_session *responder,
+    const vm_mock_service_client_session *source);
 bool vm_mock_service_enqueue_guild_application_notice(
     const vm_net_mock_guild_application_record *application,
     const vm_net_mock_guild_record *guild, u8 actionType,
@@ -556,10 +1002,24 @@ bool vm_mock_service_enqueue_guild_application_notice(
 vm_mock_service_duel *vm_mock_service_duel_begin(
     vm_mock_service_client_session *inviter,
     vm_mock_service_client_session *responder);
+bool vm_mock_service_duel_get_pending_start(
+    const vm_mock_service_client_session *observer,
+    vm_mock_service_duel_start_view *viewOut);
+bool vm_mock_service_duel_confirm_start_delivery(
+    const vm_mock_service_client_session *observer, u32 serial,
+    u8 *startedMaskOut, u8 *pendingMaskOut);
+void vm_mock_service_duel_cancel_for_client(u32 clientId, const char *reason);
 vm_mock_service_duel *vm_mock_service_arena_duel_begin(
     vm_mock_service_client_session *challenger,
     vm_mock_service_client_session *opponent, u32 roomId);
 u32 vm_mock_service_duel_serial(const vm_mock_service_duel *duel);
+u8 vm_mock_service_team_member_job_code(
+    const vm_mock_service_client_session *member);
+u8 vm_mock_service_team_member_sex_code(
+    const vm_mock_service_client_session *member);
+u32 vm_mock_service_team_member_wire_id(
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *member);
 void vm_net_mock_arena_remove_role(u32 roleId, const char *reason);
 void vm_net_mock_arena_on_duel_released(u32 roomId, u32 duelSerial);
 u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
@@ -574,6 +1034,51 @@ bool vm_net_mock_mailbox_build_dialog(
     u32 operation, u32 value, vm_net_mock_mailbox_dialog *view);
 u32 vm_net_mock_active_role_id(void);
 vm_net_mock_role_state *vm_net_mock_active_role(void);
+u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
+                                            u8 *out, u32 outCap);
+u32 vm_net_mock_build_friend_remove_and_page_response(const u8 *request,
+                                                       u32 requestLen,
+                                                       u8 *out, u32 outCap);
+u32 vm_net_mock_build_guild_kick_response(const u8 *request, u32 requestLen,
+                                           u8 *out, u32 outCap);
+u32 vm_net_mock_build_short_wt_control_ack_response(const u8 *request,
+                                                     u32 requestLen,
+                                                     u8 kind, u8 subtype,
+                                                     u8 *out, u32 outCap);
+bool vm_net_mock_is_short_wt_control_packet(const u8 *request,
+                                            u32 requestLen, u8 kind,
+                                            u8 subtype);
+u32 vm_net_mock_build_practise_help19_response(const u8 *request,
+                                               u32 requestLen,
+                                               u8 *out, u32 outCap);
+u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap);
+u32 vm_net_mock_build_practise_setting21_response(const u8 *request,
+                                                  u32 requestLen,
+                                                  u8 *out, u32 outCap);
+u32 vm_net_mock_build_practise_pill16_response(const u8 *request,
+                                                u32 requestLen,
+                                                u8 *out, u32 outCap);
+u32 vm_net_mock_build_practise_pill17_followup_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_vitality_pill33_response(const u8 *request,
+                                                u32 requestLen,
+                                                u8 *out, u32 outCap);
+bool vm_net_mock_is_login_tail_skill_request(const u8 *request,
+                                              u32 requestLen);
+u32 vm_net_mock_build_login_tail_skill_response(u8 *out, u32 outCap);
+bool vm_net_mock_append_login_tail_skill_objects(
+    u8 *out, u32 outCap, u32 *pos, u8 *addedCount, bool compactBackpack);
+u32 vm_net_mock_build_battle_death_prompt_error_response(
+    u8 *out, u32 outCap, const char *info);
+u32 vm_net_mock_role_active_exp_card_multiplier(
+    const vm_net_mock_role_state *role);
+u8 vm_net_mock_role_active_battle_insight_flag(void);
+const char *vm_net_mock_special_item_success_info(u32 itemId);
+u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
+                                               u32 requestLen,
+                                               u8 *out, u32 outCap);
+u32 vm_net_mock_build_battle_insight_status_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 u32 vm_net_mock_build_ranking_page_response(const u8 *request,
                                              u32 requestLen, u8 *out,
                                              u32 outCap);

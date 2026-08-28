@@ -1,4 +1,3 @@
-static bool vm_net_mock_append_scene_room_roles_object(u8 *out, u32 outCap, u32 *pos, u32 *roleNumOut);
 static bool vm_net_mock_scene_runtime_pending_without_target(void);
 static u8 vm_net_mock_append_scene_role_moveinfo2_objects(u8 *out, u32 outCap, u32 *pos,
                                                           const char *scene);
@@ -14,12 +13,6 @@ static void vm_net_mock_apply_actor_moveinfo_timeline(u16 *x, u16 *y,
                                                       const u8 *moveInfo, u16 moveInfoLen);
 static void vm_net_mock_format_moveinfo_timeline(const u8 *moveInfo, u16 moveInfoLen,
                                                  char *out, u32 outCap);
-static bool vm_net_mock_build_scene_list_otherinfo_blob(const char *scene,
-                                                        u8 *otherInfo,
-                                                        u32 otherInfoCap,
-                                                        u32 *otherInfoLenOut,
-                                                        u32 *roleCountOut);
-
 static bool vm_net_mock_active_client_scene_ready_for_nearby(const char *scene)
 {
     const vm_mock_service_client_session *session = NULL;
@@ -272,7 +265,7 @@ static u8 vm_net_mock_scene_room_npc_seed_count(const char *scene)
     return (u8)count;
 }
 
-static bool vm_net_mock_build_scene_npcinfo_blob(
+bool vm_net_mock_build_scene_npcinfo_blob(
     const char *scene, u8 *npcInfo, u32 npcInfoCap,
     u8 *npcNumOut, u32 *npcInfoLenOut)
 {
@@ -1281,7 +1274,7 @@ static u32 vm_net_mock_task_admin_list(vm_net_mock_task_definition *rows,
 static bool vm_net_mock_task_active_state_count(u32 taskId, u32 *countOut)
 {
     char query[256];
-    vm_mock_mysql_guild_u32_context context;
+    vm_mock_mysql_u32_context context;
 
     if (countOut)
         *countOut = 0;
@@ -1289,7 +1282,7 @@ static bool vm_net_mock_task_active_state_count(u32 taskId, u32 *countOut)
     snprintf(query, sizeof(query),
              "SELECT COUNT(*) FROM account_role_tasks WHERE task_id=%u AND task_state IN (1,2)",
              taskId);
-    if (!vm_mysql_query(query, vm_mock_mysql_guild_u32_row, &context) ||
+    if (!vm_mysql_query(query, vm_mock_mysql_single_u32_row, &context) ||
         context.invalid || !context.found)
     {
         return false;
@@ -1491,7 +1484,7 @@ static bool vm_net_mock_task_admin_delete_override(u32 taskId,
     char query[256];
     u32 activeCount = 0;
     u32 bindingCount = 0;
-    vm_mock_mysql_guild_u32_context countContext;
+    vm_mock_mysql_u32_context countContext;
 
     if (errorOut)
         *errorOut = "task override not found";
@@ -1511,7 +1504,7 @@ static bool vm_net_mock_task_admin_delete_override(u32 taskId,
              "SELECT COUNT(*) FROM server_dynamic_npc_tasks WHERE task_id=%u",
              taskId);
     if (!task->builtin &&
-        (!vm_mysql_query(query, vm_mock_mysql_guild_u32_row, &countContext) ||
+        (!vm_mysql_query(query, vm_mock_mysql_single_u32_row, &countContext) ||
          countContext.invalid || !countContext.found ||
          (bindingCount = countContext.value) != 0))
     {

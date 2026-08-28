@@ -2,8 +2,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
 
 static void vm_net_mock_clear_followup_response(void)
 {
-    g_vmNetMockFollowupResponseLen = 0;
-    g_vmNetMockFollowupResponseEventType = 7;
+    vm_net_mock_followup_response_clear();
 }
 
 static u32 vm_net_mock_build_single_object_request(const vm_net_mock_request_object *object, u8 *out, u32 outCap)
@@ -392,13 +391,12 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
-    if (g_netMockBackpackPreferRoleListAfterShopBuy)
+    if (vm_net_mock_backpack_authoritative_role_list_pending())
     {
         hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
         if (hookedLen)
         {
-            g_netMockBackpackPreferRoleListAfterShopBuy = 0;
-            g_netMockShop17ListPending = 0;
+            vm_net_mock_backpack_complete_authoritative_role_list();
             printf("[info][network] mock_shop_buy_backpack_sync shape=17/1+7/42 response=role-backpack pending=0\n");
             vm_net_log_handled_packet("builtin-shop-buy-backpack-sync-combo", request, requestLen, hookedLen);
             return hookedLen;
@@ -408,8 +406,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             hookedLen = vm_net_mock_build_backpack_open_response(out, outCap);
             if (hookedLen)
             {
-                g_netMockBackpackPreferRoleListAfterShopBuy = 0;
-                g_netMockShop17ListPending = 0;
+                vm_net_mock_backpack_complete_authoritative_role_list();
                 printf("[info][network] mock_shop_buy_backpack_sync shape=7/42 response=role-backpack pending=0\n");
                 vm_net_log_handled_packet("builtin-shop-buy-backpack-sync-open", request, requestLen, hookedLen);
                 return hookedLen;
@@ -420,8 +417,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             hookedLen = vm_net_mock_build_backpack_items_response(out, outCap);
             if (hookedLen)
             {
-                g_netMockBackpackPreferRoleListAfterShopBuy = 0;
-                g_netMockShop17ListPending = 0;
+                vm_net_mock_backpack_complete_authoritative_role_list();
                 printf("[info][network] mock_shop_buy_backpack_sync shape=17/1 response=role-backpack pending=0\n");
                 vm_net_log_handled_packet("builtin-shop-buy-backpack-sync-items", request, requestLen, hookedLen);
                 return hookedLen;

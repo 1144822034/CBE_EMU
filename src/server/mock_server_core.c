@@ -122,6 +122,29 @@ static vm_net_mock_battle_stat_modifier
  * the last still-alive member that has not acted in the current round. */
 static u8 g_vm_net_mock_team_battle_resolve_monsters_current = 0;
 
+void vm_net_mock_followup_response_clear(void)
+{
+    g_vmNetMockFollowupResponseLen = 0;
+    g_vmNetMockFollowupResponseEventType = 7;
+}
+
+void vm_net_mock_backpack_arm_authoritative_role_list(void)
+{
+    g_netMockShop17ListPending = 0;
+    g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+}
+
+bool vm_net_mock_backpack_authoritative_role_list_pending(void)
+{
+    return g_netMockBackpackPreferRoleListAfterShopBuy != 0;
+}
+
+void vm_net_mock_backpack_complete_authoritative_role_list(void)
+{
+    g_netMockBackpackPreferRoleListAfterShopBuy = 0;
+    g_netMockShop17ListPending = 0;
+}
+
 #define VM_MOCK_SERVICE_FRAME_SIZE 20
 #define VM_MOCK_SERVICE_REQUEST_FLAG_PING 0x1u
 #define VM_MOCK_SERVICE_REQUEST_FLAG_SCENE_SYNC_POLL 0x2u
@@ -265,8 +288,8 @@ bool vm_net_mock_get_object_u32_field(const u8 *request, u32 requestLen, const c
     return false;
 }
 
-static bool vm_net_mock_get_object_blob_field(const u8 *request, u32 requestLen, const char *field,
-                                              const u8 **value, u16 *valueLen)
+bool vm_net_mock_get_object_blob_field(const u8 *request, u32 requestLen, const char *field,
+                                       const u8 **value, u16 *valueLen)
 {
     u32 fieldLen = (u32)strlen(field);
     if (value)
@@ -309,7 +332,7 @@ static bool vm_net_mock_get_object_blob_field(const u8 *request, u32 requestLen,
     return false;
 }
 
-static bool vm_net_mock_get_object_string_field(const u8 *request, u32 requestLen, const char *field, char *value, u32 valueCap)
+bool vm_net_mock_get_object_string_field(const u8 *request, u32 requestLen, const char *field, char *value, u32 valueCap)
 {
     u32 fieldLen = (u32)strlen(field);
     if (value && valueCap > 0)
@@ -1476,7 +1499,6 @@ static u32 vm_net_mock_copy_response(const u8 *response, u32 responseLen, u8 *ou
 static char g_vm_net_mock_resource_dir[1024];
 static long vm_net_mock_file_size(const char *path);
 static long vm_net_mock_update_file_size(const char *name);
-static FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode);
 static u32 g_vm_mock_service_active_client_id;
 /* The headless service assigns this before dispatching every game packet.  The
  * startup updater uses it to associate the pre-login 18/9 request with the
@@ -1507,9 +1529,9 @@ static const char *vm_net_mock_resource_dir(void)
     return g_vm_net_mock_resource_dir;
 }
 
-static bool vm_net_mock_build_configured_resource_path(const char *name,
-                                                       char *out,
-                                                       size_t outCap)
+bool vm_net_mock_build_configured_resource_path(const char *name,
+                                                char *out,
+                                                size_t outCap)
 {
     size_t dirLen = strlen(g_vm_net_mock_resource_dir);
     if (out == NULL || outCap == 0 || name == NULL || name[0] == 0 || dirLen == 0)
@@ -3205,12 +3227,6 @@ static bool vm_net_mock_update_admin_save_slot(u8 slot, u16 version,
     return vm_net_mock_update_catalog_save(errorOut);
 }
 
-static bool vm_net_mock_get_object_entry_field(const u8 *request,
-                                               u32 requestLen,
-                                               const char *field,
-                                               const u8 **value,
-                                               u16 *valueLen);
-
 static bool vm_net_mock_update_admin_reset_delivery(const char **errorOut)
 {
     vm_net_mock_update_delivery_load();
@@ -3220,7 +3236,7 @@ static bool vm_net_mock_update_admin_reset_delivery(const char **errorOut)
     return vm_net_mock_update_delivery_save(errorOut);
 }
 
-static FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode)
+FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode)
 {
     FILE *fp = NULL;
 
@@ -4600,7 +4616,7 @@ static bool vm_net_mock_put_be16(u8 *out, u32 outCap, u32 *pos, u16 value)
     return vm_net_mock_put_bytes(out, outCap, pos, bytes, sizeof(bytes));
 }
 
-static bool vm_net_mock_put_be32(u8 *out, u32 outCap, u32 *pos, u32 value)
+bool vm_net_mock_put_be32(u8 *out, u32 outCap, u32 *pos, u32 value)
 {
     u8 bytes[4] = {(u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value};
     return vm_net_mock_put_bytes(out, outCap, pos, bytes, sizeof(bytes));
@@ -4633,7 +4649,7 @@ static bool vm_net_mock_put_string_field(u8 *out, u32 outCap, u32 *pos, const ch
            vm_net_mock_put_bytes(out, outCap, pos, value, valueLen);
 }
 
-static bool vm_net_mock_put_object_entry(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *value, u16 valueLen)
+bool vm_net_mock_put_object_entry(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *value, u16 valueLen)
 {
     u32 nameLen = (u32)strlen(name);
     if (nameLen > 0xff)
@@ -4655,7 +4671,7 @@ static bool vm_net_mock_put_object_ascii_digit(u8 *out, u32 outCap, u32 *pos, co
     return vm_net_mock_put_object_u8(out, outCap, pos, name, (u8)('0' + digit));
 }
 
-static bool vm_net_mock_put_object_u16(u8 *out, u32 outCap, u32 *pos, const char *name, u16 value)
+bool vm_net_mock_put_object_u16(u8 *out, u32 outCap, u32 *pos, const char *name, u16 value)
 {
     u8 encoded[] = {0x00, 0x02, (u8)(value >> 8), (u8)value};
     return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
@@ -4667,7 +4683,7 @@ bool vm_net_mock_put_object_u32(u8 *out, u32 outCap, u32 *pos, const char *name,
     return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
 }
 
-static bool vm_net_mock_put_object_blob(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *data, u16 dataLen)
+bool vm_net_mock_put_object_blob(u8 *out, u32 outCap, u32 *pos, const char *name, const u8 *data, u16 dataLen)
 {
     u32 nameLen = (u32)strlen(name);
     u16 valueLen = dataLen + 2;
@@ -4694,8 +4710,8 @@ bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const char *na
  * byte.  A few legacy handlers instead pass GetString() straight to libc-like
  * `%s` formatting.  Those fields must retain the protocol's blob wrapper but
  * include a terminal NUL in its inner payload. */
-static bool vm_net_mock_put_object_cstring(u8 *out, u32 outCap, u32 *pos,
-                                           const char *name, const char *value)
+bool vm_net_mock_put_object_cstring(u8 *out, u32 outCap, u32 *pos,
+                                    const char *name, const char *value)
 {
     size_t valueLen = value ? strlen(value) : 0;
     if (valueLen >= 0xffff)
@@ -5551,7 +5567,7 @@ bool vm_net_mock_seq_put_u8(u8 *out, u32 outCap, u32 *pos, u8 value)
            vm_net_mock_put_u8(out, outCap, pos, value);
 }
 
-static bool vm_net_mock_seq_put_i16(u8 *out, u32 outCap, u32 *pos, u16 value)
+bool vm_net_mock_seq_put_i16(u8 *out, u32 outCap, u32 *pos, u16 value)
 {
     return vm_net_mock_put_u8(out, outCap, pos, 0) &&
            vm_net_mock_put_u8(out, outCap, pos, 2) &&
@@ -6212,13 +6228,6 @@ typedef struct
 
 static u32 vm_net_mock_role_wcoin_balance(const vm_net_mock_role_state *role);
 
-static bool vm_net_mock_guild_find_role_membership(u32 roleId,
-                                                    vm_net_mock_guild_record *guildOut,
-                                                    u8 *rankOut);
-static bool vm_net_mock_guild_find_membership_for_account(const char *accountId,
-                                                           u32 roleId,
-                                                           vm_net_mock_guild_record *guildOut,
-                                                           u8 *rankOut);
 
 typedef struct
 {
@@ -6284,47 +6293,16 @@ typedef struct
     vm_net_mock_equipment_bonus equipment;
 } vm_net_mock_player_stats;
 
-/* Offline cultivation is deliberately separate from the role snapshot.  The
- * timer continues while no client session exists, so its authority is a
- * relational companion row keyed by the same account/role pair as the
- * backpack and timed-item state. */
-typedef struct
-{
-    u16 todayPastHours;
-    u16 todayPastMinutes;
-    u32 gainedExp;
-    u16 todayRemainingHours;
-    u16 todayRemainingMinutes;
-    u16 allRemainingHours;
-    u16 allRemainingMinutes;
-    u8 goldEnabled;
-} vm_net_mock_practise_info;
-
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_level_start_exp(u32 level);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
-static bool vm_net_mock_practise_get_info(vm_net_mock_role_state *role,
-                                          vm_net_mock_practise_info *infoOut);
-static u32 vm_net_mock_build_practise_help19_response(const u8 *request,
-                                                      u32 requestLen,
-                                                      u8 *out, u32 outCap);
-static bool vm_net_mock_practise_set_gold(vm_net_mock_role_state *role,
-                                          bool goldEnabled);
-static bool vm_net_mock_practise_pill_max_usable(vm_net_mock_role_state *role,
-                                                 u16 itemSeq, u32 *maxUseOut);
-static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
-                                          u16 itemSeq, u32 useCount,
-                                          u32 *remainingOut);
 static void vm_net_mock_practise_mark_offline(const char *accountId,
                                               u32 roleId);
 /* 聚元丹的“活力”不属于角色 HP/MP，也不应伪装成二者之一。它和离线
  * 奖励一样是按账号/角色持久化的伴随状态；专用物品 builder 只能在这些
  * 权威操作成功提交后返回客户端的 result=1。 */
-static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
-                                          u16 itemSeq, u32 *currentOut,
-                                          u32 *maxOut);
 /* `energy`/`energymax` is a client-owned role cache which is refreshed by
  * 2/13, battle 4/7, and task 6/4.  Every one of those paths must read the
  * same durable vitality row; none may substitute a presentation constant. */
@@ -6380,11 +6358,8 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
 static bool vm_net_mock_role_get_active_timed_item_effect(
     const vm_net_mock_role_state *role, u8 kind,
     vm_net_mock_role_item_effect *effectOut);
-static u32 vm_net_mock_role_active_exp_card_multiplier(
-    const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     const vm_net_mock_role_state *role);
-static u8 vm_net_mock_role_active_battle_insight_flag(void);
 /* Fills the final combat-stat percentage bonuses currently active for this
  * role.  These effects only alter authoritative battle calculations; there
  * is no parser evidence for treating them as a permanent ActorInfo rewrite. */
@@ -6393,16 +6368,9 @@ static bool vm_net_mock_role_active_timed_combat_bonus_percent(
     u32 *defensePercentOut);
 static u8 vm_net_mock_role_active_timed_combat_flag(void);
 static u8 vm_net_mock_role_active_exp_card_flag(void);
-static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
-                                                      u32 requestLen,
-                                                      u8 *out, u32 outCap);
-static u32 vm_net_mock_build_battle_insight_status_response(
-    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_timed_special_item_use_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_battle_insight_followup_response(
-    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
-static u32 vm_net_mock_build_vitality_pill33_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_training_book_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);

@@ -1,5 +1,6 @@
-static u32 vm_net_mock_build_guild_kick_response(const u8 *request, u32 requestLen,
-                                                  u8 *out, u32 outCap)
+#ifndef CBE_SERVER_SPLIT_OBJECTS
+u32 vm_net_mock_build_guild_kick_response(const u8 *request, u32 requestLen,
+                                          u8 *out, u32 outCap)
 {
     vm_net_mock_guild_kick_action action;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -33,7 +34,9 @@ static u32 vm_net_mock_build_guild_kick_response(const u8 *request, u32 requestL
            action.valid ? 1u : 0u, result, pos);
     return pos;
 }
+#endif
 
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 static bool vm_net_mock_is_friend_page_request(const u8 *request, u32 requestLen,
                                                  u32 *indexOut, u8 *pageSizeOut)
 {
@@ -68,12 +71,13 @@ static bool vm_net_mock_is_friend_page_request(const u8 *request, u32 requestLen
     return true;
 }
 
-static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
-                                                   u8 *out, u32 outCap)
+u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
+                                           u8 *out, u32 outCap)
 {
     u8 friendInfo[8192];
+    vm_mock_service_friend_record friendRecords[VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS];
     vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
-    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    const char *ownerAccountId = vm_mock_service_active_account_id();
     u32 index = 0;
     u32 friendInfoLen = 0;
     u32 objectStart = 0;
@@ -81,6 +85,7 @@ static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 request
     u32 totalPages = 1;
     u32 totalFriends = 0;
     u32 skippedFriends = 0;
+    u32 friendRecordCount = 0;
     u16 rowCount = 0;
     u8 pageSize = 0;
     u8 allPages8 = 1;
@@ -98,41 +103,30 @@ static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 request
      * family. HandleFriendResponse(0x0102157A) matches friendid and adds
      * addedfd to attr32, proving that attr32 is the persisted friend degree.
      */
-    vm_mock_service_friend_db_load();
-    if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0 &&
-        g_vm_mock_service_friend_db_valid)
+    if (ownerRole != NULL)
     {
-        for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
-        {
-            const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
-            if (record->ownerRoleId == ownerRole->roleId &&
-                strcmp(record->ownerAccountId, ownerAccountId) == 0)
-            {
-                ++totalFriends;
-            }
-        }
+        friendRecordCount = vm_mock_service_friend_record_collect(
+            ownerRole->roleId, ownerAccountId, friendRecords,
+            VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS);
     }
+    totalFriends = friendRecordCount;
     if (totalFriends > 0)
         totalPages = (totalFriends + pageSize - 1u) / pageSize;
     allPages8 = (u8)(totalPages > 0xffu ? 0xffu : totalPages);
 
     if (!vm_net_mock_seq_put_i16(friendInfo, sizeof(friendInfo), &friendInfoLen, 0))
         return 0;
-    if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0)
+    if (ownerRole != NULL)
     {
-        for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+        for (u32 i = 0; i < friendRecordCount; ++i)
         {
-            const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
+            const vm_mock_service_friend_record *record = &friendRecords[i];
             vm_mock_service_client_session *onlineSession = NULL;
+            vm_mock_service_online_session_view onlineView;
             const char *friendName = NULL;
             u8 friendState = 0;
             u8 friendAttr8 = 1;
 
-            if (record->ownerRoleId != ownerRole->roleId ||
-                strcmp(record->ownerAccountId, ownerAccountId) != 0)
-            {
-                continue;
-            }
             if (skippedFriends < index)
             {
                 ++skippedFriends;
@@ -141,11 +135,21 @@ static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 request
             if (rowCount >= pageSize)
                 break;
             onlineSession = vm_mock_service_find_online_friend_session(record);
-            friendName = onlineSession && onlineSession->onlineRoleName[0] ?
-                         onlineSession->onlineRoleName : record->targetRoleName;
-            friendState = onlineSession ? 1 : 0;
-            friendAttr8 = onlineSession && onlineSession->onlineJob ?
-                          onlineSession->onlineJob : record->targetJob;
+            memset(&onlineView, 0, sizeof(onlineView));
+            if (onlineSession != NULL &&
+                vm_mock_service_session_get_online_view(onlineSession, &onlineView))
+            {
+                friendName = onlineView.onlineRoleName[0] ? onlineView.onlineRoleName :
+                             record->targetRoleName;
+                friendState = 1;
+                friendAttr8 = onlineView.onlineJob ? onlineView.onlineJob :
+                              record->targetJob;
+            }
+            else
+            {
+                friendName = record->targetRoleName;
+                friendAttr8 = record->targetJob;
+            }
             if (!vm_net_mock_seq_put_u32(friendInfo, sizeof(friendInfo), &friendInfoLen,
                                          record->targetRoleId) ||
                 !vm_net_mock_seq_put_string(friendInfo, sizeof(friendInfo), &friendInfoLen,
@@ -208,12 +212,12 @@ static u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 request
  * page callback, however, consumes the following 10/1 response and clears the
  * screen's network wait.  Preserve that client-owned lifecycle by returning
  * only the post-transaction page object, never an invented 10/9 result. */
-static u32 vm_net_mock_build_friend_remove_and_page_response(const u8 *request,
-                                                              u32 requestLen,
-                                                              u8 *out, u32 outCap)
+u32 vm_net_mock_build_friend_remove_and_page_response(const u8 *request,
+                                                       u32 requestLen,
+                                                       u8 *out, u32 outCap)
 {
     vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
-    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    const char *ownerAccountId = vm_mock_service_active_account_id();
     vm_net_mock_request_object removeObject;
     vm_net_mock_request_object pageObject;
     u8 pageRequest[128];
@@ -271,6 +275,7 @@ static u32 vm_net_mock_build_friend_remove_and_page_response(const u8 *request,
                      persisted ? 1u : 0u, removed ? 1u : 0u);
     return responseLen;
 }
+#endif
 
 static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outCap, u32 *pos,
                                                                u8 *objectCount, const char *sceneOverride,
@@ -424,9 +429,9 @@ static bool vm_net_mock_append_role_skills_object(u8 *out, u32 outCap, u32 *pos)
     return true;
 }
 
-static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap,
-                                                         u32 *pos, u8 *addedCount,
-                                                         bool compactBackpack)
+bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap,
+                                                 u32 *pos, u8 *addedCount,
+                                                 bool compactBackpack)
 {
     if (addedCount == NULL)
         return false;
@@ -1909,9 +1914,6 @@ static u32 vm_net_mock_build_current_scene_reload_response(const u8 *request, u3
                      objectCount);
     return pos;
 }
-
-static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen,
-                                                   u8 kind, u8 subtype);
 
 static bool vm_net_mock_is_mmgame_scene_transfer_followup_request(const u8 *request, u32 requestLen)
 {

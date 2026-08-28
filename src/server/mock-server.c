@@ -84,15 +84,6 @@ static void vm_mock_service_mark_backpack_bootstrap_npc_reseed_pending(
 /* Item 827's 1/7/16 reply only supplies the native quantity upper bound.
  * The CBE sends the user's confirmed count in 1/7/17, which is the durable
  * commit boundary.  The session layer owns that narrow authorization edge. */
-static void vm_mock_service_arm_practise_pill17_followup(
-    const vm_net_mock_role_state *role, u16 itemSeq, u32 maxUse);
-static void vm_mock_service_clear_practise_pill17_followup(
-    const vm_net_mock_role_state *role, u16 itemSeq, const char *reason);
-static bool vm_mock_service_practise_pill17_followup_matches(
-    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum,
-    bool *replayOut, bool *rejectedOut);
-static void vm_mock_service_commit_practise_pill17_followup(
-    const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum);
 
 /* Chest configuration belongs to the catalog, while durable world-chat
  * storage and live delivery belong to the social service.  A successful
@@ -128,19 +119,15 @@ static bool vm_net_mock_resolve_nearest_safe_respawn(
     u32 *distanceOut, const char **routeOut);
 static bool vm_net_mock_adjust_recovery_landing_to_map_safe(
     const char *scene, u16 *x, u16 *y);
-/* The scene-startup recovery must distinguish a standalone WT25/5 from the
- * same object embedded in a task/runtime composite. The detector is owned by
- * the later social fragment, so declare that narrow existing contract here. */
-static bool vm_net_mock_is_short_wt_control_packet(
-    const u8 *request, u32 requestLen, u8 kind, u8 subtype);
-
 #include "mock_server_equipment_npc.c"
 #ifndef CBE_SERVER_SPLIT_OBJECTS
 #include "mock_server_mailbox.c"
 #endif
 #include "mock_server_scene_task.c"
 #include "mock_server_scene_sync.c"
+#ifndef CBE_SERVER_SPLIT_OBJECTS
 #include "mock_server_guild.c"
+#endif
 
 static bool vm_net_mock_battle_pending_settlement_is_deliverable(
     const vm_mock_service_client_session *observer);

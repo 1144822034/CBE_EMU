@@ -3959,13 +3959,6 @@ static bool vm_net_mock_build_team_battle_teaminfo_blob(
         out, outCap, teamInfoLenOut, wireIds, hps, mps, team->battleMemberCount);
 }
 
-enum
-{
-    VM_MOCK_TEAM_BATTLE_BUILD_OPERATE = 1,
-    VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK = 2,
-    VM_MOCK_TEAM_BATTLE_BUILD_ITEM = 3
-};
-
 static u16 vm_net_mock_copy_response_object(const u8 *packet,
                                             u32 packetLen,
                                             u8 kind,

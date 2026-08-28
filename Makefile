@@ -15,9 +15,15 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_scene_task.c \
 	src/server/mock_server_scene_sync.c \
 	src/server/mock_server_guild.c \
+	src/server/mock_server_interaction_control.c \
+	src/server/mock_server_login_tail_skill.c \
 	src/server/mock_server_social.c \
+	src/server/mock_server_social_guild.c \
+	src/server/mock_server_social_friends.c \
+	src/server/mock_server_timed_status.c \
 	src/server/mock_server_battle.c \
 	src/server/mock_server_arena.c \
+	src/server/mock_server_battle_death.c \
 	src/server/mock_server_interaction_login.c \
 	src/server/mock_server_dispatch.c \
 	src/server/mock_server_transport.c
@@ -28,8 +34,15 @@ MOCK_SERVER_FRAGMENTS := \
 # declared in mock_server.h.
 MOCK_SERVER_SPLIT_SOURCES := \
 	src/server/mock_server_arena.c \
+	src/server/mock_server_battle_death.c \
+	src/server/mock_server_guild.c \
+	src/server/mock_server_interaction_control.c \
+	src/server/mock_server_login_tail_skill.c \
 	src/server/mock_server_mailbox.c \
-	src/server/mock_server_ranking.c
+	src/server/mock_server_ranking.c \
+	src/server/mock_server_social_guild.c \
+	src/server/mock_server_social_friends.c \
+	src/server/mock_server_timed_status.c
 
 # Regression programs include server_main.c directly, so they must rebuild
 # whenever its standalone-service boundary changes as well.
@@ -93,7 +106,7 @@ build: client server
 client: $(CLIENT_TARGET)
 server: $(SERVER_TARGET)
 boundary-check: build
-	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-service-boundary.ps1
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-service-boundary.ps1 -Client "$(CLIENT_TARGET)" -Server "$(SERVER_TARGET)"
 
 npc-crystal-synthesis-regression: $(SERVER_OBJDIR)/npc-crystal-synthesis-regression.exe
 

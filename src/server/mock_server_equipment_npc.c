@@ -2261,7 +2261,7 @@ static void vm_net_mock_mark_pending_scene_pos_save(const char *scene, u16 x, u1
     g_vm_net_mock_pending_scene_save_valid = true;
 }
 
-static const char *vm_net_mock_current_scene_name(void)
+const char *vm_net_mock_current_scene_name(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     const char *overrideName = vm_net_mock_env_str("CBE_SCENE_KEY", "");
@@ -2296,7 +2296,7 @@ static const char *vm_net_mock_current_scene_name(void)
     return vm_net_mock_default_scene_name();
 }
 
-static u16 vm_net_mock_scene_spawn_x(void)
+u16 vm_net_mock_scene_spawn_x(void)
 {
     u16 transientX = 0;
 
@@ -2310,7 +2310,7 @@ static u16 vm_net_mock_scene_spawn_x(void)
     return VM_NET_MOCK_ROLE_INITIAL_X;
 }
 
-static u16 vm_net_mock_scene_spawn_y(void)
+u16 vm_net_mock_scene_spawn_y(void)
 {
     u16 transientY = 0;
 
@@ -2406,31 +2406,6 @@ static bool vm_net_mock_put_scene_fields(u8 *out, u32 outCap, u32 *pos, bool inc
                                              vm_net_mock_scene_spawn_x(),
                                              vm_net_mock_scene_spawn_y());
 }
-
-typedef struct
-{
-    char scene[64];
-    u16 x;
-    u16 y;
-    u32 exitId;
-    u8 mapType;
-    bool hasSceEntry;
-    bool needsSceneDownload;
-    /*
-     * The server has emitted the one position-bearing scene result for this
-     * in-flight target.  Follow-up WT25/5 families may finish resources, but
-     * must never emit another scene+posinfo result for the same target.
-     */
-    bool sceneEnterPosinfoSent;
-    /* A 30/1 or position-bearing 30/2 starts the destination shell.  The
-     * separate no-posinfo 30/2 closes that shell only after every invalidated
-     * scene resource required by it has completed WT18/7. */
-    bool sceneCompletionSent;
-    /* Content-manifest scenes get one lightweight 25/5 acknowledgement before
-     * completion. Cached scenes then continue immediately with WT6/1, while
-     * missing scenes use the same open loader to request WT18/7. */
-    bool sceneResourceProbeAcknowledged;
-} vm_net_mock_scene_change_target;
 
 typedef struct
 {
@@ -2614,6 +2589,43 @@ const char *vm_mock_service_active_account_id(void)
     return g_vm_mock_service_active_account_id;
 }
 
+bool vm_mock_service_has_active_account(void)
+{
+    return g_vm_mock_service_active_account != NULL;
+}
+
+void vm_mock_service_guild_set_selected(u32 guildId)
+{
+    if (g_vm_mock_service_active_account != NULL)
+        g_vm_mock_service_active_account->selectedGuildId = guildId;
+}
+
+void vm_mock_service_guild_clear_pending_create(void)
+{
+    if (g_vm_mock_service_active_account == NULL)
+        return;
+    g_vm_mock_service_active_account->pendingGuildCreateNameValid = false;
+    g_vm_mock_service_active_account->pendingGuildCreateName[0] = 0;
+}
+
+bool vm_mock_service_guild_set_pending_create_name(const char *name)
+{
+    if (g_vm_mock_service_active_account == NULL || name == NULL)
+        return false;
+    snprintf(g_vm_mock_service_active_account->pendingGuildCreateName,
+             sizeof(g_vm_mock_service_active_account->pendingGuildCreateName),
+             "%s", name);
+    g_vm_mock_service_active_account->pendingGuildCreateNameValid = true;
+    return true;
+}
+
+bool vm_mock_service_guild_pending_create_name_matches(const char *name)
+{
+    return g_vm_mock_service_active_account != NULL && name != NULL &&
+           g_vm_mock_service_active_account->pendingGuildCreateNameValid &&
+           strcmp(name, g_vm_mock_service_active_account->pendingGuildCreateName) == 0;
+}
+
 u32 vm_mock_service_active_client_id(void)
 {
     return g_vm_mock_service_active_client_id;
@@ -2635,8 +2647,7 @@ enum
     VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX = 512,
     VM_MOCK_SERVICE_DUEL_MAX = 16,
     VM_MOCK_SERVICE_DUEL_EVENT_MAX = 8,
-    VM_MOCK_SERVICE_TRADE_MAX = 16,
-    VM_MOCK_SERVICE_TRADE_ITEM_MAX = 10
+    VM_MOCK_SERVICE_TRADE_MAX = 16
 };
 
 enum
@@ -2754,30 +2765,7 @@ typedef struct
     vm_mock_service_duel_action actions[2];
 } vm_mock_service_duel_event;
 
-typedef struct
-{
-    u32 itemId;
-    u16 sourceSeq;
-    u16 destinationSeq;
-    /* Equipment is an individual backpack instance.  Its enhancement level
-     * belongs to that instance and must follow it through trade instead of
-     * being inferred from an item-id match in the recipient's bag. */
-    u16 enhanceLevel;
-    vm_net_mock_equipment_enhance_affix_state enhanceAffixes;
-    u16 durability;
-    u16 durabilityMax;
-    u32 count;
-} vm_mock_service_trade_item;
-
-typedef struct
-{
-    bool submitted;
-    u8 itemCount;
-    u32 money;
-    vm_mock_service_trade_item items[VM_MOCK_SERVICE_TRADE_ITEM_MAX];
-} vm_mock_service_trade_offer;
-
-typedef struct
+struct vm_mock_service_trade
 {
     bool used;
     bool active;
@@ -2790,7 +2778,7 @@ typedef struct
     u8 terminalResult;
     u32 finalMoney[2];
     vm_mock_service_trade_offer receipts[2];
-} vm_mock_service_trade;
+};
 
 enum
 {
@@ -3479,7 +3467,7 @@ static void vm_mock_service_account_state_release_if_offline(
     }
 }
 
-static vm_mock_service_client_session *vm_mock_service_find_client_session(u32 clientId)
+vm_mock_service_client_session *vm_mock_service_find_client_session(u32 clientId)
 {
     vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
     if (clientId == 0)
@@ -3595,6 +3583,132 @@ void vm_mock_service_session_clear_team_invite_reply_context(
     session->teamInviteSourceWireId = 0;
 }
 
+bool vm_mock_service_session_get_spar_invite_reply_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_spar_invite_reply_context *contextOut)
+{
+    if (contextOut != NULL)
+        memset(contextOut, 0, sizeof(*contextOut));
+    if (session == NULL || contextOut == NULL)
+        return false;
+    contextOut->active = session->sparInviteReplyActive;
+    contextOut->sourceClientId = session->sparInviteSourceClientId;
+    contextOut->sourceWireId = session->sparInviteSourceWireId;
+    return true;
+}
+
+void vm_mock_service_session_clear_spar_invite_reply_context(
+    vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return;
+    session->sparInviteReplyActive = false;
+    session->sparInviteSourceClientId = 0;
+    session->sparInviteSourceWireId = 0;
+}
+
+bool vm_mock_service_session_get_friend_invite_reply_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_friend_invite_reply_context *contextOut)
+{
+    if (contextOut != NULL)
+        memset(contextOut, 0, sizeof(*contextOut));
+    if (session == NULL || contextOut == NULL)
+        return false;
+    contextOut->active = session->friendInviteReplyActive;
+    contextOut->sourceClientId = session->friendInviteSourceClientId;
+    contextOut->sourceRoleId = session->friendInviteSourceRoleId;
+    return true;
+}
+
+void vm_mock_service_session_clear_friend_invite_reply_context(
+    vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return;
+    session->friendInviteReplyActive = false;
+    session->friendInviteSourceClientId = 0;
+    session->friendInviteSourceRoleId = 0;
+}
+
+bool vm_mock_service_session_get_trade_invite_reply_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_trade_invite_reply_context *contextOut)
+{
+    if (contextOut != NULL)
+        memset(contextOut, 0, sizeof(*contextOut));
+    if (session == NULL || contextOut == NULL)
+        return false;
+    contextOut->active = session->tradeInviteReplyActive;
+    contextOut->sourceClientId = session->tradeInviteSourceClientId;
+    contextOut->sourceRoleId = session->tradeInviteSourceRoleId;
+    return true;
+}
+
+void vm_mock_service_session_clear_trade_invite_reply_context(
+    vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return;
+    session->tradeInviteReplyActive = false;
+    session->tradeInviteSourceClientId = 0;
+    session->tradeInviteSourceRoleId = 0;
+}
+
+bool vm_mock_service_spar_invite_can_accept(
+    const vm_mock_service_client_session *responder,
+    const vm_mock_service_client_session *source)
+{
+    return responder != NULL && source != NULL && source->roleOnline &&
+           source->clientId != responder->clientId &&
+           responder->sceneVisibleReady &&
+           vm_mock_service_session_scene_is_visible(source,
+                                                    responder->sceneVisibleScene);
+}
+
+void vm_mock_service_session_set_spar_battle_ready_context(
+    vm_mock_service_client_session *session, u32 peerClientId, u32 peerWireId)
+{
+    if (session == NULL)
+        return;
+    session->sparBattleReadyPending = true;
+    session->sparBattlePeerClientId = peerClientId;
+    session->sparBattlePeerWireId = peerWireId;
+}
+
+bool vm_mock_service_session_get_spar_battle_ready_context(
+    const vm_mock_service_client_session *session,
+    vm_mock_service_spar_battle_ready_context *contextOut)
+{
+    if (contextOut != NULL)
+        memset(contextOut, 0, sizeof(*contextOut));
+    if (session == NULL || contextOut == NULL)
+        return false;
+    contextOut->active = session->sparBattleReadyPending;
+    contextOut->peerClientId = session->sparBattlePeerClientId;
+    contextOut->peerWireId = session->sparBattlePeerWireId;
+    return true;
+}
+
+void vm_mock_service_session_clear_spar_battle_ready_context(
+    vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return;
+    session->sparBattleReadyPending = false;
+    session->sparBattlePeerClientId = 0;
+    session->sparBattlePeerWireId = 0;
+}
+
+bool vm_mock_service_spar_battle_ready_source_is_valid(
+    const vm_mock_service_client_session *responder,
+    const vm_mock_service_client_session *source)
+{
+    return responder != NULL && source != NULL && source->roleOnline &&
+           vm_mock_service_session_scene_is_visible(source,
+                                                    responder->sceneVisibleScene);
+}
+
 void vm_mock_service_session_set_arena_challenge_state(
     vm_mock_service_client_session *session, bool initiatorPromptPending,
     bool replyActive, u32 sourceRoleId)
@@ -3606,7 +3720,7 @@ void vm_mock_service_session_set_arena_challenge_state(
     session->arenaChallengeSourceRoleId = sourceRoleId;
 }
 
-static void vm_mock_service_arm_practise_pill17_followup(
+void vm_mock_service_arm_practise_pill17_followup(
     const vm_net_mock_role_state *role, u16 itemSeq, u32 maxUse)
 {
     vm_mock_service_client_session *session =
@@ -3624,7 +3738,7 @@ static void vm_mock_service_arm_practise_pill17_followup(
            session->clientId, role->roleId, (u32)itemSeq, maxUse);
 }
 
-static void vm_mock_service_clear_practise_pill17_followup(
+void vm_mock_service_clear_practise_pill17_followup(
     const vm_net_mock_role_state *role, u16 itemSeq, const char *reason)
 {
     vm_mock_service_client_session *session =
@@ -3647,7 +3761,7 @@ static void vm_mock_service_clear_practise_pill17_followup(
     session->practisePill17FollowupCommittedUse = 0;
 }
 
-static bool vm_mock_service_practise_pill17_followup_matches(
+bool vm_mock_service_practise_pill17_followup_matches(
     const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum,
     bool *replayOut, bool *rejectedOut)
 {
@@ -3686,7 +3800,7 @@ static bool vm_mock_service_practise_pill17_followup_matches(
     return true;
 }
 
-static void vm_mock_service_commit_practise_pill17_followup(
+void vm_mock_service_commit_practise_pill17_followup(
     const vm_net_mock_role_state *role, u16 itemSeq, u32 useNum)
 {
     vm_mock_service_client_session *session =
@@ -3880,8 +3994,7 @@ static void vm_mock_service_duel_release_if_done(vm_mock_service_duel *duel)
     }
 }
 
-static void vm_mock_service_duel_cancel_for_client(u32 clientId,
-                                                    const char *reason)
+void vm_mock_service_duel_cancel_for_client(u32 clientId, const char *reason)
 {
     int index = -1;
     vm_mock_service_duel *duel = vm_mock_service_duel_find_for_client(clientId,
@@ -3930,8 +4043,71 @@ static void vm_mock_service_duel_cancel_for_client(u32 clientId,
 }
 
 static vm_mock_service_team *vm_mock_service_team_find_for_client(u32 clientId);
-static bool vm_mock_service_session_scene_is_visible(
-    const vm_mock_service_client_session *session, const char *scene);
+
+bool vm_mock_service_duel_get_pending_start(
+    const vm_mock_service_client_session *observer,
+    vm_mock_service_duel_start_view *viewOut)
+{
+    vm_mock_service_duel *duel = NULL;
+    int observerIndex = -1;
+    int peerIndex = -1;
+    u8 observerBit = 0;
+
+    if (viewOut != NULL)
+        memset(viewOut, 0, sizeof(*viewOut));
+    if (observer == NULL || viewOut == NULL)
+        return false;
+    duel = vm_mock_service_duel_find_for_client(observer->clientId, &observerIndex);
+    if (duel == NULL || observerIndex < 0 || observerIndex > 1)
+        return false;
+    observerBit = (u8)(1u << observerIndex);
+    if ((duel->startPendingMask & observerBit) == 0)
+        return false;
+    peerIndex = 1 - observerIndex;
+    viewOut->serial = duel->serial;
+    viewOut->peerClientId = duel->clientIds[peerIndex];
+    viewOut->observerHp = duel->hp[observerIndex];
+    viewOut->observerHpMax = duel->hpMax[observerIndex];
+    viewOut->observerMp = duel->mp[observerIndex];
+    viewOut->observerMpMax = duel->mpMax[observerIndex];
+    viewOut->peerHp = duel->hp[peerIndex];
+    viewOut->peerHpMax = duel->hpMax[peerIndex];
+    viewOut->peerMp = duel->mp[peerIndex];
+    viewOut->peerMpMax = duel->mpMax[peerIndex];
+    viewOut->observerIndex = (u8)observerIndex;
+    viewOut->arenaRoom = duel->arenaRoomId != 0;
+    snprintf(viewOut->scene, sizeof(viewOut->scene), "%s", duel->scene);
+    return true;
+}
+
+bool vm_mock_service_duel_confirm_start_delivery(
+    const vm_mock_service_client_session *observer, u32 serial,
+    u8 *startedMaskOut, u8 *pendingMaskOut)
+{
+    vm_mock_service_duel *duel = NULL;
+    int observerIndex = -1;
+    u8 observerBit = 0;
+
+    if (startedMaskOut != NULL)
+        *startedMaskOut = 0;
+    if (pendingMaskOut != NULL)
+        *pendingMaskOut = 0;
+    if (observer == NULL || serial == 0)
+        return false;
+    duel = vm_mock_service_duel_find_for_client(observer->clientId, &observerIndex);
+    if (duel == NULL || duel->serial != serial || observerIndex < 0 || observerIndex > 1)
+        return false;
+    observerBit = (u8)(1u << observerIndex);
+    if ((duel->startPendingMask & observerBit) == 0)
+        return false;
+    duel->startPendingMask &= (u8)~observerBit;
+    duel->startedMask |= observerBit;
+    if (startedMaskOut != NULL)
+        *startedMaskOut = duel->startedMask;
+    if (pendingMaskOut != NULL)
+        *pendingMaskOut = duel->startPendingMask;
+    return true;
+}
 
 static vm_mock_service_duel *vm_mock_service_duel_begin_ex(
     vm_mock_service_client_session *inviter,
@@ -4281,6 +4457,68 @@ static vm_mock_service_trade *vm_mock_service_trade_begin(
     return slot;
 }
 
+bool vm_mock_service_trade_begin_pair(
+    vm_mock_service_client_session *first,
+    vm_mock_service_client_session *second)
+{
+    return vm_mock_service_trade_begin(first, second) != NULL;
+}
+
+void vm_mock_service_trade_abort_pair(
+    vm_mock_service_client_session *first,
+    vm_mock_service_client_session *second)
+{
+    vm_mock_service_trade *trade = NULL;
+
+    if (first == NULL || second == NULL)
+        return;
+    trade = vm_mock_service_trade_find_for_client(first->clientId, NULL);
+    if (trade == NULL || !trade->active ||
+        !((trade->clientIds[0] == first->clientId &&
+           trade->clientIds[1] == second->clientId) ||
+          (trade->clientIds[0] == second->clientId &&
+           trade->clientIds[1] == first->clientId)))
+    {
+        return;
+    }
+    memset(trade, 0, sizeof(*trade));
+}
+
+vm_mock_service_trade_submit_status vm_mock_service_trade_submit_offer(
+    vm_mock_service_client_session *session,
+    const vm_mock_service_trade_offer *offer, bool offerValid,
+    vm_mock_service_trade_submit_result *resultOut)
+{
+    vm_mock_service_trade *trade = NULL;
+    vm_mock_service_trade_offer submitted;
+    int index = -1;
+
+    if (resultOut != NULL)
+    {
+        resultOut->side = -1;
+        resultOut->peerOfferPending = false;
+    }
+    if (session == NULL)
+        return VM_MOCK_SERVICE_TRADE_SUBMIT_NOT_ACTIVE;
+    trade = vm_mock_service_trade_find_for_client(session->clientId, &index);
+    if (trade == NULL || index < 0 || !trade->active)
+        return VM_MOCK_SERVICE_TRADE_SUBMIT_NOT_ACTIVE;
+    if (resultOut != NULL)
+        resultOut->side = index;
+    if (!offerValid || offer == NULL)
+        return VM_MOCK_SERVICE_TRADE_SUBMIT_INVALID;
+
+    submitted = *offer;
+    submitted.submitted = true;
+    trade->offers[index] = submitted;
+    trade->confirmedMask = 0;
+    trade->offerPendingMask |= (u8)(1u << (1 - index));
+    if (resultOut != NULL)
+        resultOut->peerOfferPending =
+            ((trade->offerPendingMask >> (1 - index)) & 1u) != 0;
+    return VM_MOCK_SERVICE_TRADE_SUBMIT_ACCEPTED;
+}
+
 static void vm_mock_service_trade_set_terminal(vm_mock_service_trade *trade,
                                                u8 subtype,
                                                u8 result,
@@ -4542,6 +4780,250 @@ done:
     return ok;
 }
 
+bool vm_mock_service_trade_validate_offer(vm_mock_service_trade_offer *offer,
+                                          vm_net_mock_role_state *role)
+{
+    if (offer == NULL || role == NULL ||
+        offer->itemCount > VM_MOCK_SERVICE_TRADE_ITEM_MAX ||
+        offer->money > role->money ||
+        (offer->itemCount == 0 && offer->money == 0))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < offer->itemCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *item = NULL;
+        if (offer->items[i].sourceSeq == 0 || offer->items[i].count == 0)
+            return false;
+        for (u32 previous = 0; previous < i; ++previous)
+        {
+            if (offer->items[previous].sourceSeq == offer->items[i].sourceSeq)
+                return false;
+        }
+        item = vm_net_mock_role_find_backpack_item(
+            role, 0, offer->items[i].sourceSeq);
+        if (item == NULL || item->itemId == 0 || item->count < offer->items[i].count)
+            return false;
+        if (vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL &&
+            offer->items[i].count != 1)
+        {
+            return false;
+        }
+        offer->items[i].itemId = item->itemId;
+        offer->items[i].enhanceLevel = (u16)SDL_min(
+            item->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        offer->items[i].enhanceAffixes = item->enhanceAffixes;
+        offer->items[i].durability = item->durability;
+        offer->items[i].durabilityMax = item->durabilityMax;
+    }
+    return true;
+}
+
+static u8 vm_mock_service_trade_commit_pair(vm_mock_service_trade *trade)
+{
+    vm_mock_service_client_session *sessions[2];
+    const vm_mock_service_client_session *persistSessions[2];
+    vm_mock_service_account_state *accounts[2];
+    vm_net_mock_role_state *liveRoles[2];
+    vm_net_mock_role_state roles[2];
+
+    if (trade == NULL || !trade->active ||
+        !trade->offers[0].submitted || !trade->offers[1].submitted)
+    {
+        return VM_MOCK_SERVICE_TRADE_COMMIT_INVALID;
+    }
+    memset(sessions, 0, sizeof(sessions));
+    memset(persistSessions, 0, sizeof(persistSessions));
+    memset(accounts, 0, sizeof(accounts));
+    memset(liveRoles, 0, sizeof(liveRoles));
+    memset(roles, 0, sizeof(roles));
+    for (u32 side = 0; side < 2; ++side)
+    {
+        sessions[side] = vm_mock_service_find_client_session(trade->clientIds[side]);
+        persistSessions[side] = sessions[side];
+        liveRoles[side] = vm_mock_service_trade_role_for_session(sessions[side],
+                                                                  &accounts[side]);
+        if (sessions[side] == NULL || !sessions[side]->roleOnline ||
+            liveRoles[side] == NULL ||
+            !vm_mock_service_trade_validate_offer(&trade->offers[side], liveRoles[side]))
+        {
+            return VM_MOCK_SERVICE_TRADE_COMMIT_INVALID;
+        }
+        roles[side] = *liveRoles[side];
+        memset(&trade->receipts[side], 0, sizeof(trade->receipts[side]));
+    }
+    for (u32 side = 0; side < 2; ++side)
+    {
+        const vm_mock_service_trade_offer *offer = &trade->offers[side];
+        for (u32 i = 0; i < offer->itemCount; ++i)
+        {
+            if (!vm_net_mock_role_consume_backpack_item(
+                    &roles[side], offer->items[i].itemId,
+                    offer->items[i].sourceSeq, offer->items[i].count, NULL))
+            {
+                return VM_MOCK_SERVICE_TRADE_COMMIT_INVALID;
+            }
+        }
+        roles[side].money -= offer->money;
+    }
+    for (u32 side = 0; side < 2; ++side)
+    {
+        const vm_mock_service_trade_offer *incoming = &trade->offers[1 - side];
+        vm_mock_service_trade_offer *receipt = &trade->receipts[side];
+        uint64_t finalMoney = (uint64_t)roles[side].money + incoming->money;
+        if (finalMoney > 0xffffffffull)
+            return VM_MOCK_SERVICE_TRADE_COMMIT_INVALID;
+        roles[side].money = (u32)finalMoney;
+        receipt->submitted = true;
+        receipt->itemCount = incoming->itemCount;
+        for (u32 i = 0; i < incoming->itemCount; ++i)
+        {
+            receipt->items[i] = incoming->items[i];
+            if (!vm_mock_service_trade_role_add_item(
+                    &roles[side], &incoming->items[i],
+                    &receipt->items[i].destinationSeq))
+            {
+                return VM_MOCK_SERVICE_TRADE_COMMIT_BAG_FULL;
+            }
+            printf("[info][mock-service] trade_item_transfer receiver_role=%u source_role=%u item=%u source_seq=%u destination_seq=%u count=%u enhance=%u durability=%u/%u equipment=%u evidence=WT21/5+21/6+21/8\n",
+                   roles[side].roleId, roles[1 - side].roleId,
+                   incoming->items[i].itemId,
+                   incoming->items[i].sourceSeq,
+                   receipt->items[i].destinationSeq,
+                   incoming->items[i].count,
+                   incoming->items[i].enhanceLevel,
+                   incoming->items[i].durability,
+                   incoming->items[i].durabilityMax,
+                   vm_net_mock_find_equipment_catalog_item(
+                       incoming->items[i].itemId) != NULL ? 1u : 0u);
+        }
+        vm_net_mock_role_normalize_backpack(&roles[side]);
+        trade->finalMoney[side] = roles[side].money;
+    }
+    if (!vm_mock_service_trade_persist_pair(persistSessions, roles))
+    {
+        return VM_MOCK_SERVICE_TRADE_COMMIT_STORAGE_FAILED;
+    }
+    for (u32 side = 0; side < 2; ++side)
+        *liveRoles[side] = roles[side];
+    for (u32 side = 0; side < 2; ++side)
+    {
+        const u32 peer = 1u - side;
+        char operationDetail[256];
+
+        snprintf(operationDetail, sizeof(operationDetail),
+                 "交易对象=%s/%u；付出:钱%u,物品%u；收到:钱%u,物品%u；余额=%u",
+                 sessions[peer]->accountId, roles[peer].roleId,
+                 trade->offers[side].money, trade->offers[side].itemCount,
+                 trade->offers[peer].money, trade->receipts[side].itemCount,
+                 roles[side].money);
+        if (!vm_mock_admin_operation_log_record(
+                "player-trade", sessions[side]->accountId, roles[side].roleId,
+                0, trade->offers[side].itemCount, trade->offers[side].money,
+                operationDetail, NULL))
+        {
+            printf("[error][mock-service] operation_log_player_trade_failed "
+                   "account=%s role=%u peer=%s/%u error=%s\n",
+                   sessions[side]->accountId, roles[side].roleId,
+                   sessions[peer]->accountId, roles[peer].roleId,
+                   vm_mysql_last_error());
+        }
+    }
+    printf("[info][mock-service] trade_commit first=%08x/%u money=%u items=%u second=%08x/%u money=%u items=%u\n",
+           sessions[0]->clientId, roles[0].roleId, roles[0].money,
+           trade->receipts[0].itemCount,
+           sessions[1]->clientId, roles[1].roleId, roles[1].money,
+           trade->receipts[1].itemCount);
+    return VM_MOCK_SERVICE_TRADE_COMMIT_OK;
+}
+
+void vm_mock_service_trade_confirm(
+    vm_mock_service_client_session *session, u8 requestResult,
+    vm_mock_service_trade_confirm_result *resultOut)
+{
+    vm_mock_service_trade *trade = NULL;
+    int index = -1;
+
+    if (resultOut == NULL)
+        return;
+    memset(resultOut, 0, sizeof(*resultOut));
+    resultOut->side = -1;
+    resultOut->responseSubtype = 7;
+    resultOut->responseResult = 2;
+    if (session == NULL)
+        return;
+    trade = vm_mock_service_trade_find_for_client(session->clientId, &index);
+    if (trade == NULL || index < 0 || !trade->active)
+        return;
+
+    resultOut->side = index;
+    if (requestResult == 2)
+    {
+        vm_mock_service_trade_set_terminal(trade, 7, 2,
+                                           (u8)(1u << (1 - index)));
+        resultOut->responseResult = 2;
+    }
+    else if (trade->offers[0].submitted && trade->offers[1].submitted)
+    {
+        trade->confirmedMask |= (u8)(1u << index);
+        resultOut->responseResult = 1;
+        if (trade->confirmedMask == 3)
+        {
+            resultOut->commitResult = vm_mock_service_trade_commit_pair(trade);
+            if (resultOut->commitResult == VM_MOCK_SERVICE_TRADE_COMMIT_OK)
+            {
+                resultOut->responseSubtype = 8;
+                resultOut->responseResult = 1;
+                vm_mock_service_trade_set_terminal(trade, 8, 1,
+                                                   (u8)(1u << (1 - index)));
+            }
+            else if (resultOut->commitResult == VM_MOCK_SERVICE_TRADE_COMMIT_BAG_FULL)
+            {
+                resultOut->responseSubtype = 8;
+                resultOut->responseResult = 3;
+                vm_mock_service_trade_set_terminal(trade, 8, 3,
+                                                   (u8)(1u << (1 - index)));
+            }
+            else if (resultOut->commitResult == VM_MOCK_SERVICE_TRADE_COMMIT_STORAGE_FAILED)
+            {
+                resultOut->responseSubtype = 8;
+                resultOut->responseResult = 2;
+                vm_mock_service_trade_set_terminal(trade, 8, 2,
+                                                   (u8)(1u << (1 - index)));
+            }
+            else
+            {
+                resultOut->responseSubtype = 7;
+                resultOut->responseResult = 3;
+                vm_mock_service_trade_set_terminal(trade, 7, 3,
+                                                   (u8)(1u << (1 - index)));
+            }
+        }
+    }
+    else
+    {
+        resultOut->responseResult = 2;
+        vm_mock_service_trade_set_terminal(trade, 7, 2,
+                                           (u8)(1u << (1 - index)));
+    }
+    resultOut->confirmedMask = trade->confirmedMask;
+    resultOut->finalMoney = trade->finalMoney[index];
+    resultOut->receipt = trade->receipts[index];
+    resultOut->releaseAfterDelivery = resultOut->responseSubtype == 8;
+}
+
+void vm_mock_service_trade_release_after_direct_terminal_delivery(
+    vm_mock_service_client_session *session)
+{
+    vm_mock_service_trade *trade = NULL;
+
+    if (session == NULL)
+        return;
+    trade = vm_mock_service_trade_find_for_client(session->clientId, NULL);
+    if (trade != NULL)
+        vm_mock_service_trade_release_if_delivered(trade);
+}
+
 static const char *vm_mock_service_social_notice_name(u8 type)
 {
     switch (type)
@@ -4579,7 +5061,7 @@ static const char *vm_mock_service_social_notice_name(u8 type)
     }
 }
 
-static bool vm_mock_service_session_enqueue_social_notice(
+bool vm_mock_service_session_enqueue_social_notice(
     vm_mock_service_client_session *target,
     u8 type,
     u8 result,
@@ -5421,8 +5903,8 @@ static void vm_mock_service_team_notify_leave(vm_mock_service_team *team,
 /* Returns true when the member was part of an active team.  Leader departure
  * deliberately dissolves the party: group subtype 5/7 clears every client
  * roster when the removed id is the leader id. */
-static bool vm_mock_service_team_remove_member(vm_mock_service_client_session *leaver,
-                                               const char *reason)
+bool vm_mock_service_team_remove_member(vm_mock_service_client_session *leaver,
+                                        const char *reason)
 {
     vm_mock_service_team *team = NULL;
     u8 memberIndex = VM_MOCK_SERVICE_TEAM_MEMBER_MAX;
@@ -6710,8 +7192,8 @@ static void vm_mock_service_expire_stale_online_sessions(void)
     }
 }
 
-static bool vm_mock_service_session_scene_is_visible(const vm_mock_service_client_session *session,
-                                                     const char *scene)
+bool vm_mock_service_session_scene_is_visible(const vm_mock_service_client_session *session,
+                                              const char *scene)
 {
     if (session == NULL ||
         !session->roleOnline ||

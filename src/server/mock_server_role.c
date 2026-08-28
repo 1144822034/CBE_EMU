@@ -232,7 +232,7 @@ static void vm_mock_service_account_db_path(char *path, size_t pathSize)
     snprintf(path, pathSize, "nvram/mock_service_accounts.bin");
 }
 
-static size_t vm_mock_mysql_bounded_strlen(const char *text, size_t capacity)
+size_t vm_mock_mysql_bounded_strlen(const char *text, size_t capacity)
 {
     size_t length = 0;
     if (text == NULL)
@@ -1663,6 +1663,38 @@ bool vm_mock_service_friend_record_find(
     return false;
 }
 
+u32 vm_mock_service_friend_record_collect(
+    u32 ownerRoleId, const char *ownerAccountId,
+    vm_mock_service_friend_record *recordsOut, u32 recordsCap)
+{
+    u32 recordCount = 0;
+
+    if (ownerRoleId == 0 || ownerAccountId == NULL || ownerAccountId[0] == 0 ||
+        recordsOut == NULL || recordsCap == 0)
+    {
+        return 0;
+    }
+
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid)
+        return 0;
+
+    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+    {
+        const vm_mock_service_friend_record *record =
+            &g_vm_mock_service_friend_db.records[i];
+        if (record->ownerRoleId != ownerRoleId ||
+            strcmp(record->ownerAccountId, ownerAccountId) != 0)
+        {
+            continue;
+        }
+        if (recordCount >= recordsCap)
+            break;
+        recordsOut[recordCount++] = *record;
+    }
+    return recordCount;
+}
+
 static bool vm_mock_service_friend_db_upsert_one(
     vm_mock_service_friend_db_file *database,
     const char *ownerAccountId, u32 ownerRoleId,
@@ -1730,7 +1762,7 @@ static bool vm_mock_service_friend_db_upsert_one(
     return true;
 }
 
-static bool vm_mock_service_friend_db_add_pair(
+bool vm_mock_service_friend_db_add_pair(
     const char *ownerAccountId, u32 ownerRoleId,
     const char *ownerRoleName, u32 ownerLevel, u8 ownerJob, u8 ownerSex,
     const char *targetAccountId, u32 targetRoleId,
@@ -1806,10 +1838,10 @@ static bool vm_mock_service_friend_db_add_pair(
 /* A friend-list deletion is a relationship operation, not a one-sided UI
  * filter.  Keep both directed rows in one MySQL transaction, then replace the
  * in-memory snapshot only after COMMIT. */
-static bool vm_mock_service_friend_db_remove_pair(const char *ownerAccountId,
-                                                  u32 ownerRoleId,
-                                                  u32 targetRoleId,
-                                                  bool *removedOut)
+bool vm_mock_service_friend_db_remove_pair(const char *ownerAccountId,
+                                           u32 ownerRoleId,
+                                           u32 targetRoleId,
+                                           bool *removedOut)
 {
     const vm_mock_service_friend_record *forward = NULL;
     vm_mock_service_friend_db_file candidate;
@@ -8166,7 +8198,7 @@ static const char *vm_net_mock_role_initial_scene_name(void)
     return vm_net_mock_default_scene_name();
 }
 
-static u32 vm_net_mock_role_default_weapon_for_job(u32 job)
+u32 vm_net_mock_role_default_weapon_for_job(u32 job)
 {
     switch (job)
     {
@@ -9338,9 +9370,9 @@ typedef struct
     bool invalid;
 } vm_mock_mysql_guild_application_rows_context;
 
-static bool vm_net_mock_guild_mysql_query(const char *sql,
-                                           vm_mysql_row_callback callback,
-                                           void *context)
+bool vm_net_mock_guild_mysql_query(const char *sql,
+                                    vm_mysql_row_callback callback,
+                                    void *context)
 {
     if (vm_mysql_query(sql, callback, context))
         return true;
@@ -9589,11 +9621,11 @@ static bool vm_mock_mysql_guild_application_record_row(void *contextValue,
     return true;
 }
 
-static bool vm_net_mock_guild_query_records(const char *whereClause,
-                                            const char *tailClause,
-                                            vm_net_mock_guild_record *rows,
-                                            u32 rowCapacity,
-                                            u32 *rowCountOut)
+bool vm_net_mock_guild_query_records(const char *whereClause,
+                                     const char *tailClause,
+                                     vm_net_mock_guild_record *rows,
+                                     u32 rowCapacity,
+                                     u32 *rowCountOut)
 {
     char query[2048];
     vm_mock_mysql_guild_rows_context context;
@@ -9624,12 +9656,12 @@ static bool vm_net_mock_guild_query_records(const char *whereClause,
     return true;
 }
 
-static bool vm_net_mock_guild_query_members(u32 guildId,
-                                             u32 offset,
-                                             u32 pageSize,
-                                             vm_net_mock_guild_member_record *rows,
-                                             u32 rowCapacity,
-                                             u32 *rowCountOut)
+bool vm_net_mock_guild_query_members(u32 guildId,
+                                      u32 offset,
+                                      u32 pageSize,
+                                      vm_net_mock_guild_member_record *rows,
+                                      u32 rowCapacity,
+                                      u32 *rowCountOut)
 {
     char query[2048];
     vm_mock_mysql_guild_member_rows_context context;
@@ -9661,8 +9693,8 @@ static bool vm_net_mock_guild_query_members(u32 guildId,
     return true;
 }
 
-static bool vm_net_mock_guild_find_member(u32 guildId, u32 roleId,
-                                           vm_net_mock_guild_member_record *memberOut)
+bool vm_net_mock_guild_find_member(u32 guildId, u32 roleId,
+                                   vm_net_mock_guild_member_record *memberOut)
 {
     char query[1536];
     vm_mock_mysql_guild_member_rows_context context;
@@ -9692,7 +9724,7 @@ static bool vm_net_mock_guild_find_member(u32 guildId, u32 roleId,
     return true;
 }
 
-static bool vm_net_mock_guild_query_applications(
+bool vm_net_mock_guild_query_applications(
     u32 guildId, u32 offset, u32 pageSize,
     vm_net_mock_guild_application_record *rows, u32 rowCapacity,
     u32 *rowCountOut)
@@ -9728,7 +9760,7 @@ static bool vm_net_mock_guild_query_applications(
     return true;
 }
 
-static bool vm_net_mock_guild_find_pending_application(
+bool vm_net_mock_guild_find_pending_application(
     u32 guildId, u32 roleId, vm_net_mock_guild_application_record *applicationOut)
 {
     char query[1536];
@@ -9760,7 +9792,7 @@ static bool vm_net_mock_guild_find_pending_application(
     return true;
 }
 
-static bool vm_net_mock_guild_count(const char *tableAndWhere, u32 *countOut)
+bool vm_net_mock_guild_count(const char *tableAndWhere, u32 *countOut)
 {
     char query[768];
     vm_mock_mysql_guild_u32_context context;
@@ -9779,7 +9811,7 @@ static bool vm_net_mock_guild_count(const char *tableAndWhere, u32 *countOut)
     return true;
 }
 
-static bool vm_net_mock_guild_find_by_id(u32 guildId, vm_net_mock_guild_record *guildOut)
+bool vm_net_mock_guild_find_by_id(u32 guildId, vm_net_mock_guild_record *guildOut)
 {
     char suffix[128];
     vm_net_mock_guild_record guild;
@@ -9797,18 +9829,18 @@ static bool vm_net_mock_guild_find_by_id(u32 guildId, vm_net_mock_guild_record *
     return true;
 }
 
-static bool vm_net_mock_guild_find_role_membership(u32 roleId,
-                                                    vm_net_mock_guild_record *guildOut,
-                                                    u8 *rankOut)
+bool vm_net_mock_guild_find_role_membership(u32 roleId,
+                                            vm_net_mock_guild_record *guildOut,
+                                            u8 *rankOut)
 {
     return vm_net_mock_guild_find_membership_for_account(g_vm_mock_service_active_account_id,
                                                           roleId, guildOut, rankOut);
 }
 
-static bool vm_net_mock_guild_find_membership_for_account(const char *accountId,
-                                                           u32 roleId,
-                                                           vm_net_mock_guild_record *guildOut,
-                                                           u8 *rankOut)
+bool vm_net_mock_guild_find_membership_for_account(const char *accountId,
+                                                    u32 roleId,
+                                                    vm_net_mock_guild_record *guildOut,
+                                                    u8 *rankOut)
 {
     char accountHex[129];
     char query[1024];
@@ -11838,8 +11870,8 @@ static void vm_net_mock_practise_fill_info(
     infoOut->goldEnabled = (u8)state->goldEnabled;
 }
 
-static bool vm_net_mock_practise_get_info(vm_net_mock_role_state *role,
-                                          vm_net_mock_practise_info *infoOut)
+bool vm_net_mock_practise_get_info(vm_net_mock_role_state *role,
+                                   vm_net_mock_practise_info *infoOut)
 {
     char accountHex[129];
     char query[1024];
@@ -12003,8 +12035,8 @@ failed:
     return false;
 }
 
-static bool vm_net_mock_practise_set_gold(vm_net_mock_role_state *role,
-                                          bool goldEnabled)
+bool vm_net_mock_practise_set_gold(vm_net_mock_role_state *role,
+                                   bool goldEnabled)
 {
     char accountHex[129];
     char query[1024];
@@ -12061,8 +12093,8 @@ static void vm_net_mock_practise_mark_offline(const char *accountId,
  * the quantity control's upper bound and later sends the chosen count in
  * 7/17.usenum, so this phase must prove the exact maximum without consuming
  * anything.  The commit routine below repeats all checks under row locks. */
-static bool vm_net_mock_practise_pill_max_usable(vm_net_mock_role_state *role,
-                                                 u16 itemSeq, u32 *maxUseOut)
+bool vm_net_mock_practise_pill_max_usable(vm_net_mock_role_state *role,
+                                          u16 itemSeq, u32 *maxUseOut)
 {
     char accountHex[129];
     char query[1280];
@@ -12127,9 +12159,9 @@ failed:
 /* 827 is a true one-hour bank deposit, not a generic consumable.  The exact
  * backpack row and companion training row are locked and committed together;
  * the user-confirmed 7/17.usenum decides both the debit and credited hours. */
-static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
-                                          u16 itemSeq, u32 useCount,
-                                          u32 *remainingOut)
+bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
+                                   u16 itemSeq, u32 useCount,
+                                   u32 *remainingOut)
 {
     char accountHex[129];
     char query[1280];
@@ -12708,9 +12740,9 @@ failed:
     return false;
 }
 
-static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
-                                          u16 itemSeq, u32 *currentOut,
-                                          u32 *maxOut)
+bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
+                                   u16 itemSeq, u32 *currentOut,
+                                   u32 *maxOut)
 {
     char accountHex[129];
     char query[1024];
@@ -12854,7 +12886,7 @@ failed:
     return false;
 }
 
-static u32 vm_net_mock_role_active_exp_card_multiplier(
+u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role)
 {
     vm_net_mock_role_item_effect effect;
@@ -12896,7 +12928,7 @@ static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     return effect.expiresUnix != 0 ? effect.multiplier : 0;
 }
 
-static u8 vm_net_mock_role_active_battle_insight_flag(void)
+u8 vm_net_mock_role_active_battle_insight_flag(void)
 {
     return vm_net_mock_role_active_battle_exp_bonus_percent(
                vm_net_mock_active_role()) != 0
