@@ -3614,24 +3614,39 @@ export class GameSession {
     } else {
       next = { ...next, count: 1, durability: 1 };
     }
+    // Wire enhance is authoritative (0 after 29/6 recast). Never `next || prev`
+    // — that kept the pre-transfer (+L) until re-login.
+    const wireEnhance = next.enhance >>> 0;
     const pendingAttrs = this.pendingBagEquipEnhance.get(it.seq);
     if (pendingAttrs?.length) {
       this.pendingBagEquipEnhance.delete(it.seq);
-      const attrs = preferEnhanceAttrs(next.enhanceAttrs, pendingAttrs);
-      next = {
-        ...next,
-        enhance: next.enhance || prev?.enhance || 0,
-        ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
-      };
-    } else if (prev?.kind === "equip") {
+      if (wireEnhance > 0) {
+        const attrs = preferEnhanceAttrs(next.enhanceAttrs, pendingAttrs);
+        next = {
+          ...next,
+          enhance: wireEnhance,
+          ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
+        };
+      } else {
+        const { enhanceAttrs: _drop, ...rest } = next;
+        next = { ...rest, enhance: 0 };
+      }
+    } else if (prev?.kind === "equip" && wireEnhance > 0) {
+      // Preserve wash attrs across reopen when wire truncates extras but
+      // level still matches an enhanced equip. Recast (enhance=0) drops them.
       const attrs = preferEnhanceAttrs(next.enhanceAttrs, prev.enhanceAttrs);
       if (attrs && attrs.length) {
         next = {
           ...next,
-          enhance: next.enhance || prev.enhance || 0,
+          enhance: wireEnhance,
           enhanceAttrs: attrs,
         };
+      } else {
+        next = { ...next, enhance: wireEnhance };
       }
+    } else if (wireEnhance === 0 && next.kind === "equip") {
+      const { enhanceAttrs: _drop, ...rest } = next;
+      next = { ...rest, enhance: 0 };
     }
     return next;
   }
@@ -4463,7 +4478,13 @@ export class GameSession {
         const packet = ingestPacket(body);
         if (!packet) continue;
         const parsed = parseEnhanceTransferConfirm(packet);
-        if (parsed) return parsed;
+        if (parsed) {
+          // CBE 0x010287C0: 29/6 result=1 writes seqs/curlevels + seqd/curleveld
+          // into bag rows. Pixi must do the same — merge alone used to keep
+          // source (+L) because enhance=0 was treated as "missing".
+          if (parsed.ok) this.applyEnhanceTransferBagLevels(parsed);
+          return parsed;
+        }
       } catch {
         /* skip */
       }
@@ -4477,6 +4498,26 @@ export class GameSession {
       destSeq: 0,
       destLevel: 0,
     };
+  }
+
+  /** Apply 29/6 curlevels/curleveld to local bag (CBE HandleItemUseAndEquip). */
+  private applyEnhanceTransferBagLevels(
+    parsed: EnhanceTransferConfirmResult,
+  ): void {
+    let changed = false;
+    this.bagItems = this.bagItems.map((it) => {
+      if (it.seq === parsed.sourceSeq && it.seq > 0) {
+        changed = true;
+        const { enhanceAttrs: _drop, ...rest } = it;
+        return { ...rest, enhance: parsed.sourceLevel >>> 0 };
+      }
+      if (it.seq === parsed.destSeq && it.seq > 0) {
+        changed = true;
+        return { ...it, enhance: parsed.destLevel >>> 0 };
+      }
+      return it;
+    });
+    if (changed) this.cb.onBag?.(this.bagItems);
   }
 
   /** @deprecated prefer enhanceTransferPreview / Confirm */

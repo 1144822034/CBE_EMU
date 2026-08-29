@@ -9,7 +9,7 @@
 **稳定定时器放在 gateway 进程（Node `setInterval`）**，不依赖手机 JS：
 
 1. 客户端进图后发出的 CBMS `SCENE_POLL`（flag=0x2）→ gateway **武装**该 WS。
-2. 之后若客户端静默 ≥ ~2.2s，gateway 每 ~30s 用同一 `clientId` 代发 scene-poll → mock TCP（防踢余量：服端约 90s）。
+2. 之后若客户端静默 ≥ ~2.2s，gateway 每 ~30s 用同一 `clientId` 代发 scene-poll → mock TCP（防踢余量：服端约 30s，与 keepalive 同量级，勿再拉长间隔）。
 3. 响应帧仍推回该 WS；客户端 `LiveTransport.onPushBodies` 走 `handleBodies`。
 4. 显式 `DISCONNECT`（登出）→ 解除武装，停 orphan。
 5. **WS 异常断开**（未发 DISCONNECT）→ 进入 **orphan keepalive**：gateway 继续用该 `clientId` 代 TCP scene-poll，丢弃响应；宽限期内 mock 不因心跳踢人。客户端 `LiveTransport` 重连同 `clientId` 后任意包/SCENE_POLL 收回武装。
@@ -35,6 +35,6 @@ cd PixiJS_web && node scripts/ws-gateway.mjs
 
 ## 边界
 
-- 宽限过期后停 orphan → 约 90s 内仍会被 `heartbeat-timeout`（避免永久幽灵在线）。
+- 宽限过期后停 orphan → 约 30s 内仍会被 `heartbeat-timeout`（避免永久幽灵在线）。
 - 进程强杀 / 换新 `clientId`（整页刷新重建 Transport）不在 orphan 覆盖内。
 - 同账号别处登录仍走 `account-login-takeover`。

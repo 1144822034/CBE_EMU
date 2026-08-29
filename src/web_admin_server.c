@@ -703,7 +703,8 @@ static const char g_vm_mock_admin_script[] =
     "if(sameAdminContext(target)){showAdminNotice(ok,message);"
     "const action=String(formData.get('action')||'');"
     "if(ok&&(action==='add-wcoin'||action==='add-money'||"
-    "action==='rename-role'||action==='set-role-exp'))"
+    "action==='rename-role'||action==='set-role-exp'||"
+    "action==='set-equip-wash'||action==='grant-item'))"
     "await refreshRoleDetails(target);"
     "const row=form.closest('tr');"
     "const enabled=form.querySelector('select[name=enabled]');"
@@ -5525,6 +5526,231 @@ static void vm_mock_admin_render_cosmetic_grant_form(
         "走 Pixi WT 1/31。勾选「全部」时忽略 ID。</p></div>");
 }
 
+static const char *vm_mock_admin_role_wash_attr_name(u8 type, u8 flag)
+{
+    switch (type)
+    {
+    case 1:
+        return "力量";
+    case 2:
+        return "敏捷";
+    case 3:
+        return "智慧";
+    case 4:
+        return "物攻";
+    case 5:
+        return "护甲";
+    case 6:
+        return "躲闪";
+    case 7:
+        return "命中";
+    case 8:
+        return "暴击";
+    case 9:
+        return flag ? "气血%" : "气血";
+    case 10:
+        return flag ? "法力%" : "法力";
+    default:
+        return "未知";
+    }
+}
+
+static const char *vm_mock_admin_role_equip_slot_name(u8 slot)
+{
+    static const char *names[] = {
+        "武器", "帽子", "上衣", "披风", "束腰", "裤子", "鞋子", "饰品"
+    };
+    if (slot >= 8)
+        return "?";
+    return names[slot];
+}
+
+static void vm_mock_admin_append_item_name_html(vm_mock_admin_text *page,
+                                                u32 itemId)
+{
+    const vm_net_mock_shop_catalog_item *item =
+        itemId != 0 ? vm_net_mock_find_shop_catalog_item(itemId) : NULL;
+    char nameUtf8[128];
+
+    memset(nameUtf8, 0, sizeof(nameUtf8));
+    if (item != NULL && item->name[0] != 0)
+        vm_net_mock_gbk_label_to_utf8(item->name, nameUtf8, sizeof(nameUtf8));
+    if (nameUtf8[0] != 0)
+        vm_mock_admin_text_append_html(page, nameUtf8);
+    else
+        vm_mock_admin_text_appendf(page, "物品#%u", itemId);
+}
+
+static void vm_mock_admin_render_equip_wash_tier_form(
+    vm_mock_admin_text *page, const char *account, u32 roleId,
+    const char *where, u32 loc, u8 unlock,
+    const vm_net_mock_enhance_wash_slot *slot)
+{
+    u8 type = 0;
+    u8 flag = 0;
+    u16 value = 0;
+    u16 washCount = 0;
+    u8 washed = 0;
+    u8 t;
+
+    if (page == NULL || account == NULL || where == NULL || slot == NULL)
+        return;
+    washed = slot->washed ? 1u : 0u;
+    type = slot->type;
+    flag = slot->flag;
+    value = slot->value;
+    washCount = slot->washCount;
+    if (type < 1u || type > 10u)
+        type = 1u;
+
+    vm_mock_admin_text_appendf(
+        page,
+        "<tr><td>+%u</td><td>%s</td><td>",
+        (u32)unlock,
+        washed ? "已洗练" : "未洗练");
+    if (washed)
+        vm_mock_admin_text_appendf(
+            page, "%s %u · 次%u",
+            vm_mock_admin_role_wash_attr_name(slot->type, slot->flag),
+            (u32)slot->value, (u32)slot->washCount);
+    else
+        vm_mock_admin_text_appendf(
+            page, "<span class=\"muted\">配置默认 · 次%u</span>",
+            (u32)slot->washCount);
+    vm_mock_admin_text_appendf(
+        page,
+        "</td><td><form class=\"wash-form\" method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"set-equip-wash\">"
+        "<input type=\"hidden\" name=\"account\" value=\"");
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
+        "<input type=\"hidden\" name=\"where\" value=\"%s\">"
+        "<input type=\"hidden\" name=\"loc\" value=\"%u\">"
+        "<input type=\"hidden\" name=\"unlock\" value=\"%u\">"
+        "<label><span>覆盖</span><select name=\"washed\">"
+        "<option value=\"1\"%s>已洗练</option>"
+        "<option value=\"0\"%s>未洗练</option></select></label>"
+        "<label><span>属性</span><select name=\"type\">",
+        roleId, where, loc, (u32)unlock,
+        washed ? " selected" : "",
+        !washed ? " selected" : "");
+    for (t = 1; t <= 10; ++t)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\"%s>%s</option>",
+            (u32)t, type == t ? " selected" : "",
+            vm_mock_admin_role_wash_attr_name(t, (t == 9 || t == 10) ? flag : 0));
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label>"
+        "<label><span>%%</span><select name=\"flag\">"
+        "<option value=\"0\"%s>数值</option>"
+        "<option value=\"1\"%s>百分比</option></select></label>"
+        "<label><span>数值</span><input type=\"number\" name=\"value\" "
+        "min=\"0\" max=\"65535\" value=\"%u\"></label>"
+        "<label><span>次数</span><input type=\"number\" name=\"wash_count\" "
+        "min=\"0\" max=\"65535\" value=\"%u\"></label>"
+        "<button type=\"submit\">保存</button></form></td></tr>",
+        flag == 0 ? " selected" : "",
+        flag != 0 ? " selected" : "",
+        (u32)value, (u32)washCount);
+}
+
+static void vm_mock_admin_render_equip_wash_piece(
+    vm_mock_admin_text *page, const char *account, u32 roleId,
+    const char *whereLabel, const char *where, u32 loc,
+    u32 itemId, u16 enhanceLevel, u32 instanceId,
+    const vm_net_mock_enhance_wash_state *wash)
+{
+    u8 i;
+
+    if (page == NULL || account == NULL || where == NULL || wash == NULL ||
+        itemId == 0)
+        return;
+    vm_mock_admin_text_appendf(page, "<div class=\"wash-piece\"><h4>");
+    vm_mock_admin_text_append_html(page, whereLabel);
+    vm_mock_admin_text_appendf(page, " · ");
+    vm_mock_admin_append_item_name_html(page, itemId);
+    vm_mock_admin_text_appendf(
+        page,
+        " <span class=\"badge\">+%u</span></h4>"
+        "<p class=\"muted\">item %u · instance %u · %s %u</p>"
+        "<table class=\"wash-table\"><thead><tr>"
+        "<th>档</th><th>状态</th><th>当前</th><th>调整</th>"
+        "</tr></thead><tbody>",
+        (u32)enhanceLevel, itemId, instanceId,
+        strcmp(where, "equip") == 0 ? "slot" : "seq", loc);
+    for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+    {
+        vm_mock_admin_render_equip_wash_tier_form(
+            page, account, roleId, where, loc,
+            vm_net_mock_enhance_unlock_for_index(i), &wash->slots[i]);
+    }
+    vm_mock_admin_text_appendf(page, "</tbody></table></div>");
+}
+
+static void vm_mock_admin_render_role_equip_wash(
+    vm_mock_admin_text *page, const char *account,
+    const vm_net_mock_role_state *role, const char *roleNameUtf8)
+{
+    u32 i;
+    u32 bagCount = 0;
+    u32 shown = 0;
+    char whereLabel[64];
+
+    if (page == NULL || account == NULL || role == NULL)
+        return;
+    vm_mock_admin_text_appendf(page, "<div class=\"wash-role\"><h3>装备洗练 · ");
+    vm_mock_admin_text_append_html(
+        page, roleNameUtf8 && roleNameUtf8[0] ? roleNameUtf8 : "-");
+    vm_mock_admin_text_appendf(page, " <span class=\"muted\">ID %u</span></h3>",
+                               role->roleId);
+
+    for (i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
+    {
+        u32 itemId = role->equippedItemIds[i];
+        if (itemId == 0 ||
+            vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
+            continue;
+        snprintf(whereLabel, sizeof(whereLabel), "穿戴·%s",
+                 vm_mock_admin_role_equip_slot_name((u8)i));
+        vm_mock_admin_render_equip_wash_piece(
+            page, account, role->roleId, whereLabel, "equip", i, itemId,
+            role->equippedEnhanceLevels[i],
+            role->equippedEnhanceInstanceIds[i],
+            &role->equippedEnhanceWash[i]);
+        ++shown;
+    }
+
+    bagCount = vm_net_mock_role_backpack_count(role);
+    for (i = 0; i < bagCount && i < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++i)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (item->itemId == 0 || item->count == 0)
+            continue;
+        if (vm_net_mock_find_equipment_catalog_item(item->itemId) == NULL)
+            continue;
+        snprintf(whereLabel, sizeof(whereLabel), "背包");
+        vm_mock_admin_render_equip_wash_piece(
+            page, account, role->roleId, whereLabel, "bag", item->seq,
+            item->itemId, item->enhanceLevel, item->enhanceInstanceId,
+            &item->enhanceWash);
+        ++shown;
+    }
+
+    if (shown == 0)
+        vm_mock_admin_text_appendf(
+            page, "<p class=\"muted\">该角色暂无穿戴或背包装备可调整洗练。</p>");
+    vm_mock_admin_text_appendf(
+        page,
+        "<p class=\"muted grant-note\">覆盖=已洗练时写入 type/flag/value；"
+        "未洗练清除覆盖并回退配置默认。次数影响下次洗练金币阶梯。"
+        "在线角色重开背包/洗练面板或重登后可见。</p></div>");
+}
+
 static void vm_mock_admin_render_item_grant_form(
     vm_mock_admin_text *page, const char *account,
     const u32 *roleIds, char roleNames[][128], u32 roleCount)
@@ -6446,10 +6672,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
         ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
+        ".wash-role{border-top:1px solid #eaecf0;margin-top:16px;padding-top:14px}.wash-role h3{font-size:15px;margin:0 0 10px}.wash-piece{border:1px solid #eaecf0;border-radius:8px;padding:10px 12px;margin:0 0 12px;background:#fafbfc}.wash-piece h4{margin:0 0 4px;font-size:14px}.wash-table{margin-top:8px}.wash-form{display:flex;flex-wrap:wrap;gap:6px;align-items:end}.wash-form label{display:grid;gap:2px;min-width:72px}.wash-form label>span{font-size:11px;color:#667085}.wash-form input,.wash-form select{padding:6px 7px;font-size:12px}.wash-form input[type=number]{width:78px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
-        "</style><script src=\"/admin.js?v=7\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=8\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
@@ -6603,6 +6830,16 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         }
         if (g_vm_net_mock_role_db.roleCount == 0)
             vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">该账号尚未创建角色</td></tr>");
+        vm_mock_admin_text_appendf(&page, "</tbody></table>");
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+            char roleNameUtf8[128];
+            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
+                                          roleNameUtf8, sizeof(roleNameUtf8));
+            vm_mock_admin_render_role_equip_wash(
+                &page, selectedAccount, role, roleNameUtf8);
+        }
         vm_mock_service_close_account_role_db_for_management(accountState, true);
     }
     else
@@ -6610,9 +6847,9 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">");
         vm_mock_admin_text_append_html(&page, selectedAccount[0] ?
                                        (roleError ? roleError : "角色数据不可用") : "请选择账号");
-        vm_mock_admin_text_appendf(&page, "</td></tr>");
+        vm_mock_admin_text_appendf(&page, "</td></tr></tbody></table>");
     }
-    vm_mock_admin_text_appendf(&page, "</tbody></table></div>");
+    vm_mock_admin_text_appendf(&page, "</div>");
     vm_mock_admin_render_item_grant_form(
         &page, selectedAccount, managedRoleIds, managedRoleNames,
         managedRoleCount);
@@ -9589,6 +9826,69 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "物品给予成功" :
                                     (error ? error : "物品给予失败"));
+        return;
+    }
+    if (strcmp(action, "set-equip-wash") == 0)
+    {
+        char where[16];
+        char locText[32];
+        char unlockText[16];
+        char washedText[16];
+        char typeText[16];
+        char flagText[16];
+        char valueText[32];
+        char countText[32];
+        u32 loc = 0;
+        u32 unlock = 0;
+        u32 washed = 0;
+        u32 type = 0;
+        u32 flag = 0;
+        u32 value = 0;
+        u32 washCount = 0;
+
+        memset(where, 0, sizeof(where));
+        memset(locText, 0, sizeof(locText));
+        memset(unlockText, 0, sizeof(unlockText));
+        memset(washedText, 0, sizeof(washedText));
+        memset(typeText, 0, sizeof(typeText));
+        memset(flagText, 0, sizeof(flagText));
+        memset(valueText, 0, sizeof(valueText));
+        memset(countText, 0, sizeof(countText));
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "where", where, sizeof(where)) ||
+            !vm_mock_admin_form_value(body, "loc", locText, sizeof(locText)) ||
+            !vm_mock_admin_form_value(body, "unlock", unlockText,
+                                      sizeof(unlockText)) ||
+            !vm_mock_admin_form_value(body, "washed", washedText,
+                                      sizeof(washedText)) ||
+            !vm_mock_admin_form_value(body, "type", typeText,
+                                      sizeof(typeText)) ||
+            !vm_mock_admin_form_value(body, "flag", flagText,
+                                      sizeof(flagText)) ||
+            !vm_mock_admin_form_value(body, "value", valueText,
+                                      sizeof(valueText)) ||
+            !vm_mock_admin_form_value(body, "wash_count", countText,
+                                      sizeof(countText)) ||
+            !vm_net_mock_parse_u32_strict(locText, &loc) ||
+            !vm_net_mock_parse_u32_strict(unlockText, &unlock) ||
+            !vm_net_mock_parse_u32_strict(washedText, &washed) ||
+            !vm_net_mock_parse_u32_strict(typeText, &type) ||
+            !vm_net_mock_parse_u32_strict(flagText, &flag) ||
+            !vm_net_mock_parse_u32_strict(valueText, &value) ||
+            !vm_net_mock_parse_u32_strict(countText, &washCount) ||
+            unlock > 255u || washed > 1u || type > 255u || flag > 1u ||
+            value > 65535u || washCount > 65535u)
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "洗练参数无效");
+            return;
+        }
+        ok = vm_mock_service_account_set_role_equip_wash(
+            account, role, where, loc, (u8)unlock, (u8)washed, (u8)type,
+            (u8)flag, (u16)value, (u16)washCount, &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "洗练属性已更新"
+                                  : (error ? error : "洗练属性调整失败"));
         return;
     }
     if (strcmp(action, "grant-cosmetic") == 0)

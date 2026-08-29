@@ -405,12 +405,75 @@ static void vm_mock_guess_announce_top_winners(u32 roundId, u8 d1, u8 d2, u8 d3)
     }
 }
 
+/* Precompute outcome flags in C (same as vm_mock_guess_choice_wins), then settle
+ * with a compact UPDATE. Avoids the old snprintf CASE that compared dice to
+ * themselves, passed too few args, and overflowed query[512]. */
+static bool vm_mock_guess_settle_bets(u32 roundId, u8 d1, u8 d2, u8 d3)
+{
+    char query[768];
+    u32 isBaozi = vm_mock_guess_is_triple(d1, d2, d3) ? 1u : 0u;
+    u32 isBig = vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_BIG, d1, d2, d3) ? 1u
+                                                                                : 0u;
+    u32 isSmall =
+        vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_SMALL, d1, d2, d3) ? 1u : 0u;
+    u32 isOdd = vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_ODD, d1, d2, d3) ? 1u
+                                                                               : 0u;
+    u32 isEven =
+        vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_EVEN, d1, d2, d3) ? 1u : 0u;
+    int wrote;
+
+    if (roundId == 0)
+        return false;
+    wrote = snprintf(
+        query, sizeof(query),
+        "UPDATE server_guess_bets SET "
+        "win=CASE "
+        "WHEN choice=%u AND %u=1 THEN 1 "
+        "WHEN choice=%u AND %u=1 THEN 1 "
+        "WHEN choice=%u AND %u=1 THEN 1 "
+        "WHEN choice=%u AND %u=1 THEN 1 "
+        "WHEN choice=%u AND %u=1 THEN 1 "
+        "ELSE 0 END, "
+        "payout_copper=CASE "
+        "WHEN choice=%u AND %u=1 THEN "
+        "GREATEST(0,stake_copper*%u-stake_copper*%u*%u/100) "
+        "WHEN choice=%u AND %u=1 THEN "
+        "GREATEST(0,stake_copper*%u-stake_copper*%u*%u/100) "
+        "WHEN choice=%u AND %u=1 THEN "
+        "GREATEST(0,stake_copper*%u-stake_copper*%u*%u/100) "
+        "WHEN choice=%u AND %u=1 THEN "
+        "GREATEST(0,stake_copper*%u-stake_copper*%u*%u/100) "
+        "WHEN choice=%u AND %u=1 THEN "
+        "GREATEST(0,stake_copper*%u-stake_copper*%u*%u/100) "
+        "ELSE 0 END "
+        "WHERE round_id=%u",
+        VM_MOCK_GUESS_CHOICE_BAOZI, isBaozi, VM_MOCK_GUESS_CHOICE_BIG, isBig,
+        VM_MOCK_GUESS_CHOICE_SMALL, isSmall, VM_MOCK_GUESS_CHOICE_ODD, isOdd,
+        VM_MOCK_GUESS_CHOICE_EVEN, isEven, VM_MOCK_GUESS_CHOICE_BAOZI, isBaozi,
+        VM_MOCK_GUESS_BAOZI_MULT, VM_MOCK_GUESS_BAOZI_MULT, VM_MOCK_GUESS_FEE_PERCENT,
+        VM_MOCK_GUESS_CHOICE_BIG, isBig, VM_MOCK_GUESS_EVEN_MULT,
+        VM_MOCK_GUESS_EVEN_MULT, VM_MOCK_GUESS_FEE_PERCENT,
+        VM_MOCK_GUESS_CHOICE_SMALL, isSmall, VM_MOCK_GUESS_EVEN_MULT,
+        VM_MOCK_GUESS_EVEN_MULT, VM_MOCK_GUESS_FEE_PERCENT,
+        VM_MOCK_GUESS_CHOICE_ODD, isOdd, VM_MOCK_GUESS_EVEN_MULT,
+        VM_MOCK_GUESS_EVEN_MULT, VM_MOCK_GUESS_FEE_PERCENT,
+        VM_MOCK_GUESS_CHOICE_EVEN, isEven, VM_MOCK_GUESS_EVEN_MULT,
+        VM_MOCK_GUESS_EVEN_MULT, VM_MOCK_GUESS_FEE_PERCENT, roundId);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(query))
+    {
+        printf("[error][mock-service] guess_settle_sql_overflow round=%u wrote=%d\n",
+               roundId, wrote);
+        return false;
+    }
+    return vm_mysql_exec(query);
+}
+
 static bool vm_mock_guess_draw_round(vm_mock_guess_round_row *round)
 {
     u8 d1;
     u8 d2;
     u8 d3;
-    char query[512];
+    char query[256];
 
     if (round == NULL || round->roundId == 0 ||
         round->status != VM_MOCK_GUESS_ROUND_OPEN)
@@ -418,53 +481,29 @@ static bool vm_mock_guess_draw_round(vm_mock_guess_round_row *round)
     d1 = vm_mock_guess_roll_die();
     d2 = vm_mock_guess_roll_die();
     d3 = vm_mock_guess_roll_die();
+    /* Write dice first; mark DRAWN only after bet settlement succeeds so a
+     * failed settle can retry on the next tick. */
     snprintf(query, sizeof(query),
-             "UPDATE server_guess_rounds SET dice1=%u,dice2=%u,dice3=%u,status=%u "
+             "UPDATE server_guess_rounds SET dice1=%u,dice2=%u,dice3=%u "
              "WHERE round_id=%u AND status=%u",
-             (u32)d1, (u32)d2, (u32)d3, VM_MOCK_GUESS_ROUND_DRAWN, round->roundId,
-             VM_MOCK_GUESS_ROUND_OPEN);
+             (u32)d1, (u32)d2, (u32)d3, round->roundId, VM_MOCK_GUESS_ROUND_OPEN);
     if (!vm_mysql_exec(query))
         return false;
+    if (!vm_mock_guess_settle_bets(round->roundId, d1, d2, d3))
+    {
+        printf("[error][mock-service] guess_settle_failed round=%u dice=%u/%u/%u\n",
+               round->roundId, (u32)d1, (u32)d2, (u32)d3);
+        snprintf(query, sizeof(query),
+                 "UPDATE server_guess_rounds SET dice1=0,dice2=0,dice3=0 "
+                 "WHERE round_id=%u AND status=%u",
+                 round->roundId, VM_MOCK_GUESS_ROUND_OPEN);
+        (void)vm_mysql_exec(query);
+        return false;
+    }
     snprintf(query, sizeof(query),
-             "UPDATE server_guess_bets b "
-             "INNER JOIN server_guess_rounds r ON r.round_id=b.round_id "
-             "SET b.win=CASE "
-             "WHEN (%u=%u AND %u=%u AND %u=%u AND b.choice=%u) THEN 1 "
-             "WHEN (%u=%u AND %u=%u AND NOT (%u=%u AND %u=%u AND %u=%u) AND "
-             "((b.choice=%u AND (%u+%u+%u) BETWEEN 11 AND 17) OR "
-             "(b.choice=%u AND (%u+%u+%u) BETWEEN 4 AND 10) OR "
-             "(b.choice=%u AND ((%u+%u+%u)%%2)=1) OR "
-             "(b.choice=%u AND ((%u+%u+%u)%%2)=0))) THEN 1 "
-             "ELSE 0 END, "
-             "b.payout_copper=CASE "
-             "WHEN (%u=%u AND %u=%u AND %u=%u AND b.choice=%u) THEN "
-             "GREATEST(0,b.stake_copper*%u-b.stake_copper*%u*%u/100) "
-             "WHEN NOT (%u=%u AND %u=%u AND %u=%u) AND "
-             "((b.choice=%u AND (%u+%u+%u) BETWEEN 11 AND 17) OR "
-             "(b.choice=%u AND (%u+%u+%u) BETWEEN 4 AND 10) OR "
-             "(b.choice=%u AND ((%u+%u+%u)%%2)=1) OR "
-             "(b.choice=%u AND ((%u+%u+%u)%%2)=0)) THEN "
-             "GREATEST(0,b.stake_copper*%u-b.stake_copper*%u*%u/100) "
-             "ELSE 0 END "
-             "WHERE b.round_id=%u",
-             (u32)d1, (u32)d1, (u32)d2, (u32)d2, (u32)d3, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_BAOZI,
-             (u32)d1, (u32)d1, (u32)d2, (u32)d2, (u32)d1, (u32)d2, (u32)d3,
-             (u32)d3,
-             VM_MOCK_GUESS_CHOICE_BIG, (u32)d1, (u32)d2, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_SMALL, (u32)d1, (u32)d2, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_ODD, (u32)d1, (u32)d2, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_EVEN, (u32)d1, (u32)d2, (u32)d3,
-             (u32)d1, (u32)d1, (u32)d2, (u32)d2, (u32)d3, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_BAOZI, VM_MOCK_GUESS_BAOZI_MULT,
-             VM_MOCK_GUESS_BAOZI_MULT, VM_MOCK_GUESS_FEE_PERCENT,
-             (u32)d1, (u32)d1, (u32)d2, (u32)d2, (u32)d3, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_BIG, (u32)d1, (u32)d2, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_SMALL, (u32)d1, (u32)d2, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_ODD, (u32)d1, (u32)d2, (u32)d3,
-             VM_MOCK_GUESS_CHOICE_EVEN, (u32)d1, (u32)d2, (u32)d3,
-             VM_MOCK_GUESS_EVEN_MULT, VM_MOCK_GUESS_EVEN_MULT,
-             VM_MOCK_GUESS_FEE_PERCENT, round->roundId);
+             "UPDATE server_guess_rounds SET status=%u "
+             "WHERE round_id=%u AND status=%u",
+             VM_MOCK_GUESS_ROUND_DRAWN, round->roundId, VM_MOCK_GUESS_ROUND_OPEN);
     if (!vm_mysql_exec(query))
         return false;
     round->dice1 = d1;
@@ -472,9 +511,17 @@ static bool vm_mock_guess_draw_round(vm_mock_guess_round_row *round)
     round->dice3 = d3;
     round->status = VM_MOCK_GUESS_ROUND_DRAWN;
     vm_mock_guess_announce_top_winners(round->roundId, d1, d2, d3);
-    printf("[info][mock-service] guess_draw round=%u dice=%u/%u/%u sum=%u\n",
+    printf("[info][mock-service] guess_draw round=%u dice=%u/%u/%u sum=%u "
+           "baozi=%u big=%u small=%u odd=%u even=%u\n",
            round->roundId, (u32)d1, (u32)d2, (u32)d3,
-           (u32)vm_mock_guess_dice_sum(d1, d2, d3));
+           (u32)vm_mock_guess_dice_sum(d1, d2, d3),
+           vm_mock_guess_is_triple(d1, d2, d3) ? 1u : 0u,
+           vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_BIG, d1, d2, d3) ? 1u : 0u,
+           vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_SMALL, d1, d2, d3) ? 1u
+                                                                            : 0u,
+           vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_ODD, d1, d2, d3) ? 1u : 0u,
+           vm_mock_guess_choice_wins(VM_MOCK_GUESS_CHOICE_EVEN, d1, d2, d3) ? 1u
+                                                                            : 0u);
     return true;
 }
 

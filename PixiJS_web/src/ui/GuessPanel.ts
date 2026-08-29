@@ -242,7 +242,7 @@ export class GuessPanel extends Container {
     this.redraw();
   }
 
-  /** ←→ 在同排选项间切换；豹子行返回 false 以便微调押金. */
+  /** ←→ 在同排选项间切换（押金用数字键盘，不走方向键）. */
   horizontal(delta: number): boolean {
     if (this.tab !== "bet") return false;
     const { row, col } = choiceGridPos(this.choiceCursor);
@@ -442,7 +442,7 @@ export class GuessPanel extends Container {
   }
 
   /**
-   * 押金 LCD 数字键盘：←→ ±1 金，点按数字/删/清，不用 HTML 输入。
+   * 押金 LCD 数字键盘：点按数字/删除/清空（方向键只切选项）。
    */
   private drawStakeKeypad(
     x: number,
@@ -454,9 +454,9 @@ export class GuessPanel extends Container {
     st: GuessStatus | null,
   ): number {
     let cy = y;
-    this.addLabel("押金(金) ←→微调", x, cy, CBE.inkLabel);
+    this.addLabel("押金(金) 数字键输入", x, cy, CBE.inkLabel);
     cy += TEXT_LINE;
-    const boxH = 22;
+    const boxH = 20;
     this.box
       .roundRect(x + 4, cy, w - 8, boxH, 3)
       .fill({ color: CBE.bgPanel })
@@ -468,19 +468,22 @@ export class GuessPanel extends Container {
       cy + boxH / 2,
       CBE.inkTipGreen,
     );
-    cy += boxH + SECTION_GAP;
+    cy += boxH + 4;
     this.addLabel(
       `手续费${st?.feePercent ?? 8}% 豹子30倍 其余2倍`,
       x,
       cy,
       CBE.inkLabel,
     );
-    cy += TEXT_LINE + 4;
+    cy += TEXT_LINE + 2;
 
-    const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "删", "0", "清"];
-    const keyW = 50;
-    const keyH = 17;
-    const gap = 3;
+    // 与商城赞助键盘一致用「删除/清空」；按可用高度缩放，避免末行被裁掉。
+    const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "删除", "0", "清空"];
+    const rows = 4;
+    const gap = 2;
+    const avail = Math.max(48, bottom - cy - 4);
+    const keyH = Math.max(14, Math.min(17, Math.floor((avail - gap * (rows - 1)) / rows)));
+    const keyW = 54;
     const gridW = keyW * 3 + gap * 2;
     const startX = x + Math.floor((w - gridW) / 2);
     for (let i = 0; i < keys.length; i++) {
@@ -488,10 +491,9 @@ export class GuessPanel extends Container {
       const row = Math.floor(i / 3);
       const kx = startX + col * (keyW + gap);
       const ky = cy + row * (keyH + gap);
-      if (ky + keyH > bottom - 4) break;
       const key = keys[i]!;
       const keyInk =
-        key === "清" ? CBE.inkWarn : key === "删" ? CBE.inkLabel : CBE.inkMint;
+        key === "清空" ? CBE.inkWarn : key === "删除" ? CBE.inkLabel : CBE.inkMint;
       this.box
         .roundRect(kx, ky, keyW, keyH, 2)
         .fill({ color: CBE.bgDeep })
@@ -499,11 +501,11 @@ export class GuessPanel extends Container {
       this.addLabelCentered(key, kx + keyW / 2, ky + keyH / 2, keyInk);
       this.rowHits.push(
         attachRowPointerHit(this, kx, ky, keyW, keyH, () => {
-          this.appendStakeKey(key === "删" ? "删除" : key === "清" ? "清空" : key);
+          this.appendStakeKey(key);
         }),
       );
     }
-    return cy + 4 * (keyH + gap);
+    return cy + rows * (keyH + gap);
   }
 
   private drawHistoryBody(x: number, y: number, w: number, bottom: number): void {

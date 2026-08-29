@@ -3228,12 +3228,20 @@ export function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): B
       : hit.count > 0
         ? hit.count
         : it.count;
+    // 17/1 enhance is wire authority (0 after recast). Never `hit.enhance ||`
+    // — prior-bag-as-grid would keep the pre-transfer level forever.
+    const enhance =
+      it.kind === "equip" || hit.kind === "equip"
+        ? it.enhance >>> 0
+        : 0;
+    const keepAttrs =
+      enhance > 0 ? attrs : it.enhanceAttrs;
     return {
       ...it,
       seq: hit.seq > 0 ? hit.seq : it.seq,
       count,
-      enhance: hit.enhance || it.enhance,
-      ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
+      enhance,
+      ...(keepAttrs && keepAttrs.length ? { enhanceAttrs: keepAttrs } : {}),
     };
   });
 }
@@ -3290,13 +3298,21 @@ export function mergeBagItemUpdateDeltas(
         count: (prev.count >>> 0) + (u.count >>> 0),
       });
     } else {
-      const attrs = preferEnhanceAttrs(u.enhanceAttrs, prev?.enhanceAttrs);
-      map.set(u.seq, {
+      // Wire enhance is authoritative — including 0 after 29/6 recast.
+      // `u.enhance || prev.enhance` treated 0 as missing and kept the old (+L).
+      const enhance = u.enhance >>> 0;
+      const attrs =
+        enhance > 0
+          ? preferEnhanceAttrs(u.enhanceAttrs, prev?.enhanceAttrs)
+          : u.enhanceAttrs;
+      const row: BagItem = {
         ...prev,
         ...u,
-        enhance: u.enhance || prev?.enhance || 0,
-        ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
-      });
+        enhance,
+      };
+      if (attrs && attrs.length) row.enhanceAttrs = attrs;
+      else delete row.enhanceAttrs;
+      map.set(u.seq, row);
     }
   }
   return [...map.values()];

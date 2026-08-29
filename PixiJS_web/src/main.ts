@@ -2448,28 +2448,24 @@ async function main(): Promise<void> {
     },
     onBattle: (state) => {
       // Hangup / challenge 4/1 may skip onMonsterCollide — hide map SCE spawn now.
+      // Temporary suppress only (wild ~10s respawn). World-boss permanent drop is
+      // solely via [WBOSS:claim] → dropWorldBossFromMap; do not permanent-remove
+      // here or post-battle SCE refresh re-paints the wild spawn immediately.
       {
         const sm = state.sceneMonster;
         const pv = session.pendingEncounterVisual;
-        const homeX = sm?.x ?? pv?.x;
-        const homeY = sm?.y ?? pv?.y;
         const hideId =
           session.sceneMonsters.find(
             (n) =>
               (sm &&
-                ((n.homeX ?? n.x | 0) === (sm.x | 0) &&
-                  (n.homeY ?? n.y | 0) === (sm.y | 0))) ||
+                (((n.homeX ?? n.x) | 0) === (sm.x | 0) &&
+                  ((n.homeY ?? n.y) | 0) === (sm.y | 0))) ||
               (pv &&
-                ((n.homeX ?? n.x | 0) === (pv.x | 0) &&
-                  (n.homeY ?? n.y | 0) === (pv.y | 0))),
+                (((n.homeX ?? n.x) | 0) === (pv.x | 0) &&
+                  ((n.homeY ?? n.y) | 0) === (pv.y | 0))),
           )?.actorId ?? 0;
         if (hideId >= 0x70000000) {
           view.actors.suppressSceneMonster(hideId);
-          view.actors.markSuppressedPermanent(hideId);
-        }
-        if (homeX != null && homeY != null) {
-          view.actors.removeSceneMonsterPermanent({ x: homeX, y: homeY });
-          session.sceneMonsters = view.actors.liveSceneMonsters();
         }
       }
       // Prefer selectedRoleId — stale activeRole was the first account role and
@@ -5745,7 +5741,8 @@ dialog.hide();
       if (guessPanel.visible) {
         if (which === "left") {
           const sk = guessPanel.softkeys();
-          if (sk.left === "押注") guessPanel.confirm();
+          // 「押注」/「领奖」走 confirm；「刷新」才拉状态。
+          if (sk.left === "押注" || sk.left === "领奖") guessPanel.confirm();
           else void refreshGuessPanel(guessHistoryPage);
         }
         if (which === "center") {
@@ -6057,11 +6054,9 @@ dialog.hide();
     }
     if (phase === "world" && guessPanel.visible) {
       if (!down) return;
+      // 方向键只切选项/记录；押金走 LCD 数字键盘（含删除）。
       if (dir === "left" || dir === "right") {
-        const d = dir === "left" ? -1 : 1;
-        if (!guessPanel.horizontal(d)) {
-          guessPanel.adjustStake(d);
-        }
+        guessPanel.horizontal(dir === "left" ? -1 : 1);
         shell.setSoftkeys(guessPanel.softkeys());
       } else {
         guessPanel.move(dir === "up" ? -1 : 1);
@@ -6262,8 +6257,30 @@ dialog.hide();
       }
       return;
     }
-    if (guessPanel.visible && guessPanel.currentTab === "bet") {
-      if (guessPanel.handleStakeKey(e.key)) {
+    if (guessPanel.visible) {
+      if (guessPanel.currentTab === "bet" && guessPanel.handleStakeKey(e.key)) {
+        e.preventDefault();
+        return;
+      }
+      if (k === "arrowup" || k === "w") {
+        guessPanel.move(-1);
+        e.preventDefault();
+        return;
+      }
+      if (k === "arrowdown" || k === "s") {
+        guessPanel.move(1);
+        e.preventDefault();
+        return;
+      }
+      if (k === "arrowleft" || k === "a") {
+        guessPanel.horizontal(-1);
+        shell.setSoftkeys(guessPanel.softkeys());
+        e.preventDefault();
+        return;
+      }
+      if (k === "arrowright" || k === "d") {
+        guessPanel.horizontal(1);
+        shell.setSoftkeys(guessPanel.softkeys());
         e.preventDefault();
         return;
       }
@@ -6706,7 +6723,6 @@ dialog.hide();
 
   const forensicRing = new GlForensicRing();
   let forensicHeartbeatN = 0;
-  let lastForensicClipboardAt = 0;
   let lastOkRenderAt = performance.now();
   let lastRenderCrashForensicAt = 0;
   let lastRenderStallForensicAt = 0;
@@ -6789,19 +6805,8 @@ dialog.hide();
     const line = `[gl] forensic ${cls} why=${why} blank=${blank} lost=${glLost}`;
     if (isAlertForensicClass(cls)) console.warn(line, payload);
     else if (verboseForensic) console.info(line);
-    if (
-      isAlertForensicClass(cls) &&
-      performance.now() - lastForensicClipboardAt > 4000
-    ) {
-      lastForensicClipboardAt = performance.now();
-      const text = forensicRing.dumpJson();
-      void copyForensicText(text).then((ok) => {
-        if (verboseForensic) {
-          if (ok) console.info("[gl] forensic clipboard ok", cls);
-          else console.warn("[gl] forensic clipboard failed", cls);
-        }
-      });
-    }
+    // No auto clipboard — alert storms overwrote the user's clipboard.
+    // Manual dump: long-press status or window.__pixiDumpForensic().
     return cls;
   };
 

@@ -407,9 +407,9 @@ static void vm_mock_world_boss_broadcast_despawn(const char *sceneGbk, u16 x,
                                                  u16 y)
 {
     char message[192];
-    /* GBK: 世界Boss 已刷新 */
+    /* GBK: 世界Boss 已刷新 （世=CA C0，勿写成 CA E0=枢） */
     static const char prefixGbk[] =
-        "\xca\xe0\xbd\xe7\x42\x6f\x73\x73\xd2\xd1\xcb\xa2\xd0\xc2\x20";
+        "\xca\xc0\xbd\xe7\x42\x6f\x73\x73\xd2\xd1\xcb\xa2\xd0\xc2\x20";
     /* GBK:  坐标 */
     static const char coordGbk[] = " \xd7\xf9\xb1\xea";
     static const char systemNameGbk[] = "\xcf\xb5\xcd\xb3";

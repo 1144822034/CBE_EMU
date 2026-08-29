@@ -4968,8 +4968,8 @@ static vm_mock_service_trade g_vm_mock_service_trades[VM_MOCK_SERVICE_TRADE_MAX]
 
 enum
 {
-    /* 900 ticks × 100ms = 90s scene-poll / gateway keepalive budget. */
-    VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS = 900,
+    /* 300 ticks × 100ms = 30s scene-poll / gateway keepalive budget. */
+    VM_MOCK_SERVICE_ONLINE_PRESENCE_MAX_AGE_TICKS = 300,
     VM_MOCK_SERVICE_SESSION_MOVEINFO_MAX = 512
 };
 
@@ -12399,6 +12399,197 @@ static bool vm_mock_service_account_grant_role_item(const char *accountId,
         *seqOut = seq;
     if (messageOut)
         *messageOut = "物品给予成功";
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
+/*
+ * Admin: set one +4/+8/+12/+16 wash override on bag (by seq) or worn (by slot).
+ * washed=0 clears the override (config default); wash_count may still be set.
+ */
+static bool vm_mock_service_account_set_role_equip_wash(
+    const char *accountId,
+    const char *roleSelector,
+    const char *where,
+    u32 loc,
+    u8 unlockLevel,
+    u8 washed,
+    u8 type,
+    u8 flag,
+    u16 value,
+    u16 washCount,
+    const char **messageOut)
+{
+    vm_mock_service_account_state *state = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_enhance_wash_state *wash = NULL;
+    vm_net_mock_enhance_wash_slot *slot = NULL;
+    vm_net_mock_backpack_item_state *bagItem = NULL;
+    u32 itemId = 0;
+    u16 enhanceLevel = 0;
+    u32 instanceId = 0;
+    u16 bagSeq = 0;
+    int unlockIndex = -1;
+    bool worn = false;
+
+    if (messageOut)
+        *messageOut = "洗练属性调整失败";
+    if (where == NULL || (strcmp(where, "bag") != 0 && strcmp(where, "equip") != 0))
+    {
+        if (messageOut)
+            *messageOut = "位置无效（bag/equip）";
+        return false;
+    }
+    worn = strcmp(where, "equip") == 0;
+    unlockIndex = vm_net_mock_enhance_index_for_unlock(unlockLevel);
+    if (unlockIndex < 0)
+    {
+        if (messageOut)
+            *messageOut = "档位无效（仅 +4/+8/+12/+16）";
+        return false;
+    }
+    if (washed > 1u || flag > 1u)
+    {
+        if (messageOut)
+            *messageOut = "washed/flag 参数无效";
+        return false;
+    }
+    if (washed != 0 && (type < 1u || type > 10u))
+    {
+        if (messageOut)
+            *messageOut = "已洗练时属性类型必须是 1..10";
+        return false;
+    }
+    if (worn)
+    {
+        if (loc >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+        {
+            if (messageOut)
+                *messageOut = "穿戴槽位无效";
+            return false;
+        }
+    }
+    else if (loc == 0 || loc > 65535u)
+    {
+        if (messageOut)
+            *messageOut = "背包 seq 无效";
+        return false;
+    }
+
+    state = vm_mock_service_open_account_role_db_for_management(accountId,
+                                                                 messageOut);
+    if (state == NULL)
+        return false;
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "角色不存在";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+
+    if (worn)
+    {
+        itemId = role->equippedItemIds[loc];
+        if (itemId == 0 ||
+            vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
+        {
+            if (messageOut)
+                *messageOut = "该穿戴槽无装备";
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return false;
+        }
+        enhanceLevel = role->equippedEnhanceLevels[loc];
+        instanceId = role->equippedEnhanceInstanceIds[loc];
+        wash = &role->equippedEnhanceWash[loc];
+        bagSeq = 0;
+    }
+    else
+    {
+        bagItem = vm_net_mock_role_find_backpack_item(role, 0, (u16)loc);
+        if (bagItem == NULL || bagItem->itemId == 0)
+        {
+            if (messageOut)
+                *messageOut = "背包中找不到该 seq";
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return false;
+        }
+        if (vm_net_mock_find_equipment_catalog_item(bagItem->itemId) == NULL)
+        {
+            if (messageOut)
+                *messageOut = "该背包物品不是装备";
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return false;
+        }
+        itemId = bagItem->itemId;
+        enhanceLevel = bagItem->enhanceLevel;
+        instanceId = bagItem->enhanceInstanceId;
+        wash = &bagItem->enhanceWash;
+        bagSeq = bagItem->seq;
+    }
+
+    slot = &wash->slots[unlockIndex];
+    if (washed == 0)
+    {
+        slot->washed = 0;
+        slot->type = 0;
+        slot->flag = 0;
+        slot->value = 0;
+        slot->washCount = washCount;
+    }
+    else
+    {
+        slot->washed = 1;
+        slot->type = type;
+        slot->flag = flag;
+        slot->value = value;
+        slot->washCount = washCount;
+    }
+
+    if (instanceId == 0)
+    {
+        instanceId = vm_net_mock_role_ensure_equipment_instance_id(
+            role, 0, itemId);
+        if (worn)
+            role->equippedEnhanceInstanceIds[loc] = instanceId;
+        else if (bagItem != NULL)
+            bagItem->enhanceInstanceId = instanceId;
+    }
+
+    vm_net_mock_role_mark_inventory_dirty("admin-equip-wash");
+    if (!vm_net_mock_role_db_save_role("admin-equip-wash", role->roleId))
+    {
+        if (messageOut)
+            *messageOut = "洗练属性持久化失败";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    if (!vm_net_mock_enhance_wash_is_empty(wash))
+    {
+        (void)vm_net_mock_enhance_wash_record_upsert(
+            role->roleId, instanceId, bagSeq, itemId, enhanceLevel, wash,
+            unlockLevel);
+    }
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-service] account_equip_wash_set user=%s role=%s id=%u "
+           "where=%s loc=%u item=%u unlock=%u washed=%u type=%u flag=%u "
+           "value=%u count=%u instance=%u\n",
+           accountId,
+           role->name[0] ? role->name : "-",
+           role->roleId,
+           where,
+           loc,
+           itemId,
+           (u32)unlockLevel,
+           (u32)slot->washed,
+           (u32)slot->type,
+           (u32)slot->flag,
+           (u32)slot->value,
+           (u32)slot->washCount,
+           instanceId);
+    if (messageOut)
+        *messageOut = "洗练属性已更新";
     vm_mock_service_close_account_role_db_for_management(state, false);
     return true;
 }

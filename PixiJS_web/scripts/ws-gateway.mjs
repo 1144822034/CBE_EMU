@@ -481,7 +481,7 @@ process.on("unhandledRejection", (err) => {
 const CBMS_FLAG_SCENE_POLL = 0x2;
 const CBMS_FLAG_DISCONNECT = 0x4;
 /**
- * Idle scene-poll (presence keepalive). Default 30000ms (~1/3 of ~90s kick).
+ * Idle scene-poll (presence keepalive). Default 30000ms (matches ~30s kick).
  * Set PIX_GATEWAY_KEEPALIVE_MS=0 to disable. Unrelated to mock hangup 2/10.
  */
 const GATEWAY_KEEPALIVE_MS = Number(process.env.PIX_GATEWAY_KEEPALIVE_MS || 30000);

@@ -32,6 +32,28 @@
 - [ ] Admin 强制刷新到另一张图：旧图客户端旧怪消失。
 - [ ] 普通野怪战后约 10s 仍回出生点。
 
+## 续：普通野怪遇怪后不消失 / 战后立刻还在
+
+### 根因
+
+`onBattle` 把世界 BOSS 的 `markSuppressedPermanent` + `removeSceneMonsterPermanent` 套到了**所有** SCE 遇怪：
+
+1. 碰撞路径已 `suppressSceneMonster`（临时隐藏）；
+2. `onBattle` 再按 home 坐标永久删点，并清掉 `suppressedScene`；
+3. `endBattleToWorld` → `refreshSceneCombatSpawns` 从 SCE 整表重载 → 无 suppress → 普通怪立刻刷回。
+
+首次偏离：进战成功后地图标记本应临时隐藏并约 10s 回出生点，却因永久删点 + 战后刷新表现为“一直存在”。
+
+### 修改
+
+- `onBattle` 仅临时 `suppressSceneMonster`；永久移除只走 `[WBOSS:claim]` / despawn → `dropWorldBossFromMap`。
+
+### 验证
+
+- [ ] 踩普通野怪：进战地图标记消失；战后约 10s 回出生点（非整场立刻刷回）。
+- [ ] 挂机遇怪：同样临时消失 + 10s 回刷。
+- [ ] 世界 BOSS claim：双方地图仍永久消失。
+
 ## 续：Admin 二次强制刷 BOSS → `具名资源发布项已达到上限`
 
 ### 根因

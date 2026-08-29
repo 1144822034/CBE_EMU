@@ -56,7 +56,7 @@ enum
      */
     VM_CLIENT_POLL_CONNECT_TIMEOUT_MS = 2000,
     /* Minimum wall time between scene-poll attempts (scheduler ticks are ~frame).
-     * 2s balances sync freshness vs short-TCP load; server presence timeout ~90s. */
+     * 2s balances sync freshness vs short-TCP load; server presence timeout ~30s. */
     VM_CLIENT_POLL_MIN_INTERVAL_MS = 2000,
     VM_CLIENT_REQUEST_MAX = 512,
     VM_CLIENT_QUEUE_MAX = 64,

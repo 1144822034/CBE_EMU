@@ -551,10 +551,13 @@ export class EntertainmentWebLayer {
           const next = await resolvePlayableVideoUrl(this.videoApi, this.videoApiJson);
           if (gen !== this.videoLoadGen || !this.isActive() || !this.videoMode) return;
           if (!next) continue;
-          // Drop cache-bust query when comparing sticky redirect APIs.
-          const norm = next.replace(/([?&])_t=\d+(\.\d+)?/g, "").replace(/[?&]$/, "");
-          const prevNorm = prev.replace(/([?&])_t=\d+(\.\d+)?/g, "").replace(/[?&]$/, "");
-          if (prevNorm && norm === prevNorm) continue;
+          // Drop cache-bust when comparing sticky CDN finals — not unresolved APIs.
+          // Browser CORS often leaves us on video.php?_t=…; that endpoint must
+          // rotate each request, so treating it as "same" blocks auto-next.
+          const norm = stripCacheBust(next);
+          const prevNorm = stripCacheBust(prev);
+          const stillApi = sameVideoEndpoint(next, this.videoApi);
+          if (prevNorm && norm === prevNorm && !stillApi) continue;
           src = next;
           break;
         }
@@ -648,6 +651,16 @@ function withCacheBust(url: string): string {
   return `${url}${url.includes("?") ? "&" : "?"}_t=${Date.now()}`;
 }
 
+function stripCacheBust(url: string): string {
+  return url.replace(/([?&])_t=\d+(\.\d+)?/g, "").replace(/[?&]$/, "");
+}
+
+/** True when `url` is still the rotate API (not a final CDN mp4). */
+function sameVideoEndpoint(url: string, api: string): boolean {
+  if (!url || !api) return false;
+  return stripCacheBust(url) === stripCacheBust(api);
+}
+
 function pickUrlFromJson(data: unknown): string | null {
   const row = Array.isArray(data) ? data[0] : data;
   if (!row || typeof row !== "object") return null;
@@ -734,50 +747,8 @@ async function resolvePlayableVideoUrl(
     if (fromJson) return fromJson;
   }
 
-  // Redirect APIs: follow with a 1-byte Range probe; keep final URL only.
-  const ctrl = new AbortController();
-  const timer = window.setTimeout(() => ctrl.abort(), 10000);
-  try {
-    const res = await fetch(bust, {
-      method: "GET",
-      redirect: "follow",
-      signal: ctrl.signal,
-      headers: { Range: "bytes=0-0", Accept: "*/*" },
-    });
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if (ct.includes("json") || ct.includes("text/html") || ct.includes("text/plain")) {
-      const text = (await res.text()).replace(/^\uFEFF/, "").trim();
-      const fromBody = pickUrlFromJson(
-        (() => {
-          try {
-            return JSON.parse(text);
-          } catch {
-            return null;
-          }
-        })(),
-      );
-      if (fromBody) return fromBody;
-      const m = text.match(/https?:\/\/[^\s"'<>\\]+?\.(?:mp4|m3u8)[^\s"'<>\\]*/i);
-      if (m?.[0]) return m[0];
-    }
-    if (res.url && /\.mp4(\?|$)/i.test(res.url)) return res.url;
-    if (res.url && res.url !== bust && !/\/video\.php(\?|$)/i.test(res.url)) {
-      return res.url;
-    }
-    if (ct.includes("video") || ct.includes("octet-stream") || ct.includes("mpegurl")) {
-      return res.url || bust;
-    }
-  } catch {
-    /* fall through */
-  } finally {
-    window.clearTimeout(timer);
-    try {
-      ctrl.abort();
-    } catch {
-      /* ignore */
-    }
-  }
-
-  // Last resort: let <video> try the API URL itself (desktop / some WebViews).
+  // Browser: <video> can follow cross-origin 302; fetch cannot (no ACAO on
+  // nrzj video.php). Probing only spams CORS errors and never yields a CDN URL.
+  // Native APK uses EntertainmentHttp above; keep Range probe unused on web.
   return bust;
 }

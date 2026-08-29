@@ -21,6 +21,9 @@
 管理入口：`/?tab=enhance`（默认档 / 洗练属性池）。
 洗练属性池支持「一键保存全部」（`enhance-pool-save-all`）：AJAX 提交后不整页刷新，仅右下角 toast。
 
+按角色调整实例覆盖：账号管理 → 角色明细「装备洗练」→ `set-equip-wash`
+（见 `docs/re/2026-08-29-admin-role-equip-wash.md`）。
+
 ## 实例覆盖
 
 背包 / 穿戴 / 仓库 / 拍卖表增加 `enhance_wash` 文本列：

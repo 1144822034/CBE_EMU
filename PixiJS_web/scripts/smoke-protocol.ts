@@ -405,6 +405,31 @@ assert(buildBattleStartRequest(1, 0, 1, 1).length > 10, "fight");
     stacked.length === 1 && stacked[0]!.count === 2,
     "7/7 type=1 stack ADD not SET",
   );
+  // Recast: wire enhance=0 must not fall back to prev (+L) via `||`.
+  const enhancedSword: BagItem = {
+    itemId: 1001,
+    seq: 7,
+    count: 1,
+    name: "剑",
+    quality: 1,
+    enhance: 5,
+    kind: "equip",
+    category: 1,
+    desc: "",
+    usable: false,
+    equipSlot: 0,
+    enhanceAttrs: [{ unlock: 4, type: 1, flag: 0, value: 10, washed: true }],
+  };
+  const zeroed = mergeBagItemUpdateDeltas(
+    [enhancedSword],
+    [{ ...enhancedSword, enhance: 0, enhanceAttrs: undefined }],
+  );
+  assert(
+    zeroed.length === 1 &&
+      zeroed[0]!.enhance === 0 &&
+      !zeroed[0]!.enhanceAttrs?.length,
+    "7/7 enhance=0 after recast clears level+wash (not || prev)",
+  );
   const afterChest = applyChestOpenToBag(
     [
       { ...crystalRow, itemId: 524, seq: 10, count: 3, name: "黄金宝箱", category: 10 },
