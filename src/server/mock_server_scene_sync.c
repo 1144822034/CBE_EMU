@@ -5191,9 +5191,10 @@ static u32 vm_net_mock_npc_sell_equipment_price(
             100u);
 }
 
-/* Quality belongs to equip.dsh metadata, not the equipment instance's
- * enhancement level.  Keep the candidate list on concrete backpack rows so
- * equipped instances remain outside the operation by construction. */
+/* Quality belongs to equip.dsh metadata, while enhancement belongs to the
+ * concrete equipment instance.  This batch-recovery action intentionally
+ * accepts only unenhanced quality-zero backpack rows; equipped instances
+ * remain outside the operation by construction. */
 static bool vm_net_mock_npc_collect_quality_zero_equipment(
     const vm_net_mock_role_state *role, u32 *itemIdsOut, u16 *sequencesOut,
     u32 outputCap, u32 *countOut, u32 *priceOut)
@@ -5226,6 +5227,7 @@ static bool vm_net_mock_npc_collect_quality_zero_equipment(
             (equipment = vm_net_mock_find_equipment_catalog_item(
                  backpackItem->itemId)) == NULL ||
             equipment->quality != 0 ||
+            backpackItem->enhanceLevel != 0 ||
             (itemPrice = vm_net_mock_npc_sell_equipment_price(catalogItem)) ==
                 0)
         {
@@ -7454,20 +7456,20 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     qualityZeroCount, page, price))
             {
                 dialogText =
-                    "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8\xa1\xa3"; /* 当前没有品质0装备。 */
+                    "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xce\xb4\xc7\xbf\xbb\xaf\xb5\xc4\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8\xa1\xa3"; /* 当前没有未强化的品质0装备。 */
             }
             else
             {
                 snprintf(dialogTextStorage, sizeof(dialogTextStorage), "%s",
-                         "\xbb\xd8\xca\xd5\xc8\xb7\xc8\xcf\xa3\xba\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8"); /* 回收确认：品质0装备 */
+                         "\xbb\xd8\xca\xd5\xc8\xb7\xc8\xcf\xa3\xba\xce\xb4\xc7\xbf\xbb\xaf\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8"); /* 回收确认：未强化品质0装备 */
                 dialogText = dialogTextStorage;
                 snprintf(optionNameStorage[0], sizeof(optionNameStorage[0]),
                          "%s %u%s +%u%s", "\xc8\xb7\xc8\xcf\xbb\xd8\xca\xd5",
                          qualityZeroCount, "\xbc\xfe", price, "\xcd\xad"); /* 确认回收 %u件 +%u铜 */
                 snprintf(optionDescriptionStorage[0],
                          sizeof(optionDescriptionStorage[0]),
-                         "\xd2\xbb\xbc\xfc\xbb\xd8\xca\xd5\xb1\xb3\xb0\xfc\xd6\xd0\xcb\xf9\xd3\xd0\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8\xa3\xac\xb9\xb2%u\xbc\xfe\xa3\xac\xbb\xf1\xb5\xc3%u\xcd\xad\xc7\xae\xa1\xa3",
-                         qualityZeroCount, price); /* 一键回收背包中所有品质0装备，共%u件，获得%u铜钱。 */
+                         "\xd2\xbb\xbc\xfc\xbb\xd8\xca\xd5\xb1\xb3\xb0\xfc\xd6\xd0\xcb\xf9\xd3\xd0\xce\xb4\xc7\xbf\xbb\xaf\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8\xa3\xac\xb9\xb2%u\xbc\xfe\xa3\xac\xbb\xf1\xb5\xc3%u\xcd\xad\xc7\xae\xa1\xa3",
+                         qualityZeroCount, price); /* 一键回收背包中所有未强化品质0装备，共%u件，获得%u铜钱。 */
                 vm_net_mock_append_npc_confirmation_detail(
                     dialogTextStorage, sizeof(dialogTextStorage),
                     optionDescriptionStorage[0]);
@@ -7569,7 +7571,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                   &price))
             {
                 dialogText =
-                    "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8\xa1\xa3"; /* 当前没有品质0装备。 */
+                    "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xce\xb4\xc7\xbf\xbb\xaf\xb5\xc4\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8\xa1\xa3"; /* 当前没有未强化的品质0装备。 */
             }
             else if (qualityZeroSaleConfirm &&
                      (transaction.kind !=
@@ -7580,7 +7582,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                       transaction.quotedPrice != price))
             {
                 dialogText =
-                    "\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8\xd7\xb4\xcc\xac\xd2\xd1\xb1\xe4\xb8\xfc\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xa1\xa3"; /* 品质0装备状态已变更，请重新选择。 */
+                    "\xc6\xb7\xd6\xca\x30\xce\xb4\xc7\xbf\xbb\xaf\xd7\xb0\xb1\xb8\xd7\xb4\xcc\xac\xd2\xd1\xb1\xe4\xb8\xfc\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xa1\xa3"; /* 品质0未强化装备状态已变更，请重新选择。 */
             }
             else
             {
@@ -7793,7 +7795,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             {
                 snprintf(optionNameStorage[optionCount],
                          sizeof(optionNameStorage[optionCount]), "%s",
-                         "\xd2\xbb\xbc\xfc\xbb\xd8\xca\xd5\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8"); /* 一键回收品质0装备 */
+                         "\xd2\xbb\xbc\xfc\xbb\xd8\xca\xd5\xce\xb4\xc7\xbf\xbb\xaf\xc6\xb7\xd6\xca\x30\xd7\xb0\xb1\xb8"); /* 一键回收未强化品质0装备 */
                 snprintf(optionDescriptionStorage[optionCount],
                          sizeof(optionDescriptionStorage[optionCount]),
                          "\xb9\xb2%u\xbc\xfe\xa3\xac\xd4\xa4\xbc\xc6\xbb\xf1\xb5\xc3%u\xcd\xad\xc7\xae\xa1\xa3",

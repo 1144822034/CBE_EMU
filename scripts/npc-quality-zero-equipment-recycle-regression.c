@@ -200,7 +200,7 @@ int main(void)
     g_vm_net_mock_equipment_catalog_loaded = true;
     g_vm_net_mock_equipment_catalog_count = 4;
     set_catalog_item(0, 1001, 100, 0); /* equipped-only quality 0 */
-    set_catalog_item(1, 1002, 100, 0); /* backpack quality 0, +5 */
+    set_catalog_item(1, 1002, 100, 0); /* backpack quality 0, +5: protected */
     set_catalog_item(2, 1003, 101, 1); /* backpack quality 1 */
     set_catalog_item(3, 1004, 101, 0); /* backpack quality 0 */
 
@@ -235,8 +235,8 @@ int main(void)
         expect(vm_net_mock_npc_collect_quality_zero_equipment(
                    &role, NULL, NULL, 0, &qualityZeroCount,
                    &qualityZeroPrice) &&
-                   qualityZeroCount == 2 && qualityZeroPrice == 21,
-               "quote did not select exactly the two backpack quality-zero rows") ||
+                   qualityZeroCount == 1 && qualityZeroPrice == 11,
+               "quote did not select only the unenhanced quality-zero backpack row") ||
         expect(vm_net_mock_npc_transaction_context_begin(
                    &session, &role, &serviceContext,
                    VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO,
@@ -276,15 +276,17 @@ int main(void)
                    &role, transaction.selector, transaction.quotedPrice,
                    &recycledCount, &recycledPrice),
                "batch settlement rejected an unchanged confirmed quote") ||
-        expect(recycledCount == 2 && recycledPrice == 21,
+        expect(recycledCount == 1 && recycledPrice == 11,
                "batch settlement returned an incorrect count or total") ||
-        expect(role.money == 521,
+        expect(role.money == 511,
                "batch settlement did not add the confirmed copper total") ||
         expect(role.equippedItems[0].itemId == 1001,
                "batch settlement changed an equipped instance") ||
-        expect(vm_net_mock_role_find_backpack_item(&role, 1002, 9) == NULL &&
-                   vm_net_mock_role_find_backpack_item(&role, 1004, 11) == NULL,
-               "batch settlement retained a quality-zero backpack row") ||
+        expect(vm_net_mock_role_find_backpack_item(&role, 1002, 9) != NULL &&
+                   vm_net_mock_role_find_backpack_item(&role, 1002, 9)->enhanceLevel == 5,
+               "batch settlement removed an enhanced quality-zero backpack row") ||
+        expect(vm_net_mock_role_find_backpack_item(&role, 1004, 11) == NULL,
+               "batch settlement retained an unenhanced quality-zero backpack row") ||
         expect(vm_net_mock_role_find_backpack_item(&role, 1003, 10) != NULL,
                "batch settlement removed a nonzero-quality backpack row"))
     {
@@ -342,6 +344,6 @@ int main(void)
         return 1;
     }
 
-    puts("quality-zero equipment recycle regression passed: quote, one-shot confirmation, stale quote rejection, atomic settlement, and dialog-only 26/1 completion");
+    puts("quality-zero equipment recycle regression passed: enhanced rows protected, quote, one-shot confirmation, stale quote rejection, atomic settlement, and dialog-only 26/1 completion");
     return 0;
 }
