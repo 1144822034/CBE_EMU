@@ -278,6 +278,52 @@ export function scanBrokenTextures(
   return hits;
 }
 
+type StripNode = WalkNode & {
+  visible?: boolean;
+  texture?: WalkNode["texture"] | null;
+  renderable?: boolean;
+};
+
+/**
+ * Hide display objects whose texture.source is null/destroyed so the next
+ * frame can paint (map/HUD) instead of throwing alphaMode every tick.
+ * Returns how many nodes were hidden. Does not unload/destroy shared atlases.
+ */
+export function stripBrokenTextureSprites(
+  root: StripNode | null | undefined,
+  maxHits = 64,
+): number {
+  let stripped = 0;
+  if (!root) return 0;
+
+  const walk = (node: StripNode, depth: number): void => {
+    if (stripped >= maxHits || depth > 48) return;
+    const kind = node.constructor?.name || "?";
+    const tex = kind.includes("Graphics") ? undefined : node.texture;
+    if (tex && node.visible !== false) {
+      let dead = false;
+      try {
+        const src = tex.source;
+        dead = src == null || !!(tex.destroyed || src?.destroyed);
+      } catch {
+        dead = true;
+      }
+      if (dead) {
+        node.visible = false;
+        stripped += 1;
+      }
+    }
+    const kids = node.children;
+    if (!kids?.length) return;
+    for (const ch of kids) {
+      if (ch) walk(ch as StripNode, depth + 1);
+    }
+  };
+
+  walk(root, 0);
+  return stripped;
+}
+
 export function isTextureSourceNullError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   return (

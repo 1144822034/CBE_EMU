@@ -7,17 +7,20 @@
  *   *before* the keyboard resizes the WebView / 100dvh.
  * - Never shrink an existing lock (keyboard race / adjustResize).
  * - `.ime-open` CSS collapses D-pad to 左软|OK|右软 and pins #app to --ime-layout-h.
- * - `#phone-wrap` is absolutely centered with `translate(-50%, -50%)`. IME pan
- *   and recover must restore that centering transform — clearing to "" lets
- *   Chromium/WebView compositor layers stay shifted after GL restore.
+ * - `#phone-wrap` is flex-centered inside `#stage` (no absolute inset / -50%
+ *   translate). Those two schemes left sticky compositor layers after GL
+ *   restore (field: LCD pinned top-left). IME pan uses delta-only translate.
  */
 let activeCount = 0;
 let lockedCssW = 0;
 let lockedCssH = 0;
 let onViewport: (() => void) | null = null;
 
-/** Stable #phone-wrap centering (absolute left/top 50% + this transform). */
-export const SHELL_WRAP_CENTER_TRANSFORM = "translate(-50%, -50%)";
+/**
+ * Idle wrap transform: flex stage centers the wrap, so this must stay none.
+ * Kept as an exported token so callers can reset without hardcoding.
+ */
+export const SHELL_WRAP_CENTER_TRANSFORM = "none";
 
 export type ImeShellLock = {
   /** CSS pixel size of #phone-wrap while IME is open (0 = not locked). */
@@ -161,11 +164,26 @@ function clearLayoutHeight(): void {
   document.documentElement.style.removeProperty("--ime-layout-h");
 }
 
+/** Pin flex-child centering (clear leftover absolute inset / -50% anchors). */
+export function forceShellWrapCenteringAnchors(): void {
+  const wrap = document.getElementById("phone-wrap");
+  if (!wrap) return;
+  wrap.style.position = "relative";
+  wrap.style.left = "auto";
+  wrap.style.right = "auto";
+  wrap.style.top = "auto";
+  wrap.style.bottom = "auto";
+  wrap.style.margin = "0";
+  wrap.style.flex = "0 0 auto";
+}
+
 function applyWrapTransform(ox: number, oy: number): void {
   const wrap = document.getElementById("phone-wrap");
   if (!wrap) return;
+  forceShellWrapCenteringAnchors();
   if (ox !== 0 || oy !== 0) {
-    wrap.style.transform = `translate(calc(-50% - ${ox}px), calc(-50% - ${oy}px))`;
+    // Delta-only pan; flex handles centering (no -50% in transform).
+    wrap.style.transform = `translate(${-ox}px, ${-oy}px)`;
   } else {
     wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
   }
@@ -190,9 +208,8 @@ function clearViewportOffset(): void {
 
 /**
  * Undo WebView adjustPan / visualViewport / IME translate residue.
- * Black-screen GL recover used to skip this → LCD stayed shifted toward
- * top-left; stage letterbox + fixed #touch-chrome-toggle looked like the
- * top-right "covered" the game.
+ * Black-screen GL recover must call this (via repairShellViewportAlignment)
+ * or the LCD stays pinned to a corner after compositor/transform residue.
  */
 export function resetShellViewportLayout(): void {
   try {
@@ -286,31 +303,35 @@ export function shellViewportSnapshot(): ShellViewportSnapshot {
 
 /**
  * After GL restore, Chromium sometimes keeps a shifted compositor layer even
- * when layout math is correct. Bounce transform + canvas display to repaint.
+ * when layout math is correct. Bounce wrap transform only.
+ *
+ * Do NOT toggle canvas `display` here. Pre-2026-08-28 recover never hid the
+ * canvas; wiring `display:none` into visibility/focus/refit caused field
+ * "画面上移后卡死" (ticker/input stall) while fixing left-top shift.
  */
 export function kickShellCompositor(): void {
   const wrap = document.getElementById("phone-wrap");
   if (!wrap) return;
-  const center = SHELL_WRAP_CENTER_TRANSFORM;
-  wrap.style.transform = `${center} translateZ(0)`;
+  forceShellWrapCenteringAnchors();
+  wrap.style.transform = "translateZ(0)";
   void wrap.offsetHeight;
   applyWrapTransform(0, 0);
-  const canvas = wrap.querySelector("canvas") as HTMLElement | null;
-  if (canvas) {
-    const prev = canvas.style.display;
-    canvas.style.display = "none";
-    void canvas.offsetHeight;
-    canvas.style.display = prev || "";
-  }
 }
 
 /**
- * Reset + compositor kick; returns true when geometry was (or still is) skewed.
+ * Soft shell reset used by black-screen recover (matches pre-2026-08-28 path):
+ * clear pan/scroll residue + re-pin inset/margin centering. No canvas hide.
+ * Returns true when geometry was (or still is) skewed.
  */
 export function repairShellViewportAlignment(): boolean {
   const before = shellViewportSnapshot();
   resetShellViewportLayout();
-  kickShellCompositor();
+  forceShellWrapCenteringAnchors();
+  // Light transform bounce only if still skewed — avoid thrashing every resume.
+  const mid = shellViewportSnapshot();
+  if (before.misaligned || mid.misaligned) {
+    kickShellCompositor();
+  }
   const after = shellViewportSnapshot();
   return before.misaligned || after.misaligned;
 }

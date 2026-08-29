@@ -34,6 +34,7 @@ import {
   isGameDisplayPhase,
   isTextureSourceNullError,
   scanBrokenTextures,
+  stripBrokenTextureSprites,
   type ForensicClass,
 } from "./debug/glForensic";
 import { GameSession } from "./game/GameSession";
@@ -107,7 +108,7 @@ import {
   imeShellClearLockSize,
   imeShellIsActive,
   imeShellLockedSize,
-  kickShellCompositor,
+  forceShellWrapCenteringAnchors,
   repairShellViewportAlignment,
   resetShellViewportLayout,
   SHELL_WRAP_CENTER_TRANSFORM,
@@ -122,9 +123,13 @@ import {
   EquipSellService,
   DREAM_BADGE_EQUIP_IDS,
   bagVisibleStackCount,
+  decodeNpcBuyItemId,
+  encodeNpcBuyItem,
   isBattleMedicineOrFlask,
   isCrystalFragment,
   isDreamBadge,
+  NpcServiceOpcode,
+  npcServiceOpcode,
 } from "./net/protocolExtras";
 import { isMapHealSkill } from "./resources/skill";
 import { lookupItemSync, warmItemCatalogs } from "./resources/itemCatalog";
@@ -487,16 +492,11 @@ async function main(): Promise<void> {
       const w = stage.clientWidth || wrap.clientWidth || 0;
       if (w > 2) touchBar.style.width = `${w}px`;
     }
-    // Keep the white-dot toggle on the LCD's top-right (not stage letterbox).
+    // Toggle lives inside #phone-wrap — keep CSS 8px inset (do not stage-offset).
     if (touchChromeToggle) {
-      const stageRect = stage.getBoundingClientRect();
-      const wrapRect = wrap.getBoundingClientRect();
-      if (stageRect.width > 2 && wrapRect.width > 2) {
-        const top = Math.max(4, wrapRect.top - stageRect.top + 6);
-        const right = Math.max(4, stageRect.right - wrapRect.right + 6);
-        touchChromeToggle.style.top = `${top}px`;
-        touchChromeToggle.style.right = `${right}px`;
-      }
+      touchChromeToggle.style.top = "8px";
+      touchChromeToggle.style.right = "8px";
+      touchChromeToggle.style.left = "";
     }
   };
   const lcdCssScaleFromWrap = (): number => {
@@ -583,6 +583,7 @@ async function main(): Promise<void> {
       if (floor) imeShellAdoptLock(floor.width, floor.height);
       fitPhoneWrap();
     } else {
+      forceShellWrapCenteringAnchors();
       wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
@@ -637,6 +638,7 @@ async function main(): Promise<void> {
   } else if (touchChromeToggle) {
     wrap.appendChild(touchChromeToggle);
   }
+  forceShellWrapCenteringAnchors();
   wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
 
   const shell = new PhoneShell(app);
@@ -4922,8 +4924,68 @@ async function main(): Promise<void> {
     // Closing approach prompt while still in range keeps latch (no spam).
     showPhase("world");
   };
+  dialog.onMedicineBuyCancel = () => {
+    void session.pickNpcOption(1, 0xe7000001, "药品").then(() => {
+      if (!dialog.visible) showPhase("world");
+    });
+  };
   dialog.onPick = (action, value, label) => {
     setChromeStatus(`NPC ${label} a=${action} v=${value >>> 0}`);
+    if (dialog.isMedicineBuyQty()) {
+      const st = dialog.getMedicineBuyQty();
+      if (!st) return;
+      const wire = encodeNpcBuyItem(st.itemId, st.qty);
+      dialog.hide();
+      void session.pickNpcOption(1, wire, label).then(() => {
+        if (session.inBattle) {
+          showPhase("battle");
+          return;
+        }
+        if (!dialog.visible) showPhase("world");
+      });
+      return;
+    }
+    /* NPC 药商：点购买行先调数量，再确认发 BUY_ITEM|(count<<16)|id */
+    if (
+      action === 1 &&
+      npcServiceOpcode(value) === NpcServiceOpcode.BUY_ITEM &&
+      label !== "购买该装备"
+    ) {
+      const itemId = decodeNpcBuyItemId(value);
+      const cat = lookupItemSync(itemId);
+      if (!cat || cat.kind !== "equip") {
+        const m = /^购买(.+)\s+(\d+)(铜|酷宝)/.exec(label);
+        const itemName = m?.[1]?.trim() || cat?.name || `物品${itemId}`;
+        const unitPrice = m ? Number(m[2]) : cat?.price || 0;
+        const currency = m?.[3] || "铜";
+        const money = (session.characterStats?.money ?? session.gold) >>> 0;
+        const maxByMoney = unitPrice > 0 ? Math.floor(money / unitPrice) : 0;
+        const hasStack = session.bagItems.some((b) => b.itemId === itemId);
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(20, session.bagItems.length);
+        const free = Math.max(0, (cap | 0) - session.bagItems.length);
+        if (!hasStack && free < 1) {
+          showGameTip("背包已满，无法购买");
+          return;
+        }
+        if (maxByMoney < 1) {
+          showGameTip(currency === "酷宝" ? "酷宝不足" : "铜钱不足");
+          return;
+        }
+        const maxQty = Math.min(255, maxByMoney);
+        dialog.showMedicineBuyQty({
+          itemId,
+          itemName,
+          unitPrice,
+          currency,
+          qty: 1,
+          maxQty,
+        });
+        shell.setSoftkeys({ left: "确定", right: "返回" });
+        return;
+      }
+    }
     // Synthetic confirm options from task/challenge prompts.
     if (action === 100) {
       dialog.hide();
@@ -6051,6 +6113,10 @@ dialog.hide();
     }
     const delta = dir === "up" || dir === "left" ? -1 : 1;
     if (dir === "left" || dir === "right") {
+      if (phase === "dialog" && dialog.isMedicineBuyQty()) {
+        dialog.adjustMedicineBuyQty(delta);
+        return;
+      }
       if (phase === "system") {
         system.moveCategory(delta);
         return;
@@ -6160,8 +6226,19 @@ dialog.hide();
       if (k === "arrowdown" || k === "s") menu.move(1);
     }
     if (phase === "dialog") {
-      if (k === "arrowup" || k === "w") dialog.move(-1);
-      if (k === "arrowdown" || k === "s") dialog.move(1);
+      if (dialog.isMedicineBuyQty()) {
+        if (k === "arrowleft" || k === "a") {
+          dialog.adjustMedicineBuyQty(-1);
+          e.preventDefault();
+        }
+        if (k === "arrowright" || k === "d") {
+          dialog.adjustMedicineBuyQty(1);
+          e.preventDefault();
+        }
+      } else {
+        if (k === "arrowup" || k === "w") dialog.move(-1);
+        if (k === "arrowdown" || k === "s") dialog.move(1);
+      }
     }
     if (mountPanel.visible) {
       if (k === "arrowup" || k === "w") {
@@ -6503,6 +6580,7 @@ dialog.hide();
   };
 
   const tryRestoreGlContext = (): void => {
+    if (!isGlContextLost()) return;
     try {
       const ctx = (
         app.renderer as unknown as {
@@ -6632,7 +6710,15 @@ dialog.hide();
   let lastOkRenderAt = performance.now();
   let lastRenderCrashForensicAt = 0;
   let lastRenderStallForensicAt = 0;
+  /** Consecutive alphaMode swallows — dead cosmetics tex without contextlost. */
+  let alphaModeStormCount = 0;
+  let lastAlphaModeStripAt = 0;
+  let alphaModeProbeBlockedUntil = 0;
   const RENDER_STALL_MS = 2500;
+  /** After this many swallowed frames, strip dead sprites once. */
+  const ALPHA_STRIP_AFTER = 24;
+  /** Still no ok render this long after strip → soft reload. */
+  const ALPHA_RELOAD_AFTER_MS = 4500;
 
   const recordForensic = async (
     why: string,
@@ -6723,10 +6809,14 @@ dialog.hide();
     const now = performance.now();
     if (now - lastRenderCrashForensicAt < 2000) return;
     lastRenderCrashForensicAt = now;
+    const alpha = why.includes("alphaMode");
+    if (alpha) alphaModeProbeBlockedUntil = now + 800;
     void recordForensic(why, {
       classOverride: "RENDER_CRASH",
-      forceBlankProbe: true,
-      scanBroken: true,
+      // extract.pixels re-enters render → more alphaMode; skip during TEX_NULL.
+      forceBlankProbe: !alpha,
+      blank: alpha ? null : undefined,
+      scanBroken: !alpha,
       extra: {
         err: err instanceof Error ? err.message : String(err),
         stack: err instanceof Error ? err.stack?.slice(0, 600) : undefined,
@@ -6734,11 +6824,57 @@ dialog.hide();
     });
   };
 
-  // Observe-only wrap + narrow兜底: alphaMode/TEX_NULL must not freeze the ticker.
-  // Pixi ticker calls renderer.render, not always app.render — stall timer must follow both.
+  // alphaMode/TEX_NULL: swallow frame so ticker lives, but must not soft-OK forever.
+  // Field: lost=false + blank=true + endless swallow → recover never reloads (BLANK_ALIVE).
   {
     const noteOk = (): void => {
       lastOkRenderAt = performance.now();
+      alphaModeStormCount = 0;
+    };
+    const onAlphaModeSwallow = (label: string): void => {
+      alphaModeStormCount += 1;
+      alphaModeProbeBlockedUntil = performance.now() + 800;
+      if (alphaModeStormCount === 1 || alphaModeStormCount % 60 === 0) {
+        console.warn(
+          `[gl] swallow render alphaMode (${label}, frame skipped)`,
+          "storm=",
+          alphaModeStormCount,
+        );
+      }
+      const now = performance.now();
+      if (
+        alphaModeStormCount >= ALPHA_STRIP_AFTER &&
+        now - lastAlphaModeStripAt > 2000
+      ) {
+        lastAlphaModeStripAt = now;
+        let stripped = 0;
+        try {
+          stripped = stripBrokenTextureSprites(
+            app.stage as unknown as Parameters<typeof stripBrokenTextureSprites>[0],
+          );
+        } catch (e) {
+          console.warn("[gl] strip broken tex", e);
+        }
+        console.warn("[gl] stripped broken textures", stripped);
+        void recordForensic("alphaMode-strip", {
+          classOverride: "RENDER_CRASH",
+          blank: null,
+          scanBroken: true,
+          extra: { stripped, storm: alphaModeStormCount },
+        });
+        try {
+          view.nudgeAfterGpuResume();
+        } catch {
+          /* ignore */
+        }
+      }
+      if (
+        isGameDisplayPhase(phase) &&
+        now - lastOkRenderAt >= ALPHA_RELOAD_AFTER_MS &&
+        alphaModeStormCount >= ALPHA_STRIP_AFTER
+      ) {
+        softReloadGl("alphaMode-storm");
+      }
     };
     const wrapRender = <T extends (...args: never[]) => unknown>(
       raw: T,
@@ -6750,16 +6886,14 @@ dialog.hide();
           noteOk();
           return out;
         } catch (e) {
-          noteRenderCrash(
-            e,
-            isTextureSourceNullError(e)
-              ? `render-crash:alphaMode:${label}`
-              : `render-crash:other:${label}`,
-          );
           if (isTextureSourceNullError(e)) {
-            console.warn(`[gl] swallow render alphaMode (${label}, frame skipped)`);
+            // Block blank extract before forensic (noteRenderCrash used to probe first).
+            alphaModeProbeBlockedUntil = performance.now() + 800;
+            noteRenderCrash(e, `render-crash:alphaMode:${label}`);
+            onAlphaModeSwallow(label);
             return undefined;
           }
+          noteRenderCrash(e, `render-crash:other:${label}`);
           throw e;
         }
       }) as T;
@@ -6816,6 +6950,9 @@ dialog.hide();
   };
 
   const regionLooksBlank = (frame: Rectangle): boolean => {
+    // extract.pixels → generateTexture → render; during alphaMode storm this
+    // re-enters the crash path and never answers "blank" usefully.
+    if (performance.now() < alphaModeProbeBlockedUntil) return true;
     try {
       const extract = (
         app.renderer as unknown as {
@@ -6944,12 +7081,13 @@ dialog.hide();
   const recoverDisplayAfterForeground = async (why: string): Promise<void> => {
     if (!rendererReady || recoverInFlight) return;
     const now = performance.now();
-    // Debounce focus+visibility storms; allow immediate restore after lost.
+    // Debounce focus+visibility storms; allow immediate restore after lost/stall.
     if (
       why !== "contextrestored" &&
       why !== "ticker-lost" &&
       why !== "interval-lost" &&
       why !== "interval-blank" &&
+      why !== "interval-stall" &&
       now - lastRecoverAt < 800
     ) {
       return;
@@ -6965,9 +7103,12 @@ dialog.hide();
       void recordForensic(`recover-hung:${why}`, { forceBlankProbe: true });
       softReloadGl("recover-hung");
     }, GL_RECOVER_HANG_MS);
-    const refitShellLayout = (): void => {
-      // adjustPan / visualViewport residue shifts the LCD toward top-left.
+    const refitShellLayout = (): boolean => {
+      // Flex-center #phone-wrap (no absolute inset / -50%). Soft reset + force
+      // anchors; light transform kick only when still skewed (no canvas hide).
       resetShellViewportLayout();
+      forceShellWrapCenteringAnchors();
+      wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
       fitPhoneWrap();
@@ -6978,11 +7119,27 @@ dialog.hide();
       }
       try {
         const canvas = app.canvas as HTMLCanvasElement;
+        canvas.style.position = "absolute";
+        canvas.style.left = "0";
+        canvas.style.top = "0";
+        canvas.style.right = "0";
+        canvas.style.bottom = "0";
         canvas.style.width = "100%";
         canvas.style.height = "100%";
       } catch {
         /* ignore */
       }
+      let after = shellViewportSnapshot();
+      if (after.misaligned) {
+        repairShellViewportAlignment();
+        forceShellWrapCenteringAnchors();
+        wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
+        after = shellViewportSnapshot();
+        if (after.misaligned) {
+          console.warn("[gl] shell still misaligned after refit", after);
+        }
+      }
+      return after.misaligned;
     };
     try {
       const stillLostBefore = isGlContextLost();
@@ -6996,6 +7153,7 @@ dialog.hide();
       void recordForensic(`recover:${why}`, {
         blank: null,
         forceBlankProbe: stillLostBefore || glLostAt > 0,
+        extra: { shell: shellViewportSnapshot() },
       });
       refitShellLayout();
       tryRestoreGlContext();
@@ -7015,7 +7173,14 @@ dialog.hide();
         requestAnimationFrame(() => r());
       });
       // Only full UC3 rebake after a real restore — interval thrash froze input.
-      if (why === "contextrestored" || stillLostBefore || glLostAt > 0) {
+      // Also rebake when alphaMode storm left blank alive (lost=false).
+      if (
+        why === "contextrestored" ||
+        why === "interval-stall" ||
+        stillLostBefore ||
+        glLostAt > 0 ||
+        alphaModeStormCount > 0
+      ) {
         clearUc3TexCache();
         try {
           await Promise.race([
@@ -7026,6 +7191,16 @@ dialog.hide();
           ]);
         } catch (e) {
           console.warn("[gl] uc3 rebake", e);
+        }
+        try {
+          const stripped = stripBrokenTextureSprites(
+            app.stage as unknown as Parameters<typeof stripBrokenTextureSprites>[0],
+          );
+          if (stripped > 0) {
+            console.warn("[gl] recover stripped broken textures", stripped);
+          }
+        } catch (e) {
+          console.warn("[gl] recover strip", e);
         }
       }
       try {
@@ -7039,10 +7214,11 @@ dialog.hide();
         console.warn("[gl] render after resume", e);
       }
       syncInputAfterGlRecover();
-      // Late system-bar / adjustPan settle after onResume.
+      // Late system-bar / adjustPan settle (single pass like pre-08-28;
+      // dual 280+600 soft+hard thrash correlated with post-recover freeze).
       window.setTimeout(() => {
         if (!rendererReady) return;
-        refitShellLayout();
+        const stillSkewed = refitShellLayout();
         try {
           syncLcdResolution(lcdCssScaleFromWrap());
           app.renderer.resize(LCD_WIDTH, LCD_HEIGHT);
@@ -7051,15 +7227,32 @@ dialog.hide();
         } catch (e) {
           console.warn("[gl] late layout refit", e);
         }
+        void recordForensic(`recover-late:${why}:280`, {
+          blank: null,
+          extra: {
+            shell: shellViewportSnapshot(),
+            stillSkewed,
+          },
+        });
       }, 280);
       const probeBlank =
         why === "contextrestored" ||
         why === "ticker-lost" ||
         why === "interval-lost" ||
         why === "interval-blank" ||
-        glLostAt > 0;
+        why === "interval-stall" ||
+        why === "visibility" ||
+        why === "focus" ||
+        glLostAt > 0 ||
+        alphaModeStormCount > 0 ||
+        performance.now() - lastOkRenderAt >= RENDER_STALL_MS;
+      const stallBroken =
+        isGameDisplayPhase(phase) &&
+        performance.now() - lastOkRenderAt >= ALPHA_RELOAD_AFTER_MS;
       const stillBroken =
-        isGlContextLost() || (probeBlank && canvasLooksBlank());
+        isGlContextLost() ||
+        stallBroken ||
+        (probeBlank && canvasLooksBlank());
       if (stillBroken) {
         consecutiveLostRecovers += 1;
         console.warn(
@@ -7069,20 +7262,33 @@ dialog.hide();
           GL_SOFT_RELOAD_AFTER,
           "lost=",
           isGlContextLost(),
+          "storm=",
+          alphaModeStormCount,
+          "msSinceOk=",
+          Math.round(performance.now() - lastOkRenderAt),
           glPressureSnapshot(),
         );
         void recordForensic(`recover-still-blank:${why}`, {
           blank: true,
           forceBlankProbe: false,
+          extra: {
+            shell: shellViewportSnapshot(),
+            storm: alphaModeStormCount,
+            msSinceOkRender: Math.round(performance.now() - lastOkRenderAt),
+          },
         });
         if (consecutiveLostRecovers >= GL_SOFT_RELOAD_AFTER) {
-          softReloadGl("failed-recover");
+          softReloadGl(stallBroken ? "render-stall" : "failed-recover");
         }
       } else {
         consecutiveLostRecovers = 0;
         glLostAt = 0;
+        alphaModeStormCount = 0;
         cancelGlRestoreWatchdog();
-        void recordForensic(`recover-ok:${why}`, { blank: false });
+        void recordForensic(`recover-ok:${why}`, {
+          blank: false,
+          extra: { shell: shellViewportSnapshot() },
+        });
       }
     } finally {
       if (recoverHangTimer) {
@@ -7136,12 +7342,18 @@ dialog.hide();
       return;
     }
     setTextureGcEnabled(true);
-    // Always undo adjustPan / translate residue — even if GL recover debounces.
+    // Soft reset only (pre-08-28). Full repair/kick here + recover refit
+    // double-hit the compositor on every resume and froze input.
     resetShellViewportLayout();
+    forceShellWrapCenteringAnchors();
+    wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
     wrap.dataset.fitW = "0";
     wrap.dataset.fitH = "0";
     fitPhoneWrap();
-    void recordForensic("visibility-visible", { forceBlankProbe: true });
+    void recordForensic("visibility-visible", {
+      forceBlankProbe: true,
+      extra: { shell: shellViewportSnapshot() },
+    });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("visibility");
     void resumeBgmAfterForeground();
@@ -7149,10 +7361,15 @@ dialog.hide();
   window.addEventListener("focus", () => {
     setTextureGcEnabled(true);
     resetShellViewportLayout();
+    forceShellWrapCenteringAnchors();
+    wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
     wrap.dataset.fitW = "0";
     wrap.dataset.fitH = "0";
     fitPhoneWrap();
-    void recordForensic("window-focus", { forceBlankProbe: true });
+    void recordForensic("window-focus", {
+      forceBlankProbe: true,
+      extra: { shell: shellViewportSnapshot() },
+    });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("focus");
     void unlockAndResumeBgm();
@@ -7187,6 +7404,7 @@ dialog.hide();
   // Pixi ticker can stop on contextlost; WebView timers usually still run.
   // While still lost: only poke restoreContext — full recover waits for restored
   // (or blank probe after gl thinks it is alive) so we do not thrash UC3/main thread.
+  // Also catch BLANK_ALIVE: alphaMode storm with lost=false never sets glLostAt.
   window.setInterval(() => {
     if (!rendererReady) return;
     if (document.visibilityState === "hidden") return;
@@ -7196,6 +7414,15 @@ dialog.hide();
     }
     if (glLostAt > 0 && !recoverInFlight) {
       void recoverDisplayAfterForeground("interval-blank");
+      return;
+    }
+    if (
+      !recoverInFlight &&
+      isGameDisplayPhase(phase) &&
+      (alphaModeStormCount >= ALPHA_STRIP_AFTER ||
+        performance.now() - lastOkRenderAt >= ALPHA_RELOAD_AFTER_MS)
+    ) {
+      void recoverDisplayAfterForeground("interval-stall");
     }
   }, 2000);
 

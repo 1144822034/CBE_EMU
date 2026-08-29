@@ -76,22 +76,32 @@
       #stage {
         flex: 1;
         min-height: 0;
-        /* LCD is absolutely centered — avoid flex+transform compositor races. */
-        display: block;
+        /*
+         * Flex-center the LCD. Absolute inset+margin and left/top 50% +
+         * translate(-50%,-50%) both left sticky compositor layers after
+         * black-screen recover (field: top-left pin). Flex has no centering
+         * transform for WebView to retain across GL resume.
+         */
+        display: flex;
+        align-items: center;
+        justify-content: center;
         background: #05070a;
         position: relative;
         overflow: hidden;
       }
       /*
        * Size set by fitPhoneWrap() to exact 240:400 — no side letterbox.
-       * left/top 50% + translate(-50%,-50%) is the stable center (see imeShell).
+       * position:relative inside flex stage; IME pan may add translate(-ox,-oy).
        */
       #phone-wrap {
-        position: absolute;
-        left: 50%;
-        top: 50%;
-        transform: translate(-50%, -50%);
+        position: relative;
+        left: auto;
+        right: auto;
+        top: auto;
+        bottom: auto;
         margin: 0;
+        transform: none;
+        flex: 0 0 auto;
         border: 0;
         border-radius: 0;
         box-shadow: none;
