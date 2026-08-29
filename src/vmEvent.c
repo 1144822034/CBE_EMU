@@ -13,12 +13,23 @@ vm_event currentEvent;
 u32 VmEventCount = 0;
 bool VmEventMutex;
 vm_event *vmEvent;
+static u32 g_vmEventSequence;
+
+static void vm_event_set_enqueue_metadata(vm_event *evt)
+{
+    if (evt == NULL)
+        return;
+    evt->enqueueTicks = SDL_GetTicks();
+    evt->sequence = ++g_vmEventSequence;
+    evt->dequeueDepth = 0;
+}
 
 void InitVmEvent()
 {
     firstEvent = &VmEventHandleList[0];
     VmEventCount = 0;
     VmEventWaitCount = 0;
+    g_vmEventSequence = 0;
 }
 
 int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
@@ -40,6 +51,7 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
             evt->event = event;
             evt->r0 = r0;
             evt->r1 = r1;
+            vm_event_set_enqueue_metadata(evt);
             vmIsLock = 0;
         }
         else
@@ -50,6 +62,7 @@ int EnqueueVMEvent(u32 event, u32 r0, u32 r1)
                 evt->event = event;
                 evt->r0 = r0;
                 evt->r1 = r1;
+                vm_event_set_enqueue_metadata(evt);
             }
             else
                 printf("WARNING:Max VmEventWaitCount\n");
@@ -80,6 +93,9 @@ inline vm_event *DequeueVMEvent()
         currentEvent.event = ta->event;
         currentEvent.r0 = ta->r0;
         currentEvent.r1 = ta->r1;
+        currentEvent.enqueueTicks = ta->enqueueTicks;
+        currentEvent.sequence = ta->sequence;
+        currentEvent.dequeueDepth = VmEventCount;
         evt = &currentEvent;
         --VmEventCount;
         for (i = 0; i < VmEventCount; i++)

@@ -7875,6 +7875,26 @@ static bool vm_net_mock_prepare_scene_enter_resources(vm_net_mock_scene_change_t
     if (!vm_net_mock_scene_client_content_ready(target->scene, missingOut,
                                                  missingOutCap))
     {
+        /* `scene_client_content_ready()` reports an actual client-side
+         * dependency by placing its exact manifest resource key in
+         * `missingOut`.  Its other false cases are server-side SCE probe
+         * failures (for example a legacy entity envelope that this optional
+         * battle-resource inspector does not understand).  The protocol has
+         * no WT18/7 request to wait for in that case: treating it as a scene
+         * download skips the first position-bearing 30/2, leaves the client
+         * on the source scene, and can make a later 4/5 target stale.
+         *
+         * Do not infer a client cache miss from an empty name.  Send the
+         * normal scene-enter contract and let the firmware issue its normal
+         * resource request if it really needs one. */
+        if (missingOut == NULL || missingOutCap == 0 || missingOut[0] == 0)
+        {
+            printf("[warn][network] mock_scene_content_probe_inconclusive "
+                   "scene=%s action=normal-scene-enter "
+                   "reason=no-manifest-resource-key\n",
+                   target->scene);
+            return true;
+        }
         target->needsSceneDownload = true;
         return false;
     }
@@ -9447,6 +9467,87 @@ static bool vm_net_mock_scene_uses_current_scene_completion(const char *scene)
            vm_net_mock_scene_is_taohuadao01(scene);
 }
 
+/*
+ * An invalid mapID must remain a rejected scene target: substituting a scene
+ * here would move the role on behalf of an unrelated composite request.  This
+ * bounded trace is deliberately observational, so a later replay can identify
+ * the actual owner of that request without changing dispatcher selection,
+ * response bytes, or client-visible state.
+ */
+static void vm_net_mock_trace_rejected_scene_change_request(
+    const u8 *request, u32 requestLen, const char *mapId, u32 exitId)
+{
+    vm_net_mock_request_object object;
+    char objects[192];
+    char hex[769];
+    u32 offset = 4;
+    u32 objectCount = 0;
+    u32 used = 0;
+    u32 hexUsed = 0;
+    u8 wtKind = 0;
+    u8 wtSubtype = 0;
+    bool truncated = false;
+
+    if (request == NULL || requestLen < 5 || request[0] != 'W' ||
+        request[1] != 'T')
+    {
+        return;
+    }
+
+    objects[0] = 0;
+    hex[0] = 0;
+    (void)vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
+                                                  &wtKind, &wtSubtype);
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        int wrote;
+
+        if (objectCount < 8)
+        {
+            wrote = snprintf(objects + used, sizeof(objects) - used,
+                             "%s%u/%u/%u:%u", objectCount ? "," : "",
+                             object.major, object.kind, object.subtype,
+                             object.payloadLen);
+            if (wrote < 0 || (u32)wrote >= sizeof(objects) - used)
+            {
+                truncated = true;
+                break;
+            }
+            used += (u32)wrote;
+        }
+        else
+        {
+            truncated = true;
+        }
+        ++objectCount;
+    }
+    if (offset != requestLen)
+        truncated = true;
+    for (u32 i = 0; i < requestLen && i < 256 && hexUsed + 3 < sizeof(hex); ++i)
+    {
+        int wrote = snprintf(hex + hexUsed, sizeof(hex) - hexUsed, "%02X%s",
+                             request[i],
+                             (i + 1u == requestLen || i + 1u == 256u) ? "" : " ");
+        if (wrote < 0 || (u32)wrote >= sizeof(hex) - hexUsed)
+        {
+            truncated = true;
+            break;
+        }
+        hexUsed += (u32)wrote;
+    }
+    if (requestLen > 256)
+        truncated = true;
+
+    printf("[debug][network] mock_scene_target_rejected_request wt=%u/%u len=%u objects=%u first=%s map_hex=%02X exit=%u fields=maptype:%u,mapID:%u,exitID:%u truncated=%u bytes=%s\n",
+           wtKind, wtSubtype, requestLen, objectCount,
+           objects[0] ? objects : "-",
+           mapId != NULL && mapId[0] != 0 ? (u8)mapId[0] : 0u, exitId,
+           vm_net_mock_request_contains(request, requestLen, "maptype") ? 1u : 0u,
+           vm_net_mock_request_contains(request, requestLen, "mapID") ? 1u : 0u,
+           vm_net_mock_request_contains(request, requestLen, "exitID") ? 1u : 0u,
+           truncated ? 1u : 0u, hex);
+}
+
 static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLen,
                                                 vm_net_mock_scene_change_target *target)
 {
@@ -9470,6 +9571,8 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
          * bootstrap scene: that would make an invalid request move the role to
          * a different map. Leaving target.scene empty makes every builder that
          * consumes this probe reject the request before state mutation. */
+        vm_net_mock_trace_rejected_scene_change_request(request, requestLen,
+                                                        mapId, exitId);
         printf("[error][network] mock_scene_target_rejected map=%s exit=%u reason=noncanonical-scene-key contract=exact-sce-key\n",
                mapId[0] ? mapId : "-", exitId);
         return;

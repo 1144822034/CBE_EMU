@@ -1322,6 +1322,128 @@ cleanup:
     return result;
 }
 
+/* A server-side SCE inspection failure is not evidence that the client is
+ * downloading a resource.  This shipped legacy scene deliberately has an
+ * entity envelope rejected by the battle-resource parser, while its file is
+ * still a valid scene key.  The first WT2/3 must therefore retain the normal
+ * position-bearing enter instead of creating a pending download with no
+ * WT18/7 resource name. */
+static int assert_inconclusive_scene_probe_enters_normally(void)
+{
+    static const char legacyScene[] =
+        "09\xBB\xAA\xC9\xBD_02.sce"; /* 09华山_02.sce */
+    u8 request[256];
+    u8 response[4096];
+    u32 requestLen = 0;
+    u32 responseLen = 0;
+
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    memset(&g_vm_net_mock_last_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_scene_change_target));
+    memset(&g_vm_net_mock_last_completed_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_completed_scene_change_target));
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    g_vm_net_mock_title_role_scene_followup_pending = false;
+    g_vm_net_mock_last_moveinfo_source_valid = false;
+    g_vm_mock_service_active_client_id = 0x4b495249u;
+    g_vm_net_mock_role_db_valid = false;
+
+    if (!build_scene_change_request(request, sizeof(request), legacyScene, 1,
+                                    &requestLen))
+    {
+        fputs("could not construct inconclusive-probe WT2/3 request\n", stderr);
+        return 1;
+    }
+    responseLen = vm_net_mock_build_scene_change_combo_response(
+        request, requestLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        count_scene_result_posinfo(response, responseLen, true) != 1 ||
+        count_scene_result_posinfo(response, responseLen, false) != 0 ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        g_vm_net_mock_last_scene_change_target.needsSceneDownload ||
+        !g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent)
+    {
+        fputs("inconclusive SCE probe was incorrectly converted to download wait\n",
+              stderr);
+        return 1;
+    }
+    puts("inconclusive scene-content probe preserves normal WT30/2 entry");
+    return 0;
+}
+
+/* player-1 reached the Blackwood Cliff outer portal at (124,387).  The SCE
+ * edge resolves that point to Kirin Hall's guarded landing (119,64).  Keep
+ * this wire-level fixture separate from an input/UI test: it verifies the
+ * only server-owned part of the encounter precondition, namely that the
+ * first portal WT2/3 creates the destination scene shell rather than a
+ * nameless download wait. */
+static int assert_kirin_hall_portal_initial_entry(void)
+{
+    static const char sourceScene[] =
+        "23\xF3\xB4\xC1\xFA\xD5\xAF_11.sce"; /* 23蟠龙寨_11.sce */
+    static const char targetScene[] =
+        "23\xF3\xB4\xC1\xFA\xD5\xAF_12.sce"; /* 23蟠龙寨_12.sce */
+    u8 request[256];
+    u8 response[4096];
+    u32 requestLen = 0;
+    u32 responseLen = 0;
+
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    memset(&g_vm_net_mock_last_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_scene_change_target));
+    memset(&g_vm_net_mock_last_completed_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_completed_scene_change_target));
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    g_vm_net_mock_title_role_scene_followup_pending = false;
+    g_vm_net_mock_role_db_valid = false;
+    g_vm_mock_service_active_client_id = 0x4b495249u;
+    snprintf(g_vm_net_mock_last_moveinfo_source_scene,
+             sizeof(g_vm_net_mock_last_moveinfo_source_scene), "%s",
+             sourceScene);
+    g_vm_net_mock_last_moveinfo_source_x = 124;
+    g_vm_net_mock_last_moveinfo_source_y = 387;
+    g_vm_net_mock_last_moveinfo_source_tick = g_schedulerTick;
+    g_vm_net_mock_last_moveinfo_source_valid = true;
+
+    if (!build_scene_change_request(request, sizeof(request), targetScene, 1,
+                                    &requestLen))
+    {
+        fputs("could not construct Kirin Hall portal WT2/3 request\n", stderr);
+        return 1;
+    }
+    responseLen = vm_net_mock_build_scene_change_combo_response(
+        request, requestLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        count_scene_result_posinfo(response, responseLen, true) != 1 ||
+        count_scene_result_posinfo(response, responseLen, false) != 0 ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        g_vm_net_mock_last_scene_change_target.needsSceneDownload ||
+        !g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent ||
+        !vm_net_mock_scene_names_equal_exact(
+            g_vm_net_mock_last_scene_change_target.scene, targetScene) ||
+        g_vm_net_mock_last_scene_change_target.x != 119 ||
+        g_vm_net_mock_last_scene_change_target.y != 64)
+    {
+        fputs("Kirin Hall portal WT2/3 did not create its position-bearing scene shell\n",
+              stderr);
+        return 1;
+    }
+    puts("Kirin Hall portal WT2/3 preserves one positioned scene entry");
+    return 0;
+}
+
 int main(void)
 {
     static const char targetScene[] =
@@ -1359,6 +1481,11 @@ int main(void)
     g_vm_net_mock_teleport_stone_direct_enter_pending = false;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     g_vm_net_mock_title_role_scene_followup_pending = false;
+
+    if (assert_inconclusive_scene_probe_enters_normally() != 0)
+        return 1;
+    if (assert_kirin_hall_portal_initial_entry() != 0)
+        return 1;
 
     if (!build_scene_change_request(sceneChange, sizeof(sceneChange),
                                     targetScene, 1, &sceneChangeLen))

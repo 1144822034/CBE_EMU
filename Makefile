@@ -100,7 +100,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-mirror-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression admin-role-timed-item-effect-regression registration-email-contract-regression mailbox-claim-backpack-refresh-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression first-login-equipment-attribute-bootstrap-regression packet-fields-zero-length-regression equipment-enhancement-bootstrap-split-regression equipment-enhancement-bootstrap-delivery-regression startup-sce-direct-enter-test-gate-regression teleport-stone-scene-catalog-regression npc-crystal-synthesis-regression npc-quality-zero-equipment-recycle-regression battle-insight-followup-regression battle-insight-status-regression timed-item-status-icon-regression task-delivery-item-consumption-regression clean
+.PHONY: all build client server boundary-check content-update-manifest-regression scene-battle-monster-field18-regression city-scene-battle-monster-layout-regression instance-guide-direct-entry-regression admin-scene-battle-monster-layout-regression admin-dynamic-npc-id-regression admin-monster-picker-regression admin-role-timed-item-effect-regression registration-email-contract-regression mailbox-claim-backpack-refresh-regression battle-primary-stat-uncap-regression battle-derived-stat-uncap-regression zhongnan-taiyi-recovery-landing-regression direct-scene-challenge-progress-regression direct-scene-challenge-progress-client-regression sdl-text-input-key-release-regression title-role-list-capacity-regression first-login-equipment-attribute-bootstrap-regression packet-fields-zero-length-regression equipment-enhancement-bootstrap-split-regression equipment-enhancement-bootstrap-delivery-regression startup-sce-direct-enter-test-gate-regression teleport-stone-scene-catalog-regression npc-crystal-synthesis-regression npc-quality-zero-equipment-recycle-regression battle-insight-followup-regression battle-insight-status-regression timed-item-status-icon-regression task-delivery-item-consumption-regression ingress-partial-frame-regression clean
 
 $(SERVER_OBJDIR)/%-regression.exe: SERVER_CPPFLAGS += -DCBE_SERVER_TEST_INCLUDE_IMPLEMENTATION
 $(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
@@ -115,6 +115,11 @@ boundary-check: build
 npc-crystal-synthesis-regression: $(SERVER_OBJDIR)/npc-crystal-synthesis-regression.exe
 
 $(SERVER_OBJDIR)/npc-crystal-synthesis-regression.exe: scripts/npc-crystal-synthesis-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+ingress-partial-frame-regression: $(SERVER_OBJDIR)/ingress-partial-frame-regression.exe
+
+$(SERVER_OBJDIR)/ingress-partial-frame-regression.exe: scripts/ingress-partial-frame-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 npc-quality-zero-equipment-recycle-regression: $(SERVER_OBJDIR)/npc-quality-zero-equipment-recycle-regression.exe
@@ -140,6 +145,11 @@ $(SERVER_OBJDIR)/battle-insight-status-regression.exe: scripts/battle-insight-st
 direct-scene-challenge-progress-regression: $(SERVER_OBJDIR)/direct-scene-challenge-progress-regression.exe
 
 $(SERVER_OBJDIR)/direct-scene-challenge-progress-regression.exe: scripts/direct-scene-challenge-progress-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+title-role-list-capacity-regression: $(SERVER_OBJDIR)/title-role-list-capacity-regression.exe
+
+$(SERVER_OBJDIR)/title-role-list-capacity-regression.exe: scripts/title-role-list-capacity-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 task-delivery-item-consumption-regression: $(SERVER_OBJDIR)/task-delivery-item-consumption-regression.exe
@@ -237,6 +247,16 @@ direct-scene-challenge-progress-client-regression: $(CLIENT_OBJDIR)/direct-scene
 $(CLIENT_OBJDIR)/direct-scene-challenge-progress-client-regression.exe: scripts/direct-scene-challenge-progress-client-regression.c $(MOCK_SERVER_FRAGMENTS) src/main.c src/network-client.c src/md5.h | $(CLIENT_OBJDIR)
 	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) $< src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/automation_png.c src/md5.c -o $@ $(CLIENT_LDLIBS)
 
+world-map-lcd-native-blit-regression: bin/world-map-lcd-native-blit-regression.exe
+
+bin/world-map-lcd-native-blit-regression.exe: scripts/world-map-lcd-native-blit-regression.c $(MOCK_SERVER_FRAGMENTS) src/main.c src/vmFunc.c src/config.h src/network-client.c src/md5.h | bin
+	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) $< src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/automation_png.c src/md5.c -o $@ $(CLIENT_LDLIBS)
+
+sdl-text-input-key-release-regression: $(CLIENT_OBJDIR)/sdl-text-input-key-release-regression.exe
+
+$(CLIENT_OBJDIR)/sdl-text-input-key-release-regression.exe: scripts/sdl-text-input-key-release-regression.c $(MOCK_SERVER_FRAGMENTS) src/main.c src/network-client.c src/md5.h | $(CLIENT_OBJDIR)
+	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) $< src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/automation_png.c src/md5.c -o $@ $(CLIENT_LDLIBS)
+
 first-login-equipment-attribute-bootstrap-regression: $(SERVER_OBJDIR)/first-login-equipment-attribute-bootstrap-regression.exe
 
 $(SERVER_OBJDIR)/first-login-equipment-attribute-bootstrap-regression.exe: scripts/first-login-equipment-attribute-bootstrap-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
@@ -318,7 +338,7 @@ LDFLAGS += -Wl,--gc-sections
 SERVER_CFLAGS := $(CFLAGS)
 SERVER_LDLIBS := -lpthread -lm
 
-.PHONY: all build server boundary-check registration-email-contract-regression mailbox-claim-backpack-refresh-regression linux-graceful-shutdown-regression clean
+.PHONY: all build server boundary-check registration-email-contract-regression mailbox-claim-backpack-refresh-regression linux-graceful-shutdown-regression ingress-partial-frame-regression clean
 $(SERVER_OBJDIR)/%-regression: SERVER_CPPFLAGS += -DCBE_SERVER_TEST_INCLUDE_IMPLEMENTATION
 $(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
 all: build
@@ -335,6 +355,11 @@ $(SERVER_OBJDIR)/registration-email-contract-regression: scripts/registration-em
 mailbox-claim-backpack-refresh-regression: $(SERVER_OBJDIR)/mailbox-claim-backpack-refresh-regression
 
 $(SERVER_OBJDIR)/mailbox-claim-backpack-refresh-regression: scripts/mailbox-claim-backpack-refresh-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
+	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
+
+ingress-partial-frame-regression: $(SERVER_OBJDIR)/ingress-partial-frame-regression
+
+$(SERVER_OBJDIR)/ingress-partial-frame-regression: scripts/ingress-partial-frame-regression.c $(MOCK_SERVER_FRAGMENTS) src/server_main.c src/mysql-client.h src/md5.h | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) $< src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c -o $@ $(SERVER_LDLIBS)
 
 linux-graceful-shutdown-regression: $(SERVER_OBJDIR)/linux-graceful-shutdown-regression

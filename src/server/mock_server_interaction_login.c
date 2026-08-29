@@ -3460,6 +3460,21 @@ static u32 vm_net_mock_build_role_list_info(u8 *out, u32 outCap)
     return pos;
 }
 
+/*
+ * Compact title actorinfo has a three-byte table header, then each supported
+ * role consumes its fixed 19-byte tagged shape plus its stored name bytes.
+ * Keep this tied to the role record rather than a guessed literal: five valid
+ * 31-byte names require 253 bytes, so the former 128-byte scratch buffers
+ * could make a legitimate WT 1/1/4 response disappear before it reached the
+ * client's normal data-event callback.
+ */
+enum
+{
+    VM_NET_MOCK_TITLE_ROLE_LIST_ACTORINFO_CAP =
+        3u + VM_NET_MOCK_ROLE_DB_MAX_ROLES *
+                  (19u + sizeof(((vm_net_mock_role_state *)0)->name) - 1u)
+};
+
 static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
 {
     u32 pos = 0;
@@ -4218,7 +4233,7 @@ static u32 vm_net_mock_build_title_server_select_response(const u8 *request, u32
     u32 moneyType = 0;
     u8 servConf[8];
     u32 servConfLen = 0;
-    u8 actorInfo[128];
+    u8 actorInfo[VM_NET_MOCK_TITLE_ROLE_LIST_ACTORINFO_CAP];
     u32 actorInfoLen = 0;
 
     if (outCap < pos)
@@ -4259,7 +4274,7 @@ static u32 vm_net_mock_build_title_rolelist_stage_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
     u32 objectStart = 0;
-    u8 actorinfo[128];
+    u8 actorinfo[VM_NET_MOCK_TITLE_ROLE_LIST_ACTORINFO_CAP];
     u32 actorinfoLen = 0;
 
     if (outCap < pos)

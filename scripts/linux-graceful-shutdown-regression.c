@@ -100,7 +100,7 @@ int main(void)
         (ssize_t)sizeof(requestHeader) ||
         !vm_mock_service_worker_pool_enqueue(&pool, sockets[0],
                                              VM_MOCK_SERVICE_CONNECTION_GAME,
-                                             NULL, 0, 0, 0, NULL))
+                                             NULL, 0, 0, 0, NULL, 0, NULL))
     {
         fputs("unable to enqueue admitted CBMS PING frame\n", stderr);
         goto cleanup;

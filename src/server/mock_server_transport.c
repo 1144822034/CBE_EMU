@@ -1579,6 +1579,8 @@ static void vm_net_mock_service_notify_disconnect(const char *reason)
  * is migrated to an explicit per-request context.
  */
 static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
+                                             const u8 *ingressFrame,
+                                             u32 ingressFrameLen,
                                              u8 *requestBuffer,
                                              u32 requestCap,
                                              u8 *responseBuffer,
@@ -1617,8 +1619,16 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     const char *authError = NULL;
     const char *sessionAccount = NULL;
 
-    if (!vm_mock_service_recv_all(client, header, sizeof(header)))
+    if (ingressFrame != NULL)
+    {
+        if (ingressFrameLen < sizeof(header))
+            return 0;
+        memcpy(header, ingressFrame, sizeof(header));
+    }
+    else if (!vm_mock_service_recv_all(client, header, sizeof(header)))
+    {
         return 0;
+    }
     if (memcmp(header, "CBMS", 4) != 0 || vm_mock_service_read_le32(header + 4) != 1)
         return 0;
 
@@ -1632,8 +1642,16 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     }
     if (requestLen == 0 || requestLen > requestCap || requestMetaLen > requestLen)
         return 0;
-    if (!vm_mock_service_recv_all(client, requestBuffer, requestLen))
+    if (ingressFrame != NULL)
+    {
+        if (ingressFrameLen != sizeof(header) + requestLen)
+            return 0;
+        memcpy(requestBuffer, ingressFrame + sizeof(header), requestLen);
+    }
+    else if (!vm_mock_service_recv_all(client, requestBuffer, requestLen))
+    {
         return 0;
+    }
     requestReceivedMs = scheduler_get_tick_ms();
 
     memset(accountId, 0, sizeof(accountId));
@@ -2123,6 +2141,8 @@ typedef struct
     u32 frameReadyMs;
     u32 ingressId;
     u32 sequence;
+    u8 *ingressFrame;
+    u32 ingressFrameLen;
 } vm_mock_service_connection_job;
 
 typedef struct
@@ -2131,6 +2151,9 @@ typedef struct
     char sourceIp[VM_MOCK_SERVICE_LOGIN_IP_CAP];
     u32 acceptedMs;
     u32 ingressId;
+    u8 *frame;
+    u32 frameLen;
+    u32 frameCap;
 } vm_mock_service_ingress_connection;
 
 typedef struct
@@ -2324,12 +2347,15 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
              * TCP peer is its effective source and can be rejected before
              * reading a protocol frame. */
             vm_mock_service_login_ip_set_source(NULL);
+            free(job.ingressFrame);
             vm_mock_service_socket_close(job.socket);
             continue;
         }
         if (job.kind == VM_MOCK_SERVICE_CONNECTION_GAME)
         {
             ok = vm_net_mock_service_handle_client(job.socket,
+                                                   job.ingressFrame,
+                                                   job.ingressFrameLen,
                                                    worker->requestBuffer,
                                                    sizeof(g_netMockResponse),
                                                    worker->responseBuffer,
@@ -2343,6 +2369,8 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
                        job.sequence, job.ingressId,
                        ingressWaitMs, queueWaitMs);
             }
+            free(job.ingressFrame);
+            job.ingressFrame = NULL;
         }
         else if (job.kind == VM_MOCK_SERVICE_CONNECTION_ADMIN)
         {
@@ -2469,6 +2497,8 @@ static void vm_mock_service_worker_pool_abort(vm_mock_service_worker_pool *pool)
     for (u32 i = 0; i < pool->queuedJobs; ++i)
     {
         u32 index = (pool->queueHead + i) % VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX;
+        free(pool->jobs[index].ingressFrame);
+        pool->jobs[index].ingressFrame = NULL;
         vm_mock_service_socket_close(pool->jobs[index].socket);
     }
     pool->queuedJobs = 0;
@@ -2503,6 +2533,8 @@ static bool vm_mock_service_worker_pool_enqueue(vm_mock_service_worker_pool *poo
                                                 u32 acceptedMs,
                                                 u32 frameReadyMs,
                                                 u32 ingressId,
+                                                u8 *ingressFrame,
+                                                u32 ingressFrameLen,
                                                 u32 *sequenceOut)
 {
     vm_mock_service_connection_job *job = NULL;
@@ -2530,6 +2562,8 @@ static bool vm_mock_service_worker_pool_enqueue(vm_mock_service_worker_pool *poo
         job->acceptedMs = acceptedMs;
         job->frameReadyMs = frameReadyMs;
         job->ingressId = ingressId;
+        job->ingressFrame = ingressFrame;
+        job->ingressFrameLen = ingressFrameLen;
         job->sequence = pool->nextSequence++;
         if (pool->nextSequence == 0)
             pool->nextSequence = 1;
@@ -2544,43 +2578,13 @@ static bool vm_mock_service_worker_pool_enqueue(vm_mock_service_worker_pool *poo
     return queued;
 }
 
-/*
- * The worker pool owns only complete game frames. Before this boundary an
- * accepted public socket lives in the listener's bounded ingress table. That
- * keeps a peer which connects and never sends CBMS from occupying all protocol
- * workers for VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS.
- */
-static bool vm_mock_service_socket_pending_bytes(vm_mock_service_socket socket,
-                                                 u32 *bytesOut)
-{
-    if (bytesOut != NULL)
-        *bytesOut = 0;
-#ifdef _WIN32
-    {
-        u_long pending = 0;
-        if (ioctlsocket(socket, FIONREAD, &pending) != 0)
-            return false;
-        if (bytesOut != NULL)
-            *bytesOut = pending > 0xffffffffUL ? 0xffffffffu : (u32)pending;
-    }
-#else
-    {
-        int pending = 0;
-        if (ioctl(socket, FIONREAD, &pending) != 0 || pending < 0)
-            return false;
-        if (bytesOut != NULL)
-            *bytesOut = (u32)pending;
-    }
-#endif
-    return true;
-}
-
 static void vm_mock_service_ingress_clear(vm_mock_service_ingress_connection *entry)
 {
     if (entry == NULL)
         return;
     if (entry->socket != VM_MOCK_SERVICE_INVALID_SOCKET)
         vm_mock_service_socket_close(entry->socket);
+    free(entry->frame);
     memset(entry, 0, sizeof(*entry));
     entry->socket = VM_MOCK_SERVICE_INVALID_SOCKET;
 }
@@ -2806,11 +2810,9 @@ static bool vm_mock_service_ingress_try_dispatch(
     vm_mock_service_ingress_drop_log_table *dropLogs,
     u32 nowMs, bool readable)
 {
-    u8 header[VM_MOCK_SERVICE_FRAME_SIZE];
     u32 frameLen = 0;
     u32 requestFlags = 0;
     u32 requestLen = 0;
-    u32 pendingBytes = 0;
     int received = 0;
     u32 sequence = 0;
 
@@ -2826,7 +2828,30 @@ static bool vm_mock_service_ingress_try_dispatch(
         return true;
     }
 
-    received = recv(entry->socket, (char *)header, sizeof(header), MSG_PEEK);
+    if (entry->frame == NULL)
+    {
+        entry->frame = (u8 *)malloc(VM_MOCK_SERVICE_FRAME_SIZE);
+        if (entry->frame == NULL)
+        {
+            if (vm_mock_service_ingress_drop_log_should_emit(
+                    dropLogs, nowMs, "frame-buffer-alloc-failed", entry->sourceIp,
+                    entry->ingressId, nowMs - entry->acceptedMs))
+            {
+                printf("[warn][mock-service] ingress_drop ingress_id=%u reason=frame-buffer-alloc-failed source=%s\n",
+                       entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
+            }
+            vm_mock_service_ingress_clear(entry);
+            return false;
+        }
+        entry->frameCap = VM_MOCK_SERVICE_FRAME_SIZE;
+    }
+
+    /* Consume each readable byte exactly once.  Re-peeking a partial TCP
+     * frame leaves the socket readable, so select() immediately returns and
+     * the listener spins in recv(MSG_PEEK)/FIONREAD.  The ingress buffer keeps
+     * the worker boundary unchanged: only a complete frame is queued. */
+    received = recv(entry->socket, (char *)entry->frame + entry->frameLen,
+                    (int)(entry->frameCap - entry->frameLen), 0);
     if (received == 0)
     {
         if (vm_mock_service_ingress_drop_log_should_emit(
@@ -2853,17 +2878,19 @@ static bool vm_mock_service_ingress_try_dispatch(
             return true;
 #endif
         if (vm_mock_service_ingress_drop_log_should_emit(
-                dropLogs, nowMs, "peek-failed", entry->sourceIp,
+                dropLogs, nowMs, "read-failed", entry->sourceIp,
                 entry->ingressId, nowMs - entry->acceptedMs))
         {
-            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=peek-failed socket_error=%d waited_ms=%u source=%s\n",
+            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=read-failed socket_error=%d waited_ms=%u source=%s\n",
                    entry->ingressId, socketError, nowMs - entry->acceptedMs,
                    entry->sourceIp[0] ? entry->sourceIp : "-");
         }
         vm_mock_service_ingress_clear(entry);
         return false;
     }
-    if (received < (int)sizeof(header))
+    entry->frameLen += (u32)received;
+
+    if (entry->frameLen < VM_MOCK_SERVICE_FRAME_SIZE)
     {
         if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry,
                                                                 dropLogs, nowMs))
@@ -2872,31 +2899,47 @@ static bool vm_mock_service_ingress_try_dispatch(
             return false;
         return true;
     }
-    if (memcmp(header, "CBMS", 4) != 0 ||
-        vm_mock_service_read_le32(header + 4) != 1)
-    {
-        if (vm_mock_service_ingress_drop_log_should_emit(
-                dropLogs, nowMs, "header-invalid", entry->sourceIp,
-                entry->ingressId, nowMs - entry->acceptedMs))
-        {
-            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=header-invalid waited_ms=%u source=%s\n",
-                   entry->ingressId, nowMs - entry->acceptedMs,
-                   entry->sourceIp[0] ? entry->sourceIp : "-");
-        }
-        vm_mock_service_ingress_clear(entry);
-        return false;
-    }
 
-    requestFlags = vm_mock_service_read_le32(header + 8);
-    requestLen = vm_mock_service_read_le32(header + 12);
-    if ((requestFlags & VM_MOCK_SERVICE_REQUEST_FLAG_PING) != 0)
+    if (entry->frameCap == VM_MOCK_SERVICE_FRAME_SIZE)
     {
-        frameLen = VM_MOCK_SERVICE_FRAME_SIZE;
-    }
-    else
-    {
+        if (memcmp(entry->frame, "CBMS", 4) != 0 ||
+            vm_mock_service_read_le32(entry->frame + 4) != 1)
+        {
+            if (vm_mock_service_ingress_drop_log_should_emit(
+                    dropLogs, nowMs, "header-invalid", entry->sourceIp,
+                    entry->ingressId, nowMs - entry->acceptedMs))
+            {
+                printf("[warn][mock-service] ingress_drop ingress_id=%u reason=header-invalid waited_ms=%u source=%s\n",
+                       entry->ingressId, nowMs - entry->acceptedMs,
+                       entry->sourceIp[0] ? entry->sourceIp : "-");
+            }
+            vm_mock_service_ingress_clear(entry);
+            return false;
+        }
+
+        requestFlags = vm_mock_service_read_le32(entry->frame + 8);
+        requestLen = vm_mock_service_read_le32(entry->frame + 12);
+        if ((requestFlags & VM_MOCK_SERVICE_REQUEST_FLAG_PING) != 0)
+        {
+            vm_mock_service_encode_header(entry->frame, "CBMR", 0, 0, 0);
+            if (!vm_mock_service_send_all(entry->socket, entry->frame,
+                                          VM_MOCK_SERVICE_FRAME_SIZE))
+            {
+                printf("[warn][mock-service] ingress_ping_send_failed ingress_id=%u source=%s\n",
+                       entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
+            }
+            else if (vm_net_mock_verbose_logging_enabled())
+            {
+                printf("[info][mock-service] ingress_ping ingress_id=%u flags=%u ingress_wait_ms=%u source=%s\n",
+                       entry->ingressId, requestFlags, nowMs - entry->acceptedMs,
+                       entry->sourceIp[0] ? entry->sourceIp : "-");
+            }
+            vm_mock_service_ingress_clear(entry);
+            return false;
+        }
+
         if (requestLen == 0 || requestLen > sizeof(g_netMockResponse) ||
-            vm_mock_service_read_le32(header + 16) > requestLen)
+            vm_mock_service_read_le32(entry->frame + 16) > requestLen)
         {
             if (vm_mock_service_ingress_drop_log_should_emit(
                     dropLogs, nowMs, "frame-length-invalid", entry->sourceIp,
@@ -2910,20 +2953,34 @@ static bool vm_mock_service_ingress_try_dispatch(
             return false;
         }
         frameLen = VM_MOCK_SERVICE_FRAME_SIZE + requestLen;
-    }
-    if (!vm_mock_service_socket_pending_bytes(entry->socket, &pendingBytes))
-    {
-        if (vm_mock_service_ingress_drop_log_should_emit(
-                dropLogs, nowMs, "pending-query-failed", entry->sourceIp,
-                entry->ingressId, nowMs - entry->acceptedMs))
+        if (frameLen > entry->frameCap)
         {
-            printf("[warn][mock-service] ingress_drop ingress_id=%u reason=pending-query-failed source=%s\n",
-                   entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
+            u8 *resized = (u8 *)realloc(entry->frame, frameLen);
+            if (resized == NULL)
+            {
+                if (vm_mock_service_ingress_drop_log_should_emit(
+                        dropLogs, nowMs, "frame-buffer-alloc-failed", entry->sourceIp,
+                        entry->ingressId, nowMs - entry->acceptedMs))
+                {
+                    printf("[warn][mock-service] ingress_drop ingress_id=%u reason=frame-buffer-alloc-failed request=%u source=%s\n",
+                           entry->ingressId, requestLen,
+                           entry->sourceIp[0] ? entry->sourceIp : "-");
+                }
+                vm_mock_service_ingress_clear(entry);
+                return false;
+            }
+            entry->frame = resized;
+            entry->frameCap = frameLen;
         }
-        vm_mock_service_ingress_clear(entry);
-        return false;
+
+        /* Header bytes were consumed in this select turn.  Do not issue a
+         * second blocking recv when the peer sent exactly one header.  If a
+         * body is already queued, select() wakes once more and that readable
+         * body is drained below. */
+        return true;
     }
-    if (pendingBytes < frameLen)
+
+    if (entry->frameLen < entry->frameCap)
     {
         if (vm_mock_service_ingress_drop_if_source_pending_cap(table, entry,
                                                                 dropLogs, nowMs))
@@ -2933,32 +2990,12 @@ static bool vm_mock_service_ingress_try_dispatch(
         return true;
     }
 
-    /* The existing client handler answers every PING-flagged transport frame
-     * with an empty CBMR before it validates request length or touches legacy
-     * protocol state.  Preserve that byte contract at ingress so probe
-     * variants cannot consume a game worker while a battle request waits. */
-    if ((requestFlags & VM_MOCK_SERVICE_REQUEST_FLAG_PING) != 0)
-    {
-        vm_mock_service_encode_header(header, "CBMR", 0, 0, 0);
-        if (!vm_mock_service_send_all(entry->socket, header, sizeof(header)))
-        {
-            printf("[warn][mock-service] ingress_ping_send_failed ingress_id=%u source=%s\n",
-                   entry->ingressId, entry->sourceIp[0] ? entry->sourceIp : "-");
-        }
-        else if (vm_net_mock_verbose_logging_enabled())
-        {
-            printf("[info][mock-service] ingress_ping ingress_id=%u flags=%u ingress_wait_ms=%u source=%s\n",
-                   entry->ingressId, requestFlags, nowMs - entry->acceptedMs,
-                   entry->sourceIp[0] ? entry->sourceIp : "-");
-        }
-        vm_mock_service_ingress_clear(entry);
-        return false;
-    }
-
     if (!vm_mock_service_worker_pool_enqueue(pool, entry->socket,
                                               VM_MOCK_SERVICE_CONNECTION_GAME,
                                               entry->sourceIp, entry->acceptedMs,
-                                              nowMs, entry->ingressId, &sequence))
+                                              nowMs, entry->ingressId,
+                                              entry->frame, entry->frameLen,
+                                              &sequence))
     {
         if (vm_mock_service_ingress_drop_log_should_emit(
                 dropLogs, nowMs, "protocol-queue-full", entry->sourceIp,
@@ -2976,6 +3013,7 @@ static bool vm_mock_service_ingress_try_dispatch(
                entry->ingressId, sequence, nowMs - entry->acceptedMs, frameLen,
                entry->sourceIp[0] ? entry->sourceIp : "-");
     }
+    entry->frame = NULL;
     memset(entry, 0, sizeof(*entry));
     entry->socket = VM_MOCK_SERVICE_INVALID_SOCKET;
     return false;
@@ -3292,7 +3330,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                                                          sourceIp,
                                                          scheduler_get_tick_ms(),
                                                          scheduler_get_tick_ms(),
-                                                         0,
+                                                         0, NULL, 0,
                                                          &sequence))
                 {
                     printf("[warn][mock-admin] connection_rejected reason=queue-full\n");

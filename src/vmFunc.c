@@ -4555,12 +4555,529 @@ int vm_DF_Sin(int deg)
     return vm_set_call_result(r);
 }
 
+/* These are host-owned ARM firmware routines, not CBE/CBM patches.  The CBE
+ * receives their addresses through its existing LCD manager table.  Captured
+ * world-map calls use the fixed main-screen ImageHeader and in-bounds source
+ * rectangles; the routines execute that normal copy/transparent-copy ABI in
+ * guest ARM code.  Any other contract falls through to the old SVC bridge. */
+enum
+{
+    VM_NATIVE_LCD_ARM_WORDS = 320,
+    VM_NATIVE_LCD_ARM_LITERAL_OFFSET = 0x400,
+    VM_NATIVE_LCD_ARM_LABEL_ROW = 0,
+    VM_NATIVE_LCD_ARM_LABEL_PIXEL,
+    VM_NATIVE_LCD_ARM_LABEL_ALPHA_BLOCK,
+    VM_NATIVE_LCD_ARM_LABEL_ALPHA_PIXEL_TAIL,
+    VM_NATIVE_LCD_ARM_LABEL_ALPHA_ROW_END,
+    VM_NATIVE_LCD_ARM_LABEL_FAST_OPAQUE_12_ROW,
+    VM_NATIVE_LCD_ARM_LABEL_FAST_ALPHA_24_ROW,
+    VM_NATIVE_LCD_ARM_LABEL_SUCCESS,
+    VM_NATIVE_LCD_ARM_LABEL_FAILURE,
+    VM_NATIVE_LCD_ARM_LABEL_COUNT,
+    VM_NATIVE_LCD_ARM_MAX_BRANCHES = 40,
+    VM_NATIVE_LCD_ARM_COND_EQ = 0,
+    VM_NATIVE_LCD_ARM_COND_NE = 1,
+    VM_NATIVE_LCD_ARM_COND_HS = 2,
+    VM_NATIVE_LCD_ARM_COND_HI = 8,
+    VM_NATIVE_LCD_ARM_COND_LT = 11,
+    VM_NATIVE_LCD_ARM_COND_LE = 13,
+    VM_NATIVE_LCD_ARM_COND_AL = 14,
+    VM_NATIVE_LCD_ARM_OP_SUB = 2,
+    VM_NATIVE_LCD_ARM_OP_RSB = 3,
+    VM_NATIVE_LCD_ARM_OP_ADD = 4,
+    VM_NATIVE_LCD_ARM_OP_TST = 8,
+    VM_NATIVE_LCD_ARM_OP_CMP = 10,
+    VM_NATIVE_LCD_ARM_OP_ORR = 12,
+    VM_NATIVE_LCD_ARM_OP_MOV = 13,
+    VM_NATIVE_LCD_ARM_OP_BIC = 14,
+};
+
+typedef struct
+{
+    u32 words[VM_NATIVE_LCD_ARM_WORDS];
+    u32 wordCount;
+    u32 labels[VM_NATIVE_LCD_ARM_LABEL_COUNT];
+    struct
+    {
+        u32 word;
+        u32 label;
+    } branches[VM_NATIVE_LCD_ARM_MAX_BRANCHES];
+    u32 branchCount;
+    bool failed;
+} vm_native_lcd_arm_builder;
+
+static void vm_native_lcd_arm_emit(vm_native_lcd_arm_builder *builder, u32 word)
+{
+    if (builder->wordCount >= VM_NATIVE_LCD_ARM_LITERAL_OFFSET / sizeof(u32))
+    {
+        builder->failed = true;
+        return;
+    }
+    builder->words[builder->wordCount++] = word;
+}
+
+static u32 vm_native_lcd_arm_dp_imm(u32 opcode, bool setFlags, u32 rn, u32 rd, u32 imm8)
+{
+    return 0xe2000000u | (opcode << 21) | (setFlags ? (1u << 20) : 0u) |
+           (rn << 16) | (rd << 12) | imm8;
+}
+
+static u32 vm_native_lcd_arm_dp_reg(u32 opcode, bool setFlags, u32 rn, u32 rd,
+                                    u32 rm, u32 shiftLeft)
+{
+    return 0xe0000000u | (opcode << 21) | (setFlags ? (1u << 20) : 0u) |
+           (rn << 16) | (rd << 12) | (shiftLeft << 7) | rm;
+}
+
+static u32 vm_native_lcd_arm_ldr(u32 rd, u32 rn, u32 offset)
+{
+    return 0xe5900000u | (rn << 16) | (rd << 12) | offset;
+}
+
+static u32 vm_native_lcd_arm_ldrh(u32 rd, u32 rn, u32 offset)
+{
+    return 0xe1d000b0u | (rn << 16) | (rd << 12) |
+           ((offset & 0xf0u) << 4) | (offset & 0x0fu);
+}
+
+static u32 vm_native_lcd_arm_strh(u32 condition, u32 rd, u32 rn)
+{
+    return (condition << 28) | 0x01c000b0u | (rn << 16) | (rd << 12);
+}
+
+static u32 vm_native_lcd_arm_strh_offset(u32 condition, u32 rd, u32 rn, u32 offset)
+{
+    return (condition << 28) | 0x01c000b0u | (rn << 16) | (rd << 12) |
+           ((offset & 0xf0u) << 4) | (offset & 0x0fu);
+}
+
+static u32 vm_native_lcd_arm_str(u32 rd, u32 rn, u32 offset)
+{
+    return 0xe5800000u | (rn << 16) | (rd << 12) | offset;
+}
+
+static u32 vm_native_lcd_arm_ldmia_writeback(u32 rn, u32 registers)
+{
+    return 0xe8b00000u | (rn << 16) | registers;
+}
+
+static u32 vm_native_lcd_arm_stmia_writeback(u32 rn, u32 registers)
+{
+    return 0xe8a00000u | (rn << 16) | registers;
+}
+
+static u32 vm_native_lcd_arm_mul(u32 rd, u32 rm, u32 rs)
+{
+    return 0xe0000090u | (rd << 16) | (rs << 8) | rm;
+}
+
+static void vm_native_lcd_arm_mark(vm_native_lcd_arm_builder *builder, u32 label)
+{
+    if (label >= VM_NATIVE_LCD_ARM_LABEL_COUNT)
+        builder->failed = true;
+    else
+        builder->labels[label] = builder->wordCount;
+}
+
+static void vm_native_lcd_arm_branch(vm_native_lcd_arm_builder *builder,
+                                     u32 condition, u32 label)
+{
+    if (builder->branchCount >= VM_NATIVE_LCD_ARM_MAX_BRANCHES ||
+        label >= VM_NATIVE_LCD_ARM_LABEL_COUNT)
+    {
+        builder->failed = true;
+        return;
+    }
+    builder->branches[builder->branchCount].word = builder->wordCount;
+    builder->branches[builder->branchCount].label = label;
+    ++builder->branchCount;
+    vm_native_lcd_arm_emit(builder, (condition << 28) | 0x0a000000u);
+}
+
+static void vm_native_lcd_arm_ldr_literal(vm_native_lcd_arm_builder *builder,
+                                          u32 baseAddress, u32 rd, u32 literalOffset)
+{
+    u32 instructionAddress = baseAddress + builder->wordCount * sizeof(u32);
+    u32 literalAddress = baseAddress + literalOffset;
+    if (literalAddress < instructionAddress + 8u ||
+        literalAddress - (instructionAddress + 8u) > 0xfffu)
+    {
+        builder->failed = true;
+        return;
+    }
+    vm_native_lcd_arm_emit(builder,
+                           vm_native_lcd_arm_ldr(rd, 15,
+                               literalAddress - (instructionAddress + 8u)));
+}
+
+static bool vm_native_lcd_arm_finish(vm_native_lcd_arm_builder *builder, u32 baseAddress)
+{
+    for (u32 i = 0; i < builder->branchCount; ++i)
+    {
+        u32 from = baseAddress + builder->branches[i].word * sizeof(u32);
+        u32 target = baseAddress + builder->labels[builder->branches[i].label] * sizeof(u32);
+        int32_t delta = (int32_t)(target - (from + 8u));
+        if (builder->failed || (delta & 3) != 0 || delta < -0x02000000 || delta >= 0x02000000)
+            return false;
+        builder->words[builder->branches[i].word] |= ((u32)(delta >> 2) & 0x00ffffffu);
+    }
+    return !builder->failed;
+}
+
+static bool vm_native_lcd_build_blit(u32 baseAddress, bool transparent,
+                                     u32 fallbackAddress, u32 *output,
+                                     bool traceRoutes)
+{
+    vm_native_lcd_arm_builder builder;
+    enum
+    {
+        LIT_SCREEN_STRUCT = VM_NATIVE_LCD_ARM_LITERAL_OFFSET,
+        LIT_SCREEN_PIXELS = VM_NATIVE_LCD_ARM_LITERAL_OFFSET + 4,
+        LIT_SCREEN_WIDTH = VM_NATIVE_LCD_ARM_LITERAL_OFFSET + 8,
+        LIT_SCREEN_HEIGHT = VM_NATIVE_LCD_ARM_LITERAL_OFFSET + 12,
+        LIT_SCREEN_PITCH = VM_NATIVE_LCD_ARM_LITERAL_OFFSET + 16,
+        LIT_FALLBACK = VM_NATIVE_LCD_ARM_LITERAL_OFFSET + 20,
+        LIT_ROUTE_AUDIT = VM_NATIVE_LCD_ARM_LITERAL_OFFSET + 24,
+    };
+
+    memset(&builder, 0, sizeof(builder));
+    vm_native_lcd_arm_emit(&builder, 0xe92d5fffu); /* push {r0-r12,lr} */
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(4, 13, 4));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(5, 13, 8));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(6, 13, 12));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(7, 13, 56));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(8, 13, 60));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(9, 13, 64));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(10, 13, 68));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(0, 13, 0));
+    vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 1, LIT_SCREEN_STRUCT);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 0, 0, 1, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 5, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_LT, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 6, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_LT, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 7, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_LE, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 8, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_LE, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 9, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_LT, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 10, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_LT, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldrh(12, 4, 4));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldrh(0, 4, 6));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 12, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_EQ, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 0, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_EQ, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 7, 0, 12, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_SUB, false, 12, 1, 7, 0));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 5, 0, 1, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 8, 0, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_SUB, false, 0, 1, 8, 0));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 6, 0, 1, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+
+    vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 1, LIT_SCREEN_WIDTH);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 7, 0, 1, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_SUB, false, 1, 1, 7, 0));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 9, 0, 1, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 1, LIT_SCREEN_HEIGHT);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 8, 0, 1, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_SUB, false, 1, 1, 8, 0));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_CMP, true, 10, 0, 1, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HI, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(11, 4, 0));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 11, 0, 0));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_EQ, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_ADD, false, 12, 12, 3));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_BIC, false, 12, 12, 3));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_MOV, false, 0, 12, 12, 1));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_mul(0, 6, 12));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 0, 0, 5, 1));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 11, 11, 0, 0));
+    vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 1, LIT_SCREEN_PIXELS);
+    vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 3, LIT_SCREEN_PITCH);
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_mul(2, 10, 3));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 2, 2, 9, 1));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 1, 1, 2, 0));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_MOV, false, 0, 0, 1, 0));
+
+    if (transparent)
+    {
+        /* The map's 96x24 atlas is always copied as 24-pixel rows.  Unroll
+         * that documented normal shape to remove the inner-loop counter and
+         * branch while retaining one 0-transparent decision per pixel. */
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 7, 0, 24));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE, VM_NATIVE_LCD_ARM_LABEL_ROW);
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_AL,
+                                 VM_NATIVE_LCD_ARM_LABEL_FAST_ALPHA_24_ROW);
+    }
+    else
+    {
+        /* 36x36 map tiles are requested as 12x12 rectangles.  When both
+         * row starts are word-aligned, LDM/STM preserves the exact pixels
+         * while replacing twelve halfword copy iterations with two words. */
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 7, 0, 12));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE, VM_NATIVE_LCD_ARM_LABEL_ROW);
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ORR, false, 11, 2, 0, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_TST, true, 2, 0, 3));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE, VM_NATIVE_LCD_ARM_LABEL_ROW);
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_MOV, false, 0, 9, 3, 0));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_AL,
+                                 VM_NATIVE_LCD_ARM_LABEL_FAST_OPAQUE_12_ROW);
+    }
+
+    vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_ROW);
+    if (traceRoutes)
+    {
+        vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 1, LIT_ROUTE_AUDIT);
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(
+            2, 1, transparent ? 8 : 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_ADD, false, 2, 2, 1));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_str(
+            2, 1, transparent ? 8 : 0));
+    }
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(
+        VM_NATIVE_LCD_ARM_OP_MOV, false, 0, 1, 7, 0));
+    if (transparent)
+    {
+        /* The active map's 35x19 transparent cards overwhelmingly use this
+         * path.  Copy eight pixels per loop body, retaining the exact
+         * zero-transparent store rule for every halfword, then finish the
+         * 0-7 pixel tail with the old single-pixel sequence. */
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_CMP, true, 1, 0, 8));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_LT,
+                                 VM_NATIVE_LCD_ARM_LABEL_ALPHA_PIXEL_TAIL);
+        vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_ALPHA_BLOCK);
+        for (u32 pixel = 0; pixel < 8; ++pixel)
+        {
+            u32 offset = pixel * sizeof(u16);
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldrh(2, 11, offset));
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+                VM_NATIVE_LCD_ARM_OP_CMP, true, 2, 0, 0));
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_strh_offset(
+                VM_NATIVE_LCD_ARM_COND_NE, 2, 0, offset));
+        }
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_ADD, false, 11, 11, 16));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_ADD, false, 0, 0, 16));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_SUB, true, 1, 1, 8));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_CMP, true, 1, 0, 8));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_HS,
+                                 VM_NATIVE_LCD_ARM_LABEL_ALPHA_BLOCK);
+        vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_ALPHA_PIXEL_TAIL);
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_CMP, true, 1, 0, 0));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_EQ,
+                                 VM_NATIVE_LCD_ARM_LABEL_ALPHA_ROW_END);
+        vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_PIXEL);
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldrh(2, 11, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_ADD, false, 11, 11, 2));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_CMP, true, 2, 0, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_strh(
+            VM_NATIVE_LCD_ARM_COND_NE, 2, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_ADD, false, 0, 0, 2));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_SUB, true, 1, 1, 1));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE,
+                                 VM_NATIVE_LCD_ARM_LABEL_PIXEL);
+        vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_ALPHA_ROW_END);
+    }
+    else
+    {
+        vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_PIXEL);
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldrh(2, 11, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_ADD, false, 11, 11, 2));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_strh(
+            VM_NATIVE_LCD_ARM_COND_AL, 2, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_ADD, false, 0, 0, 2));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+            VM_NATIVE_LCD_ARM_OP_SUB, true, 1, 1, 1));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE,
+                                 VM_NATIVE_LCD_ARM_LABEL_PIXEL);
+    }
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 11, 11, 12, 0));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_SUB, false, 11, 11, 7, 1));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_RSB, false, 7, 1, 240));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 0, 0, 1, 1));
+    vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_SUB, true, 8, 8, 1));
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE, VM_NATIVE_LCD_ARM_LABEL_ROW);
+    vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_AL, VM_NATIVE_LCD_ARM_LABEL_SUCCESS);
+
+    if (!transparent)
+    {
+        vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_FAST_OPAQUE_12_ROW);
+        if (traceRoutes)
+        {
+            vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 1, LIT_ROUTE_AUDIT);
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(2, 1, 4));
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+                VM_NATIVE_LCD_ARM_OP_ADD, false, 2, 2, 1));
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_str(2, 1, 4));
+        }
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldmia_writeback(11, 0x00fcu));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_stmia_writeback(0, 0x00fcu));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 11, 11, 12, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_SUB, false, 11, 11, 24));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_SUB, false, 9, 1, 24));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 0, 0, 1, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_SUB, true, 8, 8, 1));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE,
+                                 VM_NATIVE_LCD_ARM_LABEL_FAST_OPAQUE_12_ROW);
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_AL, VM_NATIVE_LCD_ARM_LABEL_SUCCESS);
+    }
+    else
+    {
+        vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_FAST_ALPHA_24_ROW);
+        if (traceRoutes)
+        {
+            vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 1, LIT_ROUTE_AUDIT);
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldr(2, 1, 12));
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(
+                VM_NATIVE_LCD_ARM_OP_ADD, false, 2, 2, 1));
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_str(2, 1, 12));
+        }
+        for (u32 pixel = 0; pixel < 24; ++pixel)
+        {
+            u32 offset = pixel * sizeof(u16);
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_ldrh(2, 11, offset));
+            vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_CMP, true, 2, 0, 0));
+            vm_native_lcd_arm_emit(&builder,
+                                   vm_native_lcd_arm_strh_offset(VM_NATIVE_LCD_ARM_COND_NE,
+                                                                 2, 0, offset));
+        }
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 11, 11, 12, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_reg(VM_NATIVE_LCD_ARM_OP_ADD, false, 0, 0, 3, 0));
+        vm_native_lcd_arm_emit(&builder, vm_native_lcd_arm_dp_imm(VM_NATIVE_LCD_ARM_OP_SUB, true, 8, 8, 1));
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_NE,
+                                 VM_NATIVE_LCD_ARM_LABEL_FAST_ALPHA_24_ROW);
+        vm_native_lcd_arm_branch(&builder, VM_NATIVE_LCD_ARM_COND_AL, VM_NATIVE_LCD_ARM_LABEL_SUCCESS);
+    }
+
+    vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_SUCCESS);
+    vm_native_lcd_arm_emit(&builder, 0xe8bd5fffu); /* pop {r0-r12,lr} */
+    vm_native_lcd_arm_emit(&builder, 0xe12fff1eu); /* bx lr */
+
+    vm_native_lcd_arm_mark(&builder, VM_NATIVE_LCD_ARM_LABEL_FAILURE);
+    vm_native_lcd_arm_emit(&builder, 0xe8bd5fffu); /* pop {r0-r12,lr} */
+    vm_native_lcd_arm_ldr_literal(&builder, baseAddress, 15, LIT_FALLBACK);
+
+    if (!vm_native_lcd_arm_finish(&builder, baseAddress))
+        return false;
+    memcpy(output, builder.words, sizeof(builder.words));
+    output[LIT_SCREEN_STRUCT / sizeof(u32)] = VM_screenImageStruct_ADDRESS;
+    output[LIT_SCREEN_PIXELS / sizeof(u32)] = VM_screenImage_ADDRESS;
+    output[LIT_SCREEN_WIDTH / sizeof(u32)] = LCD_WIDTH;
+    output[LIT_SCREEN_HEIGHT / sizeof(u32)] = LCD_HEIGHT;
+    output[LIT_SCREEN_PITCH / sizeof(u32)] = LCD_WIDTH * PIXEL_PER_BYTE;
+    output[LIT_FALLBACK / sizeof(u32)] = fallbackAddress;
+    output[LIT_ROUTE_AUDIT / sizeof(u32)] = VM_NATIVE_LCD_ROUTE_AUDIT_ADDRESS;
+    return true;
+}
+
+/* The generated ARM blitters execute the same LCD ABI but turn every map
+ * pixel copy into interpreted Unicorn instructions.  They are therefore kept
+ * only as an explicit experiment.  The normal manager table continues to
+ * expose the long-standing host LCD callbacks, which own the same clipping,
+ * cache-sync, and return contract without changing any CBE code or state. */
+static bool vm_native_lcd_fast_stubs_enabled(void)
+{
+    const char *setting = getenv("CBE_ENABLE_EXPERIMENTAL_NATIVE_LCD_BLITS");
+
+    return setting != NULL && setting[0] != 0 &&
+           strcmp(setting, "0") != 0 &&
+           strcmp(setting, "off") != 0 &&
+           strcmp(setting, "false") != 0;
+}
+
+static bool vm_install_native_lcd_fast_stubs(void)
+{
+    static const u32 getCurrentScreenStub[] = {
+        0xe59f0000u, /* ldr r0, [pc, #0] */
+        0xe12fff1eu, /* bx lr */
+        VM_screenImageStruct_ADDRESS,
+    };
+    static const u32 drawImageClipFallbackStub[] = {
+        0xef00f125u, /* svc #0xf125: DrawImageWithClipEx */
+        0xe12fff1eu, /* bx lr */
+    };
+    static const u32 drawImageAlphaFallbackStub[] = {
+        0xef00f126u, /* svc #0xf126: DrawImageClipAndAlphaEx */
+        0xe12fff1eu, /* bx lr */
+    };
+    u32 clipRoutine[VM_NATIVE_LCD_ARM_WORDS];
+    u32 alphaRoutine[VM_NATIVE_LCD_ARM_WORDS];
+    if (MTK == NULL ||
+        !vm_native_lcd_build_blit(VM_NATIVE_LCD_DRAW_IMAGE_CLIP_GUEST_ADDRESS,
+                                   false, VM_NATIVE_LCD_DRAW_IMAGE_CLIP_ADDRESS,
+                                   clipRoutine, false) ||
+        !vm_native_lcd_build_blit(VM_NATIVE_LCD_DRAW_IMAGE_ALPHA_GUEST_ADDRESS,
+                                   true, VM_NATIVE_LCD_DRAW_IMAGE_ALPHA_ADDRESS,
+                                   alphaRoutine, false))
+    {
+        return false;
+    }
+    return uc_mem_write(MTK, VM_NATIVE_LCD_GET_CURRENT_SCREEN_ADDRESS,
+                        getCurrentScreenStub, sizeof(getCurrentScreenStub)) == UC_ERR_OK &&
+           uc_mem_write(MTK, VM_NATIVE_LCD_DRAW_IMAGE_CLIP_ADDRESS,
+                        drawImageClipFallbackStub, sizeof(drawImageClipFallbackStub)) == UC_ERR_OK &&
+           uc_mem_write(MTK, VM_NATIVE_LCD_DRAW_IMAGE_ALPHA_ADDRESS,
+                        drawImageAlphaFallbackStub, sizeof(drawImageAlphaFallbackStub)) == UC_ERR_OK &&
+           uc_mem_write(MTK, VM_NATIVE_LCD_DRAW_IMAGE_CLIP_GUEST_ADDRESS,
+                        clipRoutine, sizeof(clipRoutine)) == UC_ERR_OK &&
+           uc_mem_write(MTK, VM_NATIVE_LCD_DRAW_IMAGE_ALPHA_GUEST_ADDRESS,
+                        alphaRoutine, sizeof(alphaRoutine)) == UC_ERR_OK;
+}
+
+static u32 vm_native_lcd_fast_stub_address(u32 index)
+{
+    if (index == 0)
+        return VM_NATIVE_LCD_GET_CURRENT_SCREEN_ADDRESS;
+    if (index == 24)
+        return VM_NATIVE_LCD_DRAW_IMAGE_CLIP_GUEST_ADDRESS;
+    if (index == 25)
+        return VM_NATIVE_LCD_DRAW_IMAGE_ALPHA_GUEST_ADDRESS;
+    return 0;
+}
+
+static u32 vm_manager_table_entry_address(u32 funcAddr, u32 index, bool nativeLcdFastStubs)
+{
+    u32 nativeStub = 0;
+    if (nativeLcdFastStubs && funcAddr == VM_MANAGER_LCD_FUNC_LIST_ADDRESS)
+        nativeStub = vm_native_lcd_fast_stub_address(index);
+    return nativeStub != 0 ? nativeStub : funcAddr + index * 4;
+}
+
 void vm_configManagerTable(u32 tableAddr, u32 funcAddr)
 {
     u32 tmp, i;
+    bool nativeLcdFastStubs = funcAddr == VM_MANAGER_LCD_FUNC_LIST_ADDRESS &&
+                              vm_native_lcd_fast_stubs_enabled() &&
+                              vm_install_native_lcd_fast_stubs();
     for (i = 0; i < (VM_MANAGER_FUNC_LIST_SIZE / 4); i++)
     {
-        tmp = funcAddr + i * 4;
+        tmp = vm_manager_table_entry_address(funcAddr, i, nativeLcdFastStubs);
         vm_set_var(tableAddr + i * 4, tmp);
     }
 }
@@ -4568,11 +5085,15 @@ void vm_configManagerTable(u32 tableAddr, u32 funcAddr)
 void vm_configManagerTableCount(u32 tableAddr, u32 funcAddr, u32 count)
 {
     u32 tmp, i;
+    bool nativeLcdFastStubs;
     if (tableAddr == 0)
         return;
+    nativeLcdFastStubs = funcAddr == VM_MANAGER_LCD_FUNC_LIST_ADDRESS &&
+                         vm_native_lcd_fast_stubs_enabled() &&
+                         vm_install_native_lcd_fast_stubs();
     for (i = 0; i < count; i++)
     {
-        tmp = funcAddr + i * 4;
+        tmp = vm_manager_table_entry_address(funcAddr, i, nativeLcdFastStubs);
         vm_set_var(tableAddr + i * 4, tmp);
     }
 }

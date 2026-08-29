@@ -36,6 +36,12 @@ typedef struct vm_event_
     u32 event;
     u32 r0;
     u32 r1;
+    /* Host-only timing metadata.  It never crosses into CBE memory: the
+     * emulator uses it solely to identify queueing delay during input
+     * forensics. */
+    u32 enqueueTicks;
+    u32 sequence;
+    u32 dequeueDepth;
 } vm_event;
 
 void InitVmEvent();

@@ -711,7 +711,6 @@ static u32 vm_net_mock_build_battle_auto11_toggle_response(const u8 *request, u3
 static u32 vm_net_mock_build_battle_auto12_replay_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap);
 static u32 vm_net_mock_min_u32(u32 a, u32 b);
-static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static uc_err scheduler_dispatch_net_tasks(void);
 /* Root-cause forensic probe for a native 4/7 settlement.  It is intentionally
  * read-only: the packet, callback and guest state remain client-owned. */
@@ -1634,6 +1633,36 @@ static void normalize_program_exit_pc(u32 fallbackPc)
         else if (lastAddress != 0 && (lastAddress & ~1u) != PROGRAM_EXIT_ADDR)
             uc_reg_write(MTK, UC_ARM_REG_PC, &lastAddress);
     }
+}
+
+/*
+ * Normal client calls all return through PROGRAM_EXIT_ADDR.  Unicorn 2.1.4
+ * has a native exit-address facility for this platform concern; using it
+ * avoids making every instruction in a loaded CBM cross a host code hook just
+ * to recognize that one address.  Failure is non-fatal to compatibility: the
+ * caller keeps the historical full-range code hook in that case.
+ */
+static bool vm_enable_program_exit_control(uc_engine *uc)
+{
+    uint64_t exits[1] = { PROGRAM_EXIT_ADDR };
+    uc_err err;
+
+    err = uc_ctl_exits_enable(uc);
+    if (err != UC_ERR_OK)
+    {
+        printf("[warn][emu] explicit-exit enable failed: %u (%s); using code hook\n",
+               err, uc_strerror(err));
+        return false;
+    }
+    err = uc_ctl_set_exits(uc, exits, sizeof(exits) / sizeof(exits[0]));
+    if (err != UC_ERR_OK)
+    {
+        printf("[warn][emu] explicit-exit configure failed: %u (%s); using code hook\n",
+               err, uc_strerror(err));
+        (void)uc_ctl_exits_disable(uc);
+        return false;
+    }
+    return true;
 }
 
 static uc_err vm_emu_start(u32 begin, u32 until)
@@ -5218,9 +5247,13 @@ done:
 
 static uc_err scheduler_dispatch_input_event(vm_event *evt);
 
-/* Trace the two host input exits that can reach an active scene.  This stays
- * observational: the event has already been dequeued, and the existing call
- * path owns all register setup, invocation, and cleanup. */
+/*
+ * This probe is deliberately generic: operators enable it only while
+ * reproducing a world-map input delay.  It does not identify a map screen by
+ * guest state and does not alter event ordering.  The record instead separates
+ * time already spent waiting in the host event queue from time spent in the
+ * existing scheduler, CBE screen callbacks, render, and local file reads.
+ */
 static void vm_trace_scene_battle_host_input(const char *route,
                                              const char *phase,
                                              const vm_event *evt,
@@ -6225,6 +6258,21 @@ void keyEvent(int type, int key)
         vm_shop_return_forensics_log("input-enqueue-key", VM_EVENT_KEYBOARD,
                                       (u32)skey, (u32)isPress, 0);
     }
+}
+
+/*
+ * SDL's key repeat latch belongs to the host, not to CBE.  A key can open the
+ * native text editor while its SDL_KEYUP is still pending; keep text mode from
+ * forwarding that release to CBE, but always retire the matching host latch.
+ * Otherwise the old opening key permanently blocks every later SDL_KEYDOWN.
+ */
+static void vm_host_handle_key_up(SDL_Keycode key)
+{
+    if (isKeyDown != key)
+        return;
+    isKeyDown = SDLK_UNKNOWN;
+    if (!g_vmInputOpen)
+        keyEvent(MR_KEY_RELEASE, key);
 }
 
 // 1按下3弹起
@@ -8335,6 +8383,8 @@ static void vm_trace_screen_lifecycle_order(const char *phase, u32 screen,
     static u32 traceCount = 0;
     const char *enabled = getenv("CBE_TRACE_SCREEN_LIFECYCLE_ORDER");
     u32 actorArray = 0;
+    u32 logicEntry = 0;
+    u32 renderEntry = 0;
     u8 actorCount = 0;
     FILE *trace = NULL;
 
@@ -8351,17 +8401,26 @@ static void vm_trace_screen_lifecycle_order(const char *phase, u32 screen,
         (void)uc_mem_read(MTK, Global_R9 + 0x5C73u, &actorCount,
                           sizeof(actorCount));
     }
+    if (screen != 0)
+    {
+        /* `screen` is the already-selected function table.  Record its
+         * entries only for this bounded lifecycle trace; this does not feed
+         * dispatch or alter any guest state. */
+        logicEntry = vm_get_var(screen + 8u);
+        renderEntry = vm_get_var(screen + 12u);
+    }
     trace = fopen("logs/screen-lifecycle-order.log", "ab");
     if (trace == NULL)
         return;
     ++traceCount;
     fprintf(trace,
             "screen_lifecycle_order seq=%u phase=%s caller=%08x screen=%08x "
-            "screen_this=%08x callback=%08x active=%08x active_this=%08x "
+            "screen_this=%08x callback=%08x logic=%08x render=%08x "
+            "active=%08x active_this=%08x "
             "change=%u exit_mode=%u replaces_active=%u stack_depth=%u "
             "actor_array=%08x actor_count=%u net_depth=%d net_slot=%d\n",
             traceCount, phase ? phase : "-", lastAddress, screen, screenThis,
-            callback, vmAddedScreen, g_currentScreenThis, screenStructChange,
+            callback, logicEntry, renderEntry, vmAddedScreen, g_currentScreenThis, screenStructChange,
             g_screenExitMode, replacesActive, g_screenStackCount, actorArray,
             (unsigned)actorCount, g_netTaskDispatchDepth,
             g_netTaskDispatchSlot);
@@ -10808,82 +10867,6 @@ static void vm_note_timer_control_item_pc(u32 pc)
                      occupied, empty);
 }
 
-/* UpdateSpriteMovement reads this shared scene controller every frame.  Keep
- * the snapshot bounded and observation-only so a crash can be attributed to
- * the first pointer producer rather than this later dereference. */
-static void vm_note_map_controller_tick_pc(u32 pc)
-{
-    static u32 observations = 0;
-    u32 controllerAddress = 0;
-    u32 controller = 0;
-    u32 r0 = 0;
-    FILE *trace = NULL;
-
-    if (pc != 0x010469ACu || observations >= 32u || Global_R9 == 0)
-        return;
-    controllerAddress = Global_R9 + 0x9540u;
-    if (uc_mem_read(MTK, controllerAddress, &controller,
-                    sizeof(controller)) != UC_ERR_OK)
-    {
-        return;
-    }
-    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
-    ++observations;
-    trace = fopen("logs/map-controller-forensics.log", "ab");
-    if (trace == NULL)
-        return;
-    fprintf(trace,
-            "map_controller_tick count=%u pc=%08x r0=%08x slot=%08x value=%08x\n",
-            observations, pc, r0, controllerAddress, controller);
-    fflush(trace);
-    fclose(trace);
-}
-
-/* fmt_sprintf_like(0x0104D744) treats R0 as the output buffer.  If its
- * destination is the scene controller slot, capture the format pointer and
- * caller before the generic byte writer obscures the original business path.
- * This is read-only and bounded; it does not validate, redirect, or suppress
- * the client call. */
-static void vm_note_map_controller_format_pc(u32 pc)
-{
-    static u32 observations = 0;
-    u32 controllerAddress = 0;
-    u32 destination = 0;
-    u32 format = 0;
-    u32 caller = 0;
-    u32 r2 = 0;
-    u32 r3 = 0;
-    u32 sp = 0;
-    char formatHead[192];
-    FILE *trace = NULL;
-
-    if (pc != 0x0104D744u || observations >= 8u || Global_R9 == 0)
-        return;
-    controllerAddress = Global_R9 + 0x9540u;
-    uc_reg_read(MTK, UC_ARM_REG_R0, &destination);
-    if (destination != controllerAddress)
-        return;
-    uc_reg_read(MTK, UC_ARM_REG_R1, &format);
-    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
-    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
-    uc_reg_read(MTK, UC_ARM_REG_LR, &caller);
-    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-    formatHead[0] = 0;
-    if (format != 0)
-        vm_autotest_format_mem_hex(format, 96, formatHead, sizeof(formatHead));
-    ++observations;
-    trace = fopen("logs/map-controller-forensics.log", "ab");
-    if (trace == NULL)
-        return;
-    fprintf(trace,
-            "map_controller_format count=%u pc=%08x caller=%08x dest=%08x "
-            "format=%08x r2=%08x r3=%08x sp=%08x format_head=%s\n",
-            observations, pc, caller, destination, format, r2, r3, sp,
-            formatHead);
-    fflush(trace);
-    fclose(trace);
-}
-
 static void vm_note_stream_read_i16_pc(u32 pc)
 {
     static u32 seenNullBlob = 0;
@@ -11466,13 +11449,7 @@ void loop()
                 }
                 break;
             case SDL_KEYUP:
-                if (g_vmInputOpen)
-                    break;
-                if (isKeyDown == ev.key.keysym.sym)
-                {
-                    isKeyDown = SDLK_UNKNOWN;
-                    keyEvent(MR_KEY_RELEASE, ev.key.keysym.sym);
-                }
+                vm_host_handle_key_up(ev.key.keysym.sym);
                 break;
             case SDL_MOUSEMOTION:
                 if (g_vmInputOpen)
@@ -12619,56 +12596,6 @@ static void vm_trace_action13_boundary_pc(u32 pc)
             "scene=%s\n",
             pc, lr, r0, slotIndex, slot, (unsigned)action, value, nodeBase,
             matchedIndex, g_lastSceLoadName[0] ? g_lastSceLoadName : "-");
-    fclose(trace);
-}
-
-/*
- * scene_runtime_tick() returns through the loading renderer until both scene
- * readiness bytes are set.  TriggerAutoBattle is downstream of the normal
- * tick branch, so record this gate before inferring anything from a missing
- * collision scan.  This observes guest state only and writes no guest data.
- */
-static void vm_trace_scene_runtime_tick_gate_pc(u32 pc)
-{
-    static int lastPhase = -1;
-    static int lastRuntimeReady = -1;
-    static int lastAssetsReady = -1;
-    u8 runtimeReady = 0;
-    u8 assetsReady = 0;
-    const char *phase = NULL;
-    FILE *trace = NULL;
-
-    if (pc == 0x01014D74u)
-        phase = "gate-runtime-ready";
-    else if (pc == 0x01014D80u)
-        phase = "loading-return";
-    else if (pc == 0x01014D8Au)
-        phase = "normal-tick";
-    else
-        return;
-    if (MTK == NULL)
-        return;
-    (void)uc_mem_read(MTK, Global_R9 + 0x5C67u, &runtimeReady,
-                      sizeof(runtimeReady));
-    (void)uc_mem_read(MTK, Global_R9 + 0x5C68u, &assetsReady,
-                      sizeof(assetsReady));
-    if (lastPhase == (int)pc && lastRuntimeReady == (int)runtimeReady &&
-        lastAssetsReady == (int)assetsReady)
-    {
-        return;
-    }
-    lastPhase = (int)pc;
-    lastRuntimeReady = (int)runtimeReady;
-    lastAssetsReady = (int)assetsReady;
-    trace = fopen("logs/scene-battle-collision.log", "ab");
-    if (trace == NULL)
-        return;
-    fprintf(trace,
-            "scene_battle_tick phase=%s pc=%08x runtime_ready=%u "
-            "assets_ready=%u screen=%08x screen_this=%08x scene=%s\n",
-            phase, pc, (unsigned)runtimeReady, (unsigned)assetsReady,
-            vmAddedScreen, g_currentScreenThis,
-            g_lastSceLoadName[0] ? g_lastSceLoadName : "-");
     fclose(trace);
 }
 
@@ -14659,127 +14586,6 @@ static void vm_trace_actor_scene_capacity_pc(u32 pc)
     }
 }
 
-/*
- * Read-only lifecycle evidence for the asset-name pointer table owned by the
- * scene vtable. FindOrAddAssetName assumes R9+0x5AE4 is live after its grow
- * helper returns; this records setup/free/find callers and host context.
- */
-static void vm_trace_scene_asset_lifecycle_pc(u32 pc)
-{
-    static u32 traceCount = 0;
-    const char *enabled = NULL;
-    const char *maxText = NULL;
-    const char *phase = NULL;
-    u32 maxRecords = 256u;
-    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r5 = 0;
-    u32 lr = 0, callerLr = 0, sp = 0;
-    u32 stack[10];
-    u32 count = 0, capacity = 0, table = 0, nextSlot = 0;
-    u32 assetPtr = 0;
-    char assetName[128];
-    bool forceNullRecord = false;
-    FILE *trace = NULL;
-
-    if (MTK == NULL ||
-        (pc != 0x0100D1D0u && pc != 0x0100D22Cu &&
-         pc != 0x0100D262u && pc != 0x0100D2A4u &&
-         pc != 0x0100DEB4u && pc != 0x0100DEF8u))
-        return;
-    enabled = getenv("CBE_TRACE_SCENE_ASSET_LIFECYCLE");
-    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
-        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
-        return;
-    maxText = getenv("CBE_TRACE_SCENE_ASSET_LIFECYCLE_MAX");
-    if (maxText != NULL && maxText[0] != 0)
-    {
-        char *end = NULL;
-        unsigned long parsed = strtoul(maxText, &end, 0);
-        if (end != maxText && end != NULL && *end == 0 && parsed > 0 &&
-            parsed <= 2048u)
-            maxRecords = (u32)parsed;
-    }
-
-    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
-    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
-    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
-    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
-    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
-    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-    memset(stack, 0, sizeof(stack));
-    if (sp != 0)
-        (void)uc_mem_read(MTK, sp, stack, sizeof(stack));
-    callerLr = lr;
-    if (pc == 0x0100D2A4u)
-        callerLr = stack[5];
-    else if (pc == 0x0100DEF8u)
-        callerLr = stack[9];
-
-    if (Global_R9 != 0)
-    {
-        (void)uc_mem_read(MTK, Global_R9 + 0x5AD8u, &count, sizeof(count));
-        (void)uc_mem_read(MTK, Global_R9 + 0x5ADCu, &capacity,
-                          sizeof(capacity));
-        (void)uc_mem_read(MTK, Global_R9 + 0x5AE4u, &table, sizeof(table));
-    }
-    if (table != 0 && count < capacity && count < 2048u)
-        (void)uc_mem_read(MTK, table + count * sizeof(u32), &nextSlot,
-                          sizeof(nextSlot));
-
-    if (pc == 0x0100D262u)
-        assetPtr = r0;
-    else if (pc == 0x0100D2A4u)
-        assetPtr = r5;
-    vm_trace_read_guest_string(assetPtr, assetName, sizeof(assetName));
-
-    if (pc == 0x0100D1D0u)
-        phase = "free-entry";
-    else if (pc == 0x0100D22Cu)
-        phase = "clear-entry";
-    else if (pc == 0x0100D262u)
-        phase = "find-entry";
-    else if (pc == 0x0100D2A4u)
-        phase = "find-after-grow";
-    else if (pc == 0x0100DEB4u)
-        phase = "setup-entry";
-    else
-        phase = "setup-after-table-alloc";
-
-    forceNullRecord = table == 0 &&
-                      (pc == 0x0100D262u || pc == 0x0100D2A4u);
-    if (traceCount >= maxRecords && !forceNullRecord)
-        return;
-    trace = fopen("logs/scene-asset-lifecycle.log", "ab");
-    if (trace == NULL)
-        return;
-    ++traceCount;
-    fprintf(trace,
-            "scene_asset_lifecycle seq=%u phase=%s pc=%08x lr=%08x "
-            "caller_lr=%08x r0=%08x r1=%08x r2=%08x r3=%08x r5=%08x "
-            "sp=%08x stack=%08x,%08x,%08x,%08x,%08x,%08x "
-            "count=%u capacity=%u table=%08x next=%08x asset_ptr=%08x "
-            "asset=%s net_depth=%d net_slot=%d screen=%08x screen_this=%08x "
-            "removed_this=%08x host_dp=%08x guest_dp=%08x stack_depth=%u\n",
-            traceCount, phase, pc, lr, callerLr, r0, r1, r2, r3, r5, sp,
-            stack[0], stack[1], stack[2], stack[3], stack[4], stack[5],
-            count, capacity, table, nextSlot, assetPtr, assetName,
-            g_netTaskDispatchDepth, g_netTaskDispatchSlot, vmAddedScreen,
-            g_currentScreenThis, g_activeScreenRemovedThis,
-            g_currentScreenDataPackage, vm_current_data_package(),
-            g_screenStackCount);
-    fclose(trace);
-
-    if (forceNullRecord)
-    {
-        printf("[info][scene] scene_asset_lifecycle phase=%s table=00000000 "
-               "count=%u capacity=%u asset=%s caller=%08x net_depth=%d "
-               "net_slot=%d host_dp=%08x guest_dp=%08x\n",
-               phase, count, capacity, assetName, callerLr,
-               g_netTaskDispatchDepth, g_netTaskDispatchSlot,
-               g_currentScreenDataPackage, vm_current_data_package());
-    }
-}
-
 static void vm_note_castlevania_wpay_pc(u32 pc)
 {
     const char *phase = NULL;
@@ -15969,12 +15775,48 @@ int main(int argc, char *args[])
         return NULL;
     }
 
-    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xFFFFFFFF);
+    /*
+     * Normal execution reaches PROGRAM_EXIT_ADDR through Unicorn's native
+     * exit facility, and platform exports are covered by their exact manager
+     * hooks below.  The only remaining generic control point is the VM log
+     * no-op.  Do not run a host code callback for every CBE ROM instruction:
+     * the game contains software rasterizers whose inner pixel loops must
+     * remain entirely in the emulator.  Repository automation retains the
+     * historical full-range callback only while it is actively running.
+     */
+#if defined(GDB_SERVER_SUPPORT)
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack,
+                      0, 0, 0xFFFFFFFF);
+#else
+    if (g_autotestEnabled || !vm_enable_program_exit_control(MTK))
+    {
+        err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack,
+                          0, 0, 0xFFFFFFFF);
+    }
+    else
+    {
+        err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack,
+                          0, VM_LOG_NOOP_ADDRESS, VM_LOG_NOOP_ADDRESS);
+    }
+#endif
     if (err == UC_ERR_OK)
         err = add_manager_code_hooks(MTK);
     //    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xFFFFFFFF);
 
-    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hookRamCallBack, 0, 0, 0xFFFFFFFF);
+    /* hookRamCallBack contains only bounded forensic/automation watches.  It
+     * has no normal client-platform behavior, so a player session must not
+     * cross it for every map-render memory access.  Repository automation
+     * and GDB retain the same read/write coverage. */
+#if defined(GDB_SERVER_SUPPORT)
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                hookRamCallBack, 0, 0, 0xFFFFFFFF);
+#else
+    if (g_autotestEnabled)
+    {
+        uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                    hookRamCallBack, 0, 0, 0xFFFFFFFF);
+    }
+#endif
 
     err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
     err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
@@ -22640,10 +22482,12 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
 {
     uc_hook hook;
     uc_err err;
-    err = uc_hook_add(uc, &hook, UC_HOOK_CODE, hook_vm_pool_code_callback, NULL,
-                      VM_Memory_Pool_ADDRESS, VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE - 1);
-    if (err != UC_ERR_OK)
-        return err;
+    /* `hookCodeCallBack` already covers all guest code, including loaded CBM
+     * modules.  The former second, pool-wide UC_HOOK_CODE callback only
+     * repeated read-only battle/R9 forensics for every dynamic instruction.
+     * Current screen/module ownership is recorded at the screen and loader
+     * lifecycle boundaries, so no platform dispatch depends on that hot-path
+     * observation. */
 #define ADD_MANAGER_CODE_HOOK_RANGE(begin, end, cb)                       \
     do                                                                    \
     {                                                                     \
@@ -22705,48 +22549,54 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+    u32 pc = (u32)address & ~1u;
 
-    vm_hangup_transition_capture_pre_restore((u32)address & ~1u);
+    /* Normal sessions invoke this only at VM_LOG_NOOP_ADDRESS.  A full guest
+     * code range is reserved for active repository automation, where the
+     * declared PC observations and R9 compatibility are needed. */
+    if (!g_autotestEnabled && vm_is_pool_entry(pc))
+        return;
+
     vm_restore_main_r9_for_rom_code((u32)address);
-    vm_autotest_arm_equipment_enhance_rules_watch();
-    vm_autotest_note_startup_pc((u32)address & ~1u);
-    vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
-    vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
-    vm_autotest_note_shop_parser_pc((u32)address & ~1u);
-    vm_autotest_note_role_attr_page_pc((u32)address & ~1u);
-    vm_autotest_note_equipment_enhance_rules_pc((u32)address & ~1u);
-    vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
-    vm_note_timer_control_item_pc((u32)address & ~1u);
-    vm_note_map_controller_tick_pc((u32)address & ~1u);
-    vm_note_map_controller_format_pc((u32)address & ~1u);
-    vm_note_stream_read_i16_pc((u32)address & ~1u);
-    vm_note_net_wrapper_pc((u32)address & ~1u);
-    vm_shop_return_forensics_note_pc((u32)address & ~1u);
-    vm_shop_return_forensics_note_mmgame_input_pc((u32)address & ~1u);
-    vm_hangup_protocol_parser_trace_note_pc((u32)address & ~1u);
-    vm_hangup_battle_state_watch_note_pc((u32)address & ~1u);
-    vm_hangup_delegate_register_trace_note_pc((u32)address & ~1u);
-    vm_hangup_ui_dispatch_trace_note_pc((u32)address & ~1u);
-    vm_hangup_rand_range_trace_note_pc((u32)address & ~1u);
-    vm_hangup_auto_candidate_watch_note_pc((u32)address & ~1u);
-    vm_hangup_transition_trace_note_pc((u32)address & ~1u);
-    vm_hangup_battle_module_trace_note_pc((u32)address & ~1u);
-    vm_hangup_combatinfo_read_trace_note_pc((u32)address & ~1u);
-    vm_hangup_candidate_fault_trace_note_pc((u32)address & ~1u);
-    vm_automation_note_battle_native_exit_pc((u32)address & ~1u);
-    vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
-    vm_hangup_vital_forensics_note_pc((u32)address & ~1u);
-    vm_battle_insight_forensics_note_pc((u32)address & ~1u);
-    vm_note_sce_load_entry_pc((u32)address & ~1u);
-    vm_trace_sce_entity_callback_pc((u32)address & ~1u);
-    vm_trace_scene_challenge_node_table_pc((u32)address & ~1u);
-    vm_trace_action13_boundary_pc((u32)address & ~1u);
-    vm_trace_scene_node_create_pc((u32)address & ~1u);
-    vm_trace_scene_runtime_tick_gate_pc((u32)address & ~1u);
-    vm_trace_scene_battle_collision_pc((u32)address & ~1u);
-    vm_trace_actor_scene_capacity_pc((u32)address & ~1u);
-    vm_trace_scene_asset_lifecycle_pc((u32)address & ~1u);
-    vm_note_castlevania_wpay_pc((u32)address & ~1u);
+    if (g_autotestEnabled)
+    {
+        vm_hangup_transition_capture_pre_restore(pc);
+        vm_autotest_arm_equipment_enhance_rules_watch();
+        vm_autotest_note_startup_pc(pc);
+        vm_autotest_note_scene_actor_parser_pc(pc);
+        vm_autotest_note_backpack_parser_pc(pc);
+        vm_autotest_note_shop_parser_pc(pc);
+        vm_autotest_note_role_attr_page_pc(pc);
+        vm_autotest_note_equipment_enhance_rules_pc(pc);
+        vm_note_mmgame_transfer_parser_pc(pc);
+        vm_note_timer_control_item_pc(pc);
+        vm_note_stream_read_i16_pc(pc);
+        vm_note_net_wrapper_pc(pc);
+        vm_shop_return_forensics_note_pc(pc);
+        vm_shop_return_forensics_note_mmgame_input_pc(pc);
+        vm_hangup_protocol_parser_trace_note_pc(pc);
+        vm_hangup_battle_state_watch_note_pc(pc);
+        vm_hangup_delegate_register_trace_note_pc(pc);
+        vm_hangup_ui_dispatch_trace_note_pc(pc);
+        vm_hangup_rand_range_trace_note_pc(pc);
+        vm_hangup_auto_candidate_watch_note_pc(pc);
+        vm_hangup_transition_trace_note_pc(pc);
+        vm_hangup_battle_module_trace_note_pc(pc);
+        vm_hangup_combatinfo_read_trace_note_pc(pc);
+        vm_hangup_candidate_fault_trace_note_pc(pc);
+        vm_automation_note_battle_native_exit_pc(pc);
+        vm_hangup_battle_render_trace_note_pc(pc);
+        vm_hangup_vital_forensics_note_pc(pc);
+        vm_battle_insight_forensics_note_pc(pc);
+        vm_note_sce_load_entry_pc(pc);
+        vm_trace_sce_entity_callback_pc(pc);
+        vm_trace_scene_challenge_node_table_pc(pc);
+        vm_trace_action13_boundary_pc(pc);
+        vm_trace_scene_node_create_pc(pc);
+        vm_trace_scene_battle_collision_pc(pc);
+        vm_trace_actor_scene_capacity_pc(pc);
+        vm_note_castlevania_wpay_pc(pc);
+    }
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;

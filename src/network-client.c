@@ -59,24 +59,6 @@ static u32 vm_alloc_host_string(const char *text)
     return ptr;
 }
 
-static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address,
-                                       uint32_t size, void *user_data)
-{
-    u32 currentR9 = 0;
-    (void)size;
-    (void)user_data;
-    /* The generic code hook is primarily a ROM dispatcher; dynamically
-     * loaded CBM code has its own pool hook.  Keep this forensic observation
-     * here so the post-callback BattleScene render transition is not missed. */
-    vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
-    uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
-    if (currentR9 >= VM_Memory_Pool_ADDRESS &&
-        currentR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-    {
-        vm_dl_note_sp_bf(currentR9, "pool-exec");
-    }
-}
-
 static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
 {
     u32 responsePtr;
