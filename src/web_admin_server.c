@@ -596,6 +596,17 @@ static const char g_vm_mock_admin_script[] =
     "const show=!wanted||option.textContent.toLowerCase().includes(wanted);"
     "option.hidden=!show;option.disabled=!show;option.style.display=show?'':'none';}};"
     "input.addEventListener('input',apply);apply();};"
+    "const setupAccountFilter=()=>{"
+    "const input=document.querySelector('#account-search');"
+    "const btn=document.querySelector('#account-search-btn');"
+    "const list=document.querySelector('.accounts');"
+    "if(!input||!btn||!list)return;"
+    "const apply=()=>{const q=input.value.trim().toLowerCase();"
+    "for(const a of list.querySelectorAll('a.account')){"
+    "const key=(a.dataset.key||a.textContent||'').toLowerCase();"
+    "a.hidden=!!q&&!key.includes(q);}};"
+    "btn.addEventListener('click',apply);"
+    "input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();apply();}});};"
     "const setupNpcKinds=()=>{for(const form of document.querySelectorAll('.npc form')){"
     "const box6=form.querySelector('input[name=\"service_kind_6\"]');"
     "const fields=form.querySelector('.instance-fields');"
@@ -723,7 +734,7 @@ static const char g_vm_mock_admin_script[] =
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
     "setupCatalogSelects();setupItemPicker();setupMonsterDrops();setupUpdateFilter();setupNpcKinds();"
-    "setupAjaxForms();setupMapEditor();});"
+    "setupAccountFilter();setupAjaxForms();setupMapEditor();});"
     "const adminRoot=()=>{const p=location.pathname;return p.endsWith('/')?p:p.replace(/[^/]*$/,'');};"
     "const b64ToU32=(b64)=>{const bin=atob(b64);const n=bin.length>>2;const out=new Uint32Array(n);"
     "for(let i=0;i<n;i++){const o=i*4;out[i]=bin.charCodeAt(o)|(bin.charCodeAt(o+1)<<8)|(bin.charCodeAt(o+2)<<16)|(bin.charCodeAt(o+3)<<24);}return out;};"
@@ -6668,6 +6679,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".sub{color:#667085;margin:4px 0 20px}.grid{display:grid;grid-template-columns:240px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:18px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
         ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
         ".accounts{display:flex;flex:1;min-height:0;flex-direction:column;gap:6px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.account{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 10px;border-radius:7px;color:#344054;text-decoration:none;scroll-margin-block:12px}.account:hover,.account.on{background:#eef4ff;color:#175cd3}.account-main{display:flex;align-items:center;gap:8px;min-width:0}.account-index{flex:0 0 auto;min-width:1.6em;color:#98a2b3;font-variant-numeric:tabular-nums;font-size:12px}"
+        ".account-filter{display:flex;gap:6px;margin:0 0 10px;flex:none}.account-filter input{flex:1;min-width:0}.account-filter button{flex:none;padding:8px 10px}"
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
@@ -6676,7 +6688,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
-        "</style><script src=\"/admin.js?v=8\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=9\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
@@ -6687,7 +6699,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱奖励</a><a class=\"tab\" href=\"/?tab=enhance\">强化配置</a><a class=\"tab\" href=\"/?tab=combat\">战斗公式</a><a class=\"tab\" href=\"/?tab=arena\">比武</a><a class=\"tab\" href=\"/?tab=worldboss\">世界BOSS</a><a class=\"tab\" href=\"/?tab=ladder\">天梯</a><a class=\"tab\" href=\"/?tab=activities\">节日/跑环</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav><div class=\"grid\">"
-        "<aside class=\"card\"><h2>账号（%u）</h2><div class=\"accounts\">",
+        "<aside class=\"card\"><h2>账号（%u）</h2>"
+        "<div class=\"account-filter\">"
+        "<input type=\"search\" id=\"account-search\" placeholder=\"按账号名筛选\" autocomplete=\"off\">"
+        "<button type=\"button\" id=\"account-search-btn\">筛选</button></div>"
+        "<div class=\"accounts\">",
         accountCount);
 
     if (accountCount == 0)
@@ -6713,14 +6729,20 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                 if (strcmp(accountId, selectedAccount) == 0)
                 {
                     vm_mock_admin_text_appendf(&page,
-                        "<a id=\"selected-account\" class=\"account on\" aria-current=\"page\" href=\"/?tab=accounts&amp;account=%s#selected-account\">"
+                        "<a id=\"selected-account\" class=\"account on\" aria-current=\"page\" data-key=\"");
+                    vm_mock_admin_text_append_html(&page, accountId);
+                    vm_mock_admin_text_appendf(&page,
+                        "\" href=\"/?tab=accounts&amp;account=%s#selected-account\">"
                         "<span class=\"account-main\"><span class=\"account-index\">%u</span><span>",
                         encoded, i + 1u);
                 }
                 else
                 {
                     vm_mock_admin_text_appendf(&page,
-                        "<a class=\"account\" href=\"/?tab=accounts&amp;account=%s#selected-account\">"
+                        "<a class=\"account\" data-key=\"");
+                    vm_mock_admin_text_append_html(&page, accountId);
+                    vm_mock_admin_text_appendf(&page,
+                        "\" href=\"/?tab=accounts&amp;account=%s#selected-account\">"
                         "<span class=\"account-main\"><span class=\"account-index\">%u</span><span>",
                         encoded, i + 1u);
                 }
