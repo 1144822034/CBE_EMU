@@ -185,20 +185,8 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "padding:8px;border-bottom:1px solid #eaecf0}"
         ".muted{color:#98a2b3}</style></head><body><main class=\"wrap\">"
         "<header><h1>比武管理</h1>"
-        "<p class=\"sub\">配置比武擂台日程、计分与排行奖励；赏金擂台（押金对决）已接入；下方可开关。</p></header>"
-        "<nav class=\"tabs\">"
-        "<a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
-        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
-        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
-        "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab\" href=\"/?tab=chests\">宝箱奖励</a>"
-        "<a class=\"tab\" href=\"/?tab=enhance\">强化配置</a>"
-        "<a class=\"tab\" href=\"/?tab=combat\">战斗公式</a>"
-        "<a class=\"tab on\" href=\"/?tab=arena\">比武</a>"
-        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "</nav>");
+        "<p class=\"sub\">配置比武擂台日程、计分与排行奖励；赏金擂台（押金对决）已接入；下方可开关。</p></header>");
+    vm_mock_admin_append_tabs(&page, "arena");
 
     if (status[0] != 0 && message[0] != 0)
     {

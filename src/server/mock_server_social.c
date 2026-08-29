@@ -5259,7 +5259,8 @@ static bool vm_mock_service_social_notice_is_modal_invite(u8 type)
     return type == VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_INVITE ||
            type == VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE ||
            type == VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE ||
-           type == VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE;
+           type == VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE ||
+           type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE;
 }
 
 /* Roster / result notices must not wait behind an open confirm dialog:
@@ -5275,7 +5276,8 @@ static bool vm_mock_service_social_notice_bypasses_modal(u8 type)
            type == VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_RESULT ||
            type == VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT ||
            type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED ||
-           type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED;
+           type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED ||
+           type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE_RESULT;
 }
 
 static int vm_net_mock_append_scene_sync_social_notice_object(
@@ -5295,7 +5297,8 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     modalActive = observer->friendInviteReplyActive ||
                   observer->tradeInviteReplyActive ||
                   observer->teamInviteReplyActive ||
-                  observer->sparInviteReplyActive;
+                  observer->sparInviteReplyActive ||
+                  observer->guildInviteReplyActive;
 
     /* Prefer roster-sync notices over a still-queued modal invite so leave /
      * join cannot starve behind an undismissed confirm prompt.  Prefer 5/5
@@ -5484,6 +5487,47 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         }
         break;
     }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE:
+    {
+        const char *guildName = notice->guildName[0] ? notice->guildName :
+                                "\xb0\xef\xc5\xc9"; /* GBK: 帮派 */
+        /* HandleGuildBusinessDispatch subtype 13 (0x0103C61E): reads fname/name
+         * and opens confirm that replies with 1/10/15.  Also carry id so the
+         * reply can address the inviter; fid mirrors the inviting guild. */
+        if (notice->sourceRoleId == 0 || notice->guildId == 0 ||
+            !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 10, 13,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id",
+                                        notice->sourceRoleId) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "fid",
+                                        notice->guildId) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "fname",
+                                           guildName) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name",
+                                           notice->sourceName))
+        {
+            return -1;
+        }
+        observer->guildInviteReplyActive = true;
+        observer->guildInviteSourceClientId = notice->sourceClientId;
+        observer->guildInviteSourceRoleId = notice->sourceRoleId;
+        observer->guildInviteGuildId = notice->guildId;
+        break;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE_RESULT:
+        /* Same dispatch, subtype 15: result=1 accepted / 2 refused tip. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 10, 15,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "result",
+                                       notice->result) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name",
+                                           notice->sourceName))
+        {
+            return -1;
+        }
+        break;
 
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT:
     {
@@ -5740,7 +5784,8 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
      * invite page shows a garbled/stolen name plate.
      */
     if (noticeType == VM_MOCK_SERVICE_SOCIAL_NOTICE_FRIEND_INVITE ||
-        noticeType == VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE)
+        noticeType == VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE ||
+        noticeType == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE)
     {
         if (!vm_net_mock_append_shop_actor_state14_object(out, outCap, pos, NULL))
             return -1;

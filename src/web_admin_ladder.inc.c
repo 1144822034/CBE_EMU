@@ -42,7 +42,7 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "<title>江湖OL 天梯</title><style>"
         "body{font:14px system-ui;margin:28px;background:#f3f5f7}"
         ".card{background:#fff;padding:18px;border-radius:10px;margin-bottom:16px}"
-        ".tab{padding:8px 12px;margin:4px;background:#fff;border:1px solid #ddd;"
+        ".tabs{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 16px}.tab{padding:8px 12px;margin:4px;background:#fff;border:1px solid #ddd;"
         "text-decoration:none;color:#333;border-radius:6px}"
         ".tab.on{background:#175cd3;color:#fff}"
         "input,select{padding:8px;width:100%%;box-sizing:border-box}"
@@ -51,13 +51,8 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "table{border-collapse:collapse;width:100%%}th,td{padding:8px;border-bottom:1px solid #eee}"
         "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px}"
         "</style></head><body><h1>天梯挑战</h1>"
-        "<p>每日挑战（次数与层数进度均按自然日重置）；对手为天机/幻剑/鬼道三人。层数越高属性与伤害越高；每10层发里程碑奖励。</p>"
-        "<nav>"
-        "<a class=\"tab\" href=\"/?tab=accounts\">账号</a>"
-        "<a class=\"tab\" href=\"/?tab=worldboss\">世界BOSS</a>"
-        "<a class=\"tab on\" href=\"/?tab=ladder\">天梯</a>"
-        "<a class=\"tab\" href=\"/?tab=arena\">比武</a>"
-        "</nav>");
+        "<p>每日挑战（次数与层数进度均按自然日重置）；对手为天机/幻剑/鬼道三人。层数越高属性与伤害越高；每10层发里程碑奖励。</p>");
+    vm_mock_admin_append_tabs(&page, "ladder");
 
     if (status[0] && message[0])
         vm_mock_admin_text_appendf(&page, "<p>%s: %s</p>", status, message);

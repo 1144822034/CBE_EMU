@@ -107,20 +107,8 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         "<p class=\"sub\">配置青铜/白银/黄金/玄晶/幻彩宝箱开出物品；保存后立即生效，无需重启。"
         "权重越大越容易抽中。各宝箱按 chest_item_id 隔离抽取，互不混用；"
         "对应箱/钥：522↔813、523↔814、524↔815、532↔533、534↔535。"
-        "任一宝箱无启用行时开箱失败。</p></div></header>"
-        "<nav class=\"tabs\">"
-        "<a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
-        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
-        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
-        "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab on\" href=\"/?tab=chests\">宝箱奖励</a>"
-        "<a class=\"tab\" href=\"/?tab=enhance\">强化配置</a>"
-        "<a class=\"tab\" href=\"/?tab=combat\">战斗公式</a>"
-        "<a class=\"tab\" href=\"/?tab=arena\">比武</a>"
-        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "</nav>");
+        "任一宝箱无启用行时开箱失败。</p></div></header>");
+    vm_mock_admin_append_tabs(&page, "chests");
 
     if (status[0] != 0 && message[0] != 0)
     {

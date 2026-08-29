@@ -52,7 +52,7 @@ static void vm_mock_admin_render_world_boss_page(char *response, size_t response
         "<title>江湖OL 世界BOSS</title><style>"
         "body{font:14px system-ui;margin:28px;background:#f3f5f7}"
         ".card{background:#fff;padding:18px;border-radius:10px;margin-bottom:16px}"
-        ".tab{padding:8px 12px;margin:4px;background:#fff;border:1px solid #ddd;"
+        ".tabs{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 16px}.tab{padding:8px 12px;margin:4px;background:#fff;border:1px solid #ddd;"
         "text-decoration:none;color:#333;border-radius:6px}"
         ".tab.on{background:#175cd3;color:#fff}"
         "input,select{padding:8px;width:100%%;box-sizing:border-box}"
@@ -63,15 +63,8 @@ static void vm_mock_admin_render_world_boss_page(char *response, size_t response
         ".btn-warn{background:#b54708}.btn-muted{background:#667085}"
         ".muted{color:#667085;font-size:13px}"
         "</style></head><body><h1>世界BOSS</h1>"
-        "<p>每小时整点刷新；提前30秒全服预告地图。首个队长遇怪开战，击杀发配置奖励。</p>"
-        "<nav>"
-        "<a class=\"tab\" href=\"/?tab=accounts\">账号</a>"
-        "<a class=\"tab\" href=\"/?tab=content\">内容</a>"
-        "<a class=\"tab\" href=\"/?tab=monsters\">怪物</a>"
-        "<a class=\"tab on\" href=\"/?tab=worldboss\">世界BOSS</a>"
-        "<a class=\"tab\" href=\"/?tab=ladder\">天梯</a>"
-        "<a class=\"tab\" href=\"/?tab=arena\">比武</a>"
-        "</nav>");
+        "<p>每小时整点刷新；提前30秒全服预告地图。首个队长遇怪开战，击杀发配置奖励。</p>");
+    vm_mock_admin_append_tabs(&page, "worldboss");
 
     if (status[0] && message[0])
         vm_mock_admin_text_appendf(&page, "<p>%s: %s</p>", status, message);

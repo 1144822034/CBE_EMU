@@ -66,6 +66,12 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
             *reasonOut = "level-too-low";
         return false;
     }
+    if (!vm_net_mock_role_job_allows_weapon_category(role->job, newEquip->category))
+    {
+        if (reasonOut)
+            *reasonOut = "wrong-job-weapon";
+        return false;
+    }
 
     slot = newEquip->slot;
     oldItemId = role->equippedItemIds[slot];
@@ -4116,7 +4122,12 @@ enum
     VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED = 10,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED = 11,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE = 12,
-    VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT = 13
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT = 13,
+    /* Target poll delivers 10/13 {id,fname,name}; reply is 1/10/15.
+     * Evidence: JianghuOL.CBE HandleGuildBusinessDispatch jump table
+     * subtype 13 → invite confirm (0x0103C61E); subtype 15 → result tip. */
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE = 14,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE_RESULT = 15
 };
 
 typedef struct
@@ -4508,6 +4519,10 @@ typedef struct vm_mock_service_client_session
     bool friendInviteReplyActive;
     u32 friendInviteSourceClientId;
     u32 friendInviteSourceRoleId;
+    bool guildInviteReplyActive;
+    u32 guildInviteSourceClientId;
+    u32 guildInviteSourceRoleId;
+    u32 guildInviteGuildId;
     bool tradeInviteReplyActive;
     u32 tradeInviteSourceClientId;
     u32 tradeInviteSourceRoleId;
@@ -7336,6 +7351,10 @@ static const char *vm_mock_service_social_notice_name(u8 type)
         return "spar-invite";
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT:
         return "spar-result";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE:
+        return "guild-invite";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE_RESULT:
+        return "guild-invite-result";
     default:
         return "unknown";
     }
@@ -10090,6 +10109,10 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->onlineRoleTitle[0] = 0;
     session->onlineRoleTitleBadge[0] = 0;
     session->onlinePkPoints = 0;
+    session->onlineEqChenghaoId = 0;
+    session->onlineEqWingId = 0;
+    session->onlineEqMountId = 0;
+    session->onlineGuildName[0] = 0;
     session->onlineScene[0] = 0;
     session->onlineX = 0;
     session->onlineY = 0;
@@ -10133,6 +10156,10 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->friendInviteReplyActive = false;
     session->friendInviteSourceClientId = 0;
     session->friendInviteSourceRoleId = 0;
+    session->guildInviteReplyActive = false;
+    session->guildInviteSourceClientId = 0;
+    session->guildInviteSourceRoleId = 0;
+    session->guildInviteGuildId = 0;
     session->tradeInviteReplyActive = false;
     session->tradeInviteSourceClientId = 0;
     session->tradeInviteSourceRoleId = 0;
@@ -10537,6 +10564,22 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     session->onlineEqChenghaoId = role->equippedChenghaoId;
     session->onlineEqWingId = role->equippedWingId;
     session->onlineEqMountId = role->equippedMountId;
+    /*
+     * Peer nameplate「门派-xxx」reads 1/31/5.guild from onlineGuildName.
+     * Earlier captures only mirrored eq* — peers with wing/mount never got a
+     * guild field on the first 31/5.  Fill here (role_guild_info is GBK).
+     */
+    {
+        char guildName[VM_NET_MOCK_GUILD_NAME_SIZE];
+
+        memset(session->onlineGuildName, 0, sizeof(session->onlineGuildName));
+        memset(guildName, 0, sizeof(guildName));
+        (void)vm_net_mock_role_guild_info(role, guildName, sizeof(guildName));
+        if (guildName[0] != 0 &&
+            strcmp(guildName, "\xce\xde\xb0\xef\xc5\xc9") != 0)
+            snprintf(session->onlineGuildName, sizeof(session->onlineGuildName),
+                     "%s", guildName);
+    }
     session->onlineHp = hp;
     session->onlineHpMax = hpMax;
     session->onlineMp = mp;
@@ -12385,6 +12428,18 @@ static bool vm_mock_service_account_grant_role_item(const char *accountId,
     }
     existing = vm_net_mock_role_find_backpack_item(role, itemId, seq);
     after = existing ? existing->count : count;
+    /*
+     * Same scoped persist as admin money/wcoin/equip-wash. Capture alone is
+     * dropped by release_if_idle when the account is offline, so MySQL must
+     * own account_role_backpack before close.
+     */
+    if (!vm_net_mock_role_db_save_role("admin-item-grant", role->roleId))
+    {
+        if (messageOut)
+            *messageOut = "物品给予持久化失败";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
     vm_mock_service_account_capture(state);
     printf("[info][mock-service] account_item_grant user=%s role=%s id=%u item=%u count=%u seq=%u stack=%u/%u\n",
            accountId,

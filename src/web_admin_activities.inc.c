@@ -161,7 +161,7 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
         "<title>江湖OL 节日/跑环</title><style>"
         "body{font:14px system-ui;margin:28px;background:#f3f5f7;max-width:1100px}"
         ".card{background:#fff;padding:18px;border-radius:10px;margin-bottom:16px}"
-        ".tab{padding:8px 12px;margin:4px;background:#fff;border:1px solid #ddd;"
+        ".tabs{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 16px}.tab{padding:8px 12px;margin:4px;background:#fff;border:1px solid #ddd;"
         "text-decoration:none;color:#333;border-radius:6px;display:inline-block}"
         ".tab.on{background:#175cd3;color:#fff}"
         "input,select,textarea{padding:8px;width:100%%;box-sizing:border-box}"
@@ -171,13 +171,8 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
         "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px;cursor:pointer}"
         "h2{font-size:17px;margin:0 0 12px}"
         "</style></head><body><h1>节日使者 / 雁门关 / 跑环</h1>"
-        "<p>比武每回合+20活力；节日使者在场景内对话选「活力兑换」；雁门关打怪掉木料石材；跑环使接随机环任务。</p>"
-        "<nav>"
-        "<a class=\"tab\" href=\"/?tab=arena\">比武</a>"
-        "<a class=\"tab\" href=\"/?tab=worldboss\">世界BOSS</a>"
-        "<a class=\"tab\" href=\"/?tab=ladder\">天梯</a>"
-        "<a class=\"tab on\" href=\"/?tab=activities\">节日/跑环</a>"
-        "</nav>");
+        "<p>比武每回合+20活力；节日使者在场景内对话选「活力兑换」；雁门关打怪掉木料石材；跑环使接随机环任务。</p>");
+    vm_mock_admin_append_tabs(&page, "activities");
 
     if (status[0] && message[0])
         vm_mock_admin_text_appendf(&page, "<p><strong>%s</strong>: %s</p>", status,

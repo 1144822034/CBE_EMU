@@ -2258,6 +2258,84 @@ static bool vm_mock_service_friend_db_add_pair(
     return true;
 }
 
+static bool vm_mock_service_friend_db_mysql_delete_pair(
+    const char *ownerAccountId, u32 ownerRoleId,
+    const char *targetAccountId, u32 targetRoleId,
+    bool *removedOut)
+{
+    char owner_hex[129];
+    char target_hex[129];
+    char query[768];
+    size_t owner_len;
+    size_t target_len;
+
+    if (removedOut)
+        *removedOut = false;
+    if (ownerAccountId == NULL || ownerAccountId[0] == 0 || ownerRoleId == 0 ||
+        targetAccountId == NULL || targetAccountId[0] == 0 || targetRoleId == 0)
+    {
+        return false;
+    }
+    owner_len = vm_mock_mysql_bounded_strlen(ownerAccountId, 64);
+    target_len = vm_mock_mysql_bounded_strlen(targetAccountId, 64);
+    if (owner_len == 0 || owner_len >= 64 || target_len == 0 || target_len >= 64 ||
+        vm_mysql_hex_encode(ownerAccountId, owner_len, owner_hex, sizeof(owner_hex)) == 0 ||
+        vm_mysql_hex_encode(targetAccountId, target_len, target_hex, sizeof(target_hex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM friendships WHERE "
+             "(owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u AND "
+             "target_account_id=CAST(X'%s' AS CHAR) AND target_role_id=%u) OR "
+             "(owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u AND "
+             "target_account_id=CAST(X'%s' AS CHAR) AND target_role_id=%u)",
+             owner_hex, ownerRoleId, target_hex, targetRoleId,
+             target_hex, targetRoleId, owner_hex, ownerRoleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] friend_pair_delete_failed owner=%s/%u target=%s/%u error=%s\n",
+               ownerAccountId, ownerRoleId, targetAccountId, targetRoleId,
+               vm_mysql_last_error());
+        return false;
+    }
+    if (removedOut)
+        *removedOut = true;
+    vm_autotest_note("mock_friend_db_mysql_delete_pair owner=%u target=%u\n",
+                     ownerRoleId, targetRoleId);
+    return true;
+}
+
+static bool vm_mock_service_friend_db_remove_pair(
+    const char *ownerAccountId, u32 ownerRoleId, u32 targetRoleId,
+    bool *removedOut)
+{
+    vm_mock_service_friend_record record;
+
+    if (removedOut)
+        *removedOut = false;
+    if (ownerAccountId == NULL || ownerAccountId[0] == 0 || ownerRoleId == 0 ||
+        targetRoleId == 0)
+    {
+        return false;
+    }
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid && !vm_mock_service_mysql_authority_is_sealed())
+        return false;
+    memset(&record, 0, sizeof(record));
+    if (!vm_mock_service_friend_db_mysql_find_owner_target(
+            ownerAccountId, ownerRoleId, targetRoleId, &record) ||
+        record.targetAccountId[0] == 0)
+    {
+        /* Not friends — treat as idempotent success for the client ack path. */
+        return true;
+    }
+    return vm_mock_service_friend_db_mysql_delete_pair(
+        ownerAccountId, ownerRoleId,
+        record.targetAccountId, record.targetRoleId,
+        removedOut);
+}
+
 static vm_mock_service_account_record *vm_mock_service_account_find_record(const char *username)
 {
     char username_hex[sizeof(g_vm_mock_service_account_lookup_scratch.username) * 2 + 1];
@@ -6233,6 +6311,28 @@ static u32 vm_net_mock_role_default_weapon_for_job(u32 job)
     case 1:
     default:
         return 1001; /* starter sword */
+    }
+}
+
+/*
+ * Weapon equip.dsh categories are job-locked:
+ *   7 天机 / 8 幻剑 / 9 鬼道.
+ * Non-weapon categories (armor/ring/etc.) are unrestricted.
+ */
+static bool vm_net_mock_role_job_allows_weapon_category(u8 job, u8 category)
+{
+    if (category < 7u || category > 9u)
+        return true;
+    switch (job)
+    {
+    case 1:
+        return category == 7u;
+    case 2:
+        return category == 8u;
+    case 3:
+        return category == 9u;
+    default:
+        return false;
     }
 }
 
@@ -12041,6 +12141,12 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
     {
         if (reasonOut)
             *reasonOut = "level-too-low";
+        return false;
+    }
+    if (!vm_net_mock_role_job_allows_weapon_category(role->job, equip->category))
+    {
+        if (reasonOut)
+            *reasonOut = "wrong-job-weapon";
         return false;
     }
 

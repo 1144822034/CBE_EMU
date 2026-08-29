@@ -372,12 +372,14 @@ static bool vm_net_mock_append_cosmetics31_5_object(u8 *out, u32 outCap, u32 *po
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "eqMount", eqMount))
         return false;
-    if (guildName != NULL && guildName[0] != 0 &&
-        strcmp(guildName, "\xce\xde\xb0\xef\xc5\xc9") != 0)
-    {
-        if (!vm_net_mock_put_object_string(out, outCap, pos, "guild", guildName))
-            return false;
-    }
+    /* Always emit guild (may be empty) so leave/clear is distinguishable from omit. */
+    if (!vm_net_mock_put_object_string(
+            out, outCap, pos, "guild",
+            (guildName != NULL && guildName[0] != 0 &&
+             strcmp(guildName, "\xce\xde\xb0\xef\xc5\xc9") != 0)
+                ? guildName
+                : ""))
+        return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
 }
@@ -393,6 +395,10 @@ static bool vm_mock_service_session_enqueue_cosmetic_notice(
     u8 i;
     u8 freeIdx = 0xff;
     u8 oldestIdx = 0;
+    bool guildPresent =
+        guildName != NULL && guildName[0] != 0 &&
+        strcmp(guildName, "\xce\xde\xb0\xef\xc5\xc9") != 0;
+
     if (target == NULL || actorId == 0)
         return false;
     for (i = 0; i < VM_NET_MOCK_COSMETIC_NOTICE_MAX; ++i)
@@ -405,7 +411,7 @@ static bool vm_mock_service_session_enqueue_cosmetic_notice(
             target->cosmeticNotices[i].eqMount = eqMount;
             memset(target->cosmeticNotices[i].guildName, 0,
                    sizeof(target->cosmeticNotices[i].guildName));
-            if (guildName != NULL && guildName[0] != 0)
+            if (guildPresent)
                 snprintf(target->cosmeticNotices[i].guildName,
                          sizeof(target->cosmeticNotices[i].guildName), "%s",
                          guildName);
@@ -429,7 +435,7 @@ static bool vm_mock_service_session_enqueue_cosmetic_notice(
     target->cosmeticNotices[freeIdx].eqMount = eqMount;
     memset(target->cosmeticNotices[freeIdx].guildName, 0,
            sizeof(target->cosmeticNotices[freeIdx].guildName));
-    if (guildName != NULL && guildName[0] != 0)
+    if (guildPresent)
         snprintf(target->cosmeticNotices[freeIdx].guildName,
                  sizeof(target->cosmeticNotices[freeIdx].guildName), "%s",
                  guildName);
@@ -592,6 +598,8 @@ static void vm_mock_service_session_enqueue_peer_cosmetics(
     u32 eqChenghao;
     u32 eqWing;
     u32 eqMount;
+    char guildForNotice[VM_NET_MOCK_GUILD_NAME_SIZE];
+    vm_mock_service_client_session *mutableSource = NULL;
 
     if (observer == NULL || source == NULL)
         return;
@@ -602,6 +610,11 @@ static void vm_mock_service_session_enqueue_peer_cosmetics(
     eqChenghao = source->onlineEqChenghaoId;
     eqWing = source->onlineEqWingId;
     eqMount = source->onlineEqMountId;
+    memset(guildForNotice, 0, sizeof(guildForNotice));
+    if (source->onlineGuildName[0] != 0 &&
+        strcmp(source->onlineGuildName, "\xce\xde\xb0\xef\xc5\xc9") != 0)
+        snprintf(guildForNotice, sizeof(guildForNotice), "%s",
+                 source->onlineGuildName);
     /*
      * Presence can lag first visibility (baseline/moveinfo before capture), and
      * older captures refreshed eq* without onlineGuildName.  Empty first 31/5 is
@@ -609,15 +622,19 @@ static void vm_mock_service_session_enqueue_peer_cosmetics(
      * is missing (not only when all eq are zero).
      */
     {
-        bool guildMissing =
-            source->onlineGuildName[0] == 0 ||
-            strcmp(source->onlineGuildName, "\xce\xde\xb0\xef\xc5\xc9") == 0;
+        bool guildMissing = guildForNotice[0] == 0;
         bool eqMissing = !(eqChenghao || eqWing || eqMount);
 
         if ((eqMissing || guildMissing) && source->onlineRoleId != 0 &&
             g_vm_net_mock_role_db_valid)
         {
             u32 i;
+
+            mutableSource =
+                vm_mock_service_find_client_session(source->clientId);
+            /* source is already the live session pointer from scene seeds. */
+            if (mutableSource == NULL)
+                mutableSource = (vm_mock_service_client_session *)source;
 
             for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
             {
@@ -628,31 +645,27 @@ static void vm_mock_service_session_enqueue_peer_cosmetics(
                 eqChenghao = role->equippedChenghaoId;
                 eqWing = role->equippedWingId;
                 eqMount = role->equippedMountId;
-                {
-                    vm_mock_service_client_session *mutableSource =
-                        vm_mock_service_find_client_session(source->clientId);
-                    if (mutableSource != NULL)
-                    {
-                        vm_mock_service_session_sync_online_cosmetics(
-                            mutableSource, role);
-                        eqChenghao = mutableSource->onlineEqChenghaoId;
-                        eqWing = mutableSource->onlineEqWingId;
-                        eqMount = mutableSource->onlineEqMountId;
-                    }
-                }
+                vm_mock_service_session_sync_online_cosmetics(mutableSource,
+                                                              role);
+                eqChenghao = mutableSource->onlineEqChenghaoId;
+                eqWing = mutableSource->onlineEqWingId;
+                eqMount = mutableSource->onlineEqMountId;
+                memset(guildForNotice, 0, sizeof(guildForNotice));
+                if (mutableSource->onlineGuildName[0] != 0 &&
+                    strcmp(mutableSource->onlineGuildName,
+                           "\xce\xde\xb0\xef\xc5\xc9") != 0)
+                    snprintf(guildForNotice, sizeof(guildForNotice), "%s",
+                             mutableSource->onlineGuildName);
                 break;
             }
         }
     }
     /* Do not enqueue all-zero: Pixi ignores the first empty notice forever.
      * Guild nameplate alone is enough to send 31/5. */
-    if (!(eqChenghao || eqWing || eqMount ||
-          (source->onlineGuildName[0] != 0 &&
-           strcmp(source->onlineGuildName, "\xce\xde\xb0\xef\xc5\xc9") != 0)))
+    if (!(eqChenghao || eqWing || eqMount || guildForNotice[0] != 0))
         return;
     (void)vm_mock_service_session_enqueue_cosmetic_notice(
-        observer, actorId, eqChenghao, eqWing, eqMount,
-        source->onlineGuildName);
+        observer, actorId, eqChenghao, eqWing, eqMount, guildForNotice);
 }
 
 static void vm_mock_service_session_sync_online_cosmetics(
@@ -672,6 +685,24 @@ static void vm_mock_service_session_sync_online_cosmetics(
         strcmp(guildName, "\xce\xde\xb0\xef\xc5\xc9") != 0)
         snprintf(session->onlineGuildName, sizeof(session->onlineGuildName),
                  "%s", guildName);
+}
+
+/* After join/leave/create: refresh presence guild + notify same-scene peers. */
+static void vm_mock_service_session_publish_guild_cosmetics(
+    vm_mock_service_client_session *session,
+    const vm_net_mock_role_state *role)
+{
+    if (session == NULL)
+        return;
+    if (role != NULL)
+        vm_mock_service_session_sync_online_cosmetics(session, role);
+    if (!session->roleOnline || !session->onlinePresenceValid ||
+        session->onlineRoleId == 0 || session->onlineScene[0] == 0)
+        return;
+    vm_mock_service_broadcast_cosmetics31_5(
+        session->onlineRoleId, session->onlineScene,
+        session->onlineEqChenghaoId, session->onlineEqWingId,
+        session->onlineEqMountId, session->clientId);
 }
 
 static bool vm_net_mock_is_cosmetics31_request(const u8 *request, u32 requestLen,

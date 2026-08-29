@@ -72,20 +72,8 @@ static void vm_mock_admin_render_combat_page(char *response, size_t responseCap,
         "</style></head><body><main class=\"wrap\">"
         "<header><h1>战斗公式</h1>"
         "<p class=\"sub\">配置主属性物攻系数、普攻软护甲、命中/闪躲、暴击、抗性、技能加成、决斗浮动与 Boss 技能倍率。"
-        "保存后立即影响服务端结算；环境变量 <code>CBE_BATTLE_*</code> 仍可覆盖调试项。</p></header>"
-        "<nav class=\"tabs\">"
-        "<a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
-        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
-        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
-        "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab\" href=\"/?tab=chests\">宝箱奖励</a>"
-        "<a class=\"tab\" href=\"/?tab=enhance\">强化配置</a>"
-        "<a class=\"tab on\" href=\"/?tab=combat\">战斗公式</a>"
-        "<a class=\"tab\" href=\"/?tab=arena\">比武</a>"
-        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "</nav>");
+        "保存后立即影响服务端结算；环境变量 <code>CBE_BATTLE_*</code> 仍可覆盖调试项。</p></header>");
+    vm_mock_admin_append_tabs(&page, "combat");
 
     if (status[0] != 0 && message[0] != 0)
     {

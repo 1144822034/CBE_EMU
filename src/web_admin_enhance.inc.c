@@ -122,20 +122,8 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         "<h1>强化配置</h1>"
         "<p class=\"sub\">配置各部位 +4/+8/+12/+16 默认词条，以及洗练可随机的属性区间。"
         "未洗练装备显示默认档词条；洗练从属性池随机类型并在区间内取值。"
-        "保存后立即生效。</p></div></header>"
-        "<nav class=\"tabs\">"
-        "<a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
-        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
-        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
-        "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab\" href=\"/?tab=chests\">宝箱奖励</a>"
-        "<a class=\"tab on\" href=\"/?tab=enhance\">强化配置</a>"
-        "<a class=\"tab\" href=\"/?tab=combat\">战斗公式</a>"
-        "<a class=\"tab\" href=\"/?tab=arena\">比武</a>"
-        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
-        "</nav>");
+        "保存后立即生效。</p></div></header>");
+    vm_mock_admin_append_tabs(&page, "enhance");
 
     if (status[0] != 0 && message[0] != 0)
     {

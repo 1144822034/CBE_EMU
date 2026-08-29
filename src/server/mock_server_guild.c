@@ -863,8 +863,10 @@ static bool vm_net_mock_is_nearby_equip_view_request(const u8 *request, u32 requ
 static bool vm_net_mock_is_nearby_guild_invite_request(const u8 *request, u32 requestLen,
                                                         u32 *actorIdOut)
 {
+    /* fid is required by CBE sender, but treat presence as optional so a
+     * recognized 10/13 never falls through to unimplemented-notice. */
     return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 10, 13,
-                                                       "fid", false, 0, actorIdOut);
+                                                       NULL, false, 0, actorIdOut);
 }
 
 static bool vm_net_mock_is_nearby_trade_request(const u8 *request, u32 requestLen,
@@ -1204,9 +1206,132 @@ static u32 vm_net_mock_build_nearby_social_action_ack_response(
 static u32 vm_net_mock_build_nearby_guild_invite_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap)
 {
-    return vm_net_mock_build_nearby_social_action_ack_response(
-        request, requestLen, out, outCap, vm_net_mock_is_nearby_guild_invite_request,
-        "guild-invite", VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE, false);
+    vm_net_mock_scene_role_seed targetSeed;
+    vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
+    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *scene = vm_net_mock_current_scene_name();
+    const char *targetScope = "unresolved";
+    const char *reason = "ok";
+    vm_net_mock_guild_record guild;
+    vm_net_mock_guild_record targetMembership;
+    u32 actorId = 0;
+    u32 pos = 5;
+    u8 memberRank = 0;
+    bool queued = false;
+    bool targetFound = false;
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    memset(&guild, 0, sizeof(guild));
+    memset(&targetMembership, 0, sizeof(targetMembership));
+    /* Recognized 1/10/13 must never fall through to unimplemented-notice.
+     * Missing/offline targets still get empty-WT transport ack (sender tip). */
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_nearby_guild_invite_request(request, requestLen, &actorId))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+
+    if (vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed))
+    {
+        targetScope = "nearby";
+        targetFound = true;
+    }
+    else if (vm_net_mock_find_friend_role_seed_by_role_id(actorId, &targetSeed))
+    {
+        targetScope = "friend";
+        targetFound = true;
+    }
+    else if (vm_net_mock_find_online_role_seed_by_role_id(actorId, &targetSeed))
+    {
+        targetScope = "online-role";
+        targetFound = true;
+    }
+
+    if (!targetFound)
+    {
+        reason = "target-unresolved";
+    }
+    else if (sourceSession == NULL || sourceRole == NULL || targetSeed.session == NULL ||
+             sourceSession->clientId == targetSeed.session->clientId)
+    {
+        reason = targetSeed.session == NULL ? "target-offline" : "no-peer";
+    }
+    else if (!vm_net_mock_guild_find_role_membership(sourceRole->roleId, &guild,
+                                                      &memberRank) ||
+             guild.guildId == 0)
+    {
+        reason = "inviter-no-guild";
+    }
+    else if (memberRank == 0 || memberRank > 2)
+    {
+        reason = "inviter-rank";
+    }
+    else if (vm_net_mock_guild_find_membership_for_account(
+                 targetSeed.session->accountId,
+                 targetSeed.session->onlineRoleId
+                     ? targetSeed.session->onlineRoleId
+                     : targetSeed.actorId,
+                 &targetMembership, NULL) &&
+             targetMembership.guildId != 0)
+    {
+        reason = "target-has-guild";
+    }
+    else if (!vm_net_mock_guild_find_by_id(guild.guildId, &guild))
+    {
+        reason = "guild-missing";
+    }
+    else if (guild.memberCount >= guild.memberLimit)
+    {
+        reason = "guild-full";
+    }
+    else
+    {
+        queued = vm_mock_service_session_enqueue_social_notice(
+            targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE, 0,
+            sourceSession, sourceRole, sourceAccountId);
+        if (queued)
+        {
+            for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+            {
+                vm_mock_service_social_notice *entry =
+                    &targetSeed.session->socialNotices[i];
+                if (entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE &&
+                    entry->sourceClientId == sourceSession->clientId &&
+                    entry->sourceRoleId == sourceRole->roleId)
+                {
+                    entry->guildId = guild.guildId;
+                    entry->guildStatus = 3;
+                    snprintf(entry->guildName, sizeof(entry->guildName), "%s",
+                             guild.guildName);
+                    break;
+                }
+            }
+            reason = "queued";
+        }
+        else
+        {
+            reason = "queue-full-or-modal";
+        }
+    }
+
+    printf("[info][network] mock_nearby_guild_invite actor=%u scope=%s target=%s "
+           "scene=%s guild=%u rank=%u queued=%u reason=%s transport_ack=empty-wt "
+           "resp=%u evidence=JianghuOL.CBE:0x0101A3C8+0x0103C61E\n",
+           actorId,
+           targetScope,
+           targetSeed.roleName ? targetSeed.roleName : "-",
+           scene ? scene : "-",
+           guild.guildId,
+           memberRank,
+           queued ? 1u : 0u,
+           reason,
+           pos);
+    vm_autotest_note("mock_nearby_guild_invite actor=%u guild=%u queued=%u reason=%s "
+                     "response=empty-wt\n",
+                     actorId, guild.guildId, queued ? 1u : 0u, reason);
+    return pos;
 }
 
 static u32 vm_net_mock_build_nearby_trade_request_response(const u8 *request, u32 requestLen,
@@ -2462,6 +2587,75 @@ static u32 vm_net_mock_build_friend_add_response(const u8 *request, u32 requestL
     return pos;
 }
 
+static bool vm_net_mock_is_friend_delete_request(const u8 *request, u32 requestLen,
+                                                  u32 *actorIdOut)
+{
+    u32 offset = 4;
+    u32 actorId = 0;
+    vm_net_mock_request_object object;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen ||
+        object.major != 1 || object.kind != 10 || object.subtype != 9 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &actorId) ||
+        actorId == 0)
+    {
+        return false;
+    }
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    return true;
+}
+
+static u32 vm_net_mock_build_friend_delete_response(const u8 *request, u32 requestLen,
+                                                     u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
+    const char *ownerAccountId = g_vm_mock_service_active_account_id;
+    u32 actorId = 0;
+    u32 pos = 5;
+    bool removed = false;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_friend_delete_request(request, requestLen, &actorId))
+    {
+        return 0;
+    }
+    if (ownerRole != NULL && ownerAccountId != NULL && ownerAccountId[0] != 0 &&
+        actorId != ownerRole->roleId)
+    {
+        if (!vm_mock_service_friend_db_remove_pair(
+                ownerAccountId, ownerRole->roleId, actorId, &removed))
+        {
+            printf("[warn][network] mock_friend_delete actor=%u owner=%s/%u failed\n",
+                   actorId,
+                   ownerAccountId,
+                   ownerRole->roleId);
+        }
+    }
+
+    /*
+     * CBE 0x0101A43A builds 10/9 {id} the same way 10/3 is fire-and-forget:
+     * no dedicated response object; next 10/1 shows the pruned list.
+     */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+
+    printf("[info][network] mock_friend_delete actor=%u removed=%u owner=%s/%u resp=%u\n",
+           actorId,
+           removed ? 1u : 0u,
+           ownerAccountId ? ownerAccountId : "-",
+           ownerRole ? ownerRole->roleId : 0,
+           pos);
+    vm_autotest_note("mock_friend_delete actor=%u removed=%u response=empty-wt evidence=JianghuOL.CBE:0x0101A43A+menu-删除好友\n",
+                     actorId,
+                     removed ? 1u : 0u);
+    return pos;
+}
+
 static bool vm_net_mock_is_friend_invite_reply_request(const u8 *request, u32 requestLen,
                                                         u32 *sourceRoleIdOut, u8 *resultOut)
 {
@@ -2567,6 +2761,240 @@ static u32 vm_net_mock_build_friend_invite_reply_response(const u8 *request, u32
            pos);
     vm_autotest_note("mock_friend_invite_reply source_role=%u result=%u added=%u notify_source=%u response=1/1/14 evidence=JianghuOL.CBE:0x010114A4+name-restore\n",
                      sourceRoleId, result, added ? 1u : 0u, resultQueued ? 1u : 0u);
+    return pos;
+}
+
+static bool vm_mock_service_enqueue_guild_application_notice(
+    const vm_net_mock_guild_application_record *application,
+    const vm_net_mock_guild_record *guild,
+    u8 actionType,
+    const vm_net_mock_role_state *requester);
+
+static bool vm_net_mock_is_guild_invite_reply_request(const u8 *request, u32 requestLen,
+                                                       u32 *sourceRoleIdOut, u8 *resultOut)
+{
+    u32 offset = 4;
+    u32 sourceRoleId = 0;
+    u8 result = 0;
+    vm_net_mock_request_object object;
+
+    if (sourceRoleIdOut)
+        *sourceRoleIdOut = 0;
+    if (resultOut)
+        *resultOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 10 ||
+        object.subtype != 15 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id",
+                                          &sourceRoleId) ||
+        !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "result",
+                                          &result) ||
+        sourceRoleId == 0 || (result != 1 && result != 2))
+    {
+        return false;
+    }
+    if (sourceRoleIdOut)
+        *sourceRoleIdOut = sourceRoleId;
+    if (resultOut)
+        *resultOut = result;
+    return true;
+}
+
+static u8 vm_net_mock_apply_guild_invite_accept(
+    vm_mock_service_client_session *responderSession,
+    vm_net_mock_role_state *responderRole,
+    const char *responderAccountId,
+    u32 guildId,
+    vm_net_mock_guild_record *guildOut)
+{
+    vm_net_mock_guild_record guild;
+    vm_net_mock_guild_record existing;
+    char accountHex[129];
+    char nameHex[129];
+    char query[1536];
+    char tableAndWhere[512];
+    u32 memberCount = 0;
+    const char *roleName = NULL;
+
+    memset(&guild, 0, sizeof(guild));
+    memset(&existing, 0, sizeof(existing));
+    memset(accountHex, 0, sizeof(accountHex));
+    memset(nameHex, 0, sizeof(nameHex));
+    memset(query, 0, sizeof(query));
+    memset(tableAndWhere, 0, sizeof(tableAndWhere));
+    if (guildOut)
+        memset(guildOut, 0, sizeof(*guildOut));
+    if (responderSession == NULL || responderRole == NULL ||
+        responderAccountId == NULL || responderAccountId[0] == 0 || guildId == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_guild_find_by_id(guildId, &guild) || guild.guildId == 0)
+        return 3; /* disbanded / missing — maps near CBE tip codes */
+    if (vm_net_mock_guild_find_membership_for_account(responderAccountId,
+                                                       responderRole->roleId,
+                                                       &existing, NULL) &&
+        existing.guildId != 0)
+    {
+        return 4; /* already in a guild */
+    }
+    if (guild.memberCount >= guild.memberLimit)
+        return 2; /* full */
+    if (vm_mysql_hex_encode(responderAccountId,
+                            vm_mock_mysql_bounded_strlen(responderAccountId, 64),
+                            accountHex, sizeof(accountHex)) == 0)
+    {
+        return 0;
+    }
+    roleName = responderRole->name[0] ? responderRole->name :
+               (responderSession->onlineRoleName[0] ? responderSession->onlineRoleName :
+                "Player");
+    if (vm_mysql_hex_encode(roleName,
+                            vm_mock_mysql_bounded_strlen(roleName, 32),
+                            nameHex, sizeof(nameHex)) == 0)
+    {
+        return 0;
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        return 0;
+    snprintf(tableAndWhere, sizeof(tableAndWhere),
+             "guild_members WHERE guild_id=%u", guild.guildId);
+    if (!vm_net_mock_guild_count(tableAndWhere, &memberCount))
+    {
+        vm_mysql_exec("ROLLBACK");
+        return 0;
+    }
+    if (memberCount >= guild.memberLimit)
+    {
+        vm_mysql_exec("ROLLBACK");
+        return 2;
+    }
+    if (vm_net_mock_guild_find_membership_for_account(responderAccountId,
+                                                       responderRole->roleId,
+                                                       &existing, NULL) &&
+        existing.guildId != 0)
+    {
+        vm_mysql_exec("ROLLBACK");
+        return 4;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO guild_members(guild_id,account_id,role_id,role_name,"
+             "member_rank,member_title) VALUES (%u,CAST(X'%s' AS CHAR),%u,"
+             "CAST(X'%s' AS CHAR),3,'')",
+             guild.guildId, accountHex, responderRole->roleId, nameHex);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+    {
+        printf("[error][network] mock_guild_invite_accept_db_failed guild=%u "
+               "role=%u error=%s\n",
+               guild.guildId, responderRole->roleId, vm_mysql_last_error());
+        vm_mysql_exec("ROLLBACK");
+        return 0;
+    }
+    if (!vm_net_mock_guild_find_by_id(guild.guildId, &guild))
+        return 0;
+    if (guildOut)
+        *guildOut = guild;
+    return 1;
+}
+
+static u32 vm_net_mock_build_guild_invite_reply_response(const u8 *request, u32 requestLen,
+                                                          u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *responderSession = vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *sourceSession = NULL;
+    vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
+    const char *responderAccountId = g_vm_mock_service_active_account_id;
+    vm_net_mock_guild_record guild;
+    vm_net_mock_guild_application_record syntheticApp;
+    u32 sourceRoleId = 0;
+    u32 guildId = 0;
+    u32 pos = 5;
+    u8 result = 0;
+    u8 sourceResult = 2;
+    u8 acceptCode = 0;
+    bool resultQueued = false;
+    bool membershipQueued = false;
+
+    memset(&guild, 0, sizeof(guild));
+    memset(&syntheticApp, 0, sizeof(syntheticApp));
+    if (out == NULL || outCap < pos || responderSession == NULL || responderRole == NULL ||
+        !vm_net_mock_is_guild_invite_reply_request(request, requestLen, &sourceRoleId,
+                                                    &result) ||
+        !responderSession->guildInviteReplyActive ||
+        responderSession->guildInviteSourceRoleId != sourceRoleId)
+    {
+        return 0;
+    }
+    guildId = responderSession->guildInviteGuildId;
+    sourceSession = vm_mock_service_find_client_session(
+        responderSession->guildInviteSourceClientId);
+
+    if (result == 1)
+    {
+        acceptCode = vm_net_mock_apply_guild_invite_accept(
+            responderSession, responderRole, responderAccountId, guildId, &guild);
+        if (acceptCode == 1)
+        {
+            sourceResult = 1;
+            snprintf(syntheticApp.accountId, sizeof(syntheticApp.accountId), "%s",
+                     responderAccountId ? responderAccountId : "");
+            syntheticApp.roleId = responderRole->roleId;
+            snprintf(syntheticApp.roleName, sizeof(syntheticApp.roleName), "%s",
+                     responderRole->name[0] ? responderRole->name : "Player");
+            /* 10/36 membership update for the invitee (same path as apply-approve). */
+            membershipQueued = vm_mock_service_enqueue_guild_application_notice(
+                &syntheticApp, &guild, 1, responderRole);
+            /* Notice helper also publishes 31/5 when the invitee session is found.
+             * Invitee may still be online under responderSession even if notice
+             * dedupe skipped — refresh presence guild for nearby observers. */
+            vm_mock_service_session_publish_guild_cosmetics(responderSession,
+                                                            responderRole);
+        }
+        else
+        {
+            /* Accept failed (full/already-in/disbanded): treat as refuse for
+             * the inviter tip, keep empty-WT for the invitee. */
+            sourceResult = 2;
+            printf("[warn][network] mock_guild_invite_accept_failed source=%u "
+                   "target=%u guild=%u code=%u\n",
+                   sourceRoleId, responderRole->roleId, guildId, acceptCode);
+        }
+    }
+
+    if (sourceSession != NULL)
+    {
+        resultQueued = vm_mock_service_session_enqueue_social_notice(
+            sourceSession,
+            VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_INVITE_RESULT,
+            sourceResult,
+            responderSession,
+            responderRole,
+            responderAccountId);
+    }
+
+    responderSession->guildInviteReplyActive = false;
+    responderSession->guildInviteSourceClientId = 0;
+    responderSession->guildInviteSourceRoleId = 0;
+    responderSession->guildInviteGuildId = 0;
+
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_guild_invite_reply source=%08x/%u target=%08x/%u "
+           "result=%u accept=%u guild=%u notify_source=%u membership=%u resp=%u "
+           "evidence=JianghuOL.CBE:0x0103C4D6+0x0103C7EC\n",
+           sourceSession ? sourceSession->clientId : 0,
+           sourceRoleId,
+           responderSession->clientId,
+           responderRole->roleId,
+           result,
+           acceptCode,
+           guild.guildId ? guild.guildId : guildId,
+           resultQueued ? 1u : 0u,
+           membershipQueued ? 1u : 0u,
+           pos);
+    vm_autotest_note("mock_guild_invite_reply source_role=%u result=%u accept=%u "
+                     "notify_source=%u response=empty-wt\n",
+                     sourceRoleId, result, acceptCode, resultQueued ? 1u : 0u);
     return pos;
 }
 
@@ -3372,16 +3800,21 @@ static bool vm_net_mock_is_guild_detail_request(const u8 *request, u32 requestLe
 /* The guild-member screen reuses 10/22 for two different operations.  A
  * selected guild row sends id=guildId and expects the 10/23 detail object;
  * confirming "leave guild" sends id=actor+100 (the current role id) and
- * HandleBattleResultEvent consumes a same-subtype 10/22 {result}. */
+ * HandleBattleResultEvent consumes a same-subtype 10/22 {result}.
+ * Pixi 解散帮派 adds optional force:u8=1 so a leader can delete a populated
+ * guild; CBE leave remains id-only and still rejects that case. */
 static bool vm_net_mock_parse_guild_leave_request(const u8 *request, u32 requestLen,
-                                                   u32 *roleIdOut)
+                                                   u32 *roleIdOut, u8 *forceOut)
 {
     u32 offset = 4;
     u32 roleId = 0;
+    u8 force = 0;
     vm_net_mock_request_object object;
 
     if (roleIdOut)
         *roleIdOut = 0;
+    if (forceOut)
+        *forceOut = 0;
     if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
         offset != requestLen || object.major != 1 || object.kind != 10 ||
@@ -3392,8 +3825,12 @@ static bool vm_net_mock_parse_guild_leave_request(const u8 *request, u32 request
     {
         return false;
     }
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                           "force", &force);
     if (roleIdOut)
         *roleIdOut = roleId;
+    if (forceOut)
+        *forceOut = force == 1 ? 1 : 0;
     return true;
 }
 
@@ -3990,6 +4427,20 @@ static bool vm_mock_service_enqueue_guild_application_notice(
            target->clientId, application->roleId,
            vm_mock_service_social_notice_name(noticeType), guild->guildId,
            guild->guildName, slot->guildStatus);
+    if (actionType == 1)
+    {
+        u32 i;
+
+        for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            vm_net_mock_role_state *joined = &g_vm_net_mock_role_db.roles[i];
+
+            if (joined->roleId != application->roleId)
+                continue;
+            vm_mock_service_session_publish_guild_cosmetics(target, joined);
+            break;
+        }
+    }
     return true;
 }
 
@@ -4292,6 +4743,7 @@ static u32 vm_net_mock_build_guild_page_compat_response(const u8 *request, u32 r
 
 static u8 vm_net_mock_apply_guild_leave(u32 requestedRoleId,
                                          vm_net_mock_role_state *role,
+                                         u8 forceDisband,
                                          u32 *guildIdOut,
                                          u8 *memberRankOut,
                                          bool *disbandedOut)
@@ -4333,10 +4785,14 @@ static u8 vm_net_mock_apply_guild_leave(u32 requestedRoleId,
     if (!vm_net_mock_guild_count(tableAndWhere, &memberCount) || memberCount == 0)
         return 0;
 
-    /* No separate dissolve-guild action exists in this client.  Let the sole
-     * leader leave by deleting the guild (FK cascades members/applications),
-     * but reject leaving a populated guild until leadership is handed over. */
-    if (memberRank == 1 && memberCount != 1)
+    /*
+     * CBE leave (force=0): sole leader may leave by deleting the guild; a
+     * populated guild requires hand-over first.  Pixi 解散 (force=1): leader
+     * may delete the guild regardless of remaining members.
+     */
+    if (memberRank == 1 && memberCount != 1 && forceDisband != 1)
+        return 0;
+    if (forceDisband == 1 && memberRank != 1)
         return 0;
 
     if (!vm_mysql_exec("START TRANSACTION"))
@@ -4352,6 +4808,19 @@ static u8 vm_net_mock_apply_guild_leave(u32 requestedRoleId,
 
     if (memberRank == 1)
     {
+        if (forceDisband == 1 || memberCount == 1)
+        {
+            snprintf(query, sizeof(query),
+                     "DELETE FROM guild_applications WHERE guild_id=%u",
+                     guild.guildId);
+            if (!vm_mysql_exec(query))
+                goto failed;
+            snprintf(query, sizeof(query),
+                     "DELETE FROM guild_members WHERE guild_id=%u",
+                     guild.guildId);
+            if (!vm_mysql_exec(query))
+                goto failed;
+        }
         snprintf(query, sizeof(query),
                  "DELETE FROM guilds WHERE guild_id=%u "
                  "AND leader_account_id=CAST(X'%s' AS CHAR) AND leader_role_id=%u",
@@ -4390,9 +4859,9 @@ static u8 vm_net_mock_apply_guild_leave(u32 requestedRoleId,
 
 failed:
     printf("[error][network] mock_guild_leave_db_failed guild=%u role=%u rank=%u "
-           "members=%u error=%s\n",
+           "members=%u force=%u error=%s\n",
            guild.guildId, role ? role->roleId : 0, memberRank,
-           memberCount, vm_mysql_last_error());
+           memberCount, forceDisband, vm_mysql_last_error());
     if (transactionStarted)
         vm_mysql_exec("ROLLBACK");
     return 0;
@@ -4407,17 +4876,25 @@ static u32 vm_net_mock_build_guild_leave_response(const u8 *request, u32 request
     u32 objectStart = 0;
     u32 pos = 5;
     u8 memberRank = 0;
+    u8 force = 0;
     u8 result = 0;
     bool disbanded = false;
 
     if (out == NULL || outCap < pos ||
-        !vm_net_mock_parse_guild_leave_request(request, requestLen, &requestedRoleId) ||
+        !vm_net_mock_parse_guild_leave_request(request, requestLen, &requestedRoleId,
+                                                &force) ||
         role == NULL || requestedRoleId != role->roleId)
     {
         return 0;
     }
-    result = vm_net_mock_apply_guild_leave(requestedRoleId, role, &guildId,
+    result = vm_net_mock_apply_guild_leave(requestedRoleId, role, force, &guildId,
                                             &memberRank, &disbanded);
+    if (result == 1)
+    {
+        vm_mock_service_client_session *session =
+            vm_mock_service_get_active_client_session();
+        vm_mock_service_session_publish_guild_cosmetics(session, role);
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 22, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
     {
@@ -4426,10 +4903,10 @@ static u32 vm_net_mock_build_guild_leave_response(const u8 *request, u32 request
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     printf("[info][network] mock_guild_leave role=%u requested=%u guild=%u rank=%u "
-           "result=%u disbanded=%u response=10/22 resp=%u "
+           "force=%u result=%u disbanded=%u response=10/22 resp=%u "
            "evidence=JianghuOL.CBE:0x0103D2FE+0x0103D5F2+0x0103DABC\n",
            role ? role->roleId : 0, requestedRoleId, guildId, memberRank,
-           result, disbanded ? 1u : 0u, pos);
+           force, result, disbanded ? 1u : 0u, pos);
     return pos;
 }
 
@@ -4802,6 +5279,8 @@ static u32 vm_net_mock_build_guild_create_commit_response(const u8 *request, u32
     {
         result = 1;
         g_vm_mock_service_active_account->selectedGuildId = guildId;
+        vm_mock_service_session_publish_guild_cosmetics(
+            vm_mock_service_get_active_client_session(), role);
     }
     if (g_vm_mock_service_active_account != NULL)
     {
