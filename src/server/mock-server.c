@@ -137,7 +137,8 @@ static void vm_mock_activities_vitality_wire(vm_net_mock_role_state *role,
                                              u32 *energyOut, u32 *energyMaxOut);
 static void vm_mock_activities_on_pve_victory(const char *scene, u32 enemyId,
                                               bool isBoss);
-static void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role, u8 victimJob,
+static void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
+                                           const char *accountId, u8 victimJob,
                                            u32 victimLevel);
 static void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss);
 static void vm_mock_activities_on_npc_talk(const char *npcName);

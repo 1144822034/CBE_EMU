@@ -24,6 +24,52 @@ export type RingQuestPanelAction = "accept" | "submit" | "claim" | "close";
 
 const PANEL_X = 8;
 const PANEL_Y = 36;
+const DESC_CHARS_PER_LINE = 14;
+
+/** Mirror server VM_MOCK_RING_TYPE_* */
+const RING_TYPE_VISIT = 1;
+const RING_TYPE_KILL_MOB = 2;
+const RING_TYPE_KILL_BOSS = 3;
+const RING_TYPE_KILL_PLAYER = 4;
+const RING_TYPE_COLLECT = 5;
+const RING_TYPE_SUBMIT_MED = 6;
+const RING_MED_PER_GROUP = 10;
+
+function wrapText(text: string, maxChars: number): string[] {
+  if (!text) return [];
+  const lines: string[] = [];
+  let cur = "";
+  for (const ch of text) {
+    cur += ch;
+    if (cur.length >= maxChars) {
+      lines.push(cur);
+      cur = "";
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function progressLine(st: RingStatus): string {
+  const target = st.targetCount || 1;
+  switch (st.taskType) {
+    case RING_TYPE_VISIT:
+      return st.progress >= 1 ? "进度：已对话" : "进度：未对话(找NPC对话)";
+    case RING_TYPE_KILL_MOB:
+    case RING_TYPE_KILL_BOSS:
+      return `进度：${st.progress}/${target}场`;
+    case RING_TYPE_KILL_PLAYER:
+      return `进度：${st.progress}/${target}名`;
+    case RING_TYPE_COLLECT:
+      return `进度：需${target}个(背包提交)`;
+    case RING_TYPE_SUBMIT_MED: {
+      const need = target * RING_MED_PER_GROUP;
+      return `需交：${target}组(每组${RING_MED_PER_GROUP}个,共${need}个)`;
+    }
+    default:
+      return `进度：${st.progress}/${target}`;
+  }
+}
 
 export class RingQuestPanel extends Container {
   private box = new Graphics();
@@ -108,22 +154,28 @@ export class RingQuestPanel extends Container {
     this.labels.push(title);
 
     const st = this.status;
-    const lines = [
+    const lines: string[] = [
       `今日：${st?.ringCount ?? 0}/${st?.dailyMax ?? 20}环`,
       st?.bonusClaimed ? "满环奖励：已领" : "满环奖励：未领(20环1个5玄)",
-      st?.taskActive
-        ? `任务：${st.desc || "进行中"}`
-        : st && st.ringCount >= st.dailyMax
-          ? "今日环数已满"
-          : "左键接取随机环任务",
-      st?.taskActive
-        ? `进度：${st.progress}/${st.targetCount || 1}`
-        : "奖励：经验/金币/低概率钥匙",
     ];
+    if (st?.taskActive) {
+      const desc = st.desc || "进行中";
+      const wrapped = wrapText(`任务：${desc}`, DESC_CHARS_PER_LINE);
+      lines.push(...(wrapped.length ? wrapped : ["任务：进行中"]));
+      /* 进度与任务描述隔开 3 行，避免长描述视觉重叠 */
+      lines.push("", "", "");
+      lines.push(progressLine(st));
+    } else if (st && st.ringCount >= st.dailyMax) {
+      lines.push("今日环数已满");
+      lines.push("奖励：经验/金币/低概率钥匙");
+    } else {
+      lines.push("左键接取随机环任务");
+      lines.push("奖励：经验/金币/低概率钥匙");
+    }
     let y = PANEL_Y + 38;
     for (const line of lines) {
       this.addLabel(line, PANEL_X + 14, y);
-      y += 17;
+      y += 15;
     }
     drawPanelTipOverlay(this, this.toast);
   }

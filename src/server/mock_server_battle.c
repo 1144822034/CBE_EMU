@@ -9105,8 +9105,10 @@ static bool vm_mock_service_duel_resolve_committed_round(
                                   : (u8)(duel->jobIndex[loserSeat] + 1u);
                     u32 victimLevel = loserRole ? loserRole->level : 1u;
 
-                    vm_mock_activities_on_pvp_kill(winnerRole, victimJob,
-                                                   victimLevel);
+                    if (winnerSession != NULL && winnerSession->accountId[0] != 0)
+                        vm_mock_activities_on_pvp_kill(
+                            winnerRole, winnerSession->accountId, victimJob,
+                            victimLevel);
                     break;
                 }
             }

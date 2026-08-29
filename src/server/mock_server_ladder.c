@@ -43,11 +43,72 @@ static bool g_vm_mock_ladder_config_loaded = false;
 static vm_mock_ladder_reward g_vm_mock_ladder_rewards[VM_MOCK_LADDER_REWARD_MAX];
 static u32 g_vm_mock_ladder_reward_count = 0;
 
-static bool g_vm_mock_ladder_battle_armed = false;
-static u16 g_vm_mock_ladder_battle_floor = 1;
-static u32 g_vm_mock_ladder_battle_enemy_ids[VM_MOCK_LADDER_JOB_COUNT];
-static u32 g_vm_mock_ladder_battle_hp[VM_MOCK_LADDER_JOB_COUNT];
-static u32 g_vm_mock_ladder_battle_mp[VM_MOCK_LADDER_JOB_COUNT];
+/*
+ * Per-role ladder arming.  Process-global armed/floor was cleared by ANY
+ * client's battle end (death or victory), so concurrent players often wiped a
+ * climber's settle before note_victory — best_floor never advanced.
+ */
+enum { VM_MOCK_LADDER_ACTIVE_MAX = 32 };
+
+typedef struct
+{
+    u32 roleId;
+    u16 floor;
+    u8 armed;
+    u32 enemyIds[VM_MOCK_LADDER_JOB_COUNT];
+    u32 hp[VM_MOCK_LADDER_JOB_COUNT];
+    u32 mp[VM_MOCK_LADDER_JOB_COUNT];
+} vm_mock_ladder_battle_slot;
+
+static vm_mock_ladder_battle_slot
+    g_vm_mock_ladder_battles[VM_MOCK_LADDER_ACTIVE_MAX];
+
+static vm_mock_ladder_battle_slot *vm_mock_ladder_battle_find(u32 roleId)
+{
+    u32 i;
+
+    if (roleId == 0)
+        return NULL;
+    for (i = 0; i < VM_MOCK_LADDER_ACTIVE_MAX; ++i)
+    {
+        if (g_vm_mock_ladder_battles[i].armed &&
+            g_vm_mock_ladder_battles[i].roleId == roleId)
+            return &g_vm_mock_ladder_battles[i];
+    }
+    return NULL;
+}
+
+static vm_mock_ladder_battle_slot *vm_mock_ladder_battle_alloc(u32 roleId)
+{
+    u32 i;
+    vm_mock_ladder_battle_slot *slot = NULL;
+
+    if (roleId == 0)
+        return NULL;
+    slot = vm_mock_ladder_battle_find(roleId);
+    if (slot != NULL)
+        return slot;
+    for (i = 0; i < VM_MOCK_LADDER_ACTIVE_MAX; ++i)
+    {
+        if (!g_vm_mock_ladder_battles[i].armed)
+        {
+            memset(&g_vm_mock_ladder_battles[i], 0,
+                   sizeof(g_vm_mock_ladder_battles[i]));
+            g_vm_mock_ladder_battles[i].roleId = roleId;
+            return &g_vm_mock_ladder_battles[i];
+        }
+    }
+    return NULL;
+}
+
+static vm_mock_ladder_battle_slot *vm_mock_ladder_battle_active_slot(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (role == NULL)
+        return NULL;
+    return vm_mock_ladder_battle_find(role->roleId);
+}
 
 static bool vm_mock_ladder_ensure_tables(void)
 {
@@ -367,7 +428,7 @@ static void vm_mock_ladder_compute_floor_stats(u16 floor, u32 *hpOut, u32 *mpOut
 
 static u32 vm_net_mock_build_ladder_battle_start_info_blob(
     u8 *out, u32 outCap, u32 roleId, u32 roleHp, u32 roleMaxHp,
-    u32 roleMp, u32 roleMaxMp)
+    u32 roleMp, u32 roleMaxMp, const vm_mock_ladder_battle_slot *slot)
 {
     u32 pos = 0;
     static const char *jobNames[3] = {
@@ -378,13 +439,15 @@ static u32 vm_net_mock_build_ladder_battle_start_info_blob(
     u8 sexGroup = 1;
     u8 jobIndex = 0;
 
+    if (slot == NULL)
+        return 0;
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, VM_MOCK_LADDER_JOB_COUNT))
         return 0;
     for (u8 i = 0; i < VM_MOCK_LADDER_JOB_COUNT; ++i)
     {
-        u32 enemyId = g_vm_mock_ladder_battle_enemy_ids[i];
-        u32 hp = g_vm_mock_ladder_battle_hp[i];
-        u32 mp = g_vm_mock_ladder_battle_mp[i];
+        u32 enemyId = slot->enemyIds[i];
+        u32 hp = slot->hp[i];
+        u32 mp = slot->mp[i];
         jobIndex = i;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, enemyId) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, hp) ||
@@ -406,7 +469,8 @@ static u32 vm_net_mock_build_ladder_battle_start_info_blob(
     return pos;
 }
 
-static u32 vm_net_mock_build_ladder_battle_response(u8 *out, u32 outCap)
+static u32 vm_net_mock_build_ladder_battle_response(
+    u8 *out, u32 outCap, const vm_mock_ladder_battle_slot *slot)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleHpDefault = VM_NET_MOCK_ROLE_DEFAULT_HP;
@@ -423,6 +487,8 @@ static u32 vm_net_mock_build_ladder_battle_response(u8 *out, u32 outCap)
     u32 pos = 5;
     u32 objectStart = 0;
 
+    if (slot == NULL || !slot->armed)
+        return 0;
     vm_net_mock_role_default_vitals(role, &roleHpDefault, &roleMaxHpDefault,
                                     &roleMpDefault, &roleMaxMpDefault);
     roleHp = role ? role->hp : roleHpDefault;
@@ -439,7 +505,7 @@ static u32 vm_net_mock_build_ladder_battle_response(u8 *out, u32 outCap)
         roleMp = roleMaxMp;
     battleInfoLen = vm_net_mock_build_ladder_battle_start_info_blob(
         battleInfo, sizeof(battleInfo), roleId, roleHp, roleMaxHp, roleMp,
-        roleMaxMp);
+        roleMaxMp, slot);
     if (battleInfoLen == 0)
         return 0;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 10,
@@ -451,19 +517,16 @@ static u32 vm_net_mock_build_ladder_battle_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     vm_net_mock_battle_arm_subtype10_multi_pve_start(
-        roleId, roleHp, roleMaxHp, roleMp, roleMaxMp,
-        g_vm_mock_ladder_battle_enemy_ids[0], VM_MOCK_LADDER_JOB_COUNT,
-        g_vm_mock_ladder_battle_hp, g_vm_mock_ladder_battle_enemy_ids);
+        roleId, roleHp, roleMaxHp, roleMp, roleMaxMp, slot->enemyIds[0],
+        VM_MOCK_LADDER_JOB_COUNT, slot->hp, slot->enemyIds);
     {
         static const u8 ladderJobs[3] = {0, 1, 2}; /* 天机/幻剑/鬼道 */
         vm_net_mock_battle_set_enemy_job_slots(ladderJobs, VM_MOCK_LADDER_JOB_COUNT);
     }
-    printf("[info][mock-service] ladder_battle_start floor=%u enemy=%u/%u/%u "
-           "resp=%u\n",
-           (u32)g_vm_mock_ladder_battle_floor,
-           g_vm_mock_ladder_battle_enemy_ids[0],
-           g_vm_mock_ladder_battle_enemy_ids[1],
-           g_vm_mock_ladder_battle_enemy_ids[2], pos);
+    printf("[info][mock-service] ladder_battle_start role=%u floor=%u "
+           "enemy=%u/%u/%u resp=%u\n",
+           roleId, (u32)slot->floor, slot->enemyIds[0], slot->enemyIds[1],
+           slot->enemyIds[2], pos);
     return pos;
 }
 
@@ -529,10 +592,13 @@ static u32 vm_net_mock_build_ladder_start_response(u8 *out, u32 outCap)
     u32 pos = 5;
     u32 objectStart = 0;
     u8 result = 0;
+    vm_mock_ladder_battle_slot *slot = NULL;
     static const char tipDisabledGbk[] =
         "\xcc\xec\xcc\xdd\xcc\xf4\xd5\xbd\xce\xb4\xbf\xaa\xc6\xf4"; /* 天梯挑战未开启 */
     static const char tipDailyGbk[] =
         "\xbd\xf1\xc8\xd5\xcc\xec\xcc\xdd\xb4\xce\xca\xfd\xd2\xd1\xd3\xc3\xcd\xea"; /* 今日天梯次数已用完 */
+    static const char tipBusyGbk[] =
+        "\xcc\xec\xcc\xdd\xc3\xbb\xd3\xd0\xbf\xd5\xcf\xd0"; /* 天梯没有空闲 */
     const char *tip = tipDisabledGbk;
 
     vm_mock_ladder_load_config(false);
@@ -549,6 +615,10 @@ static u32 vm_net_mock_build_ladder_start_response(u8 *out, u32 outCap)
     {
         tip = tipDailyGbk;
     }
+    else if ((slot = vm_mock_ladder_battle_alloc(role->roleId)) == NULL)
+    {
+        tip = tipBusyGbk;
+    }
     else if (!vm_mock_ladder_try_consume_daily(role))
     {
         tip = tipDailyGbk;
@@ -557,21 +627,18 @@ static u32 vm_net_mock_build_ladder_start_response(u8 *out, u32 outCap)
     {
         best = vm_mock_ladder_role_best_floor(role);
         floor = (u16)(best + 1u);
-        g_vm_mock_ladder_battle_floor = floor;
-        g_vm_mock_ladder_battle_enemy_ids[0] =
-            g_vm_mock_ladder_config.enemyIdTianji;
-        g_vm_mock_ladder_battle_enemy_ids[1] =
-            g_vm_mock_ladder_config.enemyIdHuanjian;
-        g_vm_mock_ladder_battle_enemy_ids[2] =
-            g_vm_mock_ladder_config.enemyIdGuidao;
+        slot->floor = floor;
+        slot->enemyIds[0] = g_vm_mock_ladder_config.enemyIdTianji;
+        slot->enemyIds[1] = g_vm_mock_ladder_config.enemyIdHuanjian;
+        slot->enemyIds[2] = g_vm_mock_ladder_config.enemyIdGuidao;
         vm_mock_ladder_compute_floor_stats(floor, &hp, &mp);
         for (u8 i = 0; i < VM_MOCK_LADDER_JOB_COUNT; ++i)
         {
-            g_vm_mock_ladder_battle_hp[i] = hp;
-            g_vm_mock_ladder_battle_mp[i] = mp;
+            slot->hp[i] = hp;
+            slot->mp[i] = mp;
         }
-        g_vm_mock_ladder_battle_armed = true;
-        return vm_net_mock_build_ladder_battle_response(out, outCap);
+        slot->armed = 1;
+        return vm_net_mock_build_ladder_battle_response(out, outCap, slot);
     }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_LADDER_WT_KIND,
                                      VM_MOCK_LADDER_WT_START, &objectStart) ||
@@ -602,54 +669,96 @@ static u32 vm_net_mock_build_ladder_protocol_response(const u8 *request,
 
 bool vm_mock_ladder_battle_is_active(void)
 {
-    return g_vm_mock_ladder_battle_armed;
+    return vm_mock_ladder_battle_active_slot() != NULL;
 }
 
 u16 vm_mock_ladder_battle_floor(void)
 {
-    return g_vm_mock_ladder_battle_floor;
+    vm_mock_ladder_battle_slot *slot = vm_mock_ladder_battle_active_slot();
+
+    return slot != NULL ? slot->floor : 1;
 }
 
 u32 vm_mock_ladder_damage_scale_percent(void)
 {
-    u32 f = g_vm_mock_ladder_battle_floor > 0 ? (u32)g_vm_mock_ladder_battle_floor : 1u;
-    u32 scale = g_vm_mock_ladder_config.damageScalePerFloor * (f - 1u);
+    vm_mock_ladder_battle_slot *slot = vm_mock_ladder_battle_active_slot();
+    u32 f = 1u;
+    u32 scale = 0;
+
+    if (slot != NULL && slot->floor > 0)
+        f = (u32)slot->floor;
+    scale = g_vm_mock_ladder_config.damageScalePerFloor * (f - 1u);
     if (scale > 500u)
         scale = 500u;
     return 100u + scale;
 }
 
+static bool vm_mock_ladder_persist_best_floor(vm_net_mock_role_state *role,
+                                              u16 floor)
+{
+    char accountHex[160];
+    char query[640];
+    u32 dayYmd = vm_mock_ladder_day_ymd();
+    bool okDaily = false;
+    bool okProgress = false;
+
+    if (role == NULL || floor == 0 || dayYmd == 0 ||
+        !vm_mock_ladder_account_hex(accountHex, sizeof(accountHex)))
+        return false;
+    /*
+     * UPSERT: UPDATE-only used to silently no-op if the daily row vanished
+     * (day rollover mid-fight / consume failed to insert). Progress table is
+     * lifetime mirror for ops; climb authority for nextFloor stays daily.
+     */
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_ladder_daily "
+             "(account_id,role_id,day_ymd,attempt_count,best_floor) VALUES "
+             "(UNHEX('%s'),%u,%u,0,%u) "
+             "ON DUPLICATE KEY UPDATE "
+             "best_floor=GREATEST(best_floor,VALUES(best_floor))",
+             accountHex, role->roleId, dayYmd, (u32)floor);
+    okDaily = vm_mysql_exec(query);
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_ladder_progress "
+             "(account_id,role_id,best_floor) VALUES "
+             "(UNHEX('%s'),%u,%u) "
+             "ON DUPLICATE KEY UPDATE "
+             "best_floor=GREATEST(best_floor,VALUES(best_floor))",
+             accountHex, role->roleId, (u32)floor);
+    okProgress = vm_mysql_exec(query);
+    if (!okDaily)
+        printf("[warn][mock-service] ladder_best_floor_daily_fail role=%u "
+               "floor=%u\n",
+               role->roleId, (u32)floor);
+    return okDaily || okProgress;
+}
+
 void vm_mock_ladder_on_battle_end(bool victory)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u16 floor = g_vm_mock_ladder_battle_floor;
+    vm_mock_ladder_battle_slot *slot = NULL;
+    u16 floor = 0;
     u32 i;
 
-    if (!g_vm_mock_ladder_battle_armed)
+    /*
+     * Only the role that armed the ladder may clear/settle.  Other clients'
+     * death/victory must not touch this climber's slot.
+     */
+    if (role == NULL)
         return;
-    g_vm_mock_ladder_battle_armed = false;
-    if (!victory || role == NULL)
+    slot = vm_mock_ladder_battle_find(role->roleId);
+    if (slot == NULL || !slot->armed)
+        return;
+    floor = slot->floor;
+    slot->armed = 0;
+    if (!victory)
     {
-        printf("[info][mock-service] ladder_battle_end victory=%u floor=%u\n",
-               victory ? 1u : 0u, (u32)floor);
+        printf("[info][mock-service] ladder_battle_end victory=0 role=%u "
+               "floor=%u\n",
+               role->roleId, (u32)floor);
         return;
     }
-    if (floor > vm_mock_ladder_role_best_floor(role))
-    {
-        char accountHex[160];
-        char query[512];
-        u32 dayYmd = vm_mock_ladder_day_ymd();
-
-        if (dayYmd != 0 &&
-            vm_mock_ladder_account_hex(accountHex, sizeof(accountHex)))
-        {
-            snprintf(query, sizeof(query),
-                     "UPDATE server_ladder_daily SET best_floor=GREATEST(best_floor,%u) "
-                     "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u",
-                     (u32)floor, accountHex, role->roleId, dayYmd);
-            (void)vm_mysql_exec(query);
-        }
-    }
+    (void)vm_mock_ladder_persist_best_floor(role, floor);
     for (i = 0; i < g_vm_mock_ladder_reward_count; ++i)
     {
         const vm_mock_ladder_reward *rw = &g_vm_mock_ladder_rewards[i];
@@ -670,8 +779,9 @@ void vm_mock_ladder_on_battle_end(bool victory)
                 "ladder-milestone-item", NULL, 0);
     }
     vm_net_mock_role_db_save("ladder-victory");
-    printf("[info][mock-service] ladder_victory role=%u floor=%u\n",
-           role->roleId, (u32)floor);
+    printf("[info][mock-service] ladder_victory role=%u floor=%u best=%u\n",
+           role->roleId, (u32)floor,
+           (u32)vm_mock_ladder_role_best_floor(role));
 }
 
 bool vm_mock_ladder_admin_save_config(

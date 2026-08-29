@@ -28,7 +28,9 @@ enum
     VM_MOCK_RING_TYPE_COLLECT = 5,
     VM_MOCK_RING_TYPE_SUBMIT_MED = 6,
     VM_MOCK_RING_TYPE_SUBMIT_EQUIP = 7,
-    VM_MOCK_RING_TYPE_COUNT = 7
+    VM_MOCK_RING_TYPE_COUNT = 7,
+    /* NPC 药商一次购买步长/一组数量（与常见江湖「一组10个」一致） */
+    VM_MOCK_RING_MED_PER_GROUP = 10
 };
 
 /* GBK defaults: 节日使者 / 关隘使者 / 跑环使 */
@@ -106,7 +108,7 @@ typedef struct
     u32 targetCount;
     u32 progress;
     char targetNpc[16];
-    char desc[128];
+    char desc[160];
     u8 active;
 } vm_mock_ring_runtime;
 
@@ -147,6 +149,14 @@ static bool vm_mock_activities_account_hex(char *hexOut, size_t hexCap)
 {
     const char *accountId = g_vm_mock_service_active_account_id;
 
+    if (accountId == NULL || accountId[0] == 0 || hexOut == NULL || hexCap == 0)
+        return false;
+    return vm_mysql_hex_encode(accountId, strlen(accountId), hexOut, hexCap) != 0;
+}
+
+static bool vm_mock_activities_account_hex_of(const char *accountId, char *hexOut,
+                                              size_t hexCap)
+{
     if (accountId == NULL || accountId[0] == 0 || hexOut == NULL || hexCap == 0)
         return false;
     return vm_mysql_hex_encode(accountId, strlen(accountId), hexOut, hexCap) != 0;
@@ -242,8 +252,8 @@ static bool vm_mock_activities_ensure_tables(void)
             "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "scene_keyword VARBINARY(32) NOT NULL DEFAULT '',"
             "npc_keyword VARBINARY(32) NOT NULL DEFAULT '',"
-            "wood_item_id INT UNSIGNED NOT NULL DEFAULT 850,"
-            "stone_item_id INT UNSIGNED NOT NULL DEFAULT 851,"
+            "wood_item_id INT UNSIGNED NOT NULL DEFAULT 3,"
+            "stone_item_id INT UNSIGNED NOT NULL DEFAULT 5,"
             "wood_drop_min TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "wood_drop_max TINYINT UNSIGNED NOT NULL DEFAULT 3,"
             "stone_drop_min TINYINT UNSIGNED NOT NULL DEFAULT 1,"
@@ -313,7 +323,12 @@ static void vm_mock_activities_seed_defaults(void)
         "(3,200,907,1,X'C6" "DF" "BC" "B6" "D0" "FE" "BE" "A7',3,1)");
     (void)vm_mysql_exec(
         "INSERT IGNORE INTO server_yanmen_config(id,enabled,scene_keyword,npc_keyword,"
-        "wood_item_id,stone_item_id) VALUES(1,1,X'" "D1E3" "C3C5" "B9D8" "',X'" "B9D8" "B0AC" "CAB9" "D5DF" "',850,851)");
+        "wood_item_id,stone_item_id) VALUES(1,1,X'" "D1E3" "C3C5" "B9D8" "',X'" "B9D8" "B0AC" "CAB9" "D5DF" "',3,5)");
+    /* 旧默认 850/851 不在 item.dsh，迁移到 3木材 / 5石料 */
+    (void)vm_mysql_exec(
+        "UPDATE server_yanmen_config SET wood_item_id=3 WHERE id=1 AND wood_item_id=850");
+    (void)vm_mysql_exec(
+        "UPDATE server_yanmen_config SET stone_item_id=5 WHERE id=1 AND stone_item_id=851");
     (void)vm_mysql_exec(
         "INSERT IGNORE INTO server_yanmen_exchange "
         "(exchange_id,wood_cost,stone_cost,item_id,item_count,label,sort_order,enabled) VALUES "
@@ -488,8 +503,8 @@ static void vm_mock_yanmen_load_config(bool force)
     vm_mock_activities_seed_defaults();
     memset(&g_vm_mock_yanmen_config, 0, sizeof(g_vm_mock_yanmen_config));
     g_vm_mock_yanmen_config.enabled = 1;
-    g_vm_mock_yanmen_config.woodItemId = 850;
-    g_vm_mock_yanmen_config.stoneItemId = 851;
+    g_vm_mock_yanmen_config.woodItemId = 3;
+    g_vm_mock_yanmen_config.stoneItemId = 5;
     g_vm_mock_yanmen_config.woodDropMin = 1;
     g_vm_mock_yanmen_config.woodDropMax = 3;
     g_vm_mock_yanmen_config.stoneDropMin = 1;
@@ -1033,11 +1048,11 @@ static const char *vm_mock_ring_job_name_gbk(u8 job)
     switch (job)
     {
     case 2:
-        return "\xb4\xcc\xbf\xcd"; /* 刺客 */
+        return "\xbb\xc3\xbd\xa3"; /* 幻剑 */
     case 3:
-        return "\xb7\xa8\xca\xa6"; /* 法师 */
+        return "\xb9\xed\xb5\xc0"; /* 鬼道 */
     default:
-        return "\xd5\xbd\xca\xbf"; /* 战士 */
+        return "\xcc\xec\xbb\xfa"; /* 天机 */
     }
 }
 
@@ -1067,40 +1082,186 @@ static void vm_mock_ring_monster_name(u32 enemyId, char *nameOut, size_t nameCap
         snprintf(nameOut, nameCap, "ID%u", enemyId);
 }
 
+/* firstScene / SCE id → 场景名（优先后台 display_name / sMap 别名） */
+static void vm_mock_ring_scene_label(const char *scene, char *out, size_t outCap)
+{
+    char withSce[80];
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (scene == NULL || scene[0] == 0)
+        return;
+    vm_mock_world_boss_resolve_map_label_gbk(scene, out, outCap);
+    if (out[0] != 0)
+        return;
+    /* sMap 行多为 xxx.sce，补后缀再试一次 */
+    if (strstr(scene, ".sce") == NULL && strstr(scene, ".SCE") == NULL)
+    {
+        snprintf(withSce, sizeof(withSce), "%s.sce", scene);
+        vm_mock_world_boss_resolve_map_label_gbk(withSce, out, outCap);
+    }
+}
+
+static void vm_mock_ring_monster_scene(u32 enemyId, char *sceneOut, size_t sceneCap)
+{
+    vm_net_mock_monster_admin_row rows[96];
+    u32 total;
+    u32 i;
+
+    if (sceneOut == NULL || sceneCap == 0)
+        return;
+    sceneOut[0] = 0;
+    total = vm_net_mock_monster_admin_list(rows, 96);
+    for (i = 0; i < total && i < 96; ++i)
+    {
+        if (rows[i].enemyId != enemyId)
+            continue;
+        if (rows[i].firstScene[0] != 0)
+        {
+            vm_mock_ring_scene_label(rows[i].firstScene, sceneOut, sceneCap);
+            return;
+        }
+    }
+}
+
+static u32 vm_mock_ring_med_need_count(void)
+{
+    u32 groups = g_vm_mock_ring_rt.targetCount ? g_vm_mock_ring_rt.targetCount : 1;
+
+    return groups * (u32)VM_MOCK_RING_MED_PER_GROUP;
+}
+
+/* 拜访 NPC 常见落点 SCE → 场景名 */
+static void vm_mock_ring_visit_scene_label(const char *npcKeyword, char *out,
+                                           size_t outCap)
+{
+    const char *sceneId = "";
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (npcKeyword == NULL || npcKeyword[0] == 0)
+        return;
+    /* 铁匠 → 蜀山南门 */
+    if (strstr(npcKeyword, "\xcc\xfa\xbd\xb3") != NULL)
+        sceneId = "c14\xca\xf7\xc9\xbd_01";
+    /* 药师 → 蓬莱（铜雀台；04 图可能不在 sMap） */
+    else if (strstr(npcKeyword, "\xd2\xa9\xca\xa6") != NULL)
+        sceneId = "c00\xc5\xec\xc0\xb4\xcf\xc9\xb5\xba_01";
+    /* 店小二 → 雁门市集 */
+    else if (strstr(npcKeyword, "\xb5\xea\xd0\xa1\xb6\xfe") != NULL)
+        sceneId = "c08\xd1\xe3\xc3\xc5\xb9\xd8_03";
+    else
+        return;
+    vm_mock_ring_scene_label(sceneId, out, outCap);
+}
+
 static void vm_mock_ring_item_name(u32 itemId, char *nameOut, size_t nameCap)
 {
     const vm_net_mock_shop_catalog_item *item;
+    u32 aliasId = itemId;
 
     if (nameOut == NULL || nameCap == 0)
         return;
     nameOut[0] = 0;
-    item = vm_net_mock_find_shop_catalog_item(itemId);
+    /* 雁门旧默认 850/851 不在 item.dsh，对应 木材/石料 */
+    if (itemId == 850u)
+        aliasId = 3u;
+    else if (itemId == 851u)
+        aliasId = 5u;
+    item = vm_net_mock_find_shop_catalog_item(aliasId);
+    if (item == NULL && aliasId != itemId)
+        item = vm_net_mock_find_shop_catalog_item(itemId);
     if (item != NULL && item->name[0] != 0)
+    {
         snprintf(nameOut, nameCap, "%s", item->name);
-    else
-        snprintf(nameOut, nameCap, "#%u", itemId);
+        return;
+    }
+    if (itemId == 850u || aliasId == 3u)
+    {
+        snprintf(nameOut, nameCap, "\xc4\xbe\xb2\xc4"); /* 木材 */
+        return;
+    }
+    if (itemId == 851u || aliasId == 5u)
+    {
+        snprintf(nameOut, nameCap, "\xca\xaf\xc1\xcf"); /* 石料 */
+        return;
+    }
+    snprintf(nameOut, nameCap, "#%u", itemId);
 }
 
 static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
 {
-    vm_net_mock_monster_admin_row rows[96];
-    u32 matchIds[96];
-    u32 matchCount = 0;
-    u32 total = vm_net_mock_monster_admin_list(rows, 96);
-    u32 i;
-
-    for (i = 0; i < total && i < 96; ++i)
+    enum
     {
-        bool isBoss = rows[i].family == (u8)VM_NET_MOCK_MONSTER_BOSS;
+        VM_MOCK_RING_MOB_POOL = 192
+    };
+    vm_net_mock_monster_admin_row rows[VM_MOCK_RING_MOB_POOL];
+    u32 matchIds[VM_MOCK_RING_MOB_POOL];
+    char seenNames[VM_MOCK_RING_MOB_POOL][32];
+    u32 matchCount = 0;
+    u32 total;
+    u32 i;
+    u32 pass;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 roleLevel = (role != NULL && role->level != 0) ? role->level : 30u;
 
-        if (bossOnly ? !isBoss : isBoss)
-            continue;
-        matchIds[matchCount++] = rows[i].enemyId;
-        if (matchCount >= 96)
-            break;
+    total = vm_net_mock_monster_admin_list(rows, VM_MOCK_RING_MOB_POOL);
+    if (total > VM_MOCK_RING_MOB_POOL)
+        total = VM_MOCK_RING_MOB_POOL;
+
+    /*
+     * 同名怪（如 白光虎 id=83/99）各占一席会抬高该名出现率。
+     * 按显示名去重；优先选与角色等级接近、且有场景的条目。
+     */
+    for (pass = 0; pass < 2 && matchCount == 0; ++pass)
+    {
+        matchCount = 0;
+        for (i = 0; i < total; ++i)
+        {
+            bool isBoss = rows[i].family == (u8)VM_NET_MOCK_MONSTER_BOSS;
+            char name[32];
+            u32 j;
+            u32 lvl = rows[i].level;
+            u32 diff;
+
+            if (bossOnly ? !isBoss : isBoss)
+                continue;
+            if (rows[i].displayName[0] != 0)
+                snprintf(name, sizeof(name), "%s", rows[i].displayName);
+            else
+                vm_mock_ring_monster_name(rows[i].enemyId, name, sizeof(name));
+            if (name[0] == 0 || (name[0] == 'I' && name[1] == 'D'))
+                continue;
+            if (pass == 0)
+            {
+                diff = lvl > roleLevel ? (lvl - roleLevel) : (roleLevel - lvl);
+                if (diff > 25u)
+                    continue;
+                if (!bossOnly && rows[i].firstScene[0] == 0)
+                    continue;
+            }
+            for (j = 0; j < matchCount; ++j)
+            {
+                if (strcmp(seenNames[j], name) == 0)
+                    break;
+            }
+            if (j < matchCount)
+                continue;
+            snprintf(seenNames[matchCount], sizeof(seenNames[matchCount]), "%s",
+                     name);
+            matchIds[matchCount++] = rows[i].enemyId;
+            if (matchCount >= VM_MOCK_RING_MOB_POOL)
+                break;
+        }
     }
+
     if (matchCount == 0)
         return bossOnly ? 13u : 1u;
+    printf("[info][mock-service] ring_pick_monster boss=%u pool=%u role_lv=%u "
+           "pick_from_unique_names evidence=dedupe-display-name\n",
+           bossOnly ? 1u : 0u, matchCount, roleLevel);
     return matchIds[vm_mock_activities_rng_next() % matchCount];
 }
 
@@ -1117,7 +1278,11 @@ static u32 vm_mock_ring_pick_collect_item(void)
     {                                                                          \
         u32 _collectId = (itemIdValue);                                        \
         u32 _collectIdx;                                                       \
+        char _name[32];                                                        \
         if (_collectId == 0)                                                   \
+            break;                                                             \
+        vm_mock_ring_item_name(_collectId, _name, sizeof(_name));              \
+        if (_name[0] == '#' || _name[0] == 0)                                  \
             break;                                                             \
         for (_collectIdx = 0; _collectIdx < itemCount; ++_collectIdx)           \
         {                                                                      \
@@ -1142,8 +1307,13 @@ static u32 vm_mock_ring_pick_collect_item(void)
     }
 #undef VM_MOCK_RING_COLLECT_ADD
     if (itemCount == 0)
-        return g_vm_mock_yanmen_config.woodItemId ? g_vm_mock_yanmen_config.woodItemId
-                                                  : 850u;
+    {
+        /* item.dsh: 3=木材 */
+        u32 wood = g_vm_mock_yanmen_config.woodItemId;
+        if (wood == 0 || wood == 850u)
+            wood = 3u;
+        return wood;
+    }
     return items[vm_mock_activities_rng_next() % itemCount];
 }
 
@@ -1153,15 +1323,25 @@ static void vm_mock_ring_collect_drop_hint(u32 itemId, char *hintOut, size_t hin
     u32 total;
     u32 i;
     u32 d;
+    char sceneLabel[40];
+    char mobName[32];
 
     if (hintOut == NULL || hintCap == 0)
         return;
     hintOut[0] = 0;
     vm_mock_yanmen_load_config(false);
     if (itemId == g_vm_mock_yanmen_config.woodItemId ||
-        itemId == g_vm_mock_yanmen_config.stoneItemId)
+        itemId == g_vm_mock_yanmen_config.stoneItemId || itemId == 850u ||
+        itemId == 851u || itemId == 3u || itemId == 5u)
     {
-        snprintf(hintOut, hintCap, "\xd1\xe3\xc3\xc5\xb9\xd8"); /* 雁门关 */
+        /* 雁门市集打怪 */
+        sceneLabel[0] = 0;
+        vm_mock_ring_scene_label("c08\xd1\xe3\xc3\xc5\xb9\xd8_03", sceneLabel,
+                                 sizeof(sceneLabel));
+        if (sceneLabel[0] != 0)
+            snprintf(hintOut, hintCap, "%s\xb4\xf2\xb9\xd6", sceneLabel);
+        else
+            snprintf(hintOut, hintCap, "\xd1\xe3\xc3\xc5\xb9\xd8\xb4\xf2\xb9\xd6");
         return;
     }
     total = vm_net_mock_monster_admin_list(rows, 96);
@@ -1171,20 +1351,30 @@ static void vm_mock_ring_collect_drop_hint(u32 itemId, char *hintOut, size_t hin
         {
             if (rows[i].drops[d].itemId != itemId)
                 continue;
-            if (rows[i].displayName[0] != 0 && rows[i].firstScene[0] != 0)
-            {
-                snprintf(hintOut, hintCap, "%s(%s)", rows[i].displayName,
-                         rows[i].firstScene);
-                return;
-            }
-            if (rows[i].displayName[0] != 0)
-            {
-                snprintf(hintOut, hintCap, "%s", rows[i].displayName);
-                return;
-            }
+            sceneLabel[0] = 0;
+            mobName[0] = 0;
             if (rows[i].firstScene[0] != 0)
+                vm_mock_ring_scene_label(rows[i].firstScene, sceneLabel,
+                                         sizeof(sceneLabel));
+            if (rows[i].displayName[0] != 0)
+                snprintf(mobName, sizeof(mobName), "%s", rows[i].displayName);
+            else
+                vm_mock_ring_monster_name(rows[i].enemyId, mobName,
+                                          sizeof(mobName));
+            if (sceneLabel[0] != 0 && mobName[0] != 0)
             {
-                snprintf(hintOut, hintCap, "%s", rows[i].firstScene);
+                /* 蜀山南门·黑熊 */
+                snprintf(hintOut, hintCap, "%s\xa1\xa2%s", sceneLabel, mobName);
+                return;
+            }
+            if (mobName[0] != 0)
+            {
+                snprintf(hintOut, hintCap, "%s", mobName);
+                return;
+            }
+            if (sceneLabel[0] != 0)
+            {
+                snprintf(hintOut, hintCap, "%s", sceneLabel);
                 return;
             }
         }
@@ -1261,12 +1451,13 @@ static void vm_mock_ring_item_acquire_hint(u32 itemId, char *hintOut, size_t hin
     snprintf(hintOut, hintCap, "\xc9\xcc\xb5\xea"); /* 商店 */
 }
 
-void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role, u8 victimJob,
+void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
+                                    const char *accountId, u8 victimJob,
                                     u32 victimLevel)
 {
     vm_mock_ring_daily_ctx row;
     char accountHex[160];
-    char query[640];
+    char query[1024];
     u32 dayYmd = vm_mock_activities_day_ymd();
     u8 reqJob = 0;
     u16 reqBracket = 0;
@@ -1275,7 +1466,8 @@ void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role, u8 victimJob,
     if (role == NULL)
         return;
     vm_mock_ring_load_config(false);
-    if (!vm_mock_activities_account_hex(accountHex, sizeof(accountHex)))
+    /* 必须用胜者账号，不能用当前请求的 active_account（切磋结算时常串号） */
+    if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
         return;
     memset(&row, 0, sizeof(row));
     snprintf(query, sizeof(query),
@@ -1304,12 +1496,45 @@ void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role, u8 victimJob,
         victimBracket = vm_mock_ring_bracket_for_level(victimLevel);
         if (victimBracket == 0 || victimJob != reqJob ||
             victimBracket != reqBracket)
+        {
+            printf("[info][mock-service] ring_pvp_kill_skip role=%u req_job=%u "
+                   "req_bracket=%u victim_job=%u victim_lv=%u victim_bracket=%u "
+                   "evidence=job-or-bracket-mismatch\n",
+                   role->roleId, (u32)reqJob, (u32)reqBracket, (u32)victimJob,
+                   victimLevel, (u32)victimBracket);
             return;
+        }
     }
     g_vm_mock_ring_rt.progress += 1;
     if (g_vm_mock_ring_rt.progress > g_vm_mock_ring_rt.targetCount)
         g_vm_mock_ring_rt.progress = g_vm_mock_ring_rt.targetCount;
-    (void)vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed);
+    {
+        /* 按胜者账号落库，避免写到 active_account */
+        char npcHex[64];
+        vm_mysql_hex_encode(g_vm_mock_ring_rt.targetNpc,
+                            strlen(g_vm_mock_ring_rt.targetNpc), npcHex,
+                            sizeof(npcHex));
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_role_ring_daily "
+                 "(account_id,role_id,day_ymd,ring_count,bonus_claimed,task_type,"
+                 "target_id,target_count,progress,target_npc,task_active) "
+                 "VALUES(UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u) "
+                 "ON DUPLICATE KEY UPDATE ring_count=VALUES(ring_count),"
+                 "bonus_claimed=VALUES(bonus_claimed),task_type=VALUES(task_type),"
+                 "target_id=VALUES(target_id),target_count=VALUES(target_count),"
+                 "progress=VALUES(progress),target_npc=VALUES(target_npc),"
+                 "task_active=VALUES(task_active)",
+                 accountHex, role->roleId, dayYmd, (u32)row.ringCount,
+                 (u32)row.bonusClaimed, (u32)g_vm_mock_ring_rt.taskType,
+                 g_vm_mock_ring_rt.targetId, g_vm_mock_ring_rt.targetCount,
+                 g_vm_mock_ring_rt.progress, npcHex,
+                 (u32)g_vm_mock_ring_rt.active);
+        (void)vm_mysql_exec(query);
+    }
+    printf("[info][mock-service] ring_pvp_kill_progress role=%u job=%u lv=%u "
+           "progress=%u/%u evidence=winner-account-hex\n",
+           role->roleId, (u32)victimJob, victimLevel, g_vm_mock_ring_rt.progress,
+           g_vm_mock_ring_rt.targetCount);
 }
 
 void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss)
@@ -1355,9 +1580,11 @@ void vm_mock_activities_on_npc_talk(const char *npcName)
 static void vm_mock_ring_format_desc(void)
 {
     u32 count;
+    u32 medNeed;
     char mobName[32];
-    char itemName[32];
-    char dropHint[48];
+    char itemName[40];
+    char dropHint[64];
+    char sceneName[40];
     u8 pvpJob = 0;
     u16 pvpBracket = 0;
 
@@ -1368,20 +1595,59 @@ static void vm_mock_ring_format_desc(void)
     switch (g_vm_mock_ring_rt.taskType)
     {
     case VM_MOCK_RING_TYPE_VISIT:
-        snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
-                 "\xb0\xdd\xb7\xc3%s", g_vm_mock_ring_rt.targetNpc);
+    {
+        char mapHint[40];
+
+        mapHint[0] = 0;
+        vm_mock_ring_visit_scene_label(g_vm_mock_ring_rt.targetNpc, mapHint,
+                                       sizeof(mapHint));
+        if (mapHint[0] != 0)
+        {
+            /* 拜访蜀山南门铁匠(对话即可完成) */
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xb0\xdd\xb7\xc3%s%s(\xb6\xd4\xbb\xb0\xbc\xb4\xbf\xc9\xcd\xea\xb3\xc9)",
+                     mapHint, g_vm_mock_ring_rt.targetNpc);
+        }
+        else
+        {
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xb0\xdd\xb7\xc3%s(\xb6\xd4\xbb\xb0\xbc\xb4\xbf\xc9\xcd\xea\xb3\xc9)",
+                     g_vm_mock_ring_rt.targetNpc);
+        }
         break;
+    }
     case VM_MOCK_RING_TYPE_KILL_MOB:
         vm_mock_ring_monster_name(g_vm_mock_ring_rt.targetId, mobName,
                                   sizeof(mobName));
-        snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
-                 "\xbb\xf7\xc9\xb1%u\xd6\xbb%s", count, mobName);
+        vm_mock_ring_monster_scene(g_vm_mock_ring_rt.targetId, sceneName,
+                                   sizeof(sceneName));
+        if (sceneName[0] != 0)
+        {
+            /* 击杀N场怪物(地图) */
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xbb\xf7\xc9\xb1%u\xb3\xa1%s(%s)", count, mobName, sceneName);
+        }
+        else
+        {
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xbb\xf7\xc9\xb1%u\xb3\xa1%s", count, mobName);
+        }
         break;
     case VM_MOCK_RING_TYPE_KILL_BOSS:
         vm_mock_ring_monster_name(g_vm_mock_ring_rt.targetId, mobName,
                                   sizeof(mobName));
-        snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
-                 "\xbb\xf7\xc9\xb1%s", mobName);
+        vm_mock_ring_monster_scene(g_vm_mock_ring_rt.targetId, sceneName,
+                                   sizeof(sceneName));
+        if (sceneName[0] != 0)
+        {
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xbb\xf7\xc9\xb1%u\xb3\xa1%s(%s)", count, mobName, sceneName);
+        }
+        else
+        {
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xbb\xf7\xc9\xb1%u\xb3\xa1%s", count, mobName);
+        }
         break;
     case VM_MOCK_RING_TYPE_KILL_PLAYER:
         if (g_vm_mock_ring_rt.targetId == 0)
@@ -1402,23 +1668,31 @@ static void vm_mock_ring_format_desc(void)
                                sizeof(itemName));
         vm_mock_ring_collect_drop_hint(g_vm_mock_ring_rt.targetId, dropHint,
                                        sizeof(dropHint));
+        /* 收集N个材料名，蜀山·黑熊掉落 */
         snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
                  "\xca\xd5\xbc\xaf%u\xb8\xf6%s\xa3\xac%s\xb5\xf4\xc2\xe4", count,
                  itemName, dropHint);
         break;
     case VM_MOCK_RING_TYPE_SUBMIT_MED:
+        medNeed = vm_mock_ring_med_need_count();
         if (g_vm_mock_ring_rt.targetId == 0)
         {
+            /* 提交N组药品(每组10个,共M个) */
             snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
-                     "\xcc\xe1\xbd\xbb%u\xd7\xe9\xd2\xa9\xc6\xb7", count);
+                     "\xcc\xe1\xbd\xbb%u\xd7\xe9\xd2\xa9\xc6\xb7(\xc3\xbf\xd7\xe9%u\xb8\xf6,"
+                     "\xb9\xb2%u\xb8\xf6)",
+                     count, (u32)VM_MOCK_RING_MED_PER_GROUP, medNeed);
             break;
         }
         vm_mock_ring_item_name(g_vm_mock_ring_rt.targetId, itemName,
                                sizeof(itemName));
         vm_mock_ring_item_acquire_hint(g_vm_mock_ring_rt.targetId, dropHint,
                                        sizeof(dropHint));
+        /* 提交N组xxx(每组10个,共M个)，药师处购买 */
         snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
-                 "\xcc\xe1\xbd\xbb%u\xd7\xe9%s\xa3\xac%s", count, itemName,
+                 "\xcc\xe1\xbd\xbb%u\xd7\xe9%s(\xc3\xbf\xd7\xe9%u\xb8\xf6,\xb9\xb2%u\xb8\xf6)"
+                 "\xa3\xac%s",
+                 count, itemName, (u32)VM_MOCK_RING_MED_PER_GROUP, medNeed,
                  dropHint);
         break;
     case VM_MOCK_RING_TYPE_SUBMIT_EQUIP:
@@ -1485,7 +1759,8 @@ static void vm_mock_ring_build_desc(void)
         g_vm_mock_ring_rt.targetCount = 1;
         break;
     case VM_MOCK_RING_TYPE_KILL_MOB:
-        count = 3 + (vm_mock_activities_rng_next() % 8);
+        /* 按战斗场次计数（胜利结算 +1），随机 10–30 场 */
+        count = 10 + (vm_mock_activities_rng_next() % 21);
         g_vm_mock_ring_rt.targetCount = count;
         g_vm_mock_ring_rt.targetId = vm_mock_ring_pick_monster_id(false);
         break;
@@ -1815,7 +2090,7 @@ static bool vm_mock_ring_task_ready(vm_net_mock_role_state *role)
         {
             return vm_mock_activities_backpack_count(
                        role, g_vm_mock_ring_rt.targetId) >=
-                   g_vm_mock_ring_rt.targetCount;
+                   vm_mock_ring_med_need_count();
         }
         for (i = 0; i < role->backpackItemCount &&
                     i < VM_NET_MOCK_BACKPACK_MAX_ITEMS;
@@ -1824,7 +2099,7 @@ static bool vm_mock_ring_task_ready(vm_net_mock_role_state *role)
             if (vm_mock_ring_item_matches_submit_med(role->backpackItems[i].itemId))
                 medCount += role->backpackItems[i].count;
         }
-        return medCount >= g_vm_mock_ring_rt.targetCount;
+        return medCount >= vm_mock_ring_med_need_count();
     case VM_MOCK_RING_TYPE_SUBMIT_EQUIP:
         if (g_vm_mock_ring_rt.targetId != 0)
         {
@@ -1923,22 +2198,22 @@ static u32 vm_net_mock_build_ring_submit_response(u8 *out, u32 outCap)
     }
     else if (g_vm_mock_ring_rt.taskType == VM_MOCK_RING_TYPE_SUBMIT_MED)
     {
+        u32 medNeed = vm_mock_ring_med_need_count();
+
         if (g_vm_mock_ring_rt.targetId != 0)
         {
             vm_net_mock_consume_sync_row sync[VM_NET_MOCK_CONSUME_SYNC_MAX];
             u32 syncCount = 0;
 
             if (!vm_net_mock_role_consume_backpack_item_amount(
-                    role, g_vm_mock_ring_rt.targetId,
-                    g_vm_mock_ring_rt.targetCount, sync,
+                    role, g_vm_mock_ring_rt.targetId, medNeed, sync,
                     VM_NET_MOCK_CONSUME_SYNC_MAX, &syncCount))
                 return vm_mock_activities_build_op_result(
                     out, outCap, VM_MOCK_RING_WT_KIND, VM_MOCK_RING_WT_SUBMIT, 5,
                     "consume");
         }
         else if (!vm_mock_ring_consume_matching_items(
-                     role, g_vm_mock_ring_rt.targetCount,
-                     vm_mock_ring_item_matches_submit_med))
+                     role, medNeed, vm_mock_ring_item_matches_submit_med))
             return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
                                                       VM_MOCK_RING_WT_SUBMIT, 5,
                                                       "consume");

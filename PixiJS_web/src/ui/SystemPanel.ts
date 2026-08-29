@@ -1926,12 +1926,8 @@ export class SystemPanel extends Container {
     const maxQty = this.maxBuyQty(g);
     if (this.buyQty > maxQty) this.buyQty = maxQty;
     const qtyY = actionTop + 10;
-    this.addLabelCentered(
-      `⇦ 数量 ${this.buyQty}/${maxQty} ⇨`,
-      LCD_WIDTH / 2,
-      qtyY + btnH / 2,
-      CBE.inkTipGreen,
-    );
+    const qtyHint = `⇦ 数量 ${this.buyQty}/${maxQty} ⇨`;
+    this.addLabelCentered(qtyHint, LCD_WIDTH / 2, qtyY + btnH / 2, CBE.inkTipGreen);
 
     const btnW = 72;
     const by = actionTop + 10 + btnH + btnGap;

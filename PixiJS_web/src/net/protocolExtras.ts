@@ -386,6 +386,17 @@ export function npcServiceOpcode(value: number): number {
   return (value >>> 24) & 0xff;
 }
 
+/** NPC medicine buy: 0xe9 | (count<<16) | itemId16. count 0 → server treats as 1. */
+export function encodeNpcBuyItem(itemId: number, count = 1): number {
+  const id = itemId & 0xffff;
+  const c = Math.max(1, Math.min(255, count | 0));
+  return ((NpcServiceOpcode.BUY_ITEM & 0xff) << 24) | ((c & 0xff) << 16) | id;
+}
+
+export function decodeNpcBuyItemId(value: number): number {
+  return value & 0xffff;
+}
+
 /**
  * Equip-sell pass (839) 26/1 service values — mirror mock_server_core.c.
  * Client may batch-call SELL_BASE without a new server opcode.

@@ -9555,6 +9555,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         u32 page = 0;
         u32 total = 0;
         u32 start = 0;
+        u32 buyItemId = 0;
+        u32 buyCount = 1;
         bool buyRequest = operation == VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE ||
                           operation == VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE;
         bool viewRequest = operation == VM_NET_MOCK_NPC_SERVICE_VIEW_ITEM_BASE;
@@ -9582,7 +9584,20 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         else
         {
-            buyItem = vm_net_mock_find_shop_catalog_item(value);
+            if (operation == VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE)
+            {
+                buyItemId = value & VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_ID_MASK;
+                buyCount = (value >> VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_COUNT_SHIFT) &
+                           VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_COUNT_MASK;
+                if (buyCount == 0)
+                    buyCount = 1;
+            }
+            else
+            {
+                buyItemId = value;
+                buyCount = 1;
+            }
+            buyItem = vm_net_mock_find_shop_catalog_item(buyItemId);
             selector = vm_net_mock_npc_shop_selector_for_item(buyItem);
             if (legacyWeaponBuy && (selector < 8u || selector > 10u))
                 selector = 0;
@@ -9661,9 +9676,15 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 dialogText =
                     "\xb8\xc3\xc9\xcc\xc6\xb7\xd2\xd1\xcf\xc2\xbc\xdc\xa1\xa3"; /* 该商品已下架。 */
             }
+            else if (buyItem->price != 0 &&
+                     buyCount > 0xffffffffu / buyItem->price)
+            {
+                dialogText =
+                    "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+            }
             else if ((session != NULL && session->coolmallSessionArmed)
-                         ? (role->wcoin < buyItem->price)
-                         : (role->money < buyItem->price))
+                         ? (role->wcoin < buyItem->price * buyCount)
+                         : (role->money < buyItem->price * buyCount))
             {
                 dialogText =
                     (session != NULL && session->coolmallSessionArmed)
@@ -9680,21 +9701,22 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 vm_net_mock_role_state purchaseBefore = *role;
                 bool payWcoin =
                     session != NULL && session->coolmallSessionArmed;
+                u32 totalCost = buyItem->price * buyCount;
 
                 if (payWcoin)
-                    role->wcoin -= buyItem->price;
+                    role->wcoin -= totalCost;
                 else
-                    role->money -= buyItem->price;
+                    role->money -= totalCost;
                 if (!vm_net_mock_role_add_backpack_item_to_role(
-                        role, buyItem->itemId, 1, 0, &backpackAddSeq,
+                        role, buyItem->itemId, buyCount, 0, &backpackAddSeq,
                         buyItem->isEquip ? "npc-equipment-buy"
                                          : "npc-medicine-buy",
                         NULL, 0))
                 {
                     if (payWcoin)
-                        role->wcoin += buyItem->price;
+                        role->wcoin += totalCost;
                     else
-                        role->money += buyItem->price;
+                        role->money += totalCost;
                     if (g_vm_net_mock_backpack_add_fail_kind ==
                         VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL)
                     {
@@ -9713,7 +9735,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         vm_net_mock_role_find_backpack_item(
                             role, buyItem->itemId, backpackAddSeq);
 
-                    /* Normal rows are an additive one-item delta.  The two
+                    /* Normal rows are an additive count delta.  The two
                      * reservoir flasks are not stackable: their item row must
                      * carry the newly allocated HP/MP pool, while the common
                      * extra still exposes one visible flask. */
@@ -9732,7 +9754,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                             vm_net_mock_backpack_item_id_uses_reservoir_count(
                                 buyItem->itemId)
                                 ? purchasedItem->count
-                                : 1;
+                                : buyCount;
                         if (backpackAddCount != 0 && session != NULL)
                         {
                             /*

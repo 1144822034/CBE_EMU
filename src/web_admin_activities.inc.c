@@ -321,8 +321,8 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
             "<div><label>石材掉落max</label><input name=\"stone_max\" value=\"%u\"></div>"
             "</div><button type=\"submit\" style=\"margin-top:10px\">保存雁门关配置</button></form>"
             "<table style=\"margin-top:16px\"><tr><th>ID</th><th>木</th><th>石</th><th>物品</th><th>数量</th><th>标签</th><th></th></tr>",
-            yanmen ? yanmen->woodItemId : 850u,
-            yanmen ? yanmen->stoneItemId : 851u,
+            yanmen ? yanmen->woodItemId : 3u,
+            yanmen ? yanmen->stoneItemId : 5u,
             yanmen ? yanmen->woodDropMin : 1u,
             yanmen ? yanmen->woodDropMax : 3u,
             yanmen ? yanmen->stoneDropMin : 1u,
@@ -577,8 +577,8 @@ static void vm_mock_admin_handle_activities_action(vm_mock_service_socket client
     if (strcmp(action, "save-yanmen-config") == 0)
     {
         u32 enabled = 1;
-        u32 woodId = 850;
-        u32 stoneId = 851;
+        u32 woodId = 3;
+        u32 stoneId = 5;
         u32 wMin = 1;
         u32 wMax = 3;
         u32 sMin = 1;

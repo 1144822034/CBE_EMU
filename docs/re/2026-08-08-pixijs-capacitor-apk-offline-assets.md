@@ -37,6 +37,12 @@ Agent 复用：`.codex/skills/pixijs-android-apk/SKILL.md`。
 
 Manifest：`WAKE_LOCK`、`FOREGROUND_SERVICE`/`_DATA_SYNC`/`_SPECIAL_USE`、`POST_NOTIFICATIONS`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`、`usesCleartextTraffic`
 
+## 2026-08-28 出包
+
+`versionCode` **48** / `1.0.48`，`client_code_version` **32**，服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **32**。  
+含黑屏恢复后 LCD 左上偏移修补（`#phone-wrap` 改 inset+margin:auto，recover 接入 `repairShellViewportAlignment`）。  
+APK：`android/app/release/jh_ol.apk`；PC：`electron-release/江湖OL-1.0.48-portable.exe`；gateway：`gateway-release/ws-gateway.exe`。
+
 ## 2026-08-21 出包
 
 `versionCode` **44** / `1.0.44`，`client_code_version` **24**，服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **24**。  

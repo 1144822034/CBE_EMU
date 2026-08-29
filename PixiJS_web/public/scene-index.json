@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-28T04:55:06.914Z",
+  "generatedAt": "2026-08-29T01:23:03.091Z",
   "assetRootHint": "web/fs/JHOnlineData",
   "defaultScene": "01桃花岛_01.sce",
   "scenes": [
@@ -135,8 +135,14 @@
     "31扩充军备_04.sce",
     "31扩充军备_05.sce",
     "36节日庆典_01.sce",
+    "采矿场.sce",
+    "采石场.sce",
     "测试地图.sce",
     "测试专用.sce",
+    "木材场.sce",
+    "雁门关-采矿场.sce",
+    "雁门关-采石场.sce",
+    "雁门关-木材场.sce",
     "b_00蓬莱仙岛.sce",
     "b_01蓬莱仙岛.sce",
     "b_01桃花岛.sce",
