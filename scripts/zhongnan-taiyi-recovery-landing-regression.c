@@ -11,6 +11,99 @@
 #include "../src/server_main.c"
 #undef main
 
+static void vm_test_write_le32(u8 *out, u32 value)
+{
+    out[0] = (u8)value;
+    out[1] = (u8)(value >> 8);
+    out[2] = (u8)(value >> 16);
+    out[3] = (u8)(value >> 24);
+}
+
+static bool vm_test_append_dsh_ascii(u8 *raw, u32 rawCap, u32 *pos,
+                                     const char *text)
+{
+    size_t textLen = text != NULL ? strlen(text) : 0;
+
+    if (raw == NULL || pos == NULL || textLen > 255 ||
+        *pos > rawCap || rawCap - *pos < textLen + 1)
+    {
+        return false;
+    }
+    raw[(*pos)++] = (u8)textLen;
+    if (textLen != 0)
+    {
+        memcpy(raw + *pos, text, textLen);
+        *pos += (u32)textLen;
+    }
+    return true;
+}
+
+/* The live resource has the conventional order, but DSH explicitly records
+ * its column names.  This fixture deliberately reorders the route columns,
+ * adds an unrelated field, and retains a blank terminal row. */
+static bool vm_test_build_reordered_wmapline_dsh(u8 *raw, u32 rawCap,
+                                                 u32 *rawLenOut)
+{
+    static const char *const columns[] = {"Y2", "ID", "X1", "Note", "Y1", "X2"};
+    static const char *const rows[][6] = {
+        {"48", "77", "12", "ignored", "34", "56"},
+        {"", "", "", "", "", ""}
+    };
+    u32 pos = 16;
+    u32 headerStart = pos;
+
+    if (rawLenOut)
+        *rawLenOut = 0;
+    if (raw == NULL || rawLenOut == NULL || rawCap < 32)
+        return false;
+    memset(raw, 0, rawCap);
+    for (u32 column = 0; column < sizeof(columns) / sizeof(columns[0]); ++column)
+    {
+        if (!vm_test_append_dsh_ascii(raw, rawCap, &pos, columns[column]))
+            return false;
+    }
+    vm_test_write_le32(raw + 4, sizeof(columns) / sizeof(columns[0]));
+    vm_test_write_le32(raw + 8, sizeof(rows) / sizeof(rows[0]));
+    vm_test_write_le32(raw + 12, pos - headerStart);
+
+    for (u32 row = 0; row < sizeof(rows) / sizeof(rows[0]); ++row)
+    {
+        u32 rowStart = pos;
+
+        if (pos > rawCap || rawCap - pos < 4)
+            return false;
+        pos += 4;
+        for (u32 column = 0; column < sizeof(columns) / sizeof(columns[0]); ++column)
+        {
+            if (!vm_test_append_dsh_ascii(raw, rawCap, &pos, rows[row][column]))
+                return false;
+        }
+        vm_test_write_le32(raw + rowStart, pos - rowStart - 4);
+    }
+    vm_test_write_le32(raw, pos - 4);
+    *rawLenOut = pos;
+    return true;
+}
+
+static bool vm_test_reordered_wmapline_schema_reader(void)
+{
+    u8 raw[128];
+    vm_net_mock_death_respawn_wmap_line lines[2];
+    u32 rawLen = 0;
+    u32 lineCount = 0;
+
+    if (!vm_test_build_reordered_wmapline_dsh(raw, sizeof(raw), &rawLen) ||
+        !vm_net_mock_death_respawn_read_wmap_lines_dsh(
+            raw, rawLen, lines, sizeof(lines) / sizeof(lines[0]), &lineCount) ||
+        lineCount != 1 || lines[0].lineId != 77 ||
+        lines[0].x1 != 12 || lines[0].y1 != 34 ||
+        lines[0].x2 != 56 || lines[0].y2 != 48)
+    {
+        return false;
+    }
+    return true;
+}
+
 int main(void)
 {
     static const char taiyiScene[] =
@@ -47,6 +140,13 @@ int main(void)
     const char *route = NULL;
     u16 x = 427;
     u16 y = 340;
+
+    if (!vm_test_reordered_wmapline_schema_reader())
+    {
+        fputs("wMapLine schema reader did not resolve reordered endpoint columns\n",
+              stderr);
+        return 1;
+    }
 
     /* The source SCE entry is close to the lower-right exit trigger.  The
      * existing portal-gap rule correctly prevents a retrigger, but moves it

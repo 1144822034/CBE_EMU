@@ -9891,6 +9891,220 @@ static bool vm_net_mock_copy_dsh_string_field(char *out, size_t outCap,
     return true;
 }
 
+/* DSH owns its schema in the length-prefixed header.  Consumers that need a
+ * named field must resolve it here instead of assuming a permanent physical
+ * column number: content edits may reorder columns or add unrelated fields. */
+enum
+{
+    VM_NET_MOCK_DSH_SCHEMA_COLUMN_MAX = 64
+};
+
+typedef struct
+{
+    const u8 *data;
+    u32 len;
+    u32 columnCount;
+    u32 rowCount;
+    u32 dataOffset;
+    const u8 *columnNames[VM_NET_MOCK_DSH_SCHEMA_COLUMN_MAX];
+    u8 columnNameLengths[VM_NET_MOCK_DSH_SCHEMA_COLUMN_MAX];
+} vm_net_mock_dsh_schema;
+
+static bool vm_net_mock_dsh_schema_parse(const u8 *data, u32 len,
+                                         vm_net_mock_dsh_schema *schema)
+{
+    u32 declaredLen = 0;
+    u32 headerBytes = 0;
+    u32 headerEnd = 0;
+    u32 pos = 0;
+
+    if (schema != NULL)
+        memset(schema, 0, sizeof(*schema));
+    if (data == NULL || schema == NULL || len < 20 ||
+        (declaredLen = vm_net_mock_read_le32_at(data, 0)) != len - 4)
+    {
+        return false;
+    }
+    schema->columnCount = vm_net_mock_read_le32_at(data, 4);
+    schema->rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (schema->columnCount == 0 ||
+        schema->columnCount > VM_NET_MOCK_DSH_SCHEMA_COLUMN_MAX ||
+        headerBytes < schema->columnCount || headerBytes > len - 16)
+    {
+        return false;
+    }
+
+    headerEnd = 16 + headerBytes;
+    pos = 16;
+    for (u32 column = 0; column < schema->columnCount; ++column)
+    {
+        u32 nameLen = 0;
+
+        if (pos >= headerEnd ||
+            (nameLen = data[pos++]) == 0 || nameLen > headerEnd - pos)
+        {
+            return false;
+        }
+        schema->columnNames[column] = data + pos;
+        schema->columnNameLengths[column] = (u8)nameLen;
+        pos += nameLen;
+    }
+    if (pos != headerEnd)
+        return false;
+
+    /* Validate every declared row once.  Later field lookups can then use
+     * bounded row spans, and malformed tail data cannot silently become a
+     * route endpoint. */
+    pos = headerEnd;
+    for (u32 row = 0; row < schema->rowCount; ++row)
+    {
+        u32 rowLen = 0;
+        u32 rowEnd = 0;
+
+        if (pos > len - 4 ||
+            (rowLen = vm_net_mock_read_le32_at(data, pos)) == 0 ||
+            rowLen > len - pos - 4)
+        {
+            return false;
+        }
+        pos += 4;
+        rowEnd = pos + rowLen;
+        for (u32 column = 0; column < schema->columnCount; ++column)
+        {
+            u32 valueLen = 0;
+
+            if (pos >= rowEnd || (valueLen = data[pos++]) > rowEnd - pos)
+                return false;
+            pos += valueLen;
+        }
+        if (pos != rowEnd)
+            return false;
+    }
+    if (pos != len)
+        return false;
+
+    schema->data = data;
+    schema->len = len;
+    schema->dataOffset = headerEnd;
+    return true;
+}
+
+/* Returns -1 for either a missing or an ambiguous name.  Both cases reject
+ * a schema rather than silently binding a travel graph to an arbitrary field. */
+static int vm_net_mock_dsh_schema_find_ascii_column(
+    const vm_net_mock_dsh_schema *schema, const char *name)
+{
+    size_t nameLen = name != NULL ? strlen(name) : 0;
+    int result = -1;
+
+    if (schema == NULL || nameLen == 0 || nameLen > 255)
+        return -1;
+    for (u32 column = 0; column < schema->columnCount; ++column)
+    {
+        if (schema->columnNameLengths[column] != nameLen ||
+            memcmp(schema->columnNames[column], name, nameLen) != 0)
+        {
+            continue;
+        }
+        if (result >= 0)
+            return -1;
+        result = (int)column;
+    }
+    return result;
+}
+
+static bool vm_net_mock_dsh_schema_row_at(const vm_net_mock_dsh_schema *schema,
+                                          u32 wantedRow, const u8 **rowOut,
+                                          u32 *rowLenOut)
+{
+    u32 pos = 0;
+
+    if (rowOut)
+        *rowOut = NULL;
+    if (rowLenOut)
+        *rowLenOut = 0;
+    if (schema == NULL || schema->data == NULL || wantedRow >= schema->rowCount)
+        return false;
+
+    pos = schema->dataOffset;
+    for (u32 row = 0; row <= wantedRow; ++row)
+    {
+        u32 rowLen = 0;
+
+        if (pos > schema->len - 4 ||
+            (rowLen = vm_net_mock_read_le32_at(schema->data, pos)) == 0 ||
+            rowLen > schema->len - pos - 4)
+        {
+            return false;
+        }
+        if (row == wantedRow)
+        {
+            if (rowOut)
+                *rowOut = schema->data + pos + 4;
+            if (rowLenOut)
+                *rowLenOut = rowLen;
+            return true;
+        }
+        pos += 4 + rowLen;
+    }
+    return false;
+}
+
+static bool vm_net_mock_dsh_schema_row_value_at(
+    const vm_net_mock_dsh_schema *schema, const u8 *row, u32 rowLen,
+    u32 wantedColumn, const u8 **valueOut, u32 *valueLenOut)
+{
+    u32 pos = 0;
+
+    if (valueOut)
+        *valueOut = NULL;
+    if (valueLenOut)
+        *valueLenOut = 0;
+    if (schema == NULL || row == NULL || wantedColumn >= schema->columnCount)
+        return false;
+
+    for (u32 column = 0; column < schema->columnCount; ++column)
+    {
+        u32 valueLen = 0;
+
+        if (pos >= rowLen || (valueLen = row[pos++]) > rowLen - pos)
+            return false;
+        if (column == wantedColumn)
+        {
+            if (valueOut)
+                *valueOut = row + pos;
+            if (valueLenOut)
+                *valueLenOut = valueLen;
+            return true;
+        }
+        pos += valueLen;
+    }
+    return false;
+}
+
+static bool vm_net_mock_parse_dsh_u32_exact(const u8 *value, u32 valueLen,
+                                             u32 *out)
+{
+    u32 parsed = 0;
+
+    if (out)
+        *out = 0;
+    if (value == NULL || valueLen == 0 || out == NULL)
+        return false;
+    for (u32 pos = 0; pos < valueLen; ++pos)
+    {
+        if (value[pos] < '0' || value[pos] > '9' ||
+            parsed > (0xffffffffu - (u32)(value[pos] - '0')) / 10u)
+        {
+            return false;
+        }
+        parsed = parsed * 10u + (u32)(value[pos] - '0');
+    }
+    *out = parsed;
+    return true;
+}
+
 static bool vm_net_mock_find_teleport_stone_wmap_row_dsh(const char *path,
                                                          u32 objId,
                                                          u32 curId,
@@ -10648,17 +10862,97 @@ static bool vm_net_mock_death_respawn_load_wmap_topology(
     return nodeCount != 0;
 }
 
+/* This is intentionally data-only so the regression can prove the schema
+ * rule with a reordered in-memory DSH fixture.  The caller below only owns
+ * locating and loading the resource file. */
+static bool vm_net_mock_death_respawn_read_wmap_lines_dsh(
+    const u8 *data, u32 len, vm_net_mock_death_respawn_wmap_line *lines,
+    u32 lineCap, u32 *lineCountOut)
+{
+    vm_net_mock_dsh_schema schema;
+    int idColumn = -1;
+    int x1Column = -1;
+    int y1Column = -1;
+    int x2Column = -1;
+    int y2Column = -1;
+    u32 lineCount = 0;
+
+    if (lineCountOut)
+        *lineCountOut = 0;
+    if (data == NULL || lines == NULL || lineCap == 0 ||
+        !vm_net_mock_dsh_schema_parse(data, len, &schema))
+        return false;
+
+    idColumn = vm_net_mock_dsh_schema_find_ascii_column(&schema, "ID");
+    x1Column = vm_net_mock_dsh_schema_find_ascii_column(&schema, "X1");
+    y1Column = vm_net_mock_dsh_schema_find_ascii_column(&schema, "Y1");
+    x2Column = vm_net_mock_dsh_schema_find_ascii_column(&schema, "X2");
+    y2Column = vm_net_mock_dsh_schema_find_ascii_column(&schema, "Y2");
+    if (idColumn < 0 || x1Column < 0 || y1Column < 0 ||
+        x2Column < 0 || y2Column < 0)
+    {
+        return false;
+    }
+
+    for (u32 rowIndex = 0; rowIndex < schema.rowCount; ++rowIndex)
+    {
+        const u8 *row = NULL;
+        u32 rowLen = 0;
+        const u8 *idValue = NULL;
+        const u8 *x1Value = NULL;
+        const u8 *y1Value = NULL;
+        const u8 *x2Value = NULL;
+        const u8 *y2Value = NULL;
+        u32 idLen = 0;
+        u32 x1Len = 0;
+        u32 y1Len = 0;
+        u32 x2Len = 0;
+        u32 y2Len = 0;
+        vm_net_mock_death_respawn_wmap_line line;
+
+        if (!vm_net_mock_dsh_schema_row_at(&schema, rowIndex, &row, &rowLen) ||
+            !vm_net_mock_dsh_schema_row_value_at(
+                &schema, row, rowLen, (u32)idColumn, &idValue, &idLen) ||
+            !vm_net_mock_dsh_schema_row_value_at(
+                &schema, row, rowLen, (u32)x1Column, &x1Value, &x1Len) ||
+            !vm_net_mock_dsh_schema_row_value_at(
+                &schema, row, rowLen, (u32)y1Column, &y1Value, &y1Len) ||
+            !vm_net_mock_dsh_schema_row_value_at(
+                &schema, row, rowLen, (u32)x2Column, &x2Value, &x2Len) ||
+            !vm_net_mock_dsh_schema_row_value_at(
+                &schema, row, rowLen, (u32)y2Column, &y2Value, &y2Len))
+        {
+            return false;
+        }
+
+        /* A blank required-field set is the native DSH end marker.  It is
+         * not a route and must be ignored; a partially blank row is invalid
+         * data rather than a candidate for default coordinates. */
+        if (idLen == 0 && x1Len == 0 && y1Len == 0 && x2Len == 0 && y2Len == 0)
+            continue;
+        if (idLen == 0 || x1Len == 0 || y1Len == 0 || x2Len == 0 || y2Len == 0 ||
+            !vm_net_mock_parse_dsh_u32_exact(idValue, idLen, &line.lineId) ||
+            !vm_net_mock_parse_dsh_u32_exact(x1Value, x1Len, &line.x1) ||
+            !vm_net_mock_parse_dsh_u32_exact(y1Value, y1Len, &line.y1) ||
+            !vm_net_mock_parse_dsh_u32_exact(x2Value, x2Len, &line.x2) ||
+            !vm_net_mock_parse_dsh_u32_exact(y2Value, y2Len, &line.y2) ||
+            line.lineId == 0 || lineCount >= lineCap)
+        {
+            return false;
+        }
+        lines[lineCount++] = line;
+    }
+    if (lineCountOut)
+        *lineCountOut = lineCount;
+    return lineCount != 0;
+}
+
 static bool vm_net_mock_death_respawn_load_wmap_lines(
     vm_net_mock_death_respawn_wmap_line *lines, u32 lineCap, u32 *lineCountOut)
 {
     char path[256];
     u8 data[4096];
     u32 len = 0;
-    u32 columnCount = 0;
-    u32 rowCount = 0;
-    u32 headerBytes = 0;
-    u32 pos = 0;
-    u32 lineCount = 0;
 
     if (lineCountOut)
         *lineCountOut = 0;
@@ -10669,57 +10963,8 @@ static bool vm_net_mock_death_respawn_load_wmap_lines(
         return false;
     }
     len = vm_net_mock_load_response_file(path, data, sizeof(data));
-    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
-        return false;
-    columnCount = vm_net_mock_read_le32_at(data, 4);
-    rowCount = vm_net_mock_read_le32_at(data, 8);
-    headerBytes = vm_net_mock_read_le32_at(data, 12);
-    if (columnCount < 5 || columnCount > 64 || rowCount > lineCap ||
-        16u + headerBytes > len)
-    {
-        return false;
-    }
-    pos = 16u + headerBytes;
-    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
-    {
-        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
-        u32 rowPos = pos + 4;
-        u32 rowEnd = rowPos + rowLen;
-        vm_net_mock_death_respawn_wmap_line line;
-        bool valid = true;
-
-        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
-            return false;
-        memset(&line, 0, sizeof(line));
-        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
-        {
-            u32 valueLen = data[rowPos++];
-            const u8 *value = data + rowPos;
-
-            if (rowPos + valueLen > rowEnd)
-            {
-                valid = false;
-                break;
-            }
-            if (col == 0)
-                line.lineId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
-            else if (col == 1)
-                line.x1 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
-            else if (col == 2)
-                line.y1 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
-            else if (col == 3)
-                line.x2 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
-            else if (col == 4)
-                line.y2 = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
-            rowPos += valueLen;
-        }
-        if (valid && line.lineId != 0)
-            lines[lineCount++] = line;
-        pos = rowEnd;
-    }
-    if (lineCountOut)
-        *lineCountOut = lineCount;
-    return lineCount != 0;
+    return vm_net_mock_death_respawn_read_wmap_lines_dsh(
+        data, len, lines, lineCap, lineCountOut);
 }
 
 static int vm_net_mock_death_respawn_wmap_index_at_canvas_point(
