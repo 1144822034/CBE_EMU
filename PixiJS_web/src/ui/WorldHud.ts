@@ -24,6 +24,7 @@ import {
 } from "../resources/actor";
 import { fetchResourceBytes } from "../resources/loader";
 import { lookupSMapAlias } from "../resources/smap";
+import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
 import {
   createPanelTipState,
   drawPanelTipOverlay,
@@ -171,6 +172,13 @@ export class WorldHud extends Container {
   private dreamTimerTick: ReturnType<typeof setInterval> | null = null;
   private dreamTtlMsCached: number | null = null;
   private dreamSceneKey = "";
+  /** Last vitals / party for Graphics rebuild after webglcontextrestored. */
+  private lastHp = 0;
+  private lastMaxHp = 1;
+  private lastMp = 0;
+  private lastMaxMp = 1;
+  private lastParty: HudPartyMate[] = [];
+  private lastPortraitActor = "";
 
   /** Center toast for「修」buff list / short world tips. */
   private toast: PanelTipState = createPanelTipState();
@@ -383,6 +391,7 @@ export class WorldHud extends Container {
   }
 
   async setPortraitActor(actorName: string): Promise<void> {
+    this.lastPortraitActor = actorName;
     try {
       const loaded = await loadActor(actorName);
       let frame = composeActorFrameIndex(loaded, 0);
@@ -511,6 +520,10 @@ export class WorldHud extends Container {
   }
 
   setVitals(hp: number, maxHp: number, mp: number, maxMp: number): void {
+    this.lastHp = hp;
+    this.lastMaxHp = maxHp;
+    this.lastMp = mp;
+    this.lastMaxMp = maxMp;
     const maxW = WorldHud.FILL_W;
     const hpW = Math.max(0, Math.min(maxW, Math.floor((maxW * hp) / Math.max(1, maxHp))));
     const spW = Math.max(0, Math.min(maxW, Math.floor((maxW * mp) / Math.max(1, maxMp))));
@@ -520,11 +533,41 @@ export class WorldHud extends Container {
   }
 
   /**
+   * webglcontextrestored: tiao frames may recover; Graphics fills / canvas
+   * portraits often stay blank until nodes are replaced and redrawn.
+   */
+  nudgeAfterGpuResume(): void {
+    try {
+      nudgeTextureSource(this.partyTiao);
+      nudgeTextureSource(this.handkuangTex);
+      for (const c of this.tiaoHost.children) {
+        nudgeTextureSource((c as Sprite).texture as Texture | undefined);
+      }
+    } catch {
+      /* ignore */
+    }
+    this.hpFill = replaceGraphics(this.hpFill);
+    this.spFill = replaceGraphics(this.spFill);
+    // Fills must sit above the tiao.gif chrome.
+    this.tiaoHost.addChild(this.hpFill, this.spFill);
+    this.setVitals(this.lastHp, this.lastMaxHp, this.lastMp, this.lastMaxMp);
+    for (const slot of this.partySlots) {
+      slot.hpFill = replaceGraphics(slot.hpFill);
+      slot.spFill = replaceGraphics(slot.spFill);
+    }
+    this.setParty(this.lastParty);
+    if (this.lastPortraitActor) {
+      void this.setPortraitActor(this.lastPortraitActor);
+    }
+  }
+
+  /**
    * Show teammate vitals under self status (map overlay).
    * Pass empty / solo roster to hide (leave team).
    */
   setParty(mates: HudPartyMate[]): void {
     const list = mates.slice(0, PARTY_MAX);
+    this.lastParty = list;
     while (this.partySlots.length < list.length) {
       this.partySlots.push(this.makePartySlot(this.partySlots.length));
     }

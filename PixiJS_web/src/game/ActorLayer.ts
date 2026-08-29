@@ -42,21 +42,11 @@ import {
   releasePoseTextureKey,
 } from "../render/poseTextureCache";
 
-function isNativePlatform(): boolean {
-  try {
-    const cap = (
-      globalThis as unknown as {
-        Capacitor?: { isNativePlatform?: () => boolean };
-      }
-    ).Capacitor;
-    return !!cap?.isNativePlatform?.();
-  } catch {
-    return false;
-  }
-}
-
-/** APK: only the nearest N peers keep wing/mount GPU. Titles stay. */
-const NATIVE_PEER_HEAVY_CAP = 6;
+/**
+ * Only the nearest N peers keep wing / mount / animated chenghao GPU
+ * (browser + APK). Farther peers fall back to classic title text/gif.
+ */
+const PEER_HEAVY_CAP = 6;
 
 const NPC_CYAN = 0x80e8ff;
 const PEER_GREEN = 0xa8e6a1;
@@ -663,33 +653,52 @@ export class ActorLayer {
       this.layoutNameplate(m);
       return;
     }
-    void this.refreshPeerTitle(m);
+    const wantsHeavy = !!(m.eqWing || m.eqMount || m.eqChenghao);
+    if (!wantsHeavy) {
+      m.wing?.clear();
+      m.mount?.clear();
+      if (m.sprite) m.sprite.y = 0;
+      void this.refreshPeerTitle(m);
+      this.layoutNameplate(m);
+      return;
+    }
     this.applyPeerHeavyCosmetics(m, this.peerHeavyAllowed().has(m.id));
   }
 
+  /** Nearest peers allowed to keep wing/mount/chenghao atlases. */
   private peerHeavyAllowed(): Set<number> {
     const ids: { id: number; d2: number }[] = [];
     for (const m of this.markers.values()) {
-      if (m.kind !== "peer" || !(m.eqWing || m.eqMount)) continue;
+      if (
+        m.kind !== "peer" ||
+        !(m.eqWing || m.eqMount || m.eqChenghao)
+      ) {
+        continue;
+      }
       const dx = m.x - this.viewerX;
       const dy = m.y - this.viewerY;
       ids.push({ id: m.id, d2: dx * dx + dy * dy });
     }
-    if (!isNativePlatform() || ids.length <= NATIVE_PEER_HEAVY_CAP) {
+    if (ids.length <= PEER_HEAVY_CAP) {
       return new Set(ids.map((p) => p.id));
     }
     ids.sort((a, b) => a.d2 - b.d2);
-    return new Set(ids.slice(0, NATIVE_PEER_HEAVY_CAP).map((p) => p.id));
+    return new Set(ids.slice(0, PEER_HEAVY_CAP).map((p) => p.id));
   }
 
   private applyPeerHeavyCosmetics(m: Marker, allow: boolean): void {
     if (!allow) {
       m.wing?.clear();
       m.mount?.clear();
+      m.chenghao?.clear();
       if (m.sprite) m.sprite.y = 0;
+      // Bust stale chenghao:* key so classic badge can rebuild.
+      if (m.titleGifKey.startsWith("chenghao:")) m.titleGifKey = "";
+      void this.refreshTitleBadge(m, m.classicTitle, m.classicTitleGif);
       this.layoutNameplate(m);
       return;
     }
+    void this.refreshPeerTitle(m);
     void this.refreshPeerWing(m);
     void this.refreshPeerMount(m);
   }
@@ -699,6 +708,7 @@ export class ActorLayer {
     const allow = this.peerHeavyAllowed();
     for (const m of this.markers.values()) {
       if (m.kind !== "peer") continue;
+      if (!(m.eqWing || m.eqMount || m.eqChenghao)) continue;
       this.applyPeerHeavyCosmetics(m, allow.has(m.id));
     }
   }

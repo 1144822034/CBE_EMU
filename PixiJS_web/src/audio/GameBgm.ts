@@ -1,5 +1,5 @@
 /**
- * Game BGM: play jh.mp3 then ss.mp3 in sequence, repeat while enabled.
+ * Game BGM: play jh.mp3 → ss.mp3 → bgad.mp3 in sequence, repeat while enabled.
  * Works in browser and Capacitor Android WebView after a user gesture.
  */
 
@@ -7,7 +7,11 @@ import { publicAssetUrl } from "../resources/publicUrl";
 
 const LS_KEY = "pix_sound_enabled";
 
-const TRACK_PATHS = ["JHOnlineData/jh.mp3", "JHOnlineData/ss.mp3"] as const;
+const TRACK_PATHS = [
+  "JHOnlineData/jh.mp3",
+  "JHOnlineData/ss.mp3",
+  "JHOnlineData/bgad.mp3",
+] as const;
 
 let enabled = readEnabled();
 let starting = false;

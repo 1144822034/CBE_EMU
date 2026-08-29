@@ -3,4 +3,4 @@
  * by `scripts/sync-offline-assets.mjs`. Used when runtime fetch misses
  * (Capacitor `base: './'`, offline, or absolute `/…` 404).
  */
-export const BUNDLED_CLIENT_CODE_VERSION = 32;
+export const BUNDLED_CLIENT_CODE_VERSION = 34;

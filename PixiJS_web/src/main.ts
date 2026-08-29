@@ -2816,8 +2816,17 @@ async function main(): Promise<void> {
       // mid-playback or deferred HP/MP never reaches the world HUD.
       if (up.escaped && up.escapeOk) {
         endBattleToWorld(up.log);
-      } else if (up.finished && !up.settlement && !(up.actions?.length)) {
-        endBattleToWorld(up.log);
+      } else if (
+        up.finished &&
+        !up.settlement &&
+        !(up.actions?.length)
+      ) {
+        if (phase === "battle") {
+          /* Lone 4/8: applyUpdate queues exit; onExitReady after any prior 4/6.
+           * Immediate endBattleToWorld here aborted multi-monster counters. */
+        } else {
+          endBattleToWorld(up.log);
+        }
       }
     },
     onWagerEvent: (ev) => {
@@ -7108,6 +7117,16 @@ dialog.hide();
         } catch {
           /* ignore */
         }
+        try {
+          if (phase === "battle" || battle.visible) battle.nudgeAfterGpuResume();
+        } catch {
+          /* ignore */
+        }
+        try {
+          hud.nudgeAfterGpuResume();
+        } catch {
+          /* ignore */
+        }
       }
       if (
         isGameDisplayPhase(phase) &&
@@ -7454,6 +7473,16 @@ dialog.hide();
         view.nudgeAfterGpuResume();
       } catch (e) {
         console.warn("[gl] scene nudge", e);
+      }
+      try {
+        if (phase === "battle" || battle.visible) battle.nudgeAfterGpuResume();
+      } catch (e) {
+        console.warn("[gl] battle nudge", e);
+      }
+      try {
+        hud.nudgeAfterGpuResume();
+      } catch (e) {
+        console.warn("[gl] hud nudge", e);
       }
       try {
         app.render();

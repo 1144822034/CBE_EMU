@@ -30,6 +30,7 @@ import { eidolonActorForIndex } from "../resources/eidolon";
 import { lookupItemSync } from "../resources/itemCatalog";
 import { loadSceneMap, resourceExists, type LoadedScene } from "../resources/loader";
 import { rgbaToTexture } from "../render/rgbaTexture";
+import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
 import type { BattleSkillRow, SkillTargetKind } from "../resources/skill";
 import { skillNeedsTargetPick } from "../resources/skill";
 import type { BagItem } from "../net/protocolExtras";
@@ -257,6 +258,10 @@ export class BattleScreen extends Container {
   private deathPromptCursor = 0;
   /** True while actioninfo FX is playing — keep menu hidden and ignore ops. */
   private playbackBusy = false;
+  /** Queued playActionScript chain — never run two 4/6 scripts in parallel. */
+  private playbackChain: Promise<void> = Promise.resolve();
+  /** In-flight + queued applyUpdate play jobs (menu/auto stay locked until 0). */
+  private playbackDepth = 0;
   /**
    * Shared round: local 4/2 already sent; waiting for 4/6 playback
    * (team merge or spar duel_round_defer). No menu / ops until applyUpdate.
@@ -672,6 +677,8 @@ export class BattleScreen extends Container {
     this.deathPromptHasStone = false;
     this.deathPromptCursor = 0;
     this.playbackBusy = false;
+    this.playbackDepth = 0;
+    this.playbackChain = Promise.resolve();
     this.awaitingRound = false;
     this.playbackGen += 1;
     this.menuMode = "root";
@@ -751,90 +758,124 @@ export class BattleScreen extends Container {
       if (row) row.hp = Math.max(0, h.hp);
     }
 
+    /*
+     * Do NOT zero left HP here when settlement is co-packet with 4/6.
+     * Solo PvE killing blow inlines 4/7 with actioninfo; pre-zeroing made
+     * isUnitDefeated true before playback → skip cast/attack, jump to death.
+     * Wipe after playActionScript (deltas + type-3 already applied).
+     */
+
+    /*
+     * Serialize scripts. A second 4/6 (auto synth / peer deliver) used to
+     * void-start in parallel while gen++ abandoned the first finally — with
+     * 3 monsters that looked like「第一只怪后己方又出手」, remaining counters
+     * stomped (docs/re/2026-07-28-battle-auto-stomp-counter-playback.md).
+     */
+    const epoch = this.playbackGen;
+    this.playbackBusy = true;
+    this.playbackDepth += 1;
+    this.playbackChain = this.playbackChain
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          if (!this.state || epoch !== this.playbackGen) return;
+          await this.playActionScript(up);
+        } finally {
+          this.finishActionPlayback(up, deferVitals, epoch);
+        }
+      });
+  }
+
+  /** After one queued script: vitals / settle / menu. Auto only when queue drained. */
+  private finishActionPlayback(
+    up: BattleActionUpdate,
+    deferVitals: boolean,
+    epoch: number,
+  ): void {
+    this.playbackDepth = Math.max(0, this.playbackDepth - 1);
+    const drained = this.playbackDepth === 0;
+    if (drained) this.playbackBusy = false;
+    if (epoch !== this.playbackGen || !this.state) return;
+
     if (up.settlement) {
       for (const row of this.state.left) row.hp = 0;
     }
-
-    const gen = ++this.playbackGen;
-    this.playbackBusy = true;
-    void this.playActionScript(up).finally(() => {
-      if (gen !== this.playbackGen || !this.state) return;
-      this.playbackBusy = false;
-      // Ensure final teaminfo MP landed (HP stays on actioninfo deltas only).
-      this.applyRightTeaminfo(up.rightHp, /* mpOnly */ true);
-      if (deferVitals) {
-        /* Death rounds attach teaminfo hp=0; actioninfo deltas alone may leave
-         * the local seat alive so beginDeathPrompt never fires. */
-        const local = this.localPlayerSide();
-        if (local) {
-          const tip = up.rightHp.find((h) => h.id === local.id);
-          if (tip?.hp === 0) {
-            local.hp = 0;
-            const view = this.units.find((u) => u.side === local);
-            if (view) view.dead = true;
-          }
-        }
-      }
-      if (deferVitals && !this.isLocalPlayerDead()) {
-        const selfW = this.selfWire();
-        const playerDeathRec = up.actions?.some(
-          (a) => (a.type === 3 || a.type === 4) && a.actorWire === selfW,
-        );
-        if (playerDeathRec) {
-          const local = this.localPlayerSide();
-          if (local) local.hp = 0;
-          const view = this.unitForWire(selfW);
+    // Ensure final teaminfo MP landed (HP stays on actioninfo deltas only).
+    this.applyRightTeaminfo(up.rightHp, /* mpOnly */ true);
+    if (deferVitals) {
+      /* Death rounds attach teaminfo hp=0; actioninfo deltas alone may leave
+       * the local seat alive so beginDeathPrompt never fires. */
+      const local = this.localPlayerSide();
+      if (local) {
+        const tip = up.rightHp.find((h) => h.id === local.id);
+        if (tip?.hp === 0) {
+          local.hp = 0;
+          const view = this.units.find((u) => u.side === local);
           if (view) view.dead = true;
         }
       }
-      if (up.settlement) {
-        // 4/7.hp/mp are recovery deltas (flask / settle recover). Apply onto
-        // the local seat so world HUD matches post-settle durable vitals.
-        this.applySettlementRecover(up.settlement);
+    }
+    if (deferVitals && !this.isLocalPlayerDead()) {
+      const selfW = this.selfWire();
+      const playerDeathRec = up.actions?.some(
+        (a) => (a.type === 3 || a.type === 4) && a.actorWire === selfW,
+      );
+      if (playerDeathRec) {
+        const local = this.localPlayerSide();
+        if (local) local.hp = 0;
+        const view = this.unitForWire(selfW);
+        if (view) view.dead = true;
       }
-      this.notifyVitalsChanged();
-      if (up.settlement) {
-        this.showSettlement(up.settlement);
-        this.awaitingExit = true;
-        this.awaitingDeathPrompt = false;
-        this.menuOpen = false;
-        this.redrawMenu();
-        this.refreshAutoBannerVisibility();
-        // 4/7+4/8 often share one WT — keep settle panel; confirm owns leave.
-        return;
-      }
-      if (up.finished) {
-        this.menuOpen = false;
-        this.redrawMenu();
-        this.refreshAutoBannerVisibility();
-        // Final deferred vitals already notified above; leave after playback.
-        this.onExitReady?.();
-        return;
-      }
-      // Death arms revival confirm on server — no 4/7/4/8 until 1/7/14.
-      // Spar/duel uses settle/exit (penalty already applied); no 复活石 prompt.
-      if (this.isLocalPlayerDead()) {
-        if (this.isSparBattle()) {
-          this.menuOpen = false;
-          this.redrawMenu();
-          this.refreshAutoBannerVisibility();
-          return;
-        }
-        this.beginDeathPrompt();
-        return;
-      }
-      this.menuMode = "root";
-      // Keep scroll hidden while [自动] / hangup; banner or stop-hangup restores.
-      this.menuOpen = this.operateMenuAllowed();
-      this.timerSec = this.turnSeconds();
-      this.timerAcc = 0;
-      this.paintTimer();
-      this.paintLocalActingTitle();
+    }
+    if (up.settlement) {
+      // 4/7.hp/mp are recovery deltas (flask / settle recover). Apply onto
+      // the local seat so world HUD matches post-settle durable vitals.
+      this.applySettlementRecover(up.settlement);
+    }
+    this.notifyVitalsChanged();
+    if (up.settlement) {
+      this.showSettlement(up.settlement);
+      this.awaitingExit = true;
+      this.awaitingDeathPrompt = false;
+      this.menuOpen = false;
       this.redrawMenu();
       this.refreshAutoBannerVisibility();
-      // Next seat is ready — main arms [自动] client 4/2 if enabled.
-      this.onAutoReady?.();
-    });
+      // 4/7+4/8 often share one WT — keep settle panel; confirm owns leave.
+      return;
+    }
+    if (up.finished) {
+      this.menuOpen = false;
+      this.redrawMenu();
+      this.refreshAutoBannerVisibility();
+      // Only leave when nothing else is queued (lone 4/8 may trail a long 4/6).
+      if (drained) this.onExitReady?.();
+      return;
+    }
+    // Death arms revival confirm on server — no 4/7/4/8 until 1/7/14.
+    // Spar/duel uses settle/exit (penalty already applied); no 复活石 prompt.
+    if (this.isLocalPlayerDead()) {
+      if (this.isSparBattle()) {
+        this.menuOpen = false;
+        this.redrawMenu();
+        this.refreshAutoBannerVisibility();
+        return;
+      }
+      this.beginDeathPrompt();
+      return;
+    }
+    // More 4/6 still queued — keep menu down and do not arm auto yet.
+    if (!drained) return;
+    this.menuMode = "root";
+    // Keep scroll hidden while [自动] / hangup; banner or stop-hangup restores.
+    this.menuOpen = this.operateMenuAllowed();
+    this.timerSec = this.turnSeconds();
+    this.timerAcc = 0;
+    this.paintTimer();
+    this.paintLocalActingTitle();
+    this.redrawMenu();
+    this.refreshAutoBannerVisibility();
+    // Next seat is ready — main arms [自动] client 4/2 if enabled.
+    this.onAutoReady?.();
   }
 
   hide(): void {
@@ -849,6 +890,8 @@ export class BattleScreen extends Container {
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
     this.playbackBusy = false;
+    this.playbackDepth = 0;
+    this.playbackChain = Promise.resolve();
     this.awaitingRound = false;
     this.playbackGen += 1;
     this.settlePaintGen += 1;
@@ -878,6 +921,75 @@ export class BattleScreen extends Container {
       } catch (e) {
         console.warn("[battle] deity sheet reload failed", u.actorName, e);
       }
+    }
+  }
+
+  /**
+   * After webglcontextrestored: world SceneView nudge does not cover battle.
+   * Re-upload map/unit textures and rebuild Graphics (HP fills / letterbox /
+   * foot shadows) so the stage is not left black with hollow xuetiao.
+   */
+  nudgeAfterGpuResume(): void {
+    if (!this.visible) return;
+    try {
+      if (this.mapSprite) {
+        const ok = nudgeTextureSource(this.mapSprite.texture);
+        if (ok) this.mapSprite.visible = true;
+      }
+      for (const c of this.mapHost.children) {
+        if (c instanceof Graphics) {
+          c.clear()
+            .rect(0, 0, LCD_WIDTH, LCD_HEIGHT)
+            .fill({ color: CBE.bgDeep });
+        } else {
+          nudgeTextureSource(
+            (c as Sprite).texture as Texture | undefined,
+          );
+        }
+      }
+    } catch (e) {
+      console.warn("[battle] map nudge", e);
+    }
+
+    for (const [, tex] of this.poseTexCache) {
+      nudgeTextureSource(tex);
+    }
+
+    for (const u of this.units) {
+      if (u.root.destroyed) continue;
+      try {
+        const shadow = u.root.children[0];
+        if (shadow instanceof Graphics) {
+          const g = replaceGraphics(shadow);
+          g.ellipse(0, 2, 13, 5).fill({ color: 0x000000, alpha: 0.35 });
+        }
+        if (u.sprite?.texture) {
+          nudgeTextureSource(u.sprite.texture);
+          if (!u.hidden) {
+            u.sprite.visible = true;
+            u.root.visible = true;
+          }
+        }
+        this.paintUnitSprite(u);
+      } catch {
+        /* ignore per-unit */
+      }
+    }
+
+    try {
+      nudgeTextureSource(this.autoBannerWords?.texture);
+      for (const c of this.fxHost.children) {
+        nudgeTextureSource((c as Sprite).texture as Texture | undefined);
+        if ((c as Sprite).visible !== false) (c as Sprite).visible = true;
+      }
+    } catch {
+      /* ignore */
+    }
+
+    if (this.state) {
+      this.partyHud.nudgeAfterGpuResume(this.state.right, {
+        playerName: this.visuals.playerName,
+      });
     }
   }
 
@@ -1936,6 +2048,13 @@ export class BattleScreen extends Container {
     this.paintActingTitle(unit?.name || `目标#${wire}`);
   }
 
+  /** Playback-time defeat gate — dead/hidden/hp<=0 must not receive dashes. */
+  private isUnitDefeated(view: UnitView | null): boolean {
+    if (!view) return true;
+    if (view.dead || view.hidden) return true;
+    return view.side.hp <= 0;
+  }
+
   private isLocalPlayerDead(): boolean {
     const side = this.localPlayerSide();
     if (!side) return false;
@@ -2106,7 +2225,7 @@ export class BattleScreen extends Container {
       const cycleMs = this.attackStripParts(actor) * frameMs;
       const hold = cycleMs + 120;
       this.setUnitPose(actor, "cast", hold);
-      await sleep(Math.max(400, cycleMs));
+      await sleep(Math.max(400, hold));
       if (actor.pose !== "death") {
         actor.pose = "idle";
         actor.poseUntil = 0;
@@ -2156,12 +2275,36 @@ export class BattleScreen extends Container {
 
   private async playHitMotion(u: UnitView): Promise<void> {
     if (u.dead || u.hidden) return;
-    this.setUnitPose(u, "hit", 700);
+    const hold = 700;
+    this.setUnitPose(u, "hit", hold);
     const x0 = u.root.x;
     u.root.x = x0 + (u.facingRight ? -6 : 6);
     await sleep(120);
     u.root.x = x0;
-    await sleep(400);
+    // Match pose hold — returning early left ~180ms of hit tint while the
+    // next actor already dashed.
+    await sleep(hold - 120);
+    if (u.pose === "hit") {
+      u.pose = "idle";
+      u.poseUntil = 0;
+      this.paintUnitSprite(u);
+    }
+  }
+
+  /**
+   * Drain leftover fxHost strips, then a short beat before the next record.
+   * Do not spin on unit poses — long pose waits stacked with auto 4/6 and made
+   * parallel stomps more likely (三怪：第一只后己方又动).
+   */
+  private async waitBattleVisualSettle(extraMs = 180): Promise<void> {
+    const deadline = performance.now() + 500;
+    while (
+      performance.now() < deadline &&
+      this.fxHost.children.length > 0
+    ) {
+      await sleep(40);
+    }
+    if (extraMs > 0) await sleep(extraMs);
   }
 
   /** Left-side units are monsters (or spar foes); facing can flip mid-cast. */
@@ -2698,36 +2841,80 @@ export class BattleScreen extends Container {
       const offensiveGroup =
         rec.children.length > 1 && rec.children.some((c) => c.delta < 0);
       const childWires = rec.children.map((c) => c.wire);
+      const offensiveChildren = rec.children.filter(
+        (c) => c.delta < 0 && c.flag !== 3,
+      );
+      const livingOffensiveWires = offensiveChildren
+        .map((c) => c.wire)
+        .filter((w) => !this.isUnitDefeated(this.unitForWire(w)));
+      const allOffensiveDefeated =
+        offensiveChildren.length > 0 && livingOffensiveWires.length === 0;
+      const firstTargetWire =
+        livingOffensiveWires[0] ??
+        childWires.find((w) => !this.isUnitDefeated(this.unitForWire(w))) ??
+        childWires[0];
       const firstTarget =
-        childWires[0] != null ? this.unitForWire(childWires[0]) : null;
+        firstTargetWire != null ? this.unitForWire(firstTargetWire) : null;
       const isSkill = rec.type === 1 || rec.type === 2;
-      const fxWires = childWires.length ? childWires : [rec.actorWire];
+      const fxWires = livingOffensiveWires.length
+        ? livingOffensiveWires
+        : childWires.length
+          ? childWires
+          : [rec.actorWire];
       const effectIndex =
         isSkill && rec.effectIndex != null && rec.effectIndex > 0
           ? rec.effectIndex
           : 0;
 
+      // Team merge keeps later seats' baked hits on already-dead wires.
+      // Skip dash/FX/floats for wholly defeated offensive records; still apply
+      // HP/MP deltas so vitals stay in lock-step with the server script.
+      if (allOffensiveDefeated) {
+        for (let i = 0; i < rec.children.length; i++) {
+          const c = rec.children[i]!;
+          const wire = childWires[i] ?? c.wire;
+          this.applyWireHpDelta(wire, c.delta);
+        }
+        if (isSkill) {
+          this.applyCasterMpFromTeaminfo(up.rightHp, rec.actorWire);
+        }
+        this.notifyVitalsChanged();
+        continue;
+      }
+
       if (actor && !actor.dead) {
-        const motion = this.playAttackMotion(
+        const actorEnemy = this.isEnemyUnit(actor);
+        const targetEnemy = !!firstTarget && this.isEnemyUnit(firstTarget);
+        // True wire desync is distinct enemy wires. Same-wire is boss self-heal
+        // / buff (subtype-10 actor==target on left) — not team-table leak.
+        if (
+          actorEnemy &&
+          targetEnemy &&
+          firstTargetWire != null &&
+          firstTargetWire !== rec.actorWire &&
+          offensiveChildren.length > 0
+        ) {
+          console.error(
+            `[battle] monster-vs-monster dash actorWire=${rec.actorWire} ` +
+              `targetWire=${firstTargetWire} P=${this.state.right.length} ` +
+              `M=${this.state.left.length} evidence=team-wire-desync`,
+          );
+        }
+        // Cast/attack strip first; eidolon FX follows after a short beat so the
+        // order reads clearly without stacking on the cast pose.
+        await this.playAttackMotion(
           actor,
-          firstTarget,
+          firstTarget && !this.isUnitDefeated(firstTarget) ? firstTarget : null,
           isSkill ? "cast" : "attack",
         );
         if (effectIndex > 0) {
-          await Promise.all([
-            motion,
-            (async () => {
-              await sleep(120);
-              await this.playSkillEffects(
-                effectIndex,
-                fxWires,
-                actor,
-                /* fallbackToActor */ !offensiveGroup,
-              );
-            })(),
-          ]);
-        } else {
-          await motion;
+          await sleep(80);
+          await this.playSkillEffects(
+            effectIndex,
+            fxWires,
+            actor,
+            /* fallbackToActor */ !offensiveGroup,
+          );
         }
       } else if (effectIndex > 0) {
         await this.playSkillEffects(
@@ -2738,12 +2925,20 @@ export class BattleScreen extends Container {
         );
       }
 
+      const hitWaits: Promise<void>[] = [];
       for (let i = 0; i < rec.children.length; i++) {
         const c = rec.children[i]!;
         const wire = childWires[i] ?? c.wire;
         const tgt = this.unitForWire(wire);
-        if (tgt && c.delta < 0 && c.flag !== 3) {
-          void this.playHitMotion(tgt);
+        const offensiveHit = c.delta < 0 && c.flag !== 3;
+        if (offensiveHit && this.isUnitDefeated(tgt)) {
+          this.applyWireHpDelta(wire, c.delta);
+          continue;
+        }
+        if (tgt && offensiveHit) {
+          // Must await — void + sleep(450) let the next actor dash while
+          // hit/FX reaction (~520ms) was still on screen.
+          hitWaits.push(this.playHitMotion(tgt));
         }
         this.spawnFloatAtWire(wire, c.delta, c.flag, rec.effectText);
         this.applyWireHpDelta(wire, c.delta);
@@ -2752,7 +2947,8 @@ export class BattleScreen extends Container {
         this.applyCasterMpFromTeaminfo(up.rightHp, rec.actorWire);
       }
       this.notifyVitalsChanged();
-      await sleep(450);
+      if (hitWaits.length) await Promise.all(hitWaits);
+      await this.waitBattleVisualSettle(180);
     }
   }
 
@@ -2792,7 +2988,7 @@ export class BattleScreen extends Container {
     }
     await Promise.all(
       spots.map((p) =>
-        this.playNamedActorFx(actorName, p.x, p.y, undefined, 750, 0.85),
+        this.playNamedActorFx(actorName, p.x, p.y, undefined, 900, 0.85),
       ),
     );
   }

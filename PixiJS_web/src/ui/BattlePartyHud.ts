@@ -13,6 +13,7 @@ import {
   loadActor,
   uiActorResourceForJobSex,
 } from "../resources/actor";
+import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
 
 const NAME_PINK = 0xff40c8;
 const HP_FILL = 0xe03828;
@@ -165,6 +166,36 @@ export class BattlePartyHud extends Container {
       if (!slot.root.visible || !row) continue;
       this.paintVitals(slot, row);
     }
+  }
+
+  /**
+   * webglcontextrestored: xuetiao frames may return via texture nudge, but
+   * HP/SP Graphics fills stay hollow until the nodes are replaced + redrawn.
+   * Portraits (Texture.from canvas) also need remount.
+   */
+  nudgeAfterGpuResume(
+    members: BattleSide[],
+    opts?: { playerName?: string; playerActor?: string },
+  ): void {
+    if (!this.ready) return;
+    try {
+      nudgeTextureSource(this.xuetiao);
+      nudgeTextureSource(this.handkuang);
+      nudgeTextureSource(this.hpLabTex);
+      nudgeTextureSource(this.spLabTex);
+    } catch {
+      /* ignore */
+    }
+    for (const slot of this.slots) {
+      slot.hpFill = replaceGraphics(slot.hpFill);
+      slot.spFill = replaceGraphics(slot.spFill);
+    }
+    this.panel = replaceGraphics(this.panel);
+    if (this.children[0] !== this.panel) {
+      this.addChildAt(this.panel, 0);
+    }
+    // setParty remounts faces + paintVitals on the fresh Graphics.
+    this.setParty(members, opts);
   }
 
   private paintVitals(slot: SlotArt, row: BattleSide): void {

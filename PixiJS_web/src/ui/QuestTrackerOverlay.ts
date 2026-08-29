@@ -205,11 +205,13 @@ export class QuestTrackerOverlay extends Container {
       );
 
       const npcBit = row.receiver ? truncateToWidth(row.receiver, textW * 0.45) : "—";
-      const sceneBudget = textW - measureUiTextWidth(npcBit, UC3_CELL) * TEXT_SCALE - 8;
+      const sepW = measureUiTextWidth(" ", UC3_CELL) * TEXT_SCALE;
+      const sceneBudget =
+        textW - measureUiTextWidth(npcBit, UC3_CELL) * TEXT_SCALE - sepW;
       const sceneBit = row.sceneLabel
         ? truncateToWidth(row.sceneLabel, Math.max(10, sceneBudget))
         : "";
-      const sub = sceneBit ? `${npcBit} · ${sceneBit}` : npcBit;
+      const sub = sceneBit ? `${npcBit} ${sceneBit}` : npcBit;
       this.addLine(truncateToWidth(sub, textW), textX, y + LINE_H, CBE.inkMint);
 
       y += blockH;
