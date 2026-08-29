@@ -9,6 +9,10 @@ import {
   formatMonsterMapName,
   loadMonsterLevelOverrides,
 } from "./resources/monsterLevels";
+import {
+  defaultNpcScenesUrl,
+  loadNpcSceneIndex,
+} from "./resources/npcScenes";
 import { loadSMapAliases } from "./resources/smap";
 import { defaultLiveGatewayUrl } from "./net/Transport";
 import {
@@ -94,6 +98,11 @@ import {
   type AuctionStatus,
 } from "./net/protocolAuction";
 import { TaskPanel } from "./ui/TaskPanel";
+import {
+  QuestTrackerOverlay,
+  buildQuestTrackerRows,
+} from "./ui/QuestTrackerOverlay";
+import { isStatusStripCollapsed } from "./resources/statusStripPref";
 import { ChatPanel, findArenaKillStreakTitle } from "./ui/ChatPanel";
 import { TradePanel } from "./ui/TradePanel";
 import { GuildPanel } from "./ui/GuildPanel";
@@ -132,7 +141,12 @@ import {
   npcServiceOpcode,
 } from "./net/protocolExtras";
 import { isMapHealSkill } from "./resources/skill";
-import { lookupItemSync, warmItemCatalogs } from "./resources/itemCatalog";
+import {
+  jobAllowsWeaponCategory,
+  lookupItemSync,
+  warmItemCatalogs,
+  weaponJobRestrictTip,
+} from "./resources/itemCatalog";
 import {
   resumeBgmAfterForeground,
   suspendBgm,
@@ -666,6 +680,8 @@ async function main(): Promise<void> {
   await loadMonsterLevelOverrides(
     defaultMonsterLevelsUrl(defaultLiveGatewayUrl()),
   );
+  // Dynamic NPC name→scene for quest tracker (server_dynamic_npcs).
+  await loadNpcSceneIndex(defaultNpcScenesUrl(defaultLiveGatewayUrl()));
 
   const title = new TitleScreen();
   const roles = new RoleScreen();
@@ -716,6 +732,7 @@ async function main(): Promise<void> {
     claimHasMore: false,
   };
   const taskUi = new TaskPanel();
+  const questTracker = new QuestTrackerOverlay();
   const chatPanel = new ChatPanel();
   const tradeUi = new TradePanel();
   const guildUi = new GuildPanel();
@@ -761,12 +778,24 @@ async function main(): Promise<void> {
     view.setDouVisible(session.hangupActive || session.hangupDesired);
   };
 
+  const refreshQuestTracker = () => {
+    questTracker.setPartyInset(hud.partyOverlayInset());
+    questTracker.setTasks(buildQuestTrackerRows(session.acceptedTasks));
+    // Keep name→scene map fresh after admin moves (throttled inside loader).
+    void loadNpcSceneIndex(defaultNpcScenesUrl(defaultLiveGatewayUrl())).then(
+      () => {
+        questTracker.setTasks(buildQuestTrackerRows(session.acceptedTasks));
+      },
+    );
+  };
+
   shell.content.addChild(
     title,
     roles,
     createRole,
     view.root,
     hud,
+    questTracker,
     miniMap,
     menu,
     battle,
@@ -1602,6 +1631,7 @@ async function main(): Promise<void> {
     guildUi.visible = p === "guild";
     worldMap.visible = p === "map";
     miniMap.visible = mapUiMode === "mini" && (p === "world" || p === "map");
+    questTracker.setWorldActive(p === "world");
     view.inputEnabled = p === "world";
     // Softkeys are HTML (#touch-bar); canvas SoftkeyBar stays hidden.
     if (p !== "world") {
@@ -1817,6 +1847,7 @@ async function main(): Promise<void> {
     setChromeStatus("任务列表…");
     const lists = await session.fetchTaskLists();
     taskUi.open(lists.accepted, lists.candidates, "accepted");
+    refreshQuestTracker();
     setChromeStatus(
       `已接${lists.accepted.length} · 可接${lists.candidates.length}`,
     );
@@ -1945,6 +1976,7 @@ async function main(): Promise<void> {
       view.invalidateMap();
       hud.setParty([]);
       hud.setIdentity("", "", "");
+      questTracker.setTasks([]);
     },
     onEnterScene: async (scene, x, y, opts) => {
       const hasPos = opts?.hasPos !== false;
@@ -2062,9 +2094,11 @@ async function main(): Promise<void> {
       setChromeStatus(
         `[${session.transport?.mode ?? "?"}] NPC×${npcs.length} 怪×${session.sceneMonsters.length}`,
       );
+      refreshQuestTracker();
     },
     onNpcTaskPrompts: (prompts) => {
       view.actors.setTaskPrompts(prompts);
+      refreshQuestTracker();
     },
     onPeers: (peers, removed) => {
       view.actors.applyPeers(peers, removed);
@@ -2184,17 +2218,33 @@ async function main(): Promise<void> {
           ? "组队邀请"
           : inv.kind === "friend"
             ? "好友邀请"
-            : "交易邀请";
+            : inv.kind === "guild"
+              ? "入帮邀请"
+              : "交易邀请";
       const body =
         inv.kind === "team"
           ? `${inv.name} 邀请你组队`
           : inv.kind === "friend"
             ? `${inv.name} 邀请加你为好友`
-            : `${inv.name} 邀请交易`;
+            : inv.kind === "guild"
+              ? `${inv.name} 邀请你加入帮派${inv.guildName ? `「${inv.guildName}」` : ""}`
+              : `${inv.name} 邀请交易`;
       const acceptAction =
-        inv.kind === "team" ? 220 : inv.kind === "friend" ? 230 : 242;
+        inv.kind === "team"
+          ? 220
+          : inv.kind === "friend"
+            ? 230
+            : inv.kind === "guild"
+              ? 258
+              : 242;
       const refuseAction =
-        inv.kind === "team" ? 221 : inv.kind === "friend" ? 231 : 243;
+        inv.kind === "team"
+          ? 221
+          : inv.kind === "friend"
+            ? 231
+            : inv.kind === "guild"
+              ? 259
+              : 243;
       dialog.show({
         title,
         body,
@@ -2262,6 +2312,17 @@ async function main(): Promise<void> {
         setChromeStatus("入帮邀请已发送");
         if (guildUi.visible) guildUi.showTip("入帮邀请已发送");
         if (social.visible) social.showTip("入帮邀请已发送");
+      } else if (n.kind === "guild_invite_result") {
+        const ok = n.result === 1;
+        const tip = ok ? "入帮邀请已同意" : "入帮邀请被拒绝";
+        hud.pushChat(
+          ok
+            ? `[帮]${n.name || "对方"} 同意加入帮派`
+            : `[帮]${n.name || "对方"} 拒绝加入帮派`,
+        );
+        setChromeStatus(tip, !ok);
+        if (guildUi.visible) guildUi.showTip(tip);
+        if (social.visible) social.showTip(tip);
       } else if (n.kind === "guild_create") {
         hud.pushChat(`[帮]${n.tip}`);
         setChromeStatus(n.tip, n.stage === "fail");
@@ -2304,14 +2365,23 @@ async function main(): Promise<void> {
         if (guildUi.visible) guildUi.showTip(u.applyResult.tip);
       }
       if (u.leaveResult) {
-        hud.pushChat(`[帮]${u.leaveResult.tip}`);
-        setChromeStatus(u.leaveResult.tip, u.leaveResult.result !== 1);
+        const tip =
+          u.leaveResult.result === 1 && expectGuildDisbandTip
+            ? "帮派已解散"
+            : u.leaveResult.tip;
+        expectGuildDisbandTip = false;
+        hud.pushChat(`[帮]${tip}`);
+        setChromeStatus(tip, u.leaveResult.result !== 1);
         if (u.leaveResult.result === 1) {
           guildUi.openHub(false, "无帮派");
           showPhase("guild");
           void view.setPlayerGuild("");
         }
-        if (guildUi.visible) guildUi.showTip(u.leaveResult.tip);
+        if (guildUi.visible) guildUi.showTip(tip);
+      }
+      if (u.kickResult) {
+        if (guildUi.visible) guildUi.showTip(u.kickResult.tip);
+        else showGameTip(u.kickResult.tip);
       }
       if (u.reviewResult) {
         hud.pushChat(`[帮]${u.reviewResult.tip}`);
@@ -2343,6 +2413,7 @@ async function main(): Promise<void> {
           u.members.allpgs,
           u.members.cnum,
           u.members.mnum,
+          { selfRoleId: session.selectedRoleId },
         );
         showPhase("guild");
       }
@@ -3005,6 +3076,18 @@ async function main(): Promise<void> {
     });
   };
 
+  view.onStatusStripCollapsed = (collapsed) => {
+    questTracker.setStripExpanded(!collapsed);
+  };
+  questTracker.setStripExpanded(!isStatusStripCollapsed());
+  questTracker.onOpenTasks = () => {
+    if (phase !== "world" || session.inBattle) return;
+    void openTaskList();
+  };
+  hud.onPartyChanged = () => {
+    questTracker.setPartyInset(hud.partyOverlayInset());
+  };
+
   view.onPaiTap = () => {
     if (phase !== "world" || session.inBattle) return;
     if (auctionPanel.visible) {
@@ -3419,6 +3502,14 @@ async function main(): Promise<void> {
   let hangupStartAfterSkillPick = false;
   /** Skill-forget DialogPanel: cancel/close returns to skill list (or battle). */
   let skillForgetDialogOpen = false;
+  /** Friend-delete DialogPanel: cancel/close returns to friend list. */
+  let friendDeleteDialogOpen = false;
+  let pendingFriendDelete: { id: number; name: string } | null = null;
+  /** Guild kick confirm. */
+  let pendingGuildKick: { roleId: number; rank: number; name: string } | null =
+    null;
+  /** Next successful 10/22 is a force-disband (tip wording). */
+  let expectGuildDisbandTip = false;
   /** Bag discard confirm: cancel/close returns to bag. */
   let discardConfirmOpen = false;
   let pendingDiscard: import("./net/protocolExtras").BagItem | null = null;
@@ -3436,6 +3527,13 @@ async function main(): Promise<void> {
     showPhase("system");
     system.open("skill");
     system.setSkills(session.learnedSkills);
+  };
+
+  const returnFromFriendDeleteDialog = (): void => {
+    friendDeleteDialogOpen = false;
+    pendingFriendDelete = null;
+    social.openFriends(session.friends, session.friendPage, session.friendAllPages);
+    showPhase("social");
   };
 
   const returnFromDiscardConfirm = (): void => {
@@ -3876,7 +3974,10 @@ async function main(): Promise<void> {
         session.characterStats?.guild ||
         "";
       const inGuild = !!session.guildId || (name !== "" && name !== "无帮派");
-      guildUi.openHub(inGuild, name || "无帮派");
+      guildUi.openHub(inGuild, name || "无帮派", {
+        selfRank: session.guildSelfRank,
+        selfRoleId: session.selectedRoleId,
+      });
       showPhase("guild");
       setChromeStatus("帮派");
       if (inGuild && !session.guildId) void session.ensureGuildId();
@@ -4357,6 +4458,11 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "equip") {
+        const job = session.characterStats?.job ?? 0;
+        if (!jobAllowsWeaponCategory(job, bag.category)) {
+          showGameTip(weaponJobRestrictTip(bag.category));
+          return;
+        }
         void session.equipItem(bag.itemId, bag.seq).then(() => void session.openBag());
         showGameTip(`装备 ${bag.name}`);
         return;
@@ -4413,11 +4519,21 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "equip") {
+        const job = session.characterStats?.job ?? 0;
+        if (!jobAllowsWeaponCategory(job, bag.category)) {
+          showGameTip(weaponJobRestrictTip(bag.category));
+          return;
+        }
         void session.equipItem(bag.itemId, bag.seq).then(() => refreshEquip());
         showGameTip(`装备 ${bag.name}`);
         return;
       }
       if (action === "swap") {
+        const job = session.characterStats?.job ?? 0;
+        if (!jobAllowsWeaponCategory(job, bag.category)) {
+          showGameTip(weaponJobRestrictTip(bag.category));
+          return;
+        }
         void session
           .swapEquip(system.getEquipFocusBodySeq(), bag.seq)
           .then(() => refreshEquip());
@@ -4551,6 +4667,7 @@ async function main(): Promise<void> {
     if (action === "refresh") {
       void session.fetchTaskLists().then((lists) => {
         taskUi.setLists(lists.accepted, lists.candidates);
+        refreshQuestTracker();
         showGameTip(
           `已接${lists.accepted.length} · 可接${lists.candidates.length}`,
         );
@@ -4568,6 +4685,7 @@ async function main(): Promise<void> {
         showGameTip(r.ok ? "已放弃" : "放弃失败");
         const lists = await session.fetchTaskLists();
         taskUi.setLists(lists.accepted, lists.candidates);
+        refreshQuestTracker();
       });
       return;
     }
@@ -4576,6 +4694,7 @@ async function main(): Promise<void> {
         showGameTip("已接取");
         const lists = await session.fetchTaskLists();
         taskUi.setLists(lists.accepted, lists.candidates);
+        refreshQuestTracker();
       });
     }
   };
@@ -4612,6 +4731,20 @@ async function main(): Promise<void> {
       void session.friendAdd(row.id);
       hud.pushChat(`[友]已发送好友邀请 ${row.name}`);
       showGameTip(`加好友 ${row.name}`);
+      return;
+    }
+    if (action === "delete_friend" && row?.id) {
+      friendDeleteDialogOpen = true;
+      pendingFriendDelete = { id: row.id >>> 0, name: row.name || "玩家" };
+      dialog.show({
+        title: "删除好友",
+        body: `确定将「${pendingFriendDelete.name}」从好友列表中删除？\n删除好友将同时清除友好度`,
+        options: [
+          { label: "确定", action: 236, value: pendingFriendDelete.id },
+          { label: "取消", action: 237, value: 0 },
+        ],
+      });
+      showPhase("dialog");
       return;
     }
     if (action === "trade" && row?.id) {
@@ -4799,7 +4932,7 @@ async function main(): Promise<void> {
   };
 
   guildUi.onClose = () => showPhase("world");
-  guildUi.onAction = (action, payload) => {
+  guildUi.onAction = (action, payload, extra) => {
     if (action === "open_list") {
       void session.openGuildList(1);
       return;
@@ -4833,6 +4966,32 @@ async function main(): Promise<void> {
         options: [
           { label: "确定", action: 252, value: 1 },
           { label: "取消", action: 253, value: 0 },
+        ],
+      });
+      showPhase("dialog");
+      return;
+    }
+    if (action === "disband") {
+      dialog.show({
+        title: "解散帮派",
+        body: "确定解散本帮？\n全体成员将失去帮派",
+        options: [
+          { label: "确定解散", action: 254, value: 1 },
+          { label: "取消", action: 255, value: 0 },
+        ],
+      });
+      showPhase("dialog");
+      return;
+    }
+    if (action === "kick" && payload && extra) {
+      const name = guildUi.peekSelectedMemberName || `角色${payload}`;
+      pendingGuildKick = { roleId: payload >>> 0, rank: extra >>> 0, name };
+      dialog.show({
+        title: "逐出帮派",
+        body: `将「${name}」逐出帮派？`,
+        options: [
+          { label: "确定", action: 256, value: payload },
+          { label: "取消", action: 257, value: 0 },
         ],
       });
       showPhase("dialog");
@@ -4907,6 +5066,10 @@ async function main(): Promise<void> {
     hangupStartAfterSkillPick = false;
     if (skillForgetDialogOpen) {
       returnFromSkillForgetDialog();
+      return;
+    }
+    if (friendDeleteDialogOpen) {
+      returnFromFriendDeleteDialog();
       return;
     }
     if (discardConfirmOpen) {
@@ -4997,6 +5160,11 @@ async function main(): Promise<void> {
         returnFromSkillForgetDialog();
         return;
       }
+      if (friendDeleteDialogOpen) {
+        dialog.hide();
+        returnFromFriendDeleteDialog();
+        return;
+      }
       if (dreamBadgeCombineOpen) {
         dialog.hide();
         returnFromDreamBadgeCombine();
@@ -5031,6 +5199,28 @@ async function main(): Promise<void> {
       void session.friendReply(action === 230).then(() => showPhase("world"));
       return;
     }
+    if (action === 236 || action === 237) {
+      dialog.hide();
+      const pending = pendingFriendDelete;
+      friendDeleteDialogOpen = false;
+      pendingFriendDelete = null;
+      if (action === 236 && pending?.id) {
+        const name = pending.name;
+        void session.friendDelete(pending.id).then(() => {
+          hud.pushChat(`[友]已删除好友 ${name}`);
+          showGameTip(`已删除 ${name}`);
+          social.openFriends(
+            session.friends,
+            session.friendPage,
+            session.friendAllPages,
+          );
+          showPhase("social");
+        });
+        return;
+      }
+      returnFromFriendDeleteDialog();
+      return;
+    }
     if (action === 242 || action === 243) {
       dialog.hide();
       void session.tradeReply(action === 242).then(() => {
@@ -5040,6 +5230,11 @@ async function main(): Promise<void> {
         }
         showPhase("world");
       });
+      return;
+    }
+    if (action === 258 || action === 259) {
+      dialog.hide();
+      void session.guildInviteReply(action === 258).then(() => showPhase("world"));
       return;
     }
     if (action === 244) {
@@ -5069,6 +5264,46 @@ async function main(): Promise<void> {
     }
     if (action === 253) {
       dialog.hide();
+      showPhase("guild");
+      return;
+    }
+    if (action === 254) {
+      dialog.hide();
+      expectGuildDisbandTip = true;
+      void session.guildDisband().then(() => {
+        if (!session.inGuild) {
+          guildUi.openHub(false, "无帮派");
+          showPhase("guild");
+        } else {
+          expectGuildDisbandTip = false;
+          showPhase("guild");
+          showGameTip("解散失败（需帮主）");
+        }
+      });
+      return;
+    }
+    if (action === 255) {
+      dialog.hide();
+      showPhase("guild");
+      return;
+    }
+    if (action === 256) {
+      dialog.hide();
+      const pending = pendingGuildKick;
+      pendingGuildKick = null;
+      if (pending?.roleId && pending.rank) {
+        void session.guildKick(pending.roleId, pending.rank).then(() => {
+          showPhase("guild");
+          showGameTip(`已逐出 ${pending.name}`);
+        });
+        return;
+      }
+      showPhase("guild");
+      return;
+    }
+    if (action === 257) {
+      dialog.hide();
+      pendingGuildKick = null;
       showPhase("guild");
       return;
     }

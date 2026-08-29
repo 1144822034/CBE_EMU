@@ -46,6 +46,29 @@ export function buildGuildLeaveRequest(roleId: number): Uint8Array {
   return b.finish();
 }
 
+/**
+ * Disband guild (leader): 1/10/22 { id=roleId, force=1 }.
+ * CBE leave is id-only and rejects a populated guild; Pixi adds force so the
+ * leader can delete the guild row (members/applications cleared with it).
+ */
+export function buildGuildDisbandRequest(roleId: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 10, 22).u32("id", roleId >>> 0).u8("force", 1);
+  return b.finish();
+}
+
+/**
+ * Kick member: 1/10/40 { id=targetRoleId, rid=memberRank }.
+ * Evidence: docs/re/2026-07-17-guild-list-and-role-display.md §逐出帮派.
+ */
+export function buildGuildKickRequest(roleId: number, memberRank: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 10, 40)
+    .u32("id", roleId >>> 0)
+    .u32("rid", memberRank >>> 0);
+  return b.finish();
+}
+
 /** Member page: 1/10/37 { index, pagesize } → 10/20. */
 export function buildGuildMemberPageRequest(index = 1, pagesize = PAGE_SIZE): Uint8Array {
   const b = new WtBuilder();
@@ -154,7 +177,8 @@ export type GuildManageUpdate = {
   members?: GuildMemberPage;
   applications?: GuildApplicationPage;
   applyResult?: { result: number; tip: string; name: string };
-  leaveResult?: { result: number; tip: string };
+  leaveResult?: { result: number; tip: string; disbanded?: boolean };
+  kickResult?: { result: number; tip: string };
   reviewResult?: { result: number; tip: string; type: number };
   membershipNotice?: {
     type: number;
@@ -218,6 +242,27 @@ function applyTip(result: number): string {
       return "申请失败";
     default:
       return `申请结果(${result})`;
+  }
+}
+
+function leaveTip(result: number): string {
+  return result === 1 ? "成功脱离帮派" : "脱离帮派失败";
+}
+
+function kickTip(result: number): string {
+  switch (result) {
+    case 1:
+      return "已逐出帮派";
+    case 2:
+      return "权限不足";
+    case 3:
+      return "目标已不在帮派";
+    case 4:
+      return "请先将干部降为帮众";
+    case 5:
+      return "操作失败";
+    default:
+      return `逐出结果(${result})`;
   }
 }
 
@@ -366,7 +411,13 @@ export function parseGuildManagePackets(packet: WtPacket): GuildManageUpdate {
       const result = fieldNum(obj, "result");
       out.leaveResult = {
         result,
-        tip: result === 1 ? "成功脱离帮派" : "脱离帮派失败",
+        tip: leaveTip(result),
+      };
+    } else if (obj.subtype === 40) {
+      const result = fieldNum(obj, "result");
+      out.kickResult = {
+        result,
+        tip: kickTip(result),
       };
     } else if (obj.subtype === 31) {
       const result = fieldNum(obj, "result");

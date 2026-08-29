@@ -35,6 +35,8 @@ export type GuildAction =
   | "open_members"
   | "open_apps"
   | "leave"
+  | "disband"
+  | "kick"
   | "refresh"
   | "detail"
   | "apply"
@@ -69,12 +71,16 @@ export class GuildPanel extends Container {
   private appMeta = "";
   private inGuild = false;
   private guildName = "";
+  /** Local player's guild rank (1=帮主); 0 unknown. */
+  private selfRank = 0;
+  private selfRoleId = 0;
   private selectedGuild: GuildListRow | null = null;
   private selectedApp: GuildApplicantRow | null = null;
+  private selectedMember: GuildMemberRow | null = null;
   private returnMode: Mode = "hub";
   private toast: PanelTipState = createPanelTipState();
 
-  onAction: ((action: GuildAction, payload?: number) => void) | null = null;
+  onAction: ((action: GuildAction, payload?: number, extra?: number) => void) | null = null;
   onClose: (() => void) | null = null;
 
   constructor() {
@@ -88,9 +94,11 @@ export class GuildPanel extends Container {
     this.addChild(this.box);
   }
 
-  openHub(inGuild: boolean, guildName: string): void {
+  openHub(inGuild: boolean, guildName: string, opts?: { selfRank?: number; selfRoleId?: number }): void {
     this.inGuild = inGuild;
     this.guildName = guildName || (inGuild ? "本帮" : "无帮派");
+    if (opts?.selfRank != null) this.selfRank = opts.selfRank | 0;
+    if (opts?.selfRoleId != null) this.selfRoleId = opts.selfRoleId >>> 0;
     this.mode = "hub";
     this.listCursor = 0;
     this.visible = true;
@@ -146,11 +154,17 @@ export class GuildPanel extends Container {
     allpgs: number,
     cnum: number,
     mnum: number,
+    opts?: { selfRoleId?: number },
   ): void {
     this.memberRows = members;
     this.memberPage = page;
     this.memberPages = Math.max(1, allpgs);
     this.memberMeta = `${cnum}/${mnum}`;
+    if (opts?.selfRoleId != null) this.selfRoleId = opts.selfRoleId >>> 0;
+    if (this.selfRoleId) {
+      const self = members.find((m) => (m.roleId >>> 0) === (this.selfRoleId >>> 0));
+      if (self) this.selfRank = self.rank | 0;
+    }
     this.mode = "members";
     this.listCursor = 0;
     this.title = `成员 ${page}/${this.memberPages} ${this.memberMeta}`;
@@ -187,6 +201,10 @@ export class GuildPanel extends Container {
   }
   get appIndex(): number {
     return this.appPage;
+  }
+
+  get peekSelectedMemberName(): string {
+    return this.selectedMember?.roleName || "";
   }
 
   hide(): void {
@@ -268,6 +286,14 @@ export class GuildPanel extends Container {
         this.onAction?.("reject", this.selectedApp.roleId);
         return;
       }
+      if (lab === "逐出帮派" && this.selectedMember) {
+        this.onAction?.(
+          "kick",
+          this.selectedMember.roleId,
+          this.selectedMember.rank,
+        );
+        return;
+      }
       if (lab === "查看详情" && this.selectedGuild) {
         this.onAction?.("detail", this.selectedGuild.guildId);
       }
@@ -281,6 +307,7 @@ export class GuildPanel extends Container {
       else if (lab === "成员列表") this.onAction?.("open_members");
       else if (lab === "招收审批") this.onAction?.("open_apps");
       else if (lab === "脱离帮派") this.onAction?.("leave");
+      else if (lab === "解散帮派") this.onAction?.("disband");
       else if (lab === "返回") {
         this.hide();
         this.onClose?.();
@@ -301,6 +328,21 @@ export class GuildPanel extends Container {
       return;
     }
     if (this.mode === "members") {
+      const row = this.memberRows[this.listCursor];
+      if (!row) return;
+      this.selectedMember = row;
+      this.returnMode = "members";
+      const acts: string[] = [];
+      const canKick =
+        this.selfRank === 1 &&
+        row.rank === 3 &&
+        (row.roleId >>> 0) !== (this.selfRoleId >>> 0);
+      if (canKick) acts.push("逐出帮派");
+      acts.push("返回");
+      this.actionLabels = acts;
+      this.actionCursor = 0;
+      this.mode = "actions";
+      this.redraw();
       return;
     }
     if (this.mode === "apps") {
@@ -342,9 +384,12 @@ export class GuildPanel extends Container {
         "成员列表",
         "招收审批",
         "脱离帮派",
-        "其他帮派",
-        "返回",
       ];
+      if (this.selfRank === 1 || this.selfRank === 0) {
+        /* Rank unknown until members page; still offer disband — server gates. */
+        this.hubLabels.push("解散帮派");
+      }
+      this.hubLabels.push("其他帮派", "返回");
     } else {
       this.hubLabels = ["其他帮派", "创建帮派", "返回"];
     }

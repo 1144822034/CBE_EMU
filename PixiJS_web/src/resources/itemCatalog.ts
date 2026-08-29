@@ -102,6 +102,28 @@ export function mapEquipCategoryToSlot(category: number): number {
 }
 
 /**
+ * Weapon categories are job-locked: 7 天机 / 8 幻剑 / 9 鬼道.
+ * Non-weapon categories always allowed. `job` is 1..3 (panel stats);
+ * unknown job defers to the server.
+ */
+export function jobAllowsWeaponCategory(job: number, category: number): boolean {
+  if (category < 7 || category > 9) return true;
+  if (job < 1 || job > 3) return true;
+  if (job === 1) return category === 7;
+  if (job === 2) return category === 8;
+  if (job === 3) return category === 9;
+  return false;
+}
+
+/** Tip when equipping a weapon the current job cannot use. */
+export function weaponJobRestrictTip(category: number): string {
+  if (category === 7) return "该武器仅限天机使用";
+  if (category === 8) return "该武器仅限幻剑使用";
+  if (category === 9) return "该武器仅限鬼道使用";
+  return "职业不符，无法装备该武器";
+}
+
+/**
  * equip.dsh 类别 → equipico.gif tile index (0..9).
  * Sheet is 160×16 = ten 16×16 icons aligned with categories 0–9.
  */

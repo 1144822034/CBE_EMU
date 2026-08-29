@@ -73,6 +73,7 @@ export type SocialAction =
   | "view_equip"
   | "invite_team"
   | "add_friend"
+  | "delete_friend"
   | "trade"
   | "private_chat"
   | "spar"
@@ -586,6 +587,7 @@ export class SocialPanel extends Container {
       action === "view_equip" ||
       action === "invite_team" ||
       action === "add_friend" ||
+      action === "delete_friend" ||
       action === "trade" ||
       action === "spar" ||
       action === "guild_invite" ||
@@ -669,6 +671,9 @@ export class SocialPanel extends Container {
         "切磋",
         "入帮",
       ];
+      if (this.kind === "friends") {
+        actions.splice(actions.indexOf("加为好友") + 1, 0, "删除好友");
+      }
       if (this.kind === "friends" && row.isSpouse) {
         actions.splice(2, 0, "传送到身边");
       }
@@ -1273,6 +1278,8 @@ function labelToAction(label: string): SocialAction {
       return "invite_team";
     case "加为好友":
       return "add_friend";
+    case "删除好友":
+      return "delete_friend";
     case "交易":
       return "trade";
     case "发起私聊":

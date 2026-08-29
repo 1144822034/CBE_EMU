@@ -585,7 +585,9 @@ export class ActorLayer {
   ): void {
     const id = actorId >>> 0;
     const guildTrim = (guild || "").replace(/\0+$/g, "").trim();
-    const allZero = !(eqChenghao || eqWing || eqMount || guildTrim);
+    const normalizedGuild =
+      guildTrim === "无" || guildTrim === "无帮派" ? "" : guildTrim;
+    const allZero = !(eqChenghao || eqWing || eqMount || normalizedGuild);
     const prev = this.pendingPeerCosmetics.get(id);
     if (allZero && !prev) {
       /* Match GameSession: ignore empty first notice. */
@@ -595,8 +597,8 @@ export class ActorLayer {
       eqChenghao: eqChenghao >>> 0,
       eqWing: eqWing >>> 0,
       eqMount: eqMount >>> 0,
-      /* Keep prior guild if this notice omitted it (eq-only refresh). */
-      guild: guildTrim || (allZero ? "" : prev?.guild || ""),
+      /* 31/5 always carries guild; empty clears the nameplate line. */
+      guild: normalizedGuild,
     });
     this.paintPeerCosmetics(id);
   }

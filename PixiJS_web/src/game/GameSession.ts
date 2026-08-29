@@ -142,6 +142,7 @@ import {
   buildFriendPageRequest,
   buildFriendAddRequest,
   buildFriendReplyRequest,
+  buildFriendDeleteRequest,
   buildSparRequest,
   buildTradeRequest,
   buildTradeReplyRequest,
@@ -149,6 +150,7 @@ import {
   buildTradeConfirmRequest,
   buildTradeOfferRequest,
   buildGuildInviteRequest,
+  buildGuildInviteReplyRequest,
   buildGuildCreateStartRequest,
   buildGuildCreateNameRequest,
   buildGuildCreateCommitRequest,
@@ -156,6 +158,8 @@ import {
   buildGuildSelfDetailRequest,
   buildGuildDetailRequest,
   buildGuildLeaveRequest,
+  buildGuildDisbandRequest,
+  buildGuildKickRequest,
   buildGuildMemberPageRequest,
   buildGuildApplyRequest,
   buildGuildApplicationPageRequest,
@@ -353,6 +357,7 @@ import {
   parseFriendPage,
   parseGroupPackets,
   parseFriendInvitePackets,
+  parseGuildInvitePackets,
   parseTradePackets,
   parseSparAck,
   parseGuildCreatePackets,
@@ -627,6 +632,8 @@ export class GameSession {
   /** Current guild id (0 = none). From list fid / detail / 10/36 / create. */
   guildId = 0;
   guildName = "";
+  /** Own membership rank in current guild (1=帮主); 0 unknown. */
+  guildSelfRank = 0;
   guildListPage = 1;
   guildMemberPage = 1;
   guildAppPage = 1;
@@ -907,6 +914,7 @@ export class GameSession {
     this.rankingPage = null;
     this.guildId = 0;
     this.guildName = "";
+    this.guildSelfRank = 0;
     this.pendingGuildCreateName = "";
     this.inBattle = false;
     this.pendingTaskId = 0;
@@ -5153,6 +5161,17 @@ export class GameSession {
     this.handleBodies(bodies);
   }
 
+  async friendDelete(actorId: number): Promise<void> {
+    if (!this.transport) return;
+    const bodies = await this.transport.exchange(
+      0,
+      buildFriendDeleteRequest(actorId),
+    );
+    this.handleBodies(bodies);
+    /* Refresh current friend page so the removed row disappears. */
+    await this.openFriends(this.friendPage);
+  }
+
   async friendReply(accept: boolean): Promise<void> {
     if (!this.transport) return;
     const inv = this.pendingSocialInvite;
@@ -5234,13 +5253,35 @@ export class GameSession {
 
   async guildInvite(actorId: number): Promise<void> {
     if (!this.transport) return;
-    const fid = 1;
+    const fid = (await this.ensureGuildId()) >>> 0;
+    if (!fid) {
+      this.setPhase("inworld", "你未在任何帮派中");
+      return;
+    }
     const bodies = await this.transport.exchange(
       0,
       buildGuildInviteRequest(actorId, fid),
     );
     this.handleBodies(bodies);
     this.cb.onSocialNotice?.({ kind: "guild_sent" });
+  }
+
+  async guildInviteReply(accept: boolean): Promise<void> {
+    if (!this.transport) return;
+    const inv = this.pendingSocialInvite;
+    if (!inv || inv.kind !== "guild") {
+      this.setPhase("inworld", "no pending guild invite");
+      return;
+    }
+    const id = inv.id;
+    this.pendingSocialInvite = null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildGuildInviteReplyRequest(id, accept),
+    );
+    this.handleBodies(bodies);
+    /* Membership 10/36 / result 10/15 may arrive on the next scene-sync poll. */
+    await this.pollOnce();
   }
 
   async guildCreateStart(): Promise<void> {
@@ -5380,6 +5421,27 @@ export class GameSession {
       buildGuildLeaveRequest(this.selectedRoleId),
     );
     this.handleBodies(bodies);
+  }
+
+  async guildDisband(): Promise<void> {
+    if (!this.transport || !this.selectedRoleId) return;
+    const bodies = await this.transport.exchange(
+      0,
+      buildGuildDisbandRequest(this.selectedRoleId),
+    );
+    this.handleBodies(bodies);
+  }
+
+  async guildKick(roleId: number, memberRank: number): Promise<void> {
+    if (!this.transport || !roleId || !memberRank) return;
+    const bodies = await this.transport.exchange(
+      0,
+      buildGuildKickRequest(roleId, memberRank),
+    );
+    this.handleBodies(bodies);
+    if (this.guildBrowseKind === "members") {
+      await this.openGuildMembers(this.guildMemberPage);
+    }
   }
 
   async guildReview(roleId: number, approve: boolean): Promise<void> {
@@ -5900,6 +5962,13 @@ export class GameSession {
       }
       if (friendInv.notice) this.cb.onSocialNotice?.(friendInv.notice);
 
+      const guildInv = parseGuildInvitePackets(packet);
+      if (guildInv.invite) {
+        this.pendingSocialInvite = guildInv.invite;
+        this.cb.onSocialInvite?.(guildInv.invite);
+      }
+      if (guildInv.notice) this.cb.onSocialNotice?.(guildInv.notice);
+
       const tradePkt = parseTradePackets(packet);
       if (tradePkt.invite) {
         this.pendingSocialInvite = tradePkt.invite;
@@ -5936,6 +6005,7 @@ export class GameSession {
           if (guildCreate.notice.stage === "done") {
             const m = /帮派ID\s+(\d+)/.exec(guildCreate.notice.tip);
             if (m) this.guildId = Number(m[1]) >>> 0;
+            this.guildSelfRank = 1;
             if (this.pendingGuildCreateName) {
               this.guildName = this.pendingGuildCreateName;
               if (this.characterStats) {
@@ -5967,10 +6037,17 @@ export class GameSession {
       if (guildManage.leaveResult?.result === 1) {
         this.guildId = 0;
         this.guildName = "";
+        this.guildSelfRank = 0;
         if (this.characterStats) {
           this.characterStats = { ...this.characterStats, guild: "无帮派" };
           this.cb.onCharacterStats?.(this.characterStats);
         }
+      }
+      if (guildManage.members) {
+        const self = guildManage.members.members.find(
+          (m) => (m.roleId >>> 0) === (this.selectedRoleId >>> 0),
+        );
+        if (self) this.guildSelfRank = self.rank | 0;
       }
       if (guildManage.membershipNotice) {
         const n = guildManage.membershipNotice;
@@ -5993,6 +6070,7 @@ export class GameSession {
         guildManage.applications ||
         guildManage.applyResult ||
         guildManage.leaveResult ||
+        guildManage.kickResult ||
         guildManage.reviewResult ||
         guildManage.membershipNotice
       ) {
@@ -6005,6 +6083,7 @@ export class GameSession {
             rest.applications ||
             rest.applyResult ||
             rest.leaveResult ||
+            rest.kickResult ||
             rest.reviewResult ||
             rest.membershipNotice
           ) {
@@ -6386,22 +6465,24 @@ export class GameSession {
         }
         const id = peerCos.actorId >>> 0;
         const guildTrim = (peerCos.guild || "").replace(/\0+$/g, "").trim();
+        const normalizedGuild =
+          guildTrim === "无" || guildTrim === "无帮派" ? "" : guildTrim;
         const allZero =
-          !(peerCos.eqChenghao || peerCos.eqWing || peerCos.eqMount || guildTrim);
+          !(peerCos.eqChenghao || peerCos.eqWing || peerCos.eqMount ||
+            normalizedGuild);
         const prev = this.scenePeerCosmeticsById.get(id);
         /*
          * Visibility enqueue can race before onlineEq* is mirrored → empty
          * 31/5. Caching that would wipe a later real notice on peer rebuild.
          * Keep empty only when we already had a notice (true unequip).
-         * Guild-only notices are non-empty for nameplate「门派-xxx」.
+         * Guild is authoritative on every 31/5 (field always present).
          */
         if (allZero && !prev) {
           continue;
         }
-        /* Stale eq-only 31/5 must not erase a known guild line. */
         const merged: CosmeticsPeer = {
           ...peerCos,
-          guild: guildTrim || (allZero ? "" : prev?.guild || ""),
+          guild: normalizedGuild,
         };
         this.scenePeerCosmeticsById.set(id, merged);
         this.cb.onCosmeticsPeer?.(merged);

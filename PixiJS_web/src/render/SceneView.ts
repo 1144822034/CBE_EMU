@@ -129,6 +129,8 @@ export class SceneView {
   onQiTap: (() => void) | null = null;
   /** Top-left「称」title list badge (after 骑). */
   onChenTap: (() => void) | null = null;
+  /** Fired when map-corner status strip collapses / expands. */
+  onStatusStripCollapsed: ((collapsed: boolean) => void) | null = null;
   /** Collision radius in map pixels. */
   monsterCollideRadius = 22;
   /** Approach / collide radius for talk prompt. */
@@ -262,6 +264,7 @@ export class SceneView {
       e.stopPropagation();
       this.statusStripCollapsed = toggleStatusStripCollapsed();
       this.layoutStatusBadges();
+      this.onStatusStripCollapsed?.(this.statusStripCollapsed);
     });
     this.root.addChild(this.statusToggleBadge);
     this.mountStatusToggleArt();

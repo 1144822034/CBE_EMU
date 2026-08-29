@@ -68,6 +68,17 @@ export function buildFriendReplyRequest(actorId: number, accept: boolean): Uint8
   return b.finish();
 }
 
+/**
+ * Delete friend: 1/10/9 { id }.
+ * Evidence: JianghuOL.CBE:0x0101A43A (kind=10 subtype=9 + field `id`);
+ * menu/confirm strings 「删除好友」/「确定将…从好友列表中删除」.
+ */
+export function buildFriendDeleteRequest(actorId: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 10, 9).u32("id", actorId >>> 0);
+  return b.finish();
+}
+
 /** Team invite: 1/5/1 { id } — field must be `id`, not actorID. */
 export function buildTeamInviteRequest(actorId: number): Uint8Array {
   const b = new WtBuilder();
@@ -157,13 +168,26 @@ export function buildTradeOfferRequest(
 
 /**
  * Guild invite: 1/10/13 { id, fid }.
- * Sender shows local tip; server empty-wt ack (target inbound unresolved).
+ * Server empty-wt ack; target receives inbound 10/13 {id,fid,fname,name} on poll.
+ * Evidence: JianghuOL.CBE:0x0101A3C8 (send) + HandleGuildBusinessDispatch 0x0103C61E.
  */
-export function buildGuildInviteRequest(actorId: number, guildId = 1): Uint8Array {
+export function buildGuildInviteRequest(actorId: number, guildId: number): Uint8Array {
   const b = new WtBuilder();
   b.object(1, 10, 13)
     .u32("id", actorId >>> 0)
     .u32("fid", guildId >>> 0);
+  return b.finish();
+}
+
+/** Guild invite reply: 1/10/15 { id, result 1|2 }. Evidence: 0x0103C4D6. */
+export function buildGuildInviteReplyRequest(
+  inviterRoleId: number,
+  accept: boolean,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 10, 15)
+    .u32("id", inviterRoleId >>> 0)
+    .u8("result", accept ? 1 : 2);
   return b.finish();
 }
 
@@ -254,7 +278,8 @@ export type TeamRoster = {
 export type SocialInvite =
   | { kind: "team"; id: number; name: string }
   | { kind: "friend"; id: number; name: string }
-  | { kind: "trade"; id: number; name: string };
+  | { kind: "trade"; id: number; name: string }
+  | { kind: "guild"; id: number; name: string; guildId: number; guildName: string };
 
 export type SocialNotice =
   | { kind: "team_result"; id: number; result: number; name: string }
@@ -263,6 +288,7 @@ export type SocialNotice =
   | { kind: "trade_result"; result: number; name: string }
   | { kind: "spar_result"; result: number; tip: string }
   | { kind: "guild_sent" }
+  | { kind: "guild_invite_result"; result: number; name: string }
   | { kind: "guild_create"; stage: "need_name" | "confirm" | "done" | "fail"; tip: string; name?: string };
 
 export type TradeOfferItem = {
@@ -692,6 +718,48 @@ export function parseFriendInvitePackets(packet: WtPacket): FriendInviteUpdate {
     } else if (obj.subtype === 6) {
       out.notice = {
         kind: "friend_result",
+        result: fieldNum(obj, "result"),
+        name: findField(obj, "name")
+          ? decodeFieldString(findField(obj, "name")!).replace(/\0+$/g, "")
+          : "",
+      };
+    }
+  }
+  return out;
+}
+
+export type GuildInviteUpdate = {
+  /** Inbound 10/13 with fname+name (invite dialog). */
+  invite?: SocialInvite;
+  /** 10/15 result tip to the inviter. */
+  notice?: SocialNotice;
+};
+
+/**
+ * Guild invite inbound 10/13 {id,fid,fname,name} and result 10/15 {result,name}.
+ * Request 10/13 from the inviter is empty-WT ack and never carries fname.
+ */
+export function parseGuildInvitePackets(packet: WtPacket): GuildInviteUpdate {
+  const out: GuildInviteUpdate = {};
+  for (const obj of packet.objects) {
+    if (obj.kind !== 10) continue;
+    if (obj.subtype === 13) {
+      const fnameRaw = findField(obj, "fname");
+      const nameRaw = findField(obj, "name");
+      if (!fnameRaw && !nameRaw) continue;
+      const id = fieldNum(obj, "id");
+      const guildId = fieldNum(obj, "fid");
+      const name = nameRaw
+        ? decodeFieldString(nameRaw).replace(/\0+$/g, "")
+        : "?";
+      const guildName = fnameRaw
+        ? decodeFieldString(fnameRaw).replace(/\0+$/g, "")
+        : "";
+      if (id)
+        out.invite = { kind: "guild", id, name, guildId, guildName };
+    } else if (obj.subtype === 15) {
+      out.notice = {
+        kind: "guild_invite_result",
         result: fieldNum(obj, "result"),
         name: findField(obj, "name")
           ? decodeFieldString(findField(obj, "name")!).replace(/\0+$/g, "")

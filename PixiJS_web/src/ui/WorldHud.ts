@@ -129,6 +129,8 @@ export class WorldHud extends Container {
   onPortrait: (() => void) | null = null;
   /** Tap party-strip mate portrait → that player's info. */
   onPartyMate: ((mateId: number) => void) | null = null;
+  /** Fired after party strip show/hide (quest tracker inset). */
+  onPartyChanged: ((mateCount: number) => void) | null = null;
 
   private locText: BitmapLabel;
   private portraitHost = new Container();
@@ -546,6 +548,16 @@ export class WorldHud extends Container {
       void this.fillPartyPortrait(slot, mate.jobIndex, mate.sex);
     }
     this.partyHost.visible = list.length > 0;
+    this.onPartyChanged?.(list.length);
+  }
+
+  /**
+   * Left pixels occupied by party strip (portrait + tiao bars).
+   * Quest tracker / similar overlays shift right when non-zero.
+   */
+  partyOverlayInset(): number {
+    if (!this.partyHost.visible) return 0;
+    return TIAO_X + WorldHud.FILL_X + WorldHud.FILL_W + 4;
   }
 
   private makePartySlot(index: number): PartySlot {

@@ -34,6 +34,7 @@ import {
 import { isMapHealSkill, type BattleSkillRow } from "../resources/skill";
 import {
   defaultCategoryForBodySlot,
+  jobAllowsWeaponCategory,
   lookupItemSync,
   qualityColor,
   WORN_SLOT_NAMES,
@@ -433,11 +434,15 @@ export class SystemPanel extends Container {
     if (this.visible && this.kind === "equip") {
       if (this.mode === "detail") {
         const slot = this.equipFocusSlot;
-        this.replaceCandidates = this.bagItems.filter(
-          (it) => it.kind === "equip" && it.equipSlot === slot,
+        this.replaceCandidates = this.filterJobCompatibleEquips(
+          this.bagItems.filter(
+            (it) => it.kind === "equip" && it.equipSlot === slot,
+          ),
         );
         if (!this.replaceCandidates.length) {
-          this.replaceCandidates = this.bagItems.filter((it) => it.kind === "equip");
+          this.replaceCandidates = this.filterJobCompatibleEquips(
+            this.bagItems.filter((it) => it.kind === "equip"),
+          );
         }
         if (this.cursorIndex >= this.replaceCandidates.length) this.cursorIndex = 0;
         this.selected = this.replaceCandidates[this.cursorIndex] ?? null;
@@ -778,8 +783,10 @@ export class SystemPanel extends Container {
 
   private enterEquipReplace(): void {
     const slot = this.equipFocusSlot;
-    this.replaceCandidates = this.bagItems.filter(
-      (it) => it.kind === "equip" && (it.equipSlot === slot || it.equipSlot === -1),
+    this.replaceCandidates = this.filterJobCompatibleEquips(
+      this.bagItems.filter(
+        (it) => it.kind === "equip" && (it.equipSlot === slot || it.equipSlot === -1),
+      ),
     );
     // Prefer strict slot match; if catalog missed equipSlot, fall back to all equips.
     const strict = this.replaceCandidates.filter((it) => it.equipSlot === slot);
@@ -1012,6 +1019,13 @@ export class SystemPanel extends Container {
       this.wornItems.find((w) => w.equipSlot === slot) ||
       null
     );
+  }
+
+  /** Drop weapons whose equip.dsh category does not match the role job. */
+  private filterJobCompatibleEquips(items: BagItem[]): BagItem[] {
+    const job = this.stats?.job ?? 0;
+    if (job < 1 || job > 3) return items;
+    return items.filter((it) => jobAllowsWeaponCategory(job, it.category));
   }
 
   private paintBrokenGlowOverlay(): void {
