@@ -193,10 +193,10 @@ static bool verify_scene_insert(const char *scene, u32 expectedCountOffset,
     return true;
 }
 
-/* Saving two draft rows must result in two independent native kind-3 records.
- * Quantity expansion alone is not sufficient evidence: these rows use a
- * different monster ID, actor resource and coordinate, which is the operator
- * contract for a multi-monster scene deployment. */
+/* Saving two draft rows with one monster ID must result in two independent
+ * native kind-3 records.  Quantity expansion alone is not sufficient evidence:
+ * these rows deliberately share one ID but use different coordinates, which is
+ * the operator contract for placing the same monster at multiple points. */
 static bool verify_multiple_draft_rows(
     const char *scene,
     const vm_net_mock_scene_battle_monster_admin_row *firstRow)
@@ -222,15 +222,14 @@ static bool verify_multiple_draft_rows(
         return false;
     }
     secondRow = *firstRow;
-    secondRow.monsterId = 1001;
     secondRow.x = 200;
     secondRow.y = 140;
-    secondRow.visualHint = 5;
-    snprintf(secondRow.displayName, sizeof(secondRow.displayName), "tiger");
-    snprintf(secondRow.actorResource, sizeof(secondRow.actorResource),
-             "e_tiger.actor");
-    snprintf(secondRow.effectResource, sizeof(secondRow.effectResource),
-             "e_ghostfireB.actor");
+    if (secondRow.monsterId != firstRow->monsterId ||
+        (secondRow.x == firstRow->x && secondRow.y == firstRow->y))
+    {
+        fputs("same-id multi-coordinate fixture was not constructed\n", stderr);
+        return false;
+    }
 
     memcpy(second, first, firstLen);
     secondLen = firstLen;

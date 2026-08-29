@@ -139,13 +139,16 @@ int main(void)
         strstr(page,
                "@media(max-width:560px){.battle-monster-fields{grid-template-columns:1fr}") == NULL ||
         strstr(page,
-               "<div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>参考怪物（保存时生成新怪物 ID）</span>") == NULL ||
+               "<div class=\"fields battle-monster-fields\"><label class=\"field battle-monster-wide\"><span>复用怪物 ID（可选，可另设坐标）</span>") == NULL ||
         strstr(page, "id=\"scene-battle-monster-search\"") == NULL ||
         strstr(page, "id=\"scene-battle-monster-list\"") == NULL ||
         strstr(page, "data-scene-battle-monster-scene=\"") == NULL ||
         strstr(page, "同一场景可保存多条") == NULL ||
-        strstr(page, "保存会自动分配一个新的独立怪物 ID") == NULL ||
-        strstr(page, "参考怪物（保存时生成新怪物 ID）") == NULL ||
+        strstr(page, "新增时可选择已有怪物 ID，以同一怪物在新的坐标生成节点") == NULL ||
+        strstr(page, "复用怪物 ID（可选，可另设坐标）") == NULL ||
+        strstr(page, "参考怪物（未复用时生成新怪物 ID）") == NULL ||
+        strstr(page, "同一 ID 可在不同坐标复用") == NULL ||
+        strstr(page, "name=\"monster_id\"") == NULL ||
         strstr(page, "name=\"source_monster_id\"") == NULL ||
         strstr(g_vm_mock_admin_script,
                "const setupSceneBattleMonsterSearch=()=>{") == NULL ||

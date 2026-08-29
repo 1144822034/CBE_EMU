@@ -36,14 +36,14 @@ CREATE TABLE IF NOT EXISTS `server_tasks` (
   KEY `idx_server_tasks_enabled` (`enabled`, `task_id`)
 ) ENGINE=InnoDB;
 
--- 动态 NPC 与一个可接取任务之间的一对一绑定。任务本身可以被多个 NPC 使用。
+-- 动态 NPC 与可接取任务之间的多对多绑定。任务本身可以被多个 NPC 使用。
 CREATE TABLE IF NOT EXISTS `server_dynamic_npc_tasks` (
   `scene` VARBINARY(64) NOT NULL,
   `actor_id` INT UNSIGNED NOT NULL,
   `task_id` INT UNSIGNED NOT NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`scene`, `actor_id`),
+  PRIMARY KEY (`scene`, `actor_id`, `task_id`),
   KEY `idx_server_dynamic_npc_tasks_task` (`task_id`),
   CONSTRAINT `fk_server_dynamic_npc_tasks_npc`
     FOREIGN KEY (`scene`, `actor_id`)

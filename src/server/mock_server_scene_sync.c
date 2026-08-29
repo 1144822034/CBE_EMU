@@ -2711,22 +2711,29 @@ static bool vm_net_mock_task_submit_context_consume(u32 taskId,
 }
 
 static u32 vm_net_mock_scene_npc_seed_priority(
+    const char *scene,
     const vm_net_mock_scene_npcinfo_seed *seed,
     const vm_net_mock_role_state *role,
     const vm_net_mock_task_state_list_row *states,
     u32 stateCount)
 {
     vm_net_mock_xse_summary summary;
+    vm_net_mock_dynamic_npc_task_binding
+        taskBindings[VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX];
+    u32 taskBindingCount = 0;
     u32 priority = 1;
 
     if (seed == NULL)
         return 0;
-    if (seed->taskId != 0)
+    taskBindingCount = vm_net_mock_dynamic_npc_task_bindings_resolve(
+        scene, seed, taskBindings, VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX);
+    for (u32 bindingIndex = 0; bindingIndex < taskBindingCount; ++bindingIndex)
     {
         const vm_net_mock_task_state_list_row *persisted =
-            vm_net_mock_task_state_list_find(states, stateCount, seed->taskId);
+            vm_net_mock_task_state_list_find(states, stateCount,
+                                             taskBindings[bindingIndex].taskId);
         const vm_net_mock_task_definition *task =
-            vm_net_mock_task_catalog_find_by_id(seed->taskId);
+            vm_net_mock_task_catalog_find_by_id(taskBindings[bindingIndex].taskId);
 
         priority = 20;
         if (persisted != NULL && persisted->state == 2)
@@ -2735,7 +2742,7 @@ static u32 vm_net_mock_scene_npc_seed_priority(
             return 400;
         if (vm_net_mock_task_definition_available(
                 task, role, states, stateCount,
-                vm_net_mock_task_repeat_policy_from_seed(seed)))
+                taskBindings[bindingIndex].repeatPolicy))
         {
             return 300;
         }
@@ -2830,7 +2837,7 @@ static u32 vm_net_mock_select_scene_npcinfo_seeds_uncached(
     for (u32 i = 0; i < catalogCount; ++i)
     {
         priorities[i] = vm_net_mock_scene_npc_seed_priority(
-            &catalog[i], role, states, stateCount);
+            scene, &catalog[i], role, states, stateCount);
     }
     selectCount = catalogCount < seedCap ? catalogCount : seedCap;
     for (u32 pick = 0; pick < selectCount; ++pick)
@@ -4221,6 +4228,9 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     vm_net_mock_task_state_list_row allTaskStates[VM_NET_MOCK_TASK_CATALOG_MAX];
     u32 allTaskStateCount = 0;
     vm_net_mock_xse_summary xseSummary;
+    vm_net_mock_dynamic_npc_task_binding
+        taskBindings[VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX];
+    u32 taskBindingCount = 0;
     const vm_net_mock_task_definition *optionTasks[VM_NET_MOCK_XSE_TASK_REF_MAX];
     bool optionSubmits[VM_NET_MOCK_XSE_TASK_REF_MAX];
     u32 optionCount = 0;
@@ -4287,7 +4297,12 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
     }
     if (matchedSeed != NULL)
+    {
         vm_net_mock_task_interaction_context_reset();
+        taskBindingCount = vm_net_mock_dynamic_npc_task_bindings_resolve(
+            scene, matchedSeed, taskBindings,
+            VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX);
+    }
     dialogText = vm_net_mock_npc_dialog_text(actorId);
     memset(&taskState, 0, sizeof(taskState));
     memset(&xseSummary, 0, sizeof(xseSummary));
@@ -4349,7 +4364,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     }
 
     if (matchedSeed != NULL && activeRole != NULL && xseSummary.loaded &&
-        matchedSeed->taskId == 0)
+        taskBindingCount == 0)
     {
         for (u32 refIndex = 0; refIndex < xseSummary.taskRefCount; ++refIndex)
         {
@@ -4480,14 +4495,21 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             dialogText = xseSummary.offerDialog;
     }
 
-    if (matchedSeed != NULL && matchedSeed->taskId != 0 && activeRole != NULL)
+    if (matchedSeed != NULL && taskBindingCount != 0 && activeRole != NULL)
     {
+        for (u32 bindingIndex = 0;
+             bindingIndex < taskBindingCount &&
+             optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX;
+             ++bindingIndex)
+        {
+        const vm_net_mock_dynamic_npc_task_binding *binding =
+            &taskBindings[bindingIndex];
         const vm_net_mock_task_definition *task =
-            vm_net_mock_task_catalog_find_by_id(matchedSeed->taskId);
+            vm_net_mock_task_catalog_find_by_id(binding->taskId);
         const vm_net_mock_task_state_list_row *persisted =
             vm_net_mock_task_state_list_find(allTaskStates,
                                              allTaskStateCount,
-                                             matchedSeed->taskId);
+                                             binding->taskId);
         u8 state = persisted ? persisted->state : 0;
         u8 progress1 = persisted ? persisted->progress1 : 0;
         u8 progress2 = persisted ? persisted->progress2 : 0;
@@ -4501,7 +4523,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
         {
             if (optionTasks[optionIndex] != NULL &&
-                optionTasks[optionIndex]->taskId == matchedSeed->taskId)
+                optionTasks[optionIndex]->taskId == binding->taskId)
             {
                 duplicate = true;
                 break;
@@ -4511,12 +4533,12 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             task, matchedSeed, scene);
         if (task != NULL && (state == 0 ||
                              (state == 3 &&
-                              vm_net_mock_task_repeat_policy_from_seed(
-                                  matchedSeed) != VM_NET_MOCK_TASK_REPEAT_NEVER)))
+                              binding->repeatPolicy !=
+                                  VM_NET_MOCK_TASK_REPEAT_NEVER)))
         {
             directOfferAvailable = vm_net_mock_task_definition_available(
                 task, activeRole, allTaskStates, allTaskStateCount,
-                vm_net_mock_task_repeat_policy_from_seed(matchedSeed));
+                binding->repeatPolicy);
         }
         if (task != NULL && !duplicate &&
             optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
@@ -4556,11 +4578,11 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             else if (optionCount == 0 &&
                      (state == 0 ||
                       (state == 3 &&
-                       vm_net_mock_task_repeat_policy_from_seed(matchedSeed) !=
+                       binding->repeatPolicy !=
                            VM_NET_MOCK_TASK_REPEAT_NEVER)) &&
                      vm_net_mock_task_definition_unavailable_reason(
                          task, activeRole, allTaskStates, allTaskStateCount,
-                         vm_net_mock_task_repeat_policy_from_seed(matchedSeed), NULL,
+                         binding->repeatPolicy, NULL,
                          unavailableTaskText,
                          sizeof(unavailableTaskText)) != NULL)
                 dialogText = unavailableTaskText;
@@ -4572,6 +4594,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 dialogText = task->completedDialog[0] != 0
                                  ? task->completedDialog
                                  : "\xc8\xce\xce\xf1\xd2\xd1\xbe\xad\xcd\xea\xb3\xc9\xa3\xac\xbf\xc9\xd2\xd4\xcc\xe1\xbd\xbb\xc1\xcb\xa1\xa3";
+        }
         }
     }
 
@@ -4911,10 +4934,17 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         const vm_net_mock_task_definition *task = optionTasks[optionIndex];
         u8 repeatPolicy = VM_NET_MOCK_TASK_REPEAT_NEVER;
 
-        if (!optionSubmits[optionIndex] && matchedSeed != NULL &&
-            matchedSeed->taskId == task->taskId)
+        if (!optionSubmits[optionIndex] && matchedSeed != NULL)
         {
-            repeatPolicy = vm_net_mock_task_repeat_policy_from_seed(matchedSeed);
+            for (u32 bindingIndex = 0; bindingIndex < taskBindingCount;
+                 ++bindingIndex)
+            {
+                if (taskBindings[bindingIndex].taskId == task->taskId)
+                {
+                    repeatPolicy = taskBindings[bindingIndex].repeatPolicy;
+                    break;
+                }
+            }
         }
 
         vm_net_mock_task_interaction_context_record(

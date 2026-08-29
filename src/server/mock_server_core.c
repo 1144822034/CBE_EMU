@@ -6260,7 +6260,6 @@ typedef struct
 static vm_mock_service_account_db_file g_vm_mock_service_account_db;
 static bool g_vm_mock_service_account_db_loaded = false;
 static bool g_vm_mock_service_account_db_valid = false;
-static vm_mock_service_friend_db_file g_vm_mock_service_friend_db;
 static bool g_vm_mock_service_friend_db_loaded = false;
 static bool g_vm_mock_service_friend_db_valid = false;
 static char g_vm_mock_service_login_issue_username[64];

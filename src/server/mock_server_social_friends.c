@@ -38,7 +38,9 @@ u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
                                            u8 *out, u32 outCap)
 {
     u8 friendInfo[8192];
-    vm_mock_service_friend_record friendRecords[VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS];
+    /* `pageSize` is a protocol u8; retain only the requested page, never a
+     * process-wide snapshot of every account's relationship rows. */
+    vm_mock_service_friend_record friendRecords[0xffu];
     vm_net_mock_role_state *ownerRole = vm_net_mock_active_role();
     const char *ownerAccountId = vm_mock_service_active_account_id();
     u32 index = 0;
@@ -47,7 +49,6 @@ u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
     u32 pos = 5;
     u32 totalPages = 1;
     u32 totalFriends = 0;
-    u32 skippedFriends = 0;
     u32 friendRecordCount = 0;
     u16 rowCount = 0;
     u8 pageSize = 0;
@@ -68,11 +69,16 @@ u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
      */
     if (ownerRole != NULL)
     {
-        friendRecordCount = vm_mock_service_friend_record_collect(
-            ownerRole->roleId, ownerAccountId, friendRecords,
-            VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS);
+        if (!vm_mock_service_friend_record_count(ownerRole->roleId,
+                                                  ownerAccountId,
+                                                  &totalFriends) ||
+            !vm_mock_service_friend_record_query_page(
+                ownerRole->roleId, ownerAccountId, index, pageSize,
+                friendRecords, pageSize, &friendRecordCount))
+        {
+            return 0;
+        }
     }
-    totalFriends = friendRecordCount;
     if (totalFriends > 0)
         totalPages = (totalFriends + pageSize - 1u) / pageSize;
     allPages8 = (u8)(totalPages > 0xffu ? 0xffu : totalPages);
@@ -90,13 +96,6 @@ u32 vm_net_mock_build_friend_page_response(const u8 *request, u32 requestLen,
             u8 friendState = 0;
             u8 friendAttr8 = 1;
 
-            if (skippedFriends < index)
-            {
-                ++skippedFriends;
-                continue;
-            }
-            if (rowCount >= pageSize)
-                break;
             onlineSession = vm_mock_service_find_online_friend_session(record);
             memset(&onlineView, 0, sizeof(onlineView));
             if (onlineSession != NULL &&

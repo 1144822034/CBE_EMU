@@ -1296,74 +1296,200 @@ static void vm_mock_service_friend_db_path(char *path, size_t pathSize)
     snprintf(path, pathSize, "nvram/mock_service_friends.bin");
 }
 
-/* Full friendship snapshots are only used for legacy import or startup
- * normalization.  Accepted invitations use the two-row transactional path. */
-static bool vm_mock_service_friend_db_save_all(const char *reason)
-{
-    if (!g_vm_mock_service_friend_db_valid)
-        return false;
-    memcpy(g_vm_mock_service_friend_db.magic, "JHF1", 4);
-    g_vm_mock_service_friend_db.version = VM_MOCK_SERVICE_FRIEND_DB_VERSION;
-    if (g_vm_mock_service_friend_db.recordCount > VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
-        g_vm_mock_service_friend_db.recordCount = VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS;
+/* `friendships` is the authoritative relationship store.  Do not preload it
+ * into a process-wide fixed array: a scene invitation needs exactly two
+ * durable rows, while a 10/1 page needs only the requested rows. */
+enum { VM_MOCK_SERVICE_FRIEND_LEGACY_FILE_MAX_RECORDS = 256u };
 
-    if (!vm_mysql_exec("START TRANSACTION") || !vm_mysql_exec("DELETE FROM friendships"))
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 recordCount;
+    vm_mock_service_friend_record records[VM_MOCK_SERVICE_FRIEND_LEGACY_FILE_MAX_RECORDS];
+} vm_mock_service_friend_db_legacy_file;
+
+typedef struct
+{
+    vm_mock_service_friend_record *records;
+    u32 recordsCap;
+    u32 recordCount;
+    bool invalid;
+} vm_mock_mysql_friend_rows_context;
+
+typedef struct
+{
+    u32 value;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_friend_count_context;
+
+static bool vm_mock_service_friend_db_account_hex(const char *accountId,
+                                                  char accountHex[129])
+{
+    size_t accountLen = 0;
+
+    if (accountHex != NULL)
+        accountHex[0] = 0;
+    if (accountId == NULL || accountHex == NULL)
+        return false;
+    accountLen = vm_mock_mysql_bounded_strlen(
+        accountId, sizeof(((vm_mock_service_friend_record *)0)->ownerAccountId));
+    return accountLen != 0 &&
+           accountLen < sizeof(((vm_mock_service_friend_record *)0)->ownerAccountId) &&
+           vm_mysql_hex_encode(accountId, accountLen, accountHex, 129) != 0;
+}
+
+static bool vm_mock_mysql_friend_row(void *contextValue,
+                                     unsigned int columnCount,
+                                     const char *const *values,
+                                     const size_t *lengths)
+{
+    vm_mock_mysql_friend_rows_context *context =
+        (vm_mock_mysql_friend_rows_context *)contextValue;
+    vm_mock_service_friend_record *record = NULL;
+    size_t nameLen = 0;
+    u32 job = 0;
+    u32 sex = 0;
+
+    if (context == NULL || context->records == NULL ||
+        context->recordCount >= context->recordsCap || columnCount != 9)
     {
-        char mysql_error[512];
-        snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
-        vm_mysql_exec("ROLLBACK");
-        vm_autotest_note("mock_friend_db_mysql_save_failed reason=%s error=%s\n",
-                         reason ? reason : "state", mysql_error);
+        if (context != NULL)
+            context->invalid = true;
         return false;
     }
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+    record = &context->records[context->recordCount];
+    memset(record, 0, sizeof(*record));
+    if (!vm_mock_mysql_copy_text(record->ownerAccountId,
+                                 sizeof(record->ownerAccountId),
+                                 values[0], lengths[0]) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &record->ownerRoleId) ||
+        !vm_mock_mysql_copy_text(record->targetAccountId,
+                                 sizeof(record->targetAccountId),
+                                 values[2], lengths[2]) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &record->targetRoleId) ||
+        values[4] == NULL ||
+        !vm_mysql_hex_decode(values[4], lengths[4], record->targetRoleName,
+                             sizeof(record->targetRoleName) - 1, &nameLen) ||
+        !vm_mock_mysql_parse_u32(values[5], lengths[5], &record->friendDegree) ||
+        !vm_mock_mysql_parse_u32(values[6], lengths[6], &record->targetLevel) ||
+        !vm_mock_mysql_parse_u32(values[7], lengths[7], &job) || job > 255 ||
+        !vm_mock_mysql_parse_u32(values[8], lengths[8], &sex) || sex > 255)
     {
-        const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
-        char owner_hex[sizeof(record->ownerAccountId) * 2 + 1];
-        char target_hex[sizeof(record->targetAccountId) * 2 + 1];
-        char name_hex[sizeof(record->targetRoleName) * 2 + 1];
-        char query[1536];
-        size_t owner_len = vm_mock_mysql_bounded_strlen(record->ownerAccountId, sizeof(record->ownerAccountId));
-        size_t target_len = vm_mock_mysql_bounded_strlen(record->targetAccountId, sizeof(record->targetAccountId));
-        size_t name_len = vm_mock_mysql_bounded_strlen(record->targetRoleName, sizeof(record->targetRoleName));
-        if (owner_len == 0 || owner_len >= sizeof(record->ownerAccountId) ||
-            target_len == 0 || target_len >= sizeof(record->targetAccountId) ||
-            name_len >= sizeof(record->targetRoleName) ||
-            vm_mysql_hex_encode(record->ownerAccountId, owner_len, owner_hex, sizeof(owner_hex)) == 0 ||
-            vm_mysql_hex_encode(record->targetAccountId, target_len, target_hex, sizeof(target_hex)) == 0 ||
-            (name_len != 0 && vm_mysql_hex_encode(record->targetRoleName, name_len, name_hex, sizeof(name_hex)) == 0))
+        context->invalid = true;
+        memset(record, 0, sizeof(*record));
+        return false;
+    }
+    record->targetRoleName[nameLen] = 0;
+    if (record->targetRoleName[0] == 0)
+        snprintf(record->targetRoleName, sizeof(record->targetRoleName), "Player");
+    record->targetLevel = record->targetLevel ? record->targetLevel : 1;
+    record->targetJob = (job >= 1 && job <= 3) ? (u8)job : 1;
+    record->targetSex = sex <= 1 ? (u8)sex : 0;
+    ++context->recordCount;
+    return true;
+}
+
+static bool vm_mock_mysql_friend_count_row(void *contextValue,
+                                           unsigned int columnCount,
+                                           const char *const *values,
+                                           const size_t *lengths)
+{
+    vm_mock_mysql_friend_count_context *context =
+        (vm_mock_mysql_friend_count_context *)contextValue;
+
+    if (context == NULL || context->found || columnCount != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->value))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return false;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_service_friend_db_build_upsert_query(
+    const vm_mock_service_friend_record *record, char *query, size_t queryCap)
+{
+    char ownerHex[sizeof(record->ownerAccountId) * 2 + 1];
+    char targetHex[sizeof(record->targetAccountId) * 2 + 1];
+    char nameHex[sizeof(record->targetRoleName) * 2 + 1];
+    size_t ownerLen = 0;
+    size_t targetLen = 0;
+    size_t nameLen = 0;
+
+    if (record == NULL || query == NULL || queryCap == 0 ||
+        record->ownerRoleId == 0 || record->targetRoleId == 0)
+    {
+        return false;
+    }
+    ownerLen = vm_mock_mysql_bounded_strlen(record->ownerAccountId,
+                                             sizeof(record->ownerAccountId));
+    targetLen = vm_mock_mysql_bounded_strlen(record->targetAccountId,
+                                              sizeof(record->targetAccountId));
+    nameLen = vm_mock_mysql_bounded_strlen(record->targetRoleName,
+                                            sizeof(record->targetRoleName));
+    if (ownerLen == 0 || ownerLen >= sizeof(record->ownerAccountId) ||
+        targetLen == 0 || targetLen >= sizeof(record->targetAccountId) ||
+        nameLen >= sizeof(record->targetRoleName) ||
+        vm_mysql_hex_encode(record->ownerAccountId, ownerLen,
+                            ownerHex, sizeof(ownerHex)) == 0 ||
+        vm_mysql_hex_encode(record->targetAccountId, targetLen,
+                            targetHex, sizeof(targetHex)) == 0 ||
+        (nameLen != 0 && vm_mysql_hex_encode(record->targetRoleName, nameLen,
+                                              nameHex, sizeof(nameHex)) == 0))
+    {
+        return false;
+    }
+    if (nameLen == 0)
+        nameHex[0] = 0;
+    snprintf(query, queryCap,
+             "INSERT INTO friendships(owner_account_id,owner_role_id,target_account_id,target_role_id,target_role_name,friend_degree,target_level,target_job,target_sex) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,CAST(X'%s' AS CHAR),%u,X'%s',%u,%u,%u,%u) "
+             "ON DUPLICATE KEY UPDATE target_role_name=VALUES(target_role_name),friend_degree=VALUES(friend_degree),target_level=VALUES(target_level),target_job=VALUES(target_job),target_sex=VALUES(target_sex)",
+             ownerHex, record->ownerRoleId, targetHex, record->targetRoleId,
+             nameHex, record->friendDegree, record->targetLevel,
+             record->targetJob, record->targetSex);
+    return true;
+}
+
+static bool vm_mock_service_friend_db_write_records(
+    const vm_mock_service_friend_record *records, u32 recordCount,
+    const char *reason)
+{
+    char query[1536];
+    char mysqlError[512];
+    bool transactionStarted = false;
+
+    if (records == NULL || recordCount == 0)
+        return recordCount == 0;
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    for (u32 i = 0; i < recordCount; ++i)
+    {
+        if (!vm_mock_service_friend_db_build_upsert_query(&records[i], query,
+                                                          sizeof(query)) ||
+            !vm_mysql_exec(query))
         {
-            vm_mysql_exec("ROLLBACK");
-            vm_autotest_note("mock_friend_db_mysql_save_failed reason=%s error=invalid-friend-record index=%u\n",
-                             reason ? reason : "state", i);
-            return false;
-        }
-        if (name_len == 0)
-            name_hex[0] = 0;
-        snprintf(query, sizeof(query),
-                 "INSERT INTO friendships(owner_account_id,owner_role_id,target_account_id,target_role_id,target_role_name,friend_degree,target_level,target_job,target_sex) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,CAST(X'%s' AS CHAR),%u,X'%s',%u,%u,%u,%u)",
-                 owner_hex, record->ownerRoleId, target_hex, record->targetRoleId, name_hex,
-                 record->friendDegree, record->targetLevel, record->targetJob, record->targetSex);
-        if (!vm_mysql_exec(query))
-        {
-            vm_autotest_note("mock_friend_db_mysql_save_failed reason=%s index=%u error=%s\n",
-                             reason ? reason : "state", i, vm_mysql_last_error());
-            vm_mysql_exec("ROLLBACK");
-            return false;
+            goto failed;
         }
     }
     if (!vm_mysql_exec("COMMIT"))
-    {
-        vm_autotest_note("mock_friend_db_mysql_save_failed reason=%s error=%s\n",
-                         reason ? reason : "state", vm_mysql_last_error());
-        vm_mysql_exec("ROLLBACK");
-        return false;
-    }
-    vm_autotest_note("mock_friend_db_mysql_save reason=%s records=%u\n",
-                     reason ? reason : "state",
-                     g_vm_mock_service_friend_db.recordCount);
+        goto failed;
+    vm_autotest_note("mock_friend_db_mysql_write reason=%s records=%u\n",
+                     reason ? reason : "state", recordCount);
     return true;
+
+failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        vm_mysql_exec("ROLLBACK");
+    vm_autotest_note("mock_friend_db_mysql_write_failed reason=%s error=%s\n",
+                     reason ? reason : "state", mysqlError);
+    return false;
 }
 
 static bool vm_mock_service_friend_db_write_pair(
@@ -1371,176 +1497,42 @@ static bool vm_mock_service_friend_db_write_pair(
     const vm_mock_service_friend_record *reverse,
     const char *reason)
 {
-    const vm_mock_service_friend_record *records[2] = { forward, reverse };
-    char queries[2][1536];
-    char mysql_error[512];
-    bool transaction_started = false;
+    vm_mock_service_friend_record records[2];
 
-    if (!g_vm_mock_service_friend_db_valid || forward == NULL || reverse == NULL)
+    if (forward == NULL || reverse == NULL)
         return false;
-    for (u32 i = 0; i < 2; ++i)
-    {
-        const vm_mock_service_friend_record *record = records[i];
-        char owner_hex[sizeof(record->ownerAccountId) * 2 + 1];
-        char target_hex[sizeof(record->targetAccountId) * 2 + 1];
-        char name_hex[sizeof(record->targetRoleName) * 2 + 1];
-        size_t owner_len = vm_mock_mysql_bounded_strlen(record->ownerAccountId, sizeof(record->ownerAccountId));
-        size_t target_len = vm_mock_mysql_bounded_strlen(record->targetAccountId, sizeof(record->targetAccountId));
-        size_t name_len = vm_mock_mysql_bounded_strlen(record->targetRoleName, sizeof(record->targetRoleName));
-
-        if (owner_len == 0 || owner_len >= sizeof(record->ownerAccountId) ||
-            target_len == 0 || target_len >= sizeof(record->targetAccountId) ||
-            name_len >= sizeof(record->targetRoleName) ||
-            vm_mysql_hex_encode(record->ownerAccountId, owner_len, owner_hex, sizeof(owner_hex)) == 0 ||
-            vm_mysql_hex_encode(record->targetAccountId, target_len, target_hex, sizeof(target_hex)) == 0 ||
-            (name_len != 0 && vm_mysql_hex_encode(record->targetRoleName, name_len, name_hex, sizeof(name_hex)) == 0))
-        {
-            vm_autotest_note("mock_friend_db_mysql_pair_failed reason=%s error=invalid-friend-record index=%u\n",
-                             reason ? reason : "state", i);
-            return false;
-        }
-        if (name_len == 0)
-            name_hex[0] = 0;
-        snprintf(queries[i], sizeof(queries[i]),
-                 "INSERT INTO friendships(owner_account_id,owner_role_id,target_account_id,target_role_id,target_role_name,friend_degree,target_level,target_job,target_sex) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,CAST(X'%s' AS CHAR),%u,X'%s',%u,%u,%u,%u) "
-                 "ON DUPLICATE KEY UPDATE target_role_name=VALUES(target_role_name),friend_degree=VALUES(friend_degree),target_level=VALUES(target_level),target_job=VALUES(target_job),target_sex=VALUES(target_sex)",
-                 owner_hex, record->ownerRoleId, target_hex, record->targetRoleId, name_hex,
-                 record->friendDegree, record->targetLevel, record->targetJob, record->targetSex);
-    }
-    if (!vm_mysql_exec("START TRANSACTION"))
-        goto failed;
-    transaction_started = true;
-    if (!vm_mysql_exec(queries[0]) || !vm_mysql_exec(queries[1]) ||
-        !vm_mysql_exec("COMMIT"))
-    {
-        goto failed;
-    }
-    vm_autotest_note("mock_friend_db_mysql_pair reason=%s records=2\n",
-                     reason ? reason : "state");
-    return true;
-
-failed:
-    snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
-    if (transaction_started)
-        vm_mysql_exec("ROLLBACK");
-    vm_autotest_note("mock_friend_db_mysql_pair_failed reason=%s error=%s\n",
-                     reason ? reason : "state", mysql_error);
-    return false;
+    records[0] = *forward;
+    records[1] = *reverse;
+    return vm_mock_service_friend_db_write_records(records, 2, reason);
 }
 
-typedef struct
-{
-    vm_mock_service_friend_db_file *database;
-    bool invalid;
-} vm_mock_mysql_friend_load_context;
-
-static bool vm_mock_mysql_friend_row(void *context_value,
-                                     unsigned int column_count,
-                                     const char *const *values,
-                                     const size_t *lengths)
-{
-    vm_mock_mysql_friend_load_context *context = (vm_mock_mysql_friend_load_context *)context_value;
-    if (context == NULL || context->database == NULL || column_count != 9 ||
-        context->database->recordCount >= VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
-    {
-        if (context != NULL)
-            context->invalid = true;
-        return true;
-    }
-    vm_mock_service_friend_record *record =
-        &context->database->records[context->database->recordCount];
-    size_t name_len = 0;
-    u32 target_job = 0;
-    u32 target_sex = 0;
-    memset(record, 0, sizeof(*record));
-    if (!vm_mock_mysql_copy_text(record->ownerAccountId, sizeof(record->ownerAccountId), values[0], lengths[0]) ||
-        !vm_mock_mysql_parse_u32(values[1], lengths[1], &record->ownerRoleId) ||
-        !vm_mock_mysql_copy_text(record->targetAccountId, sizeof(record->targetAccountId), values[2], lengths[2]) ||
-        !vm_mock_mysql_parse_u32(values[3], lengths[3], &record->targetRoleId) ||
-        values[4] == NULL ||
-        !vm_mysql_hex_decode(values[4], lengths[4], record->targetRoleName,
-                             sizeof(record->targetRoleName) - 1, &name_len) ||
-        !vm_mock_mysql_parse_u32(values[5], lengths[5], &record->friendDegree) ||
-        !vm_mock_mysql_parse_u32(values[6], lengths[6], &record->targetLevel) ||
-        !vm_mock_mysql_parse_u32(values[7], lengths[7], &target_job) || target_job > 255 ||
-        !vm_mock_mysql_parse_u32(values[8], lengths[8], &target_sex) || target_sex > 255)
-    {
-        context->invalid = true;
-        memset(record, 0, sizeof(*record));
-        return true;
-    }
-    record->targetRoleName[name_len] = 0;
-    record->targetJob = (u8)target_job;
-    record->targetSex = (u8)target_sex;
-    ++context->database->recordCount;
-    return true;
-}
-
-static void vm_mock_service_friend_db_load(void)
+static bool vm_mock_service_friend_db_import_legacy_file(void)
 {
     char path[128];
-    vm_mock_service_friend_db_file loaded;
-    vm_mock_service_friend_record compact[VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS];
-    u32 compactCount = 0;
-    bool needsSave = false;
-    bool loadedFromFile = false;
+    vm_mock_service_friend_db_legacy_file legacy;
+    vm_mock_service_friend_record normalized[VM_MOCK_SERVICE_FRIEND_LEGACY_FILE_MAX_RECORDS];
+    u32 normalizedCount = 0;
+    FILE *fp = NULL;
 
-    if (g_vm_mock_service_friend_db_loaded)
-        return;
-    g_vm_mock_service_friend_db_loaded = true;
-    memset(&g_vm_mock_service_friend_db, 0, sizeof(g_vm_mock_service_friend_db));
-    memcpy(g_vm_mock_service_friend_db.magic, "JHF1", 4);
-    g_vm_mock_service_friend_db.version = VM_MOCK_SERVICE_FRIEND_DB_VERSION;
-    g_vm_mock_service_friend_db_valid = true;
-
-    memset(&loaded, 0, sizeof(loaded));
-    memcpy(loaded.magic, "JHF1", 4);
-    loaded.version = VM_MOCK_SERVICE_FRIEND_DB_VERSION;
-    vm_mock_mysql_friend_load_context context;
-    memset(&context, 0, sizeof(context));
-    context.database = &loaded;
-    if (!vm_mysql_query(
-            "SELECT owner_account_id,owner_role_id,target_account_id,target_role_id,HEX(target_role_name),friend_degree,target_level,target_job,target_sex "
-            "FROM friendships ORDER BY owner_account_id,owner_role_id,target_account_id,target_role_id",
-            vm_mock_mysql_friend_row, &context))
+    vm_mock_service_friend_db_path(path, sizeof(path));
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return true;
+    memset(&legacy, 0, sizeof(legacy));
+    if (fread(&legacy, 1, sizeof(legacy), fp) != sizeof(legacy) ||
+        memcmp(legacy.magic, "JHF1", 4) != 0 ||
+        legacy.version != VM_MOCK_SERVICE_FRIEND_DB_VERSION ||
+        legacy.recordCount > VM_MOCK_SERVICE_FRIEND_LEGACY_FILE_MAX_RECORDS)
     {
-        g_vm_mock_service_friend_db_valid = false;
-        vm_autotest_note("mock_friend_db_mysql_load_failed error=%s\n", vm_mysql_last_error());
-        return;
+        fclose(fp);
+        vm_autotest_note("mock_friend_db_legacy_migrate_failed error=invalid-file\n");
+        return false;
     }
-    if (context.invalid)
+    fclose(fp);
+    memset(normalized, 0, sizeof(normalized));
+    for (u32 i = 0; i < legacy.recordCount; ++i)
     {
-        g_vm_mock_service_friend_db_valid = false;
-        vm_autotest_note("mock_friend_db_mysql_load_failed error=invalid-row\n");
-        return;
-    }
-    if (loaded.recordCount == 0 && !vm_mock_service_mysql_authority_is_sealed())
-    {
-        vm_mock_service_friend_db_path(path, sizeof(path));
-        FILE *fp = fopen(path, "rb");
-        if (fp != NULL)
-        {
-            vm_mock_service_friend_db_file legacy;
-            memset(&legacy, 0, sizeof(legacy));
-            if (fread(&legacy, 1, sizeof(legacy), fp) == sizeof(legacy) &&
-                memcmp(legacy.magic, "JHF1", 4) == 0 &&
-                legacy.version == VM_MOCK_SERVICE_FRIEND_DB_VERSION &&
-                legacy.recordCount <= VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
-            {
-                loaded = legacy;
-                loadedFromFile = true;
-                needsSave = true;
-                vm_autotest_note("mock_friend_db_legacy_migrate records=%u\n", loaded.recordCount);
-            }
-            fclose(fp);
-        }
-    }
-
-    memset(compact, 0, sizeof(compact));
-    for (u32 i = 0; i < loaded.recordCount; ++i)
-    {
-        vm_mock_service_friend_record record = loaded.records[i];
+        vm_mock_service_friend_record record = legacy.records[i];
         bool duplicate = false;
 
         record.ownerAccountId[sizeof(record.ownerAccountId) - 1] = 0;
@@ -1551,214 +1543,244 @@ static void vm_mock_service_friend_db_load(void)
             (record.ownerRoleId == record.targetRoleId &&
              strcmp(record.ownerAccountId, record.targetAccountId) == 0))
         {
-            needsSave = true;
             continue;
         }
-        for (u32 j = 0; j < compactCount; ++j)
+        for (u32 j = 0; j < normalizedCount; ++j)
         {
-            if (compact[j].ownerRoleId == record.ownerRoleId &&
-                compact[j].targetRoleId == record.targetRoleId &&
-                strcmp(compact[j].ownerAccountId, record.ownerAccountId) == 0 &&
-                strcmp(compact[j].targetAccountId, record.targetAccountId) == 0)
+            if (normalized[j].ownerRoleId == record.ownerRoleId &&
+                normalized[j].targetRoleId == record.targetRoleId &&
+                strcmp(normalized[j].ownerAccountId, record.ownerAccountId) == 0 &&
+                strcmp(normalized[j].targetAccountId, record.targetAccountId) == 0)
             {
                 duplicate = true;
                 break;
             }
         }
         if (duplicate)
-        {
-            needsSave = true;
             continue;
-        }
         if (record.targetRoleName[0] == 0)
             snprintf(record.targetRoleName, sizeof(record.targetRoleName), "Player");
-        if (record.targetLevel == 0)
-            record.targetLevel = 1;
-        if (record.targetJob == 0 || record.targetJob > 3)
-            record.targetJob = 1;
-        compact[compactCount++] = record;
+        record.friendDegree = record.friendDegree ? record.friendDegree : 1;
+        record.targetLevel = record.targetLevel ? record.targetLevel : 1;
+        record.targetJob = (record.targetJob >= 1 && record.targetJob <= 3) ?
+                           record.targetJob : 1;
+        record.targetSex = record.targetSex <= 1 ? record.targetSex : 0;
+        normalized[normalizedCount++] = record;
     }
-    memset(&g_vm_mock_service_friend_db, 0, sizeof(g_vm_mock_service_friend_db));
-    memcpy(g_vm_mock_service_friend_db.magic, "JHF1", 4);
-    g_vm_mock_service_friend_db.version = VM_MOCK_SERVICE_FRIEND_DB_VERSION;
-    g_vm_mock_service_friend_db.recordCount = compactCount;
-    if (compactCount > 0)
-        memcpy(g_vm_mock_service_friend_db.records, compact,
-               compactCount * sizeof(compact[0]));
-    if (needsSave &&
-        !vm_mock_service_friend_db_save_all(loadedFromFile ? "legacy-migrate" : "normalize"))
+    if (!vm_mock_service_friend_db_write_records(normalized, normalizedCount,
+                                                  "legacy-migrate"))
+    {
+        return false;
+    }
+    vm_autotest_note("mock_friend_db_legacy_migrate records=%u\n", normalizedCount);
+    return true;
+}
+
+static void vm_mock_service_friend_db_load(void)
+{
+    vm_mock_mysql_friend_count_context context;
+
+    if (g_vm_mock_service_friend_db_loaded)
+        return;
+    g_vm_mock_service_friend_db_loaded = true;
+    g_vm_mock_service_friend_db_valid = false;
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query("SELECT COUNT(*) FROM friendships",
+                        vm_mock_mysql_friend_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        vm_autotest_note("mock_friend_db_mysql_load_failed error=%s\n",
+                         vm_mysql_last_error());
+        return;
+    }
+    g_vm_mock_service_friend_db_valid = true;
+    if (context.value == 0 && !vm_mock_service_mysql_authority_is_sealed() &&
+        !vm_mock_service_friend_db_import_legacy_file())
     {
         g_vm_mock_service_friend_db_valid = false;
         return;
     }
-    vm_autotest_note("mock_friend_db_mysql_load records=%u\n",
-                     g_vm_mock_service_friend_db.recordCount);
+    vm_autotest_note("mock_friend_db_mysql_load records=%u source=on-demand\n",
+                     context.value);
 }
 
-static vm_mock_service_friend_record *vm_mock_service_friend_db_find_in(
-    vm_mock_service_friend_db_file *database,
-    const char *ownerAccountId, u32 ownerRoleId,
-    const char *targetAccountId, u32 targetRoleId)
+static bool vm_mock_service_friend_db_query_records(
+    const char *query, vm_mock_service_friend_record *records, u32 recordsCap,
+    u32 *recordCountOut)
 {
-    if (database == NULL || ownerAccountId == NULL ||
-        targetAccountId == NULL || ownerRoleId == 0 || targetRoleId == 0)
-    {
-        return NULL;
-    }
-    for (u32 i = 0; i < database->recordCount; ++i)
-    {
-        vm_mock_service_friend_record *record = &database->records[i];
-        if (record->ownerRoleId == ownerRoleId &&
-            record->targetRoleId == targetRoleId &&
-            strcmp(record->ownerAccountId, ownerAccountId) == 0 &&
-            strcmp(record->targetAccountId, targetAccountId) == 0)
-        {
-            return record;
-        }
-    }
-    return NULL;
+    vm_mock_mysql_friend_rows_context context;
+
+    if (recordCountOut)
+        *recordCountOut = 0;
+    if (query == NULL || records == NULL || recordsCap == 0)
+        return false;
+    memset(&context, 0, sizeof(context));
+    context.records = records;
+    context.recordsCap = recordsCap;
+    if (!vm_mysql_query(query, vm_mock_mysql_friend_row, &context) || context.invalid)
+        return false;
+    if (recordCountOut)
+        *recordCountOut = context.recordCount;
+    return true;
 }
 
-static vm_mock_service_friend_record *vm_mock_service_friend_db_find(
+static bool vm_mock_service_friend_db_query_pair(
     const char *ownerAccountId, u32 ownerRoleId,
-    const char *targetAccountId, u32 targetRoleId)
+    const char *targetAccountId, u32 targetRoleId,
+    vm_mock_service_friend_record *recordOut, bool *foundOut)
 {
-    vm_mock_service_friend_db_load();
-    if (!g_vm_mock_service_friend_db_valid)
-        return NULL;
-    return vm_mock_service_friend_db_find_in(&g_vm_mock_service_friend_db,
-                                             ownerAccountId, ownerRoleId,
-                                             targetAccountId, targetRoleId);
+    vm_mock_service_friend_record records[1];
+    char ownerHex[129];
+    char targetHex[129];
+    char query[768];
+    u32 recordCount = 0;
+
+    if (recordOut)
+        memset(recordOut, 0, sizeof(*recordOut));
+    if (foundOut)
+        *foundOut = false;
+    if (ownerRoleId == 0 || targetRoleId == 0 ||
+        !vm_mock_service_friend_db_account_hex(ownerAccountId, ownerHex) ||
+        !vm_mock_service_friend_db_account_hex(targetAccountId, targetHex))
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "SELECT owner_account_id,owner_role_id,target_account_id,target_role_id,HEX(target_role_name),friend_degree,target_level,target_job,target_sex "
+             "FROM friendships WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
+             "AND target_account_id=CAST(X'%s' AS CHAR) AND target_role_id=%u LIMIT 1",
+             ownerHex, ownerRoleId, targetHex, targetRoleId);
+    if (!vm_mock_service_friend_db_query_records(query, records, 1, &recordCount))
+        return false;
+    if (recordCount == 1)
+    {
+        if (recordOut)
+            *recordOut = records[0];
+        if (foundOut)
+            *foundOut = true;
+    }
+    return true;
 }
 
 bool vm_mock_service_friend_record_find(
     u32 ownerRoleId, const char *ownerAccountId, u32 targetRoleId,
     vm_mock_service_friend_record *recordOut)
 {
-    if (recordOut)
-        memset(recordOut, 0, sizeof(*recordOut));
-    if (ownerRoleId == 0 || targetRoleId == 0 || ownerAccountId == NULL ||
-        ownerAccountId[0] == 0)
-    {
-        return false;
-    }
-
-    vm_mock_service_friend_db_load();
-    if (!g_vm_mock_service_friend_db_valid)
-        return false;
-
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
-    {
-        const vm_mock_service_friend_record *record =
-            &g_vm_mock_service_friend_db.records[i];
-        if (record->ownerRoleId == ownerRoleId &&
-            record->targetRoleId == targetRoleId &&
-            strcmp(record->ownerAccountId, ownerAccountId) == 0)
-        {
-            if (recordOut)
-                *recordOut = *record;
-            return true;
-        }
-    }
-    return false;
-}
-
-u32 vm_mock_service_friend_record_collect(
-    u32 ownerRoleId, const char *ownerAccountId,
-    vm_mock_service_friend_record *recordsOut, u32 recordsCap)
-{
+    vm_mock_service_friend_record records[2];
+    char ownerHex[129];
+    char query[640];
     u32 recordCount = 0;
 
-    if (ownerRoleId == 0 || ownerAccountId == NULL || ownerAccountId[0] == 0 ||
-        recordsOut == NULL || recordsCap == 0)
+    if (recordOut)
+        memset(recordOut, 0, sizeof(*recordOut));
+    if (ownerRoleId == 0 || targetRoleId == 0 ||
+        !vm_mock_service_friend_db_account_hex(ownerAccountId, ownerHex))
     {
-        return 0;
+        return false;
     }
-
     vm_mock_service_friend_db_load();
     if (!g_vm_mock_service_friend_db_valid)
-        return 0;
-
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+        return false;
+    snprintf(query, sizeof(query),
+             "SELECT owner_account_id,owner_role_id,target_account_id,target_role_id,HEX(target_role_name),friend_degree,target_level,target_job,target_sex "
+             "FROM friendships WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
+             "AND target_role_id=%u ORDER BY target_account_id LIMIT 2",
+             ownerHex, ownerRoleId, targetRoleId);
+    if (!vm_mock_service_friend_db_query_records(query, records, 2, &recordCount) ||
+        recordCount != 1)
     {
-        const vm_mock_service_friend_record *record =
-            &g_vm_mock_service_friend_db.records[i];
-        if (record->ownerRoleId != ownerRoleId ||
-            strcmp(record->ownerAccountId, ownerAccountId) != 0)
-        {
-            continue;
-        }
-        if (recordCount >= recordsCap)
-            break;
-        recordsOut[recordCount++] = *record;
+        return false;
     }
-    return recordCount;
+    if (recordOut)
+        *recordOut = records[0];
+    return true;
 }
 
-static bool vm_mock_service_friend_db_upsert_one(
-    vm_mock_service_friend_db_file *database,
+bool vm_mock_service_friend_record_count(u32 ownerRoleId,
+                                         const char *ownerAccountId,
+                                         u32 *countOut)
+{
+    vm_mock_mysql_friend_count_context context;
+    char ownerHex[129];
+    char query[384];
+
+    if (countOut)
+        *countOut = 0;
+    if (ownerRoleId == 0 ||
+        !vm_mock_service_friend_db_account_hex(ownerAccountId, ownerHex))
+    {
+        return false;
+    }
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid)
+        return false;
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM friendships WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u",
+             ownerHex, ownerRoleId);
+    if (!vm_mysql_query(query, vm_mock_mysql_friend_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (countOut)
+        *countOut = context.value;
+    return true;
+}
+
+bool vm_mock_service_friend_record_query_page(
+    u32 ownerRoleId, const char *ownerAccountId, u32 index, u32 pageSize,
+    vm_mock_service_friend_record *recordsOut, u32 recordsCap,
+    u32 *recordCountOut)
+{
+    char ownerHex[129];
+    char query[768];
+
+    if (recordCountOut)
+        *recordCountOut = 0;
+    if (ownerRoleId == 0 || pageSize == 0 || pageSize > recordsCap ||
+        !vm_mock_service_friend_db_account_hex(ownerAccountId, ownerHex))
+    {
+        return false;
+    }
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid)
+        return false;
+    snprintf(query, sizeof(query),
+             "SELECT owner_account_id,owner_role_id,target_account_id,target_role_id,HEX(target_role_name),friend_degree,target_level,target_job,target_sex "
+             "FROM friendships WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
+             "ORDER BY target_account_id,target_role_id LIMIT %u OFFSET %u",
+             ownerHex, ownerRoleId, pageSize, index);
+    return vm_mock_service_friend_db_query_records(query, recordsOut,
+                                                    recordsCap, recordCountOut);
+}
+
+static bool vm_mock_service_friend_db_make_record(
+    vm_mock_service_friend_record *record,
     const char *ownerAccountId, u32 ownerRoleId,
     const char *targetAccountId, u32 targetRoleId,
-    const char *targetRoleName, u32 targetLevel, u8 targetJob, u8 targetSex,
-    bool *createdOut, bool *changedOut)
+    const char *targetRoleName, u32 targetLevel, u8 targetJob, u8 targetSex)
 {
-    vm_mock_service_friend_record *record = NULL;
-    bool created = false;
-    bool changed = false;
-
-    if (createdOut)
-        *createdOut = false;
-    if (changedOut)
-        *changedOut = false;
-    if (database == NULL)
+    if (record == NULL || ownerRoleId == 0 || targetRoleId == 0 ||
+        (ownerRoleId == targetRoleId &&
+         ownerAccountId != NULL && targetAccountId != NULL &&
+         strcmp(ownerAccountId, targetAccountId) == 0) ||
+        !vm_mock_service_friend_db_account_hex(ownerAccountId, (char[129]){0}) ||
+        !vm_mock_service_friend_db_account_hex(targetAccountId, (char[129]){0}))
+    {
         return false;
-    record = vm_mock_service_friend_db_find_in(database, ownerAccountId, ownerRoleId,
-                                               targetAccountId, targetRoleId);
-    if (record == NULL)
-    {
-        if (database->recordCount >= VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
-            return false;
-        record = &database->records[database->recordCount++];
-        memset(record, 0, sizeof(*record));
-        snprintf(record->ownerAccountId, sizeof(record->ownerAccountId), "%s", ownerAccountId);
-        record->ownerRoleId = ownerRoleId;
-        snprintf(record->targetAccountId, sizeof(record->targetAccountId), "%s", targetAccountId);
-        record->targetRoleId = targetRoleId;
-        created = true;
-        changed = true;
     }
-    if (targetRoleName != NULL && targetRoleName[0] != 0 &&
-        strcmp(record->targetRoleName, targetRoleName) != 0)
-    {
-        snprintf(record->targetRoleName, sizeof(record->targetRoleName), "%s", targetRoleName);
-        changed = true;
-    }
-    if (record->targetLevel != (targetLevel ? targetLevel : 1))
-    {
-        record->targetLevel = targetLevel ? targetLevel : 1;
-        changed = true;
-    }
-    if (targetJob == 0 || targetJob > 3)
-        targetJob = 1;
-    if (record->targetJob != targetJob)
-    {
-        record->targetJob = targetJob;
-        changed = true;
-    }
-    if (record->targetSex != (targetSex <= 1 ? targetSex : 0))
-    {
-        record->targetSex = targetSex <= 1 ? targetSex : 0;
-        changed = true;
-    }
-    if (record->targetRoleName[0] == 0)
-    {
-        snprintf(record->targetRoleName, sizeof(record->targetRoleName), "Player");
-        changed = true;
-    }
-    if (createdOut)
-        *createdOut = created;
-    if (changedOut)
-        *changedOut = changed;
+    memset(record, 0, sizeof(*record));
+    snprintf(record->ownerAccountId, sizeof(record->ownerAccountId), "%s", ownerAccountId);
+    record->ownerRoleId = ownerRoleId;
+    snprintf(record->targetAccountId, sizeof(record->targetAccountId), "%s", targetAccountId);
+    record->targetRoleId = targetRoleId;
+    snprintf(record->targetRoleName, sizeof(record->targetRoleName), "%s",
+             targetRoleName && targetRoleName[0] ? targetRoleName : "Player");
+    record->friendDegree = 1;
+    record->targetLevel = targetLevel ? targetLevel : 1;
+    record->targetJob = (targetJob >= 1 && targetJob <= 3) ? targetJob : 1;
+    record->targetSex = targetSex <= 1 ? targetSex : 0;
     return true;
 }
 
@@ -1769,166 +1791,87 @@ bool vm_mock_service_friend_db_add_pair(
     const char *targetRoleName, u32 targetLevel, u8 targetJob, u8 targetSex,
     bool *createdOut)
 {
+    vm_mock_service_friend_record forward;
+    vm_mock_service_friend_record reverse;
     bool forwardExists = false;
     bool reverseExists = false;
-    bool forwardCreated = false;
-    bool reverseCreated = false;
-    bool forwardChanged = false;
-    bool reverseChanged = false;
-    u32 missing = 0;
-    vm_mock_service_friend_db_file candidate;
-    const vm_mock_service_friend_record *forwardRecord;
-    const vm_mock_service_friend_record *reverseRecord;
 
     if (createdOut)
         *createdOut = false;
-    if (ownerAccountId == NULL || ownerAccountId[0] == 0 || ownerRoleId == 0 ||
-        targetAccountId == NULL || targetAccountId[0] == 0 || targetRoleId == 0 ||
-        (ownerRoleId == targetRoleId && strcmp(ownerAccountId, targetAccountId) == 0))
+    if (!vm_mock_service_friend_db_make_record(
+            &forward, ownerAccountId, ownerRoleId,
+            targetAccountId, targetRoleId, targetRoleName,
+            targetLevel, targetJob, targetSex) ||
+        !vm_mock_service_friend_db_make_record(
+            &reverse, targetAccountId, targetRoleId,
+            ownerAccountId, ownerRoleId, ownerRoleName,
+            ownerLevel, ownerJob, ownerSex))
     {
         return false;
     }
     vm_mock_service_friend_db_load();
-    forwardExists = vm_mock_service_friend_db_find(ownerAccountId, ownerRoleId,
-                                                    targetAccountId, targetRoleId) != NULL;
-    reverseExists = vm_mock_service_friend_db_find(targetAccountId, targetRoleId,
-                                                    ownerAccountId, ownerRoleId) != NULL;
-    missing = (forwardExists ? 0u : 1u) + (reverseExists ? 0u : 1u);
     if (!g_vm_mock_service_friend_db_valid ||
-        g_vm_mock_service_friend_db.recordCount + missing > VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
-    {
-        return false;
-    }
-    candidate = g_vm_mock_service_friend_db;
-    if (!vm_mock_service_friend_db_upsert_one(&candidate, ownerAccountId, ownerRoleId,
+        !vm_mock_service_friend_db_query_pair(ownerAccountId, ownerRoleId,
                                                targetAccountId, targetRoleId,
-                                               targetRoleName, targetLevel, targetJob, targetSex,
-                                               &forwardCreated, &forwardChanged) ||
-        !vm_mock_service_friend_db_upsert_one(&candidate, targetAccountId, targetRoleId,
+                                               NULL, &forwardExists) ||
+        !vm_mock_service_friend_db_query_pair(targetAccountId, targetRoleId,
                                                ownerAccountId, ownerRoleId,
-                                               ownerRoleName, ownerLevel, ownerJob, ownerSex,
-                                               &reverseCreated, &reverseChanged))
+                                               NULL, &reverseExists) ||
+        !vm_mock_service_friend_db_write_pair(&forward, &reverse,
+                                              "friend-invite-accepted"))
     {
+        printf("[error][mock-service] friend_pair_persist_failed owner=%s/%u target=%s/%u error=%s\n",
+               ownerAccountId, ownerRoleId, targetAccountId, targetRoleId,
+               vm_mysql_last_error());
         return false;
     }
-    if (forwardChanged || reverseChanged)
-    {
-        forwardRecord = vm_mock_service_friend_db_find_in(&candidate,
-                                                           ownerAccountId, ownerRoleId,
-                                                           targetAccountId, targetRoleId);
-        reverseRecord = vm_mock_service_friend_db_find_in(&candidate,
-                                                           targetAccountId, targetRoleId,
-                                                           ownerAccountId, ownerRoleId);
-        if (forwardRecord == NULL || reverseRecord == NULL ||
-            !vm_mock_service_friend_db_write_pair(forwardRecord, reverseRecord,
-                                                  "friend-invite-accepted"))
-        {
-            printf("[error][mock-service] friend_pair_persist_failed owner=%s/%u target=%s/%u error=%s\n",
-                   ownerAccountId, ownerRoleId, targetAccountId, targetRoleId,
-                   vm_mysql_last_error());
-            return false;
-        }
-    }
-    g_vm_mock_service_friend_db = candidate;
     if (createdOut)
-        *createdOut = forwardCreated || reverseCreated;
+        *createdOut = !forwardExists || !reverseExists;
     return true;
 }
 
-/* A friend-list deletion is a relationship operation, not a one-sided UI
- * filter.  Keep both directed rows in one MySQL transaction, then replace the
- * in-memory snapshot only after COMMIT. */
+/* The wire deletion key contains only targetRoleId.  Resolve that key through
+ * the owner's durable rows, reject ambiguity, then delete both directions in
+ * one transaction. */
 bool vm_mock_service_friend_db_remove_pair(const char *ownerAccountId,
                                            u32 ownerRoleId,
                                            u32 targetRoleId,
                                            bool *removedOut)
 {
-    const vm_mock_service_friend_record *forward = NULL;
-    vm_mock_service_friend_db_file candidate;
-    char ownerHex[sizeof(g_vm_mock_service_friend_db.records[0].ownerAccountId) * 2 + 1];
-    char targetHex[sizeof(g_vm_mock_service_friend_db.records[0].targetAccountId) * 2 + 1];
+    vm_mock_service_friend_record records[2];
+    char ownerHex[129];
+    char targetHex[129];
     char query[1536];
     char mysqlError[512];
-    size_t ownerLen = 0;
-    size_t targetLen = 0;
-    u32 kept = 0;
+    u32 recordCount = 0;
     bool transactionStarted = false;
-    bool removed = false;
 
     if (removedOut)
         *removedOut = false;
-    if (ownerAccountId == NULL || ownerAccountId[0] == 0 || ownerRoleId == 0 ||
-        targetRoleId == 0)
+    if (ownerRoleId == 0 || targetRoleId == 0 ||
+        !vm_mock_service_friend_db_account_hex(ownerAccountId, ownerHex))
     {
         return false;
     }
-
     vm_mock_service_friend_db_load();
     if (!g_vm_mock_service_friend_db_valid)
         return false;
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
-    {
-        const vm_mock_service_friend_record *record =
-            &g_vm_mock_service_friend_db.records[i];
-
-        if (record->ownerRoleId == ownerRoleId &&
-            record->targetRoleId == targetRoleId &&
-            strcmp(record->ownerAccountId, ownerAccountId) == 0)
-        {
-            /* The wire row contains only targetRoleId.  Refuse an ambiguous
-             * local mapping instead of deleting a different account that
-             * happens to reuse the same role id. */
-            if (forward != NULL &&
-                strcmp(forward->targetAccountId, record->targetAccountId) != 0)
-            {
-                vm_autotest_note("mock_friend_db_remove_rejected owner=%s/%u target_role=%u reason=ambiguous-role-id\n",
-                                 ownerAccountId, ownerRoleId, targetRoleId);
-                return false;
-            }
-            forward = record;
-        }
-    }
-    if (forward == NULL)
+    snprintf(query, sizeof(query),
+             "SELECT owner_account_id,owner_role_id,target_account_id,target_role_id,HEX(target_role_name),friend_degree,target_level,target_job,target_sex "
+             "FROM friendships WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
+             "AND target_role_id=%u ORDER BY target_account_id LIMIT 2",
+             ownerHex, ownerRoleId, targetRoleId);
+    if (!vm_mock_service_friend_db_query_records(query, records, 2, &recordCount))
+        return false;
+    if (recordCount == 0)
         return true;
-
-    ownerLen = vm_mock_mysql_bounded_strlen(ownerAccountId,
-                                            sizeof(g_vm_mock_service_friend_db.records[0].ownerAccountId));
-    targetLen = vm_mock_mysql_bounded_strlen(forward->targetAccountId,
-                                             sizeof(forward->targetAccountId));
-    if (ownerLen == 0 || ownerLen >= sizeof(g_vm_mock_service_friend_db.records[0].ownerAccountId) ||
-        targetLen == 0 || targetLen >= sizeof(forward->targetAccountId) ||
-        vm_mysql_hex_encode(ownerAccountId, ownerLen, ownerHex, sizeof(ownerHex)) == 0 ||
-        vm_mysql_hex_encode(forward->targetAccountId, targetLen, targetHex,
-                            sizeof(targetHex)) == 0)
+    if (recordCount != 1 ||
+        !vm_mock_service_friend_db_account_hex(records[0].targetAccountId, targetHex))
     {
+        vm_autotest_note("mock_friend_db_remove_rejected owner=%s/%u target_role=%u reason=ambiguous-role-id\n",
+                         ownerAccountId, ownerRoleId, targetRoleId);
         return false;
     }
-
-    candidate = g_vm_mock_service_friend_db;
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
-    {
-        const vm_mock_service_friend_record *record =
-            &g_vm_mock_service_friend_db.records[i];
-        bool isForward = record->ownerRoleId == ownerRoleId &&
-                         record->targetRoleId == targetRoleId &&
-                         strcmp(record->ownerAccountId, ownerAccountId) == 0 &&
-                         strcmp(record->targetAccountId, forward->targetAccountId) == 0;
-        bool isReverse = record->ownerRoleId == targetRoleId &&
-                         record->targetRoleId == ownerRoleId &&
-                         strcmp(record->ownerAccountId, forward->targetAccountId) == 0 &&
-                         strcmp(record->targetAccountId, ownerAccountId) == 0;
-
-        if (isForward || isReverse)
-        {
-            removed = true;
-            continue;
-        }
-        candidate.records[kept++] = *record;
-    }
-    if (!removed)
-        return true;
-    candidate.recordCount = kept;
-
     snprintf(query, sizeof(query),
              "DELETE FROM friendships WHERE "
              "(owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u "
@@ -1942,13 +1885,11 @@ bool vm_mock_service_friend_db_remove_pair(const char *ownerAccountId,
     transactionStarted = true;
     if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
         goto failed;
-
-    g_vm_mock_service_friend_db = candidate;
     if (removedOut)
         *removedOut = true;
-    vm_autotest_note("mock_friend_db_remove_pair owner=%s/%u target=%s/%u records=%u\n",
-                     ownerAccountId, ownerRoleId, forward->targetAccountId,
-                     targetRoleId, candidate.recordCount);
+    vm_autotest_note("mock_friend_db_remove_pair owner=%s/%u target=%s/%u source=on-demand\n",
+                     ownerAccountId, ownerRoleId,
+                     records[0].targetAccountId, targetRoleId);
     return true;
 
 failed:
@@ -10865,24 +10806,53 @@ static bool vm_net_mock_allocate_global_role_id(u32 *role_id_out)
     return true;
 }
 
-static void vm_net_mock_apply_role_id_migration_to_friend_cache(const char *account_id,
-                                                                 const u32 *old_ids,
-                                                                 const u32 *new_ids,
-                                                                 u32 mapping_count)
+static bool vm_net_mock_apply_role_id_migration_to_friendships(
+    const char *accountId, const u32 *oldIds, const u32 *newIds,
+    u32 mappingCount)
 {
-    if (account_id == NULL || old_ids == NULL || new_ids == NULL)
-        return;
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+    char accountHex[129];
+    char query[768];
+    char mysqlError[512];
+    bool transactionStarted = false;
+
+    if (mappingCount == 0)
+        return true;
+    if (accountId == NULL || oldIds == NULL || newIds == NULL ||
+        !vm_mock_service_friend_db_account_hex(accountId, accountHex))
     {
-        vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
-        for (u32 j = 0; j < mapping_count; ++j)
-        {
-            if (strcmp(record->ownerAccountId, account_id) == 0 && record->ownerRoleId == old_ids[j])
-                record->ownerRoleId = new_ids[j];
-            if (strcmp(record->targetAccountId, account_id) == 0 && record->targetRoleId == old_ids[j])
-                record->targetRoleId = new_ids[j];
-        }
+        return false;
     }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    for (u32 i = 0; i < mappingCount; ++i)
+    {
+        if (oldIds[i] == 0 || newIds[i] == 0 || oldIds[i] == newIds[i])
+            continue;
+        snprintf(query, sizeof(query),
+                 "UPDATE friendships SET owner_role_id=%u WHERE "
+                 "owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u",
+                 newIds[i], accountHex, oldIds[i]);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
+                 "UPDATE friendships SET target_role_id=%u WHERE "
+                 "target_account_id=CAST(X'%s' AS CHAR) AND target_role_id=%u",
+                 newIds[i], accountHex, oldIds[i]);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    return true;
+
+failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        vm_mysql_exec("ROLLBACK");
+    vm_autotest_note("mock_friend_role_id_migrate_failed account=%s error=%s\n",
+                     accountId ? accountId : "-", mysqlError);
+    return false;
 }
 
 typedef struct
@@ -13845,9 +13815,13 @@ static void vm_net_mock_role_db_load(void)
         }
         if (migratedIdCount > 0)
         {
-            vm_net_mock_apply_role_id_migration_to_friend_cache(
-                g_vm_mock_service_active_account_id,
-                migratedOldIds, migratedNewIds, migratedIdCount);
+            if (!vm_net_mock_apply_role_id_migration_to_friendships(
+                    g_vm_mock_service_active_account_id,
+                    migratedOldIds, migratedNewIds, migratedIdCount))
+            {
+                g_vm_net_mock_role_db_valid = false;
+                return;
+            }
             for (u32 i = 0; i < migratedIdCount; ++i)
             {
                 vm_autotest_note("mock_role_id_global_migrate account=%s old=%u new=%u\n",

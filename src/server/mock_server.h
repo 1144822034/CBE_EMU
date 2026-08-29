@@ -84,7 +84,6 @@ static inline void vm_server_shutdown_restore_listener_mask(void)
 #define VM_NET_MOCK_MAIL_REWARD_MAX 12u
 #define VM_NET_MOCK_REWARD15_MAX_ROWS 12u
 #define VM_NET_MOCK_REWARD15_ITEMINFO_MAX_BYTES 4096u
-#define VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS 256u
 /* Shared ParseEquipAttributes wire bounds. */
 #define VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES 76u
 #define VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL 16u
@@ -255,14 +254,6 @@ typedef struct
     u8 targetSex;
     u16 reserved0;
 } vm_mock_service_friend_record;
-
-typedef struct
-{
-    char magic[4];
-    u32 version;
-    u32 recordCount;
-    vm_mock_service_friend_record records[VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS];
-} vm_mock_service_friend_db_file;
 
 enum
 {
@@ -698,10 +689,13 @@ bool vm_mock_service_friend_record_find(u32 ownerRoleId,
                                         const char *ownerAccountId,
                                         u32 targetRoleId,
                                         vm_mock_service_friend_record *recordOut);
-u32 vm_mock_service_friend_record_collect(u32 ownerRoleId,
-                                          const char *ownerAccountId,
-                                          vm_mock_service_friend_record *recordsOut,
-                                          u32 recordsCap);
+bool vm_mock_service_friend_record_count(u32 ownerRoleId,
+                                         const char *ownerAccountId,
+                                         u32 *countOut);
+bool vm_mock_service_friend_record_query_page(
+    u32 ownerRoleId, const char *ownerAccountId, u32 index, u32 pageSize,
+    vm_mock_service_friend_record *recordsOut, u32 recordsCap,
+    u32 *recordCountOut);
 bool vm_mock_service_friend_db_remove_pair(const char *ownerAccountId,
                                            u32 ownerRoleId, u32 targetRoleId,
                                            bool *removedOut);

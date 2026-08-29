@@ -574,7 +574,7 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_tasks` (
   `repeatable` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=不可重复,1=不限次数,2=每日一次,3=每周一次,4=每月一次',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`scene`, `actor_id`),
+  PRIMARY KEY (`scene`, `actor_id`, `task_id`),
   KEY `idx_server_dynamic_npc_tasks_task` (`task_id`),
   CONSTRAINT `fk_server_dynamic_npc_tasks_npc`
     FOREIGN KEY (`scene`, `actor_id`)

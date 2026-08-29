@@ -1370,19 +1370,35 @@ enum
      * only server-owned overlays keyed by the exact runtime scene filename
      * and the deterministic actor id derived from that source row. */
     VM_NET_MOCK_NATIVE_NPC_OVERRIDE_MAX = 512,
-    VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX = 4096
+    VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX = 4096,
+    /* The client task-hall parser keeps eight task references.  Leave the
+     * remaining two dialog slots available for independently configured NPC
+     * services. */
+    VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX = 8
 };
+
+typedef struct
+{
+    u32 taskId;
+    u8 repeatPolicy;
+} vm_net_mock_dynamic_npc_task_binding;
 
 typedef struct
 {
     bool enabled;
     char scene[64];
     vm_net_mock_scene_npcinfo_seed seed;
+    vm_net_mock_dynamic_npc_task_binding
+        taskBindings[VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX];
+    u32 taskBindingCount;
 } vm_net_mock_dynamic_npc_override;
 
 typedef struct
 {
     vm_net_mock_scene_npcinfo_seed seed;
+    vm_net_mock_dynamic_npc_task_binding
+        taskBindings[VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX];
+    u32 taskBindingCount;
     bool enabled;
     bool builtin;
     bool overridden;
@@ -2834,7 +2850,7 @@ static bool vm_net_mock_scene_battle_monster_admin_save(
              * identical placement.  Surface that specific configuration
              * error instead of making the operator infer it from MySQL's
              * index name; any other database error remains observable. */
-            if (row->entryId == 0 && mysqlError != NULL &&
+            if (mysqlError != NULL &&
                 strstr(mysqlError, "uq_scene_battle_monster_pos") != NULL)
             {
                 *errorOut = "同一场景中相同怪物 ID 不能占用相同坐标；请调整坐标或编辑已有草稿";
@@ -5990,6 +6006,35 @@ static bool vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column(void)
     return true;
 }
 
+/* The original task-binding primary key permitted only one row per NPC.
+ * Retain all existing rows while making task_id part of the identity, so an
+ * NPC can advertise a bounded ordered set of task-hall actions. */
+static bool vm_net_mock_dynamic_npc_tasks_ensure_multiple_bindings(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_tasks' "
+            "AND CONSTRAINT_NAME='PRIMARY' AND COLUMN_NAME='task_id'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count != 0)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_tasks "
+            "DROP PRIMARY KEY,ADD PRIMARY KEY(scene,actor_id,task_id)"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_task_schema migration=multiple-bindings action=applied\n");
+    return true;
+}
+
 /* Existing databases predate customizable NPC service-menu text.  Keep this
  * migration at the configuration owner, and run it before selecting the
  * fields, rather than silently treating a missing column as an empty label. */
@@ -6379,10 +6424,64 @@ static bool vm_net_mock_dynamic_npc_instance_scene_apply_migrations(
     return context->migrationFailures == 0;
 }
 
+static bool vm_net_mock_dynamic_npc_task_bindings_parse(
+    const char *text, size_t textLen,
+    vm_net_mock_dynamic_npc_task_binding *bindings, u32 bindingCap,
+    u32 *bindingCountOut)
+{
+    const char *cursor = text;
+    const char *end = text != NULL ? text + textLen : NULL;
+    u32 count = 0;
+
+    if (bindingCountOut != NULL)
+        *bindingCountOut = 0;
+    if (bindings == NULL || bindingCap == 0 ||
+        (text == NULL && textLen != 0))
+    {
+        return false;
+    }
+    while (cursor != NULL && cursor < end)
+    {
+        const char *entryEnd = memchr(cursor, ',', (size_t)(end - cursor));
+        const char *colon = NULL;
+        u32 taskId = 0;
+        u32 repeatPolicy = 0;
+
+        if (entryEnd == NULL)
+            entryEnd = end;
+        colon = memchr(cursor, ':', (size_t)(entryEnd - cursor));
+        if (colon == NULL || colon == cursor || colon + 1 == entryEnd ||
+            count >= bindingCap ||
+            !vm_mock_mysql_parse_u32(cursor, (size_t)(colon - cursor),
+                                     &taskId) ||
+            !vm_mock_mysql_parse_u32(colon + 1,
+                                     (size_t)(entryEnd - colon - 1),
+                                     &repeatPolicy) ||
+            taskId == 0 || repeatPolicy > VM_NET_MOCK_TASK_REPEAT_MONTHLY)
+        {
+            return false;
+        }
+        for (u32 prior = 0; prior < count; ++prior)
+        {
+            if (bindings[prior].taskId == taskId)
+                return false;
+        }
+        bindings[count].taskId = taskId;
+        bindings[count].repeatPolicy = (u8)repeatPolicy;
+        ++count;
+        if (entryEnd == end)
+            break;
+        cursor = entryEnd + 1;
+    }
+    if (bindingCountOut != NULL)
+        *bindingCountOut = count;
+    return true;
+}
+
 static bool vm_net_mock_dynamic_npc_row(void *contextValue,
-                                       unsigned int columnCount,
-                                       const char *const *values,
-                                       const size_t *lengths)
+                                         unsigned int columnCount,
+                                         const char *const *values,
+                                         const size_t *lengths)
 {
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
@@ -6392,7 +6491,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 21 ||
+    if (context == NULL || columnCount != 20 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -6415,18 +6514,18 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                             row.seed.serviceOptionDescription,
                                             sizeof(row.seed.serviceOptionDescription)) ||
         !vm_mock_mysql_parse_u32(values[11], lengths[11], &number[5]) || number[5] > 1u ||
-        !vm_mock_mysql_parse_u32(values[12], lengths[12], &number[6]) ||
-        !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[7]) ||
-        number[7] > VM_NET_MOCK_TASK_REPEAT_MONTHLY ||
-        !vm_net_mock_dynamic_npc_decode_hex(values[14], lengths[14],
+        !vm_net_mock_dynamic_npc_task_bindings_parse(
+            values[12], lengths[12], row.taskBindings,
+            VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX, &row.taskBindingCount) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[13], lengths[13],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
-        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[8]) || number[8] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[9]) || number[9] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[10]) || number[10] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[12]) || number[12] > 0xffu ||
-        !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[13]) || number[13] > 1u)
+        !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[8]) || number[8] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[9]) || number[9] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[10]) || number[10] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[11]) || number[11] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[12]) || number[12] > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[13]) || number[13] > 1u)
     {
         if (context != NULL)
             ++context->skipped;
@@ -6439,8 +6538,10 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.kind = (u16)number[3];
     row.seed.orientation = (u16)number[4];
     row.enabled = number[5] != 0;
-    row.seed.taskId = number[6];
-    row.seed.taskRepeatPolicy = (u8)number[7];
+    row.seed.taskId = row.taskBindingCount != 0 ? row.taskBindings[0].taskId : 0;
+    row.seed.taskRepeatPolicy = row.taskBindingCount != 0
+                                    ? row.taskBindings[0].repeatPolicy
+                                    : VM_NET_MOCK_TASK_REPEAT_NEVER;
     row.seed.taskRepeatable = row.seed.taskRepeatPolicy !=
                               VM_NET_MOCK_TASK_REPEAT_NEVER;
     row.seed.instanceX = (u16)number[8];
@@ -6567,8 +6668,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
 
     snprintf(g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].scene,
              sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene), "%s", row.scene);
-    g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].seed = row.seed;
-    g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].enabled = row.enabled;
+    g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count] = row;
     ++g_vm_net_mock_dynamic_npc_override_count;
     ++context->loaded;
     return true;
@@ -6581,8 +6681,7 @@ static bool vm_net_mock_dynamic_npc_db_query_rows(
         "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
         "HEX(actor_resource),HEX(display_name),HEX(script_name),"
         "HEX(service_option_name),HEX(service_option_description),enabled,"
-        "COALESCE(server_dynamic_npc_tasks.task_id,0),"
-        "COALESCE(server_dynamic_npc_tasks.repeatable,0),"
+        "COALESCE(task_bindings.bindings,''),"
         "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
         "COALESCE(server_dynamic_npc_instances.target_x,0),"
         "COALESCE(server_dynamic_npc_instances.target_y,0),"
@@ -6593,8 +6692,11 @@ static bool vm_net_mock_dynamic_npc_db_query_rows(
         "WHERE sbm.scene=server_dynamic_npcs.scene "
         "AND sbm.monster_id=COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0) "
         "AND sbm.enabled=1) "
-        "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
-        "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
+        "FROM server_dynamic_npcs LEFT JOIN ("
+        "SELECT scene,actor_id,GROUP_CONCAT(CONCAT(task_id,':',repeatable) "
+        "ORDER BY task_id SEPARATOR ',') AS bindings "
+        "FROM server_dynamic_npc_tasks GROUP BY scene,actor_id"
+        ") AS task_bindings USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
         "USING(scene,actor_id) ORDER BY scene,actor_id",
         vm_net_mock_dynamic_npc_row, context);
 }
@@ -6635,10 +6737,11 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "task_id INT UNSIGNED NOT NULL,repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=不可重复,1=不限次数,2=每日,3=每周,4=每月',"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
-            "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
+            "PRIMARY KEY(scene,actor_id,task_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
             "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
             "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
         !vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column() ||
+        !vm_net_mock_dynamic_npc_tasks_ensure_multiple_bindings() ||
         !vm_net_mock_dynamic_npc_ensure_service_option_columns() ||
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npc_instances ("
@@ -6906,9 +7009,45 @@ static int vm_net_mock_dynamic_npc_find_override_exact(const char *scene,
     return -1;
 }
 
+/* Runtime scene records retain one legacy task projection for compatibility,
+ * but task-hall actions resolve the complete server-owned binding set here.
+ * An explicit override with zero bindings intentionally removes a built-in
+ * task, so only a seed without an override may use the legacy fallback. */
+static u32 vm_net_mock_dynamic_npc_task_bindings_resolve(
+    const char *scene, const vm_net_mock_scene_npcinfo_seed *seed,
+    vm_net_mock_dynamic_npc_task_binding *bindings, u32 bindingCap)
+{
+    if (seed == NULL || bindings == NULL || bindingCap == 0)
+        return 0;
+    for (u32 index = 0; index < g_vm_net_mock_dynamic_npc_override_count;
+         ++index)
+    {
+        const vm_net_mock_dynamic_npc_override *row =
+            &g_vm_net_mock_dynamic_npc_overrides[index];
+
+        if (row->seed.actorId != seed->actorId || scene == NULL ||
+            !vm_net_mock_scene_names_equal_exact(row->scene, scene))
+        {
+            continue;
+        }
+        if (row->taskBindingCount > bindingCap)
+            return 0;
+        memcpy(bindings, row->taskBindings,
+               row->taskBindingCount * sizeof(bindings[0]));
+        return row->taskBindingCount;
+    }
+    if (seed->taskId == 0)
+        return 0;
+    bindings[0].taskId = seed->taskId;
+    bindings[0].repeatPolicy = vm_net_mock_task_repeat_policy_from_seed(seed);
+    return 1;
+}
+
 static bool vm_net_mock_dynamic_npc_admin_save(
     const char *scene,
     const vm_net_mock_scene_npcinfo_seed *seed,
+    const vm_net_mock_dynamic_npc_task_binding *taskBindings,
+    u32 taskBindingCount,
     bool enabled,
     const vm_net_mock_npc_service_option *serviceOptions,
     u32 serviceOptionCount, bool replaceServiceOptions, bool createOnly,
@@ -6935,7 +7074,37 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         *errorOut = "invalid dynamic npc";
     if (seed == NULL)
         return false;
+    if ((taskBindings == NULL && taskBindingCount != 0) ||
+        taskBindingCount > VM_NET_MOCK_DYNAMIC_NPC_TASK_MAX)
+    {
+        if (errorOut)
+            *errorOut = "dynamic npc task bindings are invalid";
+        return false;
+    }
+    for (u32 index = 0; index < taskBindingCount; ++index)
+    {
+        if (taskBindings[index].taskId == 0 ||
+            taskBindings[index].repeatPolicy > VM_NET_MOCK_TASK_REPEAT_MONTHLY)
+        {
+            if (errorOut)
+                *errorOut = "dynamic npc task bindings are invalid";
+            return false;
+        }
+        for (u32 prior = 0; prior < index; ++prior)
+        {
+            if (taskBindings[prior].taskId == taskBindings[index].taskId)
+            {
+                if (errorOut)
+                    *errorOut = "dynamic npc task bindings are duplicated";
+                return false;
+            }
+        }
+    }
     normalizedSeed = *seed;
+    normalizedSeed.taskId = taskBindingCount != 0 ? taskBindings[0].taskId : 0;
+    normalizedSeed.taskRepeatPolicy = taskBindingCount != 0
+                                          ? taskBindings[0].repeatPolicy
+                                          : VM_NET_MOCK_TASK_REPEAT_NEVER;
     normalizedSeed.taskRepeatPolicy =
         vm_net_mock_task_repeat_policy_from_seed(&normalizedSeed);
     normalizedSeed.taskRepeatable = normalizedSeed.taskRepeatPolicy !=
@@ -7144,23 +7313,21 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     }
     if (!vm_mysql_exec(query))
         goto failed;
-    if (seed->taskId != 0)
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_dynamic_npc_tasks WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, seed->actorId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    for (u32 index = 0; index < taskBindingCount; ++index)
     {
         snprintf(query, sizeof(query),
                  "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable) "
-                 "VALUES(X'%s',%u,%u,%u) ON DUPLICATE KEY UPDATE "
-                 "task_id=VALUES(task_id),repeatable=VALUES(repeatable)",
-                 sceneHex, seed->actorId, seed->taskId,
-                 (u32)seed->taskRepeatPolicy);
+                 "VALUES(X'%s',%u,%u,%u)", sceneHex, seed->actorId,
+                 taskBindings[index].taskId,
+                 (u32)taskBindings[index].repeatPolicy);
+        if (!vm_mysql_exec(query))
+            goto failed;
     }
-    else
-    {
-        snprintf(query, sizeof(query),
-                 "DELETE FROM server_dynamic_npc_tasks WHERE scene=X'%s' AND actor_id=%u",
-                 sceneHex, seed->actorId);
-    }
-    if (!vm_mysql_exec(query))
-        goto failed;
     if (replaceServiceOptions &&
         !vm_net_mock_npc_service_options_replace_in_transaction(
             scene, seed->actorId, serviceOptions, serviceOptionCount,
@@ -7174,6 +7341,12 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     memset(&row, 0, sizeof(row));
     snprintf(row.scene, sizeof(row.scene), "%s", scene);
     row.seed = *seed;
+    if (taskBindingCount != 0)
+    {
+        memcpy(row.taskBindings, taskBindings,
+               taskBindingCount * sizeof(row.taskBindings[0]));
+    }
+    row.taskBindingCount = taskBindingCount;
     row.enabled = enabled;
     if (existing >= 0)
         g_vm_net_mock_dynamic_npc_overrides[existing] = row;
@@ -7181,10 +7354,11 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) challenge_enemy=%u spawn_enemy=%u spawn_source=SCE2-kind3 min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task_count=%u primary_task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) challenge_enemy=%u spawn_enemy=%u spawn_source=SCE2-kind3 min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
            seed->serviceOptionName[0] ? seed->serviceOptionName : "-",
-           seed->taskId, (u32)seed->taskRepeatPolicy, seed->x, seed->y,
+           taskBindingCount, seed->taskId, (u32)seed->taskRepeatPolicy,
+           seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
            seed->instanceSpawnEnemyId,
@@ -7435,6 +7609,11 @@ static u32 vm_net_mock_dynamic_npc_admin_list(
         {
             rows[count].seed =
                 g_vm_net_mock_dynamic_npc_overrides[overrideIndex].seed;
+            memcpy(rows[count].taskBindings,
+                   g_vm_net_mock_dynamic_npc_overrides[overrideIndex].taskBindings,
+                   sizeof(rows[count].taskBindings));
+            rows[count].taskBindingCount =
+                g_vm_net_mock_dynamic_npc_overrides[overrideIndex].taskBindingCount;
             rows[count].enabled =
                 g_vm_net_mock_dynamic_npc_overrides[overrideIndex].enabled;
             rows[count].overridden = true;
@@ -7442,6 +7621,13 @@ static u32 vm_net_mock_dynamic_npc_admin_list(
         else
         {
             rows[count].seed = builtins[i];
+            if (builtins[i].taskId != 0)
+            {
+                rows[count].taskBindings[0].taskId = builtins[i].taskId;
+                rows[count].taskBindings[0].repeatPolicy =
+                    vm_net_mock_task_repeat_policy_from_seed(&builtins[i]);
+                rows[count].taskBindingCount = 1;
+            }
             rows[count].enabled = true;
         }
         ++count;
@@ -7467,6 +7653,9 @@ static u32 vm_net_mock_dynamic_npc_admin_list(
         if (replacesBuiltin)
             continue;
         rows[count].seed = row->seed;
+        memcpy(rows[count].taskBindings, row->taskBindings,
+               sizeof(rows[count].taskBindings));
+        rows[count].taskBindingCount = row->taskBindingCount;
         rows[count].enabled = row->enabled;
         rows[count].overridden = true;
         ++count;

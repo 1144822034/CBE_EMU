@@ -70,6 +70,16 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_task_
 mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_dynamic_npc_task_repeatable.sql
 ```
 
+已有数据库需要让一个动态 NPC 同时绑定多个任务时，先停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_dynamic_npc_multiple_tasks.sql
+```
+
+脚本只把 `server_dynamic_npc_tasks` 的主键扩展为
+`(scene, actor_id, task_id)`，不会改写已有绑定。新版服务启动时也会检查并自动执行同等
+迁移；后台每个 NPC 最多保存 8 个任务，以匹配客户端任务对话入口上限。
+
 服务启动也会检查并补充该列；开关默认关闭，因此已有任务的完成后不可再次接取行为不会改变。
 
 已有数据库升级到“场景战斗怪”配置层时执行：
@@ -438,8 +448,8 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、首项奖励和三阶段 NPC 对话。
 - `server_task_reward_items`：任务的有序多项物品奖励；存在记录时覆盖 `server_tasks` 的首项奖励兼容字段。
-- `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系，以及该 NPC 是否允许角色在完成后重复接取。
-- `server_dynamic_npcs`：服务端动态 NPC 的场景位置、Actor、任务/XSE 与旧单服务兼容字段；新服务集合优先保存于 `server_npc_services`。
+- `server_dynamic_npc_tasks`：动态 NPC 到多个可接取任务的绑定关系，以及每项任务是否允许角色在完成后重复接取。
+- `server_dynamic_npcs`：服务端动态 NPC 的场景位置、Actor、隐藏的 XSE 兼容字段与旧单服务兼容字段；新服务集合优先保存于 `server_npc_services`。
 - `server_npc_services`：按场景和 Actor 保存动态 NPC 或原生 NPC 覆盖的有序多服务集合，以及每项可选的对话名称/说明；只允许现有 parser-backed 对话服务种类，任务仍由动态 NPC 任务绑定独立生成 `action=4`，守关怪挑战使用客户端原生 `action=13`。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
