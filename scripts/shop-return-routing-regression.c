@@ -89,6 +89,26 @@ static u32 make_shop_actor_query14_request(u8 *request, u32 actorId)
     return pos;
 }
 
+static u32 make_game_type_request(u8 *request, u8 type)
+{
+    u8 payload[32];
+    u32 payloadLen = 0;
+    u32 pos = 4;
+
+    if (!vm_net_mock_put_object_u8(payload, sizeof(payload), &payloadLen,
+                                   "type", type))
+    {
+        return 0;
+    }
+    request[0] = 'W';
+    request[1] = 'T';
+    pos = append_request_object(request, pos, 1, 7, 7, payload,
+                                (u16)payloadLen);
+    request[2] = (u8)(pos >> 8);
+    request[3] = (u8)pos;
+    return pos;
+}
+
 static u32 make_scene_task_subset_followup_request(u8 *request)
 {
     u8 typePayload[32];
@@ -320,9 +340,20 @@ static int assert_shop_return_grid_reseed_contract(void)
 {
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_role_state savedRole;
+    vm_mock_service_client_session *savedSessions =
+        g_vm_mock_service_client_sessions;
+    vm_mock_service_client_session *session = NULL;
+    bool ownsSession = false;
     u8 response[65536];
+    u8 type2Request[64];
+    u8 type3Request[64];
     u32 responseLen = 5;
     u8 responseObjectCount = 0;
+    u32 type2RequestLen = 0;
+    u32 type3RequestLen = 0;
+    u32 savedSeededRoleId = g_netMockBackpackGridSeededRoleId;
+    u32 savedReseedPendingRoleId = g_netMockBackpackGridReseedPendingRoleId;
+    u32 savedActiveClientId = g_vm_mock_service_active_client_id;
     u32 savedRoleCount = g_vm_net_mock_role_db.roleCount;
     u32 savedActiveRoleId = g_vm_net_mock_role_db.activeRoleId;
     bool savedRoleDbLoaded = g_vm_net_mock_role_db_loaded;
@@ -345,6 +376,20 @@ static int assert_shop_return_grid_reseed_contract(void)
     role->backpackItems[0].seq = 1;
     role->backpackItems[0].count = 5;
 
+    if (vm_mock_service_find_client_session(0x5a0f0001u) != NULL)
+    {
+        fprintf(stderr, "shop return grid: fixture client id is already occupied\n");
+        goto fail;
+    }
+    session = vm_mock_service_get_or_create_client_session(0x5a0f0001u);
+    if (session == NULL)
+    {
+        fprintf(stderr, "shop return grid: isolated client session allocation failed\n");
+        goto fail;
+    }
+    ownsSession = true;
+    g_vm_mock_service_active_client_id = session->clientId;
+
     g_netMockBackpackGridSeededRoleId = 1;
     g_netMockBackpackGridReseedPendingRoleId = 1;
     if (!vm_net_mock_append_backpack_role_grid_main_objects(
@@ -353,13 +398,31 @@ static int assert_shop_return_grid_reseed_contract(void)
         fprintf(stderr, "shop return grid: bootstrap builder failed\n");
         goto fail;
     }
-    vm_net_mock_finish_wt_packet(response, responseLen, responseObjectCount);
-    if (responseObjectCount == 0 ||
-        !response_has_object(response, responseLen, 1, 30, 21) ||
+    if (responseObjectCount != 0 || responseLen != 5 ||
         g_netMockBackpackGridReseedPendingRoleId != 0 ||
-        g_netMockBackpackGridSeededRoleId != 1)
+        g_netMockBackpackGridSeededRoleId != 0 ||
+        !vm_mock_service_backpack_full_bootstrap_matches(1, 1))
     {
-        fprintf(stderr, "shop return grid: same-role bootstrap did not consume reseed\n");
+        fprintf(stderr, "shop return grid: same-role bootstrap did not arm type-2\n");
+        goto fail;
+    }
+
+    type2RequestLen = make_game_type_request(type2Request, 2);
+    type3RequestLen = make_game_type_request(type3Request, 3);
+    if (type2RequestLen == 0 || type3RequestLen == 0 ||
+        (responseLen = vm_net_mock_build_response(
+             type2Request, type2RequestLen, response, sizeof(response))) == 0 ||
+        !response_has_object(response, responseLen, 1, 30, 21) ||
+        response_has_object(response, responseLen, 1, 7, 7) ||
+        !vm_mock_service_backpack_full_bootstrap_matches(1, 2) ||
+        (responseLen = vm_net_mock_build_response(
+             type3Request, type3RequestLen, response, sizeof(response))) == 0 ||
+        !response_has_object(response, responseLen, 1, 7, 32) ||
+        response_has_object(response, responseLen, 1, 7, 7) ||
+        g_netMockBackpackGridSeededRoleId != 1 ||
+        vm_mock_service_backpack_full_bootstrap_matches(1, 2))
+    {
+        fprintf(stderr, "shop return grid: type-3 replayed an additive equipment object\n");
         goto fail;
     }
 
@@ -368,7 +431,12 @@ static int assert_shop_return_grid_reseed_contract(void)
     g_vm_net_mock_role_db.activeRoleId = savedActiveRoleId;
     g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
     g_vm_net_mock_role_db_valid = savedRoleDbValid;
-    g_netMockBackpackGridReseedPendingRoleId = 0;
+    g_vm_mock_service_active_client_id = savedActiveClientId;
+    g_vm_mock_service_client_sessions = savedSessions;
+    if (ownsSession)
+        free(session);
+    g_netMockBackpackGridSeededRoleId = savedSeededRoleId;
+    g_netMockBackpackGridReseedPendingRoleId = savedReseedPendingRoleId;
     return 0;
 
 fail:
@@ -377,7 +445,12 @@ fail:
     g_vm_net_mock_role_db.activeRoleId = savedActiveRoleId;
     g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
     g_vm_net_mock_role_db_valid = savedRoleDbValid;
-    g_netMockBackpackGridReseedPendingRoleId = 0;
+    g_vm_mock_service_active_client_id = savedActiveClientId;
+    g_vm_mock_service_client_sessions = savedSessions;
+    if (ownsSession)
+        free(session);
+    g_netMockBackpackGridSeededRoleId = savedSeededRoleId;
+    g_netMockBackpackGridReseedPendingRoleId = savedReseedPendingRoleId;
     return 1;
 }
 

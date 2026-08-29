@@ -1,7 +1,7 @@
 # player-1 人物信息“装备”为空（2026-08-28）
 
 phase: player1-self-equipment-view
-status: staged-server-only-candidate-implemented; client-runtime-acceptance-pending
+status: superseded-by-2026-08-29-player1-shop-return-ingame-assert
 
 ## 1. 现象与边界
 
@@ -43,31 +43,22 @@ status: staged-server-only-candidate-implemented; client-runtime-acceptance-pend
 现有日志没有保留本次菜单点击后的 `WT 29/4` 原始请求/响应，因此尚不能把该历史差异与当前
 单次菜单点击直接绑定；但首次装备实例初始化被删除已经足以解释“有持久装备、客户端装备页全空”的版本回归。
 
-## 5. 当前修复候选
+## 5. 已否定的修复候选
 
-- 首个 `5/10 + 7/7(type=1)` group 响应只保留组和正常状态对象，并在当前客户端会话中记录
-  同一角色等待其原生 type-2/type-3 请求；不再将完整背包和装备对象塞入这个共享解析池的
-  响应。
-- CBE 实际发出的 `7/7(type=2)` 请求回复完整 `30/21`（及可选 `7/11`），由
-  `HandleItemGridResponse` 建立包含 `+4/+8/+12/+16` 的背包主实例。
-- CBE 随后的 `7/7(type=3)` 请求回复完整 `1/7/7 type=2 { iteminfo }`，并紧随零行
-  `1/7/7 type=3 { iteminfo=00 }`；其保留了客户端原生装备流收尾与状态重算。
-- `type=2` 行只从角色持久化的有效装备槽构造，序号固定为 `slot + 1`，携带耐久和完整强化属性；
-  不复用用户穿戴/卸下操作的 pending 状态。
-- 阶段状态仅属于当前服务端会话，重复 group 不重放，重新选角才重新建立阶段；没有恢复
-  宿主拆包、双事件投递或任何客户端内存／寄存器写入。
-- 回归场景断言三帧对象顺序、完整四档 `30/21`、重复 group 不重放、type-3 完成与重新选角
-  重新建立阶段。
+曾尝试把 `7/7(type=2)` 的完整装备行推迟到 CBE 的随后的 `7/7(type=3)` 请求中，以恢复
+装备页实例。player-1 商城返回运行再次触发 `MMORPG_Screen_InGame.c:913` 后，这一候选被否定：
+`7/7(type=2)` 仍是 CBE 的新增物品通道，而不是可以安全重放已装备行的初始化通道。
 
-## 6. 取证冲突与构建状态
+后续实现保留同角色返回所需的自然 `30/21` 背包快照与 `1/7/32` 状态响应，但完全禁止该
+bootstrap 生成 `1/7/7 { type=2|3 }`。详情见
+[`2026-08-29-player1-shop-return-ingame-assert.md`](2026-08-29-player1-shop-return-ingame-assert.md)。
 
-8 月 27 日的断言记录把 `7/7 type=2` 概括为物品操作路径并因此删除了该链路；但保存的
-player-3 原始首登包和只读客户端记录给出了更强的反证：`type=2` 的完整装备行在
-`mmGame:sub_D04` 中建立八条 category-15 装备实例，空 `type=3` 随后走原生状态重算；
-8 月 26 日用户确认正常的版本也保留这套顺序。故本次恢复的是该已捕获的、受限的首登对象序列，
-不是把任意 `7/7 type=2` 当作通用物品操作回包。
+## 6. 取证更正
 
-本轮 `make -j2` 已执行；确定性服务端回归也已重新编译并通过：
+保存的旧包只能证明解析器会读取该对象，不能证明它是该商城返回 callback 的合法响应。
+player-1 的实际断言是更强的反证：把已有装备行重新送入该 parser 会请求新增物品槽并违反
+InGame 的生命周期约束。因此装备页初始化协议仍是 `unresolved`；不得以 `7/7(type=2|3)`
+补偿该 UI 缺口。
 
 ```powershell
 make -j2
