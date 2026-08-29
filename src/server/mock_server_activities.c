@@ -1191,6 +1191,23 @@ static void vm_mock_ring_item_name(u32 itemId, char *nameOut, size_t nameCap)
     snprintf(nameOut, nameCap, "#%u", itemId);
 }
 
+/* 击杀环：须能解析出可读地图名；世界Boss 配置怪一律不进池。 */
+static bool vm_mock_ring_monster_eligible_kill(const vm_net_mock_monster_admin_row *row,
+                                              u32 worldBossMonsterId)
+{
+    char mapLabel[40];
+
+    if (row == NULL || row->enemyId == 0)
+        return false;
+    if (worldBossMonsterId != 0 && row->enemyId == worldBossMonsterId)
+        return false;
+    if (row->firstScene[0] == 0)
+        return false;
+    mapLabel[0] = 0;
+    vm_mock_ring_scene_label(row->firstScene, mapLabel, sizeof(mapLabel));
+    return mapLabel[0] != 0;
+}
+
 static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
 {
     enum
@@ -1206,6 +1223,8 @@ static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
     u32 pass;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleLevel = (role != NULL && role->level != 0) ? role->level : 30u;
+    const vm_mock_world_boss_config *wbCfg = vm_net_mock_world_boss_config_get();
+    u32 worldBossId = (wbCfg != NULL) ? wbCfg->monsterId : 0u;
 
     total = vm_net_mock_monster_admin_list(rows, VM_MOCK_RING_MOB_POOL);
     if (total > VM_MOCK_RING_MOB_POOL)
@@ -1213,7 +1232,8 @@ static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
 
     /*
      * 同名怪（如 白光虎 id=83/99）各占一席会抬高该名出现率。
-     * 按显示名去重；优先选与角色等级接近、且有场景的条目。
+     * 按显示名去重；优先选与角色等级接近、且有地图名的条目。
+     * 无地图名 / 世界Boss 配置怪：两轮均跳过。
      */
     for (pass = 0; pass < 2 && matchCount == 0; ++pass)
     {
@@ -1228,6 +1248,8 @@ static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
 
             if (bossOnly ? !isBoss : isBoss)
                 continue;
+            if (!vm_mock_ring_monster_eligible_kill(&rows[i], worldBossId))
+                continue;
             if (rows[i].displayName[0] != 0)
                 snprintf(name, sizeof(name), "%s", rows[i].displayName);
             else
@@ -1238,8 +1260,6 @@ static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
             {
                 diff = lvl > roleLevel ? (lvl - roleLevel) : (roleLevel - lvl);
                 if (diff > 25u)
-                    continue;
-                if (!bossOnly && rows[i].firstScene[0] == 0)
                     continue;
             }
             for (j = 0; j < matchCount; ++j)
@@ -1258,10 +1278,15 @@ static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
     }
 
     if (matchCount == 0)
-        return bossOnly ? 13u : 1u;
+    {
+        printf("[warn][mock-service] ring_pick_monster empty boss=%u role_lv=%u "
+               "wboss=%u evidence=require-map-skip-wboss\n",
+               bossOnly ? 1u : 0u, roleLevel, worldBossId);
+        return 0;
+    }
     printf("[info][mock-service] ring_pick_monster boss=%u pool=%u role_lv=%u "
-           "pick_from_unique_names evidence=dedupe-display-name\n",
-           bossOnly ? 1u : 0u, matchCount, roleLevel);
+           "wboss_skip=%u pick_from_unique_names evidence=map+dedupe\n",
+           bossOnly ? 1u : 0u, matchCount, roleLevel, worldBossId);
     return matchIds[vm_mock_activities_rng_next() % matchCount];
 }
 
@@ -1763,10 +1788,31 @@ static void vm_mock_ring_build_desc(void)
         count = 10 + (vm_mock_activities_rng_next() % 21);
         g_vm_mock_ring_rt.targetCount = count;
         g_vm_mock_ring_rt.targetId = vm_mock_ring_pick_monster_id(false);
+        if (g_vm_mock_ring_rt.targetId == 0)
+        {
+            /* 无可用地图名小怪：改拜访，避免无地图/世界Boss 空池发环 */
+            type = VM_MOCK_RING_TYPE_VISIT;
+            g_vm_mock_ring_rt.taskType = type;
+            snprintf(g_vm_mock_ring_rt.targetNpc,
+                     sizeof(g_vm_mock_ring_rt.targetNpc), "%s",
+                     visitPool[vm_mock_activities_rng_next() % 3]);
+            g_vm_mock_ring_rt.targetCount = 1;
+            g_vm_mock_ring_rt.targetId = 0;
+        }
         break;
     case VM_MOCK_RING_TYPE_KILL_BOSS:
         g_vm_mock_ring_rt.targetCount = 1;
         g_vm_mock_ring_rt.targetId = vm_mock_ring_pick_monster_id(true);
+        if (g_vm_mock_ring_rt.targetId == 0)
+        {
+            type = VM_MOCK_RING_TYPE_VISIT;
+            g_vm_mock_ring_rt.taskType = type;
+            snprintf(g_vm_mock_ring_rt.targetNpc,
+                     sizeof(g_vm_mock_ring_rt.targetNpc), "%s",
+                     visitPool[vm_mock_activities_rng_next() % 3]);
+            g_vm_mock_ring_rt.targetCount = 1;
+            g_vm_mock_ring_rt.targetId = 0;
+        }
         break;
     case VM_MOCK_RING_TYPE_KILL_PLAYER:
         pvpJob = (u8)(1 + (vm_mock_activities_rng_next() % 3));
@@ -2623,5 +2669,114 @@ bool vm_mock_ring_admin_save_config(u8 enabled, const char *npcKeyword, u16 dail
     if (!vm_mysql_exec(query))
         return false;
     g_vm_mock_ring_config_loaded = false;
+    return true;
+}
+
+/* 后台：清除角色当日已接跑环（保留 ring_count / 满环奖励状态）。 */
+bool vm_mock_ring_admin_clear_active_task(const char *accountId, u32 roleId,
+                                          const char **errorOut)
+{
+    char accountHex[160];
+    char query[768];
+    u32 dayYmd;
+    vm_mock_ring_daily_ctx row;
+    vm_mock_service_client_session *session;
+
+    if (errorOut)
+        *errorOut = NULL;
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0)
+    {
+        if (errorOut)
+            *errorOut = "账号或角色无效";
+        return false;
+    }
+    if (!vm_mock_activities_ensure_tables())
+    {
+        if (errorOut)
+            *errorOut = "数据库不可用";
+        return false;
+    }
+    if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
+    {
+        if (errorOut)
+            *errorOut = "账号编码失败";
+        return false;
+    }
+    dayYmd = vm_mock_activities_day_ymd();
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active FROM account_role_ring_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    if (!row.taskActive)
+    {
+        if (errorOut)
+            *errorOut = "当前没有进行中的跑环任务";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_ring_daily SET "
+             "task_type=0,target_id=0,target_count=0,progress=0,"
+             "target_npc=X'',task_active=0 "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u",
+             accountHex, roleId, dayYmd);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = "清除跑环任务失败";
+        return false;
+    }
+    /* 在线同角色：清掉进程内环运行时，避免击杀进度把旧任务写回 */
+    session = g_vm_mock_service_client_sessions;
+    while (session != NULL)
+    {
+        if (session->accountId[0] != 0 &&
+            strcmp(session->accountId, accountId) == 0 &&
+            session->onlineRoleId == roleId)
+        {
+            memset(&g_vm_mock_ring_rt, 0, sizeof(g_vm_mock_ring_rt));
+            break;
+        }
+        session = session->next;
+    }
+    printf("[info][mock-service] ring_admin_clear_active account=%s role=%u "
+           "day=%u type=%u progress=%u/%u evidence=admin-clear\n",
+           accountId, roleId, dayYmd, (u32)row.taskType, row.progress,
+           row.targetCount);
+    return true;
+}
+
+/* 后台角色页：当日是否有进行中环，以及已完成环数。 */
+bool vm_mock_ring_admin_peek_active(const char *accountId, u32 roleId,
+                                    u8 *activeOut, u16 *ringCountOut)
+{
+    char accountHex[160];
+    char query[640];
+    u32 dayYmd;
+    vm_mock_ring_daily_ctx row;
+
+    if (activeOut)
+        *activeOut = 0;
+    if (ringCountOut)
+        *ringCountOut = 0;
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0)
+        return false;
+    if (!vm_mock_activities_ensure_tables() ||
+        !vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
+        return false;
+    dayYmd = vm_mock_activities_day_ymd();
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active FROM account_role_ring_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    if (activeOut)
+        *activeOut = row.taskActive ? 1u : 0u;
+    if (ringCountOut)
+        *ringCountOut = row.ringCount;
     return true;
 }

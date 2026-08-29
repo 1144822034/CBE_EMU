@@ -20,6 +20,15 @@ export type PageNavDrawOpts = {
   onNext: () => void;
   /** Optional height (default = GIF height or 18). */
   h?: number;
+  /**
+   * Draw even when pages <= 1 (both sides disabled unless canPrev/canNext).
+   * For server hasMore-style lists that should always show the strip.
+   */
+  forceShow?: boolean;
+  /** Override enable: default page > 1. */
+  canPrev?: boolean;
+  /** Override enable: default page < pages. */
+  canNext?: boolean;
 };
 
 /**
@@ -86,19 +95,19 @@ function pageNavBtnSize(
 }
 
 /**
- * Draw tappable 上一页 / 下一页 when pages > 1.
+ * Draw tappable 上一页 / 下一页 when pages > 1 (or forceShow).
  * Uses half-crops of frontmsg/backmsg (enabled|disabled); falls back to text.
  * GIF sprites live in a strip Container pushed to `hits` so redraws clean up.
  * Returns strip height (0 if not drawn).
  */
 export function attachPageNavButtons(opts: PageNavDrawOpts): number {
   const pages = Math.max(1, opts.pages | 0);
-  if (pages <= 1) return 0;
+  if (pages <= 1 && !opts.forceShow) return 0;
   const page = Math.min(Math.max(1, opts.page | 0), pages);
   preloadPageNavTextures();
 
-  const prevOn = page > 1;
-  const nextOn = page < pages;
+  const prevOn = opts.canPrev ?? page > 1;
+  const nextOn = opts.canNext ?? page < pages;
   const y = opts.y;
   const pageGap = 28;
 

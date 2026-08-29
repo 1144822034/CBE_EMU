@@ -607,6 +607,43 @@ static const char g_vm_mock_admin_script[] =
     "a.hidden=!!q&&!key.includes(q);}};"
     "btn.addEventListener('click',apply);"
     "input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();apply();}});};"
+    "const setupSceneFilter=()=>{"
+    "const input=document.getElementById('scene-search');"
+    "const list=document.getElementById('scene-list');"
+    "const btn=document.getElementById('scene-search-btn');"
+    "if(!input||!list)return;"
+    "const rows=[...list.querySelectorAll('a.scene')];"
+    "const apply=()=>{const q=(input.value||'').trim().toLowerCase();"
+    "for(const row of rows){"
+    "const key=((row.getAttribute('data-key')||row.dataset.key||'')+' '+(row.textContent||'')).toLowerCase();"
+    "const hide=!!q&&!key.includes(q);"
+    "row.hidden=hide;"
+    "if(hide){row.setAttribute('hidden','');row.style.display='none';row.classList.add('is-filtered');}"
+    "else{row.removeAttribute('hidden');row.style.display='';row.classList.remove('is-filtered');}}};"
+    "input.addEventListener('input',apply);"
+    "input.addEventListener('keyup',apply);"
+    "input.addEventListener('compositionend',apply);"
+    "if(btn)btn.addEventListener('click',ev=>{ev.preventDefault();apply();});"
+    "apply();};"
+    "const setupMonsterFilter=()=>{"
+    "const input=document.getElementById('monster-search');"
+    "const list=document.getElementById('monster-list');"
+    "const btn=document.getElementById('monster-search-btn');"
+    "if(!input||!list)return;"
+    "const rows=[...list.querySelectorAll('a.monster')];"
+    "const apply=()=>{const q=(input.value||'').trim().toLowerCase();"
+    "for(const row of rows){"
+    "const key=((row.getAttribute('data-key')||row.dataset.key||'')+' '+(row.textContent||'')).toLowerCase();"
+    "const hide=!!q&&!key.includes(q);"
+    "row.hidden=hide;"
+    "if(hide){row.setAttribute('hidden','');row.style.display='none';row.classList.add('is-filtered');}"
+    "else{row.removeAttribute('hidden');row.style.display='';row.classList.remove('is-filtered');}}};"
+    "input.addEventListener('input',apply);"
+    "input.addEventListener('keyup',apply);"
+    "input.addEventListener('compositionend',apply);"
+    "input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();apply();}});"
+    "if(btn)btn.addEventListener('click',ev=>{ev.preventDefault();apply();});"
+    "apply();};"
     "const setupNpcKinds=()=>{for(const form of document.querySelectorAll('.npc form')){"
     "const box6=form.querySelector('input[name=\"service_kind_6\"]');"
     "const fields=form.querySelector('.instance-fields');"
@@ -615,6 +652,27 @@ static const char g_vm_mock_admin_script[] =
     "if(box6)box6.addEventListener('change',apply);"
     "for(const box of form.querySelectorAll('input[name^=\"service_kind_\"]'))box.addEventListener('change',apply);"
     "apply();}};"
+    "const setupCosmeticGrant=()=>{"
+    "const kind=document.getElementById('cosmetic-kind');"
+    "const idSel=document.getElementById('cosmetic-id');"
+    "const allBox=document.getElementById('cosmetic-all');"
+    "if(!kind||!idSel)return;"
+    "const apply=()=>{"
+    "const k=kind.value||'chenghao';"
+    "const unlockAll=!!(allBox&&allBox.checked);"
+    "let first=null;"
+    "for(const opt of idSel.options){"
+    "if(!opt.value||opt.value==='0'){opt.hidden=false;opt.disabled=false;continue;}"
+    "const show=!unlockAll&&opt.dataset.kind===k;"
+    "opt.hidden=!show;opt.disabled=!show;"
+    "if(show&&!first)first=opt;}"
+    "idSel.disabled=unlockAll;"
+    "if(unlockAll){idSel.value='0';}"
+    "else if(!idSel.selectedOptions.length||idSel.selectedOptions[0].hidden||idSel.selectedOptions[0].disabled){"
+    "idSel.value=first?first.value:'0';}};"
+    "kind.addEventListener('change',apply);"
+    "if(allBox)allBox.addEventListener('change',apply);"
+    "apply();};"
     "const setupCatalogSelects=()=>{"
     "for(const select of document.querySelectorAll('select[data-admin-catalog]')){"
     "const source=document.getElementById(select.dataset.adminCatalog);"
@@ -715,7 +773,8 @@ static const char g_vm_mock_admin_script[] =
     "const action=String(formData.get('action')||'');"
     "if(ok&&(action==='add-wcoin'||action==='add-money'||"
     "action==='rename-role'||action==='set-role-exp'||"
-    "action==='set-equip-wash'||action==='grant-item'))"
+    "action==='set-equip-wash'||action==='grant-item'||"
+    "action==='clear-ring-task'))"
     "await refreshRoleDetails(target);"
     "const row=form.closest('tr');"
     "const enabled=form.querySelector('select[name=enabled]');"
@@ -734,7 +793,7 @@ static const char g_vm_mock_admin_script[] =
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
     "setupCatalogSelects();setupItemPicker();setupMonsterDrops();setupUpdateFilter();setupNpcKinds();"
-    "setupAccountFilter();setupAjaxForms();setupMapEditor();setupSceneNpcDrag();});"
+    "setupAccountFilter();setupSceneFilter();setupMonsterFilter();setupCosmeticGrant();setupAjaxForms();setupMapEditor();setupSceneNpcDrag();});"
     "const adminRoot=()=>{const p=location.pathname;return p.endsWith('/')?p:p.replace(/[^/]*$/,'');};"
     "const b64ToU32=(b64)=>{const bin=atob(b64);const n=bin.length>>2;const out=new Uint32Array(n);"
     "for(let i=0;i<n;i++){const o=i*4;out[i]=bin.charCodeAt(o)|(bin.charCodeAt(o+1)<<8)|(bin.charCodeAt(o+2)<<16)|(bin.charCodeAt(o+3)<<24);}return out;};"
@@ -969,14 +1028,60 @@ static const char g_vm_mock_admin_script[] =
     "showAdminNotice(result.ok,result.message);"
     "if(result.ok)location.assign(result.location);"
     "}catch(_){showAdminNotice(false,'\\u590d\\u5236\\u5931\\u8d25');}};"
+    "const modal=document.getElementById('scene-pin-modal');"
+    "const modalBody=document.getElementById('scene-pin-modal-body');"
+    "const modalTitle=document.getElementById('scene-pin-modal-title');"
+    "const modalClose=document.getElementById('scene-pin-modal-close');"
+    "const panelHome=new WeakMap();"
+    "const closePinEdit=()=>{"
+    "if(!modal||!modalBody)return;"
+    "for(const el of [...modalBody.children]){"
+    "if(el.id==='combat-spawn-form')el.querySelectorAll('.combat-card').forEach(c=>{c.hidden=false;});"
+    "const home=panelHome.get(el);"
+    "if(home)home.appendChild(el);else{"
+    "const store=document.getElementById('scene-npc-store')||document.querySelector('.scene-edit-store');"
+    "if(store)store.appendChild(el);}}"
+    "modal.hidden=true;modal.setAttribute('hidden','');document.body.classList.remove('modal-open');};"
+    "const openPinEdit=(el,title,combatIndex)=>{"
+    "if(!modal||!modalBody||!el){showAdminNotice(false,'\\u672a\\u627e\\u5230\\u7f16\\u8f91\\u8868\\u5355');return;}"
+    "closePinEdit();"
+    "if(!panelHome.has(el))panelHome.set(el,el.parentElement);"
+    "modalBody.appendChild(el);"
+    "if(el.id==='combat-spawn-form'){"
+    "el.querySelectorAll('.combat-card').forEach(card=>{"
+    "const idx=card.dataset.combatIndex;"
+    "const isNew=card.dataset.combatNew==='1';"
+    "if(combatIndex==='new')card.hidden=!isNew;"
+    "else card.hidden=String(idx)!==String(combatIndex);});}"
+    "if(modalTitle)modalTitle.textContent=title||'\\u7f16\\u8f91';"
+    "modal.removeAttribute('hidden');modal.hidden=false;document.body.classList.add('modal-open');};"
+    "if(modalClose)modalClose.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();closePinEdit();});"
+    "if(modal)modal.addEventListener('click',ev=>{if(ev.target===modal)closePinEdit();});"
+    "document.addEventListener('keydown',ev=>{if(ev.key==='Escape'&&modal&&!modal.hidden)closePinEdit();});"
+    "const btnNewNpc=document.getElementById('btn-open-new-npc');"
+    "if(btnNewNpc)btnNewNpc.addEventListener('click',()=>{"
+    "openPinEdit(document.getElementById('npc-panel-new'),'\\u65b0\\u589e\\u52a8\\u6001 NPC');});"
+    "const btnNewCombat=document.getElementById('btn-open-new-combat');"
+    "if(btnNewCombat)btnNewCombat.addEventListener('click',()=>{"
+    "openPinEdit(document.getElementById('combat-spawn-form'),'\\u65b0\\u589e\\u5237\\u602a\\u70b9','new');});"
     "for(const pin of stage.querySelectorAll('.npc-pin.copyable,.npc-pin.draggable')){"
     "pin.dataset.savedX=pin.dataset.x||'';pin.dataset.savedY=pin.dataset.y||'';"
+    "pin.addEventListener('contextmenu',ev=>{"
+    "ev.preventDefault();ev.stopPropagation();"
+    "const kind=pinKind(pin);"
+    "if(kind==='combat'){"
+    "openPinEdit(document.getElementById('combat-spawn-form'),'\\u7f16\\u8f91\\u5237\\u602a\\u70b9',pin.dataset.spawnIndex);"
+    "return;}"
+    "const panelId=pin.dataset.editPanel||('npc-panel-'+(pin.dataset.actorId||''));"
+    "const panel=document.getElementById(panelId);"
+    "if(!panel){showAdminNotice(false,'\\u8be5 NPC \\u65e0\\u53ef\\u7f16\\u8f91\\u8868\\u5355');return;}"
+    "openPinEdit(panel,'\\u7f16\\u8f91 NPC');});"
     "pin.addEventListener('dblclick',ev=>{"
     "ev.preventDefault();ev.stopPropagation();"
     "copyPin(pin);});"
     "if(!pin.classList.contains('draggable'))continue;"
     "pin.addEventListener('pointerdown',ev=>{"
-    "if(ev.button!==0&&ev.pointerType==='mouse')return;"
+    "if(ev.button!==0)return;"
     "ev.preventDefault();ev.stopPropagation();"
     "const kind=pinKind(pin);"
     "if(kind==='combat'){if(pin.dataset.spawnIndex===undefined||pin.dataset.spawnIndex==='')return;}"
@@ -4496,17 +4601,18 @@ static void vm_mock_admin_render_content_page(char *response,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 游戏内容管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+        "[hidden]{display:none!important}"
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub{color:#667085;margin:4px 0 16px}"
         ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}"
         ".logout{background:none;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
-        ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene-search{margin:0 0 8px;width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.scene .scene-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
+        ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene-search-row{display:flex;gap:8px;margin:0 0 8px;align-items:stretch}.scene-search{flex:1;margin:0;width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}.scene-search-row button{flex:none}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene.is-filtered,.scene[hidden]{display:none!important}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.scene .scene-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
         ".create-scene{flex:none;margin:0 0 12px;padding:10px;border:1px solid #e4e7ec;border-radius:8px;background:#f9fafb}.create-scene .fields{grid-template-columns:1fr;gap:8px;margin-top:8px}.create-scene .actions{margin-top:8px}.monster-slots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0}.monster-slots a{color:#175cd3;text-decoration:none;font-size:12px}"
         ".portal-edit,.combat-edit{display:grid;gap:12px;margin-top:10px}.portal-card,.combat-card{border:1px solid #e4e7ec;border-radius:8px;padding:12px;background:#fff}.portal-card h3,.combat-card h3{margin:0 0 8px;font-size:14px}.portal-fields,.combat-fields{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:8px}.portal-fields .wide,.combat-fields .wide{grid-column:span 2}.combat-fields .check{display:flex;align-items:flex-end;padding-bottom:8px}"
-        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:flex-start;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.preview-head .size{margin-left:auto}.map-edit-link{padding:4px 10px;border-radius:6px;background:#175cd3;color:#fff;text-decoration:none;font-size:12px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.npc-pin.draggable{pointer-events:auto;cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none}.npc-pin.draggable:active,.npc-pin.dragging{cursor:grabbing;z-index:8}.npc-pin.dragging{opacity:.92}.npc-pin.draggable{pointer-events:auto;cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none}.npc-pin.draggable:active,.npc-pin.dragging{cursor:grabbing;z-index:8}.npc-pin.dragging{opacity:.92}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.npc-pin.combat .pin-name{background:#b42318}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-icon.combat{background:#b42318}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.npc-chip.combat{background:#fef3f2;color:#b42318}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
+        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:flex-start;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.preview-head .size{margin-left:auto}.map-edit-link{padding:4px 10px;border-radius:6px;background:#175cd3;color:#fff;text-decoration:none;font-size:12px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.npc-pin.draggable,.npc-pin.copyable{pointer-events:auto;touch-action:none;-webkit-user-select:none;user-select:none}.npc-pin.draggable{cursor:grab}.npc-pin.copyable:not(.draggable){cursor:context-menu}.npc-pin.draggable:active,.npc-pin.dragging{cursor:grabbing;z-index:8}.npc-pin.dragging{opacity:.92}.scene-pin-modal{position:fixed;inset:0;z-index:1200;place-items:center;padding:20px;background:#10182899}.scene-pin-modal:not([hidden]){display:grid}.scene-pin-modal[hidden]{display:none!important}.scene-pin-dialog{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.scene-pin-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid #eaecf0}.scene-pin-head strong{font-size:16px}.scene-pin-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.scene-pin-body{overflow:auto;padding:14px 16px 18px;overscroll-behavior:contain}.scene-pin-body .npc,.scene-pin-body .combat-card{border:0;padding:0;background:transparent}.scene-pin-body .fields{grid-template-columns:repeat(2,minmax(0,1fr))}.scene-pin-body .combat-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.scene-pin-body .instance-fields{grid-template-columns:1fr 1fr}.preview-edit-tools{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}.preview-edit-tools button{font-size:13px}.scene-edit-store{display:none!important}.modal-open{overflow:hidden}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.npc-pin.combat .pin-name{background:#b42318}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-icon.combat{background:#b42318}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.npc-chip.combat{background:#fef3f2;color:#b42318}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
         ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.badge.override{background:#fffaeb;color:#b54708}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.service-kinds{display:flex;flex-wrap:wrap;gap:8px 14px;padding:8px 10px;border:1px solid #e4e7ec;border-radius:7px;background:#f9fafb}.service-kind{display:flex;align-items:center;gap:6px;font-size:13px;color:#344054;white-space:nowrap}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-teleport-task,.instance-help{grid-column:1/-1}.instance-help{margin:0;color:#7a2e0e;font-size:12px}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-block;text-align:center}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}"
         "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields,.monster-slots{grid-template-columns:1fr 1fr}.instance-scene,.instance-help{grid-column:1/-1}}"
-        "</style><script src=\"/admin.js?v=14\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=17\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
@@ -4544,7 +4650,10 @@ static void vm_mock_admin_render_content_page(char *response,
         "</select></label></div><div class=\"actions\"><button type=\"submit\">克隆创建</button></div>"
         "<p class=\"foot\" style=\"margin:8px 0 0\">复制源 .sce，并复制其内嵌 .map 为新场景同名独立地图（不与源场景共用）。</p></form></div>"
         "<h2>SCE 场景（%u）</h2>"
-        "<input class=\"scene-search\" id=\"scene-search\" placeholder=\"按文件名或地图名筛选，如 铜雀台\">"
+        "<div class=\"scene-search-row\">"
+        "<input class=\"scene-search\" id=\"scene-search\" type=\"search\" "
+        "placeholder=\"按文件名或地图名筛选，如 铜雀台\" autocomplete=\"off\">"
+        "<button type=\"button\" id=\"scene-search-btn\">筛选</button></div>"
         "<div class=\"scene-list\" id=\"scene-list\">",
         sceneCount);
     for (u32 i = 0; i < sceneCount; ++i)
@@ -4580,13 +4689,7 @@ static void vm_mock_admin_render_content_page(char *response,
     }
     if (sceneCount == 0)
         vm_mock_admin_text_appendf(&page, "<span class=\"size\">未找到 SCE 文件</span>");
-    vm_mock_admin_text_appendf(
-        &page,
-        "</div><script>(()=>{const q=document.getElementById('scene-search'),"
-        "rows=[...document.querySelectorAll('#scene-list .scene')];if(!q)return;"
-        "q.addEventListener('input',()=>{const v=q.value.trim().toLowerCase();"
-        "for(const row of rows)row.hidden=v&&!row.dataset.key.toLowerCase().includes(v);});"
-        "})();</script></aside><section><div class=\"card\"><h2>动态 NPC：");
+    vm_mock_admin_text_appendf(&page, "</div></aside><section><div class=\"card\"><h2>动态 NPC：");
     {
         char selectedLabelUtf8[288];
         const vm_mock_admin_scene_file *selectedFile = NULL;
@@ -4746,8 +4849,10 @@ static void vm_mock_admin_render_content_page(char *response,
                     &page,
                     "<div class=\"npc-pin service draggable copyable\" "
                     "data-kind=\"npc\" data-actor-id=\"%u\" data-x=\"%u\" data-y=\"%u\" "
+                    "data-edit-panel=\"npc-panel-%u\" "
                     "style=\"left:%upx;top:%upx\" title=\"",
-                    seed->actorId, seed->x, seed->y, markerX, markerY);
+                    seed->actorId, seed->x, seed->y, seed->actorId,
+                    markerX, markerY);
             }
             else
             {
@@ -4755,8 +4860,10 @@ static void vm_mock_admin_render_content_page(char *response,
                     &page,
                     "<div class=\"npc-pin copyable\" data-kind=\"npc\" "
                     "data-actor-id=\"%u\" data-x=\"%u\" data-y=\"%u\" "
+                    "data-edit-panel=\"npc-panel-%u\" "
                     "style=\"left:%upx;top:%upx\" title=\"",
-                    seed->actorId, seed->x, seed->y, markerX, markerY);
+                    seed->actorId, seed->x, seed->y, seed->actorId,
+                    markerX, markerY);
             }
             vm_mock_admin_text_append_html(&page, npcNameUtf8);
             vm_mock_admin_text_appendf(&page,
@@ -4800,6 +4907,7 @@ static void vm_mock_admin_render_content_page(char *response,
                 &page,
                 "<div class=\"npc-pin combat draggable copyable\" data-kind=\"combat\" "
                 "data-spawn-index=\"%u\" data-x=\"%u\" data-y=\"%u\" "
+                "data-edit-panel=\"combat-spawn-form\" "
                 "style=\"left:%upx;top:%upx\" title=\"",
                 i, spawn->x, spawn->y, markerX, markerY);
             vm_mock_admin_text_append_html(&page, monsterNameUtf8);
@@ -4820,11 +4928,15 @@ static void vm_mock_admin_render_content_page(char *response,
             vm_mock_admin_text_appendf(&page, " 地图怪\"></span></div>");
         }
         vm_mock_admin_text_appendf(&page,
-            "</div></div><div class=\"preview-legend\"><span class=\"legend-icon service\">人</span><span class=\"size\">服务端动态 NPC（拖动改坐标 · 双击复制）</span>"
-            "<span class=\"legend-icon\">人</span><span class=\"size\">SCE 内置 NPC（双击复制为动态）</span>"
-            "<span class=\"legend-icon combat\">怪</span><span class=\"size\">地图刷怪点（拖动改坐标 · 双击复制）</span>"
+            "</div></div><div class=\"preview-legend\"><span class=\"legend-icon service\">人</span><span class=\"size\">服务端动态 NPC（拖动坐标 · 右键编辑 · 双击复制）</span>"
+            "<span class=\"legend-icon\">人</span><span class=\"size\">SCE 内置 NPC（右键编辑/双击复制为动态）</span>"
+            "<span class=\"legend-icon combat\">怪</span><span class=\"size\">地图刷怪点（拖动坐标 · 右键编辑 · 双击复制）</span>"
             "<span class=\"legend-portal\"></span><span class=\"size\">边界/元数据传送点</span>"
-            "<span class=\"legend-portal named\"></span><span class=\"size\">具名传送点</span></div>");
+            "<span class=\"legend-portal named\"></span><span class=\"size\">具名传送点</span></div>"
+            "<div class=\"preview-edit-tools\">"
+            "<button type=\"button\" id=\"btn-open-new-npc\">＋ 新增动态 NPC</button>"
+            "<button type=\"button\" id=\"btn-open-new-combat\">＋ 新增刷怪点</button>"
+            "<span class=\"size\">预览图：左键拖动 · 右键编辑 · 双击复制</span></div>");
         if (previewNpcCount != 0)
             vm_mock_admin_text_appendf(&page, "<div class=\"preview-npcs\">");
         for (u32 i = 0; i < previewNpcCount; ++i)
@@ -4919,6 +5031,15 @@ static void vm_mock_admin_render_content_page(char *response,
                 previewPortalTotal, previewPortalCount);
         }
         vm_mock_admin_text_appendf(&page, "</div>");
+        vm_mock_admin_text_appendf(
+            &page,
+            "<div id=\"scene-pin-modal\" class=\"scene-pin-modal\" hidden>"
+            "<div class=\"scene-pin-dialog\" role=\"dialog\" aria-modal=\"true\">"
+            "<div class=\"scene-pin-head\"><strong id=\"scene-pin-modal-title\">编辑</strong>"
+            "<button type=\"button\" class=\"scene-pin-close\" id=\"scene-pin-modal-close\" "
+            "aria-label=\"关闭\">×</button></div>"
+            "<div class=\"scene-pin-body\" id=\"scene-pin-modal-body\"></div>"
+            "</div></div>");
     }
     else
     {
@@ -5070,18 +5191,10 @@ static void vm_mock_admin_render_content_page(char *response,
             formRows = VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX;
         vm_mock_admin_text_appendf(
             &page,
-            "<div class=\"preview\" style=\"margin-bottom:16px\"><div class=\"preview-head\">"
-            "<strong>地图刷怪点</strong><span class=\"badge\">SCE kind=3 · %u%s</span></div>"
-            "<p class=\"foot\" style=\"margin:0 0 8px\">写入本地 SCE 战斗点并发布 WT18/7；决定地图上能否看到/踩到怪。"
-            "填怪物目录中的 ID（含自定义）；开战属性与地图精灵取自该 ID 的 Actor。"
-            "梦境 FB 图：SCE 线号仍固定 #200（ParseMinfo）；"
-            "<strong>名牌/地图精灵使用怪物目录显示名与 Actor</strong>；"
-            "开战 leftId/leftName 用真实目录 ID/名。"
-            "保存会发布场景与内嵌 .map。</p>"
-            "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-scene-combat-spawns\">"
-            "<input type=\"hidden\" name=\"scene\" value=\"",
-            previewCombatCount,
-            previewCombatTotal > previewCombatCount ? "+" : "");
+            "<div class=\"scene-edit-store\">"
+            "<form method=\"post\" action=\"/action\" id=\"combat-spawn-form\">"
+            "<input type=\"hidden\" name=\"action\" value=\"save-scene-combat-spawns\">"
+            "<input type=\"hidden\" name=\"scene\" value=\"");
         vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
         vm_mock_admin_text_appendf(
             &page,
@@ -5103,7 +5216,9 @@ static void vm_mock_admin_render_content_page(char *response,
                                               sizeof(nameUtf8));
             vm_mock_admin_text_appendf(
                 &page,
-                "<div class=\"combat-card\"><h3>%s #%u",
+                "<div class=\"combat-card\" data-combat-index=\"%u\"%s><h3>%s #%u",
+                i,
+                i < combatRows ? "" : " data-combat-new=\"1\"",
                 i < combatRows ? "刷怪点" : "新增刷怪点", i + 1u);
             if (nameUtf8[0] != 0)
             {
@@ -5145,7 +5260,9 @@ static void vm_mock_admin_render_content_page(char *response,
         }
         vm_mock_admin_text_appendf(
             &page,
-            "</div><div class=\"actions\"><button type=\"submit\">保存地图刷怪点</button></div></form></div>");
+            "</div><div class=\"actions\"><button type=\"submit\">保存地图刷怪点</button></div>"
+            "<p class=\"foot\">写入 SCE 战斗点并发布；X/Y/怪物 ID 都填才生效。"
+            "勾选删除后保存可移除该点。</p></form></div>");
     }
     if (runtimeScene[0] != 0)
     {
@@ -5333,6 +5450,7 @@ static void vm_mock_admin_render_content_page(char *response,
             "<div class=\"actions\"><button type=\"submit\">新增传送点</button></div></form></div>"
             "</div></div>");
     }
+    vm_mock_admin_text_appendf(&page, "<div class=\"scene-edit-store\" id=\"scene-npc-store\">");
     vm_mock_admin_text_appendf(&page, "<div class=\"npc-list\">");
     for (u32 i = 0; i < npcCount; ++i)
     {
@@ -5341,8 +5459,8 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_net_mock_gbk_label_to_utf8(row->seed.displayName,
                                       displayUtf8, sizeof(displayUtf8));
         vm_mock_admin_text_appendf(&page,
-            "<div class=\"npc%s\"><div class=\"npc-head\"><strong>Actor %u</strong><span>",
-            row->enabled ? "" : " off", row->seed.actorId);
+            "<div class=\"npc%s\" id=\"npc-panel-%u\"><div class=\"npc-head\"><strong>Actor %u</strong><span>",
+            row->enabled ? "" : " off", row->seed.actorId, row->seed.actorId);
         if (row->builtin)
             vm_mock_admin_text_appendf(&page, "<span class=\"badge\">内置%s</span> ",
                                        row->overridden ? "·已覆盖" : "");
@@ -5414,7 +5532,7 @@ static void vm_mock_admin_render_content_page(char *response,
     if (npcCount == 0)
         vm_mock_admin_text_appendf(&page, "<p class=\"size\">该场景没有服务端动态 NPC。</p>");
     vm_mock_admin_text_appendf(&page,
-        "</div><div class=\"npc new\"><div class=\"npc-head\"><strong>增加动态 NPC</strong><span class=\"badge\">下次进入场景生效</span></div>"
+        "</div><div class=\"npc new\" id=\"npc-panel-new\"><div class=\"npc-head\"><strong>增加动态 NPC</strong><span class=\"badge\">下次进入场景生效</span></div>"
         "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-npc\">"
         "<input type=\"hidden\" name=\"scene\" value=\"");
     vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
@@ -5444,7 +5562,7 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_text_appendf(&page,
         "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
         "<p class=\"foot\">服务选项可多选：对话中每个勾选的服务各增加一个入口。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人只出售 item.dsh 类别 10 中 HP/MP 恢复类药品（不含经验卡、喇叭等消耗品）。副本向导在对话中拆成「传送」与「挑战」两项：配置目标场景才显示传送（可设前置任务，ID=0 直接显示）；配置挑战怪物 ID 才显示挑战；并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。可接取任务可设「任务重复接取」与「每天可接取次数」（0=不限；大于 0 按本地自然日计数，且允许在剩余次数内完成后重接）。任务与服务合计最多 7 个对话选项。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
-        "</div></section></div></main></body></html>");
+        "</div></div></section></div></main></body></html>");
 
     if (page.truncated)
     {
@@ -5660,6 +5778,55 @@ static void vm_mock_admin_render_cosmetic_grant_form(
     vm_mock_admin_text *page, const char *account,
     const u32 *roleIds, char roleNames[][128], u32 roleCount)
 {
+    static const struct
+    {
+        u32 id;
+        const char *name;
+    } chenghaoRows[] = {
+        {86001, "开天辟地"}, {86002, "千古一帝"}, {86003, "神挡杀神"},
+        {86004, "捉鬼大师"}, {86005, "仙人之上一换一"}, {86006, "仙人之上一换十"},
+        {86007, "仙人之上一换百"}, {86008, "仙人之上我最浪"},
+        {86009, "九千九百九十九个界"}, {86010, "战无不胜"}, {86011, "天下第一"},
+        {86012, "绝世无双"}, {86013, "技冠群雄"}, {86014, "大哥带你飞"},
+        {86015, "单挑小王子"}, {86016, "痞帅街溜子"}, {86017, "专治各种不服"},
+        {86018, "泡8喝9玩10尚"}, {86019, "实力不允许低调"}, {86020, "我养你啊"},
+        {86021, "是真男人来砍我"}, {86022, "一天三顿小烧烤"}, {86024, "夜闯寡妇村"},
+        {86025, "我自横刀向天笑"}, {86026, "独孤求败"}, {86027, "万事皆与钱有缘"},
+        {86028, "一刀倒一片"}, {86029, "小楼昨夜又听雨"}, {86031, "唯我独尊"},
+        {86032, "凤翔九天"}, {86033, "飞龙在天"}, {86034, "与天同寿"},
+        {86036, "烽火戏诸侯"}, {86037, "怒斩百万雄"}, {86038, "无敌最寂寞"},
+        {86039, "无敌幸运星"}, {86040, "唯我独尊2"}, {86041, "雄才大略"},
+        {86042, "舍我其谁"}, {86043, "天下无双"}, {86044, "纵横四海"},
+        {86045, "义薄云天"}, {86046, "威震天下"}, {86047, "拔地倚天"},
+        {86048, "十步杀一人"}
+    };
+    static const struct
+    {
+        u32 id;
+        const char *name;
+    } wingRows[] = {
+        {88010, "恶魔之翼"}, {88011, "鎏金紫翼"}, {88012, "萤火紫翼"},
+        {88014, "黑白羽翼"}, {88015, "桃粉双翼"}, {88016, "暗黑紫翼"},
+        {88017, "火龙双翼"}, {88018, "白银流光"}, {88019, "血色双翼"},
+        {88020, "紫晶双翼"}, {88021, "烈焰双翼"}, {88022, "青色流光"},
+        {88023, "幽蓝羽翼"}, {88024, "红白双翼"}, {88025, "赤电双翼"},
+        {88026, "翠绿羽翼"}, {88027, "火黑双翼"}, {88028, "粉青蝶翼"},
+        {88029, "橙色羽翼"}, {88030, "暗紫双翼"}, {88031, "深黑羽翼"},
+        {88032, "暗金双翼"}, {88033, "白青双翼"}, {88034, "白金双翼"},
+        {88035, "三色羽翼"}, {88036, "暗青羽翼"}, {90002, "黑蓝羽翼"},
+        {90003, "紫金蝶翼"}, {90006, "双色波浪"}, {90007, "粉紫羽翼"},
+        {90010, "流光冰雪"}
+    };
+    static const struct
+    {
+        u32 id;
+        const char *name;
+    } mountRows[] = {
+        {11370, "藏青龙"}, {11372, "黑魔龙"}, {11802, "金圣龙"},
+        {16171, "鳄青龙"}, {20148, "黄金龙"}, {40183, "蓝云龙"},
+        {75535, "云青龙"}, {75537, "汗血马"}, {75549, "腾云龙"}
+    };
+
     if (page == NULL || account == NULL || account[0] == 0 ||
         roleIds == NULL || roleNames == NULL || roleCount == 0)
     {
@@ -5668,7 +5835,7 @@ static void vm_mock_admin_render_cosmetic_grant_form(
     vm_mock_admin_text_appendf(
         page,
         "<div class=\"item-grant\"><h2>解锁外观（称号/翅膀/坐骑）</h2>"
-        "<form class=\"grant-form\" method=\"post\" action=\"/action\">"
+        "<form class=\"grant-form cosmetic-grant\" method=\"post\" action=\"/action\">"
         "<input type=\"hidden\" name=\"action\" value=\"grant-cosmetic\">"
         "<input type=\"hidden\" name=\"account\" value=\"");
     vm_mock_admin_text_append_html(page, account);
@@ -5683,18 +5850,45 @@ static void vm_mock_admin_render_cosmetic_grant_form(
     vm_mock_admin_text_appendf(
         page,
         "</select></label>"
-        "<label><span>类型</span><select name=\"kind\" required>"
+        "<label><span>类型</span><select name=\"kind\" id=\"cosmetic-kind\" required>"
         "<option value=\"chenghao\">特效称号</option>"
         "<option value=\"wing\">翅膀</option>"
         "<option value=\"mount\">坐骑</option>"
         "</select></label>"
-        "<label><span>ID</span><input type=\"number\" name=\"id\" min=\"0\" "
-        "placeholder=\"如 86043 / 88010 / 75537\"></label>"
-        "<label><span><input type=\"checkbox\" name=\"all\" value=\"1\"> "
+        "<label><span>装扮</span><select name=\"id\" id=\"cosmetic-id\">"
+        "<option value=\"0\">请选择装扮</option>");
+    for (u32 i = 0; i < sizeof(chenghaoRows) / sizeof(chenghaoRows[0]); ++i)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\" data-kind=\"chenghao\">%u · ",
+            chenghaoRows[i].id, chenghaoRows[i].id);
+        vm_mock_admin_text_append_html(page, chenghaoRows[i].name);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    for (u32 i = 0; i < sizeof(wingRows) / sizeof(wingRows[0]); ++i)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\" data-kind=\"wing\">%u · ",
+            wingRows[i].id, wingRows[i].id);
+        vm_mock_admin_text_append_html(page, wingRows[i].name);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    for (u32 i = 0; i < sizeof(mountRows) / sizeof(mountRows[0]); ++i)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\" data-kind=\"mount\">%u · ",
+            mountRows[i].id, mountRows[i].id);
+        vm_mock_admin_text_append_html(page, mountRows[i].name);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label>"
+        "<label><span><input type=\"checkbox\" name=\"all\" id=\"cosmetic-all\" value=\"1\"> "
         "解锁该类型全部</span></label>"
         "<button type=\"submit\">解锁外观</button></form>"
-        "<p class=\"muted grant-note\">不改 special_designation_mask；"
-        "走 Pixi WT 1/31。勾选「全部」时忽略 ID。</p></div>");
+        "<p class=\"muted grant-note\">从列表选择装扮；勾选「全部」时忽略所选 ID。"
+        "走 Pixi WT 1/31，不改 special_designation_mask。</p></div>");
 }
 
 static const char *vm_mock_admin_role_wash_attr_name(u8 type, u8 flag)
@@ -6843,12 +7037,12 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form.cosmetic-grant{grid-template-columns:minmax(140px,.9fr) minmax(110px,.6fr) minmax(220px,1.4fr) auto auto;}.grant-form.cosmetic-grant select#cosmetic-id{min-width:200px}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
         ".wash-role{border-top:1px solid #eaecf0;margin-top:16px;padding-top:14px}.wash-role h3{font-size:15px;margin:0 0 10px}.wash-piece{border:1px solid #eaecf0;border-radius:8px;padding:10px 12px;margin:0 0 12px;background:#fafbfc}.wash-piece h4{margin:0 0 4px;font-size:14px}.wash-table{margin-top:8px}.wash-form{display:flex;flex-wrap:wrap;gap:6px;align-items:end}.wash-form label{display:grid;gap:2px;min-width:72px}.wash-form label>span{font-size:11px;color:#667085}.wash-form input,.wash-form select{padding:6px 7px;font-size:12px}.wash-form input[type=number]{width:78px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
-        "</style><script src=\"/admin.js?v=9\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=18\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
@@ -7007,8 +7201,34 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                 "<input type=\"number\" name=\"amount\" step=\"1\" "
                 "min=\"-2147483648\" max=\"2147483647\" "
                 "placeholder=\"正数增加，负数扣除\" required>"
-                "<button type=\"submit\">调整 W 币</button></form></td></tr>",
+                "<button type=\"submit\">调整 W 币</button></form>",
                 role->roleId);
+            {
+                u8 ringActive = 0;
+                u16 ringCount = 0;
+
+                (void)vm_mock_ring_admin_peek_active(selectedAccount, role->roleId,
+                                                     &ringActive, &ringCount);
+                vm_mock_admin_text_appendf(
+                    &page,
+                    "<div class=\"muted\" style=\"margin:4px 0 2px;font-size:12px\">"
+                    "跑环：今日 %u 环 · %s</div>",
+                    (u32)ringCount, ringActive ? "有进行中任务" : "无进行中任务");
+                if (ringActive)
+                {
+                    vm_mock_admin_text_appendf(&page,
+                        "<form class=\"inline\" method=\"post\" action=\"/action\" "
+                        "onsubmit=\"return confirm('\\u786e\\u8ba4\\u79fb\\u9664\\u8be5\\u89d2\\u8272\\u5f53\\u524d\\u5df2\\u63a5\\u8dd1\\u73af\\u4efb\\u52a1\\uff1f\\u4eca\\u65e5\\u73af\\u6570\\u4fdd\\u7559\\u3002');\">"
+                        "<input type=\"hidden\" name=\"action\" value=\"clear-ring-task\">"
+                        "<input type=\"hidden\" name=\"account\" value=\"");
+                    vm_mock_admin_text_append_html(&page, selectedAccount);
+                    vm_mock_admin_text_appendf(&page,
+                        "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
+                        "<button type=\"submit\">移除跑环任务</button></form>",
+                        role->roleId);
+                }
+            }
+            vm_mock_admin_text_appendf(&page, "</td></tr>");
         }
         if (g_vm_net_mock_role_db.roleCount == 0)
             vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">该账号尚未创建角色</td></tr>");
@@ -10343,6 +10563,22 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "总经验已更新"
                                   : (error ? error : "总经验修改失败"));
+        return;
+    }
+    if (strcmp(action, "clear-ring-task") == 0)
+    {
+        u32 roleId = 0;
+
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_net_mock_parse_u32_strict(role, &roleId) || roleId == 0)
+        {
+            vm_mock_admin_redirect(client, account, "error", "角色参数无效");
+            return;
+        }
+        ok = vm_mock_ring_admin_clear_active_task(account, roleId, &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "已移除当前跑环任务"
+                                  : (error ? error : "移除跑环任务失败"));
         return;
     }
     if (strcmp(action, "add-money") == 0)

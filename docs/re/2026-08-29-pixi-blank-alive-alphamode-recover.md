@@ -38,6 +38,6 @@
 
 ## 验证
 
-1. 复现黑屏后：数秒内应见 `[gl] stripped broken textures` 或 `[gl] soft reload alphaMode-storm`，不应无限 swallow。
-2. reload 后城镇可玩；若 strip 成功可不 reload 即出图。
+1. 复现黑屏后：数秒内应见 `[gl] stripped broken textures` 或持续 storm 后的 `soft reload alphaMode-storm`，不应无限 swallow。
+2. strip 成功出图后：**不应**因 `stallBroken` / 假 blank 立刻 reload 回标题（见 `2026-08-29-pixi-recover-soft-reload-to-splash.md`）。
 3. 正常无死贴图路径：不应误 reload。

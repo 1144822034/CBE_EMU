@@ -6648,7 +6648,8 @@ dialog.hide();
   let glWatchdogTimer = 0;
   let glSoftReloadCount = 0;
   let recoverHangTimer = 0;
-  const GL_SOFT_RELOAD_AFTER = 1;
+  /** Need consecutive failed blank recovers before full reload (→ splash). */
+  const GL_SOFT_RELOAD_AFTER = 2;
   const GL_RESTORE_WATCHDOG_MS = 5000;
   const GL_RECOVER_HANG_MS = 8000;
   const GL_RELOAD_CAP = 6;
@@ -6876,6 +6877,9 @@ dialog.hide();
       if (
         isGameDisplayPhase(phase) &&
         now - lastOkRenderAt >= ALPHA_RELOAD_AFTER_MS &&
+        // After strip, wait another window for paint — do not reload→splash
+        // while the map may already be visible again.
+        now - lastAlphaModeStripAt >= ALPHA_RELOAD_AFTER_MS &&
         alphaModeStormCount >= ALPHA_STRIP_AFTER
       ) {
         softReloadGl("alphaMode-storm");
@@ -6954,10 +6958,11 @@ dialog.hide();
     dumpForensic();
   };
 
-  const regionLooksBlank = (frame: Rectangle): boolean => {
+  /** null = inconclusive (do not soft-reload on this alone). */
+  const regionLooksBlank = (frame: Rectangle): boolean | null => {
     // extract.pixels → generateTexture → render; during alphaMode storm this
-    // re-enters the crash path and never answers "blank" usefully.
-    if (performance.now() < alphaModeProbeBlockedUntil) return true;
+    // re-enters the crash path — treat as unknown, not "blank → reload".
+    if (performance.now() < alphaModeProbeBlockedUntil) return null;
     try {
       const extract = (
         app.renderer as unknown as {
@@ -6968,7 +6973,7 @@ dialog.hide();
           };
         }
       ).extract;
-      if (!extract?.pixels) return true;
+      if (!extract?.pixels) return null;
       const out = extract.pixels({
         target: app.stage,
         frame,
@@ -6989,15 +6994,16 @@ dialog.hide();
       }
       return maxC < 24;
     } catch {
-      return true;
+      return null;
     }
   };
 
   /**
    * True when framebuffer presents only clear / HUD chrome.
    * Must sample the map band — HUD bgDeep alone looked "alive" and cancelled reload.
+   * null = probe blocked / failed — must not drive softReload (→ splash).
    */
-  const canvasLooksBlank = (): boolean => {
+  const canvasLooksBlank = (): boolean | null => {
     try {
       if (isGlContextLost()) return true;
       // Skip probe on title chrome where dark panels are normal.
@@ -7016,7 +7022,7 @@ dialog.hide();
       return regionLooksBlank(mapBand);
     } catch (e) {
       console.warn("[gl] blank probe", e);
-      return true;
+      return null;
     }
   };
 
@@ -7179,6 +7185,7 @@ dialog.hide();
       });
       // Only full UC3 rebake after a real restore — interval thrash froze input.
       // Also rebake when alphaMode storm left blank alive (lost=false).
+      let stripped = 0;
       if (
         why === "contextrestored" ||
         why === "interval-stall" ||
@@ -7198,7 +7205,7 @@ dialog.hide();
           console.warn("[gl] uc3 rebake", e);
         }
         try {
-          const stripped = stripBrokenTextureSprites(
+          stripped = stripBrokenTextureSprites(
             app.stage as unknown as Parameters<typeof stripBrokenTextureSprites>[0],
           );
           if (stripped > 0) {
@@ -7251,13 +7258,12 @@ dialog.hide();
         glLostAt > 0 ||
         alphaModeStormCount > 0 ||
         performance.now() - lastOkRenderAt >= RENDER_STALL_MS;
-      const stallBroken =
-        isGameDisplayPhase(phase) &&
-        performance.now() - lastOkRenderAt >= ALPHA_RELOAD_AFTER_MS;
+      // Sustained alphaMode stall reloads via softReloadGl("alphaMode-storm"),
+      // not here — stallBroken alone used to reload mid-recover while LCD
+      // already painted, dumping the player to splash.
+      const blankHit = probeBlank ? canvasLooksBlank() : false;
       const stillBroken =
-        isGlContextLost() ||
-        stallBroken ||
-        (probeBlank && canvasLooksBlank());
+        isGlContextLost() || blankHit === true;
       if (stillBroken) {
         consecutiveLostRecovers += 1;
         console.warn(
@@ -7267,6 +7273,10 @@ dialog.hide();
           GL_SOFT_RELOAD_AFTER,
           "lost=",
           isGlContextLost(),
+          "blank=",
+          blankHit,
+          "stripped=",
+          stripped,
           "storm=",
           alphaModeStormCount,
           "msSinceOk=",
@@ -7274,16 +7284,25 @@ dialog.hide();
           glPressureSnapshot(),
         );
         void recordForensic(`recover-still-blank:${why}`, {
-          blank: true,
+          blank: blankHit === true,
           forceBlankProbe: false,
           extra: {
             shell: shellViewportSnapshot(),
             storm: alphaModeStormCount,
+            stripped,
+            blankHit,
             msSinceOkRender: Math.round(performance.now() - lastOkRenderAt),
           },
         });
-        if (consecutiveLostRecovers >= GL_SOFT_RELOAD_AFTER) {
-          softReloadGl(stallBroken ? "render-stall" : "failed-recover");
+        // Just stripped dead sprites — give the next frames a chance to paint
+        // before location.reload() (soft reload → title / splash).
+        if (
+          stripped === 0 &&
+          consecutiveLostRecovers >= GL_SOFT_RELOAD_AFTER
+        ) {
+          softReloadGl("failed-recover");
+        } else if (stripped > 0) {
+          consecutiveLostRecovers = Math.max(0, consecutiveLostRecovers - 1);
         }
       } else {
         consecutiveLostRecovers = 0;
@@ -7291,8 +7310,8 @@ dialog.hide();
         alphaModeStormCount = 0;
         cancelGlRestoreWatchdog();
         void recordForensic(`recover-ok:${why}`, {
-          blank: false,
-          extra: { shell: shellViewportSnapshot() },
+          blank: blankHit === false ? false : null,
+          extra: { shell: shellViewportSnapshot(), blankHit, stripped },
         });
       }
     } finally {
@@ -7388,7 +7407,7 @@ dialog.hide();
       glWatchAcc = 0;
       if (isGlContextLost()) {
         tryRestoreGlContext();
-      } else if (glLostAt > 0 && canvasLooksBlank()) {
+      } else if (glLostAt > 0 && canvasLooksBlank() === true) {
         void recoverDisplayAfterForeground("ticker-lost");
       }
     }

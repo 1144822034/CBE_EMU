@@ -45,7 +45,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, preloadPageNavTextures } from "./pageNav";
 
 export type AuctionPanelAction =
   | "bid"
@@ -261,6 +261,9 @@ export class AuctionPanel extends Container {
       this.activeTab = this.pendingClaims > 0 ? 3 : 0;
     }
     this.visible = true;
+    preloadPageNavTextures(() => {
+      if (this.visible) this.redraw();
+    });
     this.redraw();
   }
 
@@ -911,57 +914,12 @@ export class AuctionPanel extends Container {
     )[] = [];
     if (this.tab === "browse") {
       for (const r of this.rows) out.push({ kind: "listing", listing: r });
-      const page = this.browsePage + 1;
-      if (this.browsePage > 0) {
-        out.push({
-          kind: "action",
-          action: "prev_page",
-          label: `上一页(${page})`,
-        });
-      }
-      if (this.browseHasMore) {
-        out.push({
-          kind: "action",
-          action: "next_page",
-          label: `下一页(${page})`,
-        });
-      }
       out.push({ kind: "action", action: "refresh", label: "刷新列表" });
     } else if (this.tab === "mine") {
       for (const r of this.mine) out.push({ kind: "listing", listing: r });
-      const page = this.minePage + 1;
-      if (this.minePage > 0) {
-        out.push({
-          kind: "action",
-          action: "prev_page",
-          label: `上一页(${page})`,
-        });
-      }
-      if (this.mineHasMore) {
-        out.push({
-          kind: "action",
-          action: "next_page",
-          label: `下一页(${page})`,
-        });
-      }
       out.push({ kind: "action", action: "refresh", label: "刷新" });
     } else if (this.tab === "claim") {
       for (const c of this.claims) out.push({ kind: "claim", claim: c });
-      const page = this.claimPage + 1;
-      if (this.claimPage > 0) {
-        out.push({
-          kind: "action",
-          action: "prev_page",
-          label: `上一页(${page})`,
-        });
-      }
-      if (this.claimHasMore) {
-        out.push({
-          kind: "action",
-          action: "next_page",
-          label: `下一页(${page})`,
-        });
-      }
       if (this.pendingClaims > 0) {
         out.push({
           kind: "action",
@@ -972,6 +930,27 @@ export class AuctionPanel extends Container {
       out.push({ kind: "action", action: "refresh", label: "刷新" });
     }
     return out;
+  }
+
+  /** Server-side list pager: known pages so far + one phantom if hasMore. */
+  private serverListPages(): { page: number; pages: number; hasMore: boolean } {
+    let pageIdx = 0;
+    let hasMore = false;
+    if (this.tab === "browse") {
+      pageIdx = this.browsePage;
+      hasMore = this.browseHasMore;
+    } else if (this.tab === "mine") {
+      pageIdx = this.minePage;
+      hasMore = this.mineHasMore;
+    } else if (this.tab === "claim") {
+      pageIdx = this.claimPage;
+      hasMore = this.claimHasMore;
+    }
+    return {
+      page: pageIdx + 1,
+      pages: Math.max(1, pageIdx + 1 + (hasMore ? 1 : 0)),
+      hasMore,
+    };
   }
 
   private feePercent(): number {
@@ -1431,37 +1410,34 @@ export class AuctionPanel extends Container {
   ): void {
     const rows = this.listRows();
     const tipY = bodyTop + bodyH - 16;
+    const pager = this.serverListPages();
+    /** Always reserve strip so 上一页/下一页 stay visible (灰显 when edge). */
+    const listBottom = tipY - 24;
     let hint = "←→标签 上下选择";
     if (this.tab === "browse") {
-      hint = this.browseHasMore || this.browsePage > 0
-        ? `←→标签 第${this.browsePage + 1}页 确定查看`
-        : "←→标签 确定查看";
+      hint = `←→标签 第${this.browsePage + 1}页 确定查看`;
     }
     if (this.tab === "mine") {
-      hint = this.mineHasMore || this.minePage > 0
-        ? `←→标签 第${this.minePage + 1}页 确定查看`
-        : "←→标签 确定查看";
+      hint = `←→标签 第${this.minePage + 1}页 确定查看`;
     }
     if (this.tab === "claim") {
       hint =
-        this.claimHasMore || this.claimPage > 0
+        this.pendingClaims > 0
           ? `←→标签 第${this.claimPage + 1}页 待领${this.pendingClaims}`
-          : this.pendingClaims > 0
-            ? `←→标签 待领${this.pendingClaims}`
-            : "←→标签 暂无待领";
+          : `←→标签 第${this.claimPage + 1}页 暂无待领`;
     }
     this.addLabel(hint, x + 10, bodyTop, CBE.inkLabel);
 
     const listTop = bodyTop + 16;
     const baseRowH = 16;
-    const maxShow = Math.max(1, Math.floor((tipY - listTop - 4) / baseRowH));
+    const maxShow = Math.max(1, Math.floor((listBottom - listTop) / baseRowH));
     let start = 0;
     if (this.listCursor >= maxShow) start = this.listCursor - maxShow + 1;
     if (!rows.length) {
       this.addLabel("(空)", x + 12, listTop + 4, CBE.inkMint);
     }
     let listY = listTop;
-    for (let idx = start; idx < rows.length && listY < tipY - 4; idx++) {
+    for (let idx = start; idx < rows.length; idx++) {
       const row = rows[idx]!;
       const hi = idx === this.listCursor;
       let label = "";
@@ -1491,6 +1467,7 @@ export class AuctionPanel extends Container {
       }
       const lineCount = wrapChars(label).length;
       const effRowH = Math.max(baseRowH, lineCount * 14 + 2);
+      if (listY + effRowH > listBottom) break;
       if (hi) this.box.rect(x + 6, listY, w - 12, effRowH - 1).fill({ color: BAG_SELECT });
       this.addLabel(label, x + 10, listY + 1, hi ? CBE.menuHi : CBE.ink);
       const hitIdx = idx;
@@ -1503,6 +1480,26 @@ export class AuctionPanel extends Container {
       );
       listY += effRowH;
     }
+    attachPageNavButtons({
+      host: this,
+      hits: this.rowHits,
+      box: this.box,
+      x: x + 8,
+      y: tipY - 22,
+      w: w - 16,
+      page: pager.page,
+      pages: pager.pages,
+      forceShow: true,
+      canPrev: pager.page > 1,
+      canNext: pager.hasMore,
+      addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+      onPrev: () => {
+        if (pager.page > 1) this.onAction?.("prev_page");
+      },
+      onNext: () => {
+        if (pager.hasMore) this.onAction?.("next_page");
+      },
+    });
     this.addLabel(this.tip || hint, x + 10, tipY, CBE.inkMint);
   }
 
