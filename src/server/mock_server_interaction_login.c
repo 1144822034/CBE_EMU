@@ -4938,9 +4938,13 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
     else if (requestType == 3 && role != NULL &&
              vm_mock_service_backpack_full_bootstrap_matches(role->roleId, 2))
     {
-        if (!vm_net_mock_append_deferred_equipment_login_objects(
-                out, outCap, &pos, &objectCount) ||
-            !vm_net_mock_append_game_type_response_object(
+        /* `7/7(type=2)` is an additive item-manager path in the CBE.  A
+         * same-role bootstrap after the mall must not replay durable equipped
+         * rows through it: player-1 reaches InGame.c:913 when that replay is
+         * interpreted as a new item insertion.  The CBE's type-3 request
+         * still receives its ordinary status response and completes the
+         * server-side one-shot phase. */
+        if (!vm_net_mock_append_game_type_response_object(
                 request, requestLen, out, outCap, &pos, requestType,
                 responseType, responseSub))
         {
@@ -4948,6 +4952,7 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
         }
         objectCount += 1;
         vm_mock_service_backpack_full_bootstrap_complete(role->roleId);
+        g_netMockBackpackGridSeededRoleId = role->roleId;
     }
     else
     {

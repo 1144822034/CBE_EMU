@@ -5,13 +5,12 @@
  * backpack row and durable HP/MP-raising equipment receives a small group
  * response, then uses the CBE's own following 7/7(type=2) request to receive
  * a complete 30/21 backpack snapshot.  Its following 7/7(type=3) request
- * receives full 7/7(type=2) equipped rows and the empty 7/7(type=3)
- * completion.  The title 1/1/6 + 1/1/15 acknowledgement must not consume
+ * receives only its normal 1/7/32 status response: durable equipped rows are
+ * never replayed as 7/7(type=2), because that is the CBE's additive item
+ * insertion path.  The title 1/1/6 + 1/1/15 acknowledgement must not consume
  * that one-shot; a repeated group poll must not duplicate it, and a new role
  * select must re-arm it.
  *
- * The type-2 rows use the fixed equipment-slot sequence namespace and full
- * common equipment attributes; type-3 has exactly one zero byte of iteminfo.
  * The durable role's derived vitals remain authoritative through actorinfo.
  */
 
@@ -538,20 +537,10 @@ static int assert_deferred_grid_full_stage_plan(
     return 0;
 }
 
-static int assert_deferred_equipment_login_completion(const u8 *packet,
-                                                       u32 length,
-                                                       u32 expectedRoleId)
+static int assert_deferred_type3_no_equipment_replay(const u8 *packet,
+                                                      u32 length,
+                                                      u32 expectedRoleId)
 {
-    const u8 *equipmentPayload = NULL;
-    const u8 *equipmentItemInfo = NULL;
-    const u8 *completionPayload = NULL;
-    const u8 *completionItemInfo = NULL;
-    u16 equipmentPayloadLen = 0;
-    u16 equipmentItemInfoLen = 0;
-    u16 completionPayloadLen = 0;
-    u16 completionItemInfoLen = 0;
-    u8 equipmentIndex = 0xff;
-    u8 completionIndex = 0xff;
     bool sawStatus = false;
 
     if (packet == NULL || length < 5)
@@ -576,41 +565,18 @@ static int assert_deferred_equipment_login_completion(const u8 *packet,
         if (major == 1 && kind == 7 && subtype == 7 &&
             vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &type))
         {
-            if (type == 2)
+            if (type == 2 || type == 3)
             {
-                equipmentIndex = index;
-                equipmentPayload = payload;
-                equipmentPayloadLen = payloadLen;
-            }
-            else if (type == 3)
-            {
-                completionIndex = index;
-                completionPayload = payload;
-                completionPayloadLen = payloadLen;
+                fputs("deferred type-3 reply replayed an additive equipment object\n",
+                      stderr);
+                return 1;
             }
         }
     }
-    if (!sawStatus || equipmentIndex == 0xff || completionIndex != equipmentIndex + 1 ||
-        !vm_net_mock_get_object_entry_bytes(equipmentPayload,
-                                            equipmentPayloadLen, "iteminfo",
-                                            &equipmentItemInfo,
-                                            &equipmentItemInfoLen) ||
-        equipmentItemInfo == NULL || equipmentItemInfoLen != 161 ||
-        equipmentItemInfo[0] != 0 || equipmentItemInfo[1] != 1 ||
-        equipmentItemInfo[2] != 2 || equipmentItemInfo[27] != 0 ||
-        equipmentItemInfo[28] != 1 || equipmentItemInfo[29] != 4 ||
-        equipmentItemInfo[106] != 0 || equipmentItemInfo[107] != 1 ||
-        equipmentItemInfo[108] != 4 ||
-        !vm_net_mock_get_object_entry_bytes(completionPayload,
-                                            completionPayloadLen, "iteminfo",
-                                            &completionItemInfo,
-                                            &completionItemInfoLen) ||
-        completionItemInfo == NULL || completionItemInfoLen != 1 ||
-        completionItemInfo[0] != 0 ||
-        g_netMockBackpackGridSeededRoleId != expectedRoleId ||
+    if (!sawStatus || g_netMockBackpackGridSeededRoleId != expectedRoleId ||
         vm_mock_service_backpack_full_bootstrap_matches(expectedRoleId, 2))
     {
-        fputs("deferred type-3 reply lacks the ordered equipment completion\n",
+        fputs("deferred type-3 reply did not complete the safe bootstrap\n",
               stderr);
         return 1;
     }
@@ -1203,10 +1169,10 @@ int main(void)
         type3Request, type3RequestLen, response, sizeof(response));
     if (responseLen == 0 || !g_netLastHandledValid ||
         strcmp(g_netLastHandledSource, "builtin-game-type") != 0 ||
-        assert_deferred_equipment_login_completion(response, responseLen,
-                                                   roleId) != 0)
+        assert_deferred_type3_no_equipment_replay(response, responseLen,
+                                                  roleId) != 0)
     {
-        fputs("native type-3 request did not finish the equipment stream\n",
+        fputs("native type-3 request did not finish the safe bootstrap\n",
               stderr);
         return 1;
     }
@@ -1235,6 +1201,6 @@ int main(void)
     if (assert_group_login_deferred(response, responseLen, roleId, true) != 0)
         return 1;
 
-    printf("first-login equipment bootstrap regression passed type3_completion=1\n");
+    printf("first-login equipment bootstrap regression passed type3_equipment_replay=0\n");
     return 0;
 }

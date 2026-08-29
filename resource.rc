@@ -1,5 +1,5 @@
 // Í¼±ê×ÊÔ´
-IDI_ICON1 ICON "app.ico"
+IDI_ICON1 ICON "jh_online.ico"
 
 #include <winver.h>
 

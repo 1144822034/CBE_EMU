@@ -77,46 +77,6 @@ static bool read_object_field(const u8 *packet, u32 objectEnd,
     return true;
 }
 
-static bool read_count11_zero(const u8 *packet, u32 packetLen, u32 *offset,
-                              u16 expectedSeq)
-{
-    const u8 *info = NULL;
-    u16 infoLen = 0;
-    u32 objectStart = 0;
-    u32 objectEnd = 0;
-    u32 fieldOffset = 0;
-    u32 infoOffset = 0;
-    u16 sequence = 0;
-    u32 remaining = 0;
-
-    if (!advance_object(packet, packetLen, offset, 7, 11, &objectStart,
-                        &objectEnd))
-    {
-        return false;
-    }
-    fieldOffset = objectStart + 6u;
-    if (!read_object_field(packet, objectEnd, &fieldOffset, "info", &info,
-                           &infoLen) ||
-        fieldOffset != objectEnd || infoLen != 13u || info[0] != 0 ||
-        info[1] != 1 || info[2] != 1 || info[3] != 0 || info[4] != 2)
-    {
-        return false;
-    }
-    infoOffset = 5;
-    sequence = (u16)(((u16)info[infoOffset] << 8) | info[infoOffset + 1u]);
-    infoOffset += 2u;
-    if (infoOffset + 6u != infoLen || info[infoOffset] != 0 ||
-        info[infoOffset + 1u] != 4)
-    {
-        return false;
-    }
-    remaining = ((u32)info[infoOffset + 2u] << 24) |
-                ((u32)info[infoOffset + 3u] << 16) |
-                ((u32)info[infoOffset + 4u] << 8) |
-                info[infoOffset + 5u];
-    return sequence == expectedSeq && remaining == 0;
-}
-
 static bool read_success_dialog_return_option(const u8 *packet, u32 objectStart,
                                               u32 objectEnd)
 {
@@ -331,11 +291,10 @@ int main(void)
         return 1;
     }
 
-    /* This is the exact post-commit object family used by the NPC handler.
-     * A deferred 17/1 query is not emitted after action=1, so every removed
-     * durable row must take the client parser's sequence-keyed zero-count
-     * deletion branch in the same normal response.  The first dialog has a
-     * real return action: an empty option list takes the firmware's empty-list
+    /* action=1 is an NPC-dialog callback.  It must contain only its 26/1
+     * completion object: adding 7/11 or 10/26 produces a client unpack error
+     * before the dialog can finish.  The first dialog has a real return
+     * action because an empty option list takes the firmware's empty-list
      * presentation branch before its success text can remain visible. */
     if (!vm_net_mock_seq_put_u8(refreshDialog, sizeof(refreshDialog),
                                 &refreshDialogLen, 0) ||
@@ -366,45 +325,23 @@ int main(void)
     vm_net_mock_finish_wt_object(refreshPacket, refreshObjectStart,
                                  refreshPacketLen);
     ++refreshObjectCount;
-    if (!vm_net_mock_append_backpack_item_count11_object(
-            refreshPacket, sizeof(refreshPacket), &refreshPacketLen,
-            &refreshObjectCount, 9, 1002, 0) ||
-        !vm_net_mock_append_backpack_item_count11_object(
-            refreshPacket, sizeof(refreshPacket), &refreshPacketLen,
-            &refreshObjectCount, 11, 1004, 0) ||
-        !vm_net_mock_append_type1_object(refreshPacket, sizeof(refreshPacket),
-                                          &refreshPacketLen, 0) ||
-        refreshObjectCount != 3)
-    {
-        fputs("could not construct quality-zero recovery refresh response\n",
-              stderr);
-        return 1;
-    }
-    ++refreshObjectCount;
     vm_net_mock_finish_wt_packet(refreshPacket, refreshPacketLen,
                                  refreshObjectCount);
 
     if (expect(refreshPacket[0] == 'W' && refreshPacket[1] == 'T' &&
-                   refreshPacket[4] == 4,
+                   refreshPacket[4] == 1,
                "recovery response object count is incorrect") ||
         expect(advance_object(refreshPacket, refreshPacketLen, &refreshOffset,
                               26, 1, &refreshObjectStart, &refreshObjectEnd) &&
                    read_success_dialog_return_option(
                        refreshPacket, refreshObjectStart, refreshObjectEnd),
-               "recovery response does not keep a returnable success dialog first") ||
-        expect(read_count11_zero(refreshPacket, refreshPacketLen,
-                                 &refreshOffset, 9) &&
-                   read_count11_zero(refreshPacket, refreshPacketLen,
-                                     &refreshOffset, 11),
-               "recovery response does not delete every recycled sequence") ||
-        expect(advance_object(refreshPacket, refreshPacketLen, &refreshOffset,
-                              10, 26, NULL, NULL) &&
-                   refreshOffset == refreshPacketLen,
-               "recovery response does not refresh the copper HUD"))
+               "recovery response does not keep a returnable success dialog") ||
+        expect(refreshOffset == refreshPacketLen,
+               "recovery response contains a non-dialog follow-up object"))
     {
         return 1;
     }
 
-    puts("quality-zero equipment recycle regression passed: quote, one-shot confirmation, stale quote rejection, atomic settlement, and returnable-26/1+7/11*+10/26 refresh");
+    puts("quality-zero equipment recycle regression passed: quote, one-shot confirmation, stale quote rejection, atomic settlement, and dialog-only 26/1 completion");
     return 0;
 }

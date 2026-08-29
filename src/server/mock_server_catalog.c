@@ -5027,65 +5027,6 @@ static bool vm_net_mock_build_item_use_count_info_blob(u8 *out, u32 outCap,
     return true;
 }
 
-static bool vm_net_mock_build_equipment_login_iteminfo_blob(
-    u8 *out, u32 outCap, const vm_net_mock_role_state *role,
-    u32 *blobLenOut, u8 *rowCountOut)
-{
-    u32 pos = 0;
-    u8 rowCount = 0;
-
-    if (blobLenOut)
-        *blobLenOut = 0;
-    if (rowCountOut)
-        *rowCountOut = 0;
-    if (out == NULL || blobLenOut == NULL || role == NULL)
-        return false;
-
-    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
-    {
-        u32 itemId = role->equippedItems[slot].itemId;
-
-        if (itemId != 0 &&
-            vm_net_mock_role_equipment_slot_is_usable(role, slot))
-            ++rowCount;
-    }
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rowCount))
-        return false;
-
-    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
-    {
-        const vm_net_mock_equipped_item_state *item = &role->equippedItems[slot];
-        u32 itemId = item->itemId;
-        u32 durability = item->durability;
-
-        /* mmGameMstarWqvga.cbm:sub_D04 reads every 7/7 row as
-         * seq(u16), itemId(u32), current-count(u32), and the common equipment
-         * attributes.  For item ids >= 1000 it writes current-count to the
-         * equipment current-durability field at item+272. */
-        if (itemId == 0 || item->durabilityMax == 0 ||
-            !vm_net_mock_role_equipment_slot_is_usable(role, slot))
-            continue;
-        if (!vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
-            !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
-            !vm_net_mock_seq_put_u32(out, outCap, &pos, durability) ||
-            !vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos,
-                itemId,
-                (u8)SDL_min(item->enhanceLevel,
-                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL,
-                &item->enhanceAffixes))
-        {
-            return false;
-        }
-    }
-
-    *blobLenOut = pos;
-    if (rowCountOut)
-        *rowCountOut = rowCount;
-    return true;
-}
-
 static bool vm_net_mock_build_backpack_reservoir_count_info_blob(
     u8 *out, u32 outCap, const vm_net_mock_role_state *role,
     u32 *blobLenOut, u32 *rowCountOut)
@@ -8086,81 +8027,6 @@ static bool vm_net_mock_append_backpack_reservoir_counts_object(
     return true;
 }
 
-/* The selected-role bootstrap has a distinct item-manager contract.  Each
- * type-2 row is a full, durable equipment instance keyed by its fixed slot
- * sequence; it is not a reply to a user-initiated 7/8 wear operation.  The
- * corresponding parser evidence and raw client capture are recorded in
- * docs/re/2026-08-20-first-login-equipment-attribute-bootstrap.md. */
-static bool vm_net_mock_append_equipment_login_object(
-    u8 *out, u32 outCap, u32 *pos, u8 *rowCountOut)
-{
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u8 itemInfo[1u + VM_NET_MOCK_NEARBY_EQUIPINFO_MAX_BYTES];
-    u32 itemInfoLen = 0;
-    u32 objectStart = 0;
-    u8 rowCount = 0;
-
-    if (rowCountOut)
-        *rowCountOut = 0;
-    if (out == NULL || pos == NULL || role == NULL)
-        return false;
-    memset(itemInfo, 0, sizeof(itemInfo));
-    if (!vm_net_mock_build_equipment_login_iteminfo_blob(
-            itemInfo, sizeof(itemInfo), role, &itemInfoLen, &rowCount) ||
-        itemInfoLen == 0 || itemInfoLen > 0xffffu)
-    {
-        return false;
-    }
-    if (rowCount == 0)
-        return true;
-    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
-        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
-                                    itemInfo, (u16)itemInfoLen))
-    {
-        return false;
-    }
-    vm_net_mock_finish_wt_object(out, objectStart, *pos);
-    if (rowCountOut)
-        *rowCountOut = rowCount;
-
-    printf("[info][network] mock_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
-           role->roleId, rowCount, itemInfoLen);
-    vm_autotest_note("mock_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
-                     role->roleId, rowCount, itemInfoLen);
-    return true;
-}
-
-/* The empty type-3 object terminates the login equipment stream after all
- * type-2 rows have been installed.  Its parser path performs the native
- * scene-status rebuild and clears the shared item notification state; it is
- * emitted only as part of this one-shot group/type-1 bootstrap. */
-static bool vm_net_mock_append_equipment_login_type3_completion_object(
-    u8 *out, u32 outCap, u32 *pos, u8 equipmentRows)
-{
-    static const u8 emptyItemInfo[] = {0};
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 objectStart = 0;
-
-    if (equipmentRows == 0)
-        return true;
-    if (out == NULL || pos == NULL || role == NULL)
-        return false;
-    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 3) ||
-        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
-                                    emptyItemInfo, sizeof(emptyItemInfo)))
-    {
-        return false;
-    }
-    vm_net_mock_finish_wt_object(out, objectStart, *pos);
-    printf("[info][network] mock_login_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
-           role->roleId, equipmentRows);
-    vm_autotest_note("mock_login_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
-                     role->roleId, equipmentRows);
-    return true;
-}
-
 static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -8192,7 +8058,6 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
             return true;
 
         bool appendedReservoirCounts = false;
-        u8 equipmentRows = 0;
 
         if (vm_net_mock_role_backpack_client_grid_count(role) != 0)
         {
@@ -8206,21 +8071,6 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
             }
             if (appendedReservoirCounts)
                 *objectCount = (u8)(*objectCount + 1);
-        }
-        if (!vm_net_mock_append_equipment_login_object(
-                out, outCap, pos, &equipmentRows))
-        {
-            return false;
-        }
-        if (equipmentRows != 0)
-        {
-            *objectCount = (u8)(*objectCount + 1);
-            if (!vm_net_mock_append_equipment_login_type3_completion_object(
-                    out, outCap, pos, equipmentRows))
-            {
-                return false;
-            }
-            *objectCount = (u8)(*objectCount + 1);
         }
         g_netMockBackpackGridSeededRoleId = role->roleId;
     }
@@ -8253,39 +8103,6 @@ static bool vm_net_mock_append_deferred_full_backpack_grid_objects(
     }
     if (appendedReservoirCounts)
         *objectCount = (u8)(*objectCount + 1);
-    return true;
-}
-
-/* The type-3 request terminates the CBE's native login-equipment stream.
- * Keep the full type-2 rows and its required empty type-3 completion beside
- * that request only, then mark this one session/role bootstrap complete. */
-static bool vm_net_mock_append_deferred_equipment_login_objects(
-    u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
-{
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u8 equipmentRows = 0;
-
-    if (out == NULL || pos == NULL || objectCount == NULL || role == NULL ||
-        !vm_mock_service_backpack_full_bootstrap_matches(role->roleId, 2))
-    {
-        return false;
-    }
-    if (!vm_net_mock_append_equipment_login_object(out, outCap, pos,
-                                                    &equipmentRows))
-    {
-        return false;
-    }
-    if (equipmentRows != 0)
-    {
-        *objectCount = (u8)(*objectCount + 1);
-        if (!vm_net_mock_append_equipment_login_type3_completion_object(
-                out, outCap, pos, equipmentRows))
-        {
-            return false;
-        }
-        *objectCount = (u8)(*objectCount + 1);
-    }
-    g_netMockBackpackGridSeededRoleId = role->roleId;
     return true;
 }
 
