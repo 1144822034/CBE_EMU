@@ -7282,16 +7282,6 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_cosmetic_grant_form(
             &page, selectedAccount, managedRoleIds, managedRoleNames,
             managedRoleCount);
-        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-        {
-            const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
-            char roleNameUtf8[128];
-            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
-                                          roleNameUtf8, sizeof(roleNameUtf8));
-            vm_mock_admin_render_role_equip_wash(
-                &page, selectedAccount, role, roleNameUtf8);
-        }
-        vm_mock_service_close_account_role_db_for_management(accountState, true);
     }
     else
     {
@@ -7300,8 +7290,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                        (roleError ? roleError : "角色数据不可用") : "请选择账号");
         vm_mock_admin_text_appendf(&page, "</td></tr></tbody></table>");
     }
-    vm_mock_admin_text_appendf(&page, "</div>");
-    vm_mock_admin_text_appendf(&page, "</div><div class=\"forms\">"
+    vm_mock_admin_text_appendf(&page, "<div class=\"forms\">"
                                "<div class=\"card\"><h2>创建账号</h2><form class=\"stack\" method=\"post\" action=\"/action\">"
                                "<input type=\"hidden\" name=\"action\" value=\"create-account\">"
                                "<input name=\"account\" maxlength=\"63\" placeholder=\"账号名\" required>"
@@ -7313,7 +7302,21 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     vm_mock_admin_text_append_html(&page, selectedAccount);
     vm_mock_admin_text_appendf(&page,
                                "\" required><input type=\"password\" name=\"password\" maxlength=\"63\" placeholder=\"新密码\" required>"
-                               "<button type=\"submit\">保存新密码</button></form></div></div>"
+                               "<button type=\"submit\">保存新密码</button></form></div></div>");
+    if (accountState != NULL)
+    {
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+            char roleNameUtf8[128];
+            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
+                                          roleNameUtf8, sizeof(roleNameUtf8));
+            vm_mock_admin_render_role_equip_wash(
+                &page, selectedAccount, role, roleNameUtf8);
+        }
+        vm_mock_service_close_account_role_db_for_management(accountState, true);
+    }
+    vm_mock_admin_text_appendf(&page, "</div></div>"
                                "<p class=\"foot\">安全限制：后台需要密码验证；所有请求有长度限制，页面不包含外部脚本。</p>"
                                "</section></div></main></body></html>");
 

@@ -3155,9 +3155,56 @@ static bool vm_net_mock_named_payload_looks_like_resource_stream(
     return declaredLen > 0 && declaredLen <= payloadLen - 4;
 }
 
+/* True if UTF-8 text contains CJK Unified Ideographs (U+4E00..U+9FFF). */
+static bool vm_net_mock_utf8_has_cjk(const char *utf8)
+{
+    const unsigned char *p = (const unsigned char *)utf8;
+
+    if (utf8 == NULL)
+        return false;
+    while (*p)
+    {
+        u32 cp;
+
+        if (*p < 0x80)
+        {
+            ++p;
+            continue;
+        }
+        if ((*p & 0xe0) == 0xc0 && (p[1] & 0xc0) == 0x80)
+        {
+            cp = ((u32)(p[0] & 0x1f) << 6) | (u32)(p[1] & 0x3f);
+            p += 2;
+        }
+        else if ((*p & 0xf0) == 0xe0 && (p[1] & 0xc0) == 0x80 &&
+                 (p[2] & 0xc0) == 0x80)
+        {
+            cp = ((u32)(p[0] & 0x0f) << 12) | ((u32)(p[1] & 0x3f) << 6) |
+                 (u32)(p[2] & 0x3f);
+            p += 3;
+        }
+        else if ((*p & 0xf8) == 0xf0 && (p[1] & 0xc0) == 0x80 &&
+                 (p[2] & 0xc0) == 0x80 && (p[3] & 0xc0) == 0x80)
+        {
+            cp = ((u32)(p[0] & 0x07) << 18) | ((u32)(p[1] & 0x3f) << 12) |
+                 ((u32)(p[2] & 0x3f) << 6) | (u32)(p[3] & 0x3f);
+            p += 4;
+        }
+        else
+            return false;
+        if (cp >= 0x4e00u && cp <= 0x9fffu)
+            return true;
+    }
+    return false;
+}
+
 static void vm_net_mock_gbk_label_to_utf8(const char *gbk, char *out, size_t outCap)
 {
     bool hasHighByte = false;
+    bool inputIsUtf8 = false;
+    bool gbkHasCjk = false;
+    bool utf8HasCjk = false;
+    char fromGbk[512];
 
     if (out == NULL || outCap == 0)
         return;
@@ -3177,19 +3224,50 @@ static void vm_net_mock_gbk_label_to_utf8(const char *gbk, char *out, size_t out
         }
     }
 
-    if (hasHighByte)
+    if (!hasHighByte)
     {
-        /* Already UTF-8 from some Android WT18/7 hosts — do not double-convert. */
-        if (vm_net_mock_update_name_is_utf8_text(gbk))
-        {
-            snprintf(out, outCap, "%s", gbk);
-            return;
-        }
-        gbk_to_utf8((u8 *)gbk, (u8 *)out, outCap);
-        if (out[0] != 0)
-            return;
+        snprintf(out, outCap, "%s", gbk);
+        return;
     }
 
+    /*
+     * Blind "valid UTF-8 → copy as-is" is wrong for several GBK pairs that are
+     * also legal UTF-8. Example: 泰山 GBK CC A9 C9 BD round-trips as
+     * U+0329/U+027D; admin then shows 07⌜_02 and /api/npc-scenes poisons the
+     * Pixi quest tracker (only「南」visible). Match PixiJS decodeGbk:
+     * prefer GBK when it yields Han and the UTF-8 view does not.
+     */
+    memset(fromGbk, 0, sizeof(fromGbk));
+    gbk_to_utf8((u8 *)gbk, (u8 *)fromGbk, sizeof(fromGbk));
+    inputIsUtf8 = vm_net_mock_update_name_is_utf8_text(gbk);
+    gbkHasCjk = fromGbk[0] != 0 && vm_net_mock_utf8_has_cjk(fromGbk);
+    utf8HasCjk = inputIsUtf8 && vm_net_mock_utf8_has_cjk(gbk);
+
+    if (gbkHasCjk && !utf8HasCjk)
+    {
+        snprintf(out, outCap, "%s", fromGbk);
+        return;
+    }
+    if (utf8HasCjk)
+    {
+        snprintf(out, outCap, "%s", gbk);
+        return;
+    }
+    if (gbkHasCjk)
+    {
+        snprintf(out, outCap, "%s", fromGbk);
+        return;
+    }
+    if (inputIsUtf8)
+    {
+        snprintf(out, outCap, "%s", gbk);
+        return;
+    }
+    if (fromGbk[0] != 0)
+    {
+        snprintf(out, outCap, "%s", fromGbk);
+        return;
+    }
     snprintf(out, outCap, "%s", gbk);
 }
 

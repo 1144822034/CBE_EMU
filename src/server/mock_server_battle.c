@@ -3987,6 +3987,23 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                 }
                 if (counterIsHeal[i])
                     counterTargetWireSlot = counterActorWireSlot;
+                if (g_vm_net_mock_team_battle_party_count_current >= 2 &&
+                    !counterIsHeal[i] &&
+                    vm_net_mock_battle_enemy_wire_is_alive(
+                        counterTargetWireSlot, playerOnRight, battleSide,
+                        enemySlot))
+                {
+                    printf("[error][network] mock_battle_counter_monster_vs_monster "
+                           "party=%u members=%u actor_wire=%u target_wire=%u "
+                           "player_wire=%u enemies=%u "
+                           "evidence=team-wire-leak-solo-table\n",
+                           g_vm_net_mock_team_battle_party_count_current,
+                           g_vm_net_mock_team_battle_member_count_current,
+                           counterActorWireSlot,
+                           counterTargetWireSlot,
+                           playerSlot,
+                           g_mockBattleEnemyCountCurrent);
+                }
                 if (actionCount < actionCap)
                     ++actionCount;
                 else
@@ -4798,6 +4815,23 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                 }
                 if (counterIsHeal[i])
                     counterTargetWireSlot = counterActorWireSlot;
+                if (g_vm_net_mock_team_battle_party_count_current >= 2 &&
+                    !counterIsHeal[i] &&
+                    vm_net_mock_battle_enemy_wire_is_alive(
+                        counterTargetWireSlot, playerOnRight, battleSide,
+                        enemySlot))
+                {
+                    printf("[error][network] mock_battle_counter_monster_vs_monster "
+                           "via=fallback party=%u members=%u actor_wire=%u "
+                           "target_wire=%u player_wire=%u enemies=%u "
+                           "evidence=team-wire-leak-solo-table\n",
+                           g_vm_net_mock_team_battle_party_count_current,
+                           g_vm_net_mock_team_battle_member_count_current,
+                           counterActorWireSlot,
+                           counterTargetWireSlot,
+                           playerSlot,
+                           g_mockBattleEnemyCountCurrent);
+                }
                 if (actionCount < actionCap)
                     ++actionCount;
                 else
@@ -6469,6 +6503,22 @@ static u32 vm_net_mock_build_team_battle_orphan_round_release(
             }
             if (strikeIsHeal)
                 counterTargetWireSlot = counterActorWireSlot;
+            if (g_vm_net_mock_team_battle_party_count_current >= 2 &&
+                !strikeIsHeal &&
+                vm_net_mock_battle_enemy_wire_is_alive(
+                    counterTargetWireSlot, playerOnRight, battleSide, enemySlot))
+            {
+                printf("[error][network] mock_battle_counter_monster_vs_monster "
+                       "via=orphan party=%u members=%u actor_wire=%u "
+                       "target_wire=%u player_wire=%u enemies=%u "
+                       "evidence=team-wire-leak-solo-table\n",
+                       g_vm_net_mock_team_battle_party_count_current,
+                       g_vm_net_mock_team_battle_member_count_current,
+                       counterActorWireSlot,
+                       counterTargetWireSlot,
+                       playerSlot,
+                       g_mockBattleEnemyCountCurrent);
+            }
             /* Miss keeps valueA=0 + child_flag=3 (闪躲); still append the counter. */
             if (totalActionCount >= 0xff ||
                 !vm_net_mock_append_battle_actioninfo_record(
@@ -7029,6 +7079,39 @@ static u32 vm_net_mock_build_synchronized_team_battle_response(
         return 0;
     }
     context = vm_mock_service_team_battle_prepare_operation();
+    /*
+     * prepare inactive while this client's party still has battleActive means
+     * the seat is missing from battleMemberClientIds (roster/disconnect skew).
+     * Falling through to solo operate then encodes player=1 / monsters=[2,3,0]
+     * after clear_operation_context wiped party_count — Pixi still holds the
+     * team M/P wire table (2p+3m → 怪互打).  Never solo-fallback here.
+     */
+    if (!context.active && activeSession != NULL)
+    {
+        vm_mock_service_team *armedTeam =
+            vm_mock_service_team_find_for_client(activeSession->clientId);
+
+        if (armedTeam != NULL && armedTeam->battleActive &&
+            !armedTeam->battleFinished)
+        {
+            u32 pos = 5;
+
+            printf("[error][mock-service] team_battle_operate_blocked_no_seat "
+                   "battle=%u source=%08x reason=%s "
+                   "evidence=solo-wire-leak-would-paint-monster-vs-monster\n",
+                   armedTeam->battleSerial,
+                   activeSession->clientId,
+                   buildType == VM_MOCK_TEAM_BATTLE_BUILD_ITEM ? "item" :
+                   (buildType == VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK
+                        ? "operate-fallback" : "operate"));
+            if (out != NULL && outCap >= pos)
+            {
+                vm_net_mock_finish_wt_packet(out, pos, 0);
+                return pos;
+            }
+            return 0;
+        }
+    }
     if (context.active && context.team->battleFinished)
     {
         responseLen = vm_net_mock_build_pending_team_battle_action_response(
@@ -7323,7 +7406,26 @@ static u32 vm_net_mock_build_synchronized_team_battle_response(
             }
         }
         else
+        {
+            /*
+             * Operate/item builder returned 0 after prepare armed team scratch.
+             * clear_operation_context drops party_count; dispatch lastchance
+             * solo operate would then emit solo multi-enemy wires while the
+             * client still uses the frozen team table → 怪互打 after deaths.
+             */
+            responseLen = vm_net_mock_build_team_battle_round_wait_response(
+                out, outCap, &context, "operate-builder-failed");
+            printf("[error][mock-service] team_battle_operate_builder_failed "
+                   "battle=%u round=%u source=%08x actor=%u build=%u "
+                   "evidence=no-solo-lastchance-after-team-prepare\n",
+                   context.team->battleSerial,
+                   context.team->battleRoundSerial,
+                   context.session ? context.session->clientId : 0,
+                   context.memberIndex,
+                   buildType);
+            vm_net_mock_battle_restore_role_vitals_to_globals();
             vm_mock_service_team_battle_clear_operation_context();
+        }
     }
     return responseLen;
 }

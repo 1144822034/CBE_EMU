@@ -1783,6 +1783,43 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     }
     if (requestKind == 4 && requestSubtype == 2)
     {
+        /*
+         * Solo lastchance must never run while this seat's party still owns an
+         * active team battle.  After team prepare failure/clear, party_count is
+         * 0 and solo multi-enemy wires (player=1, monsters=[2,3,0]) decode on
+         * the Pixi team table (2p+3m) as monster-vs-monster dashes.
+         */
+        {
+            vm_mock_service_client_session *lastchanceSession =
+                vm_mock_service_get_active_client_session();
+            vm_mock_service_team *lastchanceTeam =
+                lastchanceSession
+                    ? vm_mock_service_team_find_for_client(
+                          lastchanceSession->clientId)
+                    : NULL;
+
+            if (lastchanceTeam != NULL && lastchanceTeam->battleActive &&
+                !lastchanceTeam->battleFinished)
+            {
+                u32 pos = 5;
+
+                printf("[error][network] mock_battle_operate_lastchance_blocked "
+                       "battle=%u source=%08x "
+                       "evidence=team-active-solo-wire-leak\n",
+                       lastchanceTeam->battleSerial,
+                       lastchanceSession ? lastchanceSession->clientId : 0);
+                if (out != NULL && outCap >= pos)
+                {
+                    vm_net_mock_finish_wt_packet(out, pos, 0);
+                    vm_net_log_handled_packet(
+                        "builtin-battle-operate-lastchance-blocked-team",
+                        request, requestLen, pos);
+                    return pos;
+                }
+                vm_net_log_unhandled_packet(request, requestLen);
+                return 0;
+            }
+        }
         hookedLen = vm_net_mock_build_battle_operate_response_fallback(request, requestLen, out, outCap);
         if (hookedLen)
         {

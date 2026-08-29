@@ -440,6 +440,99 @@ static void vm_mock_world_boss_broadcast_marker(const char *markerAscii,
     (void)vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
 }
 
+/*
+ * Victory live [世]: solo 「恭喜玩家{名}战胜世界BOSS！」 /
+ * party 「恭喜{名}的队伍战胜世界BOSS！」.  ≤81 GBK; avoid 【世界BOSS】 /
+ * [WBOSS:] / 「世界Boss 已刷新」 so Pixi map-sync chat filters stay quiet.
+ */
+static void vm_mock_world_boss_broadcast_victory(vm_net_mock_role_state *role)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    vm_mock_service_client_session *session = NULL;
+    vm_mock_service_client_session *sess = NULL;
+    vm_mock_service_team *team = NULL;
+    const char *playerName = NULL;
+    char message[82];
+    int wrote = 0;
+    u32 recipients = 0;
+    u32 claimId = g_vm_mock_world_boss_rt.claimRoleId;
+    bool isTeam = false;
+
+    if (claimId != 0)
+    {
+        for (sess = g_vm_mock_service_client_sessions; sess != NULL;
+             sess = sess->next)
+        {
+            if (sess->onlineRoleId != claimId)
+                continue;
+            session = sess;
+            if (sess->onlineRoleName[0] != 0)
+                playerName = sess->onlineRoleName;
+            break;
+        }
+    }
+    if (session == NULL)
+        session = vm_mock_service_get_active_client_session();
+    if (playerName == NULL && session != NULL && session->onlineRoleName[0] != 0)
+        playerName = session->onlineRoleName;
+    if (playerName == NULL && role != NULL && role->name[0] != 0)
+        playerName = role->name;
+    if (playerName == NULL || playerName[0] == 0)
+        return;
+
+    if (session != NULL)
+        team = vm_mock_service_team_find_for_client(session->clientId);
+    if (team != NULL && team->active)
+    {
+        if (team->battleActive && team->battleMemberCount >= 2)
+            isTeam = true;
+        else if (team->memberCount >= 2)
+            isTeam = true;
+    }
+
+    memset(message, 0, sizeof(message));
+    if (isTeam)
+    {
+        /* 恭喜{名}的队伍战胜世界BOSS！ */
+        wrote = snprintf(
+            message, sizeof(message),
+            "\xB9\xA7\xCF\xB2%s\xB5\xC4\xB6\xD3\xCE\xE9"
+            "\xD5\xBD\xCA\xA4\xCA\xC0\xBD\xE7\x42\x4F\x53\x53\xA3\xA1",
+            playerName);
+        if (wrote <= 0 || (size_t)wrote >= sizeof(message))
+        {
+            memset(message, 0, sizeof(message));
+            wrote = snprintf(
+                message, sizeof(message),
+                "\xB9\xA7\xCF\xB2\xB6\xD3\xCE\xE9"
+                "\xD5\xBD\xCA\xA4\xCA\xC0\xBD\xE7\x42\x4F\x53\x53\xA3\xA1");
+        }
+    }
+    else
+    {
+        /* 恭喜玩家{名}战胜世界BOSS！ */
+        wrote = snprintf(
+            message, sizeof(message),
+            "\xB9\xA7\xCF\xB2\xCD\xE6\xBC\xD2%s"
+            "\xD5\xBD\xCA\xA4\xCA\xC0\xBD\xE7\x42\x4F\x53\x53\xA3\xA1",
+            playerName);
+        if (wrote <= 0 || (size_t)wrote >= sizeof(message))
+        {
+            memset(message, 0, sizeof(message));
+            wrote = snprintf(
+                message, sizeof(message),
+                "\xB9\xA7\xCF\xB2\xCD\xE6\xBC\xD2"
+                "\xD5\xBD\xCA\xA4\xCA\xC0\xBD\xE7\x42\x4F\x53\x53\xA3\xA1");
+        }
+    }
+    if (wrote <= 0 || (size_t)wrote >= sizeof(message))
+        return;
+    recipients = vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
+    printf("[info][mock-service] world_boss_victory_broadcast team=%u "
+           "player=%s claim=%u recipients=%u tip=%s\n",
+           isTeam ? 1u : 0u, playerName, claimId, recipients, message);
+}
+
 static bool vm_mock_world_boss_pick_scene_and_pos_at(
     u32 outdoorIndex, char *sceneOut, size_t sceneCap, u16 *xOut, u16 *yOut)
 {
@@ -819,6 +912,7 @@ void vm_mock_world_boss_on_battle_end(bool victory)
            g_vm_mock_world_boss_config.rewardMoney,
            g_vm_mock_world_boss_config.rewardItemId,
            g_vm_mock_world_boss_config.rewardItemCount);
+    vm_mock_world_boss_broadcast_victory(role);
     vm_mock_world_boss_despawn_active("battle-victory");
 }
 

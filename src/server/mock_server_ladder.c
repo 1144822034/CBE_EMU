@@ -162,7 +162,15 @@ static bool vm_mock_ladder_ensure_tables(void)
             "best_floor SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
-            "PRIMARY KEY (account_id,role_id,day_ymd)) ENGINE=InnoDB"))
+            "PRIMARY KEY (account_id,role_id,day_ymd)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            /* Daily first clear of each 10x floor (world announce gate). */
+            "CREATE TABLE IF NOT EXISTS server_ladder_daily_lead ("
+            "day_ymd INT UNSIGNED NOT NULL,"
+            "floor_n SMALLINT UNSIGNED NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "PRIMARY KEY (day_ymd,floor_n)) ENGINE=InnoDB"))
         return false;
     /* Existing installs: add columns introduced after first ladder rollout. */
     (void)vm_mysql_exec(
@@ -733,12 +741,184 @@ static bool vm_mock_ladder_persist_best_floor(vm_net_mock_role_state *role,
     return okDaily || okProgress;
 }
 
+static const char *vm_mock_ladder_player_name_gbk(vm_net_mock_role_state *role)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session != NULL && session->onlineRoleName[0] != 0)
+        return session->onlineRoleName;
+    if (role != NULL && role->name[0] != 0)
+        return role->name;
+    return NULL;
+}
+
+static bool vm_mock_ladder_u32_row(void *contextValue, unsigned int columnCount,
+                                   const char *const *values, const size_t *lengths)
+{
+    u32 *out = (u32 *)contextValue;
+    u32 tmp = 0;
+
+    (void)columnCount;
+    if (out == NULL || values == NULL || lengths == NULL || values[0] == NULL)
+        return false;
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &tmp))
+        return false;
+    *out = tmp;
+    return true;
+}
+
+/* INSERT IGNORE first claim of (day, 10x floor); true only for the winner. */
+static bool vm_mock_ladder_claim_daily_ten_lead(u16 floor, u32 roleId)
+{
+    char query[256];
+    u32 dayYmd = vm_mock_ladder_day_ymd();
+    u32 affected = 0;
+
+    if (floor == 0 || (floor % 10u) != 0 || roleId == 0 || dayYmd == 0)
+        return false;
+    if (!vm_mock_ladder_ensure_tables())
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO server_ladder_daily_lead "
+             "(day_ymd,floor_n,role_id) VALUES (%u,%u,%u)",
+             dayYmd, (u32)floor, roleId);
+    if (!vm_mysql_exec(query))
+        return false;
+    if (!vm_mysql_query("SELECT ROW_COUNT()", vm_mock_ladder_u32_row, &affected))
+        return false;
+    return affected == 1u;
+}
+
+static void vm_mock_ladder_announce_daily_ten_lead(u16 floor,
+                                                   const char *playerName)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    char message[82];
+    int wrote;
+    u32 recipients;
+
+    if (playerName == NULL || playerName[0] == 0 || floor == 0)
+        return;
+    /* 玩家{名}领先通过{N}层天梯 — ≤81 GBK wire. */
+    memset(message, 0, sizeof(message));
+    wrote = snprintf(
+        message, sizeof(message),
+        "\xCD\xE6\xBC\xD2%s\xC1\xEC\xCF\xC8\xCD\xA8\xB9\xFD%u"
+        "\xB2\xE3\xCC\xEC\xCC\xDD",
+        playerName, (u32)floor);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(message))
+    {
+        memset(message, 0, sizeof(message));
+        wrote = snprintf(
+            message, sizeof(message),
+            "\xCD\xE6\xBC\xD2\xC1\xEC\xCF\xC8\xCD\xA8\xB9\xFD%u"
+            "\xB2\xE3\xCC\xEC\xCC\xDD",
+            (u32)floor);
+    }
+    if (wrote <= 0 || (size_t)wrote >= sizeof(message))
+        return;
+    recipients = vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
+    printf("[info][mock-service] ladder_daily_lead floor=%u player=%s "
+           "recipients=%u tip=%s\n",
+           (u32)floor, playerName, recipients, message);
+}
+
+static bool vm_mock_ladder_tip_append(char *out, u32 outCap, u32 *used,
+                                      const char *frag)
+{
+    size_t n;
+
+    if (out == NULL || used == NULL || frag == NULL || outCap == 0)
+        return false;
+    n = strlen(frag);
+    if (n == 0)
+        return true;
+    if (*used + n + 1u > outCap)
+        return false;
+    memcpy(out + *used, frag, n);
+    *used += (u32)n;
+    out[*used] = 0;
+    return true;
+}
+
+/* Personal system tip: 恭喜玩家获得经验N、金钱N、物品xN */
+static void vm_mock_ladder_notify_milestone_tip(u32 rewardExp, u32 rewardMoney,
+                                                u32 rewardItemId,
+                                                u32 rewardItemCount)
+{
+    static const char prefixGbk[] =
+        "\xB9\xA7\xCF\xB2\xCD\xE6\xBC\xD2\xBB\xF1\xB5\xC3"; /* 恭喜玩家获得 */
+    static const char sepGbk[] = "\xA1\xA2"; /* 、 */
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    const vm_net_mock_shop_catalog_item *shop = NULL;
+    char tip[82];
+    char part[64];
+    u32 used = 0;
+    u32 parts = 0;
+
+    if (session == NULL)
+        return;
+    if (rewardExp == 0 && rewardMoney == 0 &&
+        (rewardItemId == 0 || rewardItemCount == 0))
+        return;
+    tip[0] = 0;
+    if (!vm_mock_ladder_tip_append(tip, sizeof(tip), &used, prefixGbk))
+        return;
+    if (rewardExp)
+    {
+        snprintf(part, sizeof(part), "\xBE\xAD\xD1\xE9%u", rewardExp);
+        if (vm_mock_ladder_tip_append(tip, sizeof(tip), &used, part))
+            ++parts;
+    }
+    if (rewardMoney)
+    {
+        if (parts && !vm_mock_ladder_tip_append(tip, sizeof(tip), &used, sepGbk))
+            goto enqueue;
+        snprintf(part, sizeof(part), "\xBD\xF0\xC7\xAE%u", rewardMoney);
+        if (vm_mock_ladder_tip_append(tip, sizeof(tip), &used, part))
+            ++parts;
+    }
+    if (rewardItemId && rewardItemCount)
+    {
+        if (parts && !vm_mock_ladder_tip_append(tip, sizeof(tip), &used, sepGbk))
+            goto enqueue;
+        shop = vm_net_mock_find_shop_catalog_item(rewardItemId);
+        if (shop != NULL && shop->name[0] != 0)
+            snprintf(part, sizeof(part), "%sx%u", shop->name, rewardItemCount);
+        else
+            snprintf(part, sizeof(part), "#%ux%u", rewardItemId,
+                     rewardItemCount);
+        if (!vm_mock_ladder_tip_append(tip, sizeof(tip), &used, part))
+        {
+            snprintf(part, sizeof(part), "#%ux%u", rewardItemId,
+                     rewardItemCount);
+            if (vm_mock_ladder_tip_append(tip, sizeof(tip), &used, part))
+                ++parts;
+        }
+        else
+            ++parts;
+    }
+enqueue:
+    if (parts == 0 || tip[0] == 0)
+        return;
+    if (vm_mock_service_session_enqueue_system_message(session, tip))
+        printf("[info][mock-service] ladder_milestone_tip tip=%s\n", tip);
+}
+
 void vm_mock_ladder_on_battle_end(bool victory)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_mock_ladder_battle_slot *slot = NULL;
     u16 floor = 0;
+    u16 prevBest = 0;
     u32 i;
+    u32 grantedExp = 0;
+    u32 grantedMoney = 0;
+    u32 grantedItemId = 0;
+    u32 grantedItemCount = 0;
+    const char *playerName = NULL;
 
     /*
      * Only the role that armed the ladder may clear/settle.  Other clients'
@@ -758,7 +938,12 @@ void vm_mock_ladder_on_battle_end(bool victory)
                role->roleId, (u32)floor);
         return;
     }
+    prevBest = vm_mock_ladder_role_best_floor(role);
     (void)vm_mock_ladder_persist_best_floor(role, floor);
+    playerName = vm_mock_ladder_player_name_gbk(role);
+    if (floor > prevBest && (floor % 10u) == 0 &&
+        vm_mock_ladder_claim_daily_ten_lead(floor, role->roleId))
+        vm_mock_ladder_announce_daily_ten_lead(floor, playerName);
     for (i = 0; i < g_vm_mock_ladder_reward_count; ++i)
     {
         const vm_mock_ladder_reward *rw = &g_vm_mock_ladder_rewards[i];
@@ -767,21 +952,40 @@ void vm_mock_ladder_on_battle_end(bool victory)
             (floor % rw->floorMilestone) != 0)
             continue;
         if (rw->rewardExp)
+        {
             (void)vm_net_mock_role_add_exp(role, rw->rewardExp);
+            grantedExp = vm_net_mock_add_capped_u32(grantedExp, rw->rewardExp);
+        }
         if (rw->rewardMoney)
         {
             role->money = vm_net_mock_add_capped_u32(role->money, rw->rewardMoney);
+            grantedMoney =
+                vm_net_mock_add_capped_u32(grantedMoney, rw->rewardMoney);
             vm_net_mock_role_mark_inventory_dirty("ladder-milestone-money");
         }
         if (rw->rewardItemId && rw->rewardItemCount)
+        {
             (void)vm_net_mock_role_add_backpack_item_to_role(
                 role, rw->rewardItemId, rw->rewardItemCount, 0, &itemSeq,
                 "ladder-milestone-item", NULL, 0);
+            /* Tip lists first item id; later different ids still granted. */
+            if (grantedItemId == 0)
+                grantedItemId = rw->rewardItemId;
+            if (grantedItemId == rw->rewardItemId)
+                grantedItemCount = vm_net_mock_add_capped_u32(
+                    grantedItemCount, rw->rewardItemCount);
+        }
     }
+    if (grantedExp || grantedMoney ||
+        (grantedItemId && grantedItemCount))
+        vm_mock_ladder_notify_milestone_tip(grantedExp, grantedMoney,
+                                            grantedItemId, grantedItemCount);
     vm_net_mock_role_db_save("ladder-victory");
-    printf("[info][mock-service] ladder_victory role=%u floor=%u best=%u\n",
+    printf("[info][mock-service] ladder_victory role=%u floor=%u best=%u "
+           "milestone_exp=%u money=%u item=%u x%u\n",
            role->roleId, (u32)floor,
-           (u32)vm_mock_ladder_role_best_floor(role));
+           (u32)vm_mock_ladder_role_best_floor(role), grantedExp, grantedMoney,
+           grantedItemId, grantedItemCount);
 }
 
 bool vm_mock_ladder_admin_save_config(

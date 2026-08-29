@@ -51,7 +51,9 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "table{border-collapse:collapse;width:100%%}th,td{padding:8px;border-bottom:1px solid #eee}"
         "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px}"
         "</style></head><body><h1>天梯挑战</h1>"
-        "<p>每日挑战（次数与层数进度均按自然日重置）；对手为天机/幻剑/鬼道三人。层数越高属性与伤害越高；每10层发里程碑奖励。</p>");
+        "<p>每日挑战（次数与层数进度均按自然日重置）；对手为天机/幻剑/鬼道三人。"
+        "层数越高属性与伤害越高；每N层发里程碑奖励（并系统提示）。"
+        "每日每个10倍数层（10/20/30…）首位通关者会世界播报。</p>");
     vm_mock_admin_append_tabs(&page, "ladder");
 
     if (status[0] && message[0])
