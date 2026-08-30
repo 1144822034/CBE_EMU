@@ -12232,6 +12232,13 @@ void cbeShutdown(void)
     g_vmInputSdlTextInputWanted = 0;
 }
 
+const char *cbeAndroidGetPreferredServerName(void)
+{
+    if (g_mockPreferredTitleServerUtf8[0] != 0)
+        return g_mockPreferredTitleServerUtf8;
+    return "";
+}
+
 const char *cbeGetCpuInfoText(void)
 {
     static char info[512];

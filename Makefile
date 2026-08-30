@@ -84,7 +84,7 @@ $(CLIENT_OBJDIR)/main.o: src/main.c src/network-client.c src/md5.h \
 $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
 	src/web_admin_chests.inc.c \
-	src/web_admin_enhance.inc.c src/web_admin_arena.inc.c \
+	src/web_admin_enhance.inc.c src/web_admin_combat.inc.c src/web_admin_arena.inc.c \
 	src/web_admin_world_boss.inc.c src/web_admin_ladder.inc.c \
 	src/web_admin_activities.inc.c \
 	src/server/mock_server_arena_wager.inc.c \
@@ -137,7 +137,8 @@ boundary-check: build
 
 $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/web_admin_chests.inc.c src/web_admin_arena.inc.c \
+	src/web_admin_chests.inc.c src/web_admin_enhance.inc.c src/web_admin_combat.inc.c \
+	src/web_admin_arena.inc.c \
 	src/web_admin_world_boss.inc.c src/web_admin_ladder.inc.c \
 	src/web_admin_activities.inc.c \
 	src/server/mock_server_arena_wager.inc.c \

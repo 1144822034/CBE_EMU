@@ -32,7 +32,8 @@ status: implemented-client
 
 - `1/1/21` 只有帮派名、无 guildId；已入帮但 id 未知时用 `ensureGuildId()` 静默拉 `10/21.fid`。
 - 详情请求 `10/22.id=guildId` → 响应 `10/23`；脱离同 subtype 请求 `id=roleId` → 响应 `10/22 {result}`。
-- 位阶变更 / 踢人 / 公告编辑未接（`10/35`/`10/38`–`10/41`）。
+- 位阶变更 / 公告编辑未接（`10/35`/`10/38`/`10/39`/`10/41`）。
+- 踢人 `10/40`、解散 `10/22+force`：见 `docs/re/2026-08-29-pixi-guild-kick-disband.md`。
 
 ## Validation
 

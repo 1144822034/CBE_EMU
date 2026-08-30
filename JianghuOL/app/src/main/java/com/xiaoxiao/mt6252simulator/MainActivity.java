@@ -62,7 +62,7 @@ public class MainActivity extends Activity {
     private static final String PREF_SELECTED_SERVER = "selected_server_name";
     private static final String PREF_VIRTUAL_PAD_ENABLED = "virtual_pad_enabled";
     private static final String PREF_BATTERY_OPT_PROMPTED = "battery_opt_prompted";
-    private static final String DEFAULT_ACCOUNT_WEB_URL = "https://jh.cbhub.top";
+    private static final String DEFAULT_ACCOUNT_WEB_URL = "http://116.211.150.66:19091";
     private static final int REQ_POST_NOTIFICATIONS = 1001;
     /* Same Android button ids as bindKeyButton(up/down/left/right). */
     private static final int PAD_KEY_UP = 14;
@@ -159,6 +159,7 @@ public class MainActivity extends Activity {
         public void run() {
             pollTextInputDialog();
             pollAccountWebOpenRequest();
+            pollNeedLoginTip();
             if (textInputPolling) {
                 textInputHandler.postDelayed(this, 150);
             }
@@ -611,6 +612,10 @@ public class MainActivity extends Activity {
     }
 
     private void openAccountWebsite(){
+        openAccountWebsite(false);
+    }
+
+    private void openAccountWebsite(boolean preferLoginPage){
         /*
          * No modal AlertDialog: it steals focus and the on-screen pad stops
          * working the moment the prompt appears.  Copy URL, Toast, and open an
@@ -619,8 +624,9 @@ public class MainActivity extends Activity {
         if (isFinishing() || isDestroyed())
             return;
         refreshAccountWebUrlFromNative();
-        final String url = (accountWebUrl != null && accountWebUrl.length() > 0)
+        String base = (accountWebUrl != null && accountWebUrl.length() > 0)
                 ? accountWebUrl : DEFAULT_ACCOUNT_WEB_URL;
+        final String url = preferLoginPage ? ensureUserLoginUrl(base) : trimTrailingSlash(base);
         copyTextToClipboard("account_web_url", url);
         final Context app = getApplicationContext();
         /*
@@ -628,7 +634,10 @@ public class MainActivity extends Activity {
          * sequence while still in the foreground; opening immediately was
          * racing the guest UI and looked like a freeze.
          */
-        Toast.makeText(app, "充值链接已复制，即将打开浏览器", Toast.LENGTH_SHORT).show();
+        String toast = preferLoginPage
+                ? "无登录记录，即将打开账号登录页"
+                : "账号中心链接已复制，即将打开浏览器";
+        Toast.makeText(app, toast, Toast.LENGTH_SHORT).show();
         new Handler().postDelayed(new Runnable() {
             @Override
             public void run() {
@@ -642,6 +651,24 @@ public class MainActivity extends Activity {
                 }
             }
         }, 800);
+    }
+
+    private static String trimTrailingSlash(String url){
+        if (url == null)
+            return "";
+        String trimmed = url.trim();
+        while (trimmed.endsWith("/"))
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        return trimmed;
+    }
+
+    private static String ensureUserLoginUrl(String base){
+        String trimmed = trimTrailingSlash(base);
+        if (trimmed.length() == 0)
+            trimmed = DEFAULT_ACCOUNT_WEB_URL;
+        if (trimmed.endsWith("/user/login"))
+            return trimmed;
+        return trimmed + "/user/login";
     }
 
     private void copyTextToClipboard(String label, String text){
@@ -1232,8 +1259,29 @@ public class MainActivity extends Activity {
         int serial = nativeConsumeAccountWebOpenRequest();
         if(serial == 0)
             return;
-        Log.i(TAG, "native requested account web open serial=" + serial);
-        openAccountWebsite();
+        String reason = nativeGetAccountWebOpenReason();
+        Log.i(TAG, "native requested account web open serial=" + serial
+                + " reason=" + (reason != null ? reason : "-"));
+        openAccountWebsite(false);
+    }
+
+    private void pollNeedLoginTip(){
+        int serial = nativeConsumeNeedLoginTip();
+        if(serial == 0)
+            return;
+        Log.i(TAG, "native requested need-login tip serial=" + serial);
+        if (isFinishing() || isDestroyed())
+            return;
+        try {
+            new AlertDialog.Builder(this)
+                    .setTitle("提示")
+                    .setMessage("请先登录游戏")
+                    .setPositiveButton("确定", null)
+                    .show();
+        } catch (Exception e) {
+            Log.w(TAG, "need-login tip dialog failed", e);
+            Toast.makeText(getApplicationContext(), "请先登录游戏", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void showTextInputDialog(final int serial){
@@ -1403,6 +1451,8 @@ public class MainActivity extends Activity {
     public native String nativeGetTextInputPrompt();
     public native void nativeSubmitTextInput(String text, boolean cancelled);
     public native int nativeConsumeAccountWebOpenRequest();
+    public native String nativeGetAccountWebOpenReason();
+    public native int nativeConsumeNeedLoginTip();
     public native String nativeGetPreferredServerName();
 
     public native void keyEvent(int isPress,int key);

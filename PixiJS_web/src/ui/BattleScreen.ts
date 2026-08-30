@@ -275,6 +275,16 @@ export class BattleScreen extends Container {
   private timerAcc = 0;
   private battleMapFile = "";
   private battleMapWorld = "";
+  /**
+   * CPU copy of the last battle map pixels. After webglcontextrestored,
+   * BufferImageSource.source.update() often leaves a black sprite; rebuild
+   * from this buffer instead of reusing the dead GPU texture.
+   */
+  private mapPixels: {
+    width: number;
+    height: number;
+    rgba: Uint8ClampedArray;
+  } | null = null;
   private playbackGen = 0;
   /** Drop stale async map loads when show() races. */
   private mapLoadGen = 0;
@@ -926,34 +936,48 @@ export class BattleScreen extends Container {
 
   /**
    * After webglcontextrestored: world SceneView nudge does not cover battle.
-   * Re-upload map/unit textures and rebuild Graphics (HP fills / letterbox /
-   * foot shadows) so the stage is not left black with hollow xuetiao.
+   * BufferImageSource map/pose textures must be *recreated* from CPU RGBA —
+   * source.update() alone leaves a black stage with UC3/HUD still painting.
+   * Graphics (HP fills / letterbox / foot shadows) need DisplayObject replace.
    */
   nudgeAfterGpuResume(): void {
     if (!this.visible) return;
     try {
-      if (this.mapSprite) {
-        const ok = nudgeTextureSource(this.mapSprite.texture);
-        if (ok) this.mapSprite.visible = true;
-      }
-      for (const c of this.mapHost.children) {
-        if (c instanceof Graphics) {
-          c.clear()
-            .rect(0, 0, LCD_WIDTH, LCD_HEIGHT)
-            .fill({ color: CBE.bgDeep });
-        } else {
-          nudgeTextureSource(
-            (c as Sprite).texture as Texture | undefined,
-          );
+      if (this.mapPixels) {
+        this.applyMapTexture(
+          this.mapPixels.width,
+          this.mapPixels.height,
+          this.mapPixels.rgba,
+        );
+      } else if (this.battleMapWorld) {
+        // No CPU copy yet (load in flight / failed): bust cache and reload.
+        const world = this.battleMapWorld;
+        this.battleMapFile = "";
+        void this.loadBattleMapBg(world);
+      } else {
+        // Keep letterbox valid even without a map sprite.
+        for (const c of [...this.mapHost.children]) {
+          if (!(c instanceof Graphics)) continue;
+          const g = replaceGraphics(c);
+          g.rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgDeep });
+          g.eventMode = "none";
         }
       }
+      if (this.mapSprite) this.mapSprite.visible = true;
     } catch (e) {
-      console.warn("[battle] map nudge", e);
+      console.warn("[battle] map rebuild", e);
     }
 
-    for (const [, tex] of this.poseTexCache) {
-      nudgeTextureSource(tex);
+    // Drop dead BufferImageSource poses; paintUnitSprite rebuilds from actor RGBA.
+    for (const tex of this.poseTexCache.values()) {
+      try {
+        tex.destroy(true);
+      } catch {
+        /* ignore */
+      }
     }
+    this.poseTexCache.clear();
+    this.poseTexKey = new WeakMap();
 
     for (const u of this.units) {
       if (u.root.destroyed) continue;
@@ -963,14 +987,11 @@ export class BattleScreen extends Container {
           const g = replaceGraphics(shadow);
           g.ellipse(0, 2, 13, 5).fill({ color: 0x000000, alpha: 0.35 });
         }
-        if (u.sprite?.texture) {
-          nudgeTextureSource(u.sprite.texture);
-          if (!u.hidden) {
-            u.sprite.visible = true;
-            u.root.visible = true;
-          }
-        }
         this.paintUnitSprite(u);
+        if (u.sprite && !u.hidden) {
+          u.sprite.visible = true;
+          u.root.visible = true;
+        }
       } catch {
         /* ignore per-unit */
       }
@@ -1835,15 +1856,36 @@ export class BattleScreen extends Container {
   }
 
   private paintMap(scene: LoadedScene): void {
+    const expected = scene.width * scene.height * 4;
+    const rgba = new Uint8ClampedArray(expected);
+    rgba.set(
+      scene.rgba.length >= expected
+        ? scene.rgba.subarray(0, expected)
+        : scene.rgba,
+    );
+    this.mapPixels = {
+      width: scene.width,
+      height: scene.height,
+      rgba,
+    };
+    this.applyMapTexture(scene.width, scene.height, rgba);
+  }
+
+  /** Sync map sprite + letterbox from CPU pixels (load path and GPU resume). */
+  private applyMapTexture(
+    width: number,
+    height: number,
+    rgba: Uint8ClampedArray,
+  ): void {
     const prev = this.mapSprite;
-    const tex = rgbaToTexture(scene.width, scene.height, scene.rgba);
+    const tex = rgbaToTexture(width, height, rgba);
     const spr = new Sprite(tex);
     // Fit battle map into stage band (top..bottom), cover LCD width.
     const stageH = STAGE_BOTTOM - STAGE_TOP;
-    const scale = Math.max(LCD_WIDTH / scene.width, stageH / scene.height);
+    const scale = Math.max(LCD_WIDTH / width, stageH / height);
     spr.scale.set(scale);
-    spr.x = (LCD_WIDTH - scene.width * scale) / 2;
-    spr.y = STAGE_TOP + (stageH - scene.height * scale) / 2;
+    spr.x = (LCD_WIDTH - width * scale) / 2;
+    spr.y = STAGE_TOP + (stageH - height * scale) / 2;
     this.mapSprite = spr;
     // Dark letterbox under cover-scaled map (never the old green flash tint).
     for (const c of [...this.mapHost.children]) {
@@ -1976,7 +2018,11 @@ export class BattleScreen extends Container {
       this.poseTexCache.set(key, tex);
       this.evictUnusedPoseTextures();
     }
-    if (this.poseTexKey.get(u.sprite) !== key) {
+    if (
+      this.poseTexKey.get(u.sprite) !== key ||
+      u.sprite.texture?.destroyed ||
+      u.sprite.texture !== tex
+    ) {
       u.sprite.texture = tex;
       this.poseTexKey.set(u.sprite, key);
     }

@@ -535,6 +535,12 @@ export class GameSession {
   npcs: NpcActor[] = [];
   /** SCE kind=3 combat spawns for the current map (not in 27/11). */
   sceneMonsters: NpcActor[] = [];
+  /**
+   * Full SCE combat seeds for this map shell. Unlike `sceneMonsters` (live /
+   * unsuppressed only), this stays populated while engaged spawns are hidden
+   * for the post-battle respawn delay — hangup must still pick map species.
+   */
+  sceneMonsterCatalog: NpcActor[] = [];
   /** Last 26/1 talk target — challenge confirm binds guide NPC visuals. */
   lastNpcId = 0;
   /**
@@ -858,6 +864,7 @@ export class GameSession {
   private clearRoleBoundState(notify = false): void {
     this.npcs = [];
     this.sceneMonsters = [];
+    this.sceneMonsterCatalog = [];
     this.lastNpcId = 0;
     this.pendingChallengeGuideActorId = 0;
     this.pendingChallengeEnemyId = 0;
@@ -1285,6 +1292,7 @@ export class GameSession {
       // Drop outdoor SCE combat rows immediately — city maps have none, and a
       // stale bee/ghostfire pool would still feed F-key / collide challenges.
       this.sceneMonsters = [];
+      this.sceneMonsterCatalog = [];
       this.clearNpcTaskPrompts("scene-change");
     }
     const gen = ++this.enterSceneGen;
@@ -1622,6 +1630,22 @@ export class GameSession {
   }
 
   /**
+   * Replace both the live wild pool and the stable SCE seed catalog (map load /
+   * combat-spawn refresh). Do not call when only syncing live/suppressed lists.
+   */
+  adoptSceneCombatSpawns(monsters: NpcActor[]): void {
+    const copy = monsters.map((m) => ({ ...m }));
+    this.sceneMonsterCatalog = copy;
+    this.sceneMonsters = monsters.map((m) => ({ ...m }));
+  }
+
+  /** Drop live + seed pools (map hop / role wipe). */
+  clearSceneCombatSpawns(): void {
+    this.sceneMonsters = [];
+    this.sceneMonsterCatalog = [];
+  }
+
+  /**
    * Same species seed used by collide / F-key / hangup. Challenge assigns
    * catalog `challenge_enemy_id` as preferNpcId (hangup path + id).
    */
@@ -1660,10 +1684,13 @@ export class GameSession {
         /^e_/i.test(n.actorResource) ||
         (/^e_/i.test(n.name) && n.actorId < 100000),
     );
-    const pool = [...this.sceneMonsters, ...catalogMonsters];
     if (!id) {
-      // Prefer SCE combat spawns, then catalog e_* rows; never town NPCs.
-      encounter = pickNearest(pool);
+      // Live SCE first; if every spawn is post-battle-suppressed, reuse map
+      // seeds (same species/home). Never invent hard-coded 9001 (formula Lv45).
+      encounter =
+        pickNearest(this.sceneMonsters) ||
+        pickNearest(this.sceneMonsterCatalog) ||
+        pickNearest(catalogMonsters);
       if (encounter) {
         id = encounter.battleActorId ?? encounter.actorId;
         index = id;
@@ -1671,7 +1698,9 @@ export class GameSession {
         battleY = (encounter.homeY ?? encounter.y) | 0;
       }
     } else if (id >= 0x70000000) {
-      const local = this.sceneMonsters.find((n) => n.actorId === id);
+      const local =
+        this.sceneMonsters.find((n) => n.actorId === id) ??
+        this.sceneMonsterCatalog.find((n) => n.actorId === id);
       encounter = local ?? null;
       id = local?.battleActorId ?? id;
       index = id;
@@ -1683,9 +1712,13 @@ export class GameSession {
       // Catalog / challenge_enemy_id: keep id + catalog actor. Do not borrow
       // nearest map spawn visual (wrong species) or its tile (pos remap stole
       // floor bind stats). Neutral 1,1 matches instance-challenge wire fallback.
-      const local = this.sceneMonsters.find(
-        (n) => n.battleActorId === id || n.actorId === id,
-      );
+      const local =
+        this.sceneMonsters.find(
+          (n) => n.battleActorId === id || n.actorId === id,
+        ) ??
+        this.sceneMonsterCatalog.find(
+          (n) => n.battleActorId === id || n.actorId === id,
+        );
       if (local) {
         encounter = local;
         battleX = (local.homeX ?? local.x) | 0;
@@ -1699,8 +1732,8 @@ export class GameSession {
       }
     }
     if (!id) {
-      id = 9001;
-      index = 0;
+      this.pendingEncounterVisual = null;
+      return { id: 0, index: 0, battleX: px | 0, battleY: py | 0, encounter: null };
     }
     const catalogActor = monsterActorForEnemyId(id) || "";
     const explicitCatalog = (preferNpcId ?? 0) !== 0;
@@ -1742,8 +1775,10 @@ export class GameSession {
       py,
       preferNpcId,
     );
-    if (id === 9001 && !preferNpcId) {
-      console.warn("[session] battle wild id=9001 (no monster catalog)");
+    if (!(id >>> 0)) {
+      console.warn("[session] battle wild refused (no scene monster)", this.scene);
+      this.setPhase("world", "no-scene-monster");
+      return;
     }
     this.setPhase("battle-start", `id=${id} index=${index} pos=${battleX},${battleY}`);
     this.inBattle = true;

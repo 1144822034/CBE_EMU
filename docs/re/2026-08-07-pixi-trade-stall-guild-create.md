@@ -49,5 +49,5 @@ status: implemented-client
 ## Negative / unresolved
 
 - 帮派列表/管理/审批 UI 未接（仅创建）
-- 入帮邀请对端 `10/14` 仍 unresolved
+- 入帮邀请对端 `10/13`+`10/15` 已接：见 `2026-08-29-pixi-guild-invite-inbound.md`
 - 勿用默认物品/金币掩盖空报价或失败 `21/8`

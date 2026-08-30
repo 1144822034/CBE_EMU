@@ -193,6 +193,6 @@ Pixi：`parseSceneMoveSeeds` + `parseBattleStart(ctx)`；`parseActionInfoScript`
 
 - 背包 `iteminfo` 字段布局未完全取证，列表可能显示 `unresolved` 数字
 - 组队连打、梦境、coolmall、原生银行不在本阶段
-- 遇怪 `4/1` 的 id/index 在无怪物目录时仍 fallback `9001`
+- 遇怪 `4/1` 的 id/index：本图无 live SCE 时回落 `sceneMonsterCatalog` 种子；**不再** fallback `9001`（见 `2026-08-30-hangup-fallback-9001-high-monster.md`）
 - `codeVersion` 现硬编码为 2；与服端文件不一致时需对齐或改为读 `client_code_version.txt`
 - 多怪 wire 表（N=2/3）与技能列表仍待实网逐条回归

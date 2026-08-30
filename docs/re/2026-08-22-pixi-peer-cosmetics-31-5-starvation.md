@@ -53,7 +53,7 @@ Date: 2026-08-22
 | 自有 `31/2` | `cosmeticsStatePushPending` 仍下一 poll 即刷 |
 | idle 快路径 | 仅 `poll_needs_cosmetics_flush` 为真时阻塞 |
 | 服务端踢线 | `presence_timeout_ms=30000`（300 tick × 100ms） |
-| Gateway 代发 | `PIX_GATEWAY_KEEPALIVE_MS` 默认 **30000**；`PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS` 默认 **60000** |
+| Gateway 代发 | `PIX_GATEWAY_KEEPALIVE_MS` 默认 **0（关）**；需代发时设 `30000`；`PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS` 默认 **60000** |
 
 ## unresolved
 

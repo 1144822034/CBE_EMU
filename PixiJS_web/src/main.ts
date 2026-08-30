@@ -1753,21 +1753,23 @@ async function main(): Promise<void> {
     // Cross-map only: wiping monsters on the same shell would reset hangup
     // respawn timers and force another SCE compose.
     if (!same) {
-      session.sceneMonsters = [];
+      session.clearSceneCombatSpawns();
       view.actors.setSceneMonsters([]);
     }
     const scene = await loadSceneMap(name);
     if (!same) {
-      session.sceneMonsters = (scene.combatSpawns ?? []).map((s, i) => ({
-        actorId: 0x70000000 + i,
-        x: s.x,
-        y: s.y,
-        name: formatMonsterMapName(s.name, s.sceActorId),
-        actorResource: s.mapActorResource,
-        battleActorResource: s.battleActorResource,
-        scriptName: `sce_combat_${s.sceActorId}`,
-        battleActorId: s.sceActorId,
-      }));
+      session.adoptSceneCombatSpawns(
+        (scene.combatSpawns ?? []).map((s, i) => ({
+          actorId: 0x70000000 + i,
+          x: s.x,
+          y: s.y,
+          name: formatMonsterMapName(s.name, s.sceActorId),
+          actorResource: s.mapActorResource,
+          battleActorResource: s.battleActorResource,
+          scriptName: `sce_combat_${s.sceActorId}`,
+          battleActorId: s.sceActorId,
+        })),
+      );
     }
     await view.showScene(scene, x, y);
   };
@@ -1816,16 +1818,18 @@ async function main(): Promise<void> {
     try {
       const scene = await loadSceneMap(name, { forceReload: true });
       if ((session.scene || "") !== name) return;
-      session.sceneMonsters = (scene.combatSpawns ?? []).map((s, i) => ({
-        actorId: 0x70000000 + i,
-        x: s.x,
-        y: s.y,
-        name: formatMonsterMapName(s.name, s.sceActorId),
-        actorResource: s.mapActorResource,
-        battleActorResource: s.battleActorResource,
-        scriptName: `sce_combat_${s.sceActorId}`,
-        battleActorId: s.sceActorId,
-      }));
+      session.adoptSceneCombatSpawns(
+        (scene.combatSpawns ?? []).map((s, i) => ({
+          actorId: 0x70000000 + i,
+          x: s.x,
+          y: s.y,
+          name: formatMonsterMapName(s.name, s.sceActorId),
+          actorResource: s.mapActorResource,
+          battleActorResource: s.battleActorResource,
+          scriptName: `sce_combat_${s.sceActorId}`,
+          battleActorId: s.sceActorId,
+        })),
+      );
       view.actors.setSceneMonsters(session.sceneMonsters);
       console.info(
         `[world-boss] combat-spawn refresh reason=${reason} count=${session.sceneMonsters.length}`,
@@ -7499,6 +7503,25 @@ dialog.hide();
           syncLcdResolution(lcdCssScaleFromWrap());
           app.renderer.resize(LCD_WIDTH, LCD_HEIGHT);
           shell.layout();
+          // WebView often finishes GL restore a frame after contextrestored;
+          // re-nudge battle map/units so BufferImageSource rebuild sticks.
+          try {
+            view.nudgeAfterGpuResume();
+          } catch {
+            /* ignore */
+          }
+          try {
+            if (phase === "battle" || battle.visible) {
+              battle.nudgeAfterGpuResume();
+            }
+          } catch {
+            /* ignore */
+          }
+          try {
+            hud.nudgeAfterGpuResume();
+          } catch {
+            /* ignore */
+          }
           app.render();
         } catch (e) {
           console.warn("[gl] late layout refit", e);

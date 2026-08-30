@@ -143,7 +143,7 @@
 
 修改：
 
-- `destroyMarker` 先 `clear()` 妆容；APK 只给最近 6 名附近玩家上传翅/骑（称号仍全员）。
+- `destroyMarker` 先 `clear()` 妆容；浏览器与 APK 都只给最近 6 名附近玩家上传翅/骑/动态称号（落选回退经典称号）。
 - 显示中的 plist `autoGarbageCollect=false`；native 闲置卸 GPU 延迟 30s。
 - `powerPreference=low-power`、TextureGC 回到 60s。
 - `webglcontextlost` 立即 `WEBGL_lose_context.restoreContext()`；`setInterval` 不依赖 ticker；reload 上限 6。
@@ -152,7 +152,7 @@
 
 `resolution=1` 会把整块 240×400 画布（字 + 地图）一起拉伸，UC3 变糊。Framebuffer 相对妆容 PNG 很小，不是黑屏主因。
 
-已恢复 native LCD `resolution` 跟 CSS 缩放（上限 3），字体/HUD 与浏览器一致。画面侧 GPU 仍靠：离开玩家 `clear()` 妆容、附近翅/骑最多 6 人、plist 闲置 unload。
+已恢复 native LCD `resolution` 跟 CSS 缩放（上限 3），字体/HUD 与浏览器一致。画面侧 GPU 仍靠：离开玩家 `clear()` 妆容、附近翅/骑/称号最多 6 人、plist 闲置 unload。
 
 验证：城镇地名条 / 菜单字应接近 HTML 软键清晰度；黑屏路径仍走上一节。
 
@@ -165,3 +165,9 @@
 - 战斗：同 `b_*.sce` 不重绘底图；进出战斗保留姿态贴图缓存；`resolveBattleSce` 结果记住。
 
 验证：同图走动/战后回图不应再卡一下重绘；挂机连续遇敌战斗底图不闪、角色贴图不重新上传。
+
+## 2026-08-30 距离 cap 扩到动态称号
+
+根因补充：`peerHeavyAllowed` 原先只统计翅/骑，城镇全员动态称号仍吃 plist + 像素采样。
+
+修改：有 `eqWing|eqMount|eqChenghao` 的 peer 统一按距玩家距离排序；**浏览器与 APK** 均仅最近 6 人保留三套图集。落选者 `wing/mount/chenghao.clear()`，称号回退 `classicTitle` 文字/GIF。无妆容 peer 不进 500ms 刷新路径。本人妆容不受 cap。

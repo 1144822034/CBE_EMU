@@ -34,6 +34,7 @@ import {
   buildNearbyPageRequest,
   buildPlayerInfoRequest,
   buildFriendAddRequest,
+  buildFriendDeleteRequest,
   buildSparRequest,
   buildTradeRequest,
   buildTradeReplyRequest,
@@ -41,6 +42,7 @@ import {
   buildTradeConfirmRequest,
   buildTradeOfferRequest,
   buildGuildInviteRequest,
+  buildGuildInviteReplyRequest,
   buildGuildCreateStartRequest,
   buildGuildCreateNameRequest,
   buildGuildCreateCommitRequest,
@@ -48,6 +50,7 @@ import {
   parseTradePackets,
   parseSparAck,
   parseGuildCreatePackets,
+  parseGuildInvitePackets,
   demoGroupinfoBlob,
   type TeamMember,
 } from "../src/net/protocolSocial";
@@ -55,6 +58,8 @@ import {
   buildGuildListRequest,
   buildGuildDetailRequest,
   buildGuildLeaveRequest,
+  buildGuildDisbandRequest,
+  buildGuildKickRequest,
   buildGuildMemberPageRequest,
   buildGuildApplyRequest,
   buildGuildApplicationPageRequest,
@@ -571,6 +576,10 @@ assert(moveWt.length === 32, "2/1 moveinfo blob WT len=32 (not bare raw 30)");
   assert(buildNearbyPageRequest(0).length > 10, "2/7 nearby page");
   assert(buildPlayerInfoRequest(1).length > 10, "10/2 player info");
   assert(buildFriendAddRequest(1).length > 10, "10/3 friend add");
+  {
+    const del = buildFriendDeleteRequest(1);
+    assert(del[4] === 1 && del[5] === 10 && del[6] === 9, "10/9 friend delete");
+  }
 
   const spar = buildSparRequest(0x6a010001);
   const sparStr = String.fromCharCode(...spar.filter((b) => b >= 0x20 && b < 0x7f));
@@ -594,6 +603,39 @@ assert(moveWt.length === 32, "2/1 moveinfo blob WT len=32 (not bare raw 30)");
   const guildStr = String.fromCharCode(...guild.filter((b) => b >= 0x20 && b < 0x7f));
   assert(guild[5] === 10 && guild[6] === 13, "guild invite 10/13");
   assert(guildStr.includes("id") && guildStr.includes("fid"), "guild id+fid");
+  {
+    const reply = buildGuildInviteReplyRequest(10001, true);
+    assert(reply[5] === 10 && reply[6] === 15, "guild invite reply 10/15");
+    const s = String.fromCharCode(...reply.filter((b) => b >= 0x20 && b < 0x7f));
+    assert(s.includes("id") && s.includes("result"), "reply id+result");
+  }
+  {
+    const b = new WtBuilder();
+    b.object(1, 10, 13)
+      .u32("id", 10001)
+      .u32("fid", 4)
+      .string("fname", "测试帮")
+      .string("name", "邀请人");
+    const g = parseGuildInvitePackets(ingestPacket(b.finishResponse())!);
+    assert(
+      g.invite?.kind === "guild" &&
+        g.invite.name === "邀请人" &&
+        g.invite.guildName === "测试帮" &&
+        g.invite.guildId === 4,
+      "10/13 inbound guild invite",
+    );
+  }
+  {
+    const b = new WtBuilder();
+    b.object(1, 10, 15).u8("result", 1).string("name", "被邀请人");
+    const g = parseGuildInvitePackets(ingestPacket(b.finishResponse())!);
+    assert(
+      g.notice?.kind === "guild_invite_result" &&
+        g.notice.result === 1 &&
+        g.notice.name === "被邀请人",
+      "10/15 guild invite result",
+    );
+  }
 
   assert(buildGuildCreateStartRequest()[5] === 10 && buildGuildCreateStartRequest()[6] === 30, "guild create start 10/30");
   assert(buildGuildCreateNameRequest("测试帮")[6] === 28, "guild name 10/28");
@@ -627,6 +669,18 @@ assert(moveWt.length === 32, "2/1 moveinfo blob WT len=32 (not bare raw 30)");
   assert(buildGuildListRequest(1)[5] === 10 && buildGuildListRequest(1)[6] === 21, "guild list 10/21");
   assert(buildGuildDetailRequest(4)[6] === 22, "guild detail req 10/22");
   assert(buildGuildLeaveRequest(10024)[6] === 22, "guild leave req 10/22");
+  {
+    const dis = buildGuildDisbandRequest(10024);
+    assert(dis[5] === 10 && dis[6] === 22, "guild disband 10/22");
+    const s = String.fromCharCode(...dis.filter((b) => b >= 0x20 && b < 0x7f));
+    assert(s.includes("force"), "disband force field");
+  }
+  {
+    const kick = buildGuildKickRequest(10024, 3);
+    assert(kick[5] === 10 && kick[6] === 40, "guild kick 10/40");
+    const s = String.fromCharCode(...kick.filter((b) => b >= 0x20 && b < 0x7f));
+    assert(s.includes("id") && s.includes("rid"), "kick id+rid");
+  }
   assert(buildGuildMemberPageRequest(1)[6] === 37, "guild members 10/37");
   assert(buildGuildApplyRequest(4)[6] === 31, "guild apply 10/31");
   assert(buildGuildApplicationPageRequest(1)[6] === 32, "guild apps 10/32");
@@ -636,6 +690,12 @@ assert(moveWt.length === 32, "2/1 moveinfo blob WT len=32 (not bare raw 30)");
     b.object(1, 10, 22).u8("result", 1);
     const g = parseGuildManagePackets(ingestPacket(b.finishResponse())!);
     assert(g.leaveResult?.result === 1, "10/22 leave ok");
+  }
+  {
+    const b = new WtBuilder();
+    b.object(1, 10, 40).u8("result", 1);
+    const g = parseGuildManagePackets(ingestPacket(b.finishResponse())!);
+    assert(g.kickResult?.result === 1 && g.kickResult.tip.includes("逐出"), "10/40 kick ok");
   }
   {
     const b = new WtBuilder();

@@ -770,14 +770,18 @@ static void vm_client_capture_remote_observation(const u8 *response,
 /*
  * Title no-account "start" sends WT 1/1/12 with empty username/password.  The
  * service historically auto-issued guestXXXX credentials there.  On Android
- * we cancel that path and ask Java to open ACCOUNT_WEB_URL instead.
+ * we cancel that path and tip the player to use 「登录游戏」 first.
  */
 static volatile int g_androidAccountWebOpenSerial = 0;
 static volatile int g_androidAccountWebOpenPending = 0;
 static u32 g_androidAccountWebOpenLastMs = 0;
+static char g_androidAccountWebOpenReason[48];
 static volatile int g_androidRechargeBlockedTipSerial = 0;
 static volatile int g_androidRechargeBlockedTipPending = 0;
 static u32 g_androidRechargeBlockedTipLastMs = 0;
+static volatile int g_androidNeedLoginTipSerial = 0;
+static volatile int g_androidNeedLoginTipPending = 0;
+static u32 g_androidNeedLoginTipLastMs = 0;
 
 int cbeAndroidConsumeAccountWebOpenRequest(void)
 {
@@ -787,12 +791,25 @@ int cbeAndroidConsumeAccountWebOpenRequest(void)
     return g_androidAccountWebOpenSerial;
 }
 
+const char *cbeAndroidGetAccountWebOpenReason(void)
+{
+    return g_androidAccountWebOpenReason;
+}
+
 int cbeAndroidConsumeRechargeBlockedTip(void)
 {
     if (!g_androidRechargeBlockedTipPending)
         return 0;
     g_androidRechargeBlockedTipPending = 0;
     return g_androidRechargeBlockedTipSerial;
+}
+
+int cbeAndroidConsumeNeedLoginTip(void)
+{
+    if (!g_androidNeedLoginTipPending)
+        return 0;
+    g_androidNeedLoginTipPending = 0;
+    return g_androidNeedLoginTipSerial;
 }
 
 static void vm_android_request_account_web_open(const char *reason)
@@ -806,6 +823,11 @@ static void vm_android_request_account_web_open(const char *reason)
     if (g_androidAccountWebOpenSerial == 0)
         g_androidAccountWebOpenSerial = 1;
     g_androidAccountWebOpenPending = 1;
+    if (reason != NULL && reason[0] != 0)
+        snprintf(g_androidAccountWebOpenReason,
+                 sizeof(g_androidAccountWebOpenReason), "%s", reason);
+    else
+        g_androidAccountWebOpenReason[0] = 0;
     printf("[info][network] redirected to account_web reason=%s serial=%d\n",
            reason && reason[0] ? reason : "-",
            g_androidAccountWebOpenSerial);
@@ -826,6 +848,22 @@ static void vm_android_request_recharge_blocked_tip(const char *reason)
     printf("[info][wpay] recharge blocked tip reason=%s serial=%d\n",
            reason && reason[0] ? reason : "-",
            g_androidRechargeBlockedTipSerial);
+}
+
+static void vm_android_request_need_login_tip(const char *reason)
+{
+    u32 now = SDL_GetTicks();
+    if (g_androidNeedLoginTipLastMs != 0 &&
+        now - g_androidNeedLoginTipLastMs < 2500u)
+        return;
+    g_androidNeedLoginTipLastMs = now;
+    ++g_androidNeedLoginTipSerial;
+    if (g_androidNeedLoginTipSerial == 0)
+        g_androidNeedLoginTipSerial = 1;
+    g_androidNeedLoginTipPending = 1;
+    printf("[info][network] need_login tip reason=%s serial=%d\n",
+           reason && reason[0] ? reason : "-",
+           g_androidNeedLoginTipSerial);
 }
 
 static bool vm_client_packet_string_field_empty(const u8 *packet, u32 packetLen,
@@ -4866,6 +4904,39 @@ static void vm_net_mock_async_shutdown(void)
     pthread_mutex_unlock(&g_vmClientAsync.mutex);
 }
 
+#ifdef CBE_PLATFORM_ANDROID
+/*
+ * Local empty WT (objectCount=0) on the same connectId so title net callback
+ * runs and clears the login progress bar without forwarding to the service.
+ */
+static bool vm_client_deliver_local_empty_wt(u32 connectId)
+{
+    u8 packet[8];
+    vm_net_channel *channel = scheduler_find_net_channel(connectId);
+
+    if (channel == NULL || channel->callback == 0)
+    {
+        printf("[warn][network] empty_wt_ack no channel connect=%u\n",
+               connectId);
+        return false;
+    }
+    memset(packet, 0, sizeof(packet));
+    vm_client_finish_wt_packet(packet, 5, 0);
+    if (vm_client_deliver_wt_response(packet, 5, 7, channel->callback,
+                                      channel->context, connectId, false,
+                                      false) == 0)
+    {
+        printf("[warn][network] empty_wt_ack deliver failed connect=%u\n",
+               connectId);
+        return false;
+    }
+    printf("[info][network] empty_wt_ack connect=%u event=7 len=5 "
+           "objects=0\n",
+           connectId);
+    return true;
+}
+#endif
+
 static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
 {
     u8 request[VM_CLIENT_REQUEST_MAX];
@@ -4880,12 +4951,12 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     if (vm_client_is_android_no_account_login(request, readLen))
     {
         /*
-         * Product path opens ACCOUNT_WEB (:19091) instead of auto-guest.
-         * Do not probe game-login codeVersion here — account-center register /
-         * login must remain usable even when the APK is behind the game gate.
-         * Saved-credential 「开始游戏」 still hits WT login and the server gate.
+         * No saved login record: 「开始游戏」 builds empty WT 1/1/12.
+         * Do not forward. Tip「请先登录游戏」and locally ack with an empty
+         * WT so the title progress bar / net wait is dismissed.
          */
-        vm_android_request_account_web_open("no_account_login");
+        vm_android_request_need_login_tip("no_account_start");
+        (void)vm_client_deliver_local_empty_wt(connectId);
         return;
     }
 #endif

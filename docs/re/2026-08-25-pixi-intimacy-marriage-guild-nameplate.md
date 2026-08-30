@@ -62,7 +62,7 @@ status: implemented
 1. **自己**：`setPlayerGuild` 仅挂在 `onCharacterStats`；进图只刷名字/称号，未拉 `1/1/21`，缓存常空。
 2. **附近**：`capture_online_presence` 只刷 `onlineEq*`，从不写 `onlineGuildName`；`enqueue_peer_cosmetics` 仅在 eq 全 0 时才 DB 补齐 → 有翅/骑/称号的对端 `31/5` 经常无 `guild`。
 
-### 修复
+### 修复（2026-08-25）
 
 | 层 | 改动 |
 |----|------|
@@ -70,6 +70,17 @@ status: implemented
 | S 31/5 | `enqueue_peer_cosmetics`：eq 或 guild 缺失都从 role DB `sync_online_cosmetics` |
 | C 进图 | 立刻 `setPlayerGuild(cache)` + `openCharacterStats()` |
 | C 会话 | `1/1/21` 写回 `guildName`；`31/5` 空 guild 不覆盖已知门派行 |
+
+### 回归 2026-08-29：附近仍不见门派
+
+文档写了 presence 同步，但当时 commit **只加了 `onlineGuildName` 字段**，capture 路径仍只写 `onlineEq*`。入队侧虽可 DB 补齐，eq 已缓存时仍常把空 guild 写入 notice；客户端又为「eq-only 不擦门派」保留旧值 → 若从未收到过非空 guild，名板一直空。自己走 `1/1/21`，所以只表现为「能看见自己、看不见附近」。
+
+| 层 | 改动 |
+|----|------|
+| S presence | capture 用 `role_guild_info` 写入 `onlineGuildName`；offline 清零 |
+| S 31/5 | enqueue 用本地 `guildForNotice`（sync 后拷贝）；`31/5` **总是带 `guild` 字段**（可空，便于退帮清除） |
+| S 入帮/退帮/建帮 | `publish_guild_cosmetics` → sync + 同图广播 `31/5` |
+| C | `31/5.guild` 权威应用（空/`无帮派` 清名板），不再用 prev 兜底 |
 
 ## Negative
 

@@ -35,4 +35,5 @@ MySQL 加载，于是非当前角色的改动表现为「没反应」。
 
 ## 已知风险
 
-给予物品路径仍主要依赖内存 capture，未走同一 scoped save；若出现同类「非当前角色赠物丢失」，应同样按 `roleId` 持久化。
+给予物品路径已在 2026-08-29 补上同一 scoped save，见
+`docs/re/2026-08-29-admin-grant-item-persist.md`。

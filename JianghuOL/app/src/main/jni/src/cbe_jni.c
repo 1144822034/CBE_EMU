@@ -31,7 +31,9 @@ extern const char *cbeAndroidInputGetTextUtf8(void);
 extern const char *cbeAndroidInputGetPromptUtf8(void);
 extern void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancelled);
 extern int cbeAndroidConsumeAccountWebOpenRequest(void);
+extern const char *cbeAndroidGetAccountWebOpenReason(void);
 extern int cbeAndroidConsumeRechargeBlockedTip(void);
+extern int cbeAndroidConsumeNeedLoginTip(void);
 extern const char *cbeAndroidGetPreferredServerName(void);
 extern void keyEvent(int type, int key);
 extern void mouseEvent(int type, int x, int y);
@@ -323,12 +325,27 @@ Java_com_xiaoxiao_mt6252simulator_MainActivity_nativeConsumeAccountWebOpenReques
     return cbeAndroidConsumeAccountWebOpenRequest();
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_xiaoxiao_mt6252simulator_MainActivity_nativeGetAccountWebOpenReason(JNIEnv *env, jobject thiz)
+{
+    (void)thiz;
+    return (*env)->NewStringUTF(env, cbeAndroidGetAccountWebOpenReason());
+}
+
 JNIEXPORT jint JNICALL
 Java_com_xiaoxiao_mt6252simulator_MainActivity_nativeConsumeRechargeBlockedTip(JNIEnv *env, jobject thiz)
 {
     (void)env;
     (void)thiz;
     return cbeAndroidConsumeRechargeBlockedTip();
+}
+
+JNIEXPORT jint JNICALL
+Java_com_xiaoxiao_mt6252simulator_MainActivity_nativeConsumeNeedLoginTip(JNIEnv *env, jobject thiz)
+{
+    (void)env;
+    (void)thiz;
+    return cbeAndroidConsumeNeedLoginTip();
 }
 
 JNIEXPORT jstring JNICALL

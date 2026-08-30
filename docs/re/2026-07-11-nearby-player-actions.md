@@ -342,8 +342,10 @@ side=1, left_count=1, right_count=1
 
 ### 其余邀请与请求
 
-入帮邀请发送器仍会在发起端立即显示“已发送”提示，服务端目前仅返回空 WT
-传输确认；它的目标端入站通知与接受/拒绝协议尚未根据客户端证据实现。
+入帮邀请发送器在发起端显示“已发送”提示；服务端 empty-WT ack，并对目标 session
+排队 social notice。目标端 scene-sync 投递 `10/13 {id,fid,fname,name}`，确认后发
+`1/10/15 {id,result}`；邀请方 poll 收到 `10/15` 结果 tip。详见
+`2026-08-29-pixi-guild-invite-inbound.md`。
 
 negative_evidence:
   missing_or_bad_field: `29/4` 缺少 `equipinfo` 时，`HandleEquipInfoResponse` 走“查看玩家装备信息异常”分支；`result=1` 配合 `num=0`/零行流会让装备查看状态半初始化。`work` 若错误写为持久化职业值 `1..3`，职业显示会错位；职业 3 更会使 `2*work+sex` 越过六项角色资源表，随后在 `DrawMapTileLayer(0x01004E9C)` 访问无效地图层并闪退。
@@ -353,6 +355,6 @@ unknowns:
   - name: 切磋中的道具使用与主动技能状态效果
     current_value: 普攻、伤害型技能、HP=0 离场已同步；切磋/比武 `4/3` 已纳入 duel 回合提交（用药/血壶可推进，双方用药不卡死）；状态效果仍部分 unresolved
     why_kept: 状态效果是否应在结束后保留仍缺完整契约；道具路径见 `2026-08-10-pixi-arena-biwu.md`。
-  - name: 入帮邀请的目标端入站通知与接受/拒绝包
-    current_value: 未实现
-    why_kept: 当前没有完整的目标端确认解析契约；伪造成功包会跳过真实目标端流程。
+  - name: 入帮邀请发送失败的 10/14 tip
+    current_value: 服侧仅记 reason 日志，不回 10/14
+    why_kept: CBE subtype 14 为失败 tip；邀请方目前依赖本地“已发送”，失败不感知。

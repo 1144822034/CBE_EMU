@@ -6,13 +6,13 @@
  *   PIX_GATEWAY_HOST / PIX_GATEWAY_PORT — listen bind (default 0.0.0.0:19092)
  *   PIX_TCP_HOST / PIX_TCP_PORT — mock-server (default 127.0.0.1:19090)
  *   PIX_ADMIN_HOST / PIX_ADMIN_PORT — admin HTTP for /api/* proxy
- *     (monster-levels, recharge/create, register; default same host as TCP, port 19091)
- *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 30000; 0=off)
+ *     (monster-levels, npc-scenes, recharge/create, register; default same host as TCP, port 19091)
+ *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 0=off; e.g. 30000 to enable)
  *   PIX_GATEWAY_KEEPALIVE_IDLE_MS — silence before synth poll (default 2200)
  *   PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS — mock TCP read budget per CBMS (default 60000)
  *   PIX_GATEWAY_ORPHAN_MS — after WS drop (no DISCONNECT), keep TCP scene-poll
  *     for this clientId so mock presence does not heartbeat-timeout (default
- *     600000 = 10min; 0=off). Client LiveTransport reconnects with same id.
+ *     0=off; e.g. 600000 = 10min). Client LiveTransport reconnects with same id.
  *   PIX_GATEWAY_MOCK_TCP_MAX — max concurrent outbound mock TCP sockets (default
  *     48; prevents Windows ephemeral-port EADDRINUSE under login brute force).
  *   PIX_GATEWAY_WS_PER_IP_MAX — max new WS handshakes per IPv4 per 60s (default
@@ -25,6 +25,10 @@
  * After the client arms SCENE_POLL (in-world), this process can run a Node
  * interval and synthesize idle scene-polls so Android WebView timer freezes do
  * not cause server heartbeat-timeout. See docs/re/2026-08-10-pixi-gateway-idle-keepalive.md.
+ *
+ * When keepalive/orphan are off (default): WS close without an explicit CBMS
+ * DISCONNECT immediately forwards DISCONNECT to mock TCP so role data flushes
+ * instead of waiting for heartbeat-timeout.
  */
 import http from "node:http";
 import net from "node:net";
@@ -406,6 +410,10 @@ const server = http.createServer((req, res) => {
     proxyAdminApi(req, res, "/api/monster-levels", { methods: ["GET"] });
     return;
   }
+  if (path === "/api/npc-scenes") {
+    proxyAdminApi(req, res, "/api/npc-scenes", { methods: ["GET"] });
+    return;
+  }
   if (path === "/api/recharge/create") {
     proxyAdminApi(req, res, "/api/recharge/create", { methods: ["POST"] });
     return;
@@ -458,6 +466,9 @@ server.listen(listenPort, listenHost, () => {
     `[ws-gateway] http /api/monster-levels -> http://${adminHost}:${adminPort}/api/monster-levels`,
   );
   console.log(
+    `[ws-gateway] http /api/npc-scenes -> http://${adminHost}:${adminPort}/api/npc-scenes`,
+  );
+  console.log(
     `[ws-gateway] http /api/recharge/create -> http://${adminHost}:${adminPort}/api/recharge/create`,
   );
   console.log(
@@ -481,10 +492,10 @@ process.on("unhandledRejection", (err) => {
 const CBMS_FLAG_SCENE_POLL = 0x2;
 const CBMS_FLAG_DISCONNECT = 0x4;
 /**
- * Idle scene-poll (presence keepalive). Default 30000ms (matches ~30s kick).
- * Set PIX_GATEWAY_KEEPALIVE_MS=0 to disable. Unrelated to mock hangup 2/10.
+ * Idle scene-poll (presence keepalive). Default off — client/native FGS polls.
+ * Set PIX_GATEWAY_KEEPALIVE_MS=30000 to re-enable. Unrelated to mock hangup 2/10.
  */
-const GATEWAY_KEEPALIVE_MS = Number(process.env.PIX_GATEWAY_KEEPALIVE_MS || 30000);
+const GATEWAY_KEEPALIVE_MS = Number(process.env.PIX_GATEWAY_KEEPALIVE_MS || 0);
 /** Only synth poll when client has been silent this long (avoid double-poll races). */
 const GATEWAY_KEEPALIVE_IDLE_MS = Number(
   process.env.PIX_GATEWAY_KEEPALIVE_IDLE_MS || 2200,
@@ -492,12 +503,12 @@ const GATEWAY_KEEPALIVE_IDLE_MS = Number(
 /**
  * After abrupt WS drop (no CBMS DISCONNECT), keep TCP scene-poll for this
  * clientId so mock does not heartbeat-timeout while the phone reconnects.
- * Default 10 minutes; 0 disables orphan (old behavior: WS close → stop poll).
+ * Default off; set PIX_GATEWAY_ORPHAN_MS=600000 (and keepalive>0) to enable.
  */
 const GATEWAY_ORPHAN_MS = Number(
   process.env.PIX_GATEWAY_ORPHAN_MS !== undefined
     ? process.env.PIX_GATEWAY_ORPHAN_MS
-    : 600_000,
+    : 0,
 );
 
 /** @type {Map<number, { timer: NodeJS.Timeout, busy: boolean, startedAt: number }>} */
@@ -569,6 +580,42 @@ function encodeScenePollCbms(clientId) {
   return out;
 }
 
+/** Same meta-only CBMS shape as SCENE_POLL, flag=DISCONNECT — triggers mock flush. */
+function encodeDisconnectCbms(clientId) {
+  const out = Buffer.alloc(24);
+  out.write("CBMS", 0, 4, "ascii");
+  out.writeUInt32LE(1, 4);
+  out.writeUInt32LE(CBMS_FLAG_DISCONNECT, 8);
+  out.writeUInt32LE(4, 12);
+  out.writeUInt32LE(4, 16);
+  out.writeUInt32LE(clientId >>> 0, 20);
+  return out;
+}
+
+/**
+ * Notify mock to flush + mark offline for this clientId.
+ * Fire-and-forget; response is discarded (WS already gone).
+ */
+function notifyMockDisconnect(clientId, reason) {
+  const id = clientId >>> 0;
+  if (!id) return Promise.resolve();
+  console.log(
+    `[ws-gateway] disconnect→mock clientId=${id.toString(16)} reason=${reason}`,
+  );
+  return exchangeOnce(encodeDisconnectCbms(id))
+    .then(() => {
+      console.log(
+        `[ws-gateway] disconnect ok clientId=${id.toString(16)} reason=${reason}`,
+      );
+    })
+    .catch((err) => {
+      console.error(
+        `[ws-gateway] disconnect fail clientId=${id.toString(16)} reason=${reason}`,
+        err.message || err,
+      );
+    });
+}
+
 wss.on("connection", (ws, req) => {
   const remoteIpv4 = clientRemoteIpv4(ws);
   if (!allowWsHandshake(remoteIpv4)) {
@@ -599,7 +646,11 @@ wss.on("connection", (ws, req) => {
 
   const enqueueExchange = (req, via) => {
     const job = chain.then(async () => {
-      if (ws.readyState !== ws.OPEN) return;
+      const head = parseCbmsHead(req);
+      const isDisconnect = !!(head && (head.flags & CBMS_FLAG_DISCONNECT));
+      // DISCONNECT must still reach mock after WS close (logout race);
+      // other traffic can drop — no live client to deliver the CBMR.
+      if (ws.readyState !== ws.OPEN && !isDisconnect) return;
       try {
         const frames = await exchangeOnce(req);
         for (const frame of frames) {
@@ -643,15 +694,27 @@ wss.on("connection", (ws, req) => {
 
   ws.on("close", () => {
     clearKeepalive();
-    // Abrupt drop (OEM kill / Wi-Fi blip): keep mock presence warm so the
-    // same LiveTransport.clientId can reconnect without heartbeat-timeout.
-    // Explicit DISCONNECT (logout) must not leave a ghost online.
-    if (pollArmed && clientId && !explicitDisconnect) {
-      startOrphanKeepalive(clientId);
-    } else if (clientId && explicitDisconnect) {
-      stopOrphanKeepalive(clientId, "disconnect");
-    }
+    const id = clientId >>> 0;
+    const wasExplicit = explicitDisconnect;
+    const wasArmed = pollArmed;
     pollArmed = false;
+    if (!id) return;
+    if (wasExplicit) {
+      // Client already sent CBMS DISCONNECT (logout / LiveTransport.close).
+      stopOrphanKeepalive(id, "disconnect");
+      return;
+    }
+    // Opt-in orphan: keep presence warm across brief drops (legacy).
+    if (GATEWAY_KEEPALIVE_MS > 0 && GATEWAY_ORPHAN_MS > 0 && wasArmed) {
+      startOrphanKeepalive(id);
+      return;
+    }
+    stopOrphanKeepalive(id, "ws-close");
+    // Default: drain in-flight exchanges, then flush role data immediately
+    // (do not wait for mock heartbeat-timeout ~30s).
+    void chain
+      .catch(() => undefined)
+      .then(() => notifyMockDisconnect(id, "ws-close"));
   });
 
   ws.on("message", (data) => {
@@ -694,5 +757,5 @@ console.log(
   GATEWAY_ORPHAN_MS > 0 && GATEWAY_KEEPALIVE_MS > 0
     ? `[ws-gateway] orphan keepalive after WS drop ${GATEWAY_ORPHAN_MS}ms ` +
         `(PIX_GATEWAY_ORPHAN_MS; 0=off)`
-    : "[ws-gateway] orphan keepalive off",
+    : "[ws-gateway] orphan keepalive off; WS close → immediate DISCONNECT flush",
 );

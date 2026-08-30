@@ -2,10 +2,15 @@ import { Graphics } from "pixi.js";
 
 /**
  * After webglcontextrestored, Pixi 8 often leaves Graphics GPU buffers blank
- * while Texture sprites may still recover via source.update(). Replacing the
+ * while Texture sprites *may* recover via source.update(). Replacing the
  * DisplayObject forces a fresh geometry upload on the next paint.
+ *
+ * Caveat: BufferImageSource (battle map / pose rgbaToTexture) frequently stays
+ * black after update() — callers must recreate those Textures from CPU RGBA
+ * (see BattleScreen.nudgeAfterGpuResume), not only nudgeTextureSource.
+ *
  * Evidence: docs/re/2026-08-18-pixi-apk-black-screen-plan.md (Graphics 失效);
- * user screenshot 2026-08-30 battle HUD frames+text OK, fills empty.
+ * docs/re/2026-08-30-pixi-battle-black-recover-incomplete.md (map/units black).
  */
 export function replaceGraphics(old: Graphics): Graphics {
   const parent = old.parent;
