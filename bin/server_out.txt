@@ -5,7 +5,7 @@
 [info][mock-service] resource_overlay database=jh_online_release_20260822 root=../web/fs/JHOnlineData/.cbe-overlays/jh_online_release_20260822 base=immutable
 [info][mock-service] mysql_authority_prepare sealed=1 storage=InnoDB marker=mysql-authoritative-v1
 mock_account_cache_init entries=0 source=runtime-lifecycle
-mock_friend_db_mysql_load records=256
+mock_friend_db_mysql_load records=256 source=on-demand
 [info][mock-service] role_count_authority_migration marker=role-count-authority-v3 corrected_accounts=0 max_roles=5 action=already-applied
 [info][network] mock_shop_catalog total=1715 items=230 equips=1485 first=1001 source=item.dsh/equip.dsh
 [info][mock-admin] shop_item_db_load rows=1516 skipped=1
@@ -34,17 +34,3 @@ mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.
 [info][mock-admin] listening=http://0.0.0.0:19091/
 [info][mock-service] concurrency pool=game workers=4 queue=128 state_model=serialized-legacy-context
 [info][mock-service] concurrency pool=admin workers=2 queue=128 state_model=serialized-legacy-context
-[info][mock-admin] request pool=admin worker=1 sequence=1 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
-[info][admin] login_success account=1144822034 failed_attempts_reset=1
-[info][mock-service] equipment_instance_schema_prepare storage=relational
-[info][mock-admin] designation_config_load rows=27
-[info][network] mock_item_effect_catalog total=230 source=item.dsh
-mock_role_db_mysql_load account=07060707 source=relational roles=1 active=10438
-[info][mock-service] account_state_release account=07060707 reason=admin-management-close
-[info][mock-admin] monster_db_load rows=91 skipped=1 drops=685 drops_skipped=1
-[info][mock-admin] request pool=admin worker=2 sequence=8 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=156
-[info][mock-admin] request pool=admin worker=2 sequence=12 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=140
-[info][mock-admin] request pool=admin worker=1 sequence=13 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=172
-[info][mock-admin] request pool=admin worker=2 sequence=14 result=1 queue_wait_ms=0 state_wait_ms=172 process_ms=15
-[info][mock-admin] request pool=admin worker=1 sequence=15 result=1 queue_wait_ms=172 state_wait_ms=15 process_ms=0
-[info][mock-admin] request pool=admin worker=2 sequence=16 result=1 queue_wait_ms=187 state_wait_ms=0 process_ms=0

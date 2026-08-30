@@ -124,3 +124,63 @@ u32 vm_net_mock_build_battle_insight_status_response(
                      active ? 1u : 0u, pos);
     return pos;
 }
+
+/* The scene's "力" badge sends one empty `1/22/6` object.  The CBE
+ * `net_handle_ruffianflag_info` branch at 0x01010F6C reads `info` first,
+ * then `ruffianflag`, and uses its normal completion path to dismiss the
+ * pending progress dialog.  This is only a status description: it must not
+ * consume, extend, or otherwise alter the timed combat effect. */
+static bool vm_net_mock_is_timed_combat_status_request(const u8 *request,
+                                                       u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    return request != NULL && requestLen == 9 && request[0] == 'W' &&
+           request[1] == 'T' &&
+           vm_net_mock_next_request_object(request, requestLen, &offset,
+                                           &object) &&
+           offset == requestLen && object.major == 1 && object.kind == 22 &&
+           object.subtype == 6 && object.payloadLen == 0;
+}
+
+static const char *vm_net_mock_timed_combat_status_info(bool active)
+{
+    if (active)
+    {
+        /* 攻击、防御时效效果生效中。 */
+        return "\xB9\xA5\xBB\xF7\xA1\xA2\xB7\xC0\xD3\xF9\xCA\xB1\xD0\xA7\xD0\xA7\xB9\xFB\xC9\xFA\xD0\xA7\xD6\xD0\xA1\xA3";
+    }
+    /* 当前未使用攻防时效道具。 */
+    return "\xB5\xB1\xC7\xB0\xCE\xB4\xCA\xB9\xD3\xC3\xB9\xA5\xB7\xC0\xCA\xB1\xD0\xA7\xB5\xC0\xBE\xDF\xA1\xA3";
+}
+
+u32 vm_net_mock_build_timed_combat_status_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    const bool active = vm_net_mock_role_active_timed_combat_flag() != 0;
+    const char *info = vm_net_mock_timed_combat_status_info(active);
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_is_timed_combat_status_request(request, requestLen) ||
+        out == NULL || outCap < pos || info == NULL || info[0] == '\0')
+    {
+        return 0;
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 22, 6,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "info", info) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "ruffianflag",
+                                   active ? 1u : 0u))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_timed_combat_status request=22/6 active=%u response=%u action=client-description evidence=JianghuOL.CBE:0x01010F6C\\n",
+           active ? 1u : 0u, pos);
+    vm_autotest_note("mock_timed_combat_status request=22/6 active=%u response=%u action=client-description evidence=JianghuOL.CBE:0x01010F6C\\n",
+                     active ? 1u : 0u, pos);
+    return pos;
+}

@@ -1103,12 +1103,15 @@ u32 vm_net_mock_build_battle_death_prompt_error_response(
     u8 *out, u32 outCap, const char *info);
 u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role);
+u8 vm_net_mock_role_active_timed_combat_flag(void);
 u8 vm_net_mock_role_active_battle_insight_flag(void);
 const char *vm_net_mock_special_item_success_info(u32 itemId);
 u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
                                                u32 requestLen,
                                                u8 *out, u32 outCap);
 u32 vm_net_mock_build_battle_insight_status_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+u32 vm_net_mock_build_timed_combat_status_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap,
                                              const char *hint);

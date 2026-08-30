@@ -124,6 +124,126 @@ static bool read_reward_row(const u8 *info, u16 infoLen, u32 *offset,
            attrCount == 0;
 }
 
+static bool skip_seq_string(const u8 *blob, u16 blobLen, u32 *offset)
+{
+    u16 length = 0;
+
+    if (blob == NULL || offset == NULL || *offset + 2u > blobLen)
+        return false;
+    length = (u16)(((u16)blob[*offset] << 8) | blob[*offset + 1u]);
+    *offset += 2u;
+    if (length == 0 || *offset + length > blobLen)
+        return false;
+    *offset += length;
+    return true;
+}
+
+static bool read_npc_dialog_option_values(const u8 *dialog, u16 dialogLen,
+                                          u8 *countOut, u32 *values,
+                                          u8 valueCap)
+{
+    u32 offset = 0;
+    u8 count = 0;
+    u8 dialogType = 0;
+    u8 terminator = 0;
+
+    if (countOut != NULL)
+        *countOut = 0;
+    if (dialog == NULL || dialogLen < 5 || values == NULL ||
+        !read_tagged_u8(dialog, dialogLen, &offset, &dialogType) ||
+        dialogType != 0 || !skip_seq_string(dialog, dialogLen, &offset) ||
+        !read_tagged_u8(dialog, dialogLen, &offset, &count))
+    {
+        return false;
+    }
+    if (count > valueCap)
+        return false;
+    for (u8 i = 0; i < count; ++i)
+    {
+        u8 type = 0;
+        u8 action = 0;
+
+        if (!read_tagged_u8(dialog, dialogLen, &offset, &type) || type != 4 ||
+            !skip_seq_string(dialog, dialogLen, &offset) ||
+            !read_tagged_u8(dialog, dialogLen, &offset, &action) ||
+            !read_tagged_u32(dialog, dialogLen, &offset, &values[i]) ||
+            !skip_seq_string(dialog, dialogLen, &offset) || action != 1)
+        {
+            return false;
+        }
+    }
+    if (!read_tagged_u8(dialog, dialogLen, &offset, &terminator) ||
+        terminator != 0 || offset != dialogLen)
+    {
+        return false;
+    }
+    if (countOut != NULL)
+        *countOut = count;
+    return true;
+}
+
+static u32 build_npc_service_dialog_request(u8 *out, u32 outCap,
+                                            u32 serviceValue)
+{
+    u32 pos = 9;
+    u32 objectLen = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "id", serviceValue))
+    {
+        return 0;
+    }
+    objectLen = pos - 4u;
+    if (objectLen > 0xffffu)
+        return 0;
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(pos >> 8);
+    out[3] = (u8)pos;
+    out[4] = 1;
+    out[5] = 26;
+    out[6] = 1;
+    out[7] = (u8)(objectLen >> 8);
+    out[8] = (u8)objectLen;
+    return pos;
+}
+
+static bool read_npc_service_dialog(const u8 *packet, u32 packetLen,
+                                    const u8 **dialogOut, u16 *dialogLenOut)
+{
+    u32 objectOffset = 5;
+    u32 fieldOffset = 0;
+    u16 objectLen = 0;
+    const u8 *ignored = NULL;
+    u16 ignoredLen = 0;
+
+    if (dialogOut != NULL)
+        *dialogOut = NULL;
+    if (dialogLenOut != NULL)
+        *dialogLenOut = 0;
+    if (packet == NULL || packetLen < 11 || packet[0] != 'W' ||
+        packet[1] != 'T' || packet[4] != 1 || packet[objectOffset] != 1 ||
+        packet[objectOffset + 1u] != 26 || packet[objectOffset + 2u] != 1)
+    {
+        return false;
+    }
+    objectLen = (u16)(((u16)packet[objectOffset + 4u] << 8) |
+                      packet[objectOffset + 5u]);
+    fieldOffset = objectOffset + 6u;
+    if (objectLen < 6u || objectOffset + objectLen > packetLen ||
+        !read_object_field(packet, packetLen, &fieldOffset, "hidebtn",
+                           &ignored, &ignoredLen) ||
+        ignoredLen != 3 || !read_object_field(packet, packetLen, &fieldOffset,
+                                               "dialog", dialogOut,
+                                               dialogLenOut) ||
+        fieldOffset != objectOffset + objectLen)
+    {
+        return false;
+    }
+    return true;
+}
+
 int main(void)
 {
     vm_net_mock_role_state role;
@@ -134,6 +254,7 @@ int main(void)
     vm_mock_service_npc_transaction_context transaction;
     vm_net_mock_backpack_item_state *result = NULL;
     vm_net_mock_role_state tierRole;
+    vm_net_mock_role_state dialogRole;
     vm_net_mock_backpack_item_state *tierResult = NULL;
     vm_net_mock_reward15_item_row rewardRow;
     const char *name = NULL;
@@ -147,6 +268,9 @@ int main(void)
     u32 fieldOffset = 0;
     u32 countInfoOffset = 0;
     u32 itemInfoOffset = 0;
+    u32 requestLen = 0;
+    u32 responseLen = 0;
+    u32 dialogValues[VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS];
     u16 sourceSeq = 0;
     u16 resultSeq = 0;
     u16 objectLen = 0;
@@ -162,9 +286,14 @@ int main(void)
     const u8 *wireResult = NULL;
     const u8 *wireTotal = NULL;
     const u8 *itemInfo = NULL;
+    const u8 *dialogPayload = NULL;
     u8 objectCount = 0;
     u8 wireUseResult = 0;
+    u8 dialogOptionCount = 0;
     u8 packet[2048];
+    u8 request[256];
+    u8 response[4096];
+    u16 dialogPayloadLen = 0;
 
     memset(&role, 0, sizeof(role));
     memset(&seed, 0, sizeof(seed));
@@ -172,8 +301,12 @@ int main(void)
     memset(&serviceContext, 0, sizeof(serviceContext));
     memset(&transaction, 0, sizeof(transaction));
     memset(&tierRole, 0, sizeof(tierRole));
+    memset(&dialogRole, 0, sizeof(dialogRole));
     memset(&rewardRow, 0, sizeof(rewardRow));
     memset(packet, 0, sizeof(packet));
+    memset(request, 0, sizeof(request));
+    memset(response, 0, sizeof(response));
+    memset(dialogValues, 0, sizeof(dialogValues));
     seed.actorId = 20020;
     role.roleId = 7003;
     role.backpackCapacity = 24;
@@ -182,7 +315,8 @@ int main(void)
     role.backpackItems[0].itemId = 900;
     role.backpackItems[0].seq = 39;
     role.backpackItems[0].count =
-        VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT +
+        VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT *
+            3u +
         2u;
     serviceContext.active = true;
     serviceContext.roleId = role.roleId;
@@ -202,55 +336,78 @@ int main(void)
                    VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE) &&
                    vm_net_mock_npc_service_opcode_is_supported(
                        VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE) &&
-                   !vm_net_mock_npc_service_opcode_is_supported(0xfa000000u),
+                   !vm_net_mock_npc_service_opcode_is_supported(0xfb000000u),
                "crystal synthesis opcode boundary is not exact") ||
         expect(vm_net_mock_crystal_synthesis_recipe(900, &resultItemId) &&
                    resultItemId == 901 &&
                    vm_net_mock_crystal_synthesis_item_page(900) == 0 &&
                    vm_net_mock_crystal_synthesis_item_page(905) == 1,
                "fragment or page recipe is incorrect") ||
+        expect(VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MAX_QUANTITY == 10u &&
+                   vm_net_mock_crystal_synthesis_quantity_is_valid(1) &&
+                   vm_net_mock_crystal_synthesis_quantity_is_valid(10) &&
+                   !vm_net_mock_crystal_synthesis_quantity_is_valid(0) &&
+                   !vm_net_mock_crystal_synthesis_quantity_is_valid(11) &&
+                   vm_net_mock_crystal_synthesis_total_material_count(900, 3) ==
+                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT *
+                           3u &&
+                   vm_net_mock_crystal_synthesis_total_material_count(901, 10) ==
+                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MATERIAL_COUNT *
+                           10u &&
+                   ((VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE |
+                     (3u << VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT) |
+                     900u) &
+                    VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_SOURCE_MASK) == 900u,
+               "one-to-ten quantity selection is not bounded or encoded safely") ||
         expect(!vm_net_mock_crystal_synthesis_recipe(916, &resultItemId) &&
                    !vm_net_mock_crystal_synthesis_recipe(899, &resultItemId),
                "out-of-range crystal recipe was accepted") ||
         expect(vm_net_mock_npc_transaction_context_begin(
                    &session, &role, &serviceContext,
                    VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS, 900,
-                   0, 0, 0,
-                   VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT),
+                   0, 3, 0,
+                   VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT *
+                       3u),
                "synthesis prompt did not create a confirmation context") ||
         expect(vm_net_mock_npc_transaction_context_take(
                    &session, &role, &serviceContext, &transaction) &&
                    transaction.kind ==
                        VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS &&
                    transaction.itemId == 900 && transaction.page == 0 &&
+                   transaction.selector == 3 &&
                    transaction.quotedPrice ==
-                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT,
+                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT *
+                           3u,
                "synthesis confirmation lost recipe or material count") ||
         expect(!vm_net_mock_npc_transaction_context_take(
                    &session, &role, &serviceContext, &transaction),
                "synthesis confirmation context can be replayed") ||
         expect(vm_net_mock_role_crystal_synthesize_in_memory(
-                   &role, 900, &sourceSeq, &sourceRemaining, &resultSeq) &&
+                   &role, 900, 3, &sourceSeq, &sourceRemaining, &resultSeq) &&
                    sourceSeq == 39 && sourceRemaining == 2 &&
                    resultSeq != 0 &&
                    (vm_net_mock_role_find_backpack_item(&role, 900, sourceSeq)) != NULL &&
                    vm_net_mock_role_find_backpack_item(&role, 900, sourceSeq)->count == 2 &&
                    (result = vm_net_mock_role_find_backpack_item(
                         &role, 901, resultSeq)) != NULL &&
-                   result->count == 1,
-               "ten fragments did not atomically become one first-level crystal"))
+                   result->count == 3,
+               "thirty fragments did not atomically become three first-level crystals"))
     {
         return 1;
     }
     before = role;
     if (expect(!vm_net_mock_role_crystal_synthesize_in_memory(
-                   &role, 901, &sourceSeq, &sourceRemaining, &resultSeq) &&
+                   &role, 901, 2, &sourceSeq, &sourceRemaining, &resultSeq) &&
                    memcmp(&role, &before, sizeof(role)) == 0,
                "insufficient material changed the backpack") ||
         expect(!vm_net_mock_role_crystal_synthesize_in_memory(
-                   &role, 916, &sourceSeq, &sourceRemaining, &resultSeq) &&
+                   &role, 916, 1, &sourceSeq, &sourceRemaining, &resultSeq) &&
                    memcmp(&role, &before, sizeof(role)) == 0,
-               "sixteenth-level crystal produced an invalid output"))
+               "sixteenth-level crystal produced an invalid output") ||
+        expect(!vm_net_mock_role_crystal_synthesize_in_memory(
+                   &role, 900, 11, &sourceSeq, &sourceRemaining, &resultSeq) &&
+                   memcmp(&role, &before, sizeof(role)) == 0,
+               "out-of-range synthesis quantity changed the backpack"))
     {
         return 1;
     }
@@ -261,19 +418,143 @@ int main(void)
     tierRole.backpackItems[0].itemId = 901;
     tierRole.backpackItems[0].seq = 60;
     tierRole.backpackItems[0].count =
-        VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MATERIAL_COUNT * 2u;
+        VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MATERIAL_COUNT * 3u;
     tierRole.backpackItems[1].itemId = 902;
     tierRole.backpackItems[1].seq = 61;
     tierRole.backpackItems[1].count = 4;
     if (expect(vm_net_mock_role_crystal_synthesize_in_memory(
-                   &tierRole, 901, &sourceSeq, &sourceRemaining, &resultSeq) &&
+                   &tierRole, 901, 2, &sourceSeq, &sourceRemaining, &resultSeq) &&
                    sourceSeq == 60 && sourceRemaining == 3 && resultSeq == 61 &&
                    vm_net_mock_role_find_backpack_item(&tierRole, 901, sourceSeq) != NULL &&
                    vm_net_mock_role_find_backpack_item(&tierRole, 901, sourceSeq)->count == 3 &&
                    (tierResult = vm_net_mock_role_find_backpack_item(
                         &tierRole, 902, resultSeq)) != NULL &&
-                   tierResult->count == 5,
-               "three same-level crystals did not update the existing higher-level stack"))
+                   tierResult->count == 6,
+               "six same-level crystals did not update the existing higher-level stack"))
+    {
+        return 1;
+    }
+
+    /* Exercise the real 26/1 dialog builder entirely in this test process.
+     * The active role/session are stack-backed test fixtures, and no request
+     * below confirms the transaction, so this does not open a listener or
+     * write the role database. */
+    dialogRole.roleId = 7004;
+    dialogRole.backpackCapacity = 24;
+    dialogRole.nextBackpackSeq = 70;
+    dialogRole.backpackItemCount = 1;
+    dialogRole.backpackItems[0].itemId = 900;
+    dialogRole.backpackItems[0].seq = 69;
+    dialogRole.backpackItems[0].count =
+        VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT *
+        3u;
+    snprintf(dialogRole.scene, sizeof(dialogRole.scene), "%s",
+             "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65"); /* c00蓬莱仙岛_01.sce */
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = dialogRole.roleId;
+    g_vm_net_mock_role_db.roles[0] = dialogRole;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    memset(&session, 0, sizeof(session));
+    session.clientId = 7004;
+    session.npcServiceContext.active = true;
+    session.npcServiceContext.roleId = dialogRole.roleId;
+    session.npcServiceContext.actorId = seed.actorId;
+    session.npcServiceContext.serviceMask = vm_net_mock_npc_service_kind_mask(
+        VM_NET_MOCK_NPC_KIND_CRYSTAL_SYNTHESIS);
+    snprintf(session.npcServiceContext.scene,
+             sizeof(session.npcServiceContext.scene), "%s", dialogRole.scene);
+    g_vm_mock_service_client_sessions = &session;
+    g_vm_mock_service_active_client_id = session.clientId;
+
+    requestLen = build_npc_service_dialog_request(
+        request, sizeof(request),
+        VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE);
+    responseLen = requestLen != 0
+                      ? vm_net_mock_build_npc_service_dialog_response(
+                            request, requestLen, response, sizeof(response))
+                      : 0;
+    if (expect(responseLen != 0 &&
+                   read_npc_service_dialog(response, responseLen,
+                                           &dialogPayload, &dialogPayloadLen) &&
+                   read_npc_dialog_option_values(
+                       dialogPayload, dialogPayloadLen, &dialogOptionCount,
+                       dialogValues, VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS) &&
+                   dialogOptionCount == 6 &&
+                   dialogValues[0] ==
+                       (VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE | 900u) &&
+                   dialogValues[5] ==
+                       (VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE | 1u),
+               "first-level crystal list changed") ||
+        expect((requestLen = build_npc_service_dialog_request(
+                    request, sizeof(request),
+                    VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE | 900u)) !=
+                   0 &&
+                   (responseLen = vm_net_mock_build_npc_service_dialog_response(
+                        request, requestLen, response, sizeof(response))) != 0 &&
+                   read_npc_service_dialog(response, responseLen,
+                                           &dialogPayload, &dialogPayloadLen) &&
+                   read_npc_dialog_option_values(
+                       dialogPayload, dialogPayloadLen, &dialogOptionCount,
+                       dialogValues, VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS) &&
+                   dialogOptionCount ==
+                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MAX_QUANTITY &&
+                   dialogValues[0] ==
+                       (VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE |
+                        (1u <<
+                         VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT) |
+                        900u) &&
+                   dialogValues[9] ==
+                       (VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE |
+                        (10u <<
+                         VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT) |
+                        900u),
+               "second-level quantity list is not exactly one through ten") ||
+        expect((requestLen = build_npc_service_dialog_request(
+                    request, sizeof(request),
+                    VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE |
+                    (3u <<
+                     VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT) |
+                    900u)) != 0 &&
+                   (responseLen = vm_net_mock_build_npc_service_dialog_response(
+                        request, requestLen, response, sizeof(response))) != 0 &&
+                   read_npc_service_dialog(response, responseLen,
+                                           &dialogPayload, &dialogPayloadLen) &&
+                   read_npc_dialog_option_values(
+                       dialogPayload, dialogPayloadLen, &dialogOptionCount,
+                       dialogValues, VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS) &&
+                   dialogOptionCount == 2 &&
+                   dialogValues[0] ==
+                       VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION &&
+                   dialogValues[1] ==
+                       VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION &&
+                   session.npcTransactionContext.active &&
+                   session.npcTransactionContext.itemId == 900 &&
+                   session.npcTransactionContext.selector == 3 &&
+                   session.npcTransactionContext.quotedPrice ==
+                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT *
+                           3u,
+               "third-level confirmation did not bind the selected batch") ||
+        expect((requestLen = build_npc_service_dialog_request(
+                    request, sizeof(request),
+                    VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION)) != 0 &&
+                   (responseLen = vm_net_mock_build_npc_service_dialog_response(
+                        request, requestLen, response, sizeof(response))) != 0 &&
+                   read_npc_service_dialog(response, responseLen,
+                                           &dialogPayload, &dialogPayloadLen) &&
+                   read_npc_dialog_option_values(
+                       dialogPayload, dialogPayloadLen, &dialogOptionCount,
+                       dialogValues, VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS) &&
+                   dialogOptionCount ==
+                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MAX_QUANTITY &&
+                   dialogValues[0] ==
+                       (VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE |
+                        (1u <<
+                         VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT) |
+                        900u) &&
+                   !session.npcTransactionContext.active,
+               "cancel did not return to quantity selection or clear the quote"))
     {
         return 1;
     }
@@ -289,7 +570,7 @@ int main(void)
     vm_net_mock_finish_wt_object(packet, objectStart, packetLen);
     ++objectCount;
     rewardRow.item = tierResult;
-    rewardRow.acquiredCount = 1;
+    rewardRow.acquiredCount = 2;
     if (!vm_net_mock_append_backpack_item_count11_object(
             packet, sizeof(packet), &packetLen, &objectCount,
             sourceSeq, 901, sourceRemaining) ||
@@ -367,7 +648,7 @@ int main(void)
         wireResult[1] != 1 || wireResult[2] != 1 || totalLen != 3 ||
         wireTotal[0] != 0 || wireTotal[1] != 1 || wireTotal[2] != 1 ||
         !read_reward_row(itemInfo, itemInfoLen, &itemInfoOffset, 902,
-                         resultSeq, 1) || itemInfoOffset != itemInfoLen)
+                         resultSeq, 2) || itemInfoOffset != itemInfoLen)
     {
         fputs("crystal 7/15 output-item delta fields are invalid\n", stderr);
         return 1;
@@ -401,6 +682,6 @@ int main(void)
         return 1;
     }
 
-    puts("npc crystal synthesis regression passed: 10:1 fragment recipe, 3:1 crystal recipe, one-time confirmation, atomic mutation, and 26/1+7/11+7/15+7/11 backpack refresh");
+    puts("npc crystal synthesis regression passed: first-level list contract, one-to-ten quantity selection, one-time confirmation, atomic batch mutation, and 26/1+7/11+7/15+7/11 backpack refresh");
     return 0;
 }

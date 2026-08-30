@@ -5902,6 +5902,10 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
 #define VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS 5u
 #define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_PAGE_ITEMS 5u
+#define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_SOURCE_MASK 0x0000ffffu
+#define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_MASK 0x00ff0000u
+#define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT 16u
+#define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MAX_QUANTITY 10u
 #define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MATERIAL_COUNT 3u
 #define VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_FRAGMENT_MATERIAL_COUNT 10u
 #define VM_NET_MOCK_CRYSTAL_SYNTHESIS_INPUT_ITEM_FIRST 900u
@@ -6384,7 +6388,7 @@ static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
 static bool vm_net_mock_role_active_timed_combat_bonus_percent(
     const vm_net_mock_role_state *role, u32 *attackPercentOut,
     u32 *defensePercentOut);
-static u8 vm_net_mock_role_active_timed_combat_flag(void);
+u8 vm_net_mock_role_active_timed_combat_flag(void);
 static u8 vm_net_mock_role_active_exp_card_flag(void);
 static u32 vm_net_mock_build_timed_special_item_use_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);

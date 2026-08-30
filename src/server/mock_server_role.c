@@ -13124,7 +13124,7 @@ static bool vm_net_mock_role_active_timed_combat_bonus_percent(
     return true;
 }
 
-static u8 vm_net_mock_role_active_timed_combat_flag(void)
+u8 vm_net_mock_role_active_timed_combat_flag(void)
 {
     u32 attackPercent = 0;
     u32 defensePercent = 0;

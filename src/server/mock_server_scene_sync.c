@@ -6420,6 +6420,26 @@ static u32 vm_net_mock_crystal_synthesis_material_count(u32 sourceItemId)
                : VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MATERIAL_COUNT;
 }
 
+static bool vm_net_mock_crystal_synthesis_quantity_is_valid(u32 quantity)
+{
+    return quantity > 0 &&
+           quantity <= VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MAX_QUANTITY;
+}
+
+static u32 vm_net_mock_crystal_synthesis_total_material_count(
+    u32 sourceItemId, u32 quantity)
+{
+    u32 materialCount = vm_net_mock_crystal_synthesis_material_count(
+        sourceItemId);
+
+    if (materialCount == 0 ||
+        !vm_net_mock_crystal_synthesis_quantity_is_valid(quantity))
+    {
+        return 0;
+    }
+    return materialCount * quantity;
+}
+
 static u32 vm_net_mock_crystal_synthesis_item_page(u32 sourceItemId)
 {
     if (!vm_net_mock_crystal_synthesis_recipe(sourceItemId, NULL))
@@ -6446,13 +6466,13 @@ static void vm_net_mock_crystal_synthesis_item_label(u32 itemId, char *out,
  * persists exactly the final role after this function returns successfully;
  * a full backpack or a stale material row restores the whole snapshot. */
 static bool vm_net_mock_role_crystal_synthesize_in_memory(
-    vm_net_mock_role_state *role, u32 sourceItemId, u16 *sourceSeqOut,
-    u32 *sourceRemainingOut, u16 *resultSeqOut)
+    vm_net_mock_role_state *role, u32 sourceItemId, u32 quantity,
+    u16 *sourceSeqOut, u32 *sourceRemainingOut, u16 *resultSeqOut)
 {
     vm_net_mock_role_state before;
     vm_net_mock_backpack_item_state *source = NULL;
     u32 resultItemId = 0;
-    u32 materialCount = 0;
+    u32 totalMaterialCount = 0;
     u32 sourceRemaining = 0;
     u16 sourceSeq = 0;
     u16 resultSeq = 0;
@@ -6468,20 +6488,22 @@ static bool vm_net_mock_role_crystal_synthesize_in_memory(
     {
         return false;
     }
-    materialCount = vm_net_mock_crystal_synthesis_material_count(sourceItemId);
-    if (materialCount == 0)
+    totalMaterialCount = vm_net_mock_crystal_synthesis_total_material_count(
+        sourceItemId, quantity);
+    if (totalMaterialCount == 0)
         return false;
     before = *role;
     source = vm_net_mock_role_find_backpack_item(role, sourceItemId, 0);
-    if (source == NULL || source->count < materialCount)
+    if (source == NULL || source->count < totalMaterialCount)
     {
         return false;
     }
     sourceSeq = source->seq;
     if (!vm_net_mock_role_consume_backpack_item(
-            role, sourceItemId, sourceSeq, materialCount, &sourceRemaining) ||
+            role, sourceItemId, sourceSeq, totalMaterialCount,
+            &sourceRemaining) ||
         !vm_net_mock_role_add_backpack_item_to_role_in_memory(
-            role, resultItemId, 1, &resultSeq))
+            role, resultItemId, quantity, &resultSeq))
     {
         *role = before;
         return false;
@@ -6502,14 +6524,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     vm_net_mock_role_service_state *serviceState = NULL;
     const char *dialogText =
         "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
-    const char *optionNames[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
-    const char *optionDescriptions[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
-    char optionNameStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
-    char optionDescriptionStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][192];
+    const char *optionNames[VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS];
+    const char *optionDescriptions[VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS];
+    char optionNameStorage[VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS][64];
+    char optionDescriptionStorage[VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS][192];
     /* The parser owns the main text buffer length, so keep enough room for a
      * catalog name plus the complete (<=192-byte) formatted detail. */
     char dialogTextStorage[512];
-    u32 optionValues[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
+    u32 optionValues[VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS];
     u32 serviceValue = 0;
     u32 operation = 0;
     u32 value = 0;
@@ -6543,6 +6565,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 crystalSynthesisSourceRemaining = 0;
     u32 crystalSynthesisResultItemId = 0;
     u32 crystalSynthesisResultTotal = 0;
+    u32 crystalSynthesisAcquiredCount = 0;
     u16 crystalSynthesisSourceSeq = 0;
     u16 crystalSynthesisResultSeq = 0;
     vm_mock_service_client_session *session =
@@ -6609,8 +6632,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             else if (transaction.kind ==
                      VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS)
             {
-                operation = VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE;
-                value = transaction.page;
+                operation = VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE;
+                value = transaction.itemId;
                 action = "crystal-synthesis-cancel";
             }
             else
@@ -6676,10 +6699,26 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             operation == VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE;
         const u32 total = VM_NET_MOCK_CRYSTAL_SYNTHESIS_INPUT_ITEM_LAST -
                           VM_NET_MOCK_CRYSTAL_SYNTHESIS_INPUT_ITEM_FIRST + 1u;
+        u32 sourceItemId = value &
+                           VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_SOURCE_MASK;
+        u32 quantity = (value &
+                        VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_MASK) >>
+                       VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT;
         u32 page = synthesisRequest
-                       ? vm_net_mock_crystal_synthesis_item_page(value)
+                       ? vm_net_mock_crystal_synthesis_item_page(sourceItemId)
                        : value;
         u32 start = 0;
+
+        /* The existing source-item action now opens the quantity list.  Its
+         * high value bits carry only the user-selected quantity for the
+         * following action=1 dialog; confirmation remains a one-shot,
+         * session-bound transaction instead of trusting that menu value. */
+        if (synthesisRequest && transactionConfirm)
+        {
+            sourceItemId = transaction.itemId;
+            quantity = transaction.selector;
+            page = transaction.page;
+        }
 
         if (!vm_net_mock_npc_service_context_has(
                 shopContext, VM_NET_MOCK_NPC_KIND_CRYSTAL_SYNTHESIS))
@@ -6692,32 +6731,92 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 "\xca\xae\xb8\xf6\xd0\xfe\xbe\xa7\xcb\xe9\xc6\xac\xbf\xc9\xba\xcf\xb3\xc9\xd2\xbb\xbc\xb6\xd0\xfe\xbe\xa7\xa3\xbb\xc8\xfd\xb8\xf6\xcd\xac\xbc\xb6\xd0\xfe\xbe\xa7\xbf\xc9\xba\xcf\xb3\xc9\xb8\xdf\xd2\xbb\xbc\xb6\xd0\xfe\xbe\xa7\xa1\xa3"; /* 十个玄晶碎片可合成一级玄晶；三个同级玄晶可合成高一级玄晶。 */
             action = "crystal-synthesis-list";
         }
-        else
+        else if (quantity == 0)
         {
-            vm_net_mock_backpack_item_state *source = NULL;
             u32 resultItemId = 0;
-            u32 materialCount = 0;
 
-            if (!vm_net_mock_crystal_synthesis_recipe(value, &resultItemId))
+            if (!vm_net_mock_crystal_synthesis_recipe(sourceItemId,
+                                                       &resultItemId))
             {
                 action = "crystal-synthesis-invalid-recipe";
             }
             else
             {
-                materialCount = vm_net_mock_crystal_synthesis_material_count(
-                    value);
-                source = vm_net_mock_role_find_backpack_item(role, value, 0);
-                if (materialCount == 0 || source == NULL ||
-                    source->count < materialCount)
+                char sourceLabel[64];
+                char resultLabel[64];
+
+                memset(sourceLabel, 0, sizeof(sourceLabel));
+                memset(resultLabel, 0, sizeof(resultLabel));
+                vm_net_mock_crystal_synthesis_item_label(
+                    sourceItemId, sourceLabel, sizeof(sourceLabel));
+                vm_net_mock_crystal_synthesis_item_label(
+                    resultItemId, resultLabel, sizeof(resultLabel));
+                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                         "\xc7\xeb\xd1\xa1\xd4\xf1\xba\xcf\xb3\xc9\xca\xfd\xc1\xbf\xa3\xa8\x31\x2d\x31\x30\xa3\xa9\xa3\xba"); /* 请选择合成数量（1-10）： */
+                dialogText = dialogTextStorage;
+                restoredListPage = page;
+                for (u32 selectedQuantity = 1;
+                     selectedQuantity <=
+                     VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_MAX_QUANTITY;
+                     ++selectedQuantity)
+                {
+                    const u32 totalMaterialCount =
+                        vm_net_mock_crystal_synthesis_total_material_count(
+                            sourceItemId, selectedQuantity);
+
+                    snprintf(optionNameStorage[optionCount],
+                             sizeof(optionNameStorage[optionCount]),
+                             "\xba\xcf\xb3\xc9\xca\xfd\xc1\xbf\xa3\xba\x25\x75", /* 合成数量：%u */
+                             selectedQuantity);
+                    snprintf(optionDescriptionStorage[optionCount],
+                             sizeof(optionDescriptionStorage[optionCount]),
+                             "\xcf\xfb\xba\xc4\x25\x75\xb8\xf6\x25\x73\xa3\xac\xba\xcf\xb3\xc9\x25\x75\xb8\xf6\x25\x73", /* 消耗%u个%s，合成%u个%s */
+                             totalMaterialCount, sourceLabel,
+                             selectedQuantity, resultLabel);
+                    optionNames[optionCount] = optionNameStorage[optionCount];
+                    optionDescriptions[optionCount] =
+                        optionDescriptionStorage[optionCount];
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE |
+                        (selectedQuantity <<
+                         VM_NET_MOCK_NPC_SERVICE_CRYSTAL_SYNTHESIS_QUANTITY_SHIFT) |
+                        sourceItemId;
+                    ++optionCount;
+                }
+                action = "crystal-synthesis-quantity-list";
+                goto npc_service_serialize;
+            }
+        }
+        else
+        {
+            vm_net_mock_backpack_item_state *source = NULL;
+            u32 resultItemId = 0;
+            u32 totalMaterialCount = 0;
+
+            if (!vm_net_mock_crystal_synthesis_recipe(sourceItemId,
+                                                       &resultItemId) ||
+                !vm_net_mock_crystal_synthesis_quantity_is_valid(quantity))
+            {
+                action = "crystal-synthesis-invalid-selection";
+            }
+            else
+            {
+                totalMaterialCount =
+                    vm_net_mock_crystal_synthesis_total_material_count(
+                        sourceItemId, quantity);
+                source = vm_net_mock_role_find_backpack_item(role,
+                                                             sourceItemId, 0);
+                if (totalMaterialCount == 0 || source == NULL ||
+                    source->count < totalMaterialCount)
                 {
                     char sourceLabel[64];
 
                     memset(sourceLabel, 0, sizeof(sourceLabel));
                     vm_net_mock_crystal_synthesis_item_label(
-                        value, sourceLabel, sizeof(sourceLabel));
+                        sourceItemId, sourceLabel, sizeof(sourceLabel));
                     snprintf(dialogTextStorage, sizeof(dialogTextStorage),
                              "\xb2\xc4\xc1\xcf\xb2\xbb\xd7\xe3\xa3\xac\xd0\xe8\xd2\xaa\x25\x75\xb8\xf6\x25\x73\xa1\xa3", /* 材料不足，需要%u个%s。 */
-                             materialCount, sourceLabel);
+                             totalMaterialCount, sourceLabel);
                     dialogText = dialogTextStorage;
                     action = "crystal-synthesis-material-insufficient";
                 }
@@ -6729,22 +6828,23 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     memset(sourceLabel, 0, sizeof(sourceLabel));
                     memset(resultLabel, 0, sizeof(resultLabel));
                     vm_net_mock_crystal_synthesis_item_label(
-                        value, sourceLabel, sizeof(sourceLabel));
+                        sourceItemId, sourceLabel, sizeof(sourceLabel));
                     vm_net_mock_crystal_synthesis_item_label(
                         resultItemId, resultLabel, sizeof(resultLabel));
                     if (!vm_net_mock_npc_transaction_context_begin(
                             session, role, shopContext,
                             VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS,
-                            value, 0, 0, page,
-                            materialCount))
+                            sourceItemId, 0, quantity, page,
+                            totalMaterialCount))
                     {
                         action = "crystal-synthesis-prompt-invalid";
                     }
                     else
                     {
                         snprintf(dialogTextStorage, sizeof(dialogTextStorage),
-                                 "\xba\xcf\xb3\xc9\xc8\xb7\xc8\xcf\xa3\xba\x25\x75\xb8\xf6\x25\x73\x20\x2d\x3e\x20\x31\xb8\xf6\x25\x73", /* 合成确认：%u个%s -> 1个%s */
-                                 materialCount, sourceLabel, resultLabel);
+                                 "\xc8\xb7\xc8\xcf\xca\xc7\xb7\xf1\xca\xb9\xd3\xc3\x25\x75\xb8\xf6\x25\x73\xba\xcf\xb3\xc9\x25\x75\xb8\xf6\x25\x73\xa3\xbf", /* 确认是否使用%u个%s合成%u个%s？ */
+                                 totalMaterialCount, sourceLabel, quantity,
+                                 resultLabel);
                         dialogText = dialogTextStorage;
                         optionNames[0] =
                             "\xc8\xb7\xc8\xcf\xba\xcf\xb3\xc9"; /* 确认合成 */
@@ -6752,9 +6852,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         optionValues[0] =
                             VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION;
                         optionNames[1] =
-                            "\xd4\xdd\xb2\xbb\xba\xcf\xb3\xc9"; /* 暂不合成 */
+                            "\xb7\xb5\xbb\xd8\xca\xfd\xc1\xbf\xd1\xa1\xd4\xf1"; /* 返回数量选择 */
                         optionDescriptions[1] =
-                            "\xd4\xdd\xb2\xbb\xba\xcf\xb3\xc9"; /* 暂不合成 */
+                            "\xb7\xb5\xbb\xd8\xca\xfd\xc1\xbf\xd1\xa1\xd4\xf1"; /* 返回数量选择 */
                         optionValues[1] =
                             VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION;
                         optionCount = 2;
@@ -6764,9 +6864,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 }
                 else if (transaction.kind !=
                              VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS ||
-                         transaction.itemId != value ||
-                         transaction.quotedPrice !=
-                             materialCount)
+                         transaction.itemId != sourceItemId ||
+                         transaction.selector != quantity ||
+                         transaction.quotedPrice != totalMaterialCount)
                 {
                     dialogText =
                         "\xba\xcf\xb3\xc9\xd7\xb4\xcc\xac\xd2\xd1\xb1\xe4\xbb\xaf\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xa1\xa3"; /* 合成状态已变化，请重新选择。 */
@@ -6781,8 +6881,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     u32 sourceRemaining = 0;
 
                     if (!vm_net_mock_role_crystal_synthesize_in_memory(
-                            role, value, &sourceSeq, &sourceRemaining,
-                            &resultSeq))
+                            role, sourceItemId, quantity, &sourceSeq,
+                            &sourceRemaining, &resultSeq))
                     {
                         dialogText =
                             "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb7\xc5\xc8\xeb\xba\xcf\xb3\xc9\xbd\xe1\xb9\xfb\xa1\xa3"; /* 背包已满，无法放入合成结果。 */
@@ -6814,12 +6914,13 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                              * query after this action=1 response.  Keep the
                              * dialog first, then use the sequence-keyed 7/11
                              * update for the consumed stack and the native
-                             * 7/15 reward delta for the one output item. */
+                             * 7/15 reward delta for the selected output count. */
                             crystalSynthesisRefresh = true;
-                            crystalSynthesisSourceItemId = value;
+                            crystalSynthesisSourceItemId = sourceItemId;
                             crystalSynthesisSourceRemaining = sourceRemaining;
                             crystalSynthesisResultItemId = resultItemId;
                             crystalSynthesisResultTotal = resultItem->count;
+                            crystalSynthesisAcquiredCount = quantity;
                             crystalSynthesisSourceSeq = sourceSeq;
                             crystalSynthesisResultSeq = resultSeq;
                             dialogText =
@@ -8405,14 +8506,17 @@ npc_service_serialize:
             crystalSynthesisSourceSeq == 0 ||
             crystalSynthesisResultItemId == 0 ||
             crystalSynthesisResultSeq == 0 ||
-            crystalSynthesisResultTotal == 0 || resultItem == NULL ||
+            crystalSynthesisResultTotal == 0 ||
+            !vm_net_mock_crystal_synthesis_quantity_is_valid(
+                crystalSynthesisAcquiredCount) ||
+            resultItem == NULL ||
             resultItem->count != crystalSynthesisResultTotal)
         {
             return 0;
         }
         memset(&rewardRow, 0, sizeof(rewardRow));
         rewardRow.item = resultItem;
-        rewardRow.acquiredCount = 1;
+        rewardRow.acquiredCount = crystalSynthesisAcquiredCount;
         if (!vm_net_mock_append_backpack_item_count11_object(
                 out, outCap, &pos, &objectCount,
                 crystalSynthesisSourceSeq, crystalSynthesisSourceItemId,
