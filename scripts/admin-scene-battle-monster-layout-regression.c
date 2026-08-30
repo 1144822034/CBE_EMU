@@ -6,6 +6,11 @@
 #include "../src/server_main.c"
 #undef main
 
+/* The page renderer and its catalog helpers remain deliberately internal to
+ * the aggregate service unit. Include that unit here so this layout fixture
+ * can exercise the rendered markup without needing a running server. */
+#include "../src/server/mock-server.c"
+
 static bool verify_scene_battle_draft_catalog_contract(void)
 {
     static const char scene[] = "draft-catalog.sce";
@@ -152,6 +157,14 @@ int main(void)
         strstr(page, "name=\"source_monster_id\"") == NULL ||
         strstr(g_vm_mock_admin_script,
                "const setupSceneBattleMonsterSearch=()=>{") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "const setupSceneBattleMonsterSelection=()=>{") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "editor.innerHTML=nextEditor.innerHTML") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "search.value=query;search.dispatchEvent(new Event('input'))") == NULL ||
+        strstr(g_vm_mock_admin_script,
+               "list.scrollTop=top") == NULL ||
         strstr(page, "<span>显示名称（GBK ≤29字节）</span>") == NULL ||
         strstr(page, "<span>Actor 资源</span>") == NULL ||
         strstr(page, "c 开头的城市会同时生成带专属 b_ 背景的非 c 战斗镜像") == NULL ||

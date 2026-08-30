@@ -1074,6 +1074,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     bool emitInitialScenePosition = false;
     bool currentSceneAlreadyTarget = false;
     bool samePendingTarget = false;
+    bool directSceneEnterPendingTarget = false;
     u8 fb4Type = 1;
     u32 pos = 5;
     u32 objectStart = 0;
@@ -1115,6 +1116,13 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         g_vm_net_mock_last_scene_change_target_valid &&
         vm_net_mock_scene_change_targets_equal(
             &target, &g_vm_net_mock_last_scene_change_target);
+    /* A direct NPC-instance 30/1 already created the destination shell.
+     * Its first same-target WT2/3 only asks for adjacent service families;
+     * it must not consume the later resource-completion 30/2. */
+    directSceneEnterPendingTarget =
+        samePendingTarget &&
+        g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent &&
+        !g_vm_net_mock_last_scene_change_target.sceneCompletionSent;
     /*
      * `scene_handle_change_result_scene_pos` (WT30/2) calls the scene entry
      * method only when `posinfo` is present.  An ordinary edge portal has no
@@ -1123,10 +1131,11 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
      * the following scene-runtime request can deliver its resources and a
      * no-posinfo completion acknowledgement.
      *
-     * A duplicate WT2/3 for the same pending target is not a second entry:
-     * retain its recorded phase and acknowledge it without posinfo.  This is
-     * what prevents a completed loading cycle from immediately re-entering the
-     * same scene.
+     * A duplicate WT2/3 for the same pending target is not a second entry.
+     * When a direct 30/1 created that shell, it also cannot consume the
+     * resource-completion 30/2; retain the pending phase until the real
+     * WT25/5/WT18/7 boundary.  Completed targets still receive their normal
+     * no-posinfo acknowledgement, preventing same-scene re-entry.
      */
     emitInitialScenePosition =
         resourcesReady &&
@@ -1186,7 +1195,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         return pos;
     }
     fb4Type = vm_net_mock_get_request_fb4_type(request, requestLen, 1);
-    if (!deferTeleportResourceCompletion)
+    if (!deferTeleportResourceCompletion && !directSceneEnterPendingTarget)
     {
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
             return 0;
@@ -1292,7 +1301,14 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         g_vm_net_mock_last_scene_change_fb4_type = fb4Type;
         return pos;
     }
-    if (currentSceneAlreadyTarget)
+    if (directSceneEnterPendingTarget)
+    {
+        printf("[info][network] mock_scene_change_direct_enter_followup_ack scene=%s pos=(%u,%u) exit=%u action=no-30/2-keep-resource-boundary\n",
+               target.scene, target.x, target.y, target.exitId);
+        vm_autotest_note("mock_scene_change_direct_enter_followup_ack scene=%s pos=(%u,%u) exit=%u response=request-families-only completion=WT25/5-after-WT18/7 evidence=JianghuOL.CBE:0x010396D6+0x01039770\n",
+                         target.scene, target.x, target.y, target.exitId);
+    }
+    else if (currentSceneAlreadyTarget)
     {
         /*
          * Some edge portals locally create the destination scene screen before

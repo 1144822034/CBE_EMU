@@ -27,7 +27,7 @@ mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.
 [warn][mock-admin] monster_catalog_scene_battle_drafts action=skip error=MySQL query attempted from an active result callback
 [info][network] mock_monster_catalog base=80 scenes=196 spawns=478 scene_added=12 drafts_added=0 rejected=0 total=92 source=SCE2-kind3+task-kill-labels+scene-battle-drafts
 [error][mock-admin] dynamic_npc_instance_target_unresolved scene=c04¡Ÿ∞≤∏Æ_05.sce actor=30001 target_scene=36Ω⁄»’«Ïµ‰_01.sce enemy=3000 action=skip-row reason=direct-challenge-requires-enabled-scene-battle-monster-or-instance-catalog-target direct_scene_target_exists=0 source=parent-load-query
-[info][mock-admin] dynamic_npc_db_load rows=38 skipped=1 quarantined=0 migrated=0 parent_migrated=0
+[info][mock-admin] dynamic_npc_db_load rows=39 skipped=1 quarantined=0 migrated=0 parent_migrated=0
 [info][network] mock_scene_npc_exact_validate scene=c00≈Ó¿≥œ…µ∫_01.sce rows=2 total=2 guojing=0 policy=exact-scene-only
 [info][network] mock_scene_npc_service_validate scene=00≈Ó¿≥œ…µ∫_02.sce rows=3 total=3 blacksmith=1 monkey=1 test_task_npc=0 policy=production-catalog-only
 [info][mock-service] listening=127.0.0.1:19090

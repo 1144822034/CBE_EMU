@@ -18,6 +18,21 @@
 #include "../src/server_main.c"
 #undef main
 
+/* Production links this newly split handler from its own object.  The
+ * historical in-process aggregate used by this scene-only regression omits
+ * that object, and this fixture never submits its signature.  Keep the test
+ * link complete without pulling an unrelated module that overlaps legacy
+ * no-split status builders. */
+u32 vm_net_mock_build_timed_combat_status_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    (void)request;
+    (void)requestLen;
+    (void)out;
+    (void)outCap;
+    return 0;
+}
+
 static bool begin_request_object(u8 *out, u32 outCap, u32 *pos, u8 kind,
                                  u8 subtype, u32 *objectStart)
 {
@@ -621,6 +636,139 @@ cleanup:
     g_vm_net_mock_role_db = savedRoleDb;
     g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
     g_vm_net_mock_role_db_valid = savedRoleDbValid;
+    return result;
+}
+
+/* player-1 can issue a same-target WT2/3 immediately after an NPC instance
+ * returns 30/1.  That request is not the resource-completion boundary: it
+ * must leave the one direct-enter shell pending until a real WT18/7 and its
+ * subsequent standalone WT25/5 complete it with one 30/2(no-posinfo). */
+static int assert_instance_direct_enter_scene_change_resource_boundary(
+    const char *targetScene)
+{
+    const u32 clientId = 0x50607080u;
+    vm_net_mock_scene_npcinfo_seed seed;
+    u8 sceneChange[256];
+    u8 defaultEvent[64];
+    u8 response[4096];
+    u32 sceneChangeLen = 0;
+    u32 defaultEventLen = 0;
+    u32 responseLen = 0;
+    int result = 1;
+
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = 1;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    g_vm_net_mock_role_db.roles[0].roleId = 1;
+    snprintf(g_vm_net_mock_role_db.roles[0].scene,
+             sizeof(g_vm_net_mock_role_db.roles[0].scene), "%s", targetScene);
+    g_vm_net_mock_role_db.roles[0].x = 120;
+    g_vm_net_mock_role_db.roles[0].y = 120;
+    memset(&g_vm_net_mock_last_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_scene_change_target));
+    memset(&g_vm_net_mock_last_completed_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_completed_scene_change_target));
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    g_vm_net_mock_content_update_loaded = true;
+    g_vm_net_mock_content_update.enabled = true;
+    g_vm_net_mock_content_update.id = 905;
+    g_vm_net_mock_content_update.code = 906;
+    g_vm_net_mock_content_update.nameCount = 1;
+    snprintf(g_vm_net_mock_content_update.names[0],
+             sizeof(g_vm_net_mock_content_update.names[0]), "%s", targetScene);
+    g_vm_mock_service_active_client_id = clientId;
+    /* A current manifest can still discover this SCE lazily.  This matches
+     * player-1's path: only the first post-30/1 WT25/5 creates the resource
+     * boundary, so the preceding same-target WT2/3 must leave it intact. */
+    vm_net_mock_content_client_note_version(clientId, true, true);
+
+    memset(&seed, 0, sizeof(seed));
+    seed.actorId = 20092;
+    snprintf(seed.instanceScene, sizeof(seed.instanceScene), "%s", targetScene);
+    seed.instanceX = 120;
+    seed.instanceY = 120;
+    responseLen = vm_net_mock_build_instance_enter_response(
+        &seed, response, sizeof(response));
+    if (responseLen == 0 ||
+        !response_has_object(response, responseLen, 0x1e, 1) ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent ||
+        g_vm_net_mock_last_scene_change_target.sceneCompletionSent ||
+        !build_scene_change_request(sceneChange, sizeof(sceneChange),
+                                    targetScene, 0, &sceneChangeLen) ||
+        !build_scene_default_event_request(defaultEvent, sizeof(defaultEvent),
+                                           &defaultEventLen))
+    {
+        fputs("could not arm player-1 direct-instance resource boundary fixture\n",
+              stderr);
+        goto cleanup;
+    }
+
+    responseLen = vm_net_mock_build_scene_change_combo_response(
+        sceneChange, sceneChangeLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        response_has_object(response, responseLen, 0x1e, 1) ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        count_scene_result_posinfo(response, responseLen, false) != 0 ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent ||
+        g_vm_net_mock_last_scene_change_target.sceneCompletionSent)
+    {
+        fputs("direct-instance WT2/3 consumed the resource completion 30/2\n",
+              stderr);
+        goto cleanup;
+    }
+
+    responseLen = vm_net_mock_build_mmgame_scene_transfer_followup_response(
+        defaultEvent, defaultEventLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        !response_has_object(response, responseLen, 0x19, 5) ||
+        response_has_object(response, responseLen, 0x1e, 1) ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        count_scene_result_posinfo(response, responseLen, false) != 0 ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_scene_change_target.needsSceneDownload ||
+        g_vm_net_mock_last_scene_change_target.sceneCompletionSent)
+    {
+        fputs("direct-instance first WT25/5 closed before its SCE download\n",
+              stderr);
+        goto cleanup;
+    }
+
+    vm_net_mock_note_update_chunk_complete(targetScene);
+    responseLen = vm_net_mock_build_mmgame_scene_transfer_followup_response(
+        defaultEvent, defaultEventLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        response_has_object(response, responseLen, 0x1e, 1) ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        count_scene_result_posinfo(response, responseLen, false) != 1 ||
+        g_vm_net_mock_last_scene_change_target_valid ||
+        !g_vm_net_mock_last_completed_scene_change_target_valid ||
+        !g_vm_net_mock_last_completed_scene_change_target.sceneCompletionSent)
+    {
+        fputs("direct-instance post-download WT25/5 did not complete once\n",
+              stderr);
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    g_vm_mock_service_active_client_id = 0;
+    g_vm_net_mock_update_completed_reenter_pending = false;
+    g_vm_net_mock_update_completed_name[0] = 0;
+    memset(g_vm_net_mock_content_client_states, 0,
+           sizeof(g_vm_net_mock_content_client_states));
+    memset(&g_vm_net_mock_content_update, 0,
+           sizeof(g_vm_net_mock_content_update));
     return result;
 }
 
@@ -1569,6 +1717,11 @@ int main(void)
         return 1;
     if (assert_instance_direct_enter_followup_order(targetScene) != 0)
         return 1;
+    if (assert_instance_direct_enter_scene_change_resource_boundary(
+            targetScene) != 0)
+    {
+        return 1;
+    }
     if (assert_instance_sce_install_completion_order(targetScene) != 0)
         return 1;
     if (assert_startup_sce_install_no_second_scene_enter(targetScene) != 0)
