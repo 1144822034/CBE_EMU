@@ -8378,12 +8378,17 @@ static u32 vm_mock_service_duel_skill_heal_amount(
 /*
  * 比武指数成长：第 1 回合 1×，第 2 回合 2×，第 3 回合 4× …
  * resolvedRoundCount = 已完整结算的回合数（当前正在结算的回合尚未计入）。
+ * Admin: damage_scale_enabled=0 → always 1×.
  */
 static u32 vm_mock_service_duel_arena_round_scale(const vm_mock_service_duel *duel)
 {
     u32 n;
+    const vm_mock_arena_config *cfg;
 
     if (duel == NULL || !duel->arenaMode)
+        return 1u;
+    cfg = vm_net_mock_arena_config_get();
+    if (cfg == NULL || !cfg->damageScaleEnabled)
         return 1u;
     n = duel->resolvedRoundCount;
     /* Cap 2^12=4096：避免 u32 溢出把伤害/命中撑爆。 */
@@ -8392,18 +8397,28 @@ static u32 vm_mock_service_duel_arena_round_scale(const vm_mock_service_duel *du
     return 1u << n;
 }
 
-/* 比武：禁止回血/增益/驱散/封魔等非伤害辅助；防对刷与天机互封拖死。 */
+/* 比武：禁止回血/增益/驱散/封魔等非伤害辅助；防对刷与天机互封拖死。
+ * Admin allow_heal=1 时放行回血/复活技（其它辅助仍禁）。 */
 static bool vm_mock_service_duel_arena_blocks_support_operate(u32 operate)
 {
     const vm_net_mock_skill_catalog_item *skill =
         vm_net_mock_battle_operate_skill(operate);
+    const vm_mock_arena_config *cfg;
+    bool isHeal = false;
 
     if (operate <= 2 || skill == NULL)
         return false;
-    if (vm_net_mock_battle_operate_skill_targets_friendly_group_heal(operate) ||
-        vm_net_mock_battle_operate_skill_targets_friendly_group_modifier(operate) ||
+    isHeal = vm_net_mock_battle_operate_skill_targets_friendly_group_heal(operate) ||
+             vm_net_mock_battle_skill_is_revive(skill);
+    if (isHeal)
+    {
+        cfg = vm_net_mock_arena_config_get();
+        if (cfg != NULL && cfg->allowHeal)
+            return false;
+        return true;
+    }
+    if (vm_net_mock_battle_operate_skill_targets_friendly_group_modifier(operate) ||
         vm_net_mock_battle_operate_skill_targets_enemy_status_no_damage(operate) ||
-        vm_net_mock_battle_skill_is_revive(skill) ||
         vm_net_mock_battle_skill_is_dispel(skill) ||
         vm_net_mock_battle_skill_is_silence(skill))
     {
@@ -8556,9 +8571,13 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
 
         if (operate > 2 && skill != NULL)
             magical = vm_net_mock_battle_skill_is_magical(skill);
-        /* 鬼道法术忽略闪躲；物理普攻/物技仍检定。 */
+        /* 鬼道法术忽略闪躲；物理普攻/物技仍检定（admin allow_dodge=0 则必中）。 */
         {
             u32 attackHit = sourceStats.hit;
+            const vm_mock_arena_config *arenaCfg =
+                duel->arenaMode ? vm_net_mock_arena_config_get() : NULL;
+            bool dodgeEnabled =
+                !duel->arenaMode || arenaCfg == NULL || arenaCfg->allowDodge != 0;
 
             if (duel->arenaMode)
             {
@@ -8569,7 +8588,7 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
                 attackHit = scaledHit > 0xffffffffull ? 0xffffffffu
                                                          : (u32)scaledHit;
             }
-            if (!magical &&
+            if (dodgeEnabled && !magical &&
                 !vm_net_mock_battle_roll_hit(attackHit, targetStats.dodge))
             {
                 hitOut->targetSelf = false;
@@ -8625,6 +8644,27 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
         else
         {
             rawDamage = sourceStats.attack ? sourceStats.attack : 1;
+        }
+        /* 比武：admin allow_combat_pill=1 时套用大力丸/神力丸 ATK%（与 PvE 同口径）。 */
+        if (duel->arenaMode)
+        {
+            const vm_mock_arena_config *pillCfg = vm_net_mock_arena_config_get();
+
+            if (pillCfg != NULL && pillCfg->allowCombatPill != 0)
+            {
+                u32 pillBonusPercent =
+                    vm_net_mock_role_active_combat_pill_attack_bonus_percent(
+                        sourceRole);
+
+                if (pillBonusPercent != 0)
+                {
+                    uint64_t boosted =
+                        (uint64_t)rawDamage * (100ull + pillBonusPercent) /
+                        100ull;
+                    rawDamage =
+                        boosted > 0xffffffffull ? 0xffffffffu : (u32)boosted;
+                }
+            }
         }
         if (operate > 2 && skill != NULL)
         {

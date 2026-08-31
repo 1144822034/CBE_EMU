@@ -54,6 +54,11 @@ typedef struct
     u8 wagerEnabled;
     u8 wagerFeePercent;
     u8 wagerCurrency;
+    /* Timed-arena duel rules (admin). Defaults preserve historical contract. */
+    u8 damageScaleEnabled; /* round damage/hit 2^n */
+    u8 allowHeal;          /* heal/revive skills (items still client-gated) */
+    u8 allowDodge;         /* physical hit vs dodge roll */
+    u8 allowCombatPill;    /* 大力丸/神力丸 ATK% in arena duel */
 } vm_mock_arena_config;
 
 typedef struct
@@ -420,6 +425,10 @@ static void vm_mock_arena_config_set_defaults(vm_mock_arena_config *cfg)
     cfg->wagerEnabled = 0;
     cfg->wagerFeePercent = 10;
     cfg->wagerCurrency = 0;
+    cfg->damageScaleEnabled = 1;
+    cfg->allowHeal = 0;
+    cfg->allowDodge = 1;
+    cfg->allowCombatPill = 0;
 }
 
 static bool vm_mock_arena_ensure_tables(void)
@@ -449,6 +458,10 @@ static bool vm_mock_arena_ensure_tables(void)
             "wager_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "wager_fee_percent TINYINT UNSIGNED NOT NULL DEFAULT 10,"
             "wager_currency TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "damage_scale_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "allow_heal TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "allow_dodge TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "allow_combat_pill TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(id)) ENGINE=InnoDB") ||
         !vm_mysql_exec(
@@ -532,6 +545,19 @@ static bool vm_mock_arena_ensure_tables(void)
     (void)vm_mysql_exec(
         "ALTER TABLE server_arena_config ADD COLUMN weekday_brackets "
         "VARCHAR(32) NOT NULL DEFAULT '0,70,50,10,70,50,10' AFTER weekday_mask");
+    /* Timed-arena duel rule toggles (ignore if already present). */
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_config ADD COLUMN damage_scale_enabled "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 1 AFTER wager_currency");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_config ADD COLUMN allow_heal "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER damage_scale_enabled");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_config ADD COLUMN allow_dodge "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 1 AFTER allow_heal");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_config ADD COLUMN allow_combat_pill "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER allow_dodge");
     if (!vm_mock_wager_ensure_member_table())
         return false;
     ready = true;
@@ -594,6 +620,14 @@ static bool vm_mock_arena_config_row(void *contextValue, unsigned int columnCoun
         cfg->wagerFeePercent = (u8)tmp;
     if (values[18] && vm_mock_mysql_parse_u32(values[18], lengths[18], &tmp))
         cfg->wagerCurrency = (u8)tmp;
+    if (values[19] && lengths[19])
+        cfg->damageScaleEnabled = (u8)(values[19][0] == '0' ? 0 : 1);
+    if (values[20] && lengths[20])
+        cfg->allowHeal = (u8)(values[20][0] == '0' ? 0 : 1);
+    if (values[21] && lengths[21])
+        cfg->allowDodge = (u8)(values[21][0] == '0' ? 0 : 1);
+    if (values[22] && lengths[22])
+        cfg->allowCombatPill = (u8)(values[22][0] == '0' ? 0 : 1);
     return true;
 }
 
@@ -652,7 +686,8 @@ static bool vm_mock_arena_load_config(bool force)
             "SELECT enabled,scene,spawn_x,spawn_y,weekday_mask,weekday_brackets,"
             "entry_start_minute,entry_end_minute,match_start_minute,match_end_minute,"
             "round_seconds,battle_timeout_seconds,score_win,score_bye,score_draw,"
-            "npc_name_keyword,wager_enabled,wager_fee_percent,wager_currency "
+            "npc_name_keyword,wager_enabled,wager_fee_percent,wager_currency,"
+            "damage_scale_enabled,allow_heal,allow_dodge,allow_combat_pill "
             "FROM server_arena_config WHERE id=1 LIMIT 1",
             vm_mock_arena_config_row, &g_vm_mock_arena_config))
     {
@@ -677,9 +712,11 @@ static bool vm_mock_arena_load_config(bool force)
                      "entry_start_minute,entry_end_minute,match_start_minute,"
                      "match_end_minute,round_seconds,battle_timeout_seconds,"
                      "score_win,score_bye,score_draw,npc_name_keyword,"
-                     "wager_enabled,wager_fee_percent,wager_currency) VALUES ("
+                     "wager_enabled,wager_fee_percent,wager_currency,"
+                     "damage_scale_enabled,allow_heal,allow_dodge,allow_combat_pill) "
+                     "VALUES ("
                      "1,1,UNHEX('%s'),%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-                     "UNHEX('%s'),0,10,0) ON DUPLICATE KEY UPDATE id=id",
+                     "UNHEX('%s'),0,10,0,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE id=id",
                      sceneHex, g_vm_mock_arena_config.spawnX,
                      g_vm_mock_arena_config.spawnY,
                      g_vm_mock_arena_config.weekdayMask, bracketsText,
@@ -691,7 +728,11 @@ static bool vm_mock_arena_load_config(bool force)
                      g_vm_mock_arena_config.battleTimeoutSeconds,
                      g_vm_mock_arena_config.scoreWin,
                      g_vm_mock_arena_config.scoreBye,
-                     g_vm_mock_arena_config.scoreDraw, kwHex);
+                     g_vm_mock_arena_config.scoreDraw, kwHex,
+                     (u32)g_vm_mock_arena_config.damageScaleEnabled,
+                     (u32)g_vm_mock_arena_config.allowHeal,
+                     (u32)g_vm_mock_arena_config.allowDodge,
+                     (u32)g_vm_mock_arena_config.allowCombatPill);
             (void)vm_mysql_exec(query);
         }
     }
@@ -4134,36 +4175,74 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
         }
         else
         {
-            if (reward->rewardExp)
-                (void)vm_net_mock_role_add_exp(role, reward->rewardExp);
-            if (reward->rewardMoney)
+            bool bagOk = true;
+            vm_net_mock_role_state beforeBag;
+            bool wasInventoryDirty = false;
+
+            /*
+             * Grant bag rows first. If item/equip cannot enter, refuse the
+             * whole claim (no exp/money/wcoin, claimed stays 0) so a full
+             * backpack cannot burn the reward.
+             */
+            if ((reward->itemId && reward->itemCount) || reward->equipId)
             {
-                role->money = vm_net_mock_add_capped_u32(role->money,
-                                                         reward->rewardMoney);
-                vm_net_mock_role_mark_inventory_dirty("arena-claim-money");
+                wasInventoryDirty = g_vm_net_mock_role_inventory_dirty;
+                beforeBag = *role;
+                if (reward->itemId && reward->itemCount &&
+                    !vm_net_mock_role_add_backpack_item_to_role(
+                        role, reward->itemId, reward->itemCount, 0, &seq,
+                        "arena-claim-item", NULL, 0))
+                    bagOk = false;
+                if (bagOk && reward->equipId &&
+                    !vm_net_mock_role_add_backpack_item_to_role(
+                        role, reward->equipId, 1, 0, &seq, "arena-claim-equip",
+                        NULL, 0))
+                    bagOk = false;
+                if (!bagOk)
+                {
+                    *role = beforeBag;
+                    g_vm_net_mock_role_inventory_dirty = wasInventoryDirty;
+                    result = 6;
+                    /* 背包已满，请清理后再领奖 */
+                    snprintf(tipGbk, sizeof(tipGbk),
+                             "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac"
+                             "\xc7\xeb\xc7\xe5\xc0\xed\xba\xf3\xd4\xd9"
+                             "\xc1\xec\xbd\xb1");
+                    printf("[info][mock-service] arena_claim_bag_full "
+                           "role=%u rank=%u item=%u x%u equip=%u\n",
+                           role->roleId, (u32)p->rankPos, reward->itemId,
+                           reward->itemCount, reward->equipId);
+                }
             }
-            if (reward->rewardWcoin)
-                (void)vm_net_mock_role_add_wcoin(role, reward->rewardWcoin);
-            if (reward->itemId && reward->itemCount)
-                (void)vm_net_mock_role_add_backpack_item_to_role(
-                    role, reward->itemId, reward->itemCount, 0, &seq,
-                    "arena-claim-item", NULL, 0);
-            if (reward->equipId)
-                (void)vm_net_mock_role_add_backpack_item_to_role(
-                    role, reward->equipId, 1, 0, &seq, "arena-claim-equip", NULL, 0);
-            p->claimed = 1;
-            (void)vm_mock_arena_persist_score(p);
-            result = 1;
-            vm_mock_arena_format_claim_tip(reward, tipGbk, sizeof(tipGbk));
-            if (tipGbk[0] != 0 && session != NULL)
+
+            if (bagOk)
             {
-                (void)vm_mock_service_session_enqueue_system_message(session,
-                                                                    tipGbk);
-                printf("[info][mock-service] arena_claim_tip role=%u rank=%u "
-                       "exp=%u money=%u wcoin=%u item=%u x%u equip=%u tip=%s\n",
-                       role->roleId, (u32)p->rankPos, reward->rewardExp,
-                       reward->rewardMoney, reward->rewardWcoin, reward->itemId,
-                       reward->itemCount, reward->equipId, tipGbk);
+                if (reward->rewardExp)
+                    (void)vm_net_mock_role_add_exp(role, reward->rewardExp);
+                if (reward->rewardMoney)
+                {
+                    role->money = vm_net_mock_add_capped_u32(
+                        role->money, reward->rewardMoney);
+                    vm_net_mock_role_mark_inventory_dirty("arena-claim-money");
+                }
+                if (reward->rewardWcoin)
+                    (void)vm_net_mock_role_add_wcoin(role, reward->rewardWcoin);
+                p->claimed = 1;
+                (void)vm_mock_arena_persist_score(p);
+                result = 1;
+                vm_mock_arena_format_claim_tip(reward, tipGbk, sizeof(tipGbk));
+                if (tipGbk[0] != 0 && session != NULL)
+                {
+                    (void)vm_mock_service_session_enqueue_system_message(
+                        session, tipGbk);
+                    printf("[info][mock-service] arena_claim_tip role=%u "
+                           "rank=%u exp=%u money=%u wcoin=%u item=%u x%u "
+                           "equip=%u tip=%s\n",
+                           role->roleId, (u32)p->rankPos, reward->rewardExp,
+                           reward->rewardMoney, reward->rewardWcoin,
+                           reward->itemId, reward->itemCount, reward->equipId,
+                           tipGbk);
+                }
             }
         }
     }
@@ -4221,12 +4300,13 @@ static bool vm_net_mock_arena_admin_save_config(
     const u16 weekdayBrackets[7], u16 entryStart, u16 entryEnd, u16 matchStart,
     u16 matchEnd, u32 roundSec, u32 battleTimeout, u32 scoreWin, u32 scoreBye,
     u32 scoreDraw, const char *npcKeyword, u8 wagerEnabled, u8 wagerFee,
-    u8 wagerCurrency)
+    u8 wagerCurrency, u8 damageScaleEnabled, u8 allowHeal, u8 allowDodge,
+    u8 allowCombatPill)
 {
     char sceneHex[192];
     char kwHex[96];
     char bracketsText[48];
-    char query[2200];
+    char query[2600];
     int written;
     vm_mock_arena_config tmpCfg;
     u32 i;
@@ -4258,9 +4338,10 @@ static bool vm_net_mock_arena_admin_save_config(
         "weekday_mask,weekday_brackets,entry_start_minute,entry_end_minute,"
         "match_start_minute,match_end_minute,round_seconds,battle_timeout_seconds,"
         "score_win,score_bye,score_draw,npc_name_keyword,wager_enabled,"
-        "wager_fee_percent,wager_currency) VALUES (1,%u,UNHEX('%s'),%u,%u,%u,"
-        "'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,UNHEX('%s'),%u,%u,%u) ON DUPLICATE KEY "
-        "UPDATE "
+        "wager_fee_percent,wager_currency,damage_scale_enabled,allow_heal,"
+        "allow_dodge,allow_combat_pill) VALUES (1,%u,UNHEX('%s'),%u,%u,%u,"
+        "'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u) "
+        "ON DUPLICATE KEY UPDATE "
         "enabled=VALUES(enabled),scene=VALUES(scene),spawn_x=VALUES(spawn_x),"
         "spawn_y=VALUES(spawn_y),weekday_mask=VALUES(weekday_mask),"
         "weekday_brackets=VALUES(weekday_brackets),"
@@ -4274,11 +4355,16 @@ static bool vm_net_mock_arena_admin_save_config(
         "score_draw=VALUES(score_draw),npc_name_keyword=VALUES(npc_name_keyword),"
         "wager_enabled=VALUES(wager_enabled),"
         "wager_fee_percent=VALUES(wager_fee_percent),"
-        "wager_currency=VALUES(wager_currency)",
+        "wager_currency=VALUES(wager_currency),"
+        "damage_scale_enabled=VALUES(damage_scale_enabled),"
+        "allow_heal=VALUES(allow_heal),allow_dodge=VALUES(allow_dodge),"
+        "allow_combat_pill=VALUES(allow_combat_pill)",
         (u32)enabled, sceneHex, (u32)spawnX, (u32)spawnY, weekdayMask,
         bracketsText, (u32)entryStart, (u32)entryEnd, (u32)matchStart,
         (u32)matchEnd, roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw,
-        kwHex, (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency);
+        kwHex, (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency,
+        (u32)(damageScaleEnabled ? 1u : 0u), (u32)(allowHeal ? 1u : 0u),
+        (u32)(allowDodge ? 1u : 0u), (u32)(allowCombatPill ? 1u : 0u));
     if (written < 0 || (size_t)written >= sizeof(query))
     {
         printf("[error][mock-service] arena_admin_save_config query truncated "

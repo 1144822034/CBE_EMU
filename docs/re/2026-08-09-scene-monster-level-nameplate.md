@@ -37,4 +37,4 @@
 ## 风险
 
 - 须同时更新/重建 gateway（`npm run gateway` 或 `gateway:exe`）；旧纯 WS gateway 无 `/api/monster-levels` 时 Pixi 回退 builtin。  
-- 梦境 wire `#200` 名牌按线号查等级（幽冥鬼火 Lv.43），开战真实 ID 等级可能不同——与现有「名牌用线号存量名」契约一致。
+- 梦境 wire `#200`/`#250` 名牌须按 **real id**（见 `2026-08-31-monster-nameplate-real-id.md`）；旧「按线号」契约已废止。

@@ -1,6 +1,6 @@
 import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
 import type { LoadedScene } from "../resources/loader";
-import { formatMonsterMapName } from "../resources/monsterLevels";
+import { formatCombatSpawnNameplate } from "../resources/monsterLevels";
 import { ActorLayer } from "../game/ActorLayer";
 import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale } from "../ui/constants";
 import { BitmapLabel } from "../ui/BitmapLabel";
@@ -31,7 +31,11 @@ import {
   releasePoseTextureKey,
 } from "./poseTextureCache";
 import { nudgePlistAtlasesAfterGpuResume } from "../resources/plistAtlas";
-import { replaceGraphics } from "./gpuResume";
+import {
+  createSolidMaskSprite,
+  remountSolidMaskSprite,
+  replaceGraphics,
+} from "./gpuResume";
 import {
   WingOverlay,
   writeWingIdPreference,
@@ -155,8 +159,12 @@ export class SceneView {
   private walkLastX = 0;
   private walkLastY = 0;
   private mapPointer: Graphics;
-  /** Clip rect for the map band — Graphics dies after context restore. */
-  private clipMask: Graphics;
+  /**
+   * Clip rect for the map band. Must be a Sprite (not Graphics): after
+   * webglcontextrestored, Graphics masks stay empty on WebView even when
+   * replaceGraphics runs — HUD outside clip still paints (正椁室黑屏).
+   */
+  private clipMask: Sprite;
   private clip: Container;
   private lastTick = 0;
   private movePixelAcc = 0;
@@ -218,9 +226,7 @@ export class SceneView {
   constructor(private readonly app: Application) {
     this.root.y = WORLD_TOP_H;
     this.clip = new Container();
-    this.clipMask = new Graphics()
-      .rect(0, 0, this.viewW, this.viewH)
-      .fill({ color: 0xffffff });
+    this.clipMask = createSolidMaskSprite(this.viewW, this.viewH);
     this.clip.mask = this.clipMask;
     this.clip.addChild(this.clipMask);
     // Behind world: empty-map taps walk here; NPC/peer markers sit above and win hit-test.
@@ -544,16 +550,26 @@ export class SceneView {
       this.paintDecorations();
       this.paintPortals();
       this.actors.setSceneMonsters(
-        (scene.combatSpawns ?? []).map((s, i) => ({
-          actorId: 0x70000000 + i,
-          x: s.x,
-          y: s.y,
-          name: formatMonsterMapName(s.name, s.sceActorId),
-          actorResource: s.mapActorResource,
-          battleActorResource: s.battleActorResource,
-          scriptName: `sce_combat_${s.sceActorId}`,
-          battleActorId: s.sceActorId,
-        })),
+        (scene.combatSpawns ?? []).map((s, i) => {
+          const plate = formatCombatSpawnNameplate({
+            scene: scene.sceneFile,
+            x: s.x,
+            y: s.y,
+            wire: s.sceActorId,
+            sceName: s.name,
+            battleActor: s.battleActorResource,
+          });
+          return {
+            actorId: 0x70000000 + i,
+            x: s.x,
+            y: s.y,
+            name: plate.name,
+            actorResource: s.mapActorResource,
+            battleActorResource: s.battleActorResource,
+            scriptName: `sce_combat_${plate.realId}`,
+            battleActorId: plate.realId,
+          };
+        }),
       );
       this.actors.setTeleportStones(
         (scene.teleportStones ?? []).map((s, i) => ({
@@ -1442,21 +1458,28 @@ export class SceneView {
    * Town map + actor poses use BufferImageSource — source.update() alone leaves
    * a black world while HUD/UC3 still paint. Recreate from CPU RGBA like battle.
    *
-   * Critical: clip.mask is Graphics. After restore its GPU geometry is empty, so
-   * the whole map band (map + player + NPC/peer) is clipped to nothing while the
-   * world HUD outside `clip` still paints — matches「正存室」HUD 在、场景全黑.
+   * Critical: clip.mask must be a remounted Sprite. Graphics masks stay empty
+   * after restore on WebView (replaceGraphics insufficient) → map band clips to
+   * nothing while world HUD + 修/拍 UC3 labels outside `clip` still paint.
    */
   nudgeAfterGpuResume(): void {
     try {
       // Drop mask before destroy so StencilMask.reset does not race a live effect.
       this.clip.mask = null;
-      this.clipMask = replaceGraphics(this.clipMask);
-      this.clipMask
-        .rect(0, 0, this.viewW, this.viewH)
-        .fill({ color: 0xffffff });
+      this.clipMask = remountSolidMaskSprite(
+        this.clipMask,
+        this.viewW,
+        this.viewH,
+      );
       this.clip.mask = this.clipMask;
     } catch (e) {
       console.warn("[scene] clip mask rebuild", e);
+      // Last resort: unclip so map can paint (may briefly spill into HUD bands).
+      try {
+        this.clip.mask = null;
+      } catch {
+        /* ignore */
+      }
     }
     try {
       const prevPtr = this.mapPointer;
@@ -1538,6 +1561,25 @@ export class SceneView {
     const body = this.playerSprite as Sprite | null;
     if (body) body.visible = true;
     this.actors.nudgeAfterGpuResume();
+
+    // Status badge plates are Graphics — UC3 glyphs return via refreshAllUc3Labels
+    // but plates stay blank, leaving bare「修 拍 擂…」over the black band.
+    try {
+      this.mountStatusToggleArt();
+      void this.mountXiuArt();
+      void this.mountPaiArt();
+      void this.mountLeiArt();
+      void this.mountYuArt();
+      void this.mountChiArt();
+      void this.mountQiArt();
+      void this.mountChenArt();
+      void this.mountGifBadge(this.douBadge, "vip_effect.gif");
+      void this.mountGifBadge(this.lianBadge, "training.gif");
+      this.layoutStatusBadges();
+    } catch (e) {
+      console.warn("[scene] status strip remount", e);
+    }
+
     // Do NOT force this.root.visible = true — showPhase owns that. GPU resume
     // on the title/login screen was un-hiding 修/拍/… over Background.gif.
     this.world.visible = true;

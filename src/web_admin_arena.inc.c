@@ -277,17 +277,39 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<div><label>平局分</label><input name=\"score_draw\" value=\"%u\"></div>"
         "<div><label>NPC名关键字</label>"
         "<input name=\"npc_keyword\" value=\"%s\"></div>"
+        "<div><label>回合伤害加深</label><select name=\"damage_scale_enabled\">"
+        "<option value=\"1\"%s>开启(每回合×2)</option>"
+        "<option value=\"0\"%s>关闭</option></select></div>"
+        "<div><label>是否允许回血</label><select name=\"allow_heal\">"
+        "<option value=\"0\"%s>禁止</option>"
+        "<option value=\"1\"%s>允许(回血/复活技)</option></select></div>"
+        "<div><label>是否允许闪躲</label><select name=\"allow_dodge\">"
+        "<option value=\"1\"%s>允许</option>"
+        "<option value=\"0\"%s>禁止(物理必中)</option></select></div>"
+        "<div><label>神力丸/大力丸</label><select name=\"allow_combat_pill\">"
+        "<option value=\"0\"%s>不生效</option>"
+        "<option value=\"1\"%s>生效(+ATK%%)</option></select></div>"
         "</div><button type=\"submit\">保存配置</button></form>"
         "<p class=\"muted\">每天只开一个等级段；场地按职业分流：天机→基准图，"
         "幻剑→基准50，鬼道→基准70。默认周一70/周二50-69/周三10-49/周四70/"
         "周五50-69/周六10-49/周日休息；进场 20:20–20:29，比赛 20:30–21:00。"
+        "战斗规则默认：伤害加深开、禁回血、允许闪躲、神力丸不生效；"
+        "增益/封魔/战斗物品仍固定禁用。"
         "</p></section>",
         cfg ? cfg->roundSeconds : 300,
         cfg ? cfg->battleTimeoutSeconds : 240,
         cfg ? cfg->scoreWin : 20,
         cfg ? cfg->scoreBye : 20,
         cfg ? cfg->scoreDraw : 10,
-        kwUtf8[0] ? kwUtf8 : "比武");
+        kwUtf8[0] ? kwUtf8 : "比武",
+        cfg && cfg->damageScaleEnabled ? " selected" : "",
+        cfg && !cfg->damageScaleEnabled ? " selected" : "",
+        cfg && !cfg->allowHeal ? " selected" : "",
+        cfg && cfg->allowHeal ? " selected" : "",
+        cfg && cfg->allowDodge ? " selected" : "",
+        cfg && !cfg->allowDodge ? " selected" : "",
+        cfg && !cfg->allowCombatPill ? " selected" : "",
+        cfg && cfg->allowCombatPill ? " selected" : "");
 
 
     vm_mock_admin_text_appendf(
@@ -402,6 +424,10 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
     u32 wagerEnabled = 0;
     u32 wagerFee = 10;
     u32 wagerCurrency = 0;
+    u32 damageScaleEnabled = 1;
+    u32 allowHeal = 0;
+    u32 allowDodge = 1;
+    u32 allowCombatPill = 0;
     char sceneUtf8[128];
     char kwUtf8[64];
     char sceneGbk[64];
@@ -451,6 +477,12 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         (void)vm_mock_admin_form_u32(body, "score_win", 1000u, &scoreWin);
         (void)vm_mock_admin_form_u32(body, "score_bye", 1000u, &scoreBye);
         (void)vm_mock_admin_form_u32(body, "score_draw", 1000u, &scoreDraw);
+        (void)vm_mock_admin_form_u32(body, "damage_scale_enabled", 1u,
+                                     &damageScaleEnabled);
+        (void)vm_mock_admin_form_u32(body, "allow_heal", 1u, &allowHeal);
+        (void)vm_mock_admin_form_u32(body, "allow_dodge", 1u, &allowDodge);
+        (void)vm_mock_admin_form_u32(body, "allow_combat_pill", 1u,
+                                     &allowCombatPill);
         if (sceneUtf8[0] == 0)
             snprintf(sceneUtf8, sizeof(sceneUtf8), "%s", "c04比武擂台");
         if (!vm_mock_admin_utf8_to_gbk_text(sceneUtf8, sceneGbk, sizeof(sceneGbk),
@@ -468,7 +500,8 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
                 (u16)matchStart, (u16)matchEnd, roundSec, battleTimeout,
                 scoreWin, scoreBye, scoreDraw, kwGbk,
                 cfg ? cfg->wagerEnabled : 0, cfg ? cfg->wagerFeePercent : 10,
-                cfg ? cfg->wagerCurrency : 0))
+                cfg ? cfg->wagerCurrency : 0, (u8)damageScaleEnabled,
+                (u8)allowHeal, (u8)allowDodge, (u8)allowCombatPill))
             vm_mock_admin_redirect_arena(client, "ok", "比武配置已保存");
         else
             vm_mock_admin_redirect_arena(client, "error", "保存比武配置失败");
@@ -521,7 +554,9 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
                 cfg->entryEndMinute, cfg->matchStartMinute, cfg->matchEndMinute,
                 cfg->roundSeconds, cfg->battleTimeoutSeconds, cfg->scoreWin,
                 cfg->scoreBye, cfg->scoreDraw, cfg->npcNameKeyword,
-                (u8)wagerEnabled, (u8)wagerFee, (u8)wagerCurrency))
+                (u8)wagerEnabled, (u8)wagerFee, (u8)wagerCurrency,
+                cfg->damageScaleEnabled, cfg->allowHeal, cfg->allowDodge,
+                cfg->allowCombatPill))
             vm_mock_admin_redirect_arena(client, "ok", "赏金擂台配置已保存");
         else
             vm_mock_admin_redirect_arena(client, "error", "保存失败");

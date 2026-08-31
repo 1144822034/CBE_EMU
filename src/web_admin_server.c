@@ -11072,9 +11072,9 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                     "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
         return 1;
     }
-    /* Public id→level (+ optional actor) map for Pixi nameplates / battle
-     * visuals (via gateway proxy).  Only rows with a loaded server_monsters
-     * override; builtin level fallback stays client-side. */
+    /* Public catalog for Pixi map nameplates / battle visuals (gateway proxy):
+     * overrides=levels, actors, names (UTF-8), reals=wire→real spawn bindings.
+     * Nameplates must key by REAL id, never SCE keep-id wire (#200/#250). */
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, "/api/monster-levels") == 0)
     {
@@ -11083,15 +11083,36 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         size_t jsonLen = 0;
         u32 levelWritten = 0;
         u32 actorWritten = 0;
+        u32 nameWritten = 0;
+        u32 realWritten = 0;
         int ok = 0;
+        vm_net_mock_monster_admin_row *rows = NULL;
+        u32 rowTotal = 0;
+        u32 rowCap = 0;
 
         (void)vm_net_mock_monster_db_load();
-        jsonCap = 96u + (size_t)g_vm_net_mock_monster_catalog_count * 48u;
-        if (jsonCap < 256u)
-            jsonCap = 256u;
+        vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
+        rowTotal = vm_net_mock_monster_admin_list(NULL, 0);
+        rowCap = rowTotal ? rowTotal : 1u;
+        rows = (vm_net_mock_monster_admin_row *)calloc(
+            rowCap, sizeof(vm_net_mock_monster_admin_row));
+        if (rows == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"oom\"}\n");
+            return 0;
+        }
+        rowTotal = vm_net_mock_monster_admin_list(rows, rowCap);
+        jsonCap = 256u + (size_t)rowTotal * 160u +
+                  (size_t)g_vm_net_mock_sce_combat_spawn_binding_count * 96u;
+        if (jsonCap < 512u)
+            jsonCap = 512u;
         json = (char *)malloc(jsonCap);
         if (json == NULL)
         {
+            free(rows);
             vm_mock_admin_send_response(client, "500 Internal Server Error",
                                         "application/json; charset=utf-8",
                                         "Access-Control-Allow-Origin: *\r\n",
@@ -11107,20 +11128,16 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         }
         else
             ok = 0;
-        for (u32 i = 0; ok && i < g_vm_net_mock_monster_catalog_count; ++i)
+        for (u32 i = 0; ok && i < rowTotal; ++i)
         {
-            const vm_net_mock_monster_override *override =
-                &g_vm_net_mock_monster_overrides[i];
             char piece[40];
             int pieceLen;
 
-            if (!override->used || override->stats.enemyId == 0 ||
-                override->stats.level == 0)
+            if (rows[i].enemyId == 0 || rows[i].level == 0)
                 continue;
             pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":%u",
-                                levelWritten ? "," : "",
-                                override->stats.enemyId,
-                                override->stats.level);
+                                levelWritten ? "," : "", rows[i].enemyId,
+                                rows[i].level);
             if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
                 jsonLen + (size_t)pieceLen + 4u >= jsonCap)
             {
@@ -11138,37 +11155,31 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         }
         else
             ok = 0;
-        for (u32 i = 0; ok && i < g_vm_net_mock_monster_catalog_count; ++i)
+        for (u32 i = 0; ok && i < rowTotal; ++i)
         {
-            const vm_net_mock_monster_override *override =
-                &g_vm_net_mock_monster_overrides[i];
-            const char *actor = NULL;
+            const char *actor = rows[i].actorResource;
             char piece[96];
             int pieceLen;
+            size_t alen;
+            int safe;
 
-            if (!override->used || override->stats.enemyId == 0)
+            if (rows[i].enemyId == 0 || actor[0] == 0)
                 continue;
-            if (override->actorResource[0] == 0)
-                continue;
-            actor = override->actorResource;
-            /* Catalog actors are ASCII *.actor paths — reject odd bytes. */
+            alen = strlen(actor);
+            safe = alen > 0 && alen < 64;
+            for (size_t a = 0; safe && a < alen; ++a)
             {
-                size_t alen = strlen(actor);
-                int safe = alen > 0 && alen < 64;
-                for (size_t a = 0; safe && a < alen; ++a)
-                {
-                    unsigned char c = (unsigned char)actor[a];
-                    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                          (c >= '0' && c <= '9') || c == '_' || c == '.' ||
-                          c == '-' || c == '/'))
-                        safe = 0;
-                }
-                if (!safe)
-                    continue;
+                unsigned char c = (unsigned char)actor[a];
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                      (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+                      c == '-' || c == '/'))
+                    safe = 0;
             }
+            if (!safe)
+                continue;
             pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":\"%s\"",
-                                actorWritten ? "," : "",
-                                override->stats.enemyId, actor);
+                                actorWritten ? "," : "", rows[i].enemyId,
+                                actor);
             if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
                 jsonLen + (size_t)pieceLen + 4u >= jsonCap)
             {
@@ -11179,9 +11190,93 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             jsonLen += (size_t)pieceLen;
             ++actorWritten;
         }
+        if (ok && jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "},\"names\":{", 11);
+            jsonLen += 11;
+        }
+        else
+            ok = 0;
+        for (u32 i = 0; ok && i < rowTotal; ++i)
+        {
+            char nameUtf8[128];
+            char nameEsc[256];
+            char piece[320];
+            int pieceLen;
+
+            if (rows[i].enemyId == 0 || rows[i].displayName[0] == 0)
+                continue;
+            memset(nameUtf8, 0, sizeof(nameUtf8));
+            vm_net_mock_gbk_label_to_utf8(rows[i].displayName, nameUtf8,
+                                          sizeof(nameUtf8));
+            if (nameUtf8[0] == 0)
+                continue;
+            if (!vm_mock_admin_json_escape(nameUtf8, nameEsc, sizeof(nameEsc)))
+            {
+                ok = 0;
+                break;
+            }
+            pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":\"%s\"",
+                                nameWritten ? "," : "", rows[i].enemyId,
+                                nameEsc);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 4u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++nameWritten;
+        }
+        if (ok && jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "},\"reals\":[", 11);
+            jsonLen += 11;
+        }
+        else
+            ok = 0;
+        for (u32 i = 0; ok && i < g_vm_net_mock_sce_combat_spawn_binding_count;
+             ++i)
+        {
+            const vm_net_mock_sce_combat_spawn_binding *bind =
+                &g_vm_net_mock_sce_combat_spawn_bindings[i];
+            char sceneUtf8[192];
+            char sceneEsc[384];
+            char piece[512];
+            int pieceLen;
+
+            if (bind->scene[0] == 0 || bind->x == 0 || bind->y == 0 ||
+                bind->wireActorId == 0 || bind->realActorId == 0)
+                continue;
+            memset(sceneUtf8, 0, sizeof(sceneUtf8));
+            vm_net_mock_gbk_label_to_utf8(bind->scene, sceneUtf8,
+                                          sizeof(sceneUtf8));
+            if (sceneUtf8[0] == 0)
+                continue;
+            if (!vm_mock_admin_json_escape(sceneUtf8, sceneEsc, sizeof(sceneEsc)))
+            {
+                ok = 0;
+                break;
+            }
+            pieceLen = snprintf(
+                piece, sizeof(piece),
+                "%s{\"s\":\"%s\",\"x\":%u,\"y\":%u,\"w\":%u,\"r\":%u}",
+                realWritten ? "," : "", sceneEsc, (u32)bind->x, (u32)bind->y,
+                (u32)bind->wireActorId, (u32)bind->realActorId);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 4u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++realWritten;
+        }
         if (ok && jsonLen + 4u < jsonCap)
         {
-            memcpy(json + jsonLen, "}}\n", 3);
+            memcpy(json + jsonLen, "]}\n", 3);
             jsonLen += 3;
             json[jsonLen] = 0;
             vm_mock_admin_send_response(client, "200 OK",
@@ -11197,6 +11292,11 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                         "{\"ok\":false,\"error\":\"build\"}\n");
         }
         free(json);
+        free(rows);
+        (void)levelWritten;
+        (void)actorWritten;
+        (void)nameWritten;
+        (void)realWritten;
         return 1;
     }
     /* Pixi quest tracker: display_name → scene from server_dynamic_npcs. */

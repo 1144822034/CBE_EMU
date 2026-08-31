@@ -1,8 +1,7 @@
 /**
  * 水果机音效 — 资源来自 luckyFruit，Vite 打包 `assets/fruit_sfx`。
- * 受「开关声音」(GameBgm) 控制。
+ * 与世界 BGM（「开关声音」）独立；水果机内常开，不读 GameBgm 偏好。
  */
-import { isSoundEnabled } from "./GameBgm";
 import rotateStart from "../../assets/fruit_sfx/rotate_start.mp3?url";
 import rotating from "../../assets/fruit_sfx/rotating.mp3?url";
 import rotateEnd from "../../assets/fruit_sfx/rotate_end.mp3?url";
@@ -106,7 +105,7 @@ const SPIN_RATE_FAST = 1.75;
 const SPIN_RATE_MID = 1.0;
 
 function canPlay(): boolean {
-  return isSoundEnabled() && typeof window !== "undefined";
+  return typeof window !== "undefined";
 }
 
 function stopAudioEl(el: HTMLAudioElement | null): void {

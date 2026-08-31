@@ -37,6 +37,12 @@ Agent 复用：`.codex/skills/pixijs-android-apk/SKILL.md`。
 
 Manifest：`WAKE_LOCK`、`FOREGROUND_SERVICE`/`_DATA_SYNC`/`_SPECIAL_USE`、`POST_NOTIFICATIONS`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`、`usesCleartextTraffic`
 
+## 2026-08-31 出包
+
+`versionCode` **54** / `1.0.54`，`client_code_version` **35**（未升登录门禁；非特别指定不改），服端同为 **35**。  
+含黑屏恢复第六轮：城镇/战斗 clip 改 Sprite mask remount、状态条底板重挂、blank 探测避开队伍头像。  
+APK：`PixiJS_web/android/app/release/jh_ol.apk`（约 57 MB）。覆盖安装会清 WebView（versionCode 变化）。
+
 ## 2026-08-28 出包
 
 `versionCode` **48** / `1.0.48`，`client_code_version` **32**，服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **32**。  

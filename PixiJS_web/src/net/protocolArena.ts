@@ -258,6 +258,8 @@ export function arenaClaimFailTip(result: number | undefined | null): string {
       return "未进入前十名";
     case 5:
       return "该名次未配置奖励";
+    case 6:
+      return "背包已满，请清理后再领奖";
     default:
       return `领奖失败(${result ?? "?"})`;
   }

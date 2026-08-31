@@ -32,6 +32,7 @@ import {
   fruitSfxSpinWheelStep,
   fruitSfxStopAll,
 } from "../audio/FruitSfx";
+import { suspendBgm, unlockAndResumeBgm } from "../audio/GameBgm";
 import type { SoftkeyLabels } from "./SoftkeyBar";
 import {
   FRUIT_BET_BTN_SCALE,
@@ -398,6 +399,8 @@ export class FruitPanel extends Container {
     this.amountDraft = "1";
     this.clearLitOverlays();
     this.visible = true;
+    // 与世界 BGM 错开：进机暂停 jh/ss/bgad，机内音效常开
+    suspendBgm();
     void this.ensureAssets().then(() => this.redraw());
   }
 
@@ -533,6 +536,7 @@ export class FruitPanel extends Container {
     fruitSfxStopAll();
     this.visible = false;
     this.spinning = false;
+    void unlockAndResumeBgm();
   }
 
   dismissTipOnSoftRight(): boolean {

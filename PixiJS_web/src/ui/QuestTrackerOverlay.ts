@@ -7,12 +7,23 @@ import { CBE, LCD_WIDTH, makePixelText } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth } from "./BitmapLabel";
 import { sceneDisplayName } from "./WorldHud";
 import type { TaskListRow } from "../net/protocolExtras";
+import type { RingStatus } from "../net/protocolActivities";
+import { NPC_RING_QUEST } from "../net/protocolActivities";
 import { lookupNpcSceneFromDb } from "../resources/npcScenes";
 import {
   isQuestTrackerCollapsed,
   toggleQuestTrackerCollapsed,
 } from "../resources/questTrackerPref";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+
+/** Mirror server VM_MOCK_RING_TYPE_* / RingQuestPanel. */
+const RING_TYPE_VISIT = 1;
+const RING_TYPE_KILL_MOB = 2;
+const RING_TYPE_KILL_BOSS = 3;
+const RING_TYPE_KILL_PLAYER = 4;
+const RING_TYPE_COLLECT = 5;
+const RING_TYPE_SUBMIT_MED = 6;
+const RING_TYPE_SUBMIT_EQUIP = 7;
 
 /**
  * Map-local coords (parent = SceneView.root, already at WORLD_TOP_H).
@@ -52,17 +63,114 @@ export function formatTaskProgress(t: TaskListRow): string {
   return parts.length ? parts.join(" ") : "进行中";
 }
 
+/** Compact right-side progress for the map tracker. */
+export function formatRingQuestProgress(st: RingStatus): string {
+  const target = st.targetCount || 1;
+  switch (st.taskType) {
+    case RING_TYPE_VISIT:
+      return st.progress >= 1 ? "可提交" : "未对话";
+    case RING_TYPE_KILL_MOB:
+    case RING_TYPE_KILL_BOSS:
+      return st.progress >= target ? "可提交" : `${st.progress}/${target}场`;
+    case RING_TYPE_KILL_PLAYER:
+      return st.progress >= target ? "可提交" : `${st.progress}/${target}名`;
+    case RING_TYPE_COLLECT:
+      return `需${target}个`;
+    case RING_TYPE_SUBMIT_MED:
+      return `需${target}组`;
+    case RING_TYPE_SUBMIT_EQUIP:
+      return `需${target}件`;
+    default:
+      return st.progress >= target ? "可提交" : `${st.progress}/${target}`;
+  }
+}
+
+function ringDescParenLabel(desc: string): string {
+  const m = /[（(]([^）)]+)[）)]/.exec(desc);
+  if (!m) return "";
+  const inner = (m[1] || "").trim();
+  // Visit desc uses （对话即可完成）— not a map label.
+  if (!inner || inner.includes("对话")) return "";
+  return inner;
+}
+
+function ringShortTitle(st: RingStatus): string {
+  const desc = (st.desc || "").trim();
+  if (!desc) return "跑环";
+  // Drop leading 击杀N场 / 收集N个 / 提交N组 so the name fits the strip.
+  const trimmed = desc
+    .replace(/^击杀\d+[场名]/, "")
+    .replace(/^收集\d+个/, "")
+    .replace(/^提交\d+组/, "")
+    .replace(/^提交\d+件/, "")
+    .replace(/^拜访/, "")
+    .replace(/[（(][^）)]*[）)]$/, "")
+    .replace(/，.+$/, "")
+    .trim();
+  if (!trimmed) return "跑环";
+  return trimmed.length > 6 ? `跑环·${trimmed.slice(0, 5)}` : `跑环·${trimmed}`;
+}
+
 /**
- * Build tracker rows: submit NPC + scene from server_dynamic_npcs.
+ * One tracker row for the active daily ring quest, or null if idle.
+ */
+export function buildRingQuestTrackerRow(
+  ring: RingStatus | null | undefined,
+  opts?: {
+    npcSceneByName?: ReadonlyMap<string, string>;
+  },
+): QuestTrackerRow | null {
+  if (!ring?.taskActive) return null;
+  const progressLabel = formatRingQuestProgress(ring);
+  let receiver = "跑环使";
+  let sceneLabel = "";
+  if (ring.taskType === RING_TYPE_VISIT) {
+    receiver = (ring.targetNpc || "").trim() || "NPC";
+  } else if (
+    ring.taskType === RING_TYPE_KILL_MOB ||
+    ring.taskType === RING_TYPE_KILL_BOSS
+  ) {
+    const map = ringDescParenLabel(ring.desc || "");
+    receiver = map || "击杀";
+    sceneLabel = "";
+  } else if (ring.taskType === RING_TYPE_KILL_PLAYER) {
+    receiver = "切磋";
+  }
+  if (!sceneLabel) {
+    const sceneKey = receiver
+      ? opts?.npcSceneByName?.get(receiver) ||
+        lookupNpcSceneFromDb(receiver) ||
+        ""
+      : opts?.npcSceneByName?.get("跑环使") ||
+        lookupNpcSceneFromDb("跑环使") ||
+        "";
+    if (sceneKey) sceneLabel = sceneDisplayName(sceneKey);
+  }
+  return {
+    taskId: NPC_RING_QUEST >>> 0,
+    name: ringShortTitle(ring),
+    receiver,
+    sceneLabel,
+    progressLabel,
+  };
+}
+
+/**
+ * Build tracker rows: active ring (if any) + accepted quests.
+ * Submit NPC + scene from server_dynamic_npcs.
  */
 export function buildQuestTrackerRows(
   accepted: TaskListRow[],
   opts?: {
     /** Optional override map; default uses loadNpcSceneIndex cache. */
     npcSceneByName?: ReadonlyMap<string, string>;
+    /** Active daily ring quest (WT47); shown as first row when taskActive. */
+    ring?: RingStatus | null;
   },
 ): QuestTrackerRow[] {
   const out: QuestTrackerRow[] = [];
+  const ringRow = buildRingQuestTrackerRow(opts?.ring, opts);
+  if (ringRow) out.push(ringRow);
   for (const t of accepted) {
     if (out.length >= MAX_TASKS) break;
     const receiver = (t.receiver || "").replace(/\0+$/g, "").trim();

@@ -222,7 +222,7 @@ typedef struct
 enum
 {
     VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX = 16,
-    /* Not #200: catalog #200 is 青龙王.  Spare outdoor-safe keep-id. */
+    /* Not #200: catalog #200 is 炼狱鬼火.  Spare outdoor-safe keep-id. */
     VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB = 250
 };
 
@@ -1279,34 +1279,16 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
         spawn.actorId = wireActorId;
         /*
          * FB / remapped wire: field 0x0E stays wire-safe (#250 on FB).
-         * Map sprites + displayName come from the catalog real id (filled
-         * above).  Only fill a missing nameplate from the wire stock row.
+         * Map sprites + displayName come from the catalog REAL id (filled
+         * above).  Never copy wire-stock labels (#200 炼狱鬼火 / keep-id
+         * #250) onto the nameplate — that poisoned outdoor Boss rows such as
+         * 青龙王 wire=250.
          */
-        if ((fbScene || wireActorId != realActorId) &&
-            spawn.displayName[0] == 0)
+        if (spawn.displayName[0] == 0)
         {
-            char stockName[32];
-            const char *stockActor = NULL;
-            u8 stockV0 = 0;
-            u8 stockV1 = 0;
-
-            memset(stockName, 0, sizeof(stockName));
-            if (vm_net_mock_monster_battle_left_appearance(
-                    wireActorId, stockName, sizeof(stockName), &stockV0,
-                    &stockV1, &stockActor) &&
-                stockName[0] != 0)
-            {
-                snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
-                         stockName);
-            }
-            else if (fbScene &&
-                     wireActorId ==
-                         (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
-            {
-                /* Neutral keep-id nameplate when catalog has no #250 row. */
-                snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
-                         "\xc1\xb6\xd3\xfc\xb9\xed\xbb\xf0");
-            }
+            /* GBK 「怪」— last-resort empty plate; real catalog should fill. */
+            snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
+                     "\xb9\xd6");
         }
         {
             bool publishActor = false;
@@ -1483,7 +1465,8 @@ static bool vm_net_mock_monster_is_task_only_enemy(u32 enemyId)
 /* Defined with server_scene_combat_spawns bindings further below. */
 static void vm_net_mock_sce_combat_spawn_bindings_ensure_loaded(void);
 static u32 vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
-    const char *scene, u16 x, u16 y, u32 wireActorId);
+    const char *scene, u16 x, u16 y, u32 wireActorId,
+    const char *battleActorResource, const char *sceDisplayName);
 
 static void vm_net_mock_monster_resource_labels_load(void)
 {
@@ -1545,7 +1528,8 @@ static void vm_net_mock_monster_resource_labels_load(void)
                     }
                     wireActorId = spawn.actorId;
                     labelEnemyId = vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
-                        catalog->scene, spawn.x, spawn.y, wireActorId);
+                        catalog->scene, spawn.x, spawn.y, wireActorId,
+                        spawn.actorResource, spawn.displayName);
                     if (labelEnemyId == 0)
                         labelEnemyId = wireActorId;
                     for (u32 idIndex = 0; idIndex < 3; ++idIndex)
@@ -1561,19 +1545,27 @@ static void vm_net_mock_monster_resource_labels_load(void)
                     /*
                      * Accept SCE names for:
                      * 1) actors declared on the current automonster.dsh row, or
-                     * 2) other catalog IDs that are not task-only kill targets.
-                     * Task-only IDs stay protected so co-located combat actors
-                     * cannot overwrite their structured task.dsh labels.
+                     * 2) other catalog IDs that are not task-only kill targets, or
+                     * 3) keep-id / binding remaps (labelEnemyId != wire) so
+                     *    task-only reals (青龙王 #63) still get battle .actor.
+                     * Task-only IDs stay protected from co-located combat actors
+                     * that share the same tile without a remap.
                      *
                      * Remapped wire≠real (world boss / custom outdoor): labels
                      * attach to REAL only — never poison the stock wire id
                      * (e.g. #213「世界BOSS」must not rename #18).
                      */
+                    {
+                        const bool remappedFromWire =
+                            labelEnemyId != 0 && labelEnemyId != wireActorId;
+                        const bool acceptLabel =
+                            declaredByAutoMonsterRow || remappedFromWire ||
+                            !vm_net_mock_monster_is_task_only_enemy(labelEnemyId);
+
                     if (monsterIndex >= 0 &&
                         g_vm_net_mock_monster_resource_labels[monsterIndex]
                             .displayName[0] == 0 &&
-                        (declaredByAutoMonsterRow ||
-                         !vm_net_mock_monster_is_task_only_enemy(labelEnemyId)))
+                        acceptLabel)
                     {
                         snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex]
                                      .displayName,
@@ -1591,9 +1583,7 @@ static void vm_net_mock_monster_resource_labels_load(void)
                                 "%s", catalog->scene);
                         }
                     }
-                    if (monsterIndex >= 0 &&
-                        (declaredByAutoMonsterRow ||
-                         !vm_net_mock_monster_is_task_only_enemy(labelEnemyId)))
+                    if (monsterIndex >= 0 && acceptLabel)
                     {
                         if (g_vm_net_mock_monster_resource_labels[monsterIndex]
                                 .visualHintValid == 0)
@@ -1626,6 +1616,7 @@ static void vm_net_mock_monster_resource_labels_load(void)
                                 "%s", spawn.actorResource2);
                         }
                     }
+                    } /* acceptLabel scope */
                     if (end > off)
                         off = end - 1;
                 }
@@ -1859,9 +1850,14 @@ static void vm_net_mock_sce_combat_spawn_bindings_ensure_loaded(void)
 /*
  * Catalog label key for an SCE spawn: when wire≠real (custom/world-boss remap),
  * the nameplate belongs to REAL.  Wire stock ids must not inherit that name.
+ * Keep-ids #200/#250 without a binding:
+ *   1) unique match by SCE displayName (task-only / labeled catalog),
+ *   2) unique match by battle .actor,
+ * else keep wire (do not poison keep-id slots with Boss names).
  */
 static u32 vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
-    const char *scene, u16 x, u16 y, u32 wireActorId)
+    const char *scene, u16 x, u16 y, u32 wireActorId,
+    const char *battleActorResource, const char *sceDisplayName)
 {
     u32 posReal = 0;
     u32 wireReal = 0;
@@ -1897,6 +1893,97 @@ static u32 vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
         return posReal;
     if (!wireAmbiguous && wireHits >= 1u && wireReal != 0)
         return wireReal;
+    if (wireActorId != 200u &&
+        wireActorId != (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
+        return wireActorId;
+
+    if (sceDisplayName != NULL && sceDisplayName[0] != 0)
+    {
+        u32 matchId = 0;
+        u32 matchCount = 0;
+
+        for (u32 i = 0;
+             i < sizeof(g_vm_net_mock_monster_task_only_labels) /
+                     sizeof(g_vm_net_mock_monster_task_only_labels[0]);
+             ++i)
+        {
+            const vm_net_mock_monster_task_only_label *label =
+                &g_vm_net_mock_monster_task_only_labels[i];
+
+            if (strcmp(label->displayName, sceDisplayName) != 0)
+                continue;
+            if (matchCount == 0)
+                matchId = label->enemyId;
+            else if (matchId != label->enemyId)
+            {
+                matchId = 0;
+                break;
+            }
+            ++matchCount;
+        }
+        if (matchCount >= 1u && matchId != 0)
+            return matchId;
+
+        matchId = 0;
+        matchCount = 0;
+        (void)vm_net_mock_monster_db_load();
+        for (u32 i = 0; i < g_vm_net_mock_monster_catalog_count; ++i)
+        {
+            u32 candidate = g_vm_net_mock_monster_entries[i].enemyId;
+            const char *name = NULL;
+
+            if (candidate == 0 || candidate == 200u ||
+                candidate == (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
+                continue;
+            if (g_vm_net_mock_monster_resource_labels[i].displayName[0] != 0)
+                name = g_vm_net_mock_monster_resource_labels[i].displayName;
+            if (name == NULL || strcmp(name, sceDisplayName) != 0)
+                continue;
+            if (matchCount == 0)
+                matchId = candidate;
+            else if (matchId != candidate)
+                return wireActorId;
+            ++matchCount;
+        }
+        if (matchCount >= 1u && matchId != 0)
+            return matchId;
+    }
+
+    if (battleActorResource != NULL && battleActorResource[0] != 0 &&
+        vm_net_mock_str_ends_with(battleActorResource, ".actor"))
+    {
+        u32 matchId = 0;
+        u32 matchCount = 0;
+
+        (void)vm_net_mock_monster_db_load();
+        for (u32 i = 0; i < g_vm_net_mock_monster_catalog_count; ++i)
+        {
+            u32 candidate = g_vm_net_mock_monster_entries[i].enemyId;
+            const char *actor = NULL;
+
+            if (candidate == 0 || candidate == 200u ||
+                candidate == (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
+                continue;
+            if (g_vm_net_mock_monster_overrides[i].used &&
+                g_vm_net_mock_monster_overrides[i].actorResource[0] != 0)
+                actor = g_vm_net_mock_monster_overrides[i].actorResource;
+            else if (g_vm_net_mock_monster_custom[i] &&
+                     g_vm_net_mock_monster_custom_actors[i][0] != 0)
+                actor = g_vm_net_mock_monster_custom_actors[i];
+            else if (g_vm_net_mock_monster_resource_labels[i].actorResource[0] !=
+                     0)
+                actor = g_vm_net_mock_monster_resource_labels[i].actorResource;
+            if (actor == NULL || strcmp(actor, battleActorResource) != 0)
+                continue;
+            if (matchCount == 0)
+                matchId = candidate;
+            else if (matchId != candidate)
+                return wireActorId;
+            ++matchCount;
+        }
+        if (matchCount >= 1u && matchId != 0)
+            return matchId;
+    }
     return wireActorId;
 }
 
@@ -2187,7 +2274,7 @@ static u32 vm_net_mock_sce_combat_spawn_wire_for_real(const char *scene,
 
 /*
  * Choose SCE field-0x0E wire id that ParseMinfo accepts.
- * FB maps: always keep-id #250 (inject v3; not #200=青龙王).  Outdoor stock
+ * FB maps: always keep-id #250 (inject v3; not #200=炼狱鬼火).  Outdoor stock
  * ids (≤300, not custom): keep self wire.  Custom/high ids: always #250 —
  * never steal another outdoor catalog id that shares the same .actor
  * (avoids nameplate poison on restart).  Non-custom stock without self

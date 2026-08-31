@@ -6,7 +6,7 @@ import { Application, Graphics, Rectangle } from "pixi.js";
 import { loadSceneIndex, loadSceneMap } from "./resources/loader";
 import {
   defaultMonsterLevelsUrl,
-  formatMonsterMapName,
+  formatCombatSpawnNameplate,
   loadMonsterLevelOverrides,
 } from "./resources/monsterLevels";
 import {
@@ -74,6 +74,7 @@ import {
   NPC_RING_QUEST,
   NPC_YANMEN_EXCHANGE,
   activityMsgTip,
+  type RingStatus,
 } from "./net/protocolActivities";
 import { AuctionPanel } from "./ui/AuctionPanel";
 import {
@@ -821,15 +822,41 @@ async function main(): Promise<void> {
     view.setDouVisible(session.hangupActive || session.hangupDesired);
   };
 
+  /** Latest WT47 ring status for the map quest tracker (null = unknown/idle). */
+  let cachedRingStatus: RingStatus | null = null;
+  let ringTrackerFetchGen = 0;
+
   const refreshQuestTracker = () => {
     questTracker.setPartyInset(hud.partyOverlayInset());
-    questTracker.setTasks(buildQuestTrackerRows(session.acceptedTasks));
+    questTracker.setTasks(
+      buildQuestTrackerRows(session.acceptedTasks, { ring: cachedRingStatus }),
+    );
     // Keep name→scene map fresh after admin moves (throttled inside loader).
     void loadNpcSceneIndex(defaultNpcScenesUrl(defaultLiveGatewayUrl())).then(
       () => {
-        questTracker.setTasks(buildQuestTrackerRows(session.acceptedTasks));
+        questTracker.setTasks(
+          buildQuestTrackerRows(session.acceptedTasks, {
+            ring: cachedRingStatus,
+          }),
+        );
       },
     );
+  };
+
+  /** Pull WT47 and refresh tracker; coalesces overlapping fetches. */
+  const syncRingQuestTracker = async () => {
+    const gen = ++ringTrackerFetchGen;
+    const st = await session.fetchRingStatus();
+    if (gen !== ringTrackerFetchGen) return st;
+    cachedRingStatus = st;
+    refreshQuestTracker();
+    return st;
+  };
+
+  const applyCachedRingStatus = (st: RingStatus | null | undefined) => {
+    if (st === undefined) return;
+    cachedRingStatus = st;
+    refreshQuestTracker();
   };
 
   // Quest tracker shares SceneView.root with 修/拍 status strip (hidden with map).
@@ -1472,6 +1499,7 @@ async function main(): Promise<void> {
 
   const refreshRingQuestPanel = async () => {
     const status = await session.fetchRingStatus();
+    applyCachedRingStatus(status);
     if (ringQuestPanel.visible) {
       ringQuestPanel.open(status);
       shell.setSoftkeys(ringQuestPanel.softkeys());
@@ -1492,6 +1520,7 @@ async function main(): Promise<void> {
     if (yanmenPanel.visible) yanmenPanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     const status = await session.fetchRingStatus();
+    applyCachedRingStatus(status);
     dialog.hide();
     closeApproach(false);
     ringQuestPanel.open(status);
@@ -1734,8 +1763,10 @@ async function main(): Promise<void> {
     }
     if (action === "accept") {
       void session.ringAccept().then(async (st) => {
-        if (st) ringQuestPanel.open(st);
-        else await refreshRingQuestPanel();
+        if (st) {
+          applyCachedRingStatus(st);
+          ringQuestPanel.open(st);
+        } else await refreshRingQuestPanel();
         ringQuestPanel.showTip(st ? "已接取环任务" : "接取失败");
         shell.setSoftkeys(ringQuestPanel.softkeys());
       });
@@ -1969,16 +2000,26 @@ async function main(): Promise<void> {
     const scene = await loadSceneMap(name);
     if (!same) {
       session.adoptSceneCombatSpawns(
-        (scene.combatSpawns ?? []).map((s, i) => ({
-          actorId: 0x70000000 + i,
-          x: s.x,
-          y: s.y,
-          name: formatMonsterMapName(s.name, s.sceActorId),
-          actorResource: s.mapActorResource,
-          battleActorResource: s.battleActorResource,
-          scriptName: `sce_combat_${s.sceActorId}`,
-          battleActorId: s.sceActorId,
-        })),
+        (scene.combatSpawns ?? []).map((s, i) => {
+          const plate = formatCombatSpawnNameplate({
+            scene: scene.sceneFile,
+            x: s.x,
+            y: s.y,
+            wire: s.sceActorId,
+            sceName: s.name,
+            battleActor: s.battleActorResource,
+          });
+          return {
+            actorId: 0x70000000 + i,
+            x: s.x,
+            y: s.y,
+            name: plate.name,
+            actorResource: s.mapActorResource,
+            battleActorResource: s.battleActorResource,
+            scriptName: `sce_combat_${plate.realId}`,
+            battleActorId: plate.realId,
+          };
+        }),
       );
     }
     await view.showScene(scene, x, y);
@@ -2029,16 +2070,26 @@ async function main(): Promise<void> {
       const scene = await loadSceneMap(name, { forceReload: true });
       if ((session.scene || "") !== name) return;
       session.adoptSceneCombatSpawns(
-        (scene.combatSpawns ?? []).map((s, i) => ({
-          actorId: 0x70000000 + i,
-          x: s.x,
-          y: s.y,
-          name: formatMonsterMapName(s.name, s.sceActorId),
-          actorResource: s.mapActorResource,
-          battleActorResource: s.battleActorResource,
-          scriptName: `sce_combat_${s.sceActorId}`,
-          battleActorId: s.sceActorId,
-        })),
+        (scene.combatSpawns ?? []).map((s, i) => {
+          const plate = formatCombatSpawnNameplate({
+            scene: scene.sceneFile,
+            x: s.x,
+            y: s.y,
+            wire: s.sceActorId,
+            sceName: s.name,
+            battleActor: s.battleActorResource,
+          });
+          return {
+            actorId: 0x70000000 + i,
+            x: s.x,
+            y: s.y,
+            name: plate.name,
+            actorResource: s.mapActorResource,
+            battleActorResource: s.battleActorResource,
+            scriptName: `sce_combat_${plate.realId}`,
+            battleActorId: plate.realId,
+          };
+        }),
       );
       view.actors.setSceneMonsters(session.sceneMonsters);
       console.info(
@@ -2215,6 +2266,7 @@ async function main(): Promise<void> {
       view.invalidateMap();
       hud.setParty([]);
       hud.setIdentity("", "", "");
+      cachedRingStatus = null;
       questTracker.setTasks([]);
     },
     onEnterScene: async (scene, x, y, opts) => {
@@ -2321,6 +2373,7 @@ async function main(): Promise<void> {
       void session.syncCosmetics();
       /* Authoritative guild for self nameplate「门派-xxx」(1/1/21). */
       void session.openCharacterStats();
+      void syncRingQuestTracker();
     },
     onPlayerPos: (x, y) => {
       view.setPlayerPos(x, y);
@@ -3925,6 +3978,7 @@ async function main(): Promise<void> {
     setChromeStatus(`[${session.transport?.mode}] ${log}`);
     session.onLeftBattleForHangup();
     syncWorldStatusBadges();
+    void syncRingQuestTracker();
   };
 
   const hasRevivalStone = () =>
@@ -5334,6 +5388,8 @@ async function main(): Promise<void> {
     }
     // Closing approach prompt while still in range keeps latch (no spam).
     showPhase("world");
+    // Visit-type ring completes on NPC talk — refresh tracker after dialog.
+    if (cachedRingStatus?.taskActive) void syncRingQuestTracker();
   };
   dialog.onMedicineBuyCancel = () => {
     void session.pickNpcOption(1, 0xe7000001, "药品").then(() => {
@@ -7629,7 +7685,9 @@ dialog.hide();
         return false;
       }
       // Map / battle content sits below world HUD (~72px).
-      const mapBand = new Rectangle(20, 90, 120, 120);
+      // Sample center-right — left strip has party portraits that stay "alive"
+      // after a dead clip mask and falsely cancelled soft-reload (正椁室).
+      const mapBand = new Rectangle(110, 120, 90, 90);
       return regionLooksBlank(mapBand);
     } catch (e) {
       console.warn("[gl] blank probe", e);

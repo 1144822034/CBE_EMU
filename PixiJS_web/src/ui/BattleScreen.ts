@@ -31,7 +31,12 @@ import { eidolonActorForIndex } from "../resources/eidolon";
 import { lookupItemSync } from "../resources/itemCatalog";
 import { loadSceneMap, resourceExists, type LoadedScene } from "../resources/loader";
 import { rgbaToTexture } from "../render/rgbaTexture";
-import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
+import {
+  createSolidMaskSprite,
+  remountSolidMaskSprite,
+  nudgeTextureSource,
+  replaceGraphics,
+} from "../render/gpuResume";
 import type { BattleSkillRow, SkillTargetKind } from "../resources/skill";
 import { skillNeedsTargetPick } from "../resources/skill";
 import type { BagItem } from "../net/protocolExtras";
@@ -233,7 +238,8 @@ export class BattleScreen extends Container {
    * after the town-mask fix (docs/re/2026-08-30-pixi-battle-black-recover-incomplete.md).
    */
   private stageHost = new Container();
-  private stageMask: Graphics;
+  /** Sprite mask (not Graphics) — remounts after webglcontextrestored. */
+  private stageMask: Sprite;
   private unitsHost = new Container();
   private fxHost = new Container();
   private menuHost = new Container();
@@ -385,10 +391,11 @@ export class BattleScreen extends Container {
   constructor() {
     super();
     // Clip stage art so oversized eidolon / map cover cannot spill into HUD.
+    // Sprite mask (BufferImageSource) remounts after context restore; Graphics
+    // masks stay empty on WebView and clip the whole fight band to black.
     const stageH = STAGE_BOTTOM - STAGE_TOP;
-    this.stageMask = new Graphics()
-      .rect(0, STAGE_TOP, LCD_WIDTH, stageH)
-      .fill({ color: 0xffffff });
+    this.stageMask = createSolidMaskSprite(LCD_WIDTH, stageH);
+    this.stageMask.y = STAGE_TOP;
     this.stageHost.mask = this.stageMask;
     this.stageHost.addChild(this.stageMask);
     this.stageHost.addChild(this.mapHost);
@@ -971,20 +978,22 @@ export class BattleScreen extends Container {
    * After webglcontextrestored: world SceneView nudge does not cover battle.
    * BufferImageSource map/pose textures must be *recreated* from CPU RGBA —
    * source.update() alone leaves a black stage with UC3/HUD still painting.
-   * Graphics (HP fills / letterbox / foot shadows / stageMask) need DisplayObject replace.
+   * Graphics (HP fills / letterbox / foot shadows) need DisplayObject replace.
    *
    * stageHost.mask dead ⇒ map/units/fx clipped empty while floatHost/HUD still paint.
-   * Clear mask before replaceGraphics so StencilMask.reset cannot fight a shared node.
+   * Use remounted Sprite mask (Graphics masks stay empty on WebView).
    */
   nudgeAfterGpuResume(): void {
     if (!this.visible) return;
     try {
       const stageH = STAGE_BOTTOM - STAGE_TOP;
       this.stageHost.mask = null;
-      this.stageMask = replaceGraphics(this.stageMask);
-      this.stageMask
-        .rect(0, STAGE_TOP, LCD_WIDTH, stageH)
-        .fill({ color: 0xffffff });
+      this.stageMask = remountSolidMaskSprite(
+        this.stageMask,
+        LCD_WIDTH,
+        stageH,
+      );
+      this.stageMask.y = STAGE_TOP;
       this.stageHost.mask = this.stageMask;
       this.stageHost.visible = true;
       this.mapHost.visible = true;
@@ -992,6 +1001,11 @@ export class BattleScreen extends Container {
       this.fxHost.visible = true;
     } catch (e) {
       console.warn("[battle] stage mask rebuild", e);
+      try {
+        this.stageHost.mask = null;
+      } catch {
+        /* ignore */
+      }
     }
     try {
       if (this.mapPixels) {

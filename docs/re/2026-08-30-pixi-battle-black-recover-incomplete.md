@@ -166,3 +166,38 @@
 | `nudgeAfterGpuResume` | 先 `stageHost.mask = null` 再 `replaceGraphics`，再赋回；强制 host.visible |
 | `SceneView` | clip 同样先卸 mask 再 replace（对称稳妥） |
 | `main` recover / alpha strip / late 280ms | 战斗可见时只 nudge `battle`；否则 `view`+`hud` |
+
+## 续记：城镇挂机 HUD 在、地图仍黑（2026-08-31 正椁室）
+
+用户截图「正椁室」挂机中：顶栏 / 血槽 / 挂机钮 / `[战]经验` 在，**地图带全黑**；「修 拍 擂 娱 翅 骑 称」以裸 UC3 字浮在黑底上（无色板）。
+
+### 第六次偏离
+
+不在「未调用 view.nudge」，而在 **Graphics 作 Container.mask 在 WebView 上不可靠**：
+
+1. 第四/五轮已对 `clipMask` / `stageMask` 做 `replaceGraphics`；城镇可恢复过，但现场仍复现同构黑带。
+2. 状态条底板是 Graphics、字是 BitmapLabel：`refreshAllUc3Labels` 救回字，底板空白 → 裸「修 拍…」叠在被裁空的地图上。
+3. 空白探测采样 `Rectangle(20,90,…)` 落在左侧队伍头像带 → 头像「活」时 `canvasLooksBlank=false`，误判 recover-ok，不触发软重载兜底。
+
+### 根因陈述（第六轮）
+
+| 项 | 内容 |
+|----|------|
+| 触发 | 同上 contextlost/restore 或 stall recover；挂机城镇 |
+| 违反契约 | 裁切 mask 必须走与地图相同的 **Texture/Sprite 重建**路径，不能依赖 Graphics 几何重传 |
+| 首个错误状态 | Graphics mask GPU 空 → clip 内像素为 0；探测区被 party HUD 污染 |
+| 证据 | 截图 HUD+挂机字+裸状态字；`replaceGraphics(clipMask)` 已在代码中仍复现 |
+
+### 修改（第六轮）
+
+| 点 | 行为 |
+|----|------|
+| `gpuResume.createSolidMaskSprite` / `remountSolidMaskSprite` | 1×1 白 BufferImageSource 拉伸为 mask Sprite |
+| `SceneView.clipMask` / `BattleScreen.stageMask` | 改为 Sprite；resume 时 remount（失败则暂时 `mask=null`） |
+| `SceneView.nudge` | 重挂 修/拍/… 底板 Graphics + GIF 斗/练 |
+| `main.canvasLooksBlank` | 采样改到地图带中右 `(110,120,90,90)`，避开队伍头像 |
+
+## 验证（增补）
+
+8. 「正椁室」类挂机城镇黑屏恢复：地图与角色应出图；状态条应有色板+字，不应只剩裸字浮在黑底。
+9. 恢复失败时 blank 探测应能判黑并走既有 soft-reload 兜底（不被左侧头像骗过）。

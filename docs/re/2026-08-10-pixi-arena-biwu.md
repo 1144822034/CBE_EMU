@@ -4,6 +4,17 @@ Date: 2026-08-10
 
 Status: implemented (PixiJS_web only; CBE 不做)
 
+## 2026-08-31 比武战斗规则进管理后台
+
+- 后台「比武管理 → 活动配置」新增四项，落库 `server_arena_config`：
+  | 字段 | 默认 | 效果 |
+  |------|------|------|
+  | `damage_scale_enabled` | 1 | 回合伤害/命中 `2^n` 加深；关则恒 1× |
+  | `allow_heal` | 0 | 允许回血/复活技；增益/封魔/驱散仍禁 |
+  | `allow_dodge` | 1 | 物理闪躲检定；关则物理必中（法术本就无视闪躲） |
+  | `allow_combat_pill` | 0 | 比武内套用大力丸/神力丸 ATK%（与 PvE 同口径） |
+- 战斗物品菜单仍客户端禁用；保存配置即热加载。迁移：`server/mysql/migrate_add_arena_battle_rules.sql`（启动 `ensure_tables` 也会 ALTER）。
+
 ## 2026-08-25 按日段位 + 按职业分场地
 
 - **卡顿根因**：同日三段段位×三职业挤在三张图，匹配/可视压力过大。
@@ -258,7 +269,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 |--------|------|------|
 | 1 | req/resp | status |
 | 2 | req/resp | rank（job/bracket/page；rows 含 rewardName/Count；myReward*） |
-| 3 | req/resp | claim（`result`+`tip`：成功明细或失败原因；成功另推系统 `1/3/3`） |
+| 3 | req/resp | claim（`result`+`tip`：成功明细或失败原因；成功另推系统 `1/3/3`）`result`：1=ok，2=未参赛/未结束，3=已领，4=未进前五，5=无配置，6=背包已满（不落 claimed、不发经验/金钱/物品） |
 | 4 | req | leave → 30/1 回原场景 |
 | 5 | push | HUD（挂在 scene-sync poll） |
 
