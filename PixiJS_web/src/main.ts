@@ -7424,6 +7424,15 @@ dialog.hide();
     });
   };
 
+  /** Open overlay panels use paintCbePanel Graphics — same blank-after-restore as HUD fills. */
+  const nudgeOverlayPanelsAfterGpuResume = (): void => {
+    try {
+      if (chatPanel.visible) chatPanel.nudgeAfterGpuResume();
+    } catch (e) {
+      console.warn("[gl] chatPanel nudge", e);
+    }
+  };
+
   // alphaMode/TEX_NULL: swallow frame so ticker lives, but must not soft-OK forever.
   // Field: lost=false + blank=true + endless swallow → recover never reloads (BLANK_ALIVE).
   {
@@ -7471,6 +7480,7 @@ dialog.hide();
             view.nudgeAfterGpuResume();
             hud.nudgeAfterGpuResume();
           }
+          nudgeOverlayPanelsAfterGpuResume();
         } catch {
           /* ignore */
         }
@@ -7824,6 +7834,7 @@ dialog.hide();
           view.nudgeAfterGpuResume();
           hud.nudgeAfterGpuResume();
         }
+        nudgeOverlayPanelsAfterGpuResume();
       } catch (e) {
         console.warn("[gl] scene/battle nudge", e);
       }
@@ -7851,6 +7862,7 @@ dialog.hide();
               view.nudgeAfterGpuResume();
               hud.nudgeAfterGpuResume();
             }
+            nudgeOverlayPanelsAfterGpuResume();
           } catch {
             /* ignore */
           }
@@ -7999,7 +8011,8 @@ dialog.hide();
     });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("visibility");
-    void resumeBgmAfterForeground();
+    // 水果机内世界 BGM 保持静音，机内音效独立常开
+    if (!fruitPanel.visible) void resumeBgmAfterForeground();
   });
   window.addEventListener("focus", () => {
     setTextureGcEnabled(true);
@@ -8015,7 +8028,7 @@ dialog.hide();
     });
     void session.wakeFromBackground();
     void recoverDisplayAfterForeground("focus");
-    void unlockAndResumeBgm();
+    if (!fruitPanel.visible) void unlockAndResumeBgm();
   });
   preloadKillStreakSfx();
   preloadFruitSfx();

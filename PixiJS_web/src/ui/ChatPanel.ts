@@ -13,6 +13,7 @@ import {
 } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   clearPanelTip,
   createPanelTipState,
@@ -160,6 +161,7 @@ export function colorForChatEntry(entry: ChatEntry): number {
 }
 
 export class ChatPanel extends Container {
+  private shade = new Graphics();
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
@@ -193,15 +195,10 @@ export class ChatPanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-        .fill({ color: 0x000000, alpha: 0.4 }),
-    );
+    this.paintShade();
+    this.addChild(this.shade);
     this.addChild(this.box);
-    this.inputHit.eventMode = "static";
-    this.inputHit.cursor = "text";
-    this.inputHit.on("pointertap", () => this.focusInput());
+    this.wireInputHit();
     this.addChild(this.inputHit);
 
     this.ime.onChange = (v) => {
@@ -209,6 +206,41 @@ export class ChatPanel extends Container {
       this.redraw();
     };
     this.ime.onSubmit = () => this.confirm();
+  }
+
+  /**
+   * webglcontextrestored: UC3 labels return via refreshAllUc3Labels, but
+   * panel Graphics (shade / chrome / input hit) stay blank — same contract as
+   * WorldHud / BattleScreen. Softkeys can still say 发送/返回 while messages
+   * float over the map with no panel fill.
+   */
+  nudgeAfterGpuResume(): void {
+    if (!this.visible) return;
+    this.shade = replaceGraphics(this.shade);
+    this.paintShade();
+    this.box = replaceGraphics(this.box);
+    this.inputHit = replaceGraphics(this.inputHit);
+    this.wireInputHit();
+    if (this.toast.gfx.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    this.redraw();
+    this.ime.show(this.inputRect());
+    this.ime.blur();
+  }
+
+  private paintShade(): void {
+    this.shade
+      .clear()
+      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+      .fill({ color: 0x000000, alpha: 0.4 });
+  }
+
+  private wireInputHit(): void {
+    this.inputHit.eventMode = "static";
+    this.inputHit.cursor = "text";
+    this.inputHit.removeAllListeners();
+    this.inputHit.on("pointertap", () => this.focusInput());
   }
 
   open(
