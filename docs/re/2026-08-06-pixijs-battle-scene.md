@@ -48,10 +48,11 @@ JHOnlineData 中战斗地图为 **`b_` + 场景名 `.sce`**，与野外 SCE 配�
 - **选角地图/组队条（2026-08-08）**：`onRoleSwitch`+`invalidateMap` 丢弃上一角色地图壳，进图只认 `1/6.actorinfo` 服务端 scene（不再 fallback 默认图）；`5/10` `memberCount<2` 视为非组队，左上角队友血蓝强制清空
 - **选角又进旧图（2026-08-08）**：同包/`follow-up` 里 deferred `30/1|30/2` 曾优先于或覆盖 `1/6.actorinfo`。现优先 actorinfo；`roleEnterSceneLock` 锁住选角场景；`enterSceneGen` 防止被取代的异步 showScene 回写 `loadedScene`
 - **离开游戏清本地 session（2026-08-08）**：`logout` → `resetLocalSession` 断联并清空场景/技能/背包/队伍等全部运行时状态（仅保留账号口令供再登录）；UI 同步清空技能/背包/地图壳，避免切角色残留
-- **单位动作**：待机循环 `composeBattlePose`；玩家普攻闪现到怪侧再劈砍（面向目标）；施法原地播 anim6/7 cast 条一次，**动作播完后再**播 eidolon（约 80ms 间隔，避免与施法姿叠播），施法/回血**不**朝友方改朝向（曾把左侧怪拧成背对玩家）；受击闪红；怪物普攻闪现到玩家侧；type3 怪播 `f_death.actor`（siwang1 水花）后淡出、玩家 death.gif
+- **单位动作**：待机循环 `composeBattlePose`；玩家普攻闪现到怪侧再劈砍（面向目标）；施法**钉死站位**播 anim6/7（风起 2 帧后 eidolon/伤害同拍重叠，鬼道不后退）；受击短闪；怪物普攻闪现到玩家侧；致死后若脚本紧跟 type3，死亡 splash 与特效同拍（见 `2026-08-30-pixi-battle-cbe-timing-continuity.md`）；type3 怪播 `f_death.actor` 后淡出、玩家 death.gif
+- **帧拍**：战斗条 / eidolon / `f_death` 默认 **100ms/part**（对齐 mmBattle 常见 tick；DrawBattleCharacter 精确定时仍 unresolved）
 - **顶栏「%s行动」（2026-08-21）**：CBE 按当前 `actioninfo` 的 `actor_wire` → battleinfo 单位名切换；Pixi 曾只在进战写本地名。现于 `playActionScript` 每条记录开始时 `paintActingTitleForWire`，菜单再开时 `paintLocalActingTitle`。
 - **击杀不跳过攻击动画（2026-08-30）**：单人致死 `4/6+4/7` 不得在播报前把 left HP 清零，否则 `isUnitDefeated` 会跳过本席动作/特效；清零改到 `playActionScript` 之后（见 `2026-08-30-pixi-settle-skips-attack-anim.md`）。
-- **回合内出手不抢跑（2026-08-30）**：同包内 `playHitMotion` 须 `await` 满 hold；**跨包**须 `playbackChain` 串行（禁止并行 `playActionScript`），见 `2026-08-30-pixi-battle-playback-queue.md` / `2026-07-28-battle-auto-stomp-counter-playback.md`。
+- **回合内出手不抢跑（2026-08-30）**：跨包须 `playbackChain` 串行；同包 skill→death 同拍重叠，仅在下一 *actor* 前短 settle（见 `2026-08-30-pixi-battle-playback-queue.md` / `2026-08-30-pixi-battle-cbe-timing-continuity.md`）。
 - **天机待机武器（2026-08-08）**：raw job0=天机→`h_*warrior`+`jian.gif`。战斗待机曾套用地图用 `SIDE_MAP_SKIP(/jian|guang|)` 把剑层剥掉，而幻剑 `bishou`/鬼道 `zhang` 不受影响。现战斗 idle/hit 仅跳过 `guang|death`，保留武器层；地图侧仍用 `SIDE_MAP_SKIP`。
 - **飘字**：伤害/回血用 CBE `-num.gif` / `+num.gif`；锚在目标躯干中心。「闪躲」黑字+细绿描边；「暴击」黑字+细青蓝描边并叠伤害数字
 - **朝向（资源证据）**：`hW_warrior` 站立 left=anim4 / right=anim5，攻击 left=anim6 / right=anim7（剑刃相对身体质心）；蜂类同 anim 内 p0==p1、p2==p3，扇翅靠 anim0↔1 图层偏移；朝玩家用 part2，禁止 flipX

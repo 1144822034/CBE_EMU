@@ -923,8 +923,9 @@ static pthread_mutex_t g_vm_mock_service_protocol_mutex = PTHREAD_MUTEX_INITIALI
 static pthread_mutex_t g_vm_mock_persist_write_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Best-effort holder label for admin protocol_lock_timeout forensics.
- * Updated only by the thread that currently owns the mutex. */
-static char g_vm_mock_protocol_lock_holder[96];
+ * Updated only by the thread that currently owns the mutex.
+ * Admin paths pass "admin-dispatch METHOD /target" so dumps name the route. */
+static char g_vm_mock_protocol_lock_holder[160];
 static u32 g_vm_mock_protocol_lock_since_ms;
 
 static void vm_mock_protocol_lock_note(const char *who)
@@ -1757,7 +1758,8 @@ static void vm_mock_service_persist_try_enqueue_account(
     job->roleDbValid = accountState->roleDbValid;
     if (accountState->warehouse.loaded &&
         accountState->warehouse.accountId[0] != 0 &&
-        strcmp(accountState->warehouse.accountId, accountState->accountId) == 0)
+        vm_mock_service_account_id_equal(accountState->warehouse.accountId,
+                                         accountState->accountId))
     {
         job->warehouse = accountState->warehouse;
         job->warehouseIncluded = true;
@@ -2298,7 +2300,28 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     }
     else if (haveLoginRequest && vm_mock_service_login_requires_auth(&loginRequest))
     {
-        vm_mock_service_copy_account_id(accountId, sizeof(accountId), loginRequest.userName);
+        char canonical[64];
+        vm_mock_service_account_record *record =
+            vm_mock_service_account_find_record(loginRequest.userName);
+
+        canonical[0] = 0;
+        if (record != NULL && record->username[0] != 0)
+            snprintf(canonical, sizeof(canonical), "%s", record->username);
+        if (canonical[0] != 0)
+        {
+            if (strcmp(canonical, loginRequest.userName) != 0)
+            {
+                printf("[warn][mock-service] account_case_canonicalized typed=%s "
+                       "canonical=%s evidence=login-session-bind\n",
+                       loginRequest.userName, canonical);
+            }
+            vm_mock_service_copy_account_id(accountId, sizeof(accountId), canonical);
+        }
+        else
+        {
+            vm_mock_service_copy_account_id(accountId, sizeof(accountId),
+                                           loginRequest.userName);
+        }
         vm_mock_service_bind_session_account(requestMeta.clientId, accountId);
     }
     else

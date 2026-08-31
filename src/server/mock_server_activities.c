@@ -1562,29 +1562,147 @@ void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
            g_vm_mock_ring_rt.targetCount);
 }
 
-void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss)
+/*
+ * Apply ring kill progress for one account/role from DB (not the process-global
+ * g_vm_mock_ring_rt alone). Multi-client sessions share that global, so team
+ * credit must key by winner account like vm_mock_activities_on_pvp_kill.
+ * When the credited role is the current active account, also refresh runtime.
+ */
+static bool vm_mock_ring_apply_pve_kill_for_account(const char *accountId,
+                                                     u32 roleId, u32 enemyId,
+                                                     bool isBoss)
 {
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_ring_daily_ctx row;
+    char accountHex[160];
+    char query[1024];
+    char npcHex[64];
+    u32 dayYmd = vm_mock_activities_day_ymd();
+    u32 newProgress;
+    bool matched = false;
+    const char *activeAccount = g_vm_mock_service_active_account_id;
+    vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
 
-    if (!g_vm_mock_ring_rt.active)
-        return;
-    if (g_vm_mock_ring_rt.taskType == VM_MOCK_RING_TYPE_KILL_MOB && !isBoss)
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0)
+        return false;
+    if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
+        return false;
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active FROM account_role_ring_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    if (!row.taskActive)
+        return false;
+    if (row.taskType == VM_MOCK_RING_TYPE_KILL_MOB && !isBoss)
     {
-        if (g_vm_mock_ring_rt.targetId != 0 &&
-            g_vm_mock_ring_rt.targetId != enemyId)
-            return;
-        g_vm_mock_ring_rt.progress += 1;
-        if (g_vm_mock_ring_rt.progress > g_vm_mock_ring_rt.targetCount)
-            g_vm_mock_ring_rt.progress = g_vm_mock_ring_rt.targetCount;
+        if (row.targetId != 0 && row.targetId != enemyId)
+            return false;
+        matched = true;
+        newProgress = row.progress + 1;
+        if (row.targetCount == 0)
+            row.targetCount = 1;
+        if (newProgress > row.targetCount)
+            newProgress = row.targetCount;
     }
-    else if (g_vm_mock_ring_rt.taskType == VM_MOCK_RING_TYPE_KILL_BOSS && isBoss)
+    else if (row.taskType == VM_MOCK_RING_TYPE_KILL_BOSS && isBoss)
     {
-        if (g_vm_mock_ring_rt.targetId == 0 || g_vm_mock_ring_rt.targetId == enemyId)
-            g_vm_mock_ring_rt.progress = g_vm_mock_ring_rt.targetCount;
+        if (row.targetId != 0 && row.targetId != enemyId)
+            return false;
+        matched = true;
+        if (row.targetCount == 0)
+            row.targetCount = 1;
+        newProgress = row.targetCount;
     }
     else
+        return false;
+    if (!matched)
+        return false;
+    row.progress = newProgress;
+    vm_mysql_hex_encode(row.targetNpc, strlen(row.targetNpc), npcHex,
+                        sizeof(npcHex));
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_ring_daily "
+             "(account_id,role_id,day_ymd,ring_count,bonus_claimed,task_type,"
+             "target_id,target_count,progress,target_npc,task_active) "
+             "VALUES(UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u) "
+             "ON DUPLICATE KEY UPDATE ring_count=VALUES(ring_count),"
+             "bonus_claimed=VALUES(bonus_claimed),task_type=VALUES(task_type),"
+             "target_id=VALUES(target_id),target_count=VALUES(target_count),"
+             "progress=VALUES(progress),target_npc=VALUES(target_npc),"
+             "task_active=VALUES(task_active)",
+             accountHex, roleId, dayYmd, (u32)row.ringCount,
+             (u32)row.bonusClaimed, (u32)row.taskType, row.targetId,
+             row.targetCount, row.progress, npcHex, (u32)row.taskActive);
+    (void)vm_mysql_exec(query);
+    if (activeAccount != NULL && activeAccount[0] != 0 &&
+        strcmp(activeAccount, accountId) == 0 && activeRole != NULL &&
+        activeRole->roleId == roleId)
+    {
+        g_vm_mock_ring_rt.taskType = row.taskType;
+        g_vm_mock_ring_rt.targetId = row.targetId;
+        g_vm_mock_ring_rt.targetCount = row.targetCount ? row.targetCount : 1;
+        g_vm_mock_ring_rt.progress = row.progress;
+        g_vm_mock_ring_rt.active = row.taskActive;
+        snprintf(g_vm_mock_ring_rt.targetNpc, sizeof(g_vm_mock_ring_rt.targetNpc),
+                 "%s", row.targetNpc);
+    }
+    printf("[info][mock-service] ring_pve_kill_progress role=%u enemy=%u "
+           "boss=%u progress=%u/%u evidence=account-hex-db\n",
+           roleId, enemyId, isBoss ? 1u : 0u, row.progress, row.targetCount);
+    return true;
+}
+
+void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss,
+                                         const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_service_team *team = NULL;
+    bool shareWithParty =
+        reason != NULL && strncmp(reason, "team-battle", 11) == 0;
+    u8 i;
+
+    if (shareWithParty && session != NULL)
+        team = vm_mock_service_team_find_for_client(session->clientId);
+
+    if (team != NULL && team->active && team->battleMemberCount >= 2)
+    {
+        if (team->battleSerial != 0 &&
+            team->ringKillRewardedSerial == team->battleSerial)
+            return;
+        for (i = 0; i < team->battleMemberCount; ++i)
+        {
+            vm_mock_service_client_session *member =
+                vm_mock_service_find_client_session(
+                    team->battleMemberClientIds[i]);
+            if (member == NULL || member->accountId[0] == 0 ||
+                member->onlineRoleId == 0)
+                continue;
+            (void)vm_mock_ring_apply_pve_kill_for_account(
+                member->accountId, member->onlineRoleId, enemyId, isBoss);
+        }
+        team->ringKillRewardedSerial =
+            team->battleSerial ? team->battleSerial : 1;
         return;
-    vm_mock_ring_persist_progress(role);
+    }
+
+    /* Solo / non-team-battle: credit active role from DB. */
+    if (session != NULL && session->accountId[0] != 0 &&
+        session->onlineRoleId != 0)
+    {
+        (void)vm_mock_ring_apply_pve_kill_for_account(
+            session->accountId, session->onlineRoleId, enemyId, isBoss);
+        return;
+    }
+    if (role != NULL && g_vm_mock_service_active_account_id != NULL &&
+        g_vm_mock_service_active_account_id[0] != 0)
+    {
+        (void)vm_mock_ring_apply_pve_kill_for_account(
+            g_vm_mock_service_active_account_id, role->roleId, enemyId, isBoss);
+    }
 }
 
 void vm_mock_activities_on_npc_talk(const char *npcName)

@@ -102,6 +102,39 @@ export type ComposedFrame = {
 };
 
 /**
+ * Horizontal sprite anchor so battle feet stay pinned at root.
+ * Cast/attack strips (鬼道 staff) widen the canvas; center-anchor (0.5) then
+ * looks like the whole body steps back/out. Lower-band opaque mass ≈ feet.
+ */
+export function battleFootAnchorX(frame: ComposedFrame): number {
+  const w = frame.width | 0;
+  const h = frame.height | 0;
+  if (w <= 0 || h <= 0) return 0.5;
+  const rgba = frame.rgba;
+  const y0 = Math.floor(h * 0.62);
+  let sx = 0;
+  let n = 0;
+  for (let y = y0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      if (rgba[(row + x) * 4 + 3]! < 40) continue;
+      sx += x;
+      n++;
+    }
+  }
+  if (!n) {
+    for (let i = 3; i < rgba.length; i += 4) {
+      if (rgba[i]! < 40) continue;
+      sx += (i / 4) % w;
+      n++;
+    }
+  }
+  if (!n) return 0.5;
+  const ax = sx / n / w;
+  return Math.min(0.88, Math.max(0.12, ax));
+}
+
+/**
  * Parse decoded .actor payload (type-2 LZSS unwrapped).
  * Layout matches `vm_mock_admin_actor_resource_inspect` in web_admin_server.c.
  */

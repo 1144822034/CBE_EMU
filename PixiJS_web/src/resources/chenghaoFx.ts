@@ -231,6 +231,25 @@ export class ChenghaoOverlay {
     }
   }
 
+  /** After webglcontextrestored: force atlas reload. */
+  async remountAfterGpuResume(): Promise<void> {
+    const id = this.titleId;
+    if (!id) return;
+    this.atlas = rebindPlistAtlas(this.atlas, null);
+    this.loadInFlight = false;
+    if (this.sprite) {
+      try {
+        this.root.removeChild(this.sprite);
+        this.sprite.destroy({ texture: false });
+      } catch {
+        /* ignore */
+      }
+      this.sprite = null;
+    }
+    this.titleId = 0;
+    await this.setTitleId(id);
+  }
+
   tick(dtMs: number): void {
     if (!this.root.visible || !this.atlas || !this.sprite) return;
     const n = this.atlas.textures.length;

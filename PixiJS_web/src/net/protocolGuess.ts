@@ -51,6 +51,7 @@ export const GUESS_CHOICE = {
 export type GuessChoice = (typeof GUESS_CHOICE)[keyof typeof GUESS_CHOICE];
 
 export type GuessStatus = {
+  enabled: boolean;
   roundId: number;
   remainSec: number;
   lockRemainSec: number;
@@ -172,6 +173,7 @@ export function parseGuessStatus(packet: WtPacket): GuessStatus | null {
   );
   if (!obj) return null;
   return {
+    enabled: fieldU32(obj, "enabled") !== 0,
     roundId: fieldU32(obj, "roundId"),
     remainSec: fieldU32(obj, "remainSec"),
     lockRemainSec: fieldU32(obj, "lockRemainSec"),

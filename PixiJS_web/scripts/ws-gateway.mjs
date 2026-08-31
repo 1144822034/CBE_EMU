@@ -7,12 +7,12 @@
  *   PIX_TCP_HOST / PIX_TCP_PORT — mock-server (default 127.0.0.1:19090)
  *   PIX_ADMIN_HOST / PIX_ADMIN_PORT — admin HTTP for /api/* proxy
  *     (monster-levels, npc-scenes, recharge/create, register; default same host as TCP, port 19091)
- *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 0=off; e.g. 30000 to enable)
+ *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 30000; 0=off)
  *   PIX_GATEWAY_KEEPALIVE_IDLE_MS — silence before synth poll (default 2200)
  *   PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS — mock TCP read budget per CBMS (default 60000)
  *   PIX_GATEWAY_ORPHAN_MS — after WS drop (no DISCONNECT), keep TCP scene-poll
  *     for this clientId so mock presence does not heartbeat-timeout (default
- *     0=off; e.g. 600000 = 10min). Client LiveTransport reconnects with same id.
+ *     120000 = 2min; 0=off). Client LiveTransport reconnects with same id.
  *   PIX_GATEWAY_MOCK_TCP_MAX — max concurrent outbound mock TCP sockets (default
  *     48; prevents Windows ephemeral-port EADDRINUSE under login brute force).
  *   PIX_GATEWAY_WS_PER_IP_MAX — max new WS handshakes per IPv4 per 60s (default
@@ -26,9 +26,8 @@
  * interval and synthesize idle scene-polls so Android WebView timer freezes do
  * not cause server heartbeat-timeout. See docs/re/2026-08-10-pixi-gateway-idle-keepalive.md.
  *
- * When keepalive/orphan are off (default): WS close without an explicit CBMS
- * DISCONNECT immediately forwards DISCONNECT to mock TCP so role data flushes
- * instead of waiting for heartbeat-timeout.
+ * Default: keepalive 30s + orphan 2min. Set either env to 0 to disable; then
+ * WS close without CBMS DISCONNECT immediately forwards DISCONNECT to mock.
  */
 import http from "node:http";
 import net from "node:net";
@@ -492,10 +491,14 @@ process.on("unhandledRejection", (err) => {
 const CBMS_FLAG_SCENE_POLL = 0x2;
 const CBMS_FLAG_DISCONNECT = 0x4;
 /**
- * Idle scene-poll (presence keepalive). Default off — client/native FGS polls.
- * Set PIX_GATEWAY_KEEPALIVE_MS=30000 to re-enable. Unrelated to mock hangup 2/10.
+ * Idle scene-poll (presence keepalive). Default 30s; set PIX_GATEWAY_KEEPALIVE_MS=0
+ * to disable (client/native FGS still polls). Unrelated to mock hangup 2/10.
  */
-const GATEWAY_KEEPALIVE_MS = Number(process.env.PIX_GATEWAY_KEEPALIVE_MS || 0);
+const GATEWAY_KEEPALIVE_MS = Number(
+  process.env.PIX_GATEWAY_KEEPALIVE_MS !== undefined
+    ? process.env.PIX_GATEWAY_KEEPALIVE_MS
+    : 30000,
+);
 /** Only synth poll when client has been silent this long (avoid double-poll races). */
 const GATEWAY_KEEPALIVE_IDLE_MS = Number(
   process.env.PIX_GATEWAY_KEEPALIVE_IDLE_MS || 2200,
@@ -503,12 +506,13 @@ const GATEWAY_KEEPALIVE_IDLE_MS = Number(
 /**
  * After abrupt WS drop (no CBMS DISCONNECT), keep TCP scene-poll for this
  * clientId so mock does not heartbeat-timeout while the phone reconnects.
- * Default off; set PIX_GATEWAY_ORPHAN_MS=600000 (and keepalive>0) to enable.
+ * Default 2min; requires keepalive>0. Set PIX_GATEWAY_ORPHAN_MS=0 to disable
+ * (WS close → immediate DISCONNECT flush).
  */
 const GATEWAY_ORPHAN_MS = Number(
   process.env.PIX_GATEWAY_ORPHAN_MS !== undefined
     ? process.env.PIX_GATEWAY_ORPHAN_MS
-    : 0,
+    : 120000,
 );
 
 /** @type {Map<number, { timer: NodeJS.Timeout, busy: boolean, startedAt: number }>} */

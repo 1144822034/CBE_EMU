@@ -36,9 +36,29 @@ enum
  * so game workers are not stalled by large page bodies or slow clients. */
 #ifdef _WIN32
 static __declspec(thread) int g_vm_mock_admin_protocol_lock_depth;
+static __declspec(thread) char g_vm_mock_admin_protocol_holder_label[160];
 #else
 static __thread int g_vm_mock_admin_protocol_lock_depth;
+static __thread char g_vm_mock_admin_protocol_holder_label[160];
 #endif
+
+static void vm_mock_admin_protocol_holder_note(void)
+{
+    vm_mock_protocol_lock_note(
+        g_vm_mock_admin_protocol_holder_label[0]
+            ? g_vm_mock_admin_protocol_holder_label
+            : "admin-dispatch");
+}
+
+static void vm_mock_admin_protocol_holder_set(const char *method,
+                                              const char *target)
+{
+    snprintf(g_vm_mock_admin_protocol_holder_label,
+             sizeof(g_vm_mock_admin_protocol_holder_label),
+             "admin-dispatch %s %s",
+             method && method[0] ? method : "-",
+             target && target[0] ? target : "-");
+}
 
 static void vm_mock_admin_protocol_io_pause(void)
 {
@@ -54,7 +74,7 @@ static void vm_mock_admin_protocol_io_resume(void)
     if (g_vm_mock_admin_protocol_lock_depth > 0)
     {
         pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
-        vm_mock_protocol_lock_note("admin-dispatch");
+        vm_mock_admin_protocol_holder_note();
     }
 }
 
@@ -228,6 +248,8 @@ static void vm_mock_admin_append_tabs(vm_mock_admin_text *page, const char *acti
         {"arena", "比武"},
         {"worldboss", "世界BOSS"},
         {"ladder", "天梯"},
+        {"fruit", "水果机"},
+        {"guess", "猜猜看"},
         {"activities", "节日/跑环"},
         {"updates", "游戏内容更新管理"},
         {"servers", "服务器列表"},
@@ -6967,6 +6989,16 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
 static void vm_mock_admin_handle_activities_action(vm_mock_service_socket client,
                                                    const char *action,
                                                    const char *body);
+static void vm_mock_admin_render_fruit_page(char *response, size_t responseCap,
+                                            const char *query);
+static void vm_mock_admin_handle_fruit_action(vm_mock_service_socket client,
+                                              const char *action,
+                                              const char *body);
+static void vm_mock_admin_render_guess_page(char *response, size_t responseCap,
+                                            const char *query);
+static void vm_mock_admin_handle_guess_action(vm_mock_service_socket client,
+                                              const char *action,
+                                              const char *body);
 
 static void vm_mock_admin_render_mapedit_page(char *response,
                                               size_t responseCap,
@@ -7053,6 +7085,16 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "ladder") == 0)
     {
         vm_mock_admin_render_ladder_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "fruit") == 0)
+    {
+        vm_mock_admin_render_fruit_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "guess") == 0)
+    {
+        vm_mock_admin_render_guess_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "activities") == 0)
@@ -7240,8 +7282,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             vm_mock_admin_text_append_html(&page, selectedAccount);
             vm_mock_admin_text_appendf(&page,
                 "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
-                "<input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加铜钱\" required>"
-                "<button type=\"submit\">加钱</button></form>", role->roleId);
+                "<input type=\"number\" name=\"amount\" step=\"1\" "
+                "min=\"-2147483648\" max=\"2147483647\" "
+                "placeholder=\"正数增加，负数扣除\" required>"
+                "<button type=\"submit\">调整铜钱</button></form>",
+                role->roleId);
             vm_mock_admin_text_appendf(&page,
                 "<form class=\"inline\" method=\"post\" action=\"/action\">"
                 "<input type=\"hidden\" name=\"action\" value=\"add-wcoin\">"
@@ -7979,6 +8024,8 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
 #include "web_admin_arena.inc.c"
 #include "web_admin_world_boss.inc.c"
 #include "web_admin_ladder.inc.c"
+#include "web_admin_fruit.inc.c"
+#include "web_admin_guess.inc.c"
 #include "web_admin_activities.inc.c"
 
 static bool vm_mock_admin_utf8_to_gbk_task_text(const char *utf8,
@@ -10543,6 +10590,18 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_ladder_action(client, action, body);
         return;
     }
+    if (strcmp(action, "save-fruit-config") == 0 ||
+        strcmp(action, "save-fruit-wheel") == 0 ||
+        strcmp(action, "reset-fruit-wheel") == 0)
+    {
+        vm_mock_admin_handle_fruit_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-guess-config") == 0)
+    {
+        vm_mock_admin_handle_guess_action(client, action, body);
+        return;
+    }
     if (strcmp(action, "save-festival-config") == 0 ||
         strcmp(action, "save-festival-exchange") == 0 ||
         strcmp(action, "save-yanmen-config") == 0 ||
@@ -10640,17 +10699,21 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     }
     if (strcmp(action, "add-money") == 0)
     {
+        int32_t delta = 0;
+
         if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
             !vm_mock_admin_form_value(body, "amount", amountText, sizeof(amountText)) ||
-            !vm_net_mock_parse_u32_strict(amountText, &amount) || amount == 0)
+            !vm_net_mock_parse_i32_strict(amountText, &delta) || delta == 0)
         {
-            vm_mock_admin_redirect(client, account, "error", "金额必须是大于 0 的整数");
+            vm_mock_admin_redirect(client, account, "error",
+                                   "金额必须是非零整数（正数增加，负数扣除）");
             return;
         }
-        ok = vm_mock_service_account_add_role_money(account, role, amount, NULL, NULL, &error);
-        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
-                               ok ? "普通钱币增加成功"
-                                  : (error ? error : "余额修改失败"));
+        ok = vm_mock_service_account_add_role_money(account, role, delta, NULL, NULL, &error);
+        vm_mock_admin_redirect(
+            client, account, ok ? "ok" : "error",
+            ok ? (delta > 0 ? "普通钱币增加成功" : "普通钱币扣除成功")
+               : (error ? error : "余额修改失败"));
         return;
     }
     if (strcmp(action, "add-wcoin") == 0)
@@ -12264,6 +12327,25 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
     else
         query = "";
 
+    /*
+     * Pixi polls these public JSON maps frequently.  They only need the
+     * in-memory monster/NPC catalogs (MySQL load is serialized inside the
+     * loaders).  Taking the shared game protocol mutex here used to stall
+     * every game worker for minutes when a cold/reconnect MySQL path blocked
+     * under admin-dispatch — see docs/re/2026-08-30-admin-dispatch-protocol-lock-mysql.md.
+     */
+    if (strcmp(method, "GET") == 0 &&
+        (strcmp(target, "/api/monster-levels") == 0 ||
+         strcmp(target, "/api/npc-scenes") == 0))
+    {
+        g_vm_mock_admin_protocol_lock_depth = 0;
+        g_vm_mock_admin_protocol_holder_label[0] = 0;
+        result = vm_mock_admin_dispatch_client(client, request, headerLen,
+                                              method, target, query, body);
+        free(request);
+        return result;
+    }
+
     {
         u32 lockWaitMs = 0;
 
@@ -12284,10 +12366,12 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
                    method, target, lockWaitMs);
         }
         g_vm_mock_admin_protocol_lock_depth = 1;
-        vm_mock_protocol_lock_note("admin-dispatch");
+        vm_mock_admin_protocol_holder_set(method, target);
+        vm_mock_admin_protocol_holder_note();
         result = vm_mock_admin_dispatch_client(client, request, headerLen,
                                               method, target, query, body);
         g_vm_mock_admin_protocol_lock_depth = 0;
+        g_vm_mock_admin_protocol_holder_label[0] = 0;
         vm_mock_protocol_lock_clear();
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
     }

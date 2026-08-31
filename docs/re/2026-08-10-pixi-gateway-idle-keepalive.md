@@ -16,26 +16,29 @@
 
 环境变量：
 
-- `PIX_GATEWAY_KEEPALIVE_MS`（默认 **0=关**；设 `30000` 可开）
+- `PIX_GATEWAY_KEEPALIVE_MS`（默认 **30000**；设 `0` 关）
 - `PIX_GATEWAY_KEEPALIVE_IDLE_MS`（默认 2200）
 - `PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS`（默认 **60000**，单次 CBMS 等 mock 回包）
-- `PIX_GATEWAY_ORPHAN_MS`（默认 **0=关**；设 `600000` 且 keepalive>0 可开 10 分钟 orphan）
+- `PIX_GATEWAY_ORPHAN_MS`（默认 **120000=2 分钟**；设 `0` 关；需 keepalive>0）
 
 与 Mock 原有挂机（`2/10` hangup loop）无关，二者并存。
 
-**2026-08-29**：默认已关闭代发 / orphan；息屏保活改由客户端 FGS + `__pixiNativeKeepAlive` 负责。需要代发时显式设环境变量。
+**2026-08-29**：曾默认关闭代发 / orphan；息屏保活仍由客户端 FGS + `__pixiNativeKeepAlive` 负责。
 
 **同日补充**：orphan 关闭时，WS 异常断开（未收到客户端 DISCONNECT）→ gateway 排空该 socket 在途交换后，立刻向 mock TCP 发 CBMS `DISCONNECT`，触发 `client-disconnect` 落盘与 `explicit-disconnect` 下线，不再等 ~30s `heartbeat-timeout`。
+
+**2026-08-30**：`ws-gateway.mjs` **代码默认**代发 30s + orphan 2 分钟（无需设环境变量）。仅要关闭时设 `PIX_GATEWAY_KEEPALIVE_MS=0` / `PIX_GATEWAY_ORPHAN_MS=0`。
 
 ## 部署
 
 ```bash
 cd PixiJS_web && node scripts/ws-gateway.mjs
+# 或 startGateway.bat / 重打后的 gateway-release/ws-gateway.exe
 ```
 
-默认启动日志应出现：`idle scene-poll keepalive off` 与 `orphan keepalive off; WS close → immediate DISCONNECT flush`。
+默认启动日志应出现：`idle scene-poll keepalive 30000ms` 与 `orphan keepalive after WS drop 120000ms`。
 
-**改完需重启 gateway 进程**才会生效。
+**改完需重启 gateway**。跑 exe 时须用当前源码重打（`npm run gateway:exe`），旧 exe 仍可能是默认关。
 
 ## 边界
 

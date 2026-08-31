@@ -31,7 +31,7 @@ export type LoadedPlistAtlas = {
 };
 
 /** Bump when atlas post-process changes so stale in-memory caches refresh. */
-const ATLAS_CACHE_VER = "centroid-v3-face";
+const ATLAS_CACHE_VER = "centroid-v4-ui-perframe";
 
 const cache = new Map<string, Promise<LoadedPlistAtlas>>();
 
@@ -257,7 +257,10 @@ function parseFrameRect(
  * Format-2 plist text parse (no DOMParser — works in browser and Node smoke).
  * Expects TexturePacker XML with `frames` / `metadata` dicts.
  */
-export function parsePlistAtlasXml(xmlText: string): {
+export function parsePlistAtlasXml(
+  xmlText: string,
+  opts?: { uiAtlas?: boolean },
+): {
   textureFileName: string;
   metaSize: { w: number; h: number };
   frames: PlistFrame[];
@@ -270,7 +273,8 @@ export function parsePlistAtlasXml(xmlText: string): {
   while ((m = frameBlockRe.exec(text))) {
     const name = m[1]!.trim();
     const body = m[2]!;
-    if (!/_\d{4}\.png$/i.test(name)) continue;
+    /* Wing/mount/chenghao sheets use _0000.png … _0015.png; UI atlases do not. */
+    if (!opts?.uiAtlas && !/_\d{4}\.png$/i.test(name)) continue;
     const frameStr = body.match(
       /<key>frame<\/key>\s*<string>([^<]*)<\/string>/,
     )?.[1];
@@ -455,6 +459,11 @@ export type LoadPlistAtlasOpts = {
   /** Keep only frames whose name starts with this prefix. */
   frameNamePrefix?: string;
   /**
+   * Cocos/TexturePacker UI sheet (e.g. fruit machine `002.plist`): frame names
+   * are not `_0000.png` animation cells — parse every `.png` entry.
+   */
+  uiAtlas?: boolean;
+  /**
    * For chenghao: drop near-empty cells; if the sheet thrashes L/R (Y-spin /
    * half-frame tumble like 86043), keep only balanced full-face frames.
    */
@@ -474,7 +483,8 @@ export function loadPlistAtlas(
   const raw = String(jhRelativePath || "").replace(/^[/\\]+/, "");
   const prefix = opts?.frameNamePrefix ? String(opts.frameNamePrefix) : "";
   const stableFace = !!opts?.stableFace;
-  const key = `${ATLAS_CACHE_VER}:${raw.replace(/\.plist$/i, "")}:p=${prefix}:sf=${stableFace ? 1 : 0}`;
+  const uiAtlas = !!opts?.uiAtlas;
+  const key = `${ATLAS_CACHE_VER}:${raw.replace(/\.plist$/i, "")}:p=${prefix}:sf=${stableFace ? 1 : 0}:ui=${uiAtlas ? 1 : 0}`;
   const hit = cache.get(key);
   if (hit) return hit;
 
@@ -484,7 +494,7 @@ export function loadPlistAtlas(
     const res = await fetch(plistUrl, { cache: "force-cache" });
     if (!res.ok) throw new Error(`plist HTTP ${res.status}: ${sheetKey}`);
     const xmlText = await res.text();
-    const parsed = parsePlistAtlasXml(xmlText);
+    const parsed = parsePlistAtlasXml(xmlText, { uiAtlas });
     const dir = sheetKey.includes("/")
       ? sheetKey.slice(0, sheetKey.lastIndexOf("/") + 1)
       : "";
@@ -621,26 +631,43 @@ export function loadPlistAtlas(
       if (f.sourceSize.h > maxH) maxH = f.sourceSize.h;
     }
 
-    // Grow canvas so every content centroid can sit on the shared center.
-    let commonW = maxW;
-    let commonH = maxH;
-    for (const c of cents) {
-      commonW = Math.max(commonW, Math.ceil(2 * Math.max(c.cx, c.w - c.cx)));
-      commonH = Math.max(commonH, Math.ceil(2 * Math.max(c.cy, c.h - c.cy)));
+    let textures: Texture[];
+    let commonOrig: { w: number; h: number };
+
+    if (uiAtlas) {
+      // UI 图集帧尺寸悬殊（水果机含 544px 侧灯）。不可共用 commonOrig，
+      // 否则小图锚在巨大透明画布上，亮灯相对暗灯会明显错位。
+      // 按每帧 sourceSize + Cocos offset（Y-up → Pixi Y-down）摆 trim。
+      textures = frames.map((fr) => {
+        const ow = Math.max(1, fr.sourceSize.w | 0);
+        const oh = Math.max(1, fr.sourceSize.h | 0);
+        const trimX = (ow - fr.frame.w) * 0.5 + fr.offset.x;
+        const trimY = (oh - fr.frame.h) * 0.5 - fr.offset.y;
+        return frameToTexture(base, fr, { w: ow, h: oh }, trimX, trimY);
+      });
+      commonOrig = { w: maxW, h: maxH };
+    } else {
+      // Grow canvas so every content centroid can sit on the shared center.
+      let commonW = maxW;
+      let commonH = maxH;
+      for (const c of cents) {
+        commonW = Math.max(commonW, Math.ceil(2 * Math.max(c.cx, c.w - c.cx)));
+        commonH = Math.max(commonH, Math.ceil(2 * Math.max(c.cy, c.h - c.cy)));
+      }
+      commonOrig = { w: commonW, h: commonH };
+      const targetX = commonW * 0.5;
+      const targetY = commonH * 0.5;
+      textures = frames.map((fr, i) => {
+        const c = cents[i]!;
+        return frameToTexture(
+          base,
+          fr,
+          commonOrig,
+          targetX - c.cx,
+          targetY - c.cy,
+        );
+      });
     }
-    const commonOrig = { w: commonW, h: commonH };
-    const targetX = commonW * 0.5;
-    const targetY = commonH * 0.5;
-    const textures = frames.map((fr, i) => {
-      const c = cents[i]!;
-      return frameToTexture(
-        base,
-        fr,
-        commonOrig,
-        targetX - c.cx,
-        targetY - c.cy,
-      );
-    });
 
     rememberCacheKey(pngUrl, key);
     return {

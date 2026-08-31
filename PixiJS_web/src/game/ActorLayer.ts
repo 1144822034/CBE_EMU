@@ -225,6 +225,11 @@ export class ActorLayer {
     { seed: NpcActor; respawnAt: number | null; permanent?: boolean }
   >();
   /**
+   * World-boss claim/despawn homes that must stay gone across SCE forceReload
+   * (server may briefly still serve a stale kind=3 row). Cleared on map clear.
+   */
+  private permanentHomeDrops = new Set<string>();
+  /**
    * 31/5 can arrive before the peer marker exists (earlier poll, or before
    * upsert's sync create runs). Keep last notice until paint can apply.
    */
@@ -276,6 +281,7 @@ export class ActorLayer {
     this.taskPrompts = new Map();
     this.mapPreview = null;
     this.suppressedScene.clear();
+    this.permanentHomeDrops.clear();
   }
 
   /**
@@ -301,6 +307,10 @@ export class ActorLayer {
     if (seed) {
       snap.x = seed.x | 0;
       snap.y = seed.y | 0;
+      if (seed.battleActorId != null) snap.battleActorId = seed.battleActorId;
+    } else if (m) {
+      snap.x = m.homeX | 0;
+      snap.y = m.homeY | 0;
     }
     this.suppressedScene.set(actorId, { seed: snap, respawnAt: null });
     if (m) {
@@ -310,10 +320,37 @@ export class ActorLayer {
     return true;
   }
 
+  /**
+   * Hide the SCE spawn at claim/home tile (hangup / 4/5 may lack map actorId).
+   * Matches seed home, or live marker home/feet. Returns suppressed actorId or 0.
+   */
+  suppressSceneMonsterAt(x: number, y: number): number {
+    const tx = x | 0;
+    const ty = y | 0;
+    const seed =
+      this.sceMonsters.find((s) => (s.x | 0) === tx && (s.y | 0) === ty) ??
+      null;
+    if (seed && this.suppressSceneMonster(seed.actorId)) return seed.actorId;
+    for (const m of this.markers.values()) {
+      if (m.kind !== "monster" || m.source !== "sce") continue;
+      if (
+        ((m.homeX | 0) === tx && (m.homeY | 0) === ty) ||
+        ((m.x | 0) === tx && (m.y | 0) === ty)
+      ) {
+        if (this.suppressSceneMonster(m.id)) return m.id;
+      }
+    }
+    // Already suppressed at this home — treat as success so callers skip restore.
+    for (const [id, info] of this.suppressedScene) {
+      if ((info.seed.x | 0) === tx && (info.seed.y | 0) === ty) return id;
+    }
+    return 0;
+  }
+
   /** Battle start failed — put the marker back immediately. */
   restoreSceneMonster(actorId: number): void {
     const held = this.suppressedScene.get(actorId);
-    if (!held) return;
+    if (!held || held.permanent) return;
     this.suppressedScene.delete(actorId);
     this.respawnSceneMonster(held.seed);
   }
@@ -338,6 +375,9 @@ export class ActorLayer {
     battleActorId?: number;
   }): number {
     let removed = 0;
+    if (match.x != null && match.y != null) {
+      this.permanentHomeDrops.add(`${match.x | 0},${match.y | 0}`);
+    }
     const next = this.sceMonsters.filter((s) => {
       const byId =
         match.actorId != null && (s.actorId >>> 0) === (match.actorId >>> 0);
@@ -412,13 +452,52 @@ export class ActorLayer {
   }
 
   setSceneMonsters(monsters: NpcActor[]): void {
-    this.sceMonsters = monsters;
-    // Drop engage/respawn only for spawns gone from the new list (map hop).
-    for (const id of [...this.suppressedScene.keys()]) {
-      if (!monsters.some((m) => m.actorId === id)) {
-        this.suppressedScene.delete(id);
-      }
+    // Remap suppress by home tile when SCE reorder / boss inject shifts
+    // 0x70000000+i ids — dropping by missing id would clear engage and
+    // post-battle refresh would paint the fought spawn immediately.
+    const filtered =
+      this.permanentHomeDrops.size === 0
+        ? monsters
+        : monsters.filter(
+            (m) => !this.permanentHomeDrops.has(`${m.x | 0},${m.y | 0}`),
+          );
+    const nextSuppress = new Map<
+      number,
+      { seed: NpcActor; respawnAt: number | null; permanent?: boolean }
+    >();
+    for (const [, info] of this.suppressedScene) {
+      const sx = info.seed.x | 0;
+      const sy = info.seed.y | 0;
+      const bid = (info.seed.battleActorId ?? 0) >>> 0;
+      const match =
+        filtered.find((m) => m.actorId === info.seed.actorId) ??
+        filtered.find((m) => (m.x | 0) === sx && (m.y | 0) === sy) ??
+        (bid
+          ? filtered.find(
+              (m) =>
+                ((m.battleActorId ?? 0) >>> 0) === bid &&
+                (m.x | 0) === sx &&
+                (m.y | 0) === sy,
+            )
+          : undefined);
+      if (!match) continue;
+      nextSuppress.set(match.actorId, {
+        ...info,
+        seed: {
+          ...info.seed,
+          actorId: match.actorId,
+          x: match.x | 0,
+          y: match.y | 0,
+          battleActorId: match.battleActorId ?? info.seed.battleActorId,
+          actorResource: match.actorResource || info.seed.actorResource,
+          battleActorResource:
+            match.battleActorResource || info.seed.battleActorResource,
+          name: match.name || info.seed.name,
+        },
+      });
     }
+    this.suppressedScene = nextSuppress;
+    this.sceMonsters = filtered;
     this.syncMarkers();
   }
 
@@ -806,17 +885,25 @@ export class ActorLayer {
 
     this.animAcc += dt;
     this.idleAnimAcc += dt;
-    const stepWalk = this.animAcc >= MAP_WALK_FRAME_MS;
-    const stepIdle = this.idleAnimAcc >= MAP_IDLE_FRAME_MS;
+    // Subtract (do not reset-to-0): keep cadence stable across 60/90/120Hz.
+    let stepWalk = 0;
+    let stepIdle = 0;
+    while (this.animAcc >= MAP_WALK_FRAME_MS) {
+      this.animAcc -= MAP_WALK_FRAME_MS;
+      stepWalk += 1;
+    }
+    while (this.idleAnimAcc >= MAP_IDLE_FRAME_MS) {
+      this.idleAnimAcc -= MAP_IDLE_FRAME_MS;
+      stepIdle += 1;
+    }
     if (!stepWalk && !stepIdle) return;
-    if (stepWalk) this.animAcc = 0;
-    if (stepIdle) this.idleAnimAcc = 0;
     for (const m of this.markers.values()) {
       if (!m.loaded || !m.animate) continue;
       if (m.kind === "peer" && !m.moving && !m.peerMoveQueue.length) continue;
       const moving = m.moving || m.peerMoveQueue.length > 0;
-      if (moving ? !stepWalk : !stepIdle) continue;
-      m.phase = (m.phase + 1) % 256;
+      const steps = moving ? stepWalk : stepIdle;
+      if (!steps) continue;
+      m.phase = (m.phase + steps) % 256;
       this.applyFrame(m);
     }
   }
@@ -1064,6 +1151,9 @@ export class ActorLayer {
     nameOutline = true,
     plus16Count = 0,
   ): Promise<void> {
+    // Engage can destroy the marker while an earlier syncMarkers upsert is
+    // still awaiting UC3/actor load — never recreate a suppressed SCE spawn.
+    if (source === "sce" && this.suppressedScene.has(id)) return;
     let m = this.markers.get(id);
     if (!m) {
       const root = new Container();
@@ -1174,6 +1264,11 @@ export class ActorLayer {
     if (this.markers.get(id) !== m || m.label.destroyed || m.root.destroyed) {
       return;
     }
+    if (source === "sce" && this.suppressedScene.has(id)) {
+      this.destroyMarker(m);
+      this.markers.delete(id);
+      return;
+    }
     m.label.scale.set(NAMEPLATE_SCALE);
     this.layoutNameplate(m);
 
@@ -1201,6 +1296,11 @@ export class ActorLayer {
       try {
         const loaded = await loadActor(actorName);
         if (this.markers.get(id) !== m) return;
+        if (source === "sce" && this.suppressedScene.has(id)) {
+          this.destroyMarker(m);
+          this.markers.delete(id);
+          return;
+        }
         m.loaded = loaded;
         m.phase = 0;
         const parts = loaded.animations[0]?.parts.length ?? 0;
@@ -1572,43 +1672,56 @@ export class ActorLayer {
   /**
    * After WebGL context restore (Android screen-off): rebuild sprites from
    * CPU RGBA so GPU uploads are fresh. Nameplates rebake via BitmapLabel.
-   * Cosmetics atlases: source.update via SceneView → nudgePlistAtlases.
+   * Caller (SceneView) must clearPoseTextureCache before this so applyFrame
+   * does not reuse dead BufferImageSource entries.
    */
   nudgeAfterGpuResume(): void {
+    for (const tex of fuhaoTexCache.values()) {
+      try {
+        tex.destroy(true);
+      } catch {
+        /* ignore */
+      }
+    }
+    fuhaoTexCache.clear();
+
     for (const m of this.markers.values()) {
       if (m.root.destroyed) continue;
-      if (m.loaded) this.applyFrame(m);
-      else if (m.sprite?.texture?.source) {
+      m.poseKey = "";
+      // Remount body Sprite — texture rebind on a restored Sprite stays black.
+      if (m.sprite) {
         try {
-          m.sprite.texture.source.update();
+          if (m.sprite.parent) m.sprite.parent.removeChild(m.sprite);
+          m.sprite.destroy({ texture: false });
         } catch {
           /* ignore */
         }
+        m.sprite = null;
+      }
+      if (m.loaded) {
+        this.applyFrame(m);
+        const body = m.sprite as Sprite | null;
+        if (body) body.visible = true;
+        m.root.visible = true;
+      }
+      // Quest marks share fuhao BufferImageSource cache — force remount.
+      if (m.questMark || m.questPrompt) {
+        m.questPrompt = 0;
+        this.clearQuestMarkSprite(m);
+        void this.refreshQuestMark(m);
       }
       try {
-        m.wing?.root.visible &&
-          m.wing.root.children.forEach((c) => {
-            const spr = c as { texture?: { source?: { update?: () => void } } };
-            spr.texture?.source?.update?.();
-          });
+        void m.wing?.remountAfterGpuResume();
       } catch {
         /* ignore */
       }
       try {
-        m.mount?.root.visible &&
-          m.mount.root.children.forEach((c) => {
-            const spr = c as { texture?: { source?: { update?: () => void } } };
-            spr.texture?.source?.update?.();
-          });
+        void m.mount?.remountAfterGpuResume();
       } catch {
         /* ignore */
       }
       try {
-        m.chenghao?.root.visible &&
-          m.chenghao.root.children.forEach((c) => {
-            const spr = c as { texture?: { source?: { update?: () => void } } };
-            spr.texture?.source?.update?.();
-          });
+        void m.chenghao?.remountAfterGpuResume();
       } catch {
         /* ignore */
       }

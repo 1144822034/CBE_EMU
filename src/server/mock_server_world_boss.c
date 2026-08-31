@@ -37,7 +37,21 @@ typedef struct
     u32 previewUnix;
     u32 spawnUnix;
     u32 claimRoleId;
+    /* Preview announce map only — must never overwrite live SCE spawn anchors. */
+    char previewScene[64];
 } vm_mock_world_boss_runtime;
+
+typedef struct
+{
+    char scene[64];
+    u16 x;
+    u16 y;
+} vm_mock_world_boss_orphan;
+
+enum
+{
+    VM_MOCK_WORLD_BOSS_ORPHAN_MAX = 64
+};
 
 static vm_mock_world_boss_config g_vm_mock_world_boss_config;
 static bool g_vm_mock_world_boss_config_loaded = false;
@@ -50,6 +64,9 @@ static u32 g_vm_mock_world_boss_resync_count = 0;
 static char g_vm_mock_world_boss_outdoor_scenes[VM_MOCK_WORLD_BOSS_OUTDOOR_MAX][64];
 static u32 g_vm_mock_world_boss_outdoor_count = 0;
 static bool g_vm_mock_world_boss_outdoor_loaded = false;
+static vm_mock_world_boss_orphan
+    g_vm_mock_world_boss_orphans[VM_MOCK_WORLD_BOSS_ORPHAN_MAX];
+static u32 g_vm_mock_world_boss_orphan_count = 0;
 
 /* scene_task.c (same TU) */
 bool vm_net_mock_runtime_inject_combat_spawn(
@@ -60,6 +77,12 @@ bool vm_net_mock_runtime_remove_combat_spawn_at(
 /* role.c */
 u32 vm_net_mock_copy_outdoor_field_scenes(char scenes[][64], u32 cap);
 bool vm_net_mock_pick_scene_spawn_xy(const char *scene, u16 *xOut, u16 *yOut);
+
+static void vm_mock_world_boss_resolve_map_label_gbk(const char *scene,
+                                                     char *out, size_t outCap);
+static void vm_mock_world_boss_queue_scene_resync_for(const char *scene);
+static void vm_mock_world_boss_broadcast_despawn(const char *sceneGbk, u16 x,
+                                                 u16 y);
 
 static bool vm_mock_world_boss_scene_in_update_catalog(const char *scene)
 {
@@ -117,6 +140,197 @@ static void vm_mock_world_boss_load_outdoor_scenes(void)
     g_vm_mock_world_boss_outdoor_count =
         vm_net_mock_copy_outdoor_field_scenes(g_vm_mock_world_boss_outdoor_scenes,
                                               VM_MOCK_WORLD_BOSS_OUTDOOR_MAX);
+}
+
+/*
+ * Track every SCE inject so preview / restart / failed respawn cannot leave
+ * live kind=3 rows on old maps. Same TU as scene_task bindings cache.
+ */
+static void vm_mock_world_boss_orphan_remember(const char *scene, u16 x, u16 y)
+{
+    if (scene == NULL || scene[0] == 0 || x == 0 || y == 0)
+        return;
+    for (u32 i = 0; i < g_vm_mock_world_boss_orphan_count; ++i)
+    {
+        if (g_vm_mock_world_boss_orphans[i].x == x &&
+            g_vm_mock_world_boss_orphans[i].y == y &&
+            vm_net_mock_scene_names_equal_loose(
+                g_vm_mock_world_boss_orphans[i].scene, scene))
+            return;
+    }
+    if (g_vm_mock_world_boss_orphan_count >= VM_MOCK_WORLD_BOSS_ORPHAN_MAX)
+    {
+        /* Drop oldest; clear-all still sweeps bindings by real id. */
+        memmove(&g_vm_mock_world_boss_orphans[0],
+                &g_vm_mock_world_boss_orphans[1],
+                (VM_MOCK_WORLD_BOSS_ORPHAN_MAX - 1u) *
+                    sizeof(g_vm_mock_world_boss_orphans[0]));
+        g_vm_mock_world_boss_orphan_count = VM_MOCK_WORLD_BOSS_ORPHAN_MAX - 1u;
+    }
+    snprintf(g_vm_mock_world_boss_orphans[g_vm_mock_world_boss_orphan_count].scene,
+             sizeof(g_vm_mock_world_boss_orphans[0].scene), "%s", scene);
+    g_vm_mock_world_boss_orphans[g_vm_mock_world_boss_orphan_count].x = x;
+    g_vm_mock_world_boss_orphans[g_vm_mock_world_boss_orphan_count].y = y;
+    ++g_vm_mock_world_boss_orphan_count;
+}
+
+static void vm_mock_world_boss_orphan_forget(const char *scene, u16 x, u16 y)
+{
+    u32 w = 0;
+
+    if (scene == NULL || scene[0] == 0)
+        return;
+    for (u32 i = 0; i < g_vm_mock_world_boss_orphan_count; ++i)
+    {
+        if (g_vm_mock_world_boss_orphans[i].x == x &&
+            g_vm_mock_world_boss_orphans[i].y == y &&
+            vm_net_mock_scene_names_equal_loose(
+                g_vm_mock_world_boss_orphans[i].scene, scene))
+            continue;
+        if (w != i)
+            g_vm_mock_world_boss_orphans[w] = g_vm_mock_world_boss_orphans[i];
+        ++w;
+    }
+    g_vm_mock_world_boss_orphan_count = w;
+}
+
+/* Collect remapped (wire≠real) binding rows for the configured boss monster. */
+static u32 vm_mock_world_boss_collect_binding_orphans(
+    vm_mock_world_boss_orphan *out, u32 cap)
+{
+    u32 n = 0;
+    u32 monsterId = g_vm_mock_world_boss_config.monsterId;
+
+    if (out == NULL || cap == 0 || monsterId == 0)
+        return 0;
+    /* Reload so process-restart still sees inject rows left in MySQL. */
+    g_vm_net_mock_sce_combat_spawn_bindings_loaded = false;
+    vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
+    for (u32 i = 0; i < g_vm_net_mock_sce_combat_spawn_binding_count && n < cap;
+         ++i)
+    {
+        const vm_net_mock_sce_combat_spawn_binding *bind =
+            &g_vm_net_mock_sce_combat_spawn_bindings[i];
+        bool dup = false;
+
+        if (bind->realActorId != (u16)monsterId)
+            continue;
+        /* Natural wild keeps wire==real; world-boss / custom remap differs. */
+        if (bind->wireActorId == bind->realActorId)
+            continue;
+        if (bind->scene[0] == 0 || bind->x == 0 || bind->y == 0)
+            continue;
+        for (u32 j = 0; j < n; ++j)
+        {
+            if (out[j].x == bind->x && out[j].y == bind->y &&
+                vm_net_mock_scene_names_equal_loose(out[j].scene, bind->scene))
+            {
+                dup = true;
+                break;
+            }
+        }
+        if (dup)
+            continue;
+        snprintf(out[n].scene, sizeof(out[n].scene), "%s", bind->scene);
+        out[n].x = bind->x;
+        out[n].y = bind->y;
+        ++n;
+    }
+    return n;
+}
+
+static void vm_mock_world_boss_clear_orphan_spawns(const char *reason)
+{
+    vm_mock_world_boss_orphan batch[VM_MOCK_WORLD_BOSS_ORPHAN_MAX];
+    u32 batchCount = 0;
+    u32 cleared = 0;
+
+    memset(batch, 0, sizeof(batch));
+    /* Merge remembered injects + binding-table remaps (covers preview orphans). */
+    for (u32 i = 0; i < g_vm_mock_world_boss_orphan_count &&
+                    batchCount < VM_MOCK_WORLD_BOSS_ORPHAN_MAX;
+         ++i)
+    {
+        batch[batchCount++] = g_vm_mock_world_boss_orphans[i];
+    }
+    if (g_vm_mock_world_boss_rt.scene[0] != 0 &&
+        g_vm_mock_world_boss_rt.x != 0 && g_vm_mock_world_boss_rt.y != 0 &&
+        (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_ACTIVE ||
+         g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_CLAIMED))
+    {
+        bool dup = false;
+        for (u32 j = 0; j < batchCount; ++j)
+        {
+            if (batch[j].x == g_vm_mock_world_boss_rt.x &&
+                batch[j].y == g_vm_mock_world_boss_rt.y &&
+                vm_net_mock_scene_names_equal_loose(
+                    batch[j].scene, g_vm_mock_world_boss_rt.scene))
+            {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup && batchCount < VM_MOCK_WORLD_BOSS_ORPHAN_MAX)
+        {
+            snprintf(batch[batchCount].scene, sizeof(batch[batchCount].scene),
+                     "%s", g_vm_mock_world_boss_rt.scene);
+            batch[batchCount].x = g_vm_mock_world_boss_rt.x;
+            batch[batchCount].y = g_vm_mock_world_boss_rt.y;
+            ++batchCount;
+        }
+    }
+    {
+        vm_mock_world_boss_orphan fromBind[VM_MOCK_WORLD_BOSS_ORPHAN_MAX];
+        u32 bindN = vm_mock_world_boss_collect_binding_orphans(
+            fromBind, VM_MOCK_WORLD_BOSS_ORPHAN_MAX);
+        for (u32 i = 0; i < bindN && batchCount < VM_MOCK_WORLD_BOSS_ORPHAN_MAX;
+             ++i)
+        {
+            bool dup = false;
+            for (u32 j = 0; j < batchCount; ++j)
+            {
+                if (batch[j].x == fromBind[i].x &&
+                    batch[j].y == fromBind[i].y &&
+                    vm_net_mock_scene_names_equal_loose(batch[j].scene,
+                                                        fromBind[i].scene))
+                {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup)
+                continue;
+            batch[batchCount++] = fromBind[i];
+        }
+    }
+
+    for (u32 i = 0; i < batchCount; ++i)
+    {
+        const char *err = NULL;
+        char sceneGbk[128];
+
+        if (!vm_net_mock_runtime_remove_combat_spawn_at(
+                batch[i].scene, batch[i].x, batch[i].y, &err))
+        {
+            printf("[warn][mock-service] world_boss_orphan_remove "
+                   "reason=%s scene=%s pos=(%u,%u) err=%s\n",
+                   reason ? reason : "-", batch[i].scene, (u32)batch[i].x,
+                   (u32)batch[i].y, err ? err : "-");
+            continue;
+        }
+        ++cleared;
+        vm_mock_world_boss_queue_scene_resync_for(batch[i].scene);
+        memset(sceneGbk, 0, sizeof(sceneGbk));
+        vm_mock_world_boss_resolve_map_label_gbk(batch[i].scene, sceneGbk,
+                                                 sizeof(sceneGbk));
+        vm_mock_world_boss_broadcast_despawn(sceneGbk, batch[i].x, batch[i].y);
+    }
+    g_vm_mock_world_boss_orphan_count = 0;
+    memset(g_vm_mock_world_boss_orphans, 0,
+           sizeof(g_vm_mock_world_boss_orphans));
+    printf("[info][mock-service] world_boss_orphan_clear reason=%s "
+           "targets=%u cleared=%u\n",
+           reason ? reason : "-", batchCount, cleared);
 }
 
 static bool vm_mock_world_boss_ensure_tables(void)
@@ -576,37 +790,35 @@ static bool vm_mock_world_boss_pick_scene_and_pos(char *sceneOut, size_t sceneCa
 
 static void vm_mock_world_boss_despawn_active(const char *reason)
 {
-    const char *despawnError = NULL;
     char sceneCopy[64];
     u16 x = 0;
     u16 y = 0;
-    char sceneGbk[128];
     u8 prevStatus = 0;
 
     if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE &&
-        g_vm_mock_world_boss_rt.scene[0] == 0)
-        return;
+        g_vm_mock_world_boss_rt.scene[0] == 0 &&
+        g_vm_mock_world_boss_orphan_count == 0)
+    {
+        /* Still sweep binding-table remaps after restart / preview orphans. */
+        vm_mock_world_boss_load_config(false);
+        if (g_vm_mock_world_boss_config.monsterId == 0)
+            return;
+    }
     prevStatus = g_vm_mock_world_boss_rt.status;
     snprintf(sceneCopy, sizeof(sceneCopy), "%s", g_vm_mock_world_boss_rt.scene);
     x = g_vm_mock_world_boss_rt.x;
     y = g_vm_mock_world_boss_rt.y;
-    /* Only ACTIVE rows live in SCE; CLAIMED already removed on encounter. */
-    if (prevStatus == VM_MOCK_WORLD_BOSS_STATUS_ACTIVE && sceneCopy[0] != 0 &&
-        x != 0 && y != 0)
+    /*
+     * Always sweep remembered + binding-table remaps. Preview used to demote
+     * ACTIVE→PREVIEW and overwrite scene, orphaning the previous SCE row;
+     * status-only remove then skipped the real map.
+     */
+    vm_mock_world_boss_load_config(false);
+    vm_mock_world_boss_clear_orphan_spawns(reason);
+    /* CLAIMED already stripped the home tile; still notify if sweep found nothing. */
+    if (prevStatus == VM_MOCK_WORLD_BOSS_STATUS_CLAIMED && sceneCopy[0] != 0)
     {
-        (void)vm_net_mock_runtime_remove_combat_spawn_at(sceneCopy, x, y,
-                                                         &despawnError);
-        vm_mock_world_boss_queue_scene_resync_for(sceneCopy);
-        memset(sceneGbk, 0, sizeof(sceneGbk));
-        vm_mock_world_boss_resolve_map_label_gbk(sceneCopy, sceneGbk,
-                                                 sizeof(sceneGbk));
-        /* ASCII tag for Pixi same-map combat-spawn refresh. */
-        vm_mock_world_boss_broadcast_despawn(sceneGbk, x, y);
-    }
-    else if (prevStatus == VM_MOCK_WORLD_BOSS_STATUS_CLAIMED &&
-             sceneCopy[0] != 0)
-    {
-        /* Map already cleared on claim; still notify clients + resync. */
+        char sceneGbk[128];
         vm_mock_world_boss_queue_scene_resync_for(sceneCopy);
         memset(sceneGbk, 0, sizeof(sceneGbk));
         vm_mock_world_boss_resolve_map_label_gbk(sceneCopy, sceneGbk,
@@ -614,9 +826,8 @@ static void vm_mock_world_boss_despawn_active(const char *reason)
         vm_mock_world_boss_broadcast_despawn(sceneGbk, x, y);
     }
     printf("[info][mock-service] world_boss_despawn reason=%s status=%u "
-           "scene=%s pos=(%u,%u) err=%s\n",
-           reason ? reason : "-", (u32)prevStatus, sceneCopy, (u32)x, (u32)y,
-           despawnError ? despawnError : "-");
+           "scene=%s pos=(%u,%u)\n",
+           reason ? reason : "-", (u32)prevStatus, sceneCopy, (u32)x, (u32)y);
     memset(&g_vm_mock_world_boss_rt, 0, sizeof(g_vm_mock_world_boss_rt));
     g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_IDLE;
     g_vm_mock_world_boss_reward_pending = false;
@@ -653,10 +864,8 @@ static bool vm_mock_world_boss_spawn_now(u32 hourKey, bool adminPureRandom,
             *errorOut = "请先配置BOSS怪物ID";
         return false;
     }
-    /* Clear ACTIVE / CLAIMED / PREVIEW so admin can re-force any time. */
-    if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_IDLE ||
-        g_vm_mock_world_boss_rt.scene[0] != 0)
-        vm_mock_world_boss_despawn_active("respawn");
+    /* Always strip prior injects (incl. preview-orphaned / restart leftovers). */
+    vm_mock_world_boss_despawn_active("respawn");
 
     vm_mock_world_boss_load_outdoor_scenes();
     if (g_vm_mock_world_boss_outdoor_count == 0)
@@ -742,6 +951,7 @@ static bool vm_mock_world_boss_spawn_now(u32 hourKey, bool adminPureRandom,
         g_vm_mock_world_boss_rt.spawnIndex = spawnIndex;
         g_vm_mock_world_boss_rt.hourKey = hourKey;
         g_vm_mock_world_boss_rt.spawnUnix = (u32)time(NULL);
+        vm_mock_world_boss_orphan_remember(scene, x, y);
         memset(sceneGbk, 0, sizeof(sceneGbk));
         vm_mock_world_boss_resolve_map_label_gbk(scene, sceneGbk,
                                                   sizeof(sceneGbk));
@@ -791,9 +1001,19 @@ static void vm_mock_world_boss_tick(void)
         if (!vm_mock_world_boss_pick_scene_and_pos(scene, sizeof(scene), NULL, NULL))
             return;
         g_vm_mock_world_boss_rt.previewUnix = hourKey;
-        g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_PREVIEW;
-        snprintf(g_vm_mock_world_boss_rt.scene, sizeof(g_vm_mock_world_boss_rt.scene),
-                 "%s", scene);
+        snprintf(g_vm_mock_world_boss_rt.previewScene,
+                 sizeof(g_vm_mock_world_boss_rt.previewScene), "%s", scene);
+        /*
+         * Preview is announce-only. Never demote ACTIVE/CLAIMED or overwrite
+         * live scene/x/y — that orphaned the previous SCE inject and left
+         * bosses on multiple maps after the next spawn.
+         */
+        if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+        {
+            g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_PREVIEW;
+            snprintf(g_vm_mock_world_boss_rt.scene,
+                     sizeof(g_vm_mock_world_boss_rt.scene), "%s", scene);
+        }
         memset(sceneGbk, 0, sizeof(sceneGbk));
         vm_mock_world_boss_resolve_map_label_gbk(scene, sceneGbk, sizeof(sceneGbk));
         vm_mock_world_boss_broadcast_preview(sceneGbk);
@@ -844,6 +1064,9 @@ bool vm_mock_world_boss_try_claim_encounter(
     (void)vm_net_mock_runtime_remove_combat_spawn_at(
         g_vm_mock_world_boss_rt.scene, g_vm_mock_world_boss_rt.x,
         g_vm_mock_world_boss_rt.y, NULL);
+    vm_mock_world_boss_orphan_forget(g_vm_mock_world_boss_rt.scene,
+                                     g_vm_mock_world_boss_rt.x,
+                                     g_vm_mock_world_boss_rt.y);
     vm_mock_world_boss_queue_scene_resync_for(g_vm_mock_world_boss_rt.scene);
     {
         char sceneGbk[128];
@@ -934,7 +1157,10 @@ void vm_mock_world_boss_admin_runtime_get(u8 *statusOut, char *sceneOut,
         *yOut = g_vm_mock_world_boss_rt.y;
 }
 
-static bool vm_mock_world_boss_admin_pick_preview_scene(char *msgOut, size_t msgCap)
+static bool vm_mock_world_boss_admin_pick_preview_scene(char *sceneOut,
+                                                        size_t sceneCap,
+                                                        char *msgOut,
+                                                        size_t msgCap)
 {
     char scene[64];
 
@@ -944,13 +1170,14 @@ static bool vm_mock_world_boss_admin_pick_preview_scene(char *msgOut, size_t msg
             snprintf(msgOut, msgCap, "无可用户外地图");
         return false;
     }
-    snprintf(g_vm_mock_world_boss_rt.scene, sizeof(g_vm_mock_world_boss_rt.scene),
-             "%s", scene);
+    if (sceneOut != NULL && sceneCap > 0)
+        snprintf(sceneOut, sceneCap, "%s", scene);
     return true;
 }
 
 bool vm_mock_world_boss_admin_force_preview(char *msgOut, size_t msgCap)
 {
+    char scene[64];
     char sceneGbk[128];
     u32 hourKey = 0;
 
@@ -961,14 +1188,23 @@ bool vm_mock_world_boss_admin_force_preview(char *msgOut, size_t msgCap)
             snprintf(msgOut, msgCap, "世界BOSS未启用");
         return false;
     }
-    if (!vm_mock_world_boss_admin_pick_preview_scene(msgOut, msgCap))
+    memset(scene, 0, sizeof(scene));
+    if (!vm_mock_world_boss_admin_pick_preview_scene(scene, sizeof(scene),
+                                                      msgOut, msgCap))
         return false;
     hourKey = vm_mock_world_boss_hour_key(time(NULL));
     g_vm_mock_world_boss_rt.previewUnix = hourKey;
-    g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_PREVIEW;
+    snprintf(g_vm_mock_world_boss_rt.previewScene,
+             sizeof(g_vm_mock_world_boss_rt.previewScene), "%s", scene);
+    /* Do not clobber live ACTIVE/CLAIMED spawn anchors. */
+    if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+    {
+        g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_PREVIEW;
+        snprintf(g_vm_mock_world_boss_rt.scene,
+                 sizeof(g_vm_mock_world_boss_rt.scene), "%s", scene);
+    }
     memset(sceneGbk, 0, sizeof(sceneGbk));
-    vm_mock_world_boss_resolve_map_label_gbk(g_vm_mock_world_boss_rt.scene,
-                                              sceneGbk, sizeof(sceneGbk));
+    vm_mock_world_boss_resolve_map_label_gbk(scene, sceneGbk, sizeof(sceneGbk));
     vm_mock_world_boss_broadcast_preview(sceneGbk);
     if (msgOut && msgCap > 0)
         snprintf(msgOut, msgCap, "已发送全服预告");
@@ -1003,7 +1239,11 @@ bool vm_mock_world_boss_admin_force_spawn(char *msgOut, size_t msgCap)
 
 bool vm_mock_world_boss_admin_force_despawn(char *msgOut, size_t msgCap)
 {
-    if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+    vm_mock_world_boss_load_config(false);
+    if (g_vm_mock_world_boss_rt.status == VM_MOCK_WORLD_BOSS_STATUS_IDLE &&
+        g_vm_mock_world_boss_rt.scene[0] == 0 &&
+        g_vm_mock_world_boss_orphan_count == 0 &&
+        g_vm_mock_world_boss_config.monsterId == 0)
     {
         if (msgOut && msgCap > 0)
             snprintf(msgOut, msgCap, "当前无活跃BOSS");
@@ -1011,7 +1251,7 @@ bool vm_mock_world_boss_admin_force_despawn(char *msgOut, size_t msgCap)
     }
     vm_mock_world_boss_despawn_active("admin");
     if (msgOut && msgCap > 0)
-        snprintf(msgOut, msgCap, "已清除当前BOSS");
+        snprintf(msgOut, msgCap, "已清除当前BOSS及残留刷怪点");
     return true;
 }
 

@@ -15,6 +15,7 @@ if %errorlevel%==0 (
 )
 
 echo [gateway] starting npm run gateway ...
+echo [gateway] defaults: keepalive 30s + orphan 2min (no env required)
 call npm run gateway
 if errorlevel 1 (
   echo.

@@ -27,5 +27,13 @@ CREATE TABLE IF NOT EXISTS `server_guess_bets` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`bet_id`),
   KEY `idx_guess_bets_role` (`role_id`, `bet_id` DESC),
-  KEY `idx_guess_bets_round` (`round_id`, `win`, `payout_copper`)
+  KEY `idx_guess_bets_round` (`round_id`, `win`, `payout_copper`),
+  KEY `idx_guess_bets_created` (`created_at`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_guess_config` (
+  `id` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
 ) ENGINE=InnoDB;

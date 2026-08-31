@@ -4868,6 +4868,8 @@ typedef struct
     bool battleActive;
     u32 battleSerial;
     u32 intimacyRewardedSerial;
+    /* Latch ring PvE kill credit once per team battleSerial (shared party). */
+    u32 ringKillRewardedSerial;
     u32 battleLeaderClientId;
     u32 battleEnemyId;
     u32 battleSceneMonsterIndex;
@@ -5210,7 +5212,8 @@ static bool vm_mock_service_account_globals_mirror(
         return false;
     if (g_vm_mock_service_active_account_id == NULL ||
         g_vm_mock_service_active_account_id[0] == 0 ||
-        strcmp(g_vm_mock_service_active_account_id, state->accountId) != 0)
+        vm_mock_service_account_id_equal(g_vm_mock_service_active_account_id,
+                                         state->accountId) == false)
     {
         return false;
     }
@@ -5381,7 +5384,8 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
      * let that empty shell overwrite a previously captured account snapshot. */
     if (g_vm_net_mock_warehouse.loaded &&
         g_vm_net_mock_warehouse.accountId[0] != 0 &&
-        strcmp(g_vm_net_mock_warehouse.accountId, state->accountId) == 0)
+        vm_mock_service_account_id_equal(g_vm_net_mock_warehouse.accountId,
+                                         state->accountId))
     {
         state->warehouse = g_vm_net_mock_warehouse;
     }
@@ -5479,7 +5483,8 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
         g_vm_net_mock_role_db_loaded &&
         g_vm_net_mock_role_db_valid &&
         g_vm_mock_service_active_account_id != NULL &&
-        strcmp(g_vm_mock_service_active_account_id, state->accountId) == 0)
+        vm_mock_service_account_id_equal(g_vm_mock_service_active_account_id,
+                                         state->accountId))
     {
         vm_mock_service_client_session *autoSession =
             vm_mock_service_get_active_client_session();
@@ -5671,7 +5676,7 @@ static vm_mock_service_account_state *vm_mock_service_account_find(const char *a
         return NULL;
     while (state)
     {
-        if (strcmp(state->accountId, accountId) == 0)
+        if (vm_mock_service_account_id_equal(state->accountId, accountId))
             return state;
         state = state->next;
     }
@@ -5725,7 +5730,8 @@ static void vm_mock_service_account_note_durable_role_write(
          */
         if (db == &g_vm_net_mock_role_db &&
             (g_vm_mock_service_active_account_id == NULL ||
-             strcmp(g_vm_mock_service_active_account_id, account->accountId) != 0))
+             !vm_mock_service_account_id_equal(g_vm_mock_service_active_account_id,
+                                               account->accountId)))
         {
             printf("[error][mock-service] durable_role_write rejected account=%s "
                    "active_id=%s reason=%s evidence=cross-account-roledb-guard\n",
@@ -5744,7 +5750,7 @@ static void vm_mock_service_account_note_durable_role_write(
     }
     if (warehouse != NULL && warehouse->loaded &&
         warehouse->accountId[0] != 0 &&
-        strcmp(warehouse->accountId, account->accountId) == 0)
+        vm_mock_service_account_id_equal(warehouse->accountId, account->accountId))
     {
         account->warehouse = *warehouse;
     }
@@ -5791,9 +5797,28 @@ static vm_mock_service_account_state *vm_mock_service_account_find_or_create(con
 {
     const char *resolvedId = (accountId && accountId[0]) ? accountId : NULL;
     vm_mock_service_account_state *state = NULL;
+    char canonical[64];
 
     if (resolvedId == NULL)
         return NULL;
+    state = vm_mock_service_account_find(resolvedId);
+    if (state != NULL)
+        return state;
+
+    /*
+     * Prefer the spelling stored in accounts (ascii_bin).  Creating a heap row
+     * under typed lowercase would later flush role_id into a foreign account_id
+     * and collide on uk_account_roles_role_id.
+     */
+    canonical[0] = 0;
+    {
+        vm_mock_service_account_record *record =
+            vm_mock_service_account_find_record(resolvedId);
+        if (record != NULL && record->username[0] != 0)
+            snprintf(canonical, sizeof(canonical), "%s", record->username);
+    }
+    if (canonical[0] != 0)
+        resolvedId = canonical;
     state = vm_mock_service_account_find(resolvedId);
     if (state != NULL)
         return state;
@@ -5817,7 +5842,7 @@ static bool vm_mock_service_account_has_bound_session(const char *accountId)
     while (session != NULL)
     {
         if (session->accountId[0] != 0 &&
-            strcmp(session->accountId, accountId) == 0)
+            vm_mock_service_account_id_equal(session->accountId, accountId))
         {
             return true;
         }
@@ -5840,7 +5865,7 @@ static void vm_mock_service_account_release_if_idle(const char *accountId)
     state = g_vm_mock_service_accounts;
     while (state != NULL)
     {
-        if (strcmp(state->accountId, accountId) == 0)
+        if (vm_mock_service_account_id_equal(state->accountId, accountId))
             break;
         prev = state;
         state = state->next;
@@ -5851,7 +5876,8 @@ static void vm_mock_service_account_release_if_idle(const char *accountId)
         return;
     if (state == g_vm_mock_service_active_account ||
         (g_vm_mock_service_active_account_id != NULL &&
-         strcmp(g_vm_mock_service_active_account_id, accountId) == 0))
+         vm_mock_service_account_id_equal(g_vm_mock_service_active_account_id,
+                                          accountId)))
     {
         return;
     }
@@ -10310,7 +10336,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     if (session->accountId[0] != 0 &&
         g_vm_net_mock_warehouse.loaded &&
         g_vm_net_mock_warehouse.accountId[0] != 0 &&
-        strcmp(g_vm_net_mock_warehouse.accountId, session->accountId) == 0)
+        vm_mock_service_account_id_equal(g_vm_net_mock_warehouse.accountId,
+                                         session->accountId))
     {
         g_vm_net_mock_warehouse.loaded = false;
     }
@@ -10371,7 +10398,7 @@ static u32 vm_mock_service_session_take_over_account(u32 authenticatedClientId,
 
         if (session->clientId != authenticatedClientId &&
             session->accountId[0] != 0 &&
-            strcmp(session->accountId, accountId) == 0)
+            vm_mock_service_account_id_equal(session->accountId, accountId))
         {
             printf("[info][mock-service] session_account_takeover account=%s new_client=%08x old_client=%08x old_role=%u old_scene=%s role_online=%u presence=%u scene_ready=%u action=kick-offline\n",
                    accountId,
@@ -10404,7 +10431,8 @@ static void vm_mock_service_bind_session_account(u32 clientId, const char *accou
         return;
     if (session->accountId[0] != 0)
     {
-        bool sameAccount = strcmp(session->accountId, accountId) == 0;
+        bool sameAccount =
+            vm_mock_service_account_id_equal(session->accountId, accountId);
         printf("[info][mock-service] session_login_lifecycle_reset client=%08x old_account=%s new_account=%s same=%u scene_ready=%u role_online=%u evidence=runtime:return-title-relogin-before-scene-init\n",
                clientId,
                session->accountId,
@@ -12112,7 +12140,7 @@ static void vm_mock_service_account_sync_online_role_admin_fields(
     while (session != NULL)
     {
         if (session->accountId[0] != 0 &&
-            strcmp(session->accountId, accountId) == 0 &&
+            vm_mock_service_account_id_equal(session->accountId, accountId) &&
             session->onlineRoleId == role->roleId)
         {
             snprintf(session->onlineRoleName, sizeof(session->onlineRoleName), "%s",
@@ -12319,7 +12347,7 @@ static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
 
 static bool vm_mock_service_account_add_role_money(const char *accountId,
                                                    const char *roleSelector,
-                                                   u32 amount,
+                                                   int32_t delta,
                                                    u32 *beforeOut,
                                                    u32 *afterOut,
                                                    const char **messageOut)
@@ -12329,6 +12357,7 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
     vm_net_mock_role_state *role = NULL;
     u32 before = 0;
     u32 after = 0;
+    uint64_t deduct = 0;
 
     if (beforeOut)
         *beforeOut = 0;
@@ -12344,10 +12373,33 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
         vm_mock_service_close_account_role_db_for_management(state, true);
         return false;
     }
+    if (delta == 0)
+    {
+        if (messageOut)
+            *messageOut = "amount must be non-zero";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
     before = role->money;
-    after = (0xffffffffu - before < amount) ? 0xffffffffu : before + amount;
+    if (delta > 0)
+    {
+        after = (0xffffffffu - before < (u32)delta) ? 0xffffffffu : before + (u32)delta;
+    }
+    else
+    {
+        deduct = (uint64_t)(-(int64_t)delta);
+        if ((uint64_t)before < deduct)
+        {
+            if (messageOut)
+                *messageOut = "铜钱不足，无法扣除";
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return false;
+        }
+        after = before - (u32)deduct;
+    }
     role->money = after;
-    if (!vm_net_mock_role_db_save_role("admin-money-add", role->roleId))
+    if (!vm_net_mock_role_db_save_role(
+            delta > 0 ? "admin-money-add" : "admin-money-deduct", role->roleId))
     {
         role->money = before;
         vm_mock_service_account_capture(state);
@@ -12357,11 +12409,11 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
         return false;
     }
     vm_mock_service_account_capture(state);
-    printf("[info][mock-service] account_money_add user=%s role=%s id=%u add=%u before=%u after=%u\n",
+    printf("[info][mock-service] account_money_adjust user=%s role=%s id=%u delta=%d before=%u after=%u\n",
            accountId,
            role->name[0] ? role->name : "-",
            role->roleId,
-           amount,
+           (int)delta,
            before,
            after);
     if (beforeOut)

@@ -24,12 +24,14 @@ import { portalContains, type SceDecoration, type ScePortal } from "../resources
 import { Plus16Sparkles } from "./Plus16Sparkles";
 import { rgbaToTexture } from "./rgbaTexture";
 import {
+  clearPoseTextureCache,
   getOrCreatePoseTexture,
   poseTextureKey,
   rebindPoseTextureKey,
   releasePoseTextureKey,
 } from "./poseTextureCache";
 import { nudgePlistAtlasesAfterGpuResume } from "../resources/plistAtlas";
+import { replaceGraphics } from "./gpuResume";
 import {
   WingOverlay,
   writeWingIdPreference,
@@ -78,6 +80,15 @@ export class SceneView {
   readonly world = new Container();
   readonly actors: ActorLayer;
   private mapSprite: Sprite | null = null;
+  /**
+   * CPU copy of the town map. After webglcontextrestored, canvas/Buffer
+   * source.update() often leaves a black world; remount from this buffer.
+   */
+  private mapPixels: {
+    width: number;
+    height: number;
+    rgba: Uint8ClampedArray;
+  } | null = null;
   private decorSprites: Sprite[] = [];
   private decorPaintGen = 0;
   private player: Container;
@@ -129,8 +140,6 @@ export class SceneView {
   onQiTap: (() => void) | null = null;
   /** Top-left「称」title list badge (after 骑). */
   onChenTap: (() => void) | null = null;
-  /** Fired when map-corner status strip collapses / expands. */
-  onStatusStripCollapsed: ((collapsed: boolean) => void) | null = null;
   /** Collision radius in map pixels. */
   monsterCollideRadius = 22;
   /** Approach / collide radius for talk prompt. */
@@ -146,6 +155,8 @@ export class SceneView {
   private walkLastX = 0;
   private walkLastY = 0;
   private mapPointer: Graphics;
+  /** Clip rect for the map band — Graphics dies after context restore. */
+  private clipMask: Graphics;
   private clip: Container;
   private lastTick = 0;
   private movePixelAcc = 0;
@@ -207,9 +218,11 @@ export class SceneView {
   constructor(private readonly app: Application) {
     this.root.y = WORLD_TOP_H;
     this.clip = new Container();
-    const mask = new Graphics().rect(0, 0, this.viewW, this.viewH).fill({ color: 0xffffff });
-    this.clip.mask = mask;
-    this.clip.addChild(mask);
+    this.clipMask = new Graphics()
+      .rect(0, 0, this.viewW, this.viewH)
+      .fill({ color: 0xffffff });
+    this.clip.mask = this.clipMask;
+    this.clip.addChild(this.clipMask);
     // Behind world: empty-map taps walk here; NPC/peer markers sit above and win hit-test.
     this.mapPointer = new Graphics()
       .rect(0, 0, this.viewW, this.viewH)
@@ -264,7 +277,6 @@ export class SceneView {
       e.stopPropagation();
       this.statusStripCollapsed = toggleStatusStripCollapsed();
       this.layoutStatusBadges();
-      this.onStatusStripCollapsed?.(this.statusStripCollapsed);
     });
     this.root.addChild(this.statusToggleBadge);
     this.mountStatusToggleArt();
@@ -436,6 +448,7 @@ export class SceneView {
       this.mapSprite.destroy({ texture: true });
       this.mapSprite = null;
     }
+    this.mapPixels = null;
     this.mapIdentity = "";
     this.actors.clear();
     this.actors.setMapCollision(null);
@@ -447,6 +460,29 @@ export class SceneView {
       spr.destroy({ texture: true });
     }
     this.decorSprites = [];
+  }
+
+  /** Upload map pixels to a fresh BufferImageSource sprite (load + GPU resume). */
+  private mountMapSprite(
+    width: number,
+    height: number,
+    rgba: Uint8ClampedArray,
+  ): void {
+    const prev = this.mapSprite;
+    const texture = rgbaToTexture(width, height, rgba);
+    const spr = new Sprite(texture);
+    spr.zIndex = 0;
+    spr.eventMode = "none";
+    spr.visible = true;
+    this.mapSprite = spr;
+    if (prev) {
+      const idx = Math.max(0, this.world.getChildIndex(prev));
+      this.world.removeChild(prev);
+      prev.destroy({ texture: true });
+      this.world.addChildAt(spr, Math.min(idx, this.world.children.length));
+    } else {
+      this.world.addChildAt(spr, 0);
+    }
   }
 
   /** True when the painted map shell is already this server scene key. */
@@ -466,27 +502,24 @@ export class SceneView {
       this.world.removeChild(this.mapSprite);
       this.mapSprite.destroy({ texture: true });
       this.mapSprite = null;
+      this.mapPixels = null;
     }
     if (!sameMap) this.actors.clear();
 
     if (!this.mapSprite) {
-      const canvas = document.createElement("canvas");
-      canvas.width = scene.width;
-      canvas.height = scene.height;
-      const ctx = canvas.getContext("2d")!;
-      ctx.putImageData(
-        new ImageData(new Uint8ClampedArray(scene.rgba), scene.width, scene.height),
-        0,
-        0,
+      const expected = scene.width * scene.height * 4;
+      const rgba = new Uint8ClampedArray(expected);
+      rgba.set(
+        scene.rgba.length >= expected
+          ? scene.rgba.subarray(0, expected)
+          : scene.rgba,
       );
-      const texture = Texture.from(canvas);
-      texture.source.scaleMode = "nearest";
-      // Map is always on-screen; TextureGC unload → empty LCD without contextlost.
-      texture.source.autoGarbageCollect = false;
-      this.mapSprite = new Sprite(texture);
-      this.mapSprite.zIndex = 0;
-      this.mapSprite.eventMode = "none";
-      this.world.addChildAt(this.mapSprite, 0);
+      this.mapPixels = {
+        width: scene.width,
+        height: scene.height,
+        rgba,
+      };
+      this.mountMapSprite(scene.width, scene.height, rgba);
       this.mapIdentity = identity;
     }
 
@@ -1198,8 +1231,10 @@ export class SceneView {
 
   private tick(): void {
     const now = performance.now();
-    const dt = this.lastTick ? now - this.lastTick : 16;
+    const raw = this.lastTick ? now - this.lastTick : 16;
     this.lastTick = now;
+    // One clamp for move + flaps + cosmetics (90/120Hz must not race cadence).
+    const dt = Math.min(Math.max(raw, 0), WALK_DT_CLAMP_MS);
     this.actors.setViewer(this.playerX, this.playerY);
     this.actors.tick(dt);
     this.plus16Sparkles.tick(dt);
@@ -1219,15 +1254,17 @@ export class SceneView {
 
     if (this.portalSprites.length) {
       this.portalAnimAcc += dt;
-      if (this.portalAnimAcc >= 120) {
-        this.portalAnimAcc = 0;
+      let stepped = false;
+      while (this.portalAnimAcc >= 120) {
+        this.portalAnimAcc -= 120;
         this.portalPhase = (this.portalPhase + 1) % 256;
-        this.applyPortalFrames();
+        stepped = true;
       }
+      if (stepped) this.applyPortalFrames();
     }
 
     if (!this.inputEnabled) return;
-    const dtMove = Math.min(Math.max(dt, 0), WALK_DT_CLAMP_MS);
+    const dtMove = dt;
     const winged = !!this.wingOverlay.currentWingId;
     const mounted = !!this.mountOverlay.currentMountId;
     const speed =
@@ -1402,24 +1439,109 @@ export class SceneView {
 
   /**
    * Android WebView often drops the WebGL context after long screen-off.
-   * Pixi clears GPU texture slots on restore; nudge CPU sources / rebuild actors.
+   * Town map + actor poses use BufferImageSource — source.update() alone leaves
+   * a black world while HUD/UC3 still paint. Recreate from CPU RGBA like battle.
+   *
+   * Critical: clip.mask is Graphics. After restore its GPU geometry is empty, so
+   * the whole map band (map + player + NPC/peer) is clipped to nothing while the
+   * world HUD outside `clip` still paints — matches「正存室」HUD 在、场景全黑.
    */
   nudgeAfterGpuResume(): void {
     try {
-      this.mapSprite?.texture?.source?.update?.();
+      // Drop mask before destroy so StencilMask.reset does not race a live effect.
+      this.clip.mask = null;
+      this.clipMask = replaceGraphics(this.clipMask);
+      this.clipMask
+        .rect(0, 0, this.viewW, this.viewH)
+        .fill({ color: 0xffffff });
+      this.clip.mask = this.clipMask;
+    } catch (e) {
+      console.warn("[scene] clip mask rebuild", e);
+    }
+    try {
+      const prevPtr = this.mapPointer;
+      this.mapPointer = replaceGraphics(this.mapPointer);
+      this.mapPointer
+        .rect(0, 0, this.viewW, this.viewH)
+        .fill({ color: 0x000000, alpha: 0.001 });
+      this.mapPointer.eventMode = "static";
+      this.mapPointer.cursor = "crosshair";
+      // replaceGraphics keeps index; rebind tap if the DisplayObject identity changed.
+      if (this.mapPointer !== prevPtr) {
+        this.mapPointer.on("pointertap", (e) => this.onMapPointerTap(e));
+      }
+    } catch (e) {
+      console.warn("[scene] mapPointer rebuild", e);
+    }
+    try {
+      this.playerFallback = replaceGraphics(this.playerFallback);
+      this.playerFallback
+        .circle(0, -4, 5)
+        .fill({ color: 0xffe08a })
+        .stroke({ width: 1, color: 0x5a4010 });
+      this.playerFallback.zIndex = 0;
     } catch {
       /* ignore */
     }
-    for (const spr of this.decorSprites) {
+
+    try {
+      if (this.mapPixels) {
+        this.mountMapSprite(
+          this.mapPixels.width,
+          this.mapPixels.height,
+          this.mapPixels.rgba,
+        );
+      } else {
+        this.mapSprite?.texture?.source?.update?.();
+        if (this.mapSprite) this.mapSprite.visible = true;
+      }
+    } catch (e) {
+      console.warn("[scene] map remount", e);
+    }
+
+    // Shared pose cache (player / peers / portals) keeps dead GPU textures
+    // across restore; clear so applyFrame / applyPlayerFrame rebuild.
+    clearPoseTextureCache();
+    this.playerPoseKey = "";
+    this.portalPoseKey = "";
+    this.portalTex = null;
+
+    // Remount body Sprite — texture swap on a post-restore Sprite stays black.
+    if (this.playerSprite) {
       try {
-        spr.texture?.source?.update?.();
+        if (this.playerSprite.parent) {
+          this.playerSprite.parent.removeChild(this.playerSprite);
+        }
+        this.playerSprite.destroy({ texture: false });
       } catch {
         /* ignore */
       }
+      this.playerSprite = null;
     }
+
+    try {
+      this.paintDecorations();
+    } catch (e) {
+      console.warn("[scene] decor remount", e);
+    }
+    try {
+      this.applyPortalFrames();
+    } catch {
+      /* ignore */
+    }
+
     nudgePlistAtlasesAfterGpuResume();
+    void this.wingOverlay.remountAfterGpuResume();
+    void this.mountOverlay.remountAfterGpuResume();
+
     this.applyPlayerFrame(true);
+    const body = this.playerSprite as Sprite | null;
+    if (body) body.visible = true;
     this.actors.nudgeAfterGpuResume();
+    // Do NOT force this.root.visible = true — showPhase owns that. GPU resume
+    // on the title/login screen was un-hiding 修/拍/… over Background.gif.
+    this.world.visible = true;
+    this.clip.visible = true;
   }
 
   private checkNpcProximity(): void {

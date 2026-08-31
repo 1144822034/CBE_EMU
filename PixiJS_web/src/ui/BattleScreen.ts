@@ -18,6 +18,7 @@ import {
 import type { BattleActionUpdate, BattleSettlement, HangupCombatinfo } from "../net/protocolExtras";
 import {
   actorResourceForJobSex,
+  battleFootAnchorX,
   composeBattlePose,
   composeMapActor,
   composePartStacked,
@@ -73,10 +74,32 @@ import {
 /** Eidolon frames can be 170px+; clamp so FX cannot dominate the 240× stage. */
 const FX_MAX_W = 96;
 const FX_MAX_H = 96;
-/** Player / combat-pose frame step (ms). */
-const UNIT_FRAME_MS = 90;
+/**
+ * Combat pose part step (ms). mmBattle PicLib advances strips on the battle
+ * tick; 100ms matches the common feature-phone cadence (CBM immediates cluster
+ * around 100/160 — prefer 100 so cast/FX/death stay in one beat).
+ */
+const UNIT_FRAME_MS = 100;
+/** Cast windup frames before eidolon overlaps (CBE AnimEffect starts mid-cast). */
+const CAST_WINDUP_FRAMES = 2;
+/** Brief hit tint — CBE flash, not a long pose lock that delays death. */
+const HIT_FLASH_MS = 200;
+/** Eidolon / f_death part step when duration is frame-derived. */
+const FX_FRAME_MS = 100;
+/** After damage floats: hold before starting death pose. */
+const AFTER_DAMAGE_BEFORE_DEATH_MS = 200;
+/** After death pose: brief gray freeze so splash is not the first death cue. */
+const BEFORE_DEATH_SPLASH_MS = 280;
+/** Monster death splash frame step. */
+const DEATH_SPLASH_FRAME_MS = 130;
+/** Monster corpse fade (non-blocking — must not gate 4/7 settle panel). */
+const DEATH_FADE_MS = 420;
+/** Brief solid hold after splash starts, before fade. */
+const DEATH_FADE_DELAY_MS = 80;
 /** Battle idle/death flap — same slow cadence for player + all monsters (鼠尾节奏). */
 const BATTLE_IDLE_FRAME_MS = 360;
+/** Cap one battle tick so a hitch cannot skip many pose parts at once. */
+const BATTLE_DT_CLAMP_MS = 50;
 
 const MONSTER_RED = 0xff8080;
 const SETTLE_GOLD = 0xffd080;
@@ -203,6 +226,14 @@ type UnitView = {
 export class BattleScreen extends Container {
   private mapHost = new Container();
   private mapSprite: Sprite | null = null;
+  /**
+   * Single clipped stage band (map + units + fx), same pattern as SceneView.clip.
+   * Do NOT share one Graphics as mask across multiple hosts — Pixi 8 StencilMask
+   * toggles mask.includeInBuild; replaceGraphics mid-restore left map/units empty
+   * after the town-mask fix (docs/re/2026-08-30-pixi-battle-black-recover-incomplete.md).
+   */
+  private stageHost = new Container();
+  private stageMask: Graphics;
   private unitsHost = new Container();
   private fxHost = new Container();
   private menuHost = new Container();
@@ -271,6 +302,8 @@ export class BattleScreen extends Container {
   private arenaDuel = false;
   private tickAcc = 0;
   private idleTickAcc = 0;
+  /** performance.now() of last battle tick — wall-clock, not ticker.deltaMS. */
+  private lastAnimTick = 0;
   private timerSec = TURN_SECONDS;
   private timerAcc = 0;
   private battleMapFile = "";
@@ -353,17 +386,17 @@ export class BattleScreen extends Container {
     super();
     // Clip stage art so oversized eidolon / map cover cannot spill into HUD.
     const stageH = STAGE_BOTTOM - STAGE_TOP;
-    const stageMask = new Graphics()
+    this.stageMask = new Graphics()
       .rect(0, STAGE_TOP, LCD_WIDTH, stageH)
       .fill({ color: 0xffffff });
-    this.mapHost.mask = stageMask;
-    this.unitsHost.mask = stageMask;
-    this.fxHost.mask = stageMask;
-    this.addChild(stageMask);
-    this.addChild(this.mapHost);
-    this.addChild(this.unitsHost);
-    this.addChild(this.targetMark);
-    this.addChild(this.fxHost);
+    this.stageHost.mask = this.stageMask;
+    this.stageHost.addChild(this.stageMask);
+    this.stageHost.addChild(this.mapHost);
+    this.stageHost.addChild(this.unitsHost);
+    // Keep target cursor under FX (old sibling order) but inside the clip band.
+    this.stageHost.addChild(this.targetMark);
+    this.stageHost.addChild(this.fxHost);
+    this.addChild(this.stageHost);
     this.addChild(this.menuHost);
     this.addChild(this.floatHost);
     this.addChild(this.settleHost);
@@ -938,10 +971,28 @@ export class BattleScreen extends Container {
    * After webglcontextrestored: world SceneView nudge does not cover battle.
    * BufferImageSource map/pose textures must be *recreated* from CPU RGBA —
    * source.update() alone leaves a black stage with UC3/HUD still painting.
-   * Graphics (HP fills / letterbox / foot shadows) need DisplayObject replace.
+   * Graphics (HP fills / letterbox / foot shadows / stageMask) need DisplayObject replace.
+   *
+   * stageHost.mask dead ⇒ map/units/fx clipped empty while floatHost/HUD still paint.
+   * Clear mask before replaceGraphics so StencilMask.reset cannot fight a shared node.
    */
   nudgeAfterGpuResume(): void {
     if (!this.visible) return;
+    try {
+      const stageH = STAGE_BOTTOM - STAGE_TOP;
+      this.stageHost.mask = null;
+      this.stageMask = replaceGraphics(this.stageMask);
+      this.stageMask
+        .rect(0, STAGE_TOP, LCD_WIDTH, stageH)
+        .fill({ color: 0xffffff });
+      this.stageHost.mask = this.stageMask;
+      this.stageHost.visible = true;
+      this.mapHost.visible = true;
+      this.unitsHost.visible = true;
+      this.fxHost.visible = true;
+    } catch (e) {
+      console.warn("[battle] stage mask rebuild", e);
+    }
     try {
       if (this.mapPixels) {
         this.applyMapTexture(
@@ -987,9 +1038,21 @@ export class BattleScreen extends Container {
           const g = replaceGraphics(shadow);
           g.ellipse(0, 2, 13, 5).fill({ color: 0x000000, alpha: 0.35 });
         }
+        // Remount Sprite DisplayObject — texture rebind alone stays black.
+        if (u.sprite) {
+          try {
+            if (u.sprite.parent) u.sprite.parent.removeChild(u.sprite);
+            u.sprite.destroy({ texture: false });
+          } catch {
+            /* ignore */
+          }
+          u.sprite = null;
+        }
         this.paintUnitSprite(u);
-        if (u.sprite && !u.hidden) {
-          u.sprite.visible = true;
+        // CFA loses mutations inside paintUnitSprite after sprite=null.
+        const body = u.sprite as Sprite | null;
+        if (body && !u.hidden) {
+          body.visible = true;
           u.root.visible = true;
         }
       } catch {
@@ -1375,10 +1438,11 @@ export class BattleScreen extends Container {
       void this.log.setText("切磋中无法逃跑", CBE.inkTip);
       return;
     }
+    // Lock like attack/skill — bare softkey spam used to fire extra 1/4/4
+    // after the first success cleared the server armed session → tip
+    // 「功能暂未实现(1/4/4)」.
     this.clearAutoForManualOp();
-    void this.log.setText("请求逃跑…", CBE.inkBody);
-    this.menuOpen = false;
-    this.redrawMenu();
+    this.noteOperateSubmitted("请求逃跑…");
     this.onFlee?.();
   }
 
@@ -1592,8 +1656,21 @@ export class BattleScreen extends Container {
     });
   }
 
-  tick(dtMs: number): void {
-    if (!this.visible || !this.state) return;
+  /**
+   * Advance combat / idle flaps on wall-clock ms.
+   * Do not trust ticker.deltaMS alone — OEM 90/120Hz WebViews have raced
+   * pose cadence the same way walk used to (docs/re/2026-08-09-pixijs-walk-speed-hz.md).
+   */
+  tick(_dtMs?: number): void {
+    const now = performance.now();
+    if (!this.visible || !this.state) {
+      // Avoid a huge catch-up step when re-entering battle after a pause.
+      this.lastAnimTick = now;
+      return;
+    }
+    const raw = this.lastAnimTick > 0 ? now - this.lastAnimTick : 16;
+    this.lastAnimTick = now;
+    const dtMs = Math.min(Math.max(raw, 0), BATTLE_DT_CLAMP_MS);
 
     // Turn countdown — only while player can act.
     if (
@@ -1620,17 +1697,22 @@ export class BattleScreen extends Container {
 
     this.tickAcc += dtMs;
     this.idleTickAcc += dtMs;
-    const now = performance.now();
-    if (this.tickAcc >= UNIT_FRAME_MS) {
-      this.tickAcc = 0;
+    while (this.tickAcc >= UNIT_FRAME_MS) {
+      this.tickAcc -= UNIT_FRAME_MS;
       for (const u of this.units) {
         if (u.hidden || !u.loaded || !u.sprite) continue;
         const prevPose = u.pose;
         if (u.pose !== "idle" && u.pose !== "death" && now >= u.poseUntil) {
           u.pose = "idle";
         }
-        // Idle/death use BATTLE_IDLE_FRAME_MS; attack/cast/hit stay at 90ms.
-        if (u.pose === "idle" || u.pose === "death") {
+        // Idle uses BATTLE_IDLE_FRAME_MS; attack/cast/hit stay at UNIT_FRAME_MS.
+        // Dead / death-pose monsters stay frozen (no flap) so splash is not
+        // the first visible “death” cue.
+        if (u.pose === "idle") {
+          if (prevPose !== u.pose) this.paintUnitSprite(u);
+          continue;
+        }
+        if (u.pose === "death" || u.dead) {
           if (prevPose !== u.pose) this.paintUnitSprite(u);
           continue;
         }
@@ -1638,11 +1720,12 @@ export class BattleScreen extends Container {
         this.paintUnitSprite(u);
       }
     }
-    if (this.idleTickAcc >= BATTLE_IDLE_FRAME_MS) {
-      this.idleTickAcc = 0;
+    while (this.idleTickAcc >= BATTLE_IDLE_FRAME_MS) {
+      this.idleTickAcc -= BATTLE_IDLE_FRAME_MS;
       for (const u of this.units) {
         if (u.hidden || !u.loaded || !u.sprite) continue;
-        if (u.pose !== "idle" && u.pose !== "death") continue;
+        if (u.dead || u.pose === "death") continue;
+        if (u.pose !== "idle") continue;
         u.phase += 1;
         this.paintUnitSprite(u);
       }
@@ -1991,7 +2074,9 @@ export class BattleScreen extends Container {
       }
       const spr = new Sprite(tex);
       this.poseTexKey.set(spr, key);
-      spr.anchor.set(0.5, 1);
+      // Foot-mass anchor — cast strips widen around the staff tip; center
+      // anchor made 鬼道 look like they stepped back/out (外移).
+      spr.anchor.set(battleFootAnchorX(frame), 1);
       spr.scale.set(
         actorSpriteScale(frame.artScale, !!frame.flipX).x,
         actorSpriteScale(frame.artScale, !!frame.flipX).y,
@@ -2008,17 +2093,29 @@ export class BattleScreen extends Container {
   }
 
   private paintUnitSprite(u: UnitView): void {
-    if (!u.loaded || !u.sprite || u.hidden) return;
+    if (!u.loaded || u.hidden) return;
     const frame = composeBattlePose(u.loaded, u.facingRight, u.pose, u.phase);
     if (!frame) return;
     const key = `${u.loaded.name}|${u.pose}|${u.facingRight ? 1 : 0}|${u.phase & 31}|${frame.width}x${frame.height}`;
     let tex = this.poseTexCache.get(key);
-    if (!tex) {
+    if (!tex || tex.destroyed) {
       tex = rgbaToTexture(frame.width, frame.height, frame.rgba);
       this.poseTexCache.set(key, tex);
       this.evictUnusedPoseTextures();
     }
-    if (
+    if (!u.sprite || u.sprite.destroyed) {
+      const spr = new Sprite(tex);
+      this.poseTexKey.set(spr, key);
+      spr.anchor.set(battleFootAnchorX(frame), 1);
+      spr.scale.set(
+        actorSpriteScale(frame.artScale, !!frame.flipX).x,
+        actorSpriteScale(frame.artScale, !!frame.flipX).y,
+      );
+      // Shadow is children[0]; keep sprite as the body layer.
+      const at = Math.min(1, u.root.children.length);
+      u.root.addChildAt(spr, at);
+      u.sprite = spr;
+    } else if (
       this.poseTexKey.get(u.sprite) !== key ||
       u.sprite.texture?.destroyed ||
       u.sprite.texture !== tex
@@ -2026,7 +2123,7 @@ export class BattleScreen extends Container {
       u.sprite.texture = tex;
       this.poseTexKey.set(u.sprite, key);
     }
-    u.sprite.anchor.set(0.5, 1);
+    u.sprite.anchor.set(battleFootAnchorX(frame), 1);
     u.sprite.scale.set(
       actorSpriteScale(frame.artScale, !!frame.flipX).x,
       actorSpriteScale(frame.artScale, !!frame.flipX).y,
@@ -2034,9 +2131,14 @@ export class BattleScreen extends Container {
     if (u.pose === "hit") {
       u.sprite.tint = 0xff8080;
     } else if (u.pose === "death") {
-      u.sprite.tint = 0xffffff;
-      // Enemy death fade owns alpha; do not snap it back to 0.95 every tick.
-      if (!this.isEnemyUnit(u)) u.sprite.alpha = 0.95;
+      // Enemy: gray frozen corpse before splash — monsters have no death.gif,
+      // so without this tint “death” and 水花 look simultaneous.
+      if (this.isEnemyUnit(u)) {
+        u.sprite.tint = 0x909090;
+      } else {
+        u.sprite.tint = 0xffffff;
+        u.sprite.alpha = 0.95;
+      }
     } else {
       u.sprite.tint = 0xffffff;
       u.sprite.alpha = 1;
@@ -2255,23 +2357,36 @@ export class BattleScreen extends Container {
     return Math.max(1, actor.loaded.animations[anim]?.parts.length ?? 8);
   }
 
+  /**
+   * Opening motion. Cast/heal stay planted (鬼道 must not step back). Melee
+   * flashes beside the foe. `windupOnly` returns after CAST_WINDUP_FRAMES so
+   * eidolon/damage can overlap the remaining cast strip (CBE AnimEffect timing).
+   */
   private async playAttackMotion(
     actor: UnitView,
     target: UnitView | null,
     pose: "attack" | "cast",
+    opts?: { windupOnly?: boolean },
   ): Promise<void> {
+    const midX = (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
     // Cast/heal: keep formation facing. Facing the heal target (often a left-side
     // ally with smaller homeX) flipped monsters left — looked like 回血后转身.
     // Melee still faces the foe for the dash/swing.
     if (pose === "cast") {
-      actor.facingRight = actor.homeX < (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
-      // Play anim6/7 cast strip once in place (no dash). Previously early-return
-      // left the caster on idle while only eidolon FX ran.
-      const frameMs = UNIT_FRAME_MS;
-      const cycleMs = this.attackStripParts(actor) * frameMs;
-      const hold = cycleMs + 120;
+      // Pin feet — cancel any leftover melee drift so casters never retreat.
+      actor.root.x = actor.homeX;
+      actor.root.y = actor.homeY;
+      actor.feetX = actor.homeX;
+      actor.feetY = actor.homeY;
+      actor.facingRight = actor.homeX < midX;
+      const cycleMs = this.attackStripParts(actor) * UNIT_FRAME_MS;
+      const hold = cycleMs + 80;
       this.setUnitPose(actor, "cast", hold);
-      await sleep(Math.max(400, hold));
+      if (opts?.windupOnly) {
+        await sleep(CAST_WINDUP_FRAMES * UNIT_FRAME_MS);
+        return;
+      }
+      await sleep(Math.max(280, cycleMs));
       if (actor.pose !== "death") {
         actor.pose = "idle";
         actor.poseUntil = 0;
@@ -2282,32 +2397,32 @@ export class BattleScreen extends Container {
     if (target) {
       actor.facingRight = target.homeX > actor.homeX;
     } else {
-      actor.facingRight = actor.homeX < (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
+      actor.facingRight = actor.homeX < midX;
     }
     this.paintUnitSprite(actor);
 
     // Match BattleScreen.tick cadence (UNIT_FRAME_MS/part); one strip only — no double loop.
-    const frameMs = UNIT_FRAME_MS;
-    const cycleMs = this.attackStripParts(actor) * frameMs;
-    const hold = cycleMs + 120;
+    const cycleMs = this.attackStripParts(actor) * UNIT_FRAME_MS;
+    const hold = cycleMs + 80;
     this.setUnitPose(actor, pose, hold);
 
     if (target) {
       // Melee: flash beside target on the side that keeps facing them, swing, return.
       const beside = actor.facingRight ? target.homeX - 30 : target.homeX + 30;
-      await this.tweenUnitTo(actor, beside, target.homeY, 260);
+      await this.tweenUnitTo(actor, beside, target.homeY, 200);
       actor.facingRight = target.homeX > actor.homeX;
       this.paintUnitSprite(actor);
-      await sleep(Math.max(400, cycleMs - 260));
-      await this.tweenUnitTo(actor, actor.homeX, actor.homeY, 300);
+      await sleep(Math.max(280, cycleMs - 200));
+      await this.tweenUnitTo(actor, actor.homeX, actor.homeY, 220);
       actor.feetX = actor.homeX;
       actor.feetY = actor.homeY;
-      actor.facingRight = actor.homeX < (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
+      actor.facingRight = actor.homeX < midX;
     } else {
-      const step = actor.facingRight ? 18 : -18;
-      await this.tweenUnitTo(actor, actor.homeX + step, actor.homeY, 220);
-      await sleep(Math.max(400, cycleMs - 220));
-      await this.tweenUnitTo(actor, actor.homeX, actor.homeY, 280);
+      // Always step toward mid-field (into the fight), never away / 后退.
+      const step = actor.homeX < midX ? 14 : -14;
+      await this.tweenUnitTo(actor, actor.homeX + step, actor.homeY, 160);
+      await sleep(Math.max(280, cycleMs - 160));
+      await this.tweenUnitTo(actor, actor.homeX, actor.homeY, 200);
       actor.feetX = actor.homeX;
       actor.feetY = actor.homeY;
     }
@@ -2319,17 +2434,17 @@ export class BattleScreen extends Container {
     }
   }
 
+  /** Brief hit flash. Keep short so type-3 death can start on the same beat. */
   private async playHitMotion(u: UnitView): Promise<void> {
     if (u.dead || u.hidden) return;
-    const hold = 700;
+    const hold = HIT_FLASH_MS;
     this.setUnitPose(u, "hit", hold);
     const x0 = u.root.x;
-    u.root.x = x0 + (u.facingRight ? -6 : 6);
-    await sleep(120);
+    // Knock away from facing (into own backline), then snap back.
+    u.root.x = x0 + (u.facingRight ? -5 : 5);
+    await sleep(Math.min(80, hold));
     u.root.x = x0;
-    // Match pose hold — returning early left ~180ms of hit tint while the
-    // next actor already dashed.
-    await sleep(hold - 120);
+    await sleep(Math.max(0, hold - 80));
     if (u.pose === "hit") {
       u.pose = "idle";
       u.poseUntil = 0;
@@ -2338,17 +2453,18 @@ export class BattleScreen extends Container {
   }
 
   /**
-   * Drain leftover fxHost strips, then a short beat before the next record.
+   * Drain leftover fxHost strips, then a short beat before the next *actor*.
    * Do not spin on unit poses — long pose waits stacked with auto 4/6 and made
-   * parallel stomps more likely (三怪：第一只后己方又动).
+   * parallel stomps more likely (三怪：第一只后己方又动). Keep extraMs small so
+   * skill→death in the same script stays continuous.
    */
-  private async waitBattleVisualSettle(extraMs = 180): Promise<void> {
-    const deadline = performance.now() + 500;
+  private async waitBattleVisualSettle(extraMs = 60): Promise<void> {
+    const deadline = performance.now() + 360;
     while (
       performance.now() < deadline &&
       this.fxHost.children.length > 0
     ) {
-      await sleep(40);
+      await sleep(30);
     }
     if (extraMs > 0) await sleep(extraMs);
   }
@@ -2359,34 +2475,24 @@ export class BattleScreen extends Container {
   }
 
   private async playDeathMotion(u: UnitView): Promise<void> {
+    if (u.hidden) return;
     u.dead = true;
     if (this.isEnemyUnit(u)) {
-      // Monster: CBE `f_death.actor` (siwang1.gif splash) then leave the stage.
-      // Do NOT key off facingRight — cast/heal toward an ally sets facing left
-      // and previously kept the first kill frozen on stage.
+      // Gray freeze → splash. Corpse fade runs in the background so the
+      // settle panel is not held ~1s after the kill already reads as dead.
+      this.setUnitPose(u, "death", 1e9);
+      if (u.sprite) u.sprite.tint = 0x909090;
+      await sleep(BEFORE_DEATH_SPLASH_MS);
       const splash = this.playNamedActorFx(
         "f_death.actor",
         u.feetX,
         u.feetY - 8,
         5,
-        550,
+        5 * DEATH_SPLASH_FRAME_MS,
         1,
       );
-      this.setUnitPose(u, "death", 2000);
-      const t0 = performance.now();
-      while (performance.now() - t0 < 700) {
-        if (u.sprite && !u.hidden) {
-          // tick/paintUnitSprite also writes death alpha — keep fading down.
-          u.sprite.alpha = Math.min(
-            u.sprite.alpha,
-            Math.max(0, 1 - (performance.now() - t0) / 700),
-          );
-        }
-        await sleep(30);
-      }
-      u.hidden = true;
-      u.root.visible = false;
-      if (u.sprite) u.sprite.alpha = 0;
+      await sleep(DEATH_FADE_DELAY_MS);
+      void this.fadeEnemyCorpse(u);
       await splash;
       return;
     }
@@ -2395,8 +2501,27 @@ export class BattleScreen extends Container {
     for (let i = 0; i < 8; i++) {
       u.phase = i;
       this.paintUnitSprite(u);
-      await sleep(120);
+      await sleep(100);
     }
+  }
+
+  /** Fade + hide enemy corpse without blocking settlement / next actor. */
+  private async fadeEnemyCorpse(u: UnitView): Promise<void> {
+    const t0 = performance.now();
+    while (performance.now() - t0 < DEATH_FADE_MS) {
+      if (!u.root.parent || u.hidden) return;
+      if (u.sprite && !u.sprite.destroyed) {
+        u.sprite.alpha = Math.min(
+          u.sprite.alpha,
+          Math.max(0, 1 - (performance.now() - t0) / DEATH_FADE_MS),
+        );
+      }
+      await sleep(30);
+    }
+    if (!u.root.parent) return;
+    u.hidden = true;
+    u.root.visible = false;
+    if (u.sprite && !u.sprite.destroyed) u.sprite.alpha = 0;
   }
 
   private refreshUnitBars(): void {
@@ -2869,17 +2994,29 @@ export class BattleScreen extends Container {
 
     if (!actions.length) {
       this.playFloatsFromDeltas(up);
-      await sleep(400);
+      await sleep(280);
       return;
     }
 
-    for (const rec of actions) {
+    /**
+     * type-3/4 wires whose death splash already started during the killing
+     * record (CBE plays damage+death as one beat). Skip when the script
+     * reaches those slots so we do not double-play.
+     */
+    const consumedDeathWires = new Set<number>();
+
+    for (let ai = 0; ai < actions.length; ai++) {
+      const rec = actions[ai]!;
       // CBE DrawBattleSceneBg `%s行动`: advance with each actioninfo actor.
       this.paintActingTitleForWire(rec.actorWire);
       if (rec.type === 3 || rec.type === 4) {
+        if (consumedDeathWires.has(rec.actorWire)) {
+          consumedDeathWires.delete(rec.actorWire);
+          continue;
+        }
         const dead = this.unitForWire(rec.actorWire);
-        if (dead) await this.playDeathMotion(dead);
-        else await sleep(600);
+        if (dead && !dead.hidden) await this.playDeathMotion(dead);
+        else if (!dead) await sleep(400);
         continue;
       }
 
@@ -2928,6 +3065,17 @@ export class BattleScreen extends Container {
         continue;
       }
 
+      // Immediate trailing type-3/4 for this kill — death after damage beat.
+      const followDeathWires = new Set<number>();
+      for (let j = ai + 1; j < actions.length; j++) {
+        const n = actions[j]!;
+        if (n.type !== 3 && n.type !== 4) break;
+        followDeathWires.add(n.actorWire);
+      }
+
+      let skillFx: Promise<void> | null = null;
+      const hitWaits: Promise<void>[] = [];
+
       if (actor && !actor.dead) {
         const actorEnemy = this.isEnemyUnit(actor);
         const targetEnemy = !!firstTarget && this.isEnemyUnit(firstTarget);
@@ -2946,24 +3094,35 @@ export class BattleScreen extends Container {
               `M=${this.state.left.length} evidence=team-wire-desync`,
           );
         }
-        // Cast/attack strip first; eidolon FX follows after a short beat so the
-        // order reads clearly without stacking on the cast pose.
-        await this.playAttackMotion(
-          actor,
-          firstTarget && !this.isUnitDefeated(firstTarget) ? firstTarget : null,
-          isSkill ? "cast" : "attack",
-        );
-        if (effectIndex > 0) {
-          await sleep(80);
-          await this.playSkillEffects(
-            effectIndex,
-            fxWires,
+        if (isSkill) {
+          // Planted cast windup, then eidolon + damage on the same beat.
+          await this.playAttackMotion(
             actor,
-            /* fallbackToActor */ !offensiveGroup,
+            firstTarget && !this.isUnitDefeated(firstTarget)
+              ? firstTarget
+              : null,
+            "cast",
+            { windupOnly: true },
+          );
+          if (effectIndex > 0) {
+            skillFx = this.playSkillEffects(
+              effectIndex,
+              fxWires,
+              actor,
+              /* fallbackToActor */ !offensiveGroup,
+            );
+          }
+        } else {
+          await this.playAttackMotion(
+            actor,
+            firstTarget && !this.isUnitDefeated(firstTarget)
+              ? firstTarget
+              : null,
+            "attack",
           );
         }
       } else if (effectIndex > 0) {
-        await this.playSkillEffects(
+        skillFx = this.playSkillEffects(
           effectIndex,
           fxWires,
           actor,
@@ -2971,7 +3130,8 @@ export class BattleScreen extends Container {
         );
       }
 
-      const hitWaits: Promise<void>[] = [];
+      // Damage floats land with FX start (same beat). Death waits until after.
+      const deathTargets: UnitView[] = [];
       for (let i = 0; i < rec.children.length; i++) {
         const c = rec.children[i]!;
         const wire = childWires[i] ?? c.wire;
@@ -2981,20 +3141,54 @@ export class BattleScreen extends Container {
           this.applyWireHpDelta(wire, c.delta);
           continue;
         }
-        if (tgt && offensiveHit) {
-          // Must await — void + sleep(450) let the next actor dash while
-          // hit/FX reaction (~520ms) was still on screen.
-          hitWaits.push(this.playHitMotion(tgt));
-        }
         this.spawnFloatAtWire(wire, c.delta, c.flag, rec.effectText);
         this.applyWireHpDelta(wire, c.delta);
+        if (
+          tgt &&
+          !tgt.hidden &&
+          followDeathWires.has(wire) &&
+          (tgt.side.hp <= 0 || this.isUnitDefeated(tgt))
+        ) {
+          consumedDeathWires.add(wire);
+          deathTargets.push(tgt);
+          continue;
+        }
+        if (tgt && offensiveHit) {
+          hitWaits.push(this.playHitMotion(tgt));
+        }
       }
       if (isSkill) {
         this.applyCasterMpFromTeaminfo(up.rightHp, rec.actorWire);
       }
       this.notifyVitalsChanged();
+
       if (hitWaits.length) await Promise.all(hitWaits);
-      await this.waitBattleVisualSettle(180);
+
+      // Death after damage: pose → brief hold → splash (fade is async).
+      if (deathTargets.length) {
+        await sleep(AFTER_DAMAGE_BEFORE_DEATH_MS);
+        await Promise.all(deathTargets.map((t) => this.playDeathMotion(t)));
+      } else if (skillFx) {
+        // Killing blow already waited through splash; do not hold settle/next
+        // actor on leftover eidolon frames under an empty stage.
+        await skillFx;
+      }
+
+      if (actor && actor.pose === "cast") {
+        actor.pose = "idle";
+        actor.poseUntil = 0;
+        actor.root.x = actor.homeX;
+        actor.root.y = actor.homeY;
+        actor.feetX = actor.homeX;
+        actor.feetY = actor.homeY;
+        this.paintUnitSprite(actor);
+      }
+
+      // Gap only before the next *actor* action — not before merged type-3.
+      const next = actions[ai + 1];
+      if (next && next.type !== 3 && next.type !== 4) {
+        await this.waitBattleVisualSettle(60);
+      }
     }
   }
 
@@ -3034,7 +3228,7 @@ export class BattleScreen extends Container {
     }
     await Promise.all(
       spots.map((p) =>
-        this.playNamedActorFx(actorName, p.x, p.y, undefined, 900, 0.85),
+        this.playNamedActorFx(actorName, p.x, p.y, undefined, undefined, 0.85),
       ),
     );
   }
@@ -3048,13 +3242,14 @@ export class BattleScreen extends Container {
   /**
    * Play a JHOnlineData `.actor` strip (eidolon FX / `f_death` splash).
    * `maxParts` caps frames when set (`f_death` has 5 splash parts).
+   * Duration defaults to frameCount * FX_FRAME_MS (CBE part tick).
    */
   private async playNamedActorFx(
     actorName: string,
     x: number,
     y: number,
     maxParts?: number,
-    durationMs = 1800,
+    durationMs?: number,
     anchorY = 1,
   ): Promise<void> {
     try {
@@ -3070,7 +3265,8 @@ export class BattleScreen extends Container {
         maxParts != null
           ? Math.min(maxParts, Math.max(1, partCount))
           : Math.max(1, partCount || 4);
-      const frameMs = Math.max(40, Math.floor(durationMs / frames));
+      const totalMs = durationMs ?? frames * FX_FRAME_MS;
+      const frameMs = Math.max(40, Math.floor(totalMs / frames));
       let painted = 0;
       for (let i = 0; i < frames; i++) {
         if (!host.parent) break;
@@ -3099,12 +3295,12 @@ export class BattleScreen extends Container {
       }
       if (!painted) {
         console.warn(`[battle] fx empty frames ${actorName}`);
-        await sleep(Math.min(800, durationMs));
+        await sleep(Math.min(600, totalMs));
       }
       host.destroy({ children: true, texture: true });
     } catch (e) {
       console.warn("[battle] fx", actorName, e);
-      await sleep(Math.min(800, durationMs));
+      await sleep(Math.min(600, durationMs ?? 600));
     }
   }
 

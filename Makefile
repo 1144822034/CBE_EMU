@@ -15,6 +15,7 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_world_boss.c \
 	src/server/mock_server_ladder.c \
 	src/server/mock_server_guess.c \
+	src/server/mock_server_fruit.c \
 	src/server/mock_server_activities.c \
 	src/server/mock_server_scene_sync.c \
 	src/server/mock_server_guild.c \

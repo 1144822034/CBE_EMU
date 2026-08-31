@@ -153,6 +153,18 @@ if (fs.existsSync(chenghaoSrc)) {
   );
 }
 
+/* Pixi 水果机 UI（luckyFruit plist+png）。 */
+const fruitUiSrc = path.join(pixiRoot, "assets", "fruit_ui");
+const fruitUiDest = path.join(dataDest, "fruit_ui");
+if (fs.existsSync(fruitUiSrc)) {
+  copyDir(fruitUiSrc, fruitUiDest);
+  console.log(`[sync-offline-assets] fruit_ui ← ${fruitUiSrc}`);
+} else {
+  console.warn(
+    "[sync-offline-assets] missing assets/fruit_ui (fruit machine UI skipped)",
+  );
+}
+
 const skySrc = resolveFont16Sky();
 if (!skySrc) {
   console.error("[sync-offline-assets] missing font_16_sky.uc3");

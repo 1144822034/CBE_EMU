@@ -199,6 +199,28 @@ export class MountOverlay {
     await this.reloadSheet();
   }
 
+  /**
+   * After webglcontextrestored: force atlas reload (update-only stays black).
+   */
+  async remountAfterGpuResume(): Promise<void> {
+    const id = this.mountId;
+    if (!id) return;
+    this.atlas = rebindPlistAtlas(this.atlas, null);
+    this.sheetKey = "";
+    this.loadingKey = "";
+    if (this.sprite) {
+      try {
+        this.root.removeChild(this.sprite);
+        this.sprite.destroy({ texture: false });
+      } catch {
+        /* ignore */
+      }
+      this.sprite = null;
+    }
+    this.mountId = 0;
+    await this.setMountId(id);
+  }
+
   setBodyDisplayHeight(h: number): void {
     const next = Math.max(8, h || 24);
     if (Math.abs(next - this.bodyDisplayH) < 0.5) return;

@@ -77,9 +77,92 @@
 | `paintUnitSprite` | texture destroyed / 对象不一致时也重新赋值 |
 | `main` recover late 280ms | 再 nudge `view` / `battle` / `hud`（WebView 常晚一帧才可用） |
 
+## 续记：战斗已恢复、城镇地图仍黑（同日）
+
+用户确认战斗层正常后，城镇 `SceneView` 仍黑。
+
+### 第三次偏离
+
+与战斗同类：**城镇地图 / 共享姿态缓存仍只做 `source.update()`**：
+
+1. 城镇地图曾用 `Texture.from(canvas)`，resume 只 `update`；现改为与战斗一致的 CPU 像素 + `rgbaToTexture` 整图重建。
+2. 玩家 / NPC / peer / 传送门姿态走共享 `poseTextureCache`（`BufferImageSource`）。`ActorLayer.applyFrame` 在缓存命中时**不会**新建 Texture → 黑精灵。
+3. SCE 装饰物各自 `rgbaToTexture`，resume 时只 update，不重建。
+
+### 修改（第三轮）
+
+| 点 | 行为 |
+|----|------|
+| `SceneView.mapPixels` + `mountMapSprite` | 进图保留像素；resume 销毁旧 map sprite 并重建 |
+| `nudgeAfterGpuResume` | `clearPoseTextureCache` → 重画 decor / portal → `applyPlayerFrame` → `actors.nudge` |
+| `ActorLayer.nudgeAfterGpuResume` | 清空 `fuhao` 缓存并强制任务叹号 remount；`applyFrame` 换绑姿态 |
+
+## 续记：城镇 HUD 在、地图/角色全黑（同日）
+
+用户截图「正存室」：顶栏地点 / 血槽 / 挂机钮 / 聊天在，**地图带全黑**（怪物与玩家也不见）。战斗同症状时浮动字仍可出现。
+
+### 第四次偏离
+
+不在贴图重建本身，而在 **Container.mask 用的 Graphics 失效**：
+
+1. `SceneView.clip.mask` = 白矩形 Graphics；`BattleScreen.stageMask` 同时 mask `mapHost` / `unitsHost` / `fxHost`。
+2. 既有文档已记 Graphics 在 restore 后 GPU 几何空白；mask 空白 ⇒ 被裁切层像素为 0。
+3. WorldHud / floatHost / UC3 在 mask 外 → 仍可见，与截图一致；此前只重建 map/pose texture，**从未替换 clip/stage mask**，所以场景永远出不来。
+4. 次要：单位/玩家仅 `sprite.texture = tex`，post-restore Sprite 仍可能黑；需销毁后新建 Sprite。
+
+### 根因陈述（第四轮）
+
+| 项 | 内容 |
+|----|------|
+| 触发 | 同上 contextlost/restore 或 stall recover |
+| 违反契约 | 作为 mask 的 Graphics 必须与其它 Graphics 一样 `replaceGraphics` 后再画 rect |
+| 首个错误状态 | clip/stage mask 几何空 → 地图与单位层被裁没；HUD 仍画 |
+| 证据 | 截图 HUD+挂机+系统字；代码 mask 仅构造时创建一次 |
+
+### 修改（第四轮）
+
+| 点 | 行为 |
+|----|------|
+| `SceneView` | 持有 `clipMask`；nudge 时 replace + 重画；`mapPointer` / `playerFallback` 同步 replace |
+| `BattleScreen` | 持有 `stageMask`；nudge **最先** replace 并重新赋给三 host |
+| 单位/玩家 | resume 销毁旧 Sprite，再 `paintUnitSprite` / `applyFrame` 新建 |
+| wing/mount/chenghao | `remountAfterGpuResume` 清 atlas 强制重载 |
+
 ## 验证
 
 1. 战斗挂机中复现黑屏恢复：场景地图与角色应重新可见；血槽有红/绿填充且与数字一致。
-2. 城镇恢复：地图仍靠既有 SceneView nudge；自身 tiao 血槽不应空洞。
+2. 城镇恢复：地图与 NPC/自身/装饰应重新可见；自身 tiao 血槽不应空洞。
 3. 正常无 contextlost 路径：不应额外销毁/重建战斗单位或打断 playback。
 4. 恢复后连续多回合挂机：地图不闪绿、姿态不长期黑影。
+5. 城镇黑屏恢复后走动：地图不黑、角色能转向换帧。
+6. 复现「正存室」类 HUD 在场景黑：恢复后地图带应出图，不应只剩字与血槽。
+7. 挂机战斗中黑屏恢复：地图已能恢复的前提下，战斗场景地图与站位也应出图（第五轮回归）。
+
+## 续记：地图已恢复、战斗又黑（2026-08-31）
+
+用户：战斗曾恢复成功一次；修完城镇 clip mask 后，挂机战斗再黑屏恢复 → 仍「字/血槽在、场景带全黑」。
+
+### 第五次偏离
+
+地图修复引入的两条路径打到战斗：
+
+1. **共享 `stageMask`**：`mapHost` / `unitsHost` / `fxHost` 共用一块 Graphics。Pixi 8 `StencilMask.reset()` 会改 `mask.includeInBuild`；`replaceGraphics` 销毁旧 mask 时多个 MaskEffect 抢同一节点 → 裁切层空，HUD（未 mask）仍在。城镇 `SceneView` 是 **一个 clip + 一块 mask**，所以地图好了、战斗坏了。
+2. **recover 总是先 `view.nudgeAfterGpuResume()`**：战斗中仍整城 remount（pose 缓存清空、地图重建、翅膀 atlas），与战斗 BufferImageSource 重建争用恢复后的 GL。
+
+### 根因陈述（第五轮）
+
+| 项 | 内容 |
+|----|------|
+| 触发 | 同上；城镇 mask 修复已上线 |
+| 违反契约 | 每条裁切带一个 mask 所有者；可见场景才 nudge |
+| 首个错误状态 | 共享 mask replace 后 stage 带像素为 0；或城镇 nudge 干扰战斗贴图重建 |
+| 证据 | 地图可恢复 + 战斗同症状回归；StencilMask.reset / 三 host 共 mask |
+
+### 修改（第五轮）
+
+| 点 | 行为 |
+|----|------|
+| `BattleScreen.stageHost` | 与 `SceneView.clip` 同构：一层容器 + 一块 mask；map/units/fx 为其子节点 |
+| `nudgeAfterGpuResume` | 先 `stageHost.mask = null` 再 `replaceGraphics`，再赋回；强制 host.visible |
+| `SceneView` | clip 同样先卸 mask 再 replace（对称稳妥） |
+| `main` recover / alpha strip / late 280ms | 战斗可见时只 nudge `battle`；否则 `view`+`hud` |

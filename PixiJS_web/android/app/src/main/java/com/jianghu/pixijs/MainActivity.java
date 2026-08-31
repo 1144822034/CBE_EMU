@@ -15,6 +15,11 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebView;
 
@@ -81,6 +86,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ApkUpdaterPlugin.class);
         registerPlugin(EntertainmentHttpPlugin.class);
         super.onCreate(savedInstanceState);
+        hideSystemBars();
         acquireCpuWakeLock();
         // Defer settings intents: some Android 8 OEMs crash if started during onCreate.
         mainHandler.postDelayed(this::maybeRequestPostNotifications, 800L);
@@ -88,6 +94,49 @@ public class MainActivity extends BridgeActivity {
         // Bridge WebView exists after super.onCreate — install SSL bypass for
         // entertainment hosts with expired certs (api.qemao.com 抖音源).
         mainHandler.post(this::installEntertainmentSslBypass);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // Dialogs / notification shade can restore system bars; re-hide on focus.
+        if (hasFocus) hideSystemBars();
+    }
+
+    /**
+     * Immersive sticky: hide status + nav bars for the whole app (title menu
+     * included). Without this, OEM panels show the system status strip above
+     * the Capacitor WebView on splash — looks like a black bar + icons.
+     */
+    @SuppressWarnings("deprecation")
+    private void hideSystemBars() {
+        try {
+            Window window = getWindow();
+            if (window == null) return;
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                window.setDecorFitsSystemWindows(false);
+                WindowInsetsController controller = window.getInsetsController();
+                if (controller != null) {
+                    controller.hide(
+                            WindowInsets.Type.statusBars()
+                                    | WindowInsets.Type.navigationBars());
+                    controller.setSystemBarsBehavior(
+                            WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                }
+            } else {
+                View decor = window.getDecorView();
+                decor.setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "hideSystemBars failed", t);
+        }
     }
 
     @Override
@@ -136,6 +185,7 @@ public class MainActivity extends BridgeActivity {
         sInstance = new WeakReference<>(this);
         pausedForBackground = false;
         mainHandler.removeCallbacks(rearmWebViewRunnable);
+        hideSystemBars();
         acquireCpuWakeLock();
         keepWebViewRunning();
     }

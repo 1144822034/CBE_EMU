@@ -25,8 +25,15 @@ enum
     VM_MOCK_GUESS_ROUND_DRAWN = 1,
     VM_MOCK_GUESS_EVEN_MULT = 2,
     VM_MOCK_GUESS_BAOZI_MULT = 30,
-    VM_MOCK_GUESS_DRAW_BATCH = 4
+    VM_MOCK_GUESS_DRAW_BATCH = 4,
+    VM_MOCK_GUESS_RECORD_RETENTION_SEC = 3u * 24u * 3600u,
+    VM_MOCK_GUESS_PURGE_INTERVAL_SEC = 3600u
 };
+
+typedef struct
+{
+    u8 enabled;
+} vm_mock_guess_config;
 
 typedef struct
 {
@@ -75,7 +82,10 @@ typedef struct
 } vm_mock_guess_winner_ctx;
 
 static u32 g_vm_mock_guess_last_tick_sec = 0;
+static u32 g_vm_mock_guess_last_purge_sec = 0;
 static u32 g_vm_mock_guess_rng = 0;
+static vm_mock_guess_config g_vm_mock_guess_config;
+static bool g_vm_mock_guess_config_loaded = false;
 
 typedef struct
 {
@@ -162,6 +172,27 @@ static bool vm_mock_guess_account_hex(char *hexOut, size_t hexCap)
     return vm_mysql_hex_encode(accountId, strlen(accountId), hexOut, hexCap) != 0;
 }
 
+static void vm_mock_guess_apply_config_defaults(void)
+{
+    memset(&g_vm_mock_guess_config, 0, sizeof(g_vm_mock_guess_config));
+    g_vm_mock_guess_config.enabled = 1;
+}
+
+static bool vm_mock_guess_config_row(void *contextValue, unsigned int columnCount,
+                                     const char *const *values, const size_t *lengths)
+{
+    vm_mock_guess_config *cfg = (vm_mock_guess_config *)contextValue;
+    u32 tmp = 0;
+
+    (void)columnCount;
+    if (cfg == NULL || values == NULL || lengths == NULL || values[0] == NULL)
+        return false;
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &tmp))
+        return false;
+    cfg->enabled = tmp ? 1u : 0u;
+    return true;
+}
+
 static bool vm_mock_guess_ensure_tables(void)
 {
     static bool ready = false;
@@ -197,10 +228,92 @@ static bool vm_mock_guess_ensure_tables(void)
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "PRIMARY KEY(bet_id),"
             "KEY idx_guess_bets_role(role_id,bet_id DESC),"
-            "KEY idx_guess_bets_round(round_id,win,payout_copper)) ENGINE=InnoDB"))
+            "KEY idx_guess_bets_round(round_id,win,payout_copper),"
+            "KEY idx_guess_bets_created(created_at)) ENGINE=InnoDB"))
+        return false;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_guess_config ("
+            "id TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(id)) ENGINE=InnoDB"))
+        return false;
+    if (!vm_mysql_exec(
+            "INSERT IGNORE INTO server_guess_config (id,enabled) VALUES (1,1)"))
         return false;
     ready = true;
     return true;
+}
+
+static void vm_mock_guess_load_config(bool force)
+{
+    if (g_vm_mock_guess_config_loaded && !force)
+        return;
+    vm_mock_guess_apply_config_defaults();
+    if (!vm_mock_guess_ensure_tables())
+        return;
+    (void)vm_mysql_query(
+        "SELECT enabled FROM server_guess_config WHERE id=1 LIMIT 1",
+        vm_mock_guess_config_row, &g_vm_mock_guess_config);
+    g_vm_mock_guess_config_loaded = true;
+}
+
+const vm_mock_guess_config *vm_net_mock_guess_config_get(void)
+{
+    vm_mock_guess_load_config(false);
+    return &g_vm_mock_guess_config;
+}
+
+bool vm_mock_guess_admin_save_config(u8 enabled)
+{
+    char query[192];
+
+    if (!vm_mock_guess_ensure_tables())
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_guess_config (id,enabled) VALUES (1,%u) "
+             "ON DUPLICATE KEY UPDATE enabled=VALUES(enabled)",
+             enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+        return false;
+    g_vm_mock_guess_config_loaded = false;
+    vm_mock_guess_load_config(true);
+    return true;
+}
+
+static bool vm_mock_guess_enabled(void)
+{
+    const vm_mock_guess_config *cfg = vm_net_mock_guess_config_get();
+
+    return cfg != NULL && cfg->enabled;
+}
+
+static void vm_mock_guess_purge_old_records(u32 now)
+{
+    char query[384];
+    u32 cutoff;
+
+    if (now < g_vm_mock_guess_last_purge_sec + VM_MOCK_GUESS_PURGE_INTERVAL_SEC &&
+        g_vm_mock_guess_last_purge_sec != 0)
+        return;
+    g_vm_mock_guess_last_purge_sec = now;
+    if (now <= VM_MOCK_GUESS_RECORD_RETENTION_SEC)
+        return;
+    cutoff = now - VM_MOCK_GUESS_RECORD_RETENTION_SEC;
+    /* Drop player bets older than retention (incl. abandoned unclaimed wins). */
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_guess_bets WHERE created_at < FROM_UNIXTIME(%u)",
+             cutoff);
+    if (!vm_mysql_exec(query))
+        return;
+    /* Remove drawn rounds with no remaining bets past retention. */
+    snprintf(query, sizeof(query),
+             "DELETE r FROM server_guess_rounds r "
+             "LEFT JOIN server_guess_bets b ON b.round_id=r.round_id "
+             "WHERE b.round_id IS NULL AND r.status=%u AND r.period_end_unix<%u",
+             VM_MOCK_GUESS_ROUND_DRAWN, cutoff);
+    (void)vm_mysql_exec(query);
 }
 
 static u32 vm_mock_guess_period_start(u32 now)
@@ -589,6 +702,7 @@ static void vm_mock_guess_tick(void)
     (void)vm_mysql_query(query, vm_mock_guess_due_round_row_cb, &due);
     for (i = 0; i < due.count; ++i)
         (void)vm_mock_guess_draw_round(&due.rows[i]);
+    vm_mock_guess_purge_old_records(now);
 }
 
 static u32 vm_mock_guess_finish_packet(u8 *out, u32 pos, u8 objectCount)
@@ -651,20 +765,25 @@ static u32 vm_net_mock_build_guess_status_response(u8 *out, u32 outCap)
     u32 remainSec = 0;
     u32 lockRemain = 0;
     u32 bettingOpen = 0;
+    u32 enabled = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 pending = 0;
 
     (void)vm_mock_guess_tick();
+    enabled = vm_mock_guess_enabled() ? 1u : 0u;
     if (!vm_mock_guess_ensure_round(periodStart, &round))
         return 0;
     bettingOpen = vm_mock_guess_betting_open(&round, now, &remainSec, &lockRemain)
                       ? 1u
                       : 0u;
+    if (!enabled)
+        bettingOpen = 0;
     if (role != NULL)
         pending = vm_mock_guess_pending_claim_count(role->roleId);
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_GUESS_WT_KIND,
                                      VM_MOCK_GUESS_WT_STATUS, &objectStart) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "enabled", enabled) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "roundId", round.roundId) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "remainSec", remainSec) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "lockRemainSec", lockRemain) ||
@@ -733,6 +852,9 @@ static u32 vm_net_mock_build_guess_bet_response(const u8 *request, u32 requestLe
     (void)vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
                                            "stakeGold", &stakeGold);
     (void)vm_mock_guess_tick();
+    if (!vm_mock_guess_enabled())
+        return vm_net_mock_build_guess_op_result(out, outCap, VM_MOCK_GUESS_WT_BET, 2,
+                                               0, "disabled");
     if (choice < VM_MOCK_GUESS_CHOICE_BIG ||
         choice > VM_MOCK_GUESS_CHOICE_BAOZI)
         return vm_net_mock_build_guess_op_result(out, outCap, VM_MOCK_GUESS_WT_BET, 2,

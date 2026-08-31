@@ -179,6 +179,28 @@ export class WingOverlay {
     }
   }
 
+  /**
+   * After webglcontextrestored: atlas ImageSource often stays black with
+   * source.update() alone. Drop binding and force setWingId to reload.
+   */
+  async remountAfterGpuResume(): Promise<void> {
+    const id = this.wingId;
+    if (!id) return;
+    this.atlas = rebindPlistAtlas(this.atlas, null);
+    this.loadInFlight = false;
+    if (this.sprite) {
+      try {
+        this.root.removeChild(this.sprite);
+        this.sprite.destroy({ texture: false });
+      } catch {
+        /* ignore */
+      }
+      this.sprite = null;
+    }
+    this.wingId = 0;
+    await this.setWingId(id);
+  }
+
   /** Update scale/offset when the body sprite size changes. */
   setBodyDisplayHeight(h: number): void {
     const next = Math.max(8, h || 24);

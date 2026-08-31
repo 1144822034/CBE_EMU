@@ -1,21 +1,30 @@
 /**
  * Left-side accepted-quest tracker under the map status strip.
- * Visibility follows strip expand/collapse (same pref as 修/拍/…).
+ * Own collapse toggle — independent from 修/拍/… status strip.
  */
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_WIDTH, WORLD_TOP_H, makePixelText } from "./constants";
+import { CBE, LCD_WIDTH, makePixelText } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth } from "./BitmapLabel";
 import { sceneDisplayName } from "./WorldHud";
 import type { TaskListRow } from "../net/protocolExtras";
 import { lookupNpcSceneFromDb } from "../resources/npcScenes";
+import {
+  isQuestTrackerCollapsed,
+  toggleQuestTrackerCollapsed,
+} from "../resources/questTrackerPref";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
-/** Map-local status strip clearance (matches WorldHud PARTY_Y0). */
+/**
+ * Map-local coords (parent = SceneView.root, already at WORLD_TOP_H).
+ * Clear status strip (修/拍/… @ y=4, 17px) — same band as WorldHud PARTY_Y0.
+ */
 const STRIP_BOTTOM = 4 + 17;
-const TRACKER_Y0 = WORLD_TOP_H + STRIP_BOTTOM + 2;
+const TRACKER_Y0 = STRIP_BOTTOM + 2;
 const TRACKER_X0 = 4;
 const TRACKER_MAX_W = 118;
 const MAX_TASKS = 4;
+const TOGGLE_SIZE = 17;
+const TOGGLE_GAP = 3;
 
 /** Smaller than map HUD UC3 (14→10). */
 const TEXT_SCALE = 10 / UC3_CELL;
@@ -79,14 +88,16 @@ export function buildQuestTrackerRows(
 }
 
 export class QuestTrackerOverlay extends Container {
-  /** Tap tracker → open full task list. */
+  /** Tap tracker body → open full task list. */
   onOpenTasks: (() => void) | null = null;
 
+  private toggle = new Container();
+  private content = new Container();
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
   private rows: QuestTrackerRow[] = [];
-  private stripExpanded = true;
+  private collapsed = isQuestTrackerCollapsed();
   private worldActive = false;
   private partyInset = 0;
 
@@ -94,15 +105,31 @@ export class QuestTrackerOverlay extends Container {
     super();
     this.visible = false;
     this.eventMode = "static";
-    this.zIndex = 12;
-    this.addChild(this.box);
-    this.position.set(TRACKER_X0, TRACKER_Y0);
-  }
+    // Same band as status strip badges (SceneView.root).
+    this.zIndex = 20;
+    this.sortableChildren = true;
 
-  /** Mirror map-corner status strip expand (false when collapsed). */
-  setStripExpanded(on: boolean): void {
-    this.stripExpanded = !!on;
-    this.applyVisibility();
+    this.toggle.zIndex = 2;
+    this.toggle.eventMode = "static";
+    this.toggle.cursor = "pointer";
+    this.toggle.hitArea = {
+      contains: (px: number, py: number) =>
+        px >= 0 && py >= 0 && px <= TOGGLE_SIZE && py <= TOGGLE_SIZE,
+    };
+    this.toggle.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.collapsed = toggleQuestTrackerCollapsed();
+      this.mountToggleArt();
+      this.applyVisibility();
+    });
+
+    this.content.zIndex = 1;
+    this.content.eventMode = "passive";
+    this.content.addChild(this.box);
+
+    this.addChild(this.content, this.toggle);
+    this.position.set(TRACKER_X0, TRACKER_Y0);
+    this.mountToggleArt();
   }
 
   /** Only show on the interactive world map band. */
@@ -127,8 +154,46 @@ export class QuestTrackerOverlay extends Container {
   }
 
   private applyVisibility(): void {
-    this.visible =
-      this.worldActive && this.stripExpanded && this.rows.length > 0;
+    const hasTasks = this.rows.length > 0;
+    const show = this.worldActive && hasTasks;
+    this.visible = show;
+    this.toggle.visible = show;
+    this.content.visible = show && !this.collapsed;
+  }
+
+  private mountToggleArt(): void {
+    this.toggle.removeChildren().forEach((c) => {
+      c.destroy({ children: true });
+    });
+    // pointRight = expand affordance when collapsed
+    const pointRight = this.collapsed;
+    const fill = pointRight ? 0x182818 : 0x281818;
+    const border = pointRight ? 0xb8e8b0 : 0xe8c8b0;
+    const ink = pointRight ? 0xc8f0c0 : 0xf0d8c0;
+    const plate = new Graphics()
+      .rect(0, 0, TOGGLE_SIZE, TOGGLE_SIZE)
+      .fill({ color: fill })
+      .stroke({ width: 1, color: border });
+    this.toggle.addChild(plate);
+
+    const g = new Graphics();
+    const cx = TOGGLE_SIZE / 2;
+    const cy = TOGGLE_SIZE / 2;
+    const drawChevron = (ox: number) => {
+      if (pointRight) {
+        g.moveTo(cx + ox - 2.5, cy - 4.5)
+          .lineTo(cx + ox + 1.5, cy)
+          .lineTo(cx + ox - 2.5, cy + 4.5);
+      } else {
+        g.moveTo(cx + ox + 2.5, cy - 4.5)
+          .lineTo(cx + ox - 1.5, cy)
+          .lineTo(cx + ox + 2.5, cy + 4.5);
+      }
+    };
+    drawChevron(pointRight ? -1.5 : 1.5);
+    drawChevron(pointRight ? 1.5 : -1.5);
+    g.stroke({ width: 1.5, color: ink, join: "miter", cap: "square" });
+    this.toggle.addChild(g);
   }
 
   private clearLabels(): void {
@@ -146,7 +211,7 @@ export class QuestTrackerOverlay extends Container {
     lab.scale.set(TEXT_SCALE);
     lab.position.set(x, y);
     lab.eventMode = "none";
-    this.addChild(lab);
+    this.content.addChild(lab);
     this.labels.push(lab);
     return lab;
   }
@@ -156,12 +221,14 @@ export class QuestTrackerOverlay extends Container {
     clearPointerHits(this.rowHits);
     this.box.clear();
     this.position.x = TRACKER_X0 + this.partyInset;
+    this.toggle.position.set(0, 0);
+    this.content.position.set(TOGGLE_SIZE + TOGGLE_GAP, 0);
 
     if (!this.rows.length) return;
 
     const maxW = Math.min(
       TRACKER_MAX_W,
-      LCD_WIDTH - TRACKER_X0 - this.partyInset - 48,
+      LCD_WIDTH - TRACKER_X0 - this.partyInset - TOGGLE_SIZE - TOGGLE_GAP - 48,
     );
     const textX = PAD_X + ACCENT_W + GAP_AFTER_ACCENT;
     const textW = maxW - textX - PAD_X;
@@ -204,7 +271,9 @@ export class QuestTrackerOverlay extends Container {
         progColor,
       );
 
-      const npcBit = row.receiver ? truncateToWidth(row.receiver, textW * 0.45) : "—";
+      const npcBit = row.receiver
+        ? truncateToWidth(row.receiver, textW * 0.45)
+        : "—";
       const sepW = measureUiTextWidth(" ", UC3_CELL) * TEXT_SCALE;
       const sceneBudget =
         textW - measureUiTextWidth(npcBit, UC3_CELL) * TEXT_SCALE - sepW;
@@ -225,7 +294,9 @@ export class QuestTrackerOverlay extends Container {
     }
 
     this.rowHits.push(
-      attachRowPointerHit(this, 0, 0, maxW, contentH, () => this.onOpenTasks?.()),
+      attachRowPointerHit(this.content, 0, 0, maxW, contentH, () =>
+        this.onOpenTasks?.(),
+      ),
     );
   }
 }

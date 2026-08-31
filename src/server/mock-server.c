@@ -128,6 +128,9 @@ static void vm_mock_guess_tick(void);
 static u32 vm_net_mock_build_guess_protocol_response(const u8 *request,
                                                      u32 requestLen, u8 *out,
                                                      u32 outCap);
+static u32 vm_net_mock_build_fruit_protocol_response(const u8 *request,
+                                                     u32 requestLen, u8 *out,
+                                                     u32 outCap);
 
 static bool vm_mock_festival_npc_offers(const char *npcName);
 static bool vm_mock_yanmen_npc_offers(const char *npcName);
@@ -140,7 +143,8 @@ static void vm_mock_activities_on_pve_victory(const char *scene, u32 enemyId,
 static void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
                                            const char *accountId, u8 victimJob,
                                            u32 victimLevel);
-static void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss);
+static void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss,
+                                                const char *reason);
 static void vm_mock_activities_on_npc_talk(const char *npcName);
 static const char *vm_mock_festival_welcome_text(void);
 static u32 vm_net_mock_build_activities_protocol_response(const u8 *request,
@@ -153,6 +157,7 @@ static u32 vm_net_mock_build_ring_protocol_response(const u8 *request,
 #include "mock_server_activities.c"
 
 #include "mock_server_guess.c"
+#include "mock_server_fruit.c"
 
 /* Pixi arena (defined in mock_server_arena.c after guild). */
 static bool vm_mock_arena_npc_offers_entry(const char *npcName);

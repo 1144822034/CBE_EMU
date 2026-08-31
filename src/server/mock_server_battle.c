@@ -10920,8 +10920,20 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
 
     if (out == NULL || outCap < pos || !vm_net_mock_is_battle_escape_request(request, requestLen))
         return 0;
+    /*
+     * Same gate as operate: no armed PvE session (and CBE_SERVER_ONLY never
+     * has an emulator battle screen).  Must not return 0 — that falls through
+     * to unimplemented-handler-notice and paints「功能暂未实现(1/4/4)」for a
+     * known contract (late/spam escape after success cleared armed, or stale
+     * battle UI).  Empty-ack mirrors mock_battle_operate_ignore.
+     */
     if (g_mockBattleOperateSessionArmed == 0 && !vm_net_mock_current_screen_is_battle())
-        return 0;
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[info][network] mock_battle_escape_ignore reason=no-armed-session "
+               "action=empty-ack evidence=reject-notice-avoid\n");
+        return pos;
+    }
 
     vm_net_mock_battle_default_wire_slots(playerOnRight, battleSide,
                                           &defaultPlayerSlot, &defaultEnemySlot);
@@ -11669,7 +11681,7 @@ static void vm_net_mock_battle_note_victory_settlement(const char *reason)
             (u8)VM_NET_MOCK_MONSTER_BOSS;
 
         vm_mock_activities_on_pve_victory(scene, enemyId, isBoss);
-        vm_mock_activities_on_kill_progress(enemyId, isBoss);
+        vm_mock_activities_on_kill_progress(enemyId, isBoss, reason);
     }
     /* Friend intimacy: only team wild PvE victories (not spar/duel/arena). */
     if (reason != NULL && strncmp(reason, "team-battle", 11) == 0)

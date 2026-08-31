@@ -2862,7 +2862,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     return true;
 }
 
-static bool vm_net_mock_dynamic_npc_db_load(void)
+static bool vm_net_mock_dynamic_npc_db_load_unlocked(void)
 {
     vm_net_mock_dynamic_npc_load_context context;
     u32 attempt = 0;
@@ -2986,6 +2986,18 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         return true;
     }
     return false;
+}
+
+/* Same rationale as monster_db_load: allow lock-free admin public GETs. */
+static bool vm_net_mock_dynamic_npc_db_load(void)
+{
+    static pthread_mutex_t s_load_mu = PTHREAD_MUTEX_INITIALIZER;
+    bool ok;
+
+    pthread_mutex_lock(&s_load_mu);
+    ok = vm_net_mock_dynamic_npc_db_load_unlocked();
+    pthread_mutex_unlock(&s_load_mu);
+    return ok;
 }
 
 static int vm_net_mock_dynamic_npc_find_override(const char *scene, u32 actorId)

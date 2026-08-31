@@ -2336,10 +2336,45 @@ static bool vm_mock_service_friend_db_remove_pair(
         removedOut);
 }
 
+/*
+ * accounts.account_id is ascii_bin (case-sensitive).  Mobile IME overlays use
+ * autocapitalize=off, so players often type aa862047 against a registered
+ * AA862047.  Compare foldably for auth, but always return the stored spelling.
+ */
+static unsigned char vm_mock_service_ascii_tolower(unsigned char ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+        return (unsigned char)(ch - 'A' + 'a');
+    return ch;
+}
+
+static int vm_mock_service_account_id_ascii_casecmp(const char *left, const char *right)
+{
+    size_t i = 0;
+
+    if (left == NULL || right == NULL)
+        return (left == right) ? 0 : (left == NULL ? -1 : 1);
+    for (;;)
+    {
+        unsigned char a = vm_mock_service_ascii_tolower((unsigned char)left[i]);
+        unsigned char b = vm_mock_service_ascii_tolower((unsigned char)right[i]);
+        if (a != b)
+            return (int)a - (int)b;
+        if (a == 0)
+            return 0;
+        ++i;
+    }
+}
+
+static bool vm_mock_service_account_id_equal(const char *left, const char *right)
+{
+    return vm_mock_service_account_id_ascii_casecmp(left, right) == 0;
+}
+
 static vm_mock_service_account_record *vm_mock_service_account_find_record(const char *username)
 {
     char username_hex[sizeof(g_vm_mock_service_account_lookup_scratch.username) * 2 + 1];
-    char query[384];
+    char query[448];
     size_t username_len;
     vm_mock_mysql_account_lookup_context context;
 
@@ -2354,36 +2389,67 @@ static vm_mock_service_account_record *vm_mock_service_account_find_record(const
     {
         return NULL;
     }
-    snprintf(query, sizeof(query),
-             "SELECT account_id,HEX(password_value) FROM accounts "
-             "WHERE account_id=CAST(X'%s' AS CHAR) LIMIT 1",
-             username_hex);
     /*
+     * Pass 0: exact ascii_bin match (preferred when both casings somehow exist).
+     * Pass 1: LOWER() fold so mobile lowercase login still finds AA862047.
      * Cold MySQL connect / brief SO_RCVTIMEO can fail the first COM_QUERY.
      * Retry once on transport failure only — a clean "not found" must not retry
      * or a missing account would look like a transient glitch.
      */
-    for (int attempt = 0; attempt < 2; ++attempt)
+    for (int pass = 0; pass < 2; ++pass)
     {
-        memset(&g_vm_mock_service_account_lookup_scratch, 0,
-               sizeof(g_vm_mock_service_account_lookup_scratch));
-        memset(&context, 0, sizeof(context));
-        context.record = &g_vm_mock_service_account_lookup_scratch;
-        if (!vm_mysql_query(query, vm_mock_mysql_account_lookup_row, &context))
+        bool transportFailed = false;
+
+        if (pass == 0)
         {
-            printf("[warn][network] account_lookup_query_failed user=%s attempt=%d error=%s\n",
-                   username,
-                   attempt + 1,
-                   vm_mysql_last_error());
-            continue;
+            snprintf(query, sizeof(query),
+                     "SELECT account_id,HEX(password_value) FROM accounts "
+                     "WHERE account_id=CAST(X'%s' AS CHAR) LIMIT 1",
+                     username_hex);
         }
-        if (context.invalid || !context.found)
+        else
+        {
+            snprintf(query, sizeof(query),
+                     "SELECT account_id,HEX(password_value) FROM accounts "
+                     "WHERE LOWER(account_id)=LOWER(CAST(X'%s' AS CHAR)) LIMIT 1",
+                     username_hex);
+        }
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            memset(&g_vm_mock_service_account_lookup_scratch, 0,
+                   sizeof(g_vm_mock_service_account_lookup_scratch));
+            memset(&context, 0, sizeof(context));
+            context.record = &g_vm_mock_service_account_lookup_scratch;
+            if (!vm_mysql_query(query, vm_mock_mysql_account_lookup_row, &context))
+            {
+                printf("[warn][network] account_lookup_query_failed user=%s "
+                       "pass=%d attempt=%d error=%s\n",
+                       username,
+                       pass,
+                       attempt + 1,
+                       vm_mysql_last_error());
+                transportFailed = true;
+                continue;
+            }
+            transportFailed = false;
+            if (context.invalid || !context.found)
+                break;
+            if (pass == 1 &&
+                strcmp(g_vm_mock_service_account_lookup_scratch.username, username) != 0)
+            {
+                printf("[warn][mock-service] account_case_canonicalized typed=%s "
+                       "canonical=%s evidence=accounts-ascii-bin-login\n",
+                       username,
+                       g_vm_mock_service_account_lookup_scratch.username);
+            }
+            return &g_vm_mock_service_account_lookup_scratch;
+        }
+        if (transportFailed)
         {
             memset(&g_vm_mock_service_account_lookup_scratch, 0,
                    sizeof(g_vm_mock_service_account_lookup_scratch));
             return NULL;
         }
-        return &g_vm_mock_service_account_lookup_scratch;
     }
     memset(&g_vm_mock_service_account_lookup_scratch, 0,
            sizeof(g_vm_mock_service_account_lookup_scratch));
@@ -4981,7 +5047,7 @@ static bool vm_net_mock_monster_catalog_extra_row(void *contextValue,
     return true;
 }
 
-static bool vm_net_mock_monster_db_load(void)
+static bool vm_net_mock_monster_db_load_unlocked(void)
 {
     vm_net_mock_monster_db_load_context context;
     vm_net_mock_monster_db_load_context catalogContext;
@@ -5073,6 +5139,19 @@ static bool vm_net_mock_monster_db_load(void)
            context.skipped, context.dropsLoaded, context.dropsSkipped,
            g_vm_net_mock_monster_catalog_count);
     return true;
+}
+
+/* Serialize catalog materialization so admin public GETs can load without
+ * holding g_vm_mock_service_protocol_mutex (avoids protocol_lock convoy). */
+static bool vm_net_mock_monster_db_load(void)
+{
+    static pthread_mutex_t s_load_mu = PTHREAD_MUTEX_INITIALIZER;
+    bool ok;
+
+    pthread_mutex_lock(&s_load_mu);
+    ok = vm_net_mock_monster_db_load_unlocked();
+    pthread_mutex_unlock(&s_load_mu);
+    return ok;
 }
 
 static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy_raw(u32 enemyId)

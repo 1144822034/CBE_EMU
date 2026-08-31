@@ -316,6 +316,20 @@ import {
   type GuessStatus,
 } from "../net/protocolGuess";
 import {
+  buildFruitCashOutRequest,
+  buildFruitCollectRequest,
+  buildFruitCompareRequest,
+  buildFruitInsertRequest,
+  buildFruitSpinRequest,
+  buildFruitStatusRequest,
+  parseFruitOpResult,
+  parseFruitSpinResult,
+  parseFruitStatus,
+  type FruitOpResult,
+  type FruitSpinResult,
+  type FruitStatus,
+} from "../net/protocolFruit";
+import {
   activityMsgTip,
   buildActivitiesStatusRequest,
   buildFestivalExchangeRequest,
@@ -492,6 +506,13 @@ export type SessionCallbacks = {
   /** Peer cosmetics update (31/5). */
   onCosmeticsPeer?: (peer: CosmeticsPeer) => void;
   onBattle: (battle: BattleState) => void;
+  /**
+   * Hide map SCE spawn when 4/1 arms (hangup/challenge skip collide).
+   * actorId may be 0 — then hide by home tile (x,y).
+   */
+  onEngageSceneMonster?: (actorId: number, x: number, y: number) => void;
+  /** Undo engage when 4/5 never arrives (same id/pos as onEngageSceneMonster). */
+  onRestoreSceneMonster?: (actorId: number, x: number, y: number) => void;
   onBattleUpdate?: (update: BattleActionUpdate) => void;
   onSkills?: (skills: BattleSkillRow[]) => void;
   onNpcDialog?: (dialog: NpcDialog) => void;
@@ -1755,8 +1776,16 @@ export class GameSession {
     return { id, index, battleX, battleY, encounter };
   }
 
-  async startBattleNearPlayer(px: number, py: number, preferNpcId?: number): Promise<void> {
-    if (!this.transport || this.inBattle) return;
+  /**
+   * Start wild / challenge 4/1. Returns true only when a battle-start object
+   * (4/5 or 4/10) arrived — callers use this to restore map SCE markers on miss.
+   */
+  async startBattleNearPlayer(
+    px: number,
+    py: number,
+    preferNpcId?: number,
+  ): Promise<boolean> {
+    if (!this.transport || this.inBattle) return false;
     // Cities: no wild automonster. Challenge/hangup with an explicit catalog id
     // (e.g. 临安守关 / dream challenge_enemy) still uses the same 4/1 path.
     if (isCitySceneKey(this.scene || this.loadedScene || "") && !((preferNpcId ?? 0) >>> 0)) {
@@ -1768,17 +1797,21 @@ export class GameSession {
         detail: "城内不能遇怪",
       });
       console.warn("[session] reject city wild battle", this.scene);
-      return;
+      return false;
     }
-    const { id, index, battleX, battleY } = this.armEncounterVisualLikeCollide(
-      px,
-      py,
-      preferNpcId,
-    );
+    const { id, index, battleX, battleY, encounter } =
+      this.armEncounterVisualLikeCollide(px, py, preferNpcId);
     if (!(id >>> 0)) {
       console.warn("[session] battle wild refused (no scene monster)", this.scene);
       this.setPhase("world", "no-scene-monster");
-      return;
+      return false;
+    }
+    // Map actor id for hangup/challenge (collide already suppressed by caller).
+    const mapActorId = (encounter?.actorId ?? 0) >>> 0;
+    if (mapActorId >= 0x70000000) {
+      this.cb.onEngageSceneMonster?.(mapActorId, battleX, battleY);
+    } else if (battleX > 0 || battleY > 0) {
+      this.cb.onEngageSceneMonster?.(0, battleX, battleY);
     }
     this.setPhase("battle-start", `id=${id} index=${index} pos=${battleX},${battleY}`);
     this.inBattle = true;
@@ -1788,17 +1821,19 @@ export class GameSession {
     );
     this.handleBodies(bodies);
     // Clear optimistic lock if no battle-start object arrived.
-    if (
-      !bodies.some((b) => {
-        const p = ingestPacket(b);
-        return p?.objects.some(
-          (o) => o.kind === 4 && (o.subtype === 5 || o.subtype === 10),
-        );
-      })
-    ) {
+    const started = bodies.some((b) => {
+      const p = ingestPacket(b);
+      return p?.objects.some(
+        (o) => o.kind === 4 && (o.subtype === 5 || o.subtype === 10),
+      );
+    });
+    if (!started) {
       this.inBattle = false;
       this.pendingEncounterVisual = null;
+      this.cb.onRestoreSceneMonster?.(mapActorId, battleX, battleY);
+      return false;
     }
+    return true;
   }
 
   async battleOperate(targetIndex: number, operate = 0): Promise<void> {
@@ -2068,8 +2103,8 @@ export class GameSession {
     }
     this.hangupActive = true;
     console.info("[session] hangup encounter", reason);
-    await this.startBattleNearPlayer(this.x | 0, this.y | 0);
-    if (!this.inBattle && this.hangupDesired) {
+    const ok = await this.startBattleNearPlayer(this.x | 0, this.y | 0);
+    if (!ok && this.hangupDesired) {
       this.scheduleNextHangupEncounter(5000);
     }
   }
@@ -2502,6 +2537,24 @@ export class GameSession {
     return { ok: false, tip: "挑战失败" };
   }
 
+  async fetchGuessStatus(): Promise<GuessStatus | null> {
+    if (!this.transport) return null;
+    const statusBodies = await this.transport.exchange(
+      0,
+      buildGuessStatusRequest(),
+    );
+    this.handleBodies(statusBodies);
+    for (const body of statusBodies) {
+      try {
+        const st = parseGuessStatus(decodeWtPacket(body));
+        if (st) return st;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
   async fetchGuessBoard(pageIndex = 0): Promise<{
     status: GuessStatus | null;
     rows: GuessHistoryRow[];
@@ -2578,6 +2631,111 @@ export class GameSession {
     for (const body of bodies) {
       try {
         const r = parseGuessOpResult(decodeWtPacket(body), 4);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fetchFruitStatus(): Promise<FruitStatus | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildFruitStatusRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const st = parseFruitStatus(decodeWtPacket(body));
+        if (st) return st;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fruitInsert(gold: number): Promise<FruitOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildFruitInsertRequest(gold),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseFruitOpResult(decodeWtPacket(body), 2);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fruitSpin(
+    multiple: number,
+    bets: Record<number, number>,
+  ): Promise<FruitSpinResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildFruitSpinRequest(multiple, bets),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseFruitSpinResult(decodeWtPacket(body));
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fruitCollect(): Promise<FruitOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildFruitCollectRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseFruitOpResult(decodeWtPacket(body), 4);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fruitCompare(guess: number): Promise<FruitOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildFruitCompareRequest(guess),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseFruitOpResult(decodeWtPacket(body), 5);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fruitCashOut(gold = 0): Promise<FruitOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildFruitCashOutRequest(gold),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseFruitOpResult(decodeWtPacket(body), 6);
         if (r) return r;
       } catch {
         /* ignore */

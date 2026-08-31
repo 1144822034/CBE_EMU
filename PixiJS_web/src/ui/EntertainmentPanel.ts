@@ -29,7 +29,7 @@ export type EntertainmentEntry = {
   /** Wider inset for music players (prev/next / lyrics hit targets). */
   panel?: "mall" | "wide";
   /** Open in-game panel instead of web overlay. */
-  nativePanel?: "guess";
+  nativePanel?: "guess" | "fruit";
 };
 
 /** Same catalog as 银河西游 时辰.lua qipai / music / video entries. */
@@ -39,6 +39,12 @@ export const ENTERTAINMENT_ENTRIES: EntertainmentEntry[] = [
     label: "猜猜看",
     url: "",
     nativePanel: "guess",
+  },
+  {
+    id: "fruit",
+    label: "水果机",
+    url: "",
+    nativePanel: "fruit",
   },
   {
     id: "qipai",
@@ -90,6 +96,7 @@ export class EntertainmentPanel extends Container {
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
   private listCursor = 0;
+  private entries: EntertainmentEntry[] = ENTERTAINMENT_ENTRIES.slice();
 
   onPick: ((entry: EntertainmentEntry) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -107,7 +114,11 @@ export class EntertainmentPanel extends Container {
     this.addChild(this.box);
   }
 
-  open(): void {
+  open(entries?: EntertainmentEntry[]): void {
+    this.entries =
+      entries && entries.length > 0
+        ? entries.slice()
+        : ENTERTAINMENT_ENTRIES.slice();
     this.listCursor = 0;
     this.eventMode = "static";
     this.visible = true;
@@ -125,14 +136,14 @@ export class EntertainmentPanel extends Container {
   }
 
   move(delta: number): void {
-    const n = ENTERTAINMENT_ENTRIES.length;
+    const n = this.entries.length;
     if (n <= 0) return;
     this.listCursor = (this.listCursor + delta + n) % n;
     this.redraw();
   }
 
   confirm(): void {
-    const entry = ENTERTAINMENT_ENTRIES[this.listCursor];
+    const entry = this.entries[this.listCursor];
     if (entry) this.onPick?.(entry);
   }
 
@@ -172,9 +183,9 @@ export class EntertainmentPanel extends Container {
       listTop,
       w: bounds.w - 12,
       footY,
-      rows: ENTERTAINMENT_ENTRIES.map((e) => ({ name: e.label })),
+      rows: this.entries.map((e) => ({ name: e.label })),
       cursor: this.listCursor,
-      pageSize: ENTERTAINMENT_ENTRIES.length,
+      pageSize: this.entries.length,
       paging: "none",
       emptyText: "(无入口)",
       onRow: (absIndex) => {
