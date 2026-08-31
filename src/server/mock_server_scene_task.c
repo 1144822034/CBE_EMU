@@ -6165,6 +6165,31 @@ static bool vm_net_mock_dynamic_npc_instances_ensure_spawn_enemy_column(void)
     return true;
 }
 
+static bool vm_net_mock_dynamic_npc_instances_ensure_timer_seconds_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_instances' "
+            "AND COLUMN_NAME='timer_seconds'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count == 0 && !vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_instances "
+            "ADD COLUMN timer_seconds INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER spawn_enemy_id"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_instance_schema migration=timer-seconds action=ready\n");
+    return true;
+}
+
 /* Every dynamic-NPC scene key is a client resource key.  Both a placement
  * scene and an instance target must name the exact downloadable SCE file;
  * accepting a bare name here makes a distinct SQL key which later collides
@@ -6298,8 +6323,8 @@ static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
             goto failed;
         snprintf(query, sizeof(query),
                  "INSERT IGNORE INTO server_dynamic_npc_instances("
-                "scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,minimum_level) "
-                 "SELECT X'%s',actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,minimum_level "
+                 "scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,minimum_level) "
+                 "SELECT X'%s',actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,minimum_level "
                  "FROM server_dynamic_npc_instances WHERE scene=X'%s' AND actor_id=%u",
                  canonicalHex, legacyHex, migration->actorId);
         if (!vm_mysql_exec(query))
@@ -6486,12 +6511,12 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[14];
+    u32 number[15];
     bool hasInstanceConfiguration = false;
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 20 ||
+    if (context == NULL || columnCount != 22 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -6520,12 +6545,14 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_net_mock_dynamic_npc_decode_hex(values[13], lengths[13],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
-        !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[8]) || number[8] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[9]) || number[9] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[10]) || number[10] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[11]) || number[11] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[12]) || number[12] > 0xffu ||
-        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[13]) || number[13] > 1u)
+        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[8]) || number[8] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[9]) || number[9] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[10]) || number[10] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[12]) || number[12] > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[13]) || number[13] > 1u ||
+        !vm_mock_mysql_parse_u32(values[21], lengths[21], &number[14]) ||
+        number[14] > VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS)
     {
         if (context != NULL)
             ++context->skipped;
@@ -6549,6 +6576,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.challengeEnemyId = number[10];
     row.seed.instanceSpawnEnemyId = number[11];
     row.seed.instanceMinLevel = (u16)number[12];
+    row.seed.instanceTimerSeconds = number[14];
     /* The parent `npc_kind` is now only a compatibility projection.  Instance
      * settings belong to the independent child row and may be used by a
      * multi-service NPC whose first selected service is not the instance
@@ -6557,6 +6585,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                row.seed.instanceX != 0 ||
                                row.seed.instanceY != 0 ||
                                row.seed.instanceSpawnEnemyId != 0 ||
+                               row.seed.instanceTimerSeconds != 0 ||
                                row.seed.challengeEnemyId != 0;
     if (context->scanningParentSceneMigrations)
     {
@@ -6691,12 +6720,10 @@ static bool vm_net_mock_dynamic_npc_db_query_rows(
         "EXISTS(SELECT 1 FROM server_scene_battle_monsters AS sbm "
         "WHERE sbm.scene=server_dynamic_npcs.scene "
         "AND sbm.monster_id=COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0) "
-        "AND sbm.enabled=1) "
-        "FROM server_dynamic_npcs LEFT JOIN ("
-        "SELECT scene,actor_id,GROUP_CONCAT(CONCAT(task_id,':',repeatable) "
-        "ORDER BY task_id SEPARATOR ',') AS bindings "
-        "FROM server_dynamic_npc_tasks GROUP BY scene,actor_id"
-        ") AS task_bindings USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
+        "AND sbm.enabled=1),"
+        "COALESCE(server_dynamic_npc_instances.timer_seconds,0),"
+        "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
+        "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
         "USING(scene,actor_id) ORDER BY scene,actor_id",
         vm_net_mock_dynamic_npc_row, context);
 }
@@ -6751,13 +6778,15 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "target_y SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "challenge_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "spawn_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "timer_seconds INT UNSIGNED NOT NULL DEFAULT 0,"
             "minimum_level TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id),"
             "CONSTRAINT fk_server_dynamic_npc_instances_npc FOREIGN KEY(scene,actor_id) "
             "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
-        !vm_net_mock_dynamic_npc_instances_ensure_spawn_enemy_column())
+        !vm_net_mock_dynamic_npc_instances_ensure_spawn_enemy_column() ||
+        !vm_net_mock_dynamic_npc_instances_ensure_timer_seconds_column())
     {
         printf("[error][mock-admin] dynamic_npc_db_load failed error=%s\n",
                vm_mysql_last_error());
@@ -7169,6 +7198,7 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         !vm_net_mock_str_ends_with(seed->actorResource, ".actor") ||
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
+        seed->instanceTimerSeconds > VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS ||
         (hasInstanceService &&
          ((!hasInstanceTeleport && !hasInstanceChallenge) ||
           (hasInstanceTeleport &&
@@ -7297,13 +7327,14 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     if (hasInstanceService)
     {
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,minimum_level) "
-                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,minimum_level) "
+                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
                  "target_scene=VALUES(target_scene),target_x=VALUES(target_x),target_y=VALUES(target_y),"
-                 "challenge_enemy_id=VALUES(challenge_enemy_id),spawn_enemy_id=VALUES(spawn_enemy_id),minimum_level=VALUES(minimum_level)",
+                 "challenge_enemy_id=VALUES(challenge_enemy_id),spawn_enemy_id=VALUES(spawn_enemy_id),timer_seconds=VALUES(timer_seconds),minimum_level=VALUES(minimum_level)",
                  sceneHex, seed->actorId, instanceSceneHex, seed->instanceX,
                  seed->instanceY, seed->challengeEnemyId,
-                 seed->instanceSpawnEnemyId, seed->instanceMinLevel);
+                 seed->instanceSpawnEnemyId, seed->instanceTimerSeconds,
+                 seed->instanceMinLevel);
     }
     else
     {
@@ -7354,14 +7385,14 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task_count=%u primary_task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) challenge_enemy=%u spawn_enemy=%u spawn_source=SCE2-kind3 min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) timer_seconds=%u challenge_enemy=%u spawn_enemy=%u spawn_source=SCE2-kind3 min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
            seed->serviceOptionName[0] ? seed->serviceOptionName : "-",
            taskBindingCount, seed->taskId, (u32)seed->taskRepeatPolicy,
            seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
-           seed->instanceX, seed->instanceY, seed->challengeEnemyId,
-           seed->instanceSpawnEnemyId,
+           seed->instanceX, seed->instanceY, seed->instanceTimerSeconds,
+           seed->challengeEnemyId, seed->instanceSpawnEnemyId,
            seed->instanceMinLevel, seed->actorResource,
            seed->scriptName[0] ? seed->scriptName : "-");
     return true;

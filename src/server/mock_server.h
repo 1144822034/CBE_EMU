@@ -318,6 +318,10 @@ enum
     VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX = 3
 };
 
+/* Limit operator input to a practical one-day countdown even though the CBE
+ * decoder itself accepts a full u32. */
+#define VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS (24u * 60u * 60u)
+
 /* A scene-visible role snapshot is shared by the scene bootstrap producer and
  * the social poll encoder.  The session remains opaque at this boundary. */
 typedef struct

@@ -598,15 +598,29 @@ static bool vm_net_mock_append_fb_target_result12_object(u8 *out, u32 outCap, u3
                                                           vm_net_mock_scene_spawn_y());
 }
 
+/* JianghuOL.CBE:0x01033CF2 reads fb-target `min` as a four-byte big-endian
+ * value.  Emit the field as u32 even for zero.  The value is scoped to the
+ * active player's authoritative transient instance, not to this shared
+ * 1/27/4 builder or a process environment variable. */
+static u32 vm_net_mock_fb_target_remaining_seconds(void)
+{
+    const vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return vm_mock_service_active_transient_instance_timer_remaining_seconds(
+        session, scheduler_get_tick_ms());
+}
+
 static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32 *pos,
                                                         u8 typeValue, const char *infoText)
 {
     u32 objectStart = 0;
+    u32 remainingSeconds = vm_net_mock_fb_target_remaining_seconds();
     if (infoText == NULL)
         infoText = "";
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x1b, 4, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "min", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "min", remainingSeconds))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
@@ -617,6 +631,9 @@ static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32
     if (!vm_net_mock_put_object_string(out, outCap, pos, "info", infoText))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_fb_target_result4 min_seconds=%u encoding=u32 "
+           "source=active-instance-session evidence=JianghuOL.CBE:0x01033CF2+0x0104C252\n",
+           remainingSeconds);
     return true;
 }
 

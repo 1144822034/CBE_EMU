@@ -3467,152 +3467,110 @@ static void vm_IMG_WriteResult(u32 resultPtr, u32 pixelsPtr, u16 width, u16 heig
     vm_set_var_byte(resultPtr + 8, needFree);
 }
 
-static u32 g_vm_img_app_data_package = 0;
-static u32 g_vm_img_inner_data_package = 0;
-static u32 g_vm_img_current_data_package = 0;
-
-/*
- * A resource filename is resolved to an image pointer before the CBE reaches
- * the LCD API, so static disassembly cannot tell whether a particular blit is
- * from time_number.gif or -num.gif.  This is deliberately a read-only,
- * opt-in bridge across that boundary.  It records the relevant atlases and
- * resource-to-image-object associations, while preserving the registered CBE
- * return path.
- */
-static bool vm_lcd_scene_number_trace_enabled(void)
+/* The scene timer shown in the supplied frame is rendered from one of the
+ * scene image atlases, not by the host window.  Keep this probe opt-in and
+ * observational: it only records the guest's already-issued LCD blit and the
+ * CBE return address that requested it.  The 110x16 atlas is shared by
+ * -num.gif/+num.gif, so the log deliberately calls it a candidate until the
+ * caller is disassembled. */
+static bool vm_scene_number_draw_trace_enabled(void)
 {
-    static int initialized = 0;
-    static bool enabled = false;
-    if (!initialized)
-    {
-        const char *setting = getenv("CBE_TRACE_SCENE_NUMBERS");
-        enabled = setting != NULL && setting[0] != '\0' &&
-                  !(setting[0] == '0' && setting[1] == '\0');
-        initialized = 1;
-    }
-    return enabled;
+    const char *setting = getenv("CBE_TRACE_SCENE_NUMBERS");
+
+    return setting != NULL && setting[0] != 0 &&
+           strcmp(setting, "0") != 0 &&
+           strcmp(setting, "off") != 0 &&
+           strcmp(setting, "false") != 0;
 }
 
-/* These two image headers are only read for opt-in trace classification.  They
- * are populated when the firmware creates the named static resources and are
- * never used to choose, alter, or schedule a draw. */
-static u32 vm_lcd_scene_trace_map_kuang2_image_info = 0;
-static u32 vm_lcd_scene_trace_map_kuang_image_info = 0;
-
-static const char *vm_lcd_scene_number_trace_atlas_name(u32 imageInfo,
-                                                         u16 width, u16 height)
+static void vm_scene_number_draw_trace(bool alpha, u32 imageInfo, u32 pixels,
+                                       u16 width, u16 height, int srcX,
+                                       int srcY, int clipW, int clipH,
+                                       int dstX, int dstY)
 {
-    if (imageInfo == vm_lcd_scene_trace_map_kuang2_image_info && imageInfo != 0)
-        return "map-frame-variant"; /* map_kuang2.gif */
-    if (imageInfo == vm_lcd_scene_trace_map_kuang_image_info && imageInfo != 0)
-        return "map-frame"; /* map_kuang.gif */
-    if (width == 110 && height == 16)
-        return "combat-number-atlas"; /* -num.gif or +num.gif */
-    if (width == 77 && height == 7)
-        return "time-number-atlas"; /* time_number.gif */
-    if (width == 13 && height == 16)
-        return "timer-icon-atlas"; /* ui_timer.gif */
-    return NULL;
-}
+    static u32 traceCount = 0;
+    const char *atlas = NULL;
+    u32 lr = 0;
+    u32 pc = 0;
+    u32 sp = 0;
+    u32 stackCallers[16] = {0};
+    u32 stackOffsets[16] = {0};
+    u32 stackCallerCount = 0;
+    FILE *trace = NULL;
 
-static const char *vm_lcd_scene_trace_resource_name(u32 imageId)
-{
-    switch (imageId)
+    if (!vm_scene_number_draw_trace_enabled() || pixels == 0 ||
+        clipW <= 0 || clipH <= 0)
     {
-    case 0:
-        return "+num.gif";
-    case 1:
-        return "-num.gif";
-    case 20:
-        return "map_kuang2.gif";
-    case 21:
-        return "map_kuang.gif";
-    case 24:
-        return "time_number.gif";
-    case 85:
-        return "ui_timer.gif";
-    default:
-        return NULL;
-    }
-}
-
-static void vm_lcd_trace_scene_resource_create(u32 imageId, u32 dataPackage,
-                                               u32 imageInfo)
-{
-    const char *name;
-    u32 pixels;
-    u16 width;
-    u16 height;
-    FILE *fp;
-
-    if (!vm_lcd_scene_number_trace_enabled() || imageInfo == 0 ||
-        dataPackage == 0 || dataPackage != g_vm_img_app_data_package)
-        return;
-    name = vm_lcd_scene_trace_resource_name(imageId);
-    if (name == NULL)
-        return;
-    if (imageId == 20)
-        vm_lcd_scene_trace_map_kuang2_image_info = imageInfo;
-    else if (imageId == 21)
-        vm_lcd_scene_trace_map_kuang_image_info = imageInfo;
-    pixels = vm_get_var(imageInfo);
-    width = vm_get_var_short(imageInfo + 4);
-    height = vm_get_var_short(imageInfo + 6);
-    fp = fopen("logs/scene-number-draw.log", "a");
-    if (fp == NULL)
-        return;
-    fprintf(fp,
-            "scene_resource_create data_package=%08x image_id=%u name=%s image_info=%08x "
-            "pixels=%08x image=%ux%u\n",
-            dataPackage, (unsigned int)imageId, name, imageInfo, pixels,
-            (unsigned int)width, (unsigned int)height);
-    fclose(fp);
-}
-
-static void vm_lcd_trace_scene_number_draw(bool alpha, u32 imageInfo,
-                                           u32 pixels, u16 imageWidth,
-                                           u16 imageHeight, int srcX,
-                                           int srcY, int width, int height,
-                                           int dstX, int dstY)
-{
-    static unsigned int sequence = 0;
-    static bool suppressionNoted = false;
-    const char *atlas;
-    u32 returnPc = 0;
-    FILE *fp;
-
-    if (!vm_lcd_scene_number_trace_enabled())
-        return;
-    atlas = vm_lcd_scene_number_trace_atlas_name(imageInfo, imageWidth,
-                                                  imageHeight);
-    if (atlas == NULL)
-        return;
-    if (sequence >= 2048)
-    {
-        if (suppressionNoted)
-            return;
-        suppressionNoted = true;
-    }
-    uc_reg_read(MTK, UC_ARM_REG_LR, &returnPc);
-    vm_automation_note_scene_number_draw(atlas, alpha, width, height, dstX,
-                                         dstY, returnPc);
-    fp = fopen("logs/scene-number-draw.log", "a");
-    if (fp == NULL)
-        return;
-    if (suppressionNoted)
-    {
-        fputs("scene_number_draw suppressed-after=2048\n", fp);
-        fclose(fp);
         return;
     }
-    fprintf(fp,
-            "scene_number_draw seq=%u atlas=%s alpha=%u image_info=%08x "
-            "pixels=%08x image=%ux%u src=(%d,%d %dx%d) dst=(%d,%d) "
-            "caller_return=%08x\n",
-            sequence++, atlas, alpha ? 1u : 0u, imageInfo, pixels,
-            (unsigned int)imageWidth, (unsigned int)imageHeight, srcX, srcY,
-            width, height, dstX, dstY, returnPc);
-    fclose(fp);
+
+    if (width == 110u && height == 16u)
+        atlas = "num-110x16";
+    else if (width == 77u && height == 7u)
+        atlas = "time-number-77x7";
+    else if (width == 17u && height == 17u)
+        atlas = "map-frame-17x17";
+    else if (width == 13u && height == 16u)
+        atlas = "timer-icon-13x16";
+    else
+        return;
+
+    /* The observed control is in the upper-right map layer.  Filtering here
+     * keeps ordinary combat and menu traffic from exhausting the bounded log. */
+    if (dstX < 120 || dstY < 0 || dstY > 120)
+        return;
+
+    if (traceCount >= 1024u)
+        return;
+    if (MTK != NULL)
+    {
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        (void)uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+        (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        for (u32 offset = 0; offset <= 512u && stackCallerCount < 16u; offset += 4u)
+        {
+            u32 candidate = vm_get_var(sp + offset) & ~1u;
+            bool duplicate = false;
+
+            if (candidate < Program_ROM_Address ||
+                candidate >= Program_ROM_Address + Program_ROM_Mapped_Size)
+            {
+                continue;
+            }
+            for (u32 index = 0; index < stackCallerCount; ++index)
+            {
+                if (stackCallers[index] == candidate)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                stackCallers[stackCallerCount] = candidate;
+                stackOffsets[stackCallerCount] = offset;
+                ++stackCallerCount;
+            }
+        }
+    }
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_draw seq=%u module=JianghuOL.CBE caller=%08x "
+            "callback_pc=%08x alpha=%u atlas=%s image=%08x pixels=%08x "
+            "sp=%08x stack=",
+            traceCount, lr & ~1u, pc & ~1u, alpha ? 1u : 0u, atlas,
+            imageInfo, pixels, sp);
+    for (u32 index = 0; index < stackCallerCount; ++index)
+    {
+        fprintf(trace, "%s%08x@+%u", index == 0 ? "" : ",",
+                stackCallers[index], stackOffsets[index]);
+    }
+    fprintf(trace, " size=%ux%u src=(%d,%d,%d,%d) dst=(%d,%d)\n",
+            width, height, srcX, srcY, clipW, clipH, dstX, dstY);
+    fclose(trace);
 }
 
 void vM_DrawImageWithClipEx()
@@ -3643,6 +3601,9 @@ void vM_DrawImageWithClipEx()
     vm_lcd_trace_scene_number_draw(false, (u32)srcInfo, (u32)srcPtr, src_w,
                                    src_h, srcX, srcY, w, h, dstX, dstY);
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
+    vm_scene_number_draw_trace(false, (u32)srcInfo, (u32)srcPtr, src_w, src_h,
+                               origSrcX, origSrcY, origW, origH,
+                               origDstX, origDstY);
     u8 tmpBuffer[480];
     // u8 buffer[188];
     // uc_mem_read(MTK, srcPtr, buffer, 188);
@@ -3755,6 +3716,9 @@ void vm_vMDrawImageClipAndAlphaEx()
     vm_lcd_trace_scene_number_draw(true, (u32)srcInfo, (u32)srcPtr, src_w,
                                    src_h, srcX, srcY, w, h, dstX, dstY);
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
+    vm_scene_number_draw_trace(true, (u32)srcInfo, (u32)srcPtr, src_w, src_h,
+                               origSrcX, origSrcY, origW, origH,
+                               origDstX, origDstY);
     u8 tmpBuffer[480];
     u8 dstBuffer[480];
     // printf("vMDrawImageClipAndAlphaEx(sx:%d,sy:%d,w:%d,h:%d,dx:%d,dy:%d)\n", srcX, srcY, w, h, dstX, dstY);

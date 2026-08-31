@@ -5917,8 +5917,15 @@ static u32 vm_net_mock_build_instance_enter_response(
         printf("[warn][network] mock_npc_instance_enter_session_unbound actor=%u scene=%s action=no-durable-position-save\n",
                seed->actorId, target.scene);
     }
-    printf("[info][network] mock_npc_instance_enter actor=%u configured_scene=%s scene=%s pos=(%u,%u) spawn_enemy=%u source=SCE2-kind3+city-mirror response=30/1 resp=%u position_owner=session-transient evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+    else if (!vm_mock_service_active_transient_instance_configure_timer(
+                 seed->instanceTimerSeconds))
+    {
+        printf("[warn][network] mock_npc_instance_timer_unbound actor=%u scene=%s seconds=%u action=emit-zero-min\n",
+               seed->actorId, target.scene, seed->instanceTimerSeconds);
+    }
+    printf("[info][network] mock_npc_instance_enter actor=%u configured_scene=%s scene=%s pos=(%u,%u) timer_seconds=%u spawn_enemy=%u source=SCE2-kind3+city-mirror response=30/1 resp=%u position_owner=session-transient evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
            seed->actorId, seed->instanceScene, target.scene, target.x, target.y,
+           seed->instanceTimerSeconds,
            seed->instanceSpawnEnemyId, pos);
     return pos;
 }

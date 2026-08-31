@@ -2973,6 +2973,7 @@ static void vm_mock_admin_render_instance_fields(
     u32 y = seed ? seed->instanceY : 0;
     u32 enemyId = seed ? seed->challengeEnemyId : 0;
     u32 spawnEnemyId = seed ? seed->instanceSpawnEnemyId : 0;
+    u32 timerSeconds = seed ? seed->instanceTimerSeconds : 0;
     u32 minimumLevel = seed && seed->instanceMinLevel != 0
                            ? seed->instanceMinLevel
                            : 1;
@@ -2988,9 +2989,10 @@ static void vm_mock_admin_render_instance_fields(
         page,
         "</label><label class=\"field\"><span>落点 X</span><input type=\"number\" name=\"instance_x\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<label class=\"field\"><span>落点 Y</span><input type=\"number\" name=\"instance_y\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
-        "<p class=\"instance-help\">落点 X/Y 都填 0 会自动解析目标 SCE 的安全入口。</p></div>"
+        "<label class=\"field\"><span>副本倒计时（秒）</span><input type=\"number\" name=\"instance_timer_seconds\" min=\"0\" max=\"%u\" value=\"%u\"></label>"
+        "<p class=\"instance-help\">进入副本时写入客户端 min 字段；填 0 显示 00:00。后台不会因客户端归零自动踢出角色。</p></div>"
         "<div class=\"instance-fields\" data-npc-instance-spawn-fields hidden><label class=\"field\"><span>传送后挑战怪物</span>",
-        x, y);
+        x, y, VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS, timerSeconds);
     vm_mock_admin_render_monster_picker_field(
         page, "instance_spawn_enemy_id", spawnEnemyId, false, true, false);
     vm_mock_admin_text_appendf(
@@ -13740,6 +13742,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 challengeEnemyId = 0;
     u32 instanceSpawnEnemyId = 0;
     u32 instanceMinLevel = 1;
+    u32 instanceTimerSeconds = 0;
     u32 serviceOptionCount = 0;
     bool hasInstanceTeleport = false;
     bool hasInstanceChallenge = false;
@@ -14252,6 +14255,16 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
             return;
         }
         if (hasInstanceTeleport &&
+            !vm_mock_admin_form_u32(
+                body, "instance_timer_seconds",
+                VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS,
+                &instanceTimerSeconds))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error", "副本倒计时必须是 0 至 86400 秒");
+            return;
+        }
+        if (hasInstanceTeleport &&
             instanceX == 0 && instanceY == 0)
         {
             u16 resolvedX = 0;
@@ -14386,6 +14399,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.challengeEnemyId = challengeEnemyId;
     seed.instanceSpawnEnemyId = instanceSpawnEnemyId;
     seed.instanceMinLevel = (u16)instanceMinLevel;
+    seed.instanceTimerSeconds = instanceTimerSeconds;
     snprintf(seed.instanceScene, sizeof(seed.instanceScene), "%s",
              instanceRuntimeScene);
     snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", actorResource);

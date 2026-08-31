@@ -2900,6 +2900,8 @@ typedef struct vm_mock_service_client_session
     u16 transientInstanceX;
     u16 transientInstanceY;
     u32 transientInstanceStartedTick;
+    u32 transientInstanceTimerSeconds;
+    u32 transientInstanceTimerStartedMs;
     bool shopSceneNpcReseedPending;
     /* 1 = real shop scene return (30/2 may be required), 2 = fresh mmGame
      * bootstrap only (replay 27/11 without re-entering the scene). */
@@ -3942,11 +3944,50 @@ static bool vm_mock_service_active_transient_instance_begin(const char *scene,
     session->transientInstanceX = x;
     session->transientInstanceY = y;
     session->transientInstanceStartedTick = g_schedulerTick;
+    session->transientInstanceTimerSeconds = 0;
+    session->transientInstanceTimerStartedMs = 0;
     printf("[info][mock-service] transient_instance_begin client=%08x role=%u scene=%s pos=(%u,%u) durable_anchor=%s@(%u,%u) reason=%s\n",
            session->clientId, role->roleId, session->transientInstanceScene,
            session->transientInstanceX, session->transientInstanceY,
            role->scene, role->x, role->y, reason ? reason : "instance-enter");
     return true;
+}
+
+/* Timer state is deliberately session-owned.  The worker invokes this only
+ * after the instance-enter builder has accepted the same NPC configuration
+ * that produced WT30/1. */
+static bool vm_mock_service_active_transient_instance_configure_timer(
+    u32 timerSeconds)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->transientInstanceActive ||
+        !vm_net_mock_scene_name_is_safe(session->transientInstanceScene) ||
+        timerSeconds > VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS)
+    {
+        return false;
+    }
+    session->transientInstanceTimerSeconds = timerSeconds;
+    session->transientInstanceTimerStartedMs = scheduler_get_tick_ms();
+    printf("[info][mock-service] transient_instance_timer_begin client=%08x scene=%s seconds=%u\n",
+           session->clientId, session->transientInstanceScene, timerSeconds);
+    return true;
+}
+
+static u32 vm_mock_service_active_transient_instance_timer_remaining_seconds(
+    const vm_mock_service_client_session *session, u32 nowMs)
+{
+    u32 elapsedSeconds = 0;
+
+    if (session == NULL || !session->transientInstanceActive ||
+        session->transientInstanceTimerSeconds == 0)
+    {
+        return 0;
+    }
+    elapsedSeconds = (nowMs - session->transientInstanceTimerStartedMs) / 1000u;
+    return elapsedSeconds >= session->transientInstanceTimerSeconds ? 0 :
+           session->transientInstanceTimerSeconds - elapsedSeconds;
 }
 
 static bool vm_mock_service_active_transient_instance_update_position(
@@ -3997,6 +4038,8 @@ static void vm_mock_service_active_transient_instance_clear_if_departing(
     session->transientInstanceX = 0;
     session->transientInstanceY = 0;
     session->transientInstanceStartedTick = 0;
+    session->transientInstanceTimerSeconds = 0;
+    session->transientInstanceTimerStartedMs = 0;
 }
 
 static void vm_mock_service_session_arm_task_prompt_refresh(const char *scene)
@@ -6567,6 +6610,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->transientInstanceX = 0;
     session->transientInstanceY = 0;
     session->transientInstanceStartedTick = 0;
+    session->transientInstanceTimerSeconds = 0;
+    session->transientInstanceTimerStartedMs = 0;
     session->shopSceneNpcReseedPending = false;
     session->shopSceneNpcReseedMode = 0;
     session->shopSceneNpcReseedScene[0] = 0;
@@ -8442,6 +8487,9 @@ typedef struct
      * configured instance scene.  This is deliberately independent from
      * challengeEnemyId, which belongs to the source-scene guard challenge. */
     u32 instanceSpawnEnemyId;
+    /* Server policy applied only at the selected NPC's WT30/1 instance entry.
+     * Zero keeps the client HUD at 00:00. */
+    u32 instanceTimerSeconds;
     u16 instanceMinLevel;
     char actorResource[64];
     char displayName[32];

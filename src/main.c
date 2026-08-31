@@ -670,7 +670,7 @@ static u8 g_mockServiceOnly = 1;
 static u8 g_mockServiceOnly = 0;
 #endif
 static u8 g_mockServiceWarnedUnavailable = 0;
-#if defined(CBE_PLATFORM_ANDROID) || defined(CBE_REMOTE_HANGUP_TEST)
+#if defined(CBE_PLATFORM_ANDROID)
 static char g_mockServiceHost[64] = "121.40.139.236";
 #else
 static char g_mockServiceHost[64] = "127.0.0.1";
@@ -22762,6 +22762,360 @@ static void hook_vm_video_code_callback(uc_engine *uc, uint64_t address, uint32_
     lastAddress = (u32)address;
 }
 
+/* Dream-map number forensics: 0x0104C252 initializes the local countdown
+ * object before 0x0104C216 decrements it once per second.  This probe is
+ * opt-in and records only the CBE's live arguments; it never changes a
+ * register, guest memory, packet, callback, or scheduling decision. */
+static bool vm_scene_number_trace_enabled(void)
+{
+    const char *setting = getenv("CBE_TRACE_SCENE_NUMBERS");
+
+    return setting != NULL && setting[0] != 0 &&
+           strcmp(setting, "0") != 0 &&
+           strcmp(setting, "off") != 0 &&
+           strcmp(setting, "false") != 0;
+}
+
+static void vm_scene_number_timer_init_code_callback(uc_engine *uc,
+                                                       uint64_t address,
+                                                       uint32_t size,
+                                                       void *user_data)
+{
+    static u32 traceCount = 0;
+    u32 timer = 0;
+    u32 seconds = 0;
+    u32 lr = 0;
+    FILE *trace = NULL;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 32u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &timer);
+    (void)uc_reg_read(uc, UC_ARM_REG_R1, &seconds);
+    (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_timer_init seq=%u module=JianghuOL.CBE "
+            "pc=0104c252 timer=%08x seconds=%u caller=%08x\n",
+            traceCount, timer, seconds, lr & ~1u);
+    fclose(trace);
+}
+
+/* The initializing caller asks its source record for the field literally
+ * named "min" at 0x01010716, then forwards that result through an indirect
+ * method at 0x01010734.  Record both instruction-boundary values so a packet
+ * field cannot be confused with a value manufactured later in the client.
+ * These callbacks are diagnostic only: they read registers and append a
+ * bounded record without changing guest execution. */
+static void vm_scene_number_min_source_code_callback(uc_engine *uc,
+                                                      uint64_t address,
+                                                      uint32_t size,
+                                                      void *user_data)
+{
+    static u32 traceCount = 0;
+    u32 component = 0;
+    u32 value = 0;
+    u32 record[4] = {0, 0, 0, 0};
+    FILE *trace = NULL;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 32u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R4, &component);
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &value);
+    if (component != 0)
+        (void)uc_mem_read(uc, component, record, sizeof(record));
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_min_source seq=%u module=JianghuOL.CBE "
+            "pc=01010718 component=%08x min=%u "
+            "record=%08x,%08x,%08x,%08x\n",
+            traceCount, component, value, record[0], record[1], record[2],
+            record[3]);
+    fclose(trace);
+}
+
+static void vm_scene_number_min_getter_code_callback(uc_engine *uc,
+                                                      uint64_t address,
+                                                      uint32_t size,
+                                                      void *user_data)
+{
+    static u32 traceCount = 0;
+    u32 component = 0;
+    u32 getter = 0;
+    u32 key = 0;
+    u32 index = 0;
+    u32 sp = 0;
+    u32 callerStack[4] = {0, 0, 0, 0};
+    FILE *trace = NULL;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 32u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &component);
+    (void)uc_reg_read(uc, UC_ARM_REG_R1, &key);
+    (void)uc_reg_read(uc, UC_ARM_REG_R2, &getter);
+    (void)uc_reg_read(uc, UC_ARM_REG_R6, &index);
+    (void)uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+    /* 0x01010594 saves LR then allocates 0x444 bytes of locals.  At this
+     * point its saved caller is therefore SP+0x454.  Reading it only
+     * identifies the dispatch path that supplied the 1/27/4 record. */
+    if (sp != 0)
+        (void)uc_mem_read(uc, sp + 0x454u, callerStack,
+                          sizeof(callerStack));
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_min_getter seq=%u module=JianghuOL.CBE "
+            "pc=01010716 component=%08x list_index=%u key=%08x getter=%08x "
+            "dispatch_stack=%08x,%08x,%08x,%08x\n",
+            traceCount, component, index, key, getter & ~1u,
+            callerStack[0] & ~1u, callerStack[1] & ~1u,
+            callerStack[2] & ~1u, callerStack[3] & ~1u);
+    fclose(trace);
+}
+
+/* 0x01033D40 is the shared object-field creator used by the record getter's
+ * family.  Watching only a 1/27/4 record whose field bytes spell `min` gives
+ * the construction caller without scanning arbitrary heap writes. */
+static void vm_scene_number_min_field_create_code_callback(uc_engine *uc,
+                                                           uint64_t address,
+                                                           uint32_t size,
+                                                           void *user_data)
+{
+    static u32 traceCount = 0;
+    u32 record = 0;
+    u32 key = 0;
+    u32 valueType = 0;
+    u32 lr = 0;
+    u32 header[3] = {0, 0, 0};
+    char name[4] = {0, 0, 0, 0};
+    FILE *trace = NULL;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 16u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &record);
+    (void)uc_reg_read(uc, UC_ARM_REG_R1, &key);
+    (void)uc_reg_read(uc, UC_ARM_REG_R2, &valueType);
+    (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    if (record == 0 || key == 0 ||
+        uc_mem_read(uc, key, name, sizeof(name)) != UC_ERR_OK ||
+        memcmp(name, "min", sizeof(name)) != 0)
+    {
+        return;
+    }
+    (void)uc_mem_read(uc, record, header, sizeof(header));
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_min_field_create seq=%u module=JianghuOL.CBE "
+            "pc=01033d40 record=%08x header=%08x,%08x,%08x "
+            "key=%08x type=%u caller=%08x\n",
+            traceCount, record, header[0], header[1], header[2], key,
+            valueType, lr & ~1u);
+    fclose(trace);
+}
+
+static void vm_scene_number_min_dispatch_code_callback(uc_engine *uc,
+                                                        uint64_t address,
+                                                        uint32_t size,
+                                                        void *user_data)
+{
+    static u32 traceCount = 0;
+    u32 receiver = 0;
+    u32 value = 0;
+    u32 method = 0;
+    FILE *trace = NULL;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 32u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &receiver);
+    (void)uc_reg_read(uc, UC_ARM_REG_R1, &value);
+    (void)uc_reg_read(uc, UC_ARM_REG_R2, &method);
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_min_dispatch seq=%u module=JianghuOL.CBE "
+            "pc=01010734 receiver=%08x min=%u method=%08x\n",
+            traceCount, receiver, value, method & ~1u);
+    fclose(trace);
+}
+
+/* The caller recovered from 0x01010594 is the type-7 data-event dispatcher
+ * at 0x01012E4C.  Its first argument is passed unchanged to the CBE packet
+ * parser.  Look only at a syntactically bounded WT 1/27/4 object at that
+ * instruction boundary, so the already-proven `min` record can be tied back
+ * to an actual delivered CBE event without observing heap writes or changing
+ * any guest/host state. */
+static bool vm_scene_number_packet_read_min(const u8 *payload, u32 payloadLen,
+                                            u32 *valueOut,
+                                            const char **encodingOut)
+{
+    static const u8 name[] = {3u, 'm', 'i', 'n'};
+
+    if (payload == NULL || payloadLen < sizeof(name) + 2u)
+        return false;
+    for (u32 i = 0; i + sizeof(name) + 2u <= payloadLen; ++i)
+    {
+        u32 valuePos;
+
+        if (memcmp(payload + i, name, sizeof(name)) != 0)
+            continue;
+        valuePos = i + sizeof(name);
+        if (valuePos < payloadLen && payload[valuePos] == 0)
+            ++valuePos;
+        if (valuePos + 7u <= payloadLen && payload[valuePos] == 0x06u &&
+            payload[valuePos + 1u] == 0 && payload[valuePos + 2u] == 4u)
+        {
+            if (valueOut != NULL)
+            {
+                *valueOut = ((u32)payload[valuePos + 3u] << 24) |
+                            ((u32)payload[valuePos + 4u] << 16) |
+                            ((u32)payload[valuePos + 5u] << 8) |
+                            (u32)payload[valuePos + 6u];
+            }
+            if (encodingOut != NULL)
+                *encodingOut = "u32";
+            return true;
+        }
+        if (valuePos + 5u <= payloadLen && payload[valuePos] == 4u &&
+            payload[valuePos + 1u] == 0 && payload[valuePos + 2u] == 2u)
+        {
+            if (valueOut != NULL)
+                *valueOut = (u32)(((u16)payload[valuePos + 3u] << 8) |
+                                  payload[valuePos + 4u]);
+            if (encodingOut != NULL)
+                *encodingOut = "u16";
+            return true;
+        }
+        if (valuePos + 5u <= payloadLen && payload[valuePos] == 4u)
+        {
+            if (valueOut != NULL)
+            {
+                *valueOut = ((u32)payload[valuePos + 1u] << 24) |
+                            ((u32)payload[valuePos + 2u] << 16) |
+                            ((u32)payload[valuePos + 3u] << 8) |
+                            (u32)payload[valuePos + 4u];
+            }
+            if (encodingOut != NULL)
+                *encodingOut = "u32-compact";
+            return true;
+        }
+        if (valuePos + 4u <= payloadLen && payload[valuePos] == 0x03u &&
+            payload[valuePos + 1u] == 0 && payload[valuePos + 2u] == 1u)
+        {
+            if (valueOut != NULL)
+                *valueOut = payload[valuePos + 3u];
+            if (encodingOut != NULL)
+                *encodingOut = "u8";
+            return true;
+        }
+    }
+    return false;
+}
+
+static void vm_scene_number_event_27_4_code_callback(uc_engine *uc,
+                                                      uint64_t address,
+                                                      uint32_t size,
+                                                      void *user_data)
+{
+    enum { VM_SCENE_NUMBER_EVENT_PACKET_MAX = 4096 };
+    static u32 traceCount = 0;
+    u32 response = 0;
+    u32 arg1 = 0;
+    u32 arg2 = 0;
+    u32 eventType = 0;
+    u32 lr = 0;
+    u8 header[5];
+    u8 packet[VM_SCENE_NUMBER_EVENT_PACKET_MAX];
+    u32 packetLen;
+    u32 offset;
+    u32 objectIndex = 0;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 16u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &response);
+    (void)uc_reg_read(uc, UC_ARM_REG_R1, &arg1);
+    (void)uc_reg_read(uc, UC_ARM_REG_R2, &arg2);
+    (void)uc_reg_read(uc, UC_ARM_REG_R3, &eventType);
+    (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    if (eventType != 7u || response == 0 ||
+        uc_mem_read(uc, response, header, sizeof(header)) != UC_ERR_OK ||
+        header[0] != 'W' || header[1] != 'T')
+    {
+        return;
+    }
+    packetLen = ((u32)header[2] << 8) | header[3];
+    if (packetLen < sizeof(header) || packetLen > sizeof(packet) ||
+        uc_mem_read(uc, response, packet, packetLen) != UC_ERR_OK)
+    {
+        return;
+    }
+    offset = 5u;
+    while (objectIndex < packet[4] && offset + 6u <= packetLen)
+    {
+        u32 objectLen = ((u32)packet[offset + 4u] << 8) |
+                        packet[offset + 5u];
+
+        if (objectLen < 6u || objectLen > packetLen - offset)
+            return;
+        if (packet[offset] == 1u && packet[offset + 1u] == 27u &&
+            packet[offset + 2u] == 4u)
+        {
+            const char *encoding = "missing-or-unsupported";
+            u32 value = 0;
+            bool haveMin = vm_scene_number_packet_read_min(
+                packet + offset + 6u, objectLen - 6u, &value, &encoding);
+            FILE *trace = fopen("logs/scene-number-draw.log", "ab");
+
+            if (trace != NULL)
+            {
+                ++traceCount;
+                fprintf(trace,
+                        "scene_number_event_27_4 seq=%u module=JianghuOL.CBE "
+                        "pc=01012e4c event=%u response=%08x arg1=%08x "
+                        "arg2=%08x caller=%08x packet_len=%u object_index=%u "
+                        "min=%u encoding=%s present=%u\n",
+                        traceCount, eventType, response, arg1, arg2,
+                        lr & ~1u, packetLen, objectIndex, value, encoding,
+                        haveMin ? 1u : 0u);
+                fclose(trace);
+            }
+            if (traceCount >= 16u)
+                return;
+        }
+        offset += objectLen;
+        ++objectIndex;
+    }
+}
+
 static uc_err add_manager_code_hooks(uc_engine *uc)
 {
     uc_hook hook;
@@ -22827,6 +23181,39 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     ADD_MANAGER_CODE_HOOK(VM_VIDEO_FUNC_LIST_ADDRESS, hook_vm_video_code_callback);
 #undef ADD_MANAGER_CODE_HOOK
 #undef ADD_MANAGER_CODE_HOOK_RANGE
+    if (vm_scene_number_trace_enabled())
+    {
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_timer_init_code_callback, NULL,
+                          0x0104C252u, 0x0104C252u);
+        if (err != UC_ERR_OK)
+            return err;
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_min_field_create_code_callback,
+                          NULL, 0x01033D40u, 0x01033D40u);
+        if (err != UC_ERR_OK)
+            return err;
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_min_getter_code_callback, NULL,
+                          0x01010716u, 0x01010716u);
+        if (err != UC_ERR_OK)
+            return err;
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_min_source_code_callback, NULL,
+                          0x01010718u, 0x01010718u);
+        if (err != UC_ERR_OK)
+            return err;
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_min_dispatch_code_callback, NULL,
+                          0x01010734u, 0x01010734u);
+        if (err != UC_ERR_OK)
+            return err;
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_event_27_4_code_callback, NULL,
+                          0x01012E4Cu, 0x01012E4Cu);
+        if (err != UC_ERR_OK)
+            return err;
+    }
     return UC_ERR_OK;
 }
 

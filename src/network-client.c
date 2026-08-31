@@ -31,7 +31,16 @@ enum
     VM_CLIENT_SOCKET_TIMEOUT_MS = 5000,
     VM_CLIENT_REQUEST_MAX = 512,
     VM_CLIENT_QUEUE_MAX = 64,
-    VM_CLIENT_FOLLOWUP_MAX = 65536
+    VM_CLIENT_FOLLOWUP_MAX = 65536,
+    /* The dream-instance capture is opt-in and stops before an accidental
+     * long-running remote session can create an unbounded raw-packet dump. */
+    VM_CLIENT_DREAM_CAPTURE_MAX_RECORDS = 128,
+    VM_CLIENT_DREAM_CAPTURE_MAX_BYTES = 1024 * 1024,
+    VM_CLIENT_DREAM_CAPTURE_AUDIT_MAX_RECORDS = 512,
+    /* Only the native 1/27/4.min field is retained before the NPC-triggered
+     * raw capture is armed.  This closes the timer-origin gap without making
+     * a session-wide packet recorder. */
+    VM_CLIENT_DREAM_MIN_TRACE_MAX_RECORDS = 64
 };
 
 /* These emulator helpers historically lived in mock-server.c because that
@@ -81,6 +90,513 @@ typedef struct
     u16 payloadLen;
 } vm_client_wt_object;
 
+/*
+ * Read-only remote evidence capture for the unexplained timer seen after the
+ * NPC "enter instance" action.  The client has already constructed the
+ * request when this is called; the capture only copies those bytes to the
+ * active profile's logs directory.  In particular it does not add a packet,
+ * inspect or alter guest state, choose a callback, or influence delivery.
+ *
+ * CBE_CAPTURE_DREAM_INSTANCE=1 arms one capture on the first WT 1/26/1
+ * dialog/service request with type 1 or 2.  This covers both known Dream
+ * Messenger edges, while allowing the configured actor id to differ from the
+ * local fixture.  0xEB remains the known ENTER_INSTANCE operation namespace.
+ * Empty scene-poll replies are deliberately omitted; any nonempty poll reply
+ * remains evidence because it could carry a timed-state update.  The manifest
+ * lists the raw files and their original packet heads.
+ */
+typedef struct
+{
+    bool armed;
+    bool limitWritten;
+    u32 runId;
+    u32 entryOperation;
+    u32 recordCount;
+    u32 totalBytes;
+    char manifestPath[160];
+} vm_client_dream_capture_state;
+
+static vm_client_dream_capture_state g_vmClientDreamCapture;
+
+/* This audit deliberately retains only WT envelope metadata, not payload
+ * bytes. It distinguishes an unset capture environment from an unexpected
+ * remote request signature without exposing login or gameplay field values. */
+typedef struct
+{
+    bool started;
+    bool limitWritten;
+    u32 runId;
+    u32 recordCount;
+    char path[160];
+} vm_client_dream_capture_audit_state;
+
+static vm_client_dream_capture_audit_state g_vmClientDreamCaptureAudit;
+
+typedef struct
+{
+    bool started;
+    bool limitWritten;
+    u32 recordCount;
+    char path[160];
+} vm_client_dream_min_trace_state;
+
+static vm_client_dream_min_trace_state g_vmClientDreamMinTrace;
+
+static bool vm_client_dream_capture_is_enabled(void)
+{
+    static int enabled = -1;
+    const char *setting;
+
+    if (enabled >= 0)
+        return enabled != 0;
+    setting = getenv("CBE_CAPTURE_DREAM_INSTANCE");
+    enabled = setting != NULL && setting[0] != 0 &&
+              strcmp(setting, "0") != 0 && strcmp(setting, "off") != 0 &&
+              strcmp(setting, "false") != 0;
+    return enabled != 0;
+}
+
+static bool vm_client_dream_capture_get_u8_field(const u8 *payload,
+                                                 u32 payloadLen,
+                                                 const char *field,
+                                                 u8 *valueOut)
+{
+    u32 fieldLen = field ? (u32)strlen(field) : 0;
+
+    if (payload == NULL || fieldLen == 0 || fieldLen > 0xff ||
+        payloadLen < fieldLen + 5)
+    {
+        return false;
+    }
+    for (u32 i = 0; i + fieldLen + 5 <= payloadLen; ++i)
+    {
+        u32 valuePos;
+
+        if (payload[i] != (u8)fieldLen ||
+            memcmp(payload + i + 1, field, fieldLen) != 0)
+        {
+            continue;
+        }
+        valuePos = i + 1 + fieldLen;
+        if (valuePos < payloadLen && payload[valuePos] == 0)
+            ++valuePos;
+        if (valuePos + 4 <= payloadLen && payload[valuePos] == 0x03 &&
+            payload[valuePos + 1] == 0 && payload[valuePos + 2] == 1)
+        {
+            if (valueOut != NULL)
+                *valueOut = payload[valuePos + 3];
+            return true;
+        }
+        if (valuePos + 2 <= payloadLen && payload[valuePos] == 1)
+        {
+            if (valueOut != NULL)
+                *valueOut = payload[valuePos + 1];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_client_dream_capture_get_u32_field(const u8 *payload,
+                                                  u32 payloadLen,
+                                                  const char *field,
+                                                  u32 *valueOut)
+{
+    u32 fieldLen = field ? (u32)strlen(field) : 0;
+
+    if (payload == NULL || fieldLen == 0 || fieldLen > 0xff ||
+        payloadLen < fieldLen + 8)
+    {
+        return false;
+    }
+    for (u32 i = 0; i + fieldLen + 8 <= payloadLen; ++i)
+    {
+        u32 valuePos;
+
+        if (payload[i] != (u8)fieldLen ||
+            memcmp(payload + i + 1, field, fieldLen) != 0)
+        {
+            continue;
+        }
+        valuePos = i + 1 + fieldLen;
+        if (valuePos < payloadLen && payload[valuePos] == 0)
+            ++valuePos;
+        if (valuePos + 7 <= payloadLen && payload[valuePos] == 0x06 &&
+            payload[valuePos + 1] == 0 && payload[valuePos + 2] == 4)
+        {
+            if (valueOut != NULL)
+            {
+                *valueOut = ((u32)payload[valuePos + 3] << 24) |
+                            ((u32)payload[valuePos + 4] << 16) |
+                            ((u32)payload[valuePos + 5] << 8) |
+                            (u32)payload[valuePos + 6];
+            }
+            return true;
+        }
+        if (valuePos + 5 <= payloadLen && payload[valuePos] == 4)
+        {
+            if (valueOut != NULL)
+            {
+                *valueOut = ((u32)payload[valuePos + 1] << 24) |
+                            ((u32)payload[valuePos + 2] << 16) |
+                            ((u32)payload[valuePos + 3] << 8) |
+                            (u32)payload[valuePos + 4];
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_client_dream_capture_get_u16_field(const u8 *payload,
+                                                  u32 payloadLen,
+                                                  const char *field,
+                                                  u16 *valueOut)
+{
+    u32 fieldLen = field ? (u32)strlen(field) : 0;
+
+    if (payload == NULL || fieldLen == 0 || fieldLen > 0xff ||
+        payloadLen < fieldLen + 6)
+    {
+        return false;
+    }
+    for (u32 i = 0; i + fieldLen + 6 <= payloadLen; ++i)
+    {
+        u32 valuePos;
+
+        if (payload[i] != (u8)fieldLen ||
+            memcmp(payload + i + 1, field, fieldLen) != 0)
+        {
+            continue;
+        }
+        valuePos = i + 1 + fieldLen;
+        if (valuePos < payloadLen && payload[valuePos] == 0)
+            ++valuePos;
+        if (valuePos + 5 <= payloadLen && payload[valuePos] == 4 &&
+            payload[valuePos + 1] == 0 && payload[valuePos + 2] == 2)
+        {
+            if (valueOut != NULL)
+            {
+                *valueOut = (u16)(((u16)payload[valuePos + 3] << 8) |
+                                   payload[valuePos + 4]);
+            }
+            return true;
+        }
+        if (valuePos + 3 <= payloadLen && payload[valuePos] == 2)
+        {
+            if (valueOut != NULL)
+            {
+                *valueOut = (u16)(((u16)payload[valuePos + 1] << 8) |
+                                   payload[valuePos + 2]);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_client_dream_capture_is_npc_dialog_or_service_request(
+    const u8 *packet, u32 packetLen, u8 *requestTypeOut, u32 *operationOut)
+{
+    u16 declaredLen;
+    u16 objectLen;
+    u16 operation16 = 0;
+    u8 requestType = 0;
+    u32 operation = 0;
+
+    if (requestTypeOut != NULL)
+        *requestTypeOut = 0;
+    if (operationOut != NULL)
+        *operationOut = 0;
+    if (packet == NULL || packetLen < 17 || packet[0] != 'W' ||
+        packet[1] != 'T' || packet[4] != 1 || packet[5] != 26 ||
+        packet[6] != 1)
+    {
+        return false;
+    }
+    declaredLen = (u16)(((u16)packet[2] << 8) | packet[3]);
+    objectLen = (u16)(((u16)packet[7] << 8) | packet[8]);
+    if (declaredLen != packetLen || objectLen < 5 ||
+        (u32)objectLen + 4u != packetLen ||
+        !vm_client_dream_capture_get_u8_field(packet + 9,
+                                               (u32)objectLen - 5u,
+                                               "type", &requestType) ||
+        (requestType != 1 && requestType != 2))
+    {
+        return false;
+    }
+    (void)vm_client_dream_capture_get_u32_field(packet + 9,
+                                                 (u32)objectLen - 5u,
+                                                 "id", &operation);
+    if (operation == 0)
+    {
+        (void)vm_client_dream_capture_get_u16_field(packet + 9,
+                                                     (u32)objectLen - 5u,
+                                                     "id", &operation16);
+    }
+    if (operation == 0)
+        operation = operation16;
+    if (requestTypeOut != NULL)
+        *requestTypeOut = requestType;
+    if (operationOut != NULL)
+        *operationOut = operation;
+    return true;
+}
+
+static void vm_client_dream_capture_packet_summary(const u8 *packet,
+                                                   u32 packetLen,
+                                                   bool uplink,
+                                                   char *summary,
+                                                   size_t summaryCap)
+{
+    u32 offset;
+    u32 objectCount;
+    size_t used = 0;
+
+    if (summary == NULL || summaryCap == 0)
+        return;
+    summary[0] = 0;
+    if (packet == NULL || packetLen < 5 || packet[0] != 'W' ||
+        packet[1] != 'T' ||
+        (u16)(((u16)packet[2] << 8) | packet[3]) != packetLen)
+    {
+        snprintf(summary, summaryCap, "invalid-wt");
+        return;
+    }
+    offset = uplink ? 4u : 5u;
+    objectCount = uplink ? 0xffffffffu : packet[4];
+    for (u32 index = 0; index < objectCount && offset < packetLen; ++index)
+    {
+        u16 objectLen;
+        int written;
+
+        if (offset + (uplink ? 5u : 6u) > packetLen)
+        {
+            snprintf(summary + used, summaryCap - used,
+                     "%sinvalid", used ? "," : "");
+            return;
+        }
+        objectLen = uplink
+                        ? (u16)(((u16)packet[offset + 3] << 8) |
+                                packet[offset + 4])
+                        : (u16)(((u16)packet[offset + 4] << 8) |
+                                packet[offset + 5]);
+        if (objectLen < (uplink ? 5u : 6u) || offset + objectLen > packetLen)
+        {
+            snprintf(summary + used, summaryCap - used,
+                     "%sinvalid", used ? "," : "");
+            return;
+        }
+        written = snprintf(summary + used, summaryCap - used, "%s%u/%u/%u:%u",
+                           used ? "," : "", packet[offset], packet[offset + 1],
+                           packet[offset + 2], objectLen);
+        if (written < 0 || (size_t)written >= summaryCap - used)
+            return;
+        used += (size_t)written;
+        offset += objectLen;
+    }
+    if (offset != packetLen || summary[0] == 0)
+        snprintf(summary, summaryCap, "invalid-wt");
+}
+
+static void vm_client_dream_capture_note_uplink_audit(const u8 *packet,
+                                                      u32 packetLen,
+                                                      u32 connectId)
+{
+    char summary[384];
+    FILE *audit;
+
+    if (!g_vmClientDreamCaptureAudit.started)
+    {
+        memset(&g_vmClientDreamCaptureAudit, 0,
+               sizeof(g_vmClientDreamCaptureAudit));
+        g_vmClientDreamCaptureAudit.started = true;
+        g_vmClientDreamCaptureAudit.runId = SDL_GetTicks();
+        if (g_vmClientDreamCaptureAudit.runId == 0)
+            g_vmClientDreamCaptureAudit.runId = 1;
+        snprintf(g_vmClientDreamCaptureAudit.path,
+                 sizeof(g_vmClientDreamCaptureAudit.path),
+                 "logs/dream-instance-capture-audit-%08x.tsv",
+                 g_vmClientDreamCaptureAudit.runId);
+        audit = fopen(g_vmClientDreamCaptureAudit.path, "wb");
+        if (audit == NULL)
+        {
+            g_vmClientDreamCaptureAudit.started = false;
+            return;
+        }
+        fprintf(audit,
+                "# metadata-only uplink audit; no packet payload bytes are written\n"
+                "index\tscheduler_tick\twall_ms\tconnect\tlength\tobjects\n");
+        fclose(audit);
+    }
+    if (g_vmClientDreamCaptureAudit.recordCount >=
+        (u32)VM_CLIENT_DREAM_CAPTURE_AUDIT_MAX_RECORDS)
+    {
+        if (!g_vmClientDreamCaptureAudit.limitWritten)
+        {
+            g_vmClientDreamCaptureAudit.limitWritten = true;
+            audit = fopen(g_vmClientDreamCaptureAudit.path, "ab");
+            if (audit != NULL)
+            {
+                fprintf(audit, "limit\trecords=%u\tmax_records=%u\n",
+                        g_vmClientDreamCaptureAudit.recordCount,
+                        (u32)VM_CLIENT_DREAM_CAPTURE_AUDIT_MAX_RECORDS);
+                fclose(audit);
+            }
+        }
+        return;
+    }
+    vm_client_dream_capture_packet_summary(packet, packetLen, true, summary,
+                                           sizeof(summary));
+    audit = fopen(g_vmClientDreamCaptureAudit.path, "ab");
+    if (audit == NULL)
+        return;
+    ++g_vmClientDreamCaptureAudit.recordCount;
+    fprintf(audit, "%u\t%u\t%u\t%u\t%u\t%s\n",
+            g_vmClientDreamCaptureAudit.recordCount, g_schedulerTick,
+            SDL_GetTicks(), connectId, packetLen, summary);
+    fclose(audit);
+}
+
+static void vm_client_dream_capture_write_limit(const char *reason)
+{
+    FILE *manifest;
+
+    if (!g_vmClientDreamCapture.armed || g_vmClientDreamCapture.limitWritten)
+        return;
+    g_vmClientDreamCapture.limitWritten = true;
+    manifest = fopen(g_vmClientDreamCapture.manifestPath, "ab");
+    if (manifest != NULL)
+    {
+        fprintf(manifest,
+                "limit\t%s\trecords=%u\tbytes=%u\tmax_records=%u\tmax_bytes=%u\n",
+                reason ? reason : "unknown", g_vmClientDreamCapture.recordCount,
+                g_vmClientDreamCapture.totalBytes,
+                (u32)VM_CLIENT_DREAM_CAPTURE_MAX_RECORDS,
+                (u32)VM_CLIENT_DREAM_CAPTURE_MAX_BYTES);
+        fclose(manifest);
+    }
+    g_vmClientDreamCapture.armed = false;
+}
+
+static void vm_client_dream_capture_note_packet(const char *direction,
+                                                const u8 *packet,
+                                                u32 packetLen,
+                                                u32 eventType,
+                                                u32 sequence,
+                                                u32 connectId,
+                                                bool scenePoll)
+{
+    char rawPath[sizeof(g_vmClientDreamCapture.manifestPath) + 48];
+    char rawName[96];
+    char summary[384];
+    FILE *raw;
+    FILE *manifest;
+    bool uplink;
+    u32 recordIndex;
+
+    if (!g_vmClientDreamCapture.armed || packet == NULL || packetLen == 0 ||
+        (direction != NULL && strcmp(direction, "downlink") == 0 &&
+         scenePoll && packetLen == 5 && packet[0] == 'W' &&
+         packet[1] == 'T' && packet[4] == 0))
+    {
+        return;
+    }
+    if (g_vmClientDreamCapture.recordCount >=
+        (u32)VM_CLIENT_DREAM_CAPTURE_MAX_RECORDS)
+    {
+        vm_client_dream_capture_write_limit("record-cap");
+        return;
+    }
+    if (packetLen > (u32)VM_CLIENT_DREAM_CAPTURE_MAX_BYTES -
+                        g_vmClientDreamCapture.totalBytes)
+    {
+        vm_client_dream_capture_write_limit("byte-cap");
+        return;
+    }
+    recordIndex = ++g_vmClientDreamCapture.recordCount;
+    g_vmClientDreamCapture.totalBytes += packetLen;
+    uplink = direction != NULL && strcmp(direction, "uplink") == 0;
+    snprintf(rawName, sizeof(rawName),
+             "dream-instance-capture-%08x-%03u-%s.wt",
+             g_vmClientDreamCapture.runId, recordIndex,
+             uplink ? "uplink" : "downlink");
+    snprintf(rawPath, sizeof(rawPath), "logs/%s", rawName);
+    raw = fopen(rawPath, "wb");
+    if (raw == NULL || fwrite(packet, 1, packetLen, raw) != packetLen)
+    {
+        if (raw != NULL)
+            fclose(raw);
+        vm_client_dream_capture_write_limit("artifact-write-failed");
+        return;
+    }
+    fclose(raw);
+    vm_client_dream_capture_packet_summary(packet, packetLen, uplink, summary,
+                                           sizeof(summary));
+    manifest = fopen(g_vmClientDreamCapture.manifestPath, "ab");
+    if (manifest == NULL)
+    {
+        vm_client_dream_capture_write_limit("manifest-write-failed");
+        return;
+    }
+    fprintf(manifest,
+            "%u\t%s\t%u\t%u\t%u\t%u\t%u\t%s\t%u\t%s\t%s\n",
+            recordIndex, uplink ? "uplink" : "downlink", g_schedulerTick,
+            SDL_GetTicks(), connectId, eventType, sequence,
+            scenePoll ? "scene-poll" : "data", packetLen, summary, rawName);
+    fclose(manifest);
+}
+
+static void vm_client_dream_capture_note_uplink(const u8 *packet,
+                                                u32 packetLen,
+                                                u32 connectId)
+{
+    u8 requestType = 0;
+    u32 operation = 0;
+    FILE *manifest;
+    bool captureEnabled = vm_client_dream_capture_is_enabled();
+
+    if (captureEnabled)
+        vm_client_dream_capture_note_uplink_audit(packet, packetLen, connectId);
+
+    if (!g_vmClientDreamCapture.armed)
+    {
+        if (!captureEnabled ||
+            !vm_client_dream_capture_is_npc_dialog_or_service_request(
+                packet, packetLen, &requestType, &operation))
+        {
+            return;
+        }
+        memset(&g_vmClientDreamCapture, 0, sizeof(g_vmClientDreamCapture));
+        g_vmClientDreamCapture.armed = true;
+        g_vmClientDreamCapture.runId = SDL_GetTicks();
+        if (g_vmClientDreamCapture.runId == 0)
+            g_vmClientDreamCapture.runId = 1;
+        g_vmClientDreamCapture.entryOperation = operation;
+        snprintf(g_vmClientDreamCapture.manifestPath,
+                 sizeof(g_vmClientDreamCapture.manifestPath),
+                 "logs/dream-instance-capture-%08x.manifest.tsv",
+                 g_vmClientDreamCapture.runId);
+        manifest = fopen(g_vmClientDreamCapture.manifestPath, "wb");
+        if (manifest == NULL)
+        {
+            g_vmClientDreamCapture.armed = false;
+            return;
+        }
+        fprintf(manifest,
+                "# read-only dream-instance capture; no packet, callback, or scheduler mutation\n"
+                "# trigger=WT 1/26/1 type=%u id=%08x max_records=%u max_bytes=%u\n"
+                "index\tdirection\tscheduler_tick\twall_ms\tconnect\tevent\tsequence\tkind\tlength\tobjects\tfile\n",
+                requestType, operation, (u32)VM_CLIENT_DREAM_CAPTURE_MAX_RECORDS,
+                (u32)VM_CLIENT_DREAM_CAPTURE_MAX_BYTES);
+        fclose(manifest);
+        printf("[info][network] dream_instance_capture_arm type=%u operation=%08x artifacts=%s\n",
+               requestType, operation, g_vmClientDreamCapture.manifestPath);
+    }
+    vm_client_dream_capture_note_packet("uplink", packet, packetLen, 0, 0,
+                                        connectId, false);
+}
+
 static bool vm_client_next_wt_object(const u8 *packet, u32 packetLen,
                                      u32 *offset, vm_client_wt_object *object)
 {
@@ -102,6 +618,109 @@ static bool vm_client_next_wt_object(const u8 *packet, u32 packetLen,
     }
     *offset = start + objectLen;
     return true;
+}
+
+/* The CBE's 0x01010716 parser reads only the literal `min` field from a
+ * 1/27/4 record before initializing the map-number object.  When the existing
+ * opt-in Dream capture is enabled, preserve only that typed field from every
+ * downlink, including records received before the NPC request arms raw
+ * capture.  The helper observes opaque bytes and scheduler metadata only; it
+ * neither changes the response nor affects callback registration/delivery. */
+static void vm_client_dream_min_trace_note_downlink(const u8 *packet,
+                                                     u32 packetLen,
+                                                     u32 eventType,
+                                                     u32 sequence,
+                                                     u32 connectId)
+{
+    u32 offset = 5;
+    vm_client_wt_object object;
+
+    if (!vm_client_dream_capture_is_enabled() || packet == NULL ||
+        packetLen < 5 || packet[0] != 'W' || packet[1] != 'T')
+    {
+        return;
+    }
+    while (vm_client_next_wt_object(packet, packetLen, &offset, &object))
+    {
+        const char *encoding = NULL;
+        u32 value32 = 0;
+        u16 value16 = 0;
+        u8 value8 = 0;
+        u32 value = 0;
+        FILE *trace;
+
+        if (object.major != 1 || object.kind != 27 || object.subtype != 4)
+            continue;
+        if (vm_client_dream_capture_get_u32_field(object.payload,
+                                                   object.payloadLen,
+                                                   "min", &value32))
+        {
+            value = value32;
+            encoding = "u32";
+        }
+        else if (vm_client_dream_capture_get_u16_field(object.payload,
+                                                        object.payloadLen,
+                                                        "min", &value16))
+        {
+            value = value16;
+            encoding = "u16";
+        }
+        else if (vm_client_dream_capture_get_u8_field(object.payload,
+                                                       object.payloadLen,
+                                                       "min", &value8))
+        {
+            value = value8;
+            encoding = "u8";
+        }
+        else
+        {
+            encoding = "missing-or-unsupported";
+        }
+        if (!g_vmClientDreamMinTrace.started)
+        {
+            memset(&g_vmClientDreamMinTrace, 0,
+                   sizeof(g_vmClientDreamMinTrace));
+            g_vmClientDreamMinTrace.started = true;
+            snprintf(g_vmClientDreamMinTrace.path,
+                     sizeof(g_vmClientDreamMinTrace.path),
+                     "logs/dream-instance-min-field.tsv");
+            trace = fopen(g_vmClientDreamMinTrace.path, "wb");
+            if (trace == NULL)
+            {
+                g_vmClientDreamMinTrace.started = false;
+                return;
+            }
+            fprintf(trace,
+                    "# read-only 1/27/4.min observation; enabled by CBE_CAPTURE_DREAM_INSTANCE=1\n"
+                    "index\tscheduler_tick\twall_ms\tconnect\tevent\tsequence\tpacket_len\tpayload_len\tencoding\tmin\n");
+            fclose(trace);
+        }
+        if (g_vmClientDreamMinTrace.recordCount >=
+            (u32)VM_CLIENT_DREAM_MIN_TRACE_MAX_RECORDS)
+        {
+            if (!g_vmClientDreamMinTrace.limitWritten)
+            {
+                g_vmClientDreamMinTrace.limitWritten = true;
+                trace = fopen(g_vmClientDreamMinTrace.path, "ab");
+                if (trace != NULL)
+                {
+                    fprintf(trace, "limit\tmax_records=%u\n",
+                            (u32)VM_CLIENT_DREAM_MIN_TRACE_MAX_RECORDS);
+                    fclose(trace);
+                }
+            }
+            return;
+        }
+        trace = fopen(g_vmClientDreamMinTrace.path, "ab");
+        if (trace == NULL)
+            return;
+        ++g_vmClientDreamMinTrace.recordCount;
+        fprintf(trace, "%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%u\n",
+                g_vmClientDreamMinTrace.recordCount, g_schedulerTick,
+                SDL_GetTicks(), connectId, eventType, sequence, packetLen,
+                (u32)object.payloadLen, encoding, value);
+        fclose(trace);
+    }
 }
 
 static void vm_client_finish_wt_packet(u8 *packet, u32 len, u8 objectCount)
@@ -641,6 +1260,17 @@ static void vm_client_free_completion(vm_client_completion *completion)
     free(completion);
 }
 
+static void vm_client_dream_capture_note_downlink(
+    const vm_client_completion *completion)
+{
+    if (completion == NULL || !g_vmClientDreamCapture.armed)
+        return;
+    vm_client_dream_capture_note_packet(
+        "downlink", completion->response, completion->responseLen,
+        completion->eventType, completion->sequence, completion->connectId,
+        completion->kind == VM_CLIENT_JOB_SCENE_POLL);
+}
+
 static void *vm_client_worker_main(void *unused)
 {
     u8 *responseScratch = (u8 *)malloc(sizeof(g_netMockResponse));
@@ -1016,6 +1646,12 @@ static void vm_net_mock_async_drain_completions(void)
             vm_client_free_completion(completion);
             continue;
         }
+        vm_client_dream_min_trace_note_downlink(completion->response,
+                                                completion->responseLen,
+                                                completion->eventType,
+                                                completion->sequence,
+                                                completion->connectId);
+        vm_client_dream_capture_note_downlink(completion);
         channel = scheduler_find_net_channel(completion->connectId);
         if (channel == NULL || channel->callback == 0)
         {
@@ -1183,6 +1819,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
     if (uc_mem_read(MTK, dataPtr, request, readLen) != UC_ERR_OK)
         return;
+    vm_client_dream_capture_note_uplink(request, readLen, connectId);
     vm_shop_return_forensics_note_uplink(request, readLen, connectId);
     vm_automation_note_uplink(request, readLen);
     if (!vm_client_enqueue(VM_CLIENT_JOB_DATA, connectId, request, readLen))

@@ -19,6 +19,8 @@ if "%CBE_TRACE_SCE_ENTITY_CALLBACK%"=="" set "CBE_TRACE_SCE_ENTITY_CALLBACK=0"
 if "%CBE_TRACE_SCE_NODE_ACTOR_ID%"=="" set "CBE_TRACE_SCE_NODE_ACTOR_ID=1001"
 if "%CBE_TRACE_SCENE_BATTLE_COLLISION%"=="" set "CBE_TRACE_SCENE_BATTLE_COLLISION=0"
 if "%CBE_TRACE_SCREEN_LIFECYCLE_ORDER%"=="" set "CBE_TRACE_SCREEN_LIFECYCLE_ORDER=1"
+if "%CBE_CAPTURE_DREAM_INSTANCE%"=="" set "CBE_CAPTURE_DREAM_INSTANCE=0"
+if "%CBE_TRACE_SCENE_NUMBERS%"=="" set "CBE_TRACE_SCENE_NUMBERS=0"
 
 call "%~dp0prepare-profile.bat" "%PROFILE_DIR%" || (
     echo Profile setup failed for %~1.
@@ -37,5 +39,7 @@ echo [%~1] actor scene capacity trace: %CBE_TRACE_ACTOR_SCENE_CAPACITY% ^(max %C
 echo [%~1] SCE entity trace: %CBE_TRACE_SCE_ENTITY_CALLBACK% ^(actor %CBE_TRACE_SCE_NODE_ACTOR_ID%^)
 echo [%~1] scene battle collision trace: %CBE_TRACE_SCENE_BATTLE_COLLISION%
 echo [%~1] screen lifecycle ordering trace: %CBE_TRACE_SCREEN_LIFECYCLE_ORDER%
+echo [%~1] dream-instance packet capture: %CBE_CAPTURE_DREAM_INSTANCE%
+echo [%~1] scene-number draw trace: %CBE_TRACE_SCENE_NUMBERS%
 "%CLIENT_EXE%" "--mock-service=%ENDPOINT%"
 pause
