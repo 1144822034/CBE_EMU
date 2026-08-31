@@ -3545,77 +3545,39 @@ static bool vm_net_mock_build_scene_player_moveinfo_blob(u8 *out, u32 outCap,
                 seed->session->pendingDirQueueLen > 0 &&
                 seed->session->pendingDirQueueLen <= sizeof(seed->session->pendingDirQueueBlob))
             {
-                u8 catchupQueue[32];
-                u16 catchupLen = 0;
-                u16 catchupX = seed->session->pendingDirQueueStartX;
-                u16 catchupY = seed->session->pendingDirQueueStartY;
-                u16 directionCount = 0;
-                u16 skipDirections = 0;
-                u16 maxCatchupSteps = vm_net_mock_env_u8("CBE_SCENE_SYNC_MAX_CATCHUP_STEPS", 4);
-
                 /*
                  * scene_node_update_move_blob() copies the raw queue into
                  * node+136 and resets node+317/node+318. The per-frame
                  * ProcessSceneAutoAction() loop then starts from the outer x/y
-                 * position and consumes one 4-pixel step per queue byte. So a
-                 * live movement burst must be sent as:
-                 *   start-position + queued-bytes
-                 * once per observer-side delivery cursor. The source keeps the
-                 * latest burst until every observer has independently polled it.
-                 *
-                 * The upload is already a completed ten-frame history by the
-                 * time the service receives it. Replaying all ten frames keeps
-                 * the remote actor a second behind. Advance the exact outer
-                 * start through the older prefix and retain only the last few
-                 * real direction steps. Zero/idle bytes carry historical timing
-                 * but no position, so they are intentionally omitted here.
+                 * position and consumes one 4-pixel step per queue byte at the
+                 * original 100 ms frame cadence. The IDA-validated contract is
+                 * therefore "outer timeline start + full raw timeline". The
+                 * upload is already a completed ten-frame history, so the
+                 * replay trails the source by up to one second, but advancing
+                 * a skipped prefix into the outer x/y teleports the remote
+                 * actor and only animates the retained suffix, which observers
+                 * see as per-second frame skipping during continuous walks.
                  */
-                if (maxCatchupSteps == 0)
-                    maxCatchupSteps = 1;
-                if (maxCatchupSteps > sizeof(catchupQueue))
-                    maxCatchupSteps = sizeof(catchupQueue);
-                for (u16 i = 0; i < seed->session->pendingDirQueueLen; ++i)
-                {
-                    if (seed->session->pendingDirQueueBlob[i] != 0)
-                        ++directionCount;
-                }
-                skipDirections = directionCount > maxCatchupSteps ?
-                                 (u16)(directionCount - maxCatchupSteps) : 0;
-                for (u16 i = 0; i < seed->session->pendingDirQueueLen; ++i)
-                {
-                    u8 direction = seed->session->pendingDirQueueBlob[i];
-                    if (direction == 0)
-                        continue;
-                    if (skipDirections > 0)
-                    {
-                        vm_net_mock_apply_actor_moveinfo_timeline(&catchupX, &catchupY,
-                                                                  &direction, 1);
-                        --skipDirections;
-                        continue;
-                    }
-                    catchupQueue[catchupLen++] = direction;
-                }
                 if (!vm_net_mock_seq_put_i16(out, outCap, &pos,
-                                             catchupX))
+                                             seed->session->pendingDirQueueStartX))
                     return false;
                 if (!vm_net_mock_seq_put_i16(out, outCap, &pos,
-                                             catchupY))
+                                             seed->session->pendingDirQueueStartY))
                     return false;
                 if (!vm_net_mock_seq_put_u32(out, outCap, &pos, seed->actorId))
                     return false;
                 if (!vm_net_mock_seq_put_len16_blob(out, outCap, &pos,
-                                                    catchupQueue,
-                                                    catchupLen))
+                                                    seed->session->pendingDirQueueBlob,
+                                                    seed->session->pendingDirQueueLen))
                     return false;
                 if (vm_net_mock_verbose_logging_enabled())
                 {
-                    printf("[info][mock-service] scene_move_catchup source=%08x frames=%u directions=%u sent=%u start=(%u,%u) end=(%u,%u)\n",
+                    printf("[info][mock-service] scene_move_delta source=%08x serial=%u frames=%u start=(%u,%u) end=(%u,%u)\n",
                            seed->session->clientId,
+                           seed->session->pendingDirQueueSerial,
                            seed->session->pendingDirQueueLen,
-                           directionCount,
-                           catchupLen,
-                           catchupX,
-                           catchupY,
+                           seed->session->pendingDirQueueStartX,
+                           seed->session->pendingDirQueueStartY,
                            seed->session->pendingDirQueueEndX,
                            seed->session->pendingDirQueueEndY);
                 }
