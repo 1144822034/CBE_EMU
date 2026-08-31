@@ -18,6 +18,10 @@
 #include "automation_png.h"
 #endif
 static bool vm_file_try_download_named_resource(const char *normalizedPath);
+static void vm_automation_note_scene_number_draw(const char *atlas, bool alpha,
+                                                  int width, int height,
+                                                  int dstX, int dstY,
+                                                  u32 callerReturn);
 #include "vmFunc.c"
 #include "hookRam.c"
 #include "vmEvent.c"
@@ -214,6 +218,15 @@ typedef enum
      * It deliberately stops at the native scene boundary; it does not fake a
      * 16/1 request or call the mmGame action callback directly. */
     VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE,
+    /* Enters the player-1-captured 梦境三层 resource fixture and waits for a
+     * real map-layer numeric draw. It sends no scene action after the native
+     * scene-ready boundary. */
+    VM_AUTOMATION_SCENARIO_DREAM_CLOCK_PROBE,
+    /* Replays the observed NPC 30406 entry route through the client's own
+     * nearest-NPC prompt and task-hall selection before observing the same
+     * dream-scene number region.  It is deliberately separate from the
+     * direct-login control above. */
+    VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE,
     /* Opens the visible equipment toolbar icon exactly once after the native
      * scene boundary, then waits for CalcEquipStatBonus' read-only table
      * capture.  It is a data-forensics scenario, not a synthetic stat test. */
@@ -248,6 +261,10 @@ typedef enum
     VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH,
     VM_AUTOMATION_STAGE_WAIT_ROLE_LIST,
     VM_AUTOMATION_STAGE_WAIT_INITIAL_SCENE,
+    VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW,
+    VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_PROMPT,
+    VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_DIALOG,
+    VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_TARGET_SCENE,
     VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
     VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN,
     VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN,
@@ -278,6 +295,15 @@ typedef struct
     u8 titleModuleUpdateLifecycleRejectSeen;
     u8 titleRoleListSeen;
     u8 initialScenePacketSeen;
+    u8 dreamClockProbeArmed;
+    u8 dreamClockTopRightNumberSeen;
+    u8 dreamClockCandidateDrawCount;
+    u8 dreamNpcPromptPcSeen;
+    u8 dreamNpcPromptConfirmSent;
+    u8 dreamNpcDialogParserPcSeen;
+    u8 dreamNpcDialogConfirmSent;
+    u8 dreamNpcInstanceEnterResponseSeen;
+    u8 dreamNpcTargetScenePacketSeen;
     u8 shopStatusSeen;
     u8 shopMoneySeen;
     u8 shopReturnSeen;
@@ -326,6 +352,14 @@ typedef struct
     u32 titleModuleUpdateTotalSize;
     u32 titleModuleUpdateChecksum;
     u32 initialScenePacketFrame;
+    u32 dreamClockProbeArmFrame;
+    u32 dreamClockLastCandidateFrame;
+    u32 dreamClockLastCandidateCallerReturn;
+    u32 dreamNpcInstanceEnterResponseSequence;
+    u32 dreamNpcTargetScenePacketSequence;
+    u32 dreamNpcTargetScenePacketFrame;
+    int dreamClockLastCandidateX;
+    int dreamClockLastCandidateY;
     u32 titleScreenInitFrame;
     /* These are observed screen descriptors, not hard-coded client addresses.
      * The return touch must be delivered only after the actual 30/2 callback
@@ -375,6 +409,7 @@ static void vm_automation_note_screen_init(u32 screen, u32 initEntry,
 static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                                                  u32 eventType, u32 sequence);
 static void vm_automation_note_uplink(const u8 *packet, u32 packetLen);
+static void vm_automation_note_dream_npc_entry_pc(u32 pc);
 /* Startup-module update investigation only.  The helper is read-only and is
  * called exclusively from the opt-in automation trace path. */
 static void vm_autotest_trace_update_state(const char *phase, u32 sequence,
@@ -6347,6 +6382,14 @@ static const char *vm_automation_stage_name(vm_automation_stage stage)
     case VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH: return "wait-title-login";
     case VM_AUTOMATION_STAGE_WAIT_ROLE_LIST: return "wait-role-list";
     case VM_AUTOMATION_STAGE_WAIT_INITIAL_SCENE: return "wait-initial-scene";
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW:
+        return "wait-dream-map-number-draw";
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_PROMPT:
+        return "wait-dream-npc-prompt";
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_DIALOG:
+        return "wait-dream-npc-dialog";
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_TARGET_SCENE:
+        return "wait-dream-npc-target-scene";
     case VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES:
         return "wait-equipment-enhance-rules";
     case VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN: return "wait-shop-open";
@@ -6381,6 +6424,10 @@ static const char *vm_automation_scenario_name(void)
         return "title-module-update-v1";
     case VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE:
         return "scene-teleport-stone-probe-v1";
+    case VM_AUTOMATION_SCENARIO_DREAM_CLOCK_PROBE:
+        return "dream-clock-probe-v1";
+    case VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE:
+        return "dream-npc-entry-clock-probe-v1";
     case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE:
         return "equipment-enhance-rules-probe-v1";
     case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE:
@@ -6431,6 +6478,16 @@ static void vm_automation_write_result(const char *result, const char *reason)
             "  \"title_module_total_size\": %u,\n"
             "  \"title_module_checksum\": %u,\n"
             "  \"title_module_lifecycle_reject\": %u,\n"
+            "  \"dream_clock_candidate_draw_count\": %u,\n"
+            "  \"dream_clock_last_candidate_frame\": %u,\n"
+            "  \"dream_clock_last_candidate_dst\": [%d, %d],\n"
+            "  \"dream_clock_last_candidate_caller_return\": \"%08x\",\n"
+            "  \"dream_npc_prompt_pc_seen\": %u,\n"
+            "  \"dream_npc_dialog_parser_pc_seen\": %u,\n"
+            "  \"dream_npc_instance_enter_response_seen\": %u,\n"
+            "  \"dream_npc_instance_enter_response_sequence\": %u,\n"
+            "  \"dream_npc_target_scene_packet_seen\": %u,\n"
+            "  \"dream_npc_target_scene_packet_sequence\": %u,\n"
             "  \"timestamp_unix\": %lld\n"
             "}\n",
             vm_automation_scenario_name(), result ? result : "unknown",
@@ -6441,6 +6498,17 @@ static void vm_automation_write_result(const char *result, const char *reason)
             g_vmAutomation.titleModuleUpdateTotalSize,
             g_vmAutomation.titleModuleUpdateChecksum,
             g_vmAutomation.titleModuleUpdateLifecycleRejectSeen,
+            g_vmAutomation.dreamClockCandidateDrawCount,
+            g_vmAutomation.dreamClockLastCandidateFrame,
+            g_vmAutomation.dreamClockLastCandidateX,
+            g_vmAutomation.dreamClockLastCandidateY,
+            g_vmAutomation.dreamClockLastCandidateCallerReturn,
+            g_vmAutomation.dreamNpcPromptPcSeen,
+            g_vmAutomation.dreamNpcDialogParserPcSeen,
+            g_vmAutomation.dreamNpcInstanceEnterResponseSeen,
+            g_vmAutomation.dreamNpcInstanceEnterResponseSequence,
+            g_vmAutomation.dreamNpcTargetScenePacketSeen,
+            g_vmAutomation.dreamNpcTargetScenePacketSequence,
             (long long)now);
     fclose(stream);
 }
@@ -6586,6 +6654,101 @@ static void vm_automation_finish(int passed, const char *reason)
                      passed ? "passed" : "failed", reason ? reason : "-");
     /* vm_automation_render_complete asks the owned process to exit only after
      * the requested LCD-only evidence frame has been exported. */
+}
+
+/* The initial NPC prompt is client-created in scene_runtime_tick after
+ * FindNearestNPCWrapper returns a non-null node.  The isolated fixture has
+ * exactly one dynamic NPC (30406) at the role's starting point, so the two
+ * fixed CBE PCs below form a narrow input trigger rather than a coordinate
+ * search: +0x15154 creates that prompt and 0x010380E8 begins parsing its
+ * first 26/1 dialog response.  This helper only records those PC boundaries;
+ * vm_automation_tick later supplies the two ordinary confirm key events.
+ */
+static void vm_automation_note_dream_npc_entry_pc(u32 pc)
+{
+    if (!g_vmAutomation.active || g_vmAutomation.finished ||
+        g_vmAutomation.scenario !=
+            VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE)
+    {
+        return;
+    }
+    if (g_vmAutomation.stage == VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_PROMPT &&
+        pc == 0x01015154u && !g_vmAutomation.dreamNpcPromptPcSeen &&
+        g_vmAutomation.initialSceneScreen != 0 &&
+        vmAddedScreen == g_vmAutomation.initialSceneScreen)
+    {
+        g_vmAutomation.dreamNpcPromptPcSeen = 1;
+        vm_autotest_note("automation_dream_npc_trigger binary=JianghuOL.CBE "
+                         "local_pc=0x015154 hit=1 state=origin-scene-ready "
+                         "screen=%08x frame=%u\n",
+                         vmAddedScreen, g_vmAutomation.renderFrames);
+        return;
+    }
+    if (g_vmAutomation.stage == VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_DIALOG &&
+        pc == 0x010380E8u && !g_vmAutomation.dreamNpcDialogParserPcSeen)
+    {
+        g_vmAutomation.dreamNpcDialogParserPcSeen = 1;
+        vm_autotest_note("automation_dream_npc_trigger binary=JianghuOL.CBE "
+                         "local_pc=0x0380e8 hit=1 state=first-26-1-dialog "
+                         "frame=%u\n",
+                         g_vmAutomation.renderFrames);
+    }
+}
+
+/* The numeric atlas may serve multiple gameplay effects, so this does not
+ * label a draw as a timer.  It merely recognizes the screenshot-derived map
+ * rectangle after the native 梦境 scene shell is ready, captures the LCD, and
+ * retains the real CBE caller for later classification.  No guest memory,
+ * rendering parameter, callback, packet, or input is modified here. */
+static void vm_automation_note_scene_number_draw(const char *atlas, bool alpha,
+                                                  int width, int height,
+                                                  int dstX, int dstY,
+                                                  u32 callerReturn)
+{
+    const bool inScreenshotMapRect = dstX >= 160 && dstX <= 232 &&
+                                     dstY >= 62 && dstY <= 105;
+
+    if (!g_vmAutomation.active || g_vmAutomation.finished ||
+        (g_vmAutomation.scenario != VM_AUTOMATION_SCENARIO_DREAM_CLOCK_PROBE &&
+         g_vmAutomation.scenario !=
+             VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE) ||
+        g_vmAutomation.stage != VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW ||
+        !g_vmAutomation.dreamClockProbeArmed || atlas == NULL ||
+        strcmp(atlas, "combat-number-atlas") != 0 || !inScreenshotMapRect ||
+        g_vmAutomation.initialSceneScreen == 0 ||
+        vmAddedScreen != g_vmAutomation.initialSceneScreen)
+    {
+        return;
+    }
+
+    if (g_vmAutomation.dreamClockLastCandidateFrame == 0 ||
+        g_vmAutomation.renderFrames >
+            g_vmAutomation.dreamClockLastCandidateFrame + 1u)
+    {
+        g_vmAutomation.dreamClockCandidateDrawCount = 0;
+    }
+    if (g_vmAutomation.dreamClockCandidateDrawCount < 0xffu)
+        ++g_vmAutomation.dreamClockCandidateDrawCount;
+    g_vmAutomation.dreamClockLastCandidateFrame = g_vmAutomation.renderFrames;
+    g_vmAutomation.dreamClockLastCandidateCallerReturn = callerReturn;
+    g_vmAutomation.dreamClockLastCandidateX = dstX;
+    g_vmAutomation.dreamClockLastCandidateY = dstY;
+    vm_autotest_note("automation_dream_map_number_draw atlas=%s alpha=%u "
+                     "clip=%dx%d dst=(%d,%d) caller_return=%08x frame=%u "
+                     "group_count=%u\n",
+                     atlas, alpha ? 1u : 0u, width, height, dstX, dstY,
+                     callerReturn, g_vmAutomation.renderFrames,
+                     g_vmAutomation.dreamClockCandidateDrawCount);
+
+    /* Four mm:ss glyphs normally arrive as separate clipped blits.  A future
+     * client may batch the row into one wide blit, so accept that equally
+     * observable rendering fact without synthesizing any scene interaction. */
+    if (g_vmAutomation.dreamClockCandidateDrawCount >= 3u || width >= 24)
+    {
+        g_vmAutomation.dreamClockTopRightNumberSeen = 1;
+        vm_automation_request_capture("dream-map-number-observed");
+        vm_automation_finish(1, "dream-map-number-draw-observed");
+    }
 }
 
 static int vm_automation_issue_key(int key, const char *trigger)
@@ -7501,6 +7664,7 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     u8 sawActorOtherAck = 0;
     u8 sawModuleUpdateChunk = 0;
     u8 sawEquipmentEnhanceStage1 = 0;
+    u8 sawDreamNpcInstanceEnter = 0;
 
     if (!g_vmAutomation.active ||
         packet == NULL || eventType != 7 ||
@@ -7534,6 +7698,8 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
             sawShopMoney = 1;
         if (kind == 30 && subtype == 2)
             sawSceneComplete = 1;
+        if (kind == 30 && subtype == 1)
+            sawDreamNpcInstanceEnter = 1;
         if (kind == 2 && subtype == 10)
             sawActorOtherAck = 1;
         if (kind == 29 && subtype == 1)
@@ -7590,10 +7756,34 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
         vm_autotest_trace_update_state("response-queued", sequence,
                                        packet, packetLen);
     }
+    if (sawDreamNpcInstanceEnter &&
+        g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE &&
+        !g_vmAutomation.dreamNpcInstanceEnterResponseSeen)
+    {
+        g_vmAutomation.dreamNpcInstanceEnterResponseSeen = 1;
+        g_vmAutomation.dreamNpcInstanceEnterResponseSequence = sequence;
+        vm_autotest_note("automation_dream_npc_instance_enter_response "
+                         "seq=%u frame=%u object=30/1\n",
+                         sequence, g_vmAutomation.renderFrames);
+    }
     if (sawTaskSubset)
     {
         g_vmAutomation.initialScenePacketSeen = 1;
         g_vmAutomation.initialScenePacketFrame = g_vmAutomation.renderFrames;
+        if (g_vmAutomation.scenario ==
+                VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE &&
+            g_vmAutomation.dreamNpcInstanceEnterResponseSeen &&
+            !g_vmAutomation.dreamNpcTargetScenePacketSeen)
+        {
+            g_vmAutomation.dreamNpcTargetScenePacketSeen = 1;
+            g_vmAutomation.dreamNpcTargetScenePacketSequence = sequence;
+            g_vmAutomation.dreamNpcTargetScenePacketFrame =
+                g_vmAutomation.renderFrames;
+            vm_autotest_note("automation_dream_npc_target_scene_packet "
+                             "seq=%u frame=%u source=25-5-after-30-1\n",
+                             sequence, g_vmAutomation.renderFrames);
+        }
     }
     if (sawTitleUpdateComplete && !g_vmAutomation.titleUpdateCompleteSeen)
     {
@@ -7707,9 +7897,9 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                          sequence, g_vmAutomation.hangupSettlementResponseCount,
                          g_vmAutomation.inputCount, g_vmAutomation.renderFrames);
     }
-    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u actor_other_ack=%u enhance_stage1=%u hangup=%u auto=%u/%u native_exit25_2=%u settlement=%u hangup_count=%u action_count=%u\n",
+    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_enter=%u scene_complete=%u actor_other_ack=%u enhance_stage1=%u hangup=%u auto=%u/%u native_exit25_2=%u settlement=%u hangup_count=%u action_count=%u\n",
                      sequence, sawTitleUpdateComplete, sawTitleLoginResponse, sawTaskSubset, sawShopStatus, sawShopMoney,
-                     sawSceneComplete, sawActorOtherAck, sawEquipmentEnhanceStage1, sawHangup, sawAutoEnable, sawAutoDisable,
+                     sawDreamNpcInstanceEnter, sawSceneComplete, sawActorOtherAck, sawEquipmentEnhanceStage1, sawHangup, sawAutoEnable, sawAutoDisable,
                      sawNativeAutoExit, sawSettlement, g_vmAutomation.hangupBattleResponseCount,
                      g_vmAutomation.battleActionResponseCount);
 }
@@ -7743,10 +7933,20 @@ static void vm_automation_tick(void)
                  VM_AUTOMATION_STAGE_WAIT_HANGUP_NATIVE_AUTO_EXIT)
             stageTimeoutMs = 60000u;
         else if (g_vmAutomation.stage ==
+                 VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW)
+            stageTimeoutMs = 75000u;
+        else if (g_vmAutomation.stage ==
                  VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_CANCEL_RESPONSE)
             stageTimeoutMs = 30000u;
         if (now - g_vmAutomation.stageStartedMs > stageTimeoutMs)
         {
+            if (g_vmAutomation.stage ==
+                VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW)
+            {
+                vm_automation_request_capture("dream-map-number-not-observed");
+                vm_automation_finish(0, "dream-map-number-not-observed");
+                return;
+            }
             vm_automation_finish(0, "stage-timeout");
             return;
         }
@@ -7789,6 +7989,34 @@ static void vm_automation_tick(void)
                  * captures the authored marker scene.  It deliberately does
                  * not manufacture the next scene interaction request. */
                 vm_automation_finish(1, "initial-scene-25-5-and-rendered-frame");
+            }
+            else if (g_vmAutomation.scenario ==
+                     VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE)
+            {
+                /* The origin scene contains one fixture-owned 30406 at the
+                 * role's coordinates.  No world-coordinate tap is guessed:
+                 * the following two confirm keys wait for the declared CBE
+                 * prompt/parser PCs in vm_automation_note_dream_npc_entry_pc.
+                 */
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                vm_automation_request_capture("dream-npc-origin-scene-ready");
+                vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_PROMPT,
+                                        "origin-25-5-and-rendered-frame");
+            }
+            else if (g_vmAutomation.scenario ==
+                     VM_AUTOMATION_SCENARIO_DREAM_CLOCK_PROBE)
+            {
+                /* The exact observed numeric rectangle is monitored only
+                 * after a normal scene 25/5 and two LCD frames. No map tap,
+                 * movement, combat action, request, or callback is issued. */
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                g_vmAutomation.dreamClockProbeArmed = 1;
+                g_vmAutomation.dreamClockProbeArmFrame =
+                    g_vmAutomation.renderFrames;
+                vm_automation_request_capture("dream-scene-ready");
+                vm_automation_set_stage(
+                    VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW,
+                    "native-scene-25-5-and-rendered-frame");
             }
             else if (g_vmAutomation.scenario ==
                          VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE ||
@@ -7929,6 +8157,52 @@ static void vm_automation_tick(void)
                 vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN,
                                         "rightmost-shop-icon-tapped");
             }
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW:
+        /* Completion is driven only by vm_automation_note_scene_number_draw.
+         * The bounded timeout above records a negative observation. */
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_PROMPT:
+        if (g_vmAutomation.dreamNpcPromptPcSeen &&
+            !g_vmAutomation.dreamNpcPromptConfirmSent &&
+            vm_automation_issue_key('f',
+                                    "JianghuOL.CBE+0x015154-nearest-npc-prompt"))
+        {
+            g_vmAutomation.dreamNpcPromptConfirmSent = 1;
+            vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_DIALOG,
+                                    "npc-prompt-confirm-key-sent");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_DIALOG:
+        if (g_vmAutomation.dreamNpcDialogParserPcSeen &&
+            !g_vmAutomation.dreamNpcDialogConfirmSent &&
+            vm_automation_issue_key('f',
+                                    "JianghuOL.CBE+0x0380e8-first-dialog-option"))
+        {
+            g_vmAutomation.dreamNpcDialogConfirmSent = 1;
+            vm_automation_set_stage(
+                VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_TARGET_SCENE,
+                "npc-enter-instance-option-confirmed");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_DREAM_NPC_TARGET_SCENE:
+        if (g_vmAutomation.dreamNpcInstanceEnterResponseSeen &&
+            g_vmAutomation.dreamNpcTargetScenePacketSeen &&
+            g_vmAutomation.renderFrames >=
+                g_vmAutomation.dreamNpcTargetScenePacketFrame + 2u)
+        {
+            /* This is the client-owned 30/1 -> scene-load -> 25/5 boundary.
+             * The number observer begins only after it, and still injects no
+             * combat, map, or timer input. */
+            g_vmAutomation.initialSceneScreen = vmAddedScreen;
+            g_vmAutomation.dreamClockProbeArmed = 1;
+            g_vmAutomation.dreamClockProbeArmFrame =
+                g_vmAutomation.renderFrames;
+            vm_automation_request_capture("dream-npc-target-scene-ready");
+            vm_automation_set_stage(
+                VM_AUTOMATION_STAGE_WAIT_DREAM_CLOCK_DRAW,
+                "npc-30-1-followed-by-25-5-and-rendered-frame");
         }
         break;
     case VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES:
@@ -8690,6 +8964,10 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE;
     else if (strcmp(scenario, "scene-teleport-stone-probe-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE;
+    else if (strcmp(scenario, "dream-clock-probe-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_DREAM_CLOCK_PROBE;
+    else if (strcmp(scenario, "dream-npc-entry-clock-probe-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE;
     else if (strcmp(scenario, "equipment-enhance-rules-probe-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE;
     else if (strcmp(scenario, "equipment-enhance-bag-probe-v1") == 0)
@@ -8724,10 +9002,16 @@ static void vm_automation_init_config(int argc, char *args[])
     g_vmAutomation.maxSteps = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
         ? 1u : (parsedScenario == VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT
             ? 14u : (parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
-                ? 4u : (g_vmAutomation.timedTitleDriver ? 13u : 10u)));
+                ? 4u : (parsedScenario == VM_AUTOMATION_SCENARIO_DREAM_CLOCK_PROBE
+                    ? 6u : (parsedScenario ==
+                             VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE
+                        ? 9u : (g_vmAutomation.timedTitleDriver ? 13u : 10u)))));
     g_vmAutomation.totalTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
         ? 30000u : (parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
-            ? 75000u : (g_vmAutomation.timedTitleDriver ? 180000u : 120000u));
+            ? 75000u : (parsedScenario == VM_AUTOMATION_SCENARIO_DREAM_CLOCK_PROBE
+                ? 150000u : (parsedScenario ==
+                             VM_AUTOMATION_SCENARIO_DREAM_NPC_ENTRY_CLOCK_PROBE
+                    ? 200000u : (g_vmAutomation.timedTitleDriver ? 180000u : 120000u))));
     g_vmAutomation.stepTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
         ? 30000u : 15000u;
     snprintf(g_vmAutomation.artifactDir, sizeof(g_vmAutomation.artifactDir),
@@ -22585,6 +22869,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         vm_hangup_combatinfo_read_trace_note_pc(pc);
         vm_hangup_candidate_fault_trace_note_pc(pc);
         vm_automation_note_battle_native_exit_pc(pc);
+        vm_automation_note_dream_npc_entry_pc(pc);
         vm_hangup_battle_render_trace_note_pc(pc);
         vm_hangup_vital_forensics_note_pc(pc);
         vm_battle_insight_forensics_note_pc(pc);

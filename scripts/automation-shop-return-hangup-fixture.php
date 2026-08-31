@@ -8,7 +8,7 @@
  *
  * Usage:
  *   php scripts/automation-shop-return-hangup-fixture.php create <database>
- *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|hangup-vitals|hangup-vitals-flask|teleport-stone-c00|equipment-enhance|linan-scene-battle]
+ *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|hangup-vitals|hangup-vitals-flask|teleport-stone-c00|dream-clock|dream-npc-entry|equipment-enhance|linan-scene-battle]
  *   php scripts/automation-shop-return-hangup-fixture.php client-login <nvram-file>
  *   php scripts/automation-shop-return-hangup-fixture.php cleanup <database>
  */
@@ -122,6 +122,7 @@ $roleId = 810001;
 $profile = $argv[3] ?? 'hangup-peach';
 $backpackItemCount = 0;
 $nextBackpackSeq = 1;
+$dreamTargetScene = null;
 if ($profile === 'hangup-peach') {
     $scene = hex2bin('3031CCD2BBA8B5BA5F30312E736365'); /* 01桃花岛_01.sce, GBK */
     $posX = 146;
@@ -184,8 +185,42 @@ if ($profile === 'hangup-peach') {
     $posY = 104;
     $hp = 120;
     $mp = 100;
+} elseif ($profile === 'dream-clock') {
+    /* The direct control begins in the same installed player-1 dream scene
+     * and position as the NPC path, but does not create an NPC interaction. */
+    $scene = hex2bin('3239C3CEBEB3BFD5BCE45F30332E736365'); /* 29梦境空间_03.sce, GBK */
+    $dreamTargetScene = $scene;
+    $posX = 120;
+    $posY = 120;
+    $hp = 120;
+    $mp = 100;
+} elseif ($profile === 'dream-npc-entry') {
+    /* c04临安府_06.sce, GBK.  The guide is placed at the identical isolated
+     * role coordinate, so the CBE's native nearest-NPC prompt finds exactly
+     * one actor; no world-coordinate tap is fabricated by the test. */
+    $scene = hex2bin('633034C1D9B0B2B8AE5F30362E736365');
+    $posX = 137;
+    $posY = 321;
+    $hp = 120;
+    $mp = 100;
+    $dreamTargetScene = hex2bin('3239C3CEBEB3BFD5BCE45F30332E736365');
 } else {
     throw new InvalidArgumentException('unknown isolated automation fixture profile');
+}
+
+if ($profile === 'dream-clock' || $profile === 'dream-npc-entry') {
+    /* MySQL DDL implicitly commits, so prepare the fixture-only operator
+     * table before the role/content seed transaction begins. */
+    $db->exec(
+        'CREATE TABLE IF NOT EXISTS server_admin_users ('
+        . 'account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,'
+        . 'password_value VARBINARY(64) NOT NULL,'
+        . 'failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,'
+        . 'locked TINYINT UNSIGNED NOT NULL DEFAULT 0,'
+        . 'created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,'
+        . 'updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,'
+        . 'PRIMARY KEY(account_id)) ENGINE=InnoDB'
+    );
 }
 
 $db->beginTransaction();
@@ -243,9 +278,68 @@ try {
             . 'enhance_level,durability,durability_max) VALUES(?,?,?,?,?,?,?,?,?)'
         )->execute([$account, $roleId, 0, 1101, 9, 1, 2, 80, 80]);
     }
+    if ($profile === 'dream-clock' || $profile === 'dream-npc-entry') {
+        /* The 411-byte player-1 SCE is the only durable evidence of this
+         * release now: jh_online no longer holds its former draft or deploy
+         * ledger.  Its client-consumed kind-3 record is recovered verbatim
+         * from that SCE (ID 3001, x=180, y=141, one copy, field16=5,
+         * e_fire.actor, e_ghostfireR.actor).  Keep the display name as its
+         * original GBK bytes so this UTF-8 PHP source remains portable.
+         *
+         * This inserts a draft only into the unique automation schema.  The
+         * runner then invokes the service's ordinary admin deploy action,
+         * which captures the clean 278-byte base, creates the overlay,
+         * updates the delivery manifest, and writes the deployment ledger.
+         * It rejects the run unless that generated overlay hashes to the
+         * pinned 411-byte player-1 resource. */
+        $dreamDisplayName = hex2bin('C3CEBEB32DB3E3C8C8');
+        if ($dreamDisplayName === false) {
+            throw new RuntimeException('could not decode pinned dream battle display name');
+        }
+        $db->prepare(
+            'INSERT INTO server_scene_battle_monsters('
+            . 'scene,monster_id,pos_x,pos_y,quantity,display_name,actor_resource,'
+            . 'effect_resource,visual_hint,enabled) VALUES(?,?,?,?,?,?,?,?,?,1)'
+        )->execute([$dreamTargetScene, 3001, 180, 141, 1, $dreamDisplayName,
+                     'e_fire.actor', 'e_ghostfireR.actor', 5]);
+        /* The normal deploy action is protected by a per-process browser
+         * session.  Create an explicitly named operator only in this unique
+         * schema, then let the runner authenticate through /login and submit
+         * /action exactly like the administration page.  It is not copied
+         * from, nor usable against, the user's service database. */
+        $db->prepare(
+            'INSERT INTO server_admin_users(account_id,password_value,failed_attempts,locked) '
+            . 'VALUES(?,?,0,0) ON DUPLICATE KEY UPDATE password_value=VALUES(password_value),'
+            . 'failed_attempts=0,locked=0'
+        )->execute(['dream_probe_admin', 'dream-probe-admin-v1']);
+        echo 'seeded pinned player-1 dream battle draft monster=3001 x=180 y=141 '
+            . 'quantity=1 source=411-byte-sce; deployment=pending-authenticated-admin-action' . "\n";
+
+        if ($profile === 'dream-npc-entry') {
+            /* Fixture-owned dynamic data in the unique automation schema.
+             * The two confirm inputs are still emitted only after CBE PC
+             * boundaries; this row merely supplies normal server-backed NPC
+             * content. */
+            $db->prepare(
+                'INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,'
+                . 'display_name,script_name,service_option_name,service_option_description,enabled) '
+                . 'VALUES(?,?,?,?,?,?,?,?,?,?,?,1)'
+            )->execute([$scene, 30406, $posX, $posY, 6, 0, 'n_woman1.actor',
+                         'DreamInstanceGuide', '', '', '']);
+            $db->prepare(
+                'INSERT INTO server_dynamic_npc_instances('
+                . 'scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,minimum_level) '
+                . 'VALUES(?,?,?,?,?,?,?,?)'
+            )->execute([$scene, 30406,
+                         $dreamTargetScene,
+                         120, 120, 0, 3001, 1]);
+        }
+    }
     $db->commit();
     echo "seeded guest00001 role=810001 profile=$profile in isolated automation database\n";
 } catch (Throwable $error) {
-    $db->rollBack();
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
     throw $error;
 }
