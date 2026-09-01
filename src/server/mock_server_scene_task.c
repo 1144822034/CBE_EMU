@@ -1108,11 +1108,12 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
     bool fbScene = false;
     bool keepLead08 = false;
     const char *writeError = NULL;
-    const char *publishError = NULL;
     const char *fillError = NULL;
-    const char *actorPublishError = NULL;
     const char *bindError = NULL;
 
+    (void)runtimeActorEnsureX;
+    (void)runtimeActorEnsureY;
+    (void)runtimeSkipAllActors;
     if (errorOut)
         *errorOut = "地图刷怪点保存失败";
     if (scene == NULL || scene[0] == 0 ||
@@ -1290,34 +1291,6 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
             snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
                      "\xb9\xd6");
         }
-        {
-            bool publishActor = false;
-
-            if (!runtimeSkipAllActors)
-            {
-                if (runtimeActorEnsureX == 0 && runtimeActorEnsureY == 0)
-                    publishActor = true;
-                else if (spawn.x == runtimeActorEnsureX &&
-                         spawn.y == runtimeActorEnsureY)
-                    publishActor = true;
-            }
-            if (publishActor &&
-                (!vm_net_mock_ensure_actor_resource_published(spawn.actorResource,
-                                                              &actorPublishError) ||
-                 (spawn.actorResource2[0] != 0 &&
-                  !vm_net_mock_ensure_actor_resource_published(
-                      spawn.actorResource2, &actorPublishError))))
-            {
-                free(data);
-                free(located);
-                free(block);
-                if (errorOut)
-                    *errorOut = actorPublishError ?
-                                    actorPublishError :
-                                    "地图刷怪 Actor 资源无法发布（请先在怪物管理指定有效 Actor）";
-                return false;
-            }
-        }
         recordLen = vm_net_mock_sce_combat_spawn_encode(&spawn, record,
                                                          sizeof(record));
         if (recordLen == 0 || blockLen + recordLen > 4096u)
@@ -1375,15 +1348,13 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
             return false;
         }
     }
-    if (!vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError) ||
-        !vm_net_mock_publish_scene_resource(scene, &publishError))
+    if (!vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError))
     {
         free(data);
         free(located);
         free(block);
         if (errorOut)
-            *errorOut = publishError ? publishError :
-                        (writeError ? writeError : "地图刷怪点写入或发布失败");
+            *errorOut = writeError ? writeError : "地图刷怪点写入失败";
         return false;
     }
     free(data);
@@ -1400,7 +1371,7 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
     if (errorOut)
         *errorOut = "ok";
     printf("[info][mock-admin] scene_combat_spawn_save scene=%s count=%u "
-           "fb=%u lead08=%u bindings=%u\n",
+           "fb=%u lead08=%u bindings=%u named_publish=off\n",
            scene, bindCount, fbScene ? 1u : 0u, keepLead08 ? 1u : 0u,
            bindCount);
     return true;
@@ -2138,6 +2109,10 @@ static bool vm_net_mock_sce_combat_spawn_scene_uses_wire_real_split(
     return false;
 }
 
+/* Implemented in mock_server_world_boss.c (same TU, included later). */
+u32 vm_mock_world_boss_remap_battle_enemy(const char *scene, u32 wireId,
+                                          u32 posx, u32 posy);
+
 static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
     const char *scene, u32 wireActorId, u32 posx, u32 posy)
 {
@@ -2145,11 +2120,21 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
     u32 wireOnlyCount = 0;
     bool wireRealUnanimous = true;
     bool sceneHasSplit = false;
+    u32 worldBossReal = 0;
 
     if (wireActorId == 0)
         return 0;
     if (scene == NULL || scene[0] == 0)
         return wireActorId;
+    worldBossReal =
+        vm_mock_world_boss_remap_battle_enemy(scene, wireActorId, posx, posy);
+    if (worldBossReal != 0)
+    {
+        printf("[info][network] mock_scene_combat_spawn_remap scene=%s "
+               "pos=(%u,%u) wire=%u real=%u source=world-boss-runtime\n",
+               scene, posx, posy, wireActorId, worldBossReal);
+        return worldBossReal;
+    }
     sceneHasSplit =
         vm_net_mock_sce_combat_spawn_scene_uses_wire_real_split(scene);
     vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
@@ -4132,7 +4117,6 @@ static bool vm_net_mock_scene_display_name_patch_sce(const char *scene,
     u16 value = 0;
     char tmp[96];
     const char *writeError = NULL;
-    const char *publishError = NULL;
     char dbg[192];
 
     if (patchedOut)
@@ -4232,13 +4216,11 @@ static bool vm_net_mock_scene_display_name_patch_sce(const char *scene,
         ++patched;
     }
 
-    if (!vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError) ||
-        !vm_net_mock_publish_scene_resource(scene, &publishError))
+    if (!vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError))
     {
         free(data);
         if (errorOut)
-            *errorOut = publishError ? publishError :
-                        (writeError ? writeError : "场景显示名发布失败");
+            *errorOut = writeError ? writeError : "场景显示名写入失败";
         return false;
     }
     free(data);
@@ -4247,7 +4229,7 @@ static bool vm_net_mock_scene_display_name_patch_sce(const char *scene,
     if (errorOut)
         *errorOut = "ok";
     printf("[info][mock-admin] scene_display_name_sce_patch scene=%s "
-           "name_bytes=%u patched=%u\n",
+           "name_bytes=%u patched=%u named_publish=off\n",
            scene, (u32)strlen(displayName), patched);
     return true;
 }
@@ -4496,22 +4478,34 @@ static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
     return count;
 }
 
+static u32 vm_net_mock_append_sce_file_npcinfo_seeds(
+    const char *scene,
+    vm_net_mock_scene_npcinfo_seed *seeds,
+    u32 seedCap,
+    u32 *inoutCount,
+    bool applyOverrides);
+
 static u32 vm_net_mock_dynamic_npc_admin_list(
     const char *scene,
     vm_net_mock_dynamic_npc_admin_row *rows,
     u32 rowCap)
 {
     vm_net_mock_scene_npcinfo_seed builtins[VM_NET_MOCK_SCENE_NPCINFO_MAX];
+    vm_net_mock_scene_npcinfo_seed occupied[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
     u32 builtinCount = 0;
     u32 count = 0;
+    u32 occupiedCount = 0;
+    u32 beforeSce = 0;
 
     if (scene == NULL || rows == NULL || rowCap == 0)
         return 0;
     memset(rows, 0, sizeof(*rows) * rowCap);
     memset(builtins, 0, sizeof(builtins));
+    memset(occupied, 0, sizeof(occupied));
     builtinCount = vm_net_mock_append_builtin_scene_npcinfo_seeds(
         scene, builtins, VM_NET_MOCK_SCENE_NPCINFO_MAX);
     (void)vm_net_mock_dynamic_npc_db_load();
+
     for (u32 i = 0; i < builtinCount && count < rowCap; ++i)
     {
         int overrideIndex = vm_net_mock_dynamic_npc_find_override(
@@ -4532,25 +4526,68 @@ static u32 vm_net_mock_dynamic_npc_admin_list(
         }
         ++count;
     }
+
+    /* SCE-embedded NPCs: editable via MySQL override; pins share these IDs. */
+    occupiedCount = vm_net_mock_append_service_scene_npcinfo_seeds(
+        scene, occupied, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX);
+    beforeSce = occupiedCount;
+    (void)vm_net_mock_append_sce_file_npcinfo_seeds(
+        scene, occupied, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX, &occupiedCount,
+        false);
+    for (u32 i = beforeSce; i < occupiedCount && count < rowCap; ++i)
+    {
+        bool already = false;
+        int overrideIndex = -1;
+
+        for (u32 j = 0; j < count; ++j)
+        {
+            if (rows[j].seed.actorId == occupied[i].actorId)
+            {
+                already = true;
+                break;
+            }
+        }
+        if (already)
+            continue;
+        overrideIndex =
+            vm_net_mock_dynamic_npc_find_override(scene, occupied[i].actorId);
+        rows[count].builtin = true;
+        if (overrideIndex >= 0)
+        {
+            rows[count].seed =
+                g_vm_net_mock_dynamic_npc_overrides[overrideIndex].seed;
+            rows[count].seed.actorId = occupied[i].actorId;
+            rows[count].enabled =
+                g_vm_net_mock_dynamic_npc_overrides[overrideIndex].enabled;
+            rows[count].overridden = true;
+        }
+        else
+        {
+            rows[count].seed = occupied[i];
+            rows[count].enabled = true;
+        }
+        ++count;
+    }
+
     for (u32 i = 0;
          i < g_vm_net_mock_dynamic_npc_override_count && count < rowCap;
          ++i)
     {
-        bool replacesBuiltin = false;
+        bool already = false;
         const vm_net_mock_dynamic_npc_override *row =
             &g_vm_net_mock_dynamic_npc_overrides[i];
 
         if (!vm_net_mock_scene_names_equal_loose(row->scene, scene))
             continue;
-        for (u32 builtinIndex = 0; builtinIndex < builtinCount; ++builtinIndex)
+        for (u32 j = 0; j < count; ++j)
         {
-            if (builtins[builtinIndex].actorId == row->seed.actorId)
+            if (rows[j].seed.actorId == row->seed.actorId)
             {
-                replacesBuiltin = true;
+                already = true;
                 break;
             }
         }
-        if (replacesBuiltin)
+        if (already)
             continue;
         rows[count].seed = row->seed;
         rows[count].enabled = row->enabled;
@@ -4560,26 +4597,169 @@ static u32 vm_net_mock_dynamic_npc_admin_list(
     return count;
 }
 
+static u32 vm_net_mock_append_sce_file_npcinfo_seeds(
+    const char *scene,
+    vm_net_mock_scene_npcinfo_seed *seeds,
+    u32 seedCap,
+    u32 *inoutCount,
+    bool applyOverrides)
+{
+    u8 data[8192];
+    u32 len = 0;
+    u32 startOff = 0;
+    u32 count = 0;
+    u32 considered = 0;
+
+    if (scene == NULL || scene[0] == 0 || seeds == NULL || seedCap == 0 ||
+        inoutCount == NULL)
+    {
+        return 0;
+    }
+    count = *inoutCount;
+    if (count > seedCap)
+        count = seedCap;
+    if (vm_net_mock_scene_is_penglai02(scene))
+        return 0;
+    if (vm_net_mock_scene_is_linan_south_gate(scene))
+        return 0;
+
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    startOff = vm_net_mock_scene_payload_start(data, len);
+    if (len == 0 || startOff == 0)
+        return 0;
+
+    if (applyOverrides)
+        (void)vm_net_mock_dynamic_npc_db_load();
+
+    for (u32 off = startOff; off + 8 <= len; ++off)
+    {
+        vm_net_mock_scene_npcinfo_seed seed;
+        u32 endPos = 0;
+        bool duplicate = false;
+        u32 candidate = 0;
+        bool collision = true;
+        bool already = false;
+        int overrideIndex = -1;
+
+        if (!vm_net_mock_parse_sce_interactive_npc_at(data, len, off, &seed,
+                                                      &endPos))
+        {
+            continue;
+        }
+        if (vm_net_mock_scene_is_penglai01(scene) &&
+            (strcmp(seed.scriptName, "task0.xse") != 0 ||
+             strcmp(seed.displayName,
+                    "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") != 0)) /* 大侠郭靖 */
+        {
+            printf("[info][network] mock_scene_npc_catalog_skip scene=%s npc=%s script=%s reason=tongquetai-authoritative-guojing-only\n",
+                   scene, seed.displayName, seed.scriptName);
+            if (endPos > off)
+                off = endPos - 1;
+            continue;
+        }
+        for (u32 i = 0; i < count; ++i)
+        {
+            if (seeds[i].x == seed.x && seeds[i].y == seed.y &&
+                strcmp(seeds[i].scriptName, seed.scriptName) == 0 &&
+                strcmp(seeds[i].displayName, seed.displayName) == 0)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+        {
+            if (endPos > off)
+                off = endPos - 1;
+            continue;
+        }
+
+        ++considered;
+        candidate =
+            20000u + (vm_net_mock_scene_npcinfo_hash(scene, &seed) % 40000u);
+        /*
+         * Prefer the stock hash id. If it is already present (enabled MySQL
+         * override installed by the service pass), do not bump to a new id —
+         * that would duplicate the NPC on the map.
+         */
+        already = false;
+        for (u32 i = 0; i < count; ++i)
+        {
+            if (seeds[i].actorId == candidate)
+            {
+                already = true;
+                break;
+            }
+        }
+        if (already)
+        {
+            if (endPos > off)
+                off = endPos - 1;
+            continue;
+        }
+        if (applyOverrides)
+        {
+            overrideIndex =
+                vm_net_mock_dynamic_npc_find_override(scene, candidate);
+            if (overrideIndex >= 0 &&
+                !g_vm_net_mock_dynamic_npc_overrides[overrideIndex].enabled)
+            {
+                if (endPos > off)
+                    off = endPos - 1;
+                continue;
+            }
+        }
+        collision = true;
+        while (collision)
+        {
+            collision = false;
+            for (u32 i = 0; i < count; ++i)
+            {
+                if (seeds[i].actorId == candidate)
+                {
+                    candidate = candidate == 59999u ? 20000u : candidate + 1u;
+                    collision = true;
+                    break;
+                }
+            }
+        }
+        seed.actorId = candidate;
+        if (applyOverrides)
+        {
+            overrideIndex =
+                vm_net_mock_dynamic_npc_find_override(scene, candidate);
+            if (overrideIndex >= 0)
+            {
+                seed = g_vm_net_mock_dynamic_npc_overrides[overrideIndex].seed;
+                seed.actorId = candidate;
+            }
+        }
+
+        if (count < seedCap)
+            seeds[count++] = seed;
+        if (endPos > off)
+            off = endPos - 1;
+    }
+    *inoutCount = count;
+    return considered;
+}
+
 static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
                                                    vm_net_mock_scene_npcinfo_seed *seeds,
                                                    u32 seedCap,
                                                    u32 *totalOut,
                                                    u32 *dynamicOut)
 {
-    u8 data[8192];
-    u32 len = 0;
-    u32 start = 0;
     u32 count = 0;
     u32 total = 0;
+    u32 sceConsidered = 0;
 
     if (totalOut)
         *totalOut = 0;
     if (dynamicOut)
         *dynamicOut = 0;
     if (scene == NULL || scene[0] == 0 || seeds == NULL || seedCap == 0)
-    {
         return 0;
-    }
     memset(seeds, 0, sizeof(*seeds) * seedCap);
     count = vm_net_mock_append_service_scene_npcinfo_seeds(scene, seeds, seedCap);
     total = count;
@@ -4612,95 +4792,9 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
                matchDisabled,
                g_vm_net_mock_dynamic_npc_db_valid ? 1u : 0u);
     }
-    /* The _02 resource was audited separately and has no actor/xse records.
-     * Avoid decoding and rescanning it on the latency-sensitive first-login
-     * request once the confirmed service-side rows have been supplied. */
-    if (vm_net_mock_scene_is_penglai02(scene))
-    {
-        if (totalOut)
-            *totalOut = total;
-        return count;
-    }
-    /* c04临安府_01.sce is the old South Gate resource. Its embedded 宋兵乙 /
-     * 守门卫兵甲 / 王大胆 / 守门卫兵 rows are a stale scene catalog and must
-     * not consume the four client display-name slots alongside the current
-     * service-side 王朝 / 马汉 / 胡斐 catalog. */
-    if (vm_net_mock_scene_is_linan_south_gate(scene))
-    {
-        if (totalOut)
-            *totalOut = total;
-        return count;
-    }
-    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
-    start = vm_net_mock_scene_payload_start(data, len);
-    if (len != 0 && start != 0)
-    {
-        for (u32 off = start; off + 8 <= len; ++off)
-        {
-            vm_net_mock_scene_npcinfo_seed seed;
-            u32 end = 0;
-            bool duplicate = false;
-
-            if (!vm_net_mock_parse_sce_interactive_npc_at(data, len, off,
-                                                          &seed, &end))
-            {
-                continue;
-            }
-            /* The authoritative Tongquetai catalog contains only 大侠郭靖.
-             * The legacy SCE also carries 郭芙蓉/task2.xse, but that row
-             * belongs to old content and must not be restored merely because
-             * the current c00 resource has an empty embedded actor catalog. */
-            if (vm_net_mock_scene_is_penglai01(scene) &&
-                (strcmp(seed.scriptName, "task0.xse") != 0 ||
-                 strcmp(seed.displayName,
-                        "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") != 0)) /* 大侠郭靖 */
-            {
-                printf("[info][network] mock_scene_npc_catalog_skip scene=%s npc=%s script=%s reason=tongquetai-authoritative-guojing-only\n",
-                       scene, seed.displayName, seed.scriptName);
-                if (end > off)
-                    off = end - 1;
-                continue;
-            }
-            for (u32 i = 0; i < count; ++i)
-            {
-                if (seeds[i].x == seed.x && seeds[i].y == seed.y &&
-                    strcmp(seeds[i].scriptName, seed.scriptName) == 0 &&
-                    strcmp(seeds[i].displayName, seed.displayName) == 0)
-                {
-                    duplicate = true;
-                    break;
-                }
-            }
-            if (duplicate)
-                continue;
-            total += 1;
-            if (count < seedCap)
-            {
-                u32 candidate = 20000u +
-                    (vm_net_mock_scene_npcinfo_hash(scene, &seed) % 40000u);
-                bool collision = true;
-                while (collision)
-                {
-                    collision = false;
-                    for (u32 i = 0; i < count; ++i)
-                    {
-                        if (seeds[i].actorId == candidate)
-                        {
-                            candidate = candidate == 59999u
-                                            ? 20000u
-                                            : candidate + 1u;
-                            collision = true;
-                            break;
-                        }
-                    }
-                }
-                seed.actorId = candidate;
-                seeds[count++] = seed;
-            }
-            if (end > off)
-                off = end - 1;
-        }
-    }
+    sceConsidered = vm_net_mock_append_sce_file_npcinfo_seeds(
+        scene, seeds, seedCap, &count, true);
+    total += sceConsidered;
     if (totalOut)
         *totalOut = total;
     return count;
@@ -11200,5 +11294,213 @@ bool vm_net_mock_runtime_remove_combat_spawn_actor(
     if (errorOut)
         *errorOut = "ok";
     return true;
+}
+
+/*
+ * World-boss despawn residual: SCE may still hold a keep-id / borrowed-wire
+ * row (legacy #18 ghostfire, or #250) whose binding was already cleared.
+ * Match by catalog displayName, real id, or keep-id + same battle .actor.
+ */
+bool vm_net_mock_runtime_remove_combat_spawns_matching_boss(
+    const char *scene, u32 monsterId, u32 *removedOut, const char **errorOut)
+{
+    vm_net_mock_sce_combat_spawn spawns[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
+    vm_net_mock_sce_combat_spawn kept[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
+    char bossName[32];
+    const char *bossActor = NULL;
+    u8 visual0 = 0;
+    u8 visual1 = 0;
+    u32 existing = 0;
+    u32 keptCount = 0;
+    u32 removed = 0;
+    const char *saveError = NULL;
+
+    if (removedOut)
+        *removedOut = 0;
+    if (errorOut)
+        *errorOut = "world-boss-despawn-failed";
+    if (scene == NULL || scene[0] == 0 || monsterId == 0)
+        return false;
+    memset(bossName, 0, sizeof(bossName));
+    if (!vm_net_mock_monster_battle_left_appearance(monsterId, bossName,
+                                                    sizeof(bossName), &visual0,
+                                                    &visual1, &bossActor) ||
+        bossName[0] == 0)
+    {
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    (void)bossActor;
+    memset(spawns, 0, sizeof(spawns));
+    memset(kept, 0, sizeof(kept));
+    if (!vm_net_mock_runtime_combat_spawn_list(scene, spawns,
+                                               VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX,
+                                               &existing))
+    {
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    for (u32 i = 0; i < existing; ++i)
+    {
+        bool drop = false;
+        u32 wire = spawns[i].actorId;
+        u32 bindReal = vm_net_mock_sce_combat_spawn_remap_battle_enemy(
+            scene, wire, spawns[i].x, spawns[i].y);
+
+        if (wire == monsterId || bindReal == monsterId)
+            drop = true;
+        else if (spawns[i].displayName[0] != 0 &&
+                 strcmp(spawns[i].displayName, bossName) == 0)
+            drop = true;
+        if (drop)
+        {
+            ++removed;
+            continue;
+        }
+        if (keptCount < VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX)
+            kept[keptCount++] = spawns[i];
+    }
+    if (removedOut)
+        *removedOut = removed;
+    if (removed == 0)
+    {
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    if (!vm_net_mock_sce_combat_spawn_admin_save_all(scene, kept, keptCount,
+                                                     0, 0, true, &saveError))
+    {
+        if (errorOut)
+            *errorOut = saveError ? saveError : "world-boss-despawn-save-failed";
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+/*
+ * In-memory kind=3 append for WT18 ephemeral world-boss overlay.
+ * Does not write disk or bindings.
+ */
+bool vm_net_mock_sce_decoded_append_combat_spawn(
+    u8 *data, u32 *lenInOut, u32 dataCap, u16 x, u16 y, u32 realActorId,
+    u32 wireActorId, const char **errorOut)
+{
+    vm_net_mock_sce_combat_spawn_located *located = NULL;
+    vm_net_mock_sce_combat_spawn spawn;
+    u8 record[256];
+    u32 recordLen = 0;
+    u32 count = 0;
+    u32 insertAt = 0;
+    u32 namedPortal = 0;
+    bool hasNamedPortal = false;
+    const char *fillError = NULL;
+
+    if (errorOut)
+        *errorOut = "ephemeral-spawn-failed";
+    if (data == NULL || lenInOut == NULL || *lenInOut == 0 || dataCap == 0 ||
+        x == 0 || y == 0 || realActorId == 0 || wireActorId == 0)
+        return false;
+    located = (vm_net_mock_sce_combat_spawn_located *)calloc(
+        VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX, sizeof(*located));
+    if (located == NULL)
+    {
+        if (errorOut)
+            *errorOut = "ephemeral-spawn-oom";
+        return false;
+    }
+    count = vm_net_mock_sce_combat_spawn_locate_in(
+        data, *lenInOut, located, VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX, NULL);
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (located[i].spawn.x == x && located[i].spawn.y == y)
+        {
+            free(located);
+            if (errorOut)
+                *errorOut = "ok";
+            return true;
+        }
+    }
+    memset(&spawn, 0, sizeof(spawn));
+    spawn.x = x;
+    spawn.y = y;
+    if (!vm_net_mock_sce_combat_spawn_fill_from_catalog(&spawn, realActorId,
+                                                        &fillError))
+    {
+        free(located);
+        if (errorOut)
+            *errorOut = fillError ? fillError : "catalog-fill-failed";
+        return false;
+    }
+    vm_net_mock_sce_combat_spawn_resolve_map_companion(&spawn);
+    spawn.actorId = wireActorId;
+    recordLen =
+        vm_net_mock_sce_combat_spawn_encode(&spawn, record, sizeof(record));
+    if (recordLen == 0)
+    {
+        free(located);
+        if (errorOut)
+            *errorOut = "encode-failed";
+        return false;
+    }
+    hasNamedPortal =
+        vm_net_mock_sce_find_named_portal_start(data, *lenInOut, &namedPortal);
+    if (count != 0)
+        insertAt = located[count - 1u].end;
+    else if (hasNamedPortal)
+        insertAt = namedPortal;
+    else
+        insertAt = *lenInOut;
+    free(located);
+    if (!vm_net_mock_sce_payload_replace_range(data, lenInOut, dataCap, insertAt,
+                                               insertAt, record, recordLen))
+    {
+        if (errorOut)
+            *errorOut = "splice-failed";
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+/* Encode decoded SCE into WT18-style LZSS file blob (no disk write). */
+u32 vm_net_mock_sce_encode_named_update_blob(const u8 *decoded, u32 decodedLen,
+                                             u8 *out, u32 outCap)
+{
+    u8 *encoded = NULL;
+    u32 compressedLen = 0;
+    u32 blockLen = 0;
+
+    if (decoded == NULL || decodedLen == 0 || out == NULL || outCap < 32u ||
+        vm_net_mock_scene_payload_start(decoded, decodedLen) == 0)
+        return 0;
+    encoded = (u8 *)malloc(VM_NET_MOCK_SCE_EDIT_ENCODE_MAX);
+    if (encoded == NULL)
+        return 0;
+    compressedLen = vm_net_mock_encode_lzss_literals(
+        decoded, decodedLen, encoded, VM_NET_MOCK_SCE_EDIT_ENCODE_MAX);
+    if (compressedLen == 0)
+    {
+        free(encoded);
+        return 0;
+    }
+    blockLen = 1u + 4u + 4u + compressedLen;
+    if (4u + blockLen > outCap)
+    {
+        free(encoded);
+        return 0;
+    }
+    vm_net_mock_store_le32(out, 0, blockLen);
+    out[4] = 2;
+    vm_net_mock_store_be32(out, 5, compressedLen);
+    vm_net_mock_store_be32(out, 9, decodedLen);
+    memcpy(out + 13, encoded, compressedLen);
+    free(encoded);
+    return 4u + blockLen;
 }
 

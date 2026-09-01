@@ -2570,6 +2570,11 @@ static long vm_net_mock_update_file_size(const char *name)
     return vm_net_mock_update_resolve_existing_leaf(name, NULL, 0);
 }
 
+/* Defined in mock_server_world_boss.c (same TU, included later). */
+u16 vm_mock_world_boss_content_version_stamp(const char *name, u16 diskVersion);
+u32 vm_mock_world_boss_overlay_update_payload(const char *payloadName, u8 *out,
+                                              u32 outCap, u32 diskLen);
+
 static bool vm_net_mock_update_named_content_version(const char *name,
                                                      u16 *versionOut)
 {
@@ -2618,126 +2623,25 @@ static bool vm_net_mock_update_named_content_version(const char *name,
     if (!readAny)
         return false;
     if (versionOut)
-        *versionOut = (u16)((hash % 65535u) + 1u);
+    {
+        u16 disk = (u16)((hash % 65535u) + 1u);
+        *versionOut = vm_mock_world_boss_content_version_stamp(name, disk);
+    }
     return true;
 }
 
-/* Publish one Actor dependency set as a single catalog transaction.  The
- * payload remains in the authoritative server tree; clients install it only
- * after their normal WT 18/7 request. */
+/* Batch named-resource catalog publish (former auto path for content-admin
+ * scene/spawn/NPC/map saves). Disabled: Pixi/CBE clientmiss can serve from
+ * disk without catalog rows; keep call sites but do not mutate
+ * server_update_catalog.tsv. Manual single-name publish still uses
+ * vm_net_mock_update_admin_save_named. */
 static bool vm_net_mock_update_admin_publish_named_files(
     const char *const *names, u32 nameCount, const char **errorOut)
 {
-    vm_net_mock_update_named_config previous[VM_NET_MOCK_UPDATE_NAMED_MAX];
-    u16 versions[VM_NET_MOCK_UPDATE_NAMED_MAX];
-    u32 previousCount = 0;
-    u32 uniqueCount = 0;
-    u32 missingRows = 0;
-
+    (void)names;
+    (void)nameCount;
     if (errorOut)
         *errorOut = NULL;
-    if (names == NULL || nameCount == 0 ||
-        nameCount > VM_NET_MOCK_UPDATE_NAMED_MAX)
-    {
-        if (errorOut)
-            *errorOut = "具名资源发布列表无效";
-        return false;
-    }
-    memset(versions, 0, sizeof(versions));
-    vm_net_mock_update_catalog_load();
-    for (u32 i = 0; i < nameCount; ++i)
-    {
-        bool duplicate = false;
-        long size = -1;
-
-        for (u32 j = 0; j < i; ++j)
-        {
-            if (names[j] != NULL && names[i] != NULL &&
-                strcmp(names[j], names[i]) == 0)
-            {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate)
-            continue;
-        if (!vm_net_mock_update_name_is_safe(names[i]))
-        {
-            if (errorOut)
-                *errorOut = "具名资源文件名不安全";
-            return false;
-        }
-        size = vm_net_mock_update_file_size(names[i]);
-        if (size <= 0)
-        {
-            if (errorOut)
-                *errorOut = "具名资源文件不存在或无法读取";
-            return false;
-        }
-        if (size > VM_NET_MOCK_UPDATE_PAYLOAD_MAX)
-        {
-            if (errorOut)
-                *errorOut = "具名资源超过发布大小上限";
-            return false;
-        }
-        if (!vm_net_mock_update_named_content_version(names[i], &versions[i]))
-        {
-            if (errorOut)
-                *errorOut = "具名资源版本计算失败";
-            return false;
-        }
-        ++uniqueCount;
-        if (vm_net_mock_update_find_named_for_request(names[i]) == NULL)
-            ++missingRows;
-    }
-    if (g_vm_net_mock_update_named_count + missingRows >
-        VM_NET_MOCK_UPDATE_NAMED_MAX)
-    {
-        if (errorOut)
-            *errorOut = "具名资源发布项已达到上限";
-        printf("[warn][mock-admin] named_resource_batch_publish_limit "
-               "catalog_rows=%u missing_rows=%u batch=%u max=%u\n",
-               g_vm_net_mock_update_named_count, missingRows, uniqueCount,
-               (u32)VM_NET_MOCK_UPDATE_NAMED_MAX);
-        return false;
-    }
-
-    memcpy(previous, g_vm_net_mock_update_named, sizeof(previous));
-    previousCount = g_vm_net_mock_update_named_count;
-    for (u32 i = 0; i < nameCount; ++i)
-    {
-        bool duplicate = false;
-        vm_net_mock_update_named_config *row = NULL;
-
-        for (u32 j = 0; j < i; ++j)
-        {
-            if (names[j] != NULL && names[i] != NULL &&
-                strcmp(names[j], names[i]) == 0)
-            {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate)
-            continue;
-        row = vm_net_mock_update_find_named_for_request(names[i]);
-        if (row == NULL)
-        {
-            row = &g_vm_net_mock_update_named[g_vm_net_mock_update_named_count++];
-            memset(row, 0, sizeof(*row));
-            snprintf(row->name, sizeof(row->name), "%s", names[i]);
-        }
-        row->enabled = true;
-        row->version = versions[i];
-    }
-    if (!vm_net_mock_update_catalog_save(errorOut))
-    {
-        memcpy(g_vm_net_mock_update_named, previous, sizeof(previous));
-        g_vm_net_mock_update_named_count = previousCount;
-        return false;
-    }
-    printf("[info][mock-admin] named_resource_batch_publish files=%u catalog_rows=%u delivery=WT18/7 source=server-authoritative\n",
-           uniqueCount, g_vm_net_mock_update_named_count);
     return true;
 }
 
@@ -3361,6 +3265,12 @@ static u32 vm_net_mock_load_named_update_payload_exact(
                            "resolved=%s len=%u evidence=WT18/7-utf8-or-suffix-leaf\n",
                            reqUtf8, resolvedUtf8, len);
                 }
+                {
+                    u32 over = vm_mock_world_boss_overlay_update_payload(
+                        payloadName, out, outCap, len);
+                    if (over != 0)
+                        return over;
+                }
                 return len;
             }
         }
@@ -3374,6 +3284,12 @@ static u32 vm_net_mock_load_named_update_payload_exact(
             continue;
         if (sourcePath && sourcePathCap)
             snprintf(sourcePath, sourcePathCap, "%s", path);
+        {
+            u32 over = vm_mock_world_boss_overlay_update_payload(
+                payloadName, out, outCap, len);
+            if (over != 0)
+                return over;
+        }
         return len;
     }
 

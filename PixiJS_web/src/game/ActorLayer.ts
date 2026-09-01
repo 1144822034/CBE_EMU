@@ -45,8 +45,21 @@ import {
 /**
  * Only the nearest N peers keep wing / mount / animated chenghao GPU
  * (browser + APK). Farther peers fall back to classic title text/gif.
+ * Native WebView budget is tighter — keep a lower cap to cut context-loss spikes.
  */
-const PEER_HEAVY_CAP = 6;
+const PEER_HEAVY_CAP = (() => {
+  try {
+    const cap = (
+      globalThis as unknown as {
+        Capacitor?: { isNativePlatform?: () => boolean };
+      }
+    ).Capacitor;
+    if (cap?.isNativePlatform?.()) return 4;
+  } catch {
+    /* ignore */
+  }
+  return 6;
+})();
 
 const NPC_CYAN = 0x80e8ff;
 const PEER_GREEN = 0xa8e6a1;
@@ -365,6 +378,11 @@ export class ActorLayer {
       if (info.permanent) continue;
       if (info.respawnAt == null) info.respawnAt = at;
     }
+  }
+
+  /** Allow a later world-boss overlay spawn at a previously claimed tile. */
+  clearPermanentHomeDrop(x: number, y: number): void {
+    this.permanentHomeDrops.delete(`${x | 0},${y | 0}`);
   }
 
   /** Drop a SCE spawn forever (world boss claimed / despawned). */

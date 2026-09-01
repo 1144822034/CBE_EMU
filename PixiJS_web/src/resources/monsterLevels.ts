@@ -251,15 +251,13 @@ export function resolveCombatEnemyRealId(opts: {
   if (posReal) return posReal;
   if (!wireAmbiguous && wireHits >= 1 && wireReal) return wireReal;
 
-  if (KEEP_WIRE_IDS.has(wire)) {
-    const wantActor = (opts.battleActor || "").trim().toLowerCase();
-    if (wantActor) {
-      for (const [idStr, actor] of Object.entries(MONSTER_ACTOR_OVERRIDES)) {
-        const id = Number(idStr) >>> 0;
-        if (!id || KEEP_WIRE_IDS.has(id)) continue;
-        if (actor.trim().toLowerCase() === wantActor) return id;
-      }
-    }
+  /*
+   * No live binding: prefer SCE displayName (same order as server
+   * label_enemy_for_wire). Covers leftover world-boss rows that still carry
+   * 「世界BOSS」 on borrowed wire #18 / keep-id #250 after despawn cleared
+   * bindings — actor-first wrongly resolved e_ghostfiresR → #18 岩浆石火.
+   */
+  {
     const wantName = (opts.sceName || "").trim();
     if (wantName) {
       let matchId = 0;
@@ -268,6 +266,26 @@ export function resolveCombatEnemyRealId(opts: {
         const id = Number(idStr) >>> 0;
         if (!id || KEEP_WIRE_IDS.has(id)) continue;
         if (name.trim() !== wantName) continue;
+        if (matchCount === 0) matchId = id;
+        else if (matchId !== id) {
+          matchId = 0;
+          break;
+        }
+        matchCount += 1;
+      }
+      if (matchCount >= 1 && matchId) return matchId;
+    }
+  }
+
+  if (KEEP_WIRE_IDS.has(wire)) {
+    const wantActor = (opts.battleActor || "").trim().toLowerCase();
+    if (wantActor) {
+      let matchId = 0;
+      let matchCount = 0;
+      for (const [idStr, actor] of Object.entries(MONSTER_ACTOR_OVERRIDES)) {
+        const id = Number(idStr) >>> 0;
+        if (!id || KEEP_WIRE_IDS.has(id)) continue;
+        if (actor.trim().toLowerCase() !== wantActor) continue;
         if (matchCount === 0) matchId = id;
         else if (matchId !== id) {
           matchId = 0;

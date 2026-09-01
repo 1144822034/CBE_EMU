@@ -4927,28 +4927,15 @@ static void vm_mock_admin_render_content_page(char *response,
             vm_net_mock_gbk_label_to_utf8(
                 seed->displayName[0] ? seed->displayName : "NPC",
                 npcNameUtf8, sizeof(npcNameUtf8));
-            if (serviceNpc)
-            {
-                vm_mock_admin_text_appendf(
-                    &page,
-                    "<div class=\"npc-pin service draggable copyable\" "
-                    "data-kind=\"npc\" data-actor-id=\"%u\" data-x=\"%u\" data-y=\"%u\" "
-                    "data-edit-panel=\"npc-panel-%u\" "
-                    "style=\"left:%upx;top:%upx\" title=\"",
-                    seed->actorId, seed->x, seed->y, seed->actorId,
-                    markerX, markerY);
-            }
-            else
-            {
-                vm_mock_admin_text_appendf(
-                    &page,
-                    "<div class=\"npc-pin copyable\" data-kind=\"npc\" "
-                    "data-actor-id=\"%u\" data-x=\"%u\" data-y=\"%u\" "
-                    "data-edit-panel=\"npc-panel-%u\" "
-                    "style=\"left:%upx;top:%upx\" title=\"",
-                    seed->actorId, seed->x, seed->y, seed->actorId,
-                    markerX, markerY);
-            }
+            vm_mock_admin_text_appendf(
+                &page,
+                "<div class=\"npc-pin%s draggable copyable\" "
+                "data-kind=\"npc\" data-actor-id=\"%u\" data-x=\"%u\" data-y=\"%u\" "
+                "data-edit-panel=\"npc-panel-%u\" "
+                "style=\"left:%upx;top:%upx\" title=\"",
+                serviceNpc ? " service" : "",
+                seed->actorId, seed->x, seed->y, seed->actorId,
+                markerX, markerY);
             vm_mock_admin_text_append_html(&page, npcNameUtf8);
             vm_mock_admin_text_appendf(&page,
                 " · (%u,%u) · 朝向 %u %s · ",
@@ -5013,7 +5000,7 @@ static void vm_mock_admin_render_content_page(char *response,
         }
         vm_mock_admin_text_appendf(&page,
             "</div></div><div class=\"preview-legend\"><span class=\"legend-icon service\">人</span><span class=\"size\">服务端动态 NPC（拖动坐标 · 右键编辑 · 双击复制）</span>"
-            "<span class=\"legend-icon\">人</span><span class=\"size\">SCE 内置 NPC（右键编辑/双击复制为动态）</span>"
+            "<span class=\"legend-icon\">人</span><span class=\"size\">SCE 内置 NPC（拖动坐标 · 右键编辑 · 双击复制；保存为覆盖）</span>"
             "<span class=\"legend-icon combat\">怪</span><span class=\"size\">地图刷怪点（拖动坐标 · 右键编辑 · 双击复制）</span>"
             "<span class=\"legend-portal\"></span><span class=\"size\">边界/元数据传送点</span>"
             "<span class=\"legend-portal named\"></span><span class=\"size\">具名传送点</span></div>"
@@ -5614,7 +5601,7 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_text_appendf(&page, "</div>");
     }
     if (npcCount == 0)
-        vm_mock_admin_text_appendf(&page, "<p class=\"size\">该场景没有服务端动态 NPC。</p>");
+        vm_mock_admin_text_appendf(&page, "<p class=\"size\">该场景没有可编辑 NPC。</p>");
     vm_mock_admin_text_appendf(&page,
         "</div><div class=\"npc new\" id=\"npc-panel-new\"><div class=\"npc-head\"><strong>增加动态 NPC</strong><span class=\"badge\">下次进入场景生效</span></div>"
         "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-npc\">"
@@ -5645,7 +5632,7 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
-        "<p class=\"foot\">服务选项可多选：对话中每个勾选的服务各增加一个入口。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人只出售 item.dsh 类别 10 中 HP/MP 恢复类药品（不含经验卡、喇叭等消耗品）。副本向导在对话中拆成「传送」与「挑战」两项：配置目标场景才显示传送（可设前置任务，ID=0 直接显示）；配置挑战怪物 ID 才显示挑战；并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。可接取任务可设「任务重复接取」与「每天可接取次数」（0=不限；大于 0 按本地自然日计数，且允许在剩余次数内完成后重接）。任务与服务合计最多 7 个对话选项。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
+        "<p class=\"foot\">服务选项可多选：对话中每个勾选的服务各增加一个入口。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人只出售 item.dsh 类别 10 中 HP/MP 恢复类药品（不含经验卡、喇叭等消耗品）。副本向导在对话中拆成「传送」与「挑战」两项：配置目标场景才显示传送（可设前置任务，ID=0 直接显示）；配置挑战怪物 ID 才显示挑战；并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。可接取任务可设「任务重复接取」与「每天可接取次数」（0=不限；大于 0 按本地自然日计数，且允许在剩余次数内完成后重接）。任务与服务合计最多 7 个对话选项。SCE 内置 NPC 可编辑：保存写入 MySQL 覆盖，不改写 .sce；「恢复内置默认」可撤销覆盖。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div></div></section></div></main></body></html>");
 
     if (page.truncated)
@@ -11299,6 +11286,88 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         (void)realWritten;
         return 1;
     }
+    /* Pixi world-boss map overlay — DB/runtime only (no .sce inject). */
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, "/api/world-boss-active") == 0)
+    {
+        char scene[64];
+        char sceneUtf8[128];
+        char sceneEsc[256];
+        char nameUtf8[128];
+        char nameEsc[256];
+        char actorEsc[192];
+        char nameGbk[32];
+        const char *actor = NULL;
+        char json[768];
+        u8 status = 0;
+        u16 x = 0;
+        u16 y = 0;
+        u32 wire = 0;
+        u32 monster = 0;
+        u8 visual0 = 0;
+        u8 visual1 = 0;
+        const vm_mock_world_boss_config *cfg;
+
+        memset(scene, 0, sizeof(scene));
+        memset(sceneUtf8, 0, sizeof(sceneUtf8));
+        memset(nameUtf8, 0, sizeof(nameUtf8));
+        memset(nameGbk, 0, sizeof(nameGbk));
+        cfg = vm_net_mock_world_boss_config_get();
+        vm_mock_world_boss_admin_runtime_get(&status, scene, sizeof(scene), &x,
+                                             &y);
+        if (status == 2 &&
+            vm_mock_world_boss_active_anchor(scene, sizeof(scene), &x, &y, &wire,
+                                            &monster))
+        {
+            if (scene[0] != 0)
+                vm_net_mock_gbk_label_to_utf8(scene, sceneUtf8,
+                                              sizeof(sceneUtf8));
+            if (monster != 0 &&
+                vm_net_mock_monster_battle_left_appearance(
+                    monster, nameGbk, sizeof(nameGbk), &visual0, &visual1,
+                    &actor) &&
+                nameGbk[0] != 0)
+            {
+                vm_net_mock_gbk_label_to_utf8(nameGbk, nameUtf8,
+                                              sizeof(nameUtf8));
+            }
+            if (!vm_mock_admin_json_escape(
+                    sceneUtf8[0] ? sceneUtf8 : scene, sceneEsc,
+                    sizeof(sceneEsc)) ||
+                !vm_mock_admin_json_escape(nameUtf8[0] ? nameUtf8 : "世界BOSS",
+                                           nameEsc, sizeof(nameEsc)) ||
+                !vm_mock_admin_json_escape(actor ? actor : "", actorEsc,
+                                           sizeof(actorEsc)))
+            {
+                vm_mock_admin_send_response(
+                    client, "500 Internal Server Error",
+                    "application/json; charset=utf-8",
+                    "Access-Control-Allow-Origin: *\r\n",
+                    "{\"ok\":false,\"error\":\"escape\"}\n");
+                return 0;
+            }
+            snprintf(json, sizeof(json),
+                     "{\"ok\":true,\"status\":%u,\"scene\":\"%s\",\"x\":%u,"
+                     "\"y\":%u,\"monsterId\":%u,\"wireId\":%u,\"name\":\"%s\","
+                     "\"actor\":\"%s\"}\n",
+                     (u32)status, sceneEsc, (u32)x, (u32)y, monster, wire,
+                     nameEsc, actorEsc);
+        }
+        else
+        {
+            snprintf(json, sizeof(json),
+                     "{\"ok\":true,\"status\":%u,\"scene\":\"\",\"x\":0,\"y\":0,"
+                     "\"monsterId\":%u,\"wireId\":0,\"name\":\"\",\"actor\":\"\"}"
+                     "\n",
+                     (u32)status, cfg ? cfg->monsterId : 0u);
+        }
+        (void)visual0;
+        (void)visual1;
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "application/json; charset=utf-8",
+                                    "Access-Control-Allow-Origin: *\r\n", json);
+        return 1;
+    }
     /* Pixi quest tracker: display_name → scene from server_dynamic_npcs. */
     if (strcmp(method, "GET") == 0 && strcmp(target, "/api/npc-scenes") == 0)
     {
@@ -12436,6 +12505,7 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
      */
     if (strcmp(method, "GET") == 0 &&
         (strcmp(target, "/api/monster-levels") == 0 ||
+         strcmp(target, "/api/world-boss-active") == 0 ||
          strcmp(target, "/api/npc-scenes") == 0))
     {
         g_vm_mock_admin_protocol_lock_depth = 0;

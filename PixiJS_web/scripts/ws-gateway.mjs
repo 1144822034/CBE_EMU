@@ -409,6 +409,10 @@ const server = http.createServer((req, res) => {
     proxyAdminApi(req, res, "/api/monster-levels", { methods: ["GET"] });
     return;
   }
+  if (path === "/api/world-boss-active") {
+    proxyAdminApi(req, res, "/api/world-boss-active", { methods: ["GET"] });
+    return;
+  }
   if (path === "/api/npc-scenes") {
     proxyAdminApi(req, res, "/api/npc-scenes", { methods: ["GET"] });
     return;
@@ -463,6 +467,9 @@ server.listen(listenPort, listenHost, () => {
   );
   console.log(
     `[ws-gateway] http /api/monster-levels -> http://${adminHost}:${adminPort}/api/monster-levels`,
+  );
+  console.log(
+    `[ws-gateway] http /api/world-boss-active -> http://${adminHost}:${adminPort}/api/world-boss-active`,
   );
   console.log(
     `[ws-gateway] http /api/npc-scenes -> http://${adminHost}:${adminPort}/api/npc-scenes`,

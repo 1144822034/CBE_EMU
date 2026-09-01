@@ -16,6 +16,12 @@ import {
 import { loadSMapAliases } from "./resources/smap";
 import { defaultLiveGatewayUrl } from "./net/Transport";
 import {
+  clearGlSessionResume,
+  readStoredLoginCredentials,
+  takeGlSessionResume,
+  writeGlSessionResume,
+} from "./net/glSessionResume";
+import {
   createRechargeOrder,
   formatRechargeYuan,
   type RechargePayType,
@@ -658,11 +664,15 @@ async function main(): Promise<void> {
   // Native WebView: reclaim idle GPU sooner. Displayed sprites keep sources "touched".
   await app.init({
     background: "#05070a",
+    // Opaque LCD — compositor need not blend WebGL with DOM behind the canvas.
+    backgroundAlpha: 1,
     antialias: false,
     resolution: Math.min(LCD_RESOLUTION_CAP, Math.max(1, bootScale)),
     autoDensity: true,
     width: LCD_WIDTH,
     height: LCD_HEIGHT,
+    // Prefer WebGL on Capacitor WebView (avoid WebGPU path on Android Chromium).
+    preference: isNativeGl() ? "webgl" : ["webgl", "webgpu"],
     // Native: integrated GPU is less likely to be power-gated than high-performance.
     powerPreference: isNativeGl() ? "low-power" : "high-performance",
     gcActive: true,
@@ -2023,12 +2033,14 @@ async function main(): Promise<void> {
       );
     }
     await view.showScene(scene, x, y);
+    void syncWorldBossOverlayFromApi("enter-scene");
   };
 
   /**
-   * World boss inject/remove mutates live SCE while players stay on the map.
-   * Compose cache would otherwise keep stale kind=3 rows.
+   * World boss is DB/runtime overlay (no .sce inject). Pixi paints from API /
+   * chat; wild SCE kind=3 stays stock.
    */
+  const WORLD_BOSS_OVERLAY_ID = 0x70ffffff;
   let combatSpawnRefreshBusy = false;
   const parseWbossPos = (
     text: string,
@@ -2044,22 +2056,121 @@ async function main(): Promise<void> {
   const isWbossSpawnLine = (text: string) =>
     text.includes("[WBOSS:spawn]") ||
     (text.includes("【世界BOSS】") && text.includes("已出现"));
+  const worldBossActiveUrl = () => {
+    const levels = defaultMonsterLevelsUrl(defaultLiveGatewayUrl());
+    return levels.replace(/\/api\/monster-levels\/?$/, "/api/world-boss-active");
+  };
+  const upsertWorldBossOverlay = (opts: {
+    x: number;
+    y: number;
+    name?: string;
+    actor?: string;
+    monsterId?: number;
+    wireId?: number;
+  }) => {
+    const x = opts.x | 0;
+    const y = opts.y | 0;
+    if (!x || !y) return;
+    view.actors.clearPermanentHomeDrop(x, y);
+    const monsterId = (opts.monsterId ?? 0) >>> 0;
+    const name =
+      (opts.name || "").trim() ||
+      formatCombatSpawnNameplate({
+        x,
+        y,
+        wire: opts.wireId || 250,
+        sceName: "世界BOSS",
+        battleActor: opts.actor,
+      }).name;
+    const actor =
+      (opts.actor || "").trim() ||
+      "e_ghostfiresR.actor";
+    const row = {
+      actorId: WORLD_BOSS_OVERLAY_ID,
+      x,
+      y,
+      name,
+      actorResource: actor,
+      battleActorResource: actor,
+      scriptName: `sce_combat_${monsterId || 250}`,
+      battleActorId: monsterId || 250,
+    };
+    const without = session.sceneMonsters.filter(
+      (m) =>
+        (m.actorId >>> 0) !== WORLD_BOSS_OVERLAY_ID &&
+        !((m.x | 0) === x && (m.y | 0) === y),
+    );
+    session.sceneMonsters = [...without, row];
+    view.actors.setSceneMonsters(session.sceneMonsters);
+    console.info(
+      `[world-boss] overlay-upsert pos=${x},${y} monster=${monsterId} name=${name}`,
+    );
+  };
+  const syncWorldBossOverlayFromApi = async (reason: string) => {
+    const cur = (session.scene || "").trim();
+    if (!cur || (phase !== "world" && phase !== "battle")) return;
+    try {
+      const res = await fetch(worldBossActiveUrl(), {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        status?: number;
+        scene?: string;
+        x?: number;
+        y?: number;
+        monsterId?: number;
+        wireId?: number;
+        name?: string;
+        actor?: string;
+      };
+      const st = (data.status ?? 0) | 0;
+      const sc = String(data.scene || "").trim();
+      const x = (data.x ?? 0) | 0;
+      const y = (data.y ?? 0) | 0;
+      const sceneHit =
+        !!sc &&
+        (cur === sc ||
+          cur.replace(/\.sce$/i, "") === sc.replace(/\.sce$/i, "") ||
+          cur.endsWith(sc) ||
+          sc.endsWith(cur.replace(/\.sce$/i, "")));
+      if (st === 2 && sceneHit && x && y) {
+        upsertWorldBossOverlay({
+          x,
+          y,
+          name: data.name,
+          actor: data.actor,
+          monsterId: data.monsterId,
+          wireId: data.wireId,
+        });
+      } else {
+        const n = view.actors.removeSceneMonsterPermanent({
+          actorId: WORLD_BOSS_OVERLAY_ID,
+        });
+        if (n)
+          session.sceneMonsters = view.actors.liveSceneMonsters();
+      }
+      console.info(
+        `[world-boss] api-sync reason=${reason} status=${st} scene=${sc || "-"} hit=${sceneHit ? 1 : 0}`,
+      );
+    } catch (e) {
+      console.warn(`[world-boss] api-sync failed (${reason})`, e);
+    }
+  };
   const dropWorldBossFromMap = (reason: string, text: string) => {
     const pos = parseWbossPos(text);
     let n = 0;
     if (pos) {
       n = view.actors.removeSceneMonsterPermanent({ x: pos.x, y: pos.y });
     }
+    n += view.actors.removeSceneMonsterPermanent({
+      actorId: WORLD_BOSS_OVERLAY_ID,
+    });
     session.sceneMonsters = view.actors.liveSceneMonsters();
     console.info(
       `[world-boss] map-drop reason=${reason} pos=${pos ? `${pos.x},${pos.y}` : "-"} removed=${n}`,
     );
-    // Secondary: re-pull SCE; re-drop in case WT18 still served a stale row.
-    void refreshSceneCombatSpawns(reason).then(() => {
-      if (!pos) return;
-      view.actors.removeSceneMonsterPermanent({ x: pos.x, y: pos.y });
-      session.sceneMonsters = view.actors.liveSceneMonsters();
-    });
   };
   const refreshSceneCombatSpawns = async (reason: string) => {
     const name = session.scene || "";
@@ -2092,6 +2203,7 @@ async function main(): Promise<void> {
         }),
       );
       view.actors.setSceneMonsters(session.sceneMonsters);
+      await syncWorldBossOverlayFromApi(`after-${reason}`);
       console.info(
         `[world-boss] combat-spawn refresh reason=${reason} count=${session.sceneMonsters.length}`,
       );
@@ -3208,9 +3320,9 @@ async function main(): Promise<void> {
               line.text,
             );
           } else if (isWbossSpawnLine(line.text)) {
-            void refreshSceneCombatSpawns("spawn");
+            void syncWorldBossOverlayFromApi("spawn");
           } else {
-            void refreshSceneCombatSpawns("notice");
+            void syncWorldBossOverlayFromApi("notice");
           }
         }
         const hangTip = line.text.includes("已停止挂机")
@@ -4021,6 +4133,77 @@ async function main(): Promise<void> {
           },
         });
       }
+    } finally {
+      loginInFlight = false;
+    }
+  };
+
+  /**
+   * After softReloadGl wrote a sessionStorage snapshot, cold-start re-enters
+   * login → server → role without dumping the player on splash.
+   */
+  const tryResumeAfterGlSoftReload = async (): Promise<boolean> => {
+    const snap = takeGlSessionResume();
+    if (!snap) return false;
+    console.info("[gl] session resume", snap.why, "role=", snap.roleId);
+    setChromeStatus("黑屏恢复中…");
+    title.setStatus("黑屏恢复中，正在重新进入…");
+    if (loginInFlight) return false;
+    loginInFlight = true;
+    try {
+      await session.start({ user: snap.user, password: snap.password });
+      const sid =
+        session.servers.find((s) => s.serverId === snap.serverId)?.serverId ??
+        session.servers.find((s) => s.serverId === session.selectedServerId)
+          ?.serverId ??
+        session.servers[0]?.serverId;
+      if (sid == null) {
+        showPhase("servers");
+        setChromeStatus("恢复失败：无可用服务器", true);
+        return true;
+      }
+      await session.confirmServer(sid);
+      const role =
+        session.roles.find((r) => (r.roleId >>> 0) === (snap.roleId >>> 0)) ??
+        null;
+      if (!role) {
+        showPhase("role");
+        roles.setRoles(session.roles);
+        setChromeStatus("恢复：请重新选择角色");
+        title.setStatus("请选择角色");
+        return true;
+      }
+      activeRole = role;
+      pendingRoles = [
+        role,
+        ...pendingRoles.filter((r) => r.roleId !== role.roleId),
+      ];
+      hud.setParty([]);
+      hud.setIdentity(role.name, "", "");
+      hud.setVitals(500, 500, 200, 200);
+      hud.setLevel(role.level || 1, 0.08);
+      void hud.setPortraitActor(
+        uiActorResourceForJobSex(role.jobIndex, role.sex),
+      );
+      if (snap.hangupDesired) session.markHangupDesired();
+      if (snap.autoBattle) {
+        try {
+          await session.setBattleAutoPrefer(true);
+        } catch {
+          session.autoBattleActive = true;
+        }
+      }
+      setChromeStatus(`恢复进入 ${role.name}…`);
+      await session.selectRole(role.roleId);
+      setChromeStatus("黑屏恢复完成");
+      return true;
+    } catch (err) {
+      console.error("[gl] session resume failed", err);
+      clearGlSessionResume();
+      const msg = err instanceof Error ? err.message : String(err);
+      title.setStatus(msg);
+      setChromeStatus(`恢复失败: ${msg}`, true);
+      return false;
     } finally {
       loginInFlight = false;
     }
@@ -7187,9 +7370,14 @@ dialog.hide();
     }
   });
 
-  showPhase("splash");
-  title.setStatus("开始游戏/登陆游戏=创建或登录");
-  setChromeStatus("就绪");
+  // Cold start: prefer GL soft-reload session resume over splash.
+  void (async () => {
+    const resumed = await tryResumeAfterGlSoftReload();
+    if (resumed) return;
+    showPhase("splash");
+    title.setStatus("开始游戏/登陆游戏=创建或登录");
+    setChromeStatus("就绪");
+  })();
 
   // Screen unlock / return to app: heal Live WS if OEM suspended the WebView.
   // Native FGS also injects window.__pixiNativeKeepAlive every ~2s while in-world.
@@ -7320,6 +7508,27 @@ dialog.hide();
     glSoftReloadCount += 1;
     console.error("[gl] soft reload", why, glSoftReloadCount, "/", GL_RELOAD_CAP);
     void recordForensic(`soft-reload:${why}`, { forceBlankProbe: true });
+    // Snapshot so cold start can re-enter world instead of splash.
+    try {
+      const creds = session.getCredentials();
+      const ls = readStoredLoginCredentials();
+      const user = (creds.user || ls?.user || "").trim();
+      const password = creds.password || ls?.password || "";
+      const roleId = session.selectedRoleId >>> 0;
+      if (user && roleId) {
+        writeGlSessionResume({
+          user,
+          password,
+          serverId: session.selectedServerId || 1,
+          roleId,
+          hangupDesired: !!session.hangupDesired,
+          autoBattle: !!session.autoBattleActive,
+          why,
+        });
+      }
+    } catch (e) {
+      console.warn("[gl] session resume snapshot", e);
+    }
     window.location.reload();
   };
 
@@ -7482,11 +7691,103 @@ dialog.hide();
 
   /** Open overlay panels use paintCbePanel Graphics — same blank-after-restore as HUD fills. */
   const nudgeOverlayPanelsAfterGpuResume = (): void => {
-    try {
+    const tryNudge = (label: string, fn: () => void): void => {
+      try {
+        fn();
+      } catch (e) {
+        console.warn(`[gl] ${label} nudge`, e);
+      }
+    };
+    tryNudge("chatPanel", () => {
       if (chatPanel.visible) chatPanel.nudgeAfterGpuResume();
-    } catch (e) {
-      console.warn("[gl] chatPanel nudge", e);
-    }
+    });
+    tryNudge("menu", () => {
+      if (menu.visible) menu.nudgeAfterGpuResume();
+    });
+    tryNudge("dialog", () => {
+      if (dialog.visible) dialog.nudgeAfterGpuResume();
+    });
+    tryNudge("approach", () => {
+      if (approach.visible) approach.nudgeAfterGpuResume();
+    });
+    tryNudge("system", () => {
+      if (system.visible) system.nudgeAfterGpuResume();
+    });
+    tryNudge("enhanceUi", () => {
+      if (enhanceUi.visible) enhanceUi.nudgeAfterGpuResume();
+    });
+    tryNudge("washUi", () => {
+      if (washUi.visible) washUi.nudgeAfterGpuResume();
+    });
+    tryNudge("social", () => {
+      if (social.visible) social.nudgeAfterGpuResume();
+    });
+    tryNudge("arenaHud", () => {
+      if (arenaHud.visible) arenaHud.nudgeAfterGpuResume();
+    });
+    tryNudge("arenaPanel", () => {
+      if (arenaPanel.visible) arenaPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("wagerPanel", () => {
+      if (wagerPanel.visible) wagerPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("ladderPanel", () => {
+      if (ladderPanel.visible) ladderPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("guessPanel", () => {
+      if (guessPanel.visible) guessPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("fruitPanel", () => {
+      if (fruitPanel.visible) fruitPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("festivalPanel", () => {
+      if (festivalPanel.visible) festivalPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("yanmenPanel", () => {
+      if (yanmenPanel.visible) yanmenPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("ringQuestPanel", () => {
+      if (ringQuestPanel.visible) ringQuestPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("auctionPanel", () => {
+      if (auctionPanel.visible) auctionPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("entertainPanel", () => {
+      if (entertainPanel.visible) entertainPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("wingPanel", () => {
+      if (wingPanel.visible) wingPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("mountPanel", () => {
+      if (mountPanel.visible) mountPanel.nudgeAfterGpuResume();
+    });
+    tryNudge("taskUi", () => {
+      if (taskUi.visible) taskUi.nudgeAfterGpuResume();
+    });
+    tryNudge("tradeUi", () => {
+      if (tradeUi.visible) tradeUi.nudgeAfterGpuResume();
+    });
+    tryNudge("guildUi", () => {
+      if (guildUi.visible) guildUi.nudgeAfterGpuResume();
+    });
+    tryNudge("worldMap", () => {
+      if (worldMap.visible) worldMap.nudgeAfterGpuResume();
+    });
+    tryNudge("miniMap", () => {
+      if (miniMap.visible) miniMap.nudgeAfterGpuResume();
+    });
+    tryNudge("questTracker", () => {
+      if (questTracker.visible) questTracker.nudgeAfterGpuResume();
+    });
+    tryNudge("title", () => {
+      if (title.visible) title.nudgeAfterGpuResume();
+    });
+    tryNudge("roles", () => {
+      if (roles.visible) roles.nudgeAfterGpuResume();
+    });
+    tryNudge("createRole", () => {
+      if (createRole.visible) createRole.nudgeAfterGpuResume();
+    });
   };
 
   // alphaMode/TEX_NULL: swallow frame so ticker lives, but must not soft-OK forever.
