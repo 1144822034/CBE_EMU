@@ -5824,11 +5824,16 @@ enum
      * server policy requested for this mock service; it is not inferred from
      * the client binary. */
     VM_NET_MOCK_NPC_KIND_CRYSTAL_SYNTHESIS = 11,
-    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_CRYSTAL_SYNTHESIS,
+    /* An administrator-owned, per-NPC item-for-item rule.  Its dialog and
+     * confirmation use the same parser-backed 26/1 action=1 path as the
+     * existing merchants; the rule data never becomes a client opcode. */
+    VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE = 12,
+    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE,
     /* ParseNPCDialogData stores action rows in ten fixed 64-byte entries.
      * Tasks and direct NPC services share this one client-owned list. */
     VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS = 10,
     VM_NET_MOCK_NPC_SERVICE_OPTION_MAX = VM_NET_MOCK_NPC_KIND_MAX,
+    VM_NET_MOCK_NPC_ITEM_EXCHANGE_MAX = 128,
     VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32
 };
 
@@ -5896,6 +5901,12 @@ static bool vm_net_mock_npc_service_kind_uses_instance_config(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE 0xf4000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE 0xf8000000u
 #define VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE 0xf9000000u
+/* Exchange rules belong to the exact (scene, actor) NPC. The client receives
+ * a private list-page selector followed by one recipe selector; it never
+ * chooses arbitrary item ids or quantities. */
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_ITEM_EXCHANGE_BASE 0xfb000000u
+#define VM_NET_MOCK_NPC_SERVICE_SELECT_ITEM_EXCHANGE_BASE 0xfc000000u
+#define VM_NET_MOCK_NPC_SERVICE_ITEM_EXCHANGE_PAGE_ITEMS 8u
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
 #define VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR 0xfeu

@@ -18,5 +18,5 @@ echo Mock service listening on 127.0.0.1:%PORT%
 echo Clients in this folder use the same service by default.
 echo Startup SCE 16/3 probe (must remain 0 in normal runs): %CBE_TEST_STARTUP_SCE_DIRECT_ENTER%
 echo Startup SCE follow-up packet trace: %CBE_TRACE_STARTUP_SCE_FOLLOWUP%
-jh-online-server.exe --mock-service-only --mock-service-bind=127.0.0.1 --mock-service-port=%PORT% >server_out.txt
+jh-online-server.exe --mock-service-only --mock-service-bind=0.0.0.0 --mock-service-port=%PORT% >server_out.txt
 pause

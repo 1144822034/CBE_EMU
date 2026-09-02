@@ -1841,6 +1841,7 @@ static bool vm_mock_admin_prefix_page_routes(char *html, size_t htmlCap)
         "src=\"" VM_MOCK_ADMIN_ROOT_PATH
     };
     char *rewritten = NULL;
+    size_t adminRouteLen = strlen(VM_MOCK_ADMIN_BASE_PATH) - 1;
     size_t sourceLen = 0;
     size_t sourcePos = 0;
     size_t targetPos = 0;
@@ -1858,8 +1859,27 @@ static bool vm_mock_admin_prefix_page_routes(char *html, size_t htmlCap)
         {
             size_t needleLen = strlen(needles[i]);
             size_t replacementLen = strlen(replacements[i]);
+            size_t routeStart = sourcePos + needleLen;
+            bool alreadyPrefixed = false;
+
+            /* A renderer may legitimately emit an already absolute admin
+             * route.  The page pass must be idempotent: otherwise an
+             * action="/admin-418yz6/action" becomes
+             * "/admin-418yz6/admin-418yz6/action" and the browser reaches
+             * no route at all. */
+            if (routeStart + adminRouteLen <= sourceLen &&
+                memcmp(html + routeStart, VM_MOCK_ADMIN_BASE_PATH + 1,
+                       adminRouteLen) == 0)
+            {
+                size_t routeEnd = routeStart + adminRouteLen;
+
+                alreadyPrefixed = routeEnd == sourceLen ||
+                    html[routeEnd] == '/' || html[routeEnd] == '"' ||
+                    html[routeEnd] == '?' || html[routeEnd] == '#';
+            }
             if (sourcePos + needleLen <= sourceLen &&
-                memcmp(html + sourcePos, needles[i], needleLen) == 0)
+                memcmp(html + sourcePos, needles[i], needleLen) == 0 &&
+                !alreadyPrefixed)
             {
                 static const char adminScript[] = "admin.js\"";
                 static const char adminScriptVersion[] =
@@ -2751,7 +2771,8 @@ static void vm_mock_admin_render_npc_kind_select(vm_mock_admin_text *page,
         "比武擂台（开设／挑战）",
         "邮箱（系统奖励）",
         "守关怪挑战",
-        "玄晶合成（碎片 10 个／同级玄晶 3 个）"
+        "玄晶合成（碎片 10 个／同级玄晶 3 个）",
+        "物品兑换（配置物品 A、B 与数量）"
     };
 
     if (page == NULL)
@@ -2778,7 +2799,8 @@ static void vm_mock_admin_render_npc_service_option_fields(
 {
     static const char *labels[VM_NET_MOCK_NPC_KIND_MAX + 1] = {
         "", "武器商店", "装备修理", "技能导师", "防具商店", "药品商店",
-        "副本传送", "装备回收", "比武擂台", "邮箱", "守关怪挑战", "玄晶合成"
+        "副本传送", "装备回收", "比武擂台", "邮箱", "守关怪挑战", "玄晶合成",
+        "物品兑换"
     };
     vm_net_mock_npc_service_option
         options[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
@@ -7303,6 +7325,104 @@ static void vm_mock_admin_render_npc_inventory_setup_pending(
             newNpc ? "先增加 NPC，再配置专属库存商品。"
                    : "先保存当前 NPC 的服务选择，再配置专属库存商品。");
     }
+    if (newNpc ||
+        (configuredServices &
+         (1u << VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE)) == 0)
+    {
+        vm_mock_admin_text_appendf(
+            page,
+            "<div class=\"inventory npc-inventory-setup\" data-npc-service-config=\"%u\" hidden><div class=\"inventory-head\"><h4>物品兑换配方</h4><span class=\"stock-note\">支持多条规则</span></div><p class=\"foot\">%s</p></div>",
+            VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE,
+            newNpc ? "先增加 NPC，再添加多条物品兑换配方。"
+                   : "先保存当前 NPC 的服务选择，随后可在这里新增、编辑或删除多条兑换配方。每次兑换仍须由玩家在游戏内二次确认。");
+    }
+}
+
+static void vm_mock_admin_render_npc_item_exchange(
+    vm_mock_admin_text *page, const char *sceneUtf8, const char *runtimeScene,
+    u32 actorId)
+{
+    vm_net_mock_npc_item_exchange_config
+        configs[VM_NET_MOCK_NPC_ITEM_EXCHANGE_MAX];
+    u32 configCount = 0;
+
+    if (page == NULL || sceneUtf8 == NULL || runtimeScene == NULL || actorId == 0)
+        return;
+    memset(configs, 0, sizeof(configs));
+    configCount = vm_net_mock_npc_item_exchange_config_admin_list(
+        runtimeScene, actorId, configs, VM_NET_MOCK_NPC_ITEM_EXCHANGE_MAX);
+    vm_mock_admin_text_appendf(
+        page,
+        "<section class=\"inventory npc-item-exchange\"><div class=\"inventory-head\"><h4>物品兑换配方</h4><span class=\"stock-note\">%u 条规则 · 二次确认后立即刷新背包</span></div><p class=\"foot\">同一 NPC 可配置多条 A→B 兑换规则。玩家先在游戏内选择配方，再二次确认；物品与数量始终由服务端保存的配方决定。</p>",
+        configCount);
+
+    for (u32 i = 0; i < configCount; ++i)
+    {
+        const vm_net_mock_npc_item_exchange_config *config = &configs[i];
+        char inputPickerId[96];
+        char outputPickerId[96];
+        char inputLabel[48];
+        char outputLabel[48];
+
+        snprintf(inputPickerId, sizeof(inputPickerId),
+                 "npc-item-exchange-%u-%u-input", actorId, config->recipeId);
+        snprintf(outputPickerId, sizeof(outputPickerId),
+                 "npc-item-exchange-%u-%u-output", actorId,
+                 config->recipeId);
+        snprintf(inputLabel, sizeof(inputLabel), "配方 %u · 物品 A",
+                 config->recipeId);
+        snprintf(outputLabel, sizeof(outputLabel), "配方 %u · 物品 B",
+                 config->recipeId);
+        vm_mock_admin_text_appendf(
+            page,
+            "<div class=\"inventory-row\" style=\"grid-template-columns:minmax(170px,1fr) 90px minmax(170px,1fr) 90px max-content max-content\"><form method=\"post\" action=\"%s\" class=\"inventory-row-form\"><input type=\"hidden\" name=\"action\" value=\"save-npc-item-exchange\"><input type=\"hidden\" name=\"scene\" value=\"",
+            "/action");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(
+            page,
+            "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"exchange_recipe_id\" value=\"%u\">",
+            actorId, config->recipeId);
+        vm_mock_admin_render_item_picker_field(
+            page, inputPickerId, "exchange_input_item_id", inputLabel,
+            config->inputItemId, true);
+        vm_mock_admin_text_appendf(
+            page,
+            "<label class=\"field npc-item-exchange-count\"><span>消耗</span><input type=\"number\" name=\"exchange_input_count\" min=\"1\" max=\"1000000\" required value=\"%u\"></label>",
+            config->inputCount);
+        vm_mock_admin_render_item_picker_field(
+            page, outputPickerId, "exchange_output_item_id", outputLabel,
+            config->outputItemId, true);
+        vm_mock_admin_text_appendf(
+            page,
+            "<label class=\"field\"><span>获得</span><input type=\"number\" name=\"exchange_output_count\" min=\"1\" max=\"1000000\" required value=\"%u\"></label><button type=\"submit\">保存</button></form><form method=\"post\" action=\"%s\" class=\"actions\" style=\"margin:0\"><input type=\"hidden\" name=\"action\" value=\"delete-npc-item-exchange\"><input type=\"hidden\" name=\"scene\" value=\"",
+            config->outputCount, "/action");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(
+            page,
+            "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"exchange_recipe_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">删除</button></form></div>",
+            actorId, config->recipeId);
+    }
+
+    vm_mock_admin_text_appendf(page,
+        "<div class=\"inventory-row\" style=\"grid-template-columns:minmax(170px,1fr) 90px minmax(170px,1fr) 90px max-content\"><form method=\"post\" action=\"%s\" class=\"inventory-row-form\"><input type=\"hidden\" name=\"action\" value=\"save-npc-item-exchange\"><input type=\"hidden\" name=\"scene\" value=\"",
+        "/action");
+    vm_mock_admin_text_append_html(page, sceneUtf8);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"exchange_recipe_id\" value=\"0\">",
+        actorId);
+    vm_mock_admin_render_item_picker_field(
+        page, "npc-item-exchange-new-input", "exchange_input_item_id",
+        "新增 · 物品 A", 0, true);
+    vm_mock_admin_text_appendf(
+        page,
+        "<label class=\"field\"><span>消耗</span><input type=\"number\" name=\"exchange_input_count\" min=\"1\" max=\"1000000\" required value=\"1\"></label>");
+    vm_mock_admin_render_item_picker_field(
+        page, "npc-item-exchange-new-output", "exchange_output_item_id",
+        "新增 · 物品 B", 0, true);
+    vm_mock_admin_text_appendf(
+        page,
+        "<label class=\"field\"><span>获得</span><input type=\"number\" name=\"exchange_output_count\" min=\"1\" max=\"1000000\" required value=\"1\"></label><button type=\"submit\">新增</button></form></div></section>");
 }
 
 static void vm_mock_admin_render_npc_inventories(
@@ -7331,14 +7451,20 @@ static void vm_mock_admin_render_npc_inventories(
     {
         char panelPrefix[64];
 
+        configuredServices |= 1u << options[i].kind;
         if (!vm_net_mock_npc_service_kind_uses_inventory(options[i].kind))
             continue;
-        configuredServices |= 1u << options[i].kind;
         snprintf(panelPrefix, sizeof(panelPrefix), "%s-%u", pickerPrefix,
                  options[i].kind);
         vm_mock_admin_render_npc_inventory(
             page, sceneUtf8, runtimeScene, seed->actorId, options[i].kind,
             panelPrefix);
+    }
+    if ((configuredServices &
+         (1u << VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE)) != 0)
+    {
+        vm_mock_admin_render_npc_item_exchange(page, sceneUtf8, runtimeScene,
+                                                seed->actorId);
     }
     vm_mock_admin_render_npc_inventory_setup_pending(
         page, false, configuredServices);
@@ -13787,6 +13913,119 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         return;
     }
 
+    if (strcmp(action, "save-npc-item-exchange") == 0 ||
+        strcmp(action, "delete-npc-item-exchange") == 0)
+    {
+        vm_net_mock_dynamic_npc_admin_row
+            dynamicRows[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+        vm_net_mock_native_npc_admin_row
+            nativeRows[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
+        vm_net_mock_npc_service_option
+            configuredServices[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
+        u16 parentKind = VM_NET_MOCK_NPC_KIND_NORMAL;
+        u32 configuredServiceCount = 0;
+        u32 inputItemId = 0;
+        u32 inputCount = 0;
+        u32 outputItemId = 0;
+        u32 outputCount = 0;
+        u32 recipeId = 0;
+        bool dynamicFound = false;
+        bool found = false;
+
+        (void)vm_net_mock_dynamic_npc_admin_list(
+            runtimeScene, dynamicRows, VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX);
+        u32 nativeCount = vm_net_mock_native_npc_admin_list(
+            runtimeScene, nativeRows, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX);
+        memset(configuredServices, 0, sizeof(configuredServices));
+        if (!vm_net_mock_dynamic_npc_admin_lookup_exact_kind(
+                runtimeScene, actorId, &dynamicFound, &parentKind))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "无法读取 NPC 父记录，请稍后重试");
+            return;
+        }
+        found = dynamicFound;
+        if (!found)
+        {
+            for (u32 i = 0; i < nativeCount; ++i)
+            {
+                if (nativeRows[i].seed.actorId == actorId)
+                {
+                    parentKind = nativeRows[i].seed.kind;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found || !vm_net_mock_npc_service_options_resolve(
+                           runtimeScene, actorId, parentKind, NULL, NULL,
+                           configuredServices,
+                           VM_NET_MOCK_NPC_SERVICE_OPTION_MAX,
+                           &configuredServiceCount, NULL) ||
+            !vm_net_mock_npc_service_options_has_kind(
+                configuredServices, configuredServiceCount,
+                VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error",
+                "该 NPC 未启用物品兑换服务；请先保存服务勾选");
+            return;
+        }
+        if (!vm_mock_admin_form_optional_u32(
+                body, "exchange_recipe_id",
+                VM_NET_MOCK_NPC_SERVICE_VALUE_MASK, &recipeId))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "兑换配方编号无效");
+            return;
+        }
+        if (strcmp(action, "delete-npc-item-exchange") == 0)
+        {
+            if (recipeId == 0)
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               "请选择要删除的兑换配方");
+                return;
+            }
+            if (!vm_net_mock_npc_item_exchange_config_admin_delete(
+                    runtimeScene, actorId, recipeId, &error))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               error ? error : "兑换配方删除失败");
+                return;
+            }
+            vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                           "物品兑换配方已删除");
+            return;
+        }
+        if (!vm_mock_admin_form_u32(body, "exchange_input_item_id",
+                                    0xffffffffu, &inputItemId) ||
+            !vm_mock_admin_form_u32(body, "exchange_input_count", 1000000u,
+                                    &inputCount) ||
+            !vm_mock_admin_form_u32(body, "exchange_output_item_id",
+                                    0xffffffffu, &outputItemId) ||
+            !vm_mock_admin_form_u32(body, "exchange_output_count", 1000000u,
+                                    &outputCount) || inputItemId == 0 ||
+            inputCount == 0 || outputItemId == 0 || outputCount == 0)
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "兑换物品或数量无效");
+            return;
+        }
+        if (!vm_net_mock_npc_item_exchange_config_admin_save(
+                runtimeScene, actorId, recipeId, inputItemId, inputCount,
+                outputItemId, outputCount, NULL, &error))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           error ? error : "兑换配方保存失败");
+            return;
+        }
+        vm_mock_admin_redirect_content(
+            client, sceneUtf8, "ok",
+            recipeId == 0 ? "物品兑换配方已新增" : "物品兑换配方已保存");
+        return;
+    }
+
     if (strcmp(action, "save-npc-inventory") == 0 ||
         strcmp(action, "delete-npc-inventory") == 0 ||
         strcmp(action, "save-npc-inventory-bulk") == 0 ||
@@ -15459,6 +15698,41 @@ done:
     free(raw);
 }
 
+static bool vm_mock_admin_action_is_npc_action(const char *action)
+{
+    return action != NULL &&
+        (strcmp(action, "save-npc") == 0 ||
+         strcmp(action, "toggle-npc") == 0 ||
+         strcmp(action, "delete-npc-override") == 0 ||
+         strcmp(action, "save-npc-inventory") == 0 ||
+         strcmp(action, "delete-npc-inventory") == 0 ||
+         strcmp(action, "save-npc-inventory-bulk") == 0 ||
+         strcmp(action, "delete-npc-inventory-bulk") == 0 ||
+         strcmp(action, "save-npc-item-exchange") == 0 ||
+         strcmp(action, "delete-npc-item-exchange") == 0 ||
+         strcmp(action, "save-native-npc-override") == 0 ||
+         strcmp(action, "delete-native-npc-override") == 0 ||
+         strcmp(action, "save-native-npc-inventory") == 0 ||
+         strcmp(action, "delete-native-npc-inventory") == 0);
+}
+
+static bool vm_mock_admin_action_is_account_action(const char *action)
+{
+    return action != NULL &&
+        (strcmp(action, "create-account") == 0 ||
+         strcmp(action, "set-password") == 0 ||
+         strcmp(action, "set-role-name") == 0 ||
+         strcmp(action, "add-money") == 0 ||
+         strcmp(action, "add-wcoin") == 0 ||
+         strcmp(action, "remove-wcoin") == 0 ||
+         strcmp(action, "reset-role-selected-scene") == 0 ||
+         strcmp(action, "set-role-level") == 0 ||
+         strcmp(action, "set-equipped-enhance-level") == 0 ||
+         strcmp(action, "grant-item") == 0 ||
+         strcmp(action, "remove-role-backpack-item") == 0 ||
+         strcmp(action, "remove-role-timed-item-effect") == 0);
+}
+
 static void vm_mock_admin_handle_action(vm_mock_service_socket client,
                                         const char *body,
                                         const char *operatorAccountId)
@@ -15580,17 +15854,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
         vm_mock_admin_handle_sce_resource_action(client, action, body);
         return;
     }
-    if (strcmp(action, "save-npc") == 0 ||
-        strcmp(action, "toggle-npc") == 0 ||
-        strcmp(action, "delete-npc-override") == 0 ||
-        strcmp(action, "save-npc-inventory") == 0 ||
-        strcmp(action, "delete-npc-inventory") == 0 ||
-        strcmp(action, "save-npc-inventory-bulk") == 0 ||
-        strcmp(action, "delete-npc-inventory-bulk") == 0 ||
-        strcmp(action, "save-native-npc-override") == 0 ||
-        strcmp(action, "delete-native-npc-override") == 0 ||
-        strcmp(action, "save-native-npc-inventory") == 0 ||
-        strcmp(action, "delete-native-npc-inventory") == 0)
+    if (vm_mock_admin_action_is_npc_action(action))
     {
         vm_mock_admin_handle_npc_action(client, action, body);
         return;
@@ -15811,6 +16075,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client,
                  "账号已封禁：已断开 %u 个游戏会话、注销 %u 个用户中心会话；后续登录将被拒绝",
                  disconnected, userSessions);
         vm_mock_admin_redirect(client, account, "ok", message);
+        return;
+    }
+    if (!vm_mock_admin_action_is_account_action(action))
+    {
+        vm_mock_admin_redirect(client, "", "error", "不支持的管理操作");
         return;
     }
     if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))

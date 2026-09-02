@@ -818,6 +818,71 @@ static bool vm_net_mock_is_active_transient_instance_target(
                target->scene, session->transientInstanceScene);
 }
 
+/* A resumed instance enters through title ActorInfo, not the original 30/1
+ * direct-instance response.  The first WT12/1 scene-runtime callback is the
+ * corresponding parser-safe boundary: its scene table exists and the client
+ * has requested the same task/other families that precede the normal instance
+ * FB completion.  Reproduce only the proven FB tail there, once and only for
+ * the recovered session's exact scene. */
+static bool vm_net_mock_append_reconnect_transient_instance_fb_completion(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, const char *scene)
+{
+    u8 objectCountBeforeNpcSeed = 0;
+
+    if (!vm_mock_service_active_transient_instance_reconnect_fb_pending_matches(
+            scene))
+    {
+        return true;
+    }
+    /* ParseDMenuResponse has ten response-object slots.  This title-login
+     * subset already carries the skill, bag, task and actor replies; its
+     * reconnect-specific FB tail is exactly three objects.  Refuse before
+     * modifying the packet if a future change leaves less than that headroom,
+     * rather than delivering a packet whose 27/4 (and its `min`) the client
+     * cannot reach. */
+    if (*objectCount >
+        VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX - 3u)
+    {
+        printf("[error][network] mock_instance_reconnect_fb_completion "
+               "scene=%s objects=%u action=reject-over-dispatch-limit "
+               "required_tail=3 limit=%u\n",
+               scene ? scene : "-", (u32)*objectCount,
+               (u32)VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX);
+        return false;
+    }
+    if (!vm_net_mock_append_fb_target_result12_for_scene(
+            out, outCap, pos, scene,
+            vm_net_mock_scene_spawn_x(), vm_net_mock_scene_spawn_y()))
+    {
+        return false;
+    }
+    *objectCount += 1;
+    objectCountBeforeNpcSeed = *objectCount;
+    if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+            out, outCap, pos, objectCount, scene, true, true))
+    {
+        return false;
+    }
+    if (*objectCount == objectCountBeforeNpcSeed)
+    {
+        /* Even a scene with no directory rows needs the exact 27/11 gate
+         * between 27/12 and 27/4; this is the same empty acknowledgement
+         * used by the normal post-enter completion path. */
+        if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, pos))
+            return false;
+        *objectCount += 1;
+    }
+    if (!vm_net_mock_append_fb_target_result4_object(out, outCap, pos, 1, ""))
+        return false;
+    *objectCount += 1;
+    vm_mock_service_active_transient_instance_reconnect_fb_complete(scene);
+    printf("[info][network] mock_instance_reconnect_fb_completion "
+           "scene=%s order=27/12,27/11,27/4 timer=active-session "
+           "response=WT12/1 evidence=JianghuOL.CBE:0x01033CF2+0x0104C252\n",
+           scene);
+    return true;
+}
+
 static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request, u32 requestLen,
                                                               u8 *out, u32 outCap)
 {
@@ -1535,6 +1600,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     bool includeSkillBooks = false;
     bool primaryTaskSubsetNeedsFb11Ack = false;
     bool sceneNpcLifecycleAppended = false;
+    bool reconnectTransientInstanceFbPending = false;
     bool shopReturnReload = false;
     u16 shopReturnX = 0;
     u16 shopReturnY = 0;
@@ -1658,6 +1724,10 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     responseScene = completeDeferredScene
                         ? g_vm_net_mock_last_scene_change_target.scene
                         : currentScene;
+    reconnectTransientInstanceFbPending =
+        startupSceneAlreadyEntered && !completeDeferredScene &&
+        vm_mock_service_active_transient_instance_reconnect_fb_pending_matches(
+            responseScene);
     shopReturnReload =
         !completeDeferredScene &&
         currentScene != NULL &&
@@ -1688,7 +1758,8 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     {
         u8 objectCountBeforeLifecycle = objectCount;
 
-        if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+        if (!reconnectTransientInstanceFbPending &&
+            !vm_net_mock_append_scene_npc_lifecycle_seed(
                 out, outCap, &pos, &objectCount, responseScene,
                 startupSceneAlreadyEntered && !completeDeferredScene,
                 !completeDeferredScene))
@@ -1697,7 +1768,8 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
         }
         sceneNpcLifecycleAppended = objectCount != objectCountBeforeLifecycle;
     }
-    if (primaryTaskSubsetNeedsFb11Ack && !sceneNpcLifecycleAppended)
+    if (primaryTaskSubsetNeedsFb11Ack && !sceneNpcLifecycleAppended &&
+        !reconnectTransientInstanceFbPending)
     {
         /*
          * The preceding 2/3 already delivered the one-shot NPC directory for
@@ -1718,13 +1790,27 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     startupNearbyInRequestedObject = startupSceneAlreadyEntered &&
                                        !completeDeferredScene &&
                                        !seedSubsetNpcOther;
-    if (!vm_net_mock_append_scene_resource_followup_objects_ex(out, outCap, &pos, &objectCount,
-                                                              responseScene,
-                                                              includeSkillBooks, true, true, true,
-                                                              false, false,
-                                                              seedSubsetNpcOther,
-                                                              startupNearbyInRequestedObject))
+    /* A recovered instance must append 27/12 -> 27/11 -> 27/4(min) to this
+     * same client-requested scene-init response.  The normal subset contains
+     * eight replies, so retaining its non-stateful 25/5 banner would create
+     * eleven objects; ParseDMenuResponse only has ten slots and then aborts
+     * before it can parse the timer's `min`.  Leave that banner for the
+     * client's ordinary later poll and reserve this one slot for the proven
+     * FB lifecycle tail. */
+    if (!vm_net_mock_append_scene_resource_followup_objects_ex(
+            out, outCap, &pos, &objectCount, responseScene,
+            includeSkillBooks, true, true,
+            !reconnectTransientInstanceFbPending,
+            false, false, seedSubsetNpcOther,
+            startupNearbyInRequestedObject))
         return 0;
+
+    if (reconnectTransientInstanceFbPending &&
+        !vm_net_mock_append_reconnect_transient_instance_fb_completion(
+            out, outCap, &pos, &objectCount, responseScene))
+    {
+        return 0;
+    }
 
     if (completeDeferredScene)
     {
@@ -3387,8 +3473,10 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 
     actorTargetX = (u8)vm_net_mock_env_u32("CBE_ACTOR_TARGET_X", 12);
     actorTargetY = (u8)vm_net_mock_env_u32("CBE_ACTOR_TARGET_Y", 10);
-    actorGridX = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_X", role ? role->x : vm_net_mock_scene_spawn_x());
-    actorGridY = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_Y", role ? role->y : vm_net_mock_scene_spawn_y());
+    actorGridX = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_X",
+                                           vm_net_mock_scene_spawn_x());
+    actorGridY = (u16)vm_net_mock_env_u32("CBE_ACTOR_GRID_Y",
+                                           vm_net_mock_scene_spawn_y());
     actorField11E = vm_net_mock_env_u8("CBE_ACTOR_BYTE_11E", actorTargetX);
     actorField120 = vm_net_mock_env_u8("CBE_ACTOR_BYTE_120", actorTargetY);
     actorResource = vm_net_mock_actor_resource_name((u8)actorJob, (u8)actorSex);
@@ -4498,6 +4586,7 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
     u32 activeActorId = 0;
     u32 actorInfoLen = 0;
     bool selected = false;
+    bool transientInstanceResumed = false;
 
     if (outCap < pos)
         return 0;
@@ -4513,6 +4602,10 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
         u32 offlineExp = 0;
         u32 offlineMinutes = 0;
         u32 offlineItems = 0;
+
+        transientInstanceResumed =
+            vm_mock_service_active_transient_instance_resume_after_role_select(
+                role->roleId);
 
         /* The three seasonal tokens have no client-side “use” request.  Settle
          * only after this exact role becomes active, so the full login actor
@@ -4570,9 +4663,10 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          * Arm the same catalog lifecycle explicitly for the first scene-ready
          * resource/task follow-up; the later sync poll remains a fallback only.
          */
-        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(role->scene);
-        printf("[info][network] mock_backpack_grid_reseed role=%u reason=title-role-select next=group-type1-30/21+7/7-type2+type3 evidence=JianghuOL.CBE:0x01039952+mmGame:0x0D04\n",
-               role->roleId);
+        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(
+            vm_net_mock_current_scene_name());
+        printf("[info][network] mock_backpack_grid_reseed role=%u reason=title-role-select instance_resume=%u next=group-type1-30/21+7/7-type2+type3 evidence=JianghuOL.CBE:0x01039952+mmGame:0x0D04\n",
+               role->roleId, transientInstanceResumed ? 1u : 0u);
     }
 
     /* A minimal {result, actorID} subtype-6 ack is accepted by

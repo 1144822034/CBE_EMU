@@ -2339,6 +2339,7 @@ static const char *vm_net_mock_scene_key_name(void)
 {
     const char *overrideName = vm_net_mock_env_str("CBE_SCENE_KEY", "");
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *transientScene = vm_mock_service_active_transient_instance_scene();
 
     /*
      * This key is copied by parse_actorinfo_response() into R9+0x5E46, then
@@ -2351,6 +2352,11 @@ static const char *vm_net_mock_scene_key_name(void)
      * byte here.  Every downstream scene comparison is strict as well, so the
      * resource key remains one complete identity from persistence to UI.
      */
+    if (transientScene != NULL &&
+        vm_net_mock_scene_name_is_persistable(transientScene))
+    {
+        return transientScene;
+    }
     if (overrideName != NULL && vm_net_mock_scene_name_is_persistable(overrideName))
         return overrideName;
     if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
@@ -2833,7 +2839,11 @@ enum
     /* The quote stores the authoritative candidate count in `selector` and
      * total copper in `quotedPrice`; confirmation rechecks both before the
      * one role transaction removes any quality-zero backpack equipment. */
-    VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO = 6
+    VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO = 6,
+    /* Per-NPC A-to-B rule, quoted before the ordinary confirm/cancel action.
+     * recipeId identifies one server-configured rule; itemId=input,
+     * selector=output, page=input count, quotedPrice=output count. */
+    VM_MOCK_SERVICE_NPC_TRANSACTION_ITEM_EXCHANGE = 7
 };
 
 /* A 26/1 action=1 request only carries a private menu value.  Retain the
@@ -2847,6 +2857,7 @@ typedef struct
     u32 actorId;
     u32 serviceMask;
     u32 itemId;
+    u32 recipeId;
     u16 backpackSeq;
     u32 selector;
     u32 page;
@@ -2899,12 +2910,22 @@ typedef struct vm_mock_service_client_session
      * It may service scene traffic while connected, but it must never replace
      * the role row used by the next ActorInfo bootstrap. */
     bool transientInstanceActive;
+    /* The transient scene remains bound to the selected role even after a
+     * transport session is torn down.  This is intentionally separate from
+     * onlineRoleId, which is cleared during the offline transition before a
+     * later title role-select can restore the temporary destination. */
+    u32 transientInstanceRoleId;
     char transientInstanceScene[64];
     u16 transientInstanceX;
     u16 transientInstanceY;
     u32 transientInstanceStartedTick;
     u32 transientInstanceTimerMinutes;
     u32 transientInstanceTimerStartedMs;
+    /* A title role-select rebuilds the scene shell without repeating the
+     * original WT30/1 instance enter.  Retain one narrow marker so its first
+     * client-requested scene-runtime response can emit the same FB target
+     * state (27/12, 27/11, 27/4) that initializes the countdown HUD. */
+    bool transientInstanceReconnectFbPending;
     /* Preserve the durable world position from immediately before an NPC
      * instance enters its temporary scene. A timer expiry may only return to
      * this distinct, server-owned anchor through the existing 30/1 path. */
@@ -3063,6 +3084,29 @@ typedef struct vm_mock_service_client_session
 } vm_mock_service_client_session;
 
 static vm_mock_service_client_session *g_vm_mock_service_client_sessions = NULL;
+
+/* A transient NPC instance is normally session-owned.  An unexpected client
+ * loss is the narrow exception: retain one server-process-local handoff
+ * record, keyed by the authenticated account and selected role, until that
+ * same role completes the ordinary title role-select again.  This is not a
+ * role-row update and it deliberately does not survive a service restart. */
+typedef struct vm_mock_service_transient_instance_reconnect
+{
+    char accountId[64];
+    u32 roleId;
+    char scene[64];
+    u16 x;
+    u16 y;
+    u32 timerMinutes;
+    u32 timerStartedMs;
+    char returnScene[64];
+    u16 returnX;
+    u16 returnY;
+    struct vm_mock_service_transient_instance_reconnect *next;
+} vm_mock_service_transient_instance_reconnect;
+
+static vm_mock_service_transient_instance_reconnect
+    *g_vm_mock_service_transient_instance_reconnects = NULL;
 
 /*
  * A team is deliberately service-local rather than persisted in the role DB.
@@ -3992,6 +4036,54 @@ static bool vm_mock_service_active_transient_instance_position(u16 *xOut, u16 *y
     return true;
 }
 
+static vm_mock_service_transient_instance_reconnect
+    *vm_mock_service_transient_instance_reconnect_take(const char *accountId,
+                                                       u32 roleId)
+{
+    vm_mock_service_transient_instance_reconnect **link =
+        &g_vm_mock_service_transient_instance_reconnects;
+
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0)
+        return NULL;
+    while (*link != NULL)
+    {
+        vm_mock_service_transient_instance_reconnect *record = *link;
+
+        if (record->roleId == roleId && strcmp(record->accountId, accountId) == 0)
+        {
+            *link = record->next;
+            record->next = NULL;
+            return record;
+        }
+        link = &record->next;
+    }
+    return NULL;
+}
+
+static void vm_mock_service_transient_instance_reconnect_discard(
+    const char *accountId, u32 roleId, const char *reason)
+{
+    vm_mock_service_transient_instance_reconnect *record =
+        vm_mock_service_transient_instance_reconnect_take(accountId, roleId);
+
+    if (record == NULL)
+        return;
+    printf("[info][mock-service] transient_instance_reconnect_discard account=%s role=%u scene=%s pos=(%u,%u) reason=%s\n",
+           record->accountId, record->roleId, record->scene, record->x, record->y,
+           reason ? reason : "-");
+    free(record);
+}
+
+static bool vm_mock_service_transient_instance_offline_reason_allows_reconnect(
+    const char *reason)
+{
+    return reason != NULL &&
+           (strcmp(reason, "explicit-disconnect") == 0 ||
+            strcmp(reason, "heartbeat-timeout") == 0 ||
+            strcmp(reason, "account-login-takeover") == 0 ||
+            strcmp(reason, "title-login-rebind") == 0);
+}
+
 static bool vm_mock_service_active_transient_instance_begin(const char *scene,
                                                             u16 x, u16 y,
                                                             const char *reason)
@@ -4007,8 +4099,11 @@ static bool vm_mock_service_active_transient_instance_begin(const char *scene,
     {
         return false;
     }
+    vm_mock_service_transient_instance_reconnect_discard(
+        session->accountId, role->roleId, "new-instance-enter");
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
     session->transientInstanceActive = true;
+    session->transientInstanceRoleId = role->roleId;
     snprintf(session->transientInstanceScene,
              sizeof(session->transientInstanceScene), "%s", scene);
     session->transientInstanceX = x;
@@ -4016,6 +4111,7 @@ static bool vm_mock_service_active_transient_instance_begin(const char *scene,
     session->transientInstanceStartedTick = g_schedulerTick;
     session->transientInstanceTimerMinutes = 0;
     session->transientInstanceTimerStartedMs = 0;
+    session->transientInstanceReconnectFbPending = false;
     session->transientInstanceExpiryExitCompletionPending = false;
     session->transientInstanceExpiryExitScene[0] = 0;
     session->transientInstanceExpiryExitX = 0;
@@ -4069,6 +4165,183 @@ static u32 vm_mock_service_active_transient_instance_timer_remaining_minutes(
     elapsedMinutes = (nowMs - session->transientInstanceTimerStartedMs) / 60000u;
     return elapsedMinutes >= session->transientInstanceTimerMinutes ? 0 :
            session->transientInstanceTimerMinutes - elapsedMinutes;
+}
+
+static bool vm_mock_service_transient_instance_reconnect_snapshot(
+    const vm_mock_service_client_session *session, u32 roleId, const char *reason)
+{
+    vm_mock_service_transient_instance_reconnect *record = NULL;
+    u32 remainingMinutes = 0;
+
+    if (session == NULL || session->accountId[0] == 0 || roleId == 0 ||
+        !session->transientInstanceActive ||
+        !vm_net_mock_scene_name_is_safe(session->transientInstanceScene) ||
+        session->transientInstanceX == 0 || session->transientInstanceY == 0 ||
+        !vm_net_mock_scene_name_is_persistable(
+            session->transientInstanceReturnScene) ||
+        session->transientInstanceReturnX == 0 ||
+        session->transientInstanceReturnY == 0)
+    {
+        if (session != NULL)
+        {
+            vm_mock_service_transient_instance_reconnect_discard(
+                session->accountId, roleId, "offline-state-invalid");
+        }
+        return false;
+    }
+    if (session->transientInstanceTimerMinutes != 0)
+    {
+        remainingMinutes =
+            vm_mock_service_active_transient_instance_timer_remaining_minutes(
+                session, scheduler_get_tick_ms());
+        if (remainingMinutes == 0)
+        {
+            vm_mock_service_transient_instance_reconnect_discard(
+                session->accountId, roleId, "expired-before-offline");
+            printf("[info][mock-service] transient_instance_reconnect_skip account=%s role=%u scene=%s reason=expired-before-offline\n",
+                   session->accountId, roleId, session->transientInstanceScene);
+            return false;
+        }
+    }
+
+    record = vm_mock_service_transient_instance_reconnect_take(
+        session->accountId, roleId);
+    if (record == NULL)
+    {
+        record = (vm_mock_service_transient_instance_reconnect *)calloc(
+            1, sizeof(*record));
+        if (record == NULL)
+        {
+            printf("[error][mock-service] transient_instance_reconnect_snapshot_failed account=%s role=%u reason=allocation\n",
+                   session->accountId, roleId);
+            return false;
+        }
+    }
+    snprintf(record->accountId, sizeof(record->accountId), "%s", session->accountId);
+    record->roleId = roleId;
+    snprintf(record->scene, sizeof(record->scene), "%s",
+             session->transientInstanceScene);
+    record->x = session->transientInstanceX;
+    record->y = session->transientInstanceY;
+    record->timerMinutes = session->transientInstanceTimerMinutes;
+    record->timerStartedMs = session->transientInstanceTimerStartedMs;
+    snprintf(record->returnScene, sizeof(record->returnScene), "%s",
+             session->transientInstanceReturnScene);
+    record->returnX = session->transientInstanceReturnX;
+    record->returnY = session->transientInstanceReturnY;
+    record->next = g_vm_mock_service_transient_instance_reconnects;
+    g_vm_mock_service_transient_instance_reconnects = record;
+    printf("[info][mock-service] transient_instance_reconnect_snapshot client=%08x account=%s role=%u scene=%s pos=(%u,%u) remaining_minutes=%u reason=%s\n",
+           session->clientId, record->accountId, record->roleId, record->scene,
+           record->x, record->y, remainingMinutes, reason ? reason : "-");
+    return true;
+}
+
+static bool vm_mock_service_active_transient_instance_resume_after_role_select(
+    u32 roleId)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_mock_service_transient_instance_reconnect *record = NULL;
+    u32 remainingMinutes = 0;
+
+    if (session == NULL || session->accountId[0] == 0 || roleId == 0)
+        return false;
+    record = vm_mock_service_transient_instance_reconnect_take(
+        session->accountId, roleId);
+    if (record == NULL)
+        return false;
+    if (!vm_net_mock_scene_name_is_safe(record->scene) ||
+        record->x == 0 || record->y == 0 ||
+        !vm_net_mock_scene_name_is_persistable(record->returnScene) ||
+        record->returnX == 0 || record->returnY == 0)
+    {
+        printf("[info][mock-service] transient_instance_reconnect_discard account=%s role=%u scene=%s pos=(%u,%u) reason=restore-state-invalid\n",
+               record->accountId, record->roleId, record->scene, record->x,
+               record->y);
+        free(record);
+        return false;
+    }
+
+    if (record->timerMinutes != 0)
+    {
+        vm_mock_service_client_session timerProbe;
+
+        memset(&timerProbe, 0, sizeof(timerProbe));
+        timerProbe.transientInstanceActive = true;
+        timerProbe.transientInstanceTimerMinutes = record->timerMinutes;
+        timerProbe.transientInstanceTimerStartedMs = record->timerStartedMs;
+        remainingMinutes =
+            vm_mock_service_active_transient_instance_timer_remaining_minutes(
+                &timerProbe, scheduler_get_tick_ms());
+        if (remainingMinutes == 0)
+        {
+            printf("[info][mock-service] transient_instance_reconnect_discard account=%s role=%u scene=%s pos=(%u,%u) reason=expired-before-relogin\n",
+                   record->accountId, record->roleId, record->scene, record->x,
+                   record->y);
+            free(record);
+            return false;
+        }
+    }
+
+    session->transientInstanceActive = true;
+    session->transientInstanceRoleId = record->roleId;
+    snprintf(session->transientInstanceScene,
+             sizeof(session->transientInstanceScene), "%s", record->scene);
+    session->transientInstanceX = record->x;
+    session->transientInstanceY = record->y;
+    session->transientInstanceStartedTick = g_schedulerTick;
+    session->transientInstanceTimerMinutes = record->timerMinutes;
+    session->transientInstanceTimerStartedMs = record->timerStartedMs;
+    session->transientInstanceReconnectFbPending = true;
+    snprintf(session->transientInstanceReturnScene,
+             sizeof(session->transientInstanceReturnScene), "%s",
+             record->returnScene);
+    session->transientInstanceReturnX = record->returnX;
+    session->transientInstanceReturnY = record->returnY;
+    session->transientInstanceExpiryExitCompletionPending = false;
+    session->transientInstanceExpiryExitScene[0] = 0;
+    session->transientInstanceExpiryExitX = 0;
+    session->transientInstanceExpiryExitY = 0;
+    session->transientInstanceExpiryExitNpcReseedPending = false;
+    session->transientInstanceExpiryExitNpcReseedScene[0] = 0;
+    session->transientInstanceExpiryExitAwaitingBattleClose = false;
+    printf("[info][mock-service] transient_instance_reconnect_resume client=%08x account=%s role=%u scene=%s pos=(%u,%u) remaining_minutes=%u\n",
+           session->clientId, record->accountId, record->roleId, record->scene,
+           record->x, record->y, remainingMinutes);
+    free(record);
+    return true;
+}
+
+static bool vm_mock_service_active_transient_instance_reconnect_fb_pending_matches(
+    const char *scene)
+{
+    const vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && session->transientInstanceActive &&
+           session->transientInstanceReconnectFbPending &&
+           vm_net_mock_scene_name_is_safe(scene) &&
+           vm_net_mock_scene_names_equal_exact(session->transientInstanceScene,
+                                               scene);
+}
+
+static void vm_mock_service_active_transient_instance_reconnect_fb_complete(
+    const char *scene)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (!vm_mock_service_active_transient_instance_reconnect_fb_pending_matches(
+            scene))
+    {
+        return;
+    }
+    session->transientInstanceReconnectFbPending = false;
+    printf("[info][mock-service] transient_instance_reconnect_fb_complete client=%08x scene=%s remaining_minutes=%u\n",
+           session->clientId, scene,
+           vm_mock_service_active_transient_instance_timer_remaining_minutes(
+               session, scheduler_get_tick_ms()));
 }
 
 static void vm_mock_service_active_transient_instance_expiry_exit_completion_clear(
@@ -4262,13 +4535,18 @@ static void vm_mock_service_active_transient_instance_clear_if_departing(
            session->clientId, session->transientInstanceScene,
            session->transientInstanceX, session->transientInstanceY, scene,
            reason ? reason : "scene-change");
+    vm_mock_service_transient_instance_reconnect_discard(
+        session->accountId, session->transientInstanceRoleId,
+        reason ? reason : "scene-change");
     session->transientInstanceActive = false;
+    session->transientInstanceRoleId = 0;
     session->transientInstanceScene[0] = 0;
     session->transientInstanceX = 0;
     session->transientInstanceY = 0;
     session->transientInstanceStartedTick = 0;
     session->transientInstanceTimerMinutes = 0;
     session->transientInstanceTimerStartedMs = 0;
+    session->transientInstanceReconnectFbPending = false;
     session->transientInstanceReturnScene[0] = 0;
     session->transientInstanceReturnX = 0;
     session->transientInstanceReturnY = 0;
@@ -6779,11 +7057,14 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     bool roleIdentityReassigned = false;
     char accountId[sizeof(session->accountId)];
     u32 offlineRoleId = 0;
+    u32 transientInstanceRoleId = 0;
 
     if (session == NULL)
         return;
     snprintf(accountId, sizeof(accountId), "%s", session->accountId);
     offlineRoleId = session->onlineRoleId;
+    transientInstanceRoleId = session->transientInstanceRoleId != 0 ?
+        session->transientInstanceRoleId : offlineRoleId;
     /* A completed user-center role migration has already removed this source
      * (account, role) parent and recreated it under the target account with a
      * new role id.  Do not let the old session recreate stale offline-timer
@@ -6797,6 +7078,16 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     {
         vm_net_mock_practise_mark_offline(accountId, offlineRoleId);
         vm_net_mock_offline_exp_mark_offline(accountId, offlineRoleId);
+    }
+    if (vm_mock_service_transient_instance_offline_reason_allows_reconnect(reason))
+    {
+        (void)vm_mock_service_transient_instance_reconnect_snapshot(
+            session, transientInstanceRoleId, reason);
+    }
+    else
+    {
+        vm_mock_service_transient_instance_reconnect_discard(
+            accountId, transientInstanceRoleId, reason ? reason : "offline");
     }
     vm_mock_service_session_clear_scene_hangup(session,
                                                reason ? reason : "offline");
@@ -6839,12 +7130,14 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
     session->transientInstanceActive = false;
+    session->transientInstanceRoleId = 0;
     session->transientInstanceScene[0] = 0;
     session->transientInstanceX = 0;
     session->transientInstanceY = 0;
     session->transientInstanceStartedTick = 0;
     session->transientInstanceTimerMinutes = 0;
     session->transientInstanceTimerStartedMs = 0;
+    session->transientInstanceReconnectFbPending = false;
     session->transientInstanceReturnScene[0] = 0;
     session->transientInstanceReturnX = 0;
     session->transientInstanceReturnY = 0;

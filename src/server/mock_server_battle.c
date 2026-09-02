@@ -6306,6 +6306,51 @@ static u32 vm_net_mock_build_battle_revival_stone_completion_response(u8 *out,
     return pos;
 }
 
+/*
+ * PvP armour mitigation
+ * ---------------------
+ *
+ * Duel participants can accumulate thousands of direct equip.dsh armour and
+ * a further primary-stat multiplier from enhancement.  Applying the PvE
+ * 100 / (100 + defense) curve to that value made a high-end duel approach
+ * zero damage.  Keep armour valuable, but make its benefit diminish and cap
+ * its total PvP mitigation at 75%:
+ *
+ *   reduction = 75 * defense / (defense + 2000) percent
+ *   damage    = raw * (1 - reduction / 100)
+ *
+ * This helper deliberately belongs to the duel path.  Monster damage keeps
+ * using vm_net_mock_damage_after_defense(), so changing PvP balance cannot
+ * silently retune PvE.
+ */
+static u32 vm_mock_service_duel_damage_after_pvp_defense(u32 rawDamage,
+                                                          u32 defense)
+{
+    uint64_t denominator = ((uint64_t)defense + 2000u) * 4u;
+    uint64_t wholeQuarters = 0;
+    uint64_t quarterRemainder = 0;
+    uint64_t fractionalNumerator = 0;
+    uint64_t scaled = 0;
+
+    if (rawDamage == 0)
+        rawDamage = 1;
+
+    /*
+     * damage = raw * (defense + 8000) / (4 * (defense + 2000)).
+     * Split raw into four-unit groups before multiplying so malformed u32
+     * inputs cannot overflow the intermediate arithmetic.
+     */
+    wholeQuarters = rawDamage / 4u;
+    quarterRemainder = rawDamage % 4u;
+    fractionalNumerator = wholeQuarters * 6000u * 4u +
+                          quarterRemainder * ((uint64_t)defense + 8000u);
+    scaled = wholeQuarters +
+             (fractionalNumerator + denominator / 2u) / denominator;
+    if (scaled == 0)
+        scaled = 1;
+    return scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
+}
+
 static u32 vm_mock_service_duel_damage(vm_mock_service_duel *duel,
                                        int sourceIndex,
                                        u32 operate,
@@ -6363,7 +6408,7 @@ static u32 vm_mock_service_duel_damage(vm_mock_service_duel *duel,
     }
     rawDamage = vm_net_mock_env_u32_if_set(
         operate > 2 ? "CBE_DUEL_SKILL_DAMAGE" : "CBE_DUEL_DAMAGE",
-        vm_net_mock_damage_after_defense(rawDamage, defense));
+        vm_mock_service_duel_damage_after_pvp_defense(rawDamage, defense));
     if (rawDamage == 0)
         rawDamage = 1;
     if (sourceMpAfterOut)

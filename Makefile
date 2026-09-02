@@ -108,7 +108,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check initial-login-equipped-bootstrap-regression clean
+.PHONY: all build client server boundary-check initial-login-equipped-bootstrap-regression transient-instance-reconnect-regression npc-item-exchange-regression admin-route-prefix-regression clean
 
 $(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
 
@@ -121,6 +121,15 @@ boundary-check: build
 initial-login-equipped-bootstrap-regression: scripts/initial-login-equipped-bootstrap-regression.c
 	mkdir -p "$(SERVER_OBJDIR)"
 	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/initial-login-equipped-bootstrap-regression.exe $(SERVER_LDLIBS)
+transient-instance-reconnect-regression: scripts/transient-instance-reconnect-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/transient-instance-reconnect-regression.exe $(SERVER_LDLIBS)
+npc-item-exchange-regression: scripts/npc-item-exchange-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/npc-item-exchange-regression.exe $(SERVER_LDLIBS)
+admin-route-prefix-regression: scripts/admin-route-prefix-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/admin-route-prefix-regression.exe $(SERVER_LDLIBS)
 
 $(CLIENT_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
@@ -173,7 +182,7 @@ LDFLAGS += -Wl,--gc-sections
 SERVER_CFLAGS := $(CFLAGS)
 SERVER_LDLIBS := -lpthread -lm
 
-.PHONY: all build server boundary-check initial-login-equipped-bootstrap-regression clean
+.PHONY: all build server boundary-check initial-login-equipped-bootstrap-regression transient-instance-reconnect-regression npc-item-exchange-regression admin-route-prefix-regression clean
 $(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
 all: build
 build: server
@@ -183,6 +192,15 @@ boundary-check: build
 initial-login-equipped-bootstrap-regression: scripts/initial-login-equipped-bootstrap-regression.c
 	mkdir -p "$(SERVER_OBJDIR)"
 	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/initial-login-equipped-bootstrap-regression $(SERVER_LDLIBS)
+transient-instance-reconnect-regression: scripts/transient-instance-reconnect-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/transient-instance-reconnect-regression $(SERVER_LDLIBS)
+npc-item-exchange-regression: scripts/npc-item-exchange-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/npc-item-exchange-regression $(SERVER_LDLIBS)
+admin-route-prefix-regression: scripts/admin-route-prefix-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/admin-route-prefix-regression $(SERVER_LDLIBS)
 
 $(SERVER_OBJDIR)/server_main.o: src/server_main.c src/server/mock_server.h \
 	src/main.h src/gifDecode.h src/md5.h src/config.h

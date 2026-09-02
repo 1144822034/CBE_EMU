@@ -4027,6 +4027,11 @@ static bool vm_net_mock_npc_service_option_default(
         description = "\xca\xae\xb8\xf6\xd0\xfe\xbe\xa7\xcb\xe9\xc6\xac\xba\xcf\xb3\xc9\xd2\xbb\xbc\xb6\xa3\xbb\xcd\xac\xbc\xb6\xc8\xfd\xb8\xf6\xba\xcf\xb3\xc9\xb8\xdf\xd2\xbb\xbc\xb6"; /* 十个玄晶碎片合成一级；同级三个合成高一级 */
         value = VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE;
         break;
+    case VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE:
+        name = "\xce\xef\xc6\xb7\xbb\xbb\xc8\xa1"; /* 物品兑换 */
+        description = "\xb0\xb4\xc5\xe4\xd6\xc3\xcf\xfb\xba\xc4\xb2\xc4\xc1\xcf\xa3\xac\xbb\xbb\xc8\xa1\xce\xef\xc6\xb7"; /* 按配置消耗材料，换取物品 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_ITEM_EXCHANGE_BASE;
+        break;
     default:
         return false;
     }
@@ -4125,7 +4130,8 @@ static bool vm_net_mock_npc_transaction_context_begin(
          kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN &&
          kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET &&
          kind != VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS &&
-         kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO) ||
+         kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO &&
+         kind != VM_MOCK_SERVICE_NPC_TRANSACTION_ITEM_EXCHANGE) ||
         itemId == 0 ||
         ((kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY ||
           kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SELL ||
@@ -4177,7 +4183,9 @@ static bool vm_net_mock_npc_transaction_context_take(
              transaction.kind ==
                  VM_MOCK_SERVICE_NPC_TRANSACTION_CRYSTAL_SYNTHESIS ||
              transaction.kind ==
-                 VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO) &&
+                 VM_MOCK_SERVICE_NPC_TRANSACTION_SELL_QUALITY_ZERO ||
+             transaction.kind ==
+                 VM_MOCK_SERVICE_NPC_TRANSACTION_ITEM_EXCHANGE) &&
             transaction.roleId == role->roleId &&
             transaction.actorId == serviceContext->actorId &&
             transaction.serviceMask == serviceContext->serviceMask &&
@@ -5568,6 +5576,8 @@ static bool vm_net_mock_npc_service_opcode_is_supported(u32 opcode)
     case VM_NET_MOCK_NPC_SERVICE_CLAIM_MAIL_BASE:
     case VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE:
     case VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_ITEM_EXCHANGE_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_SELECT_ITEM_EXCHANGE_BASE:
         return true;
     default:
         return false;
@@ -6614,6 +6624,64 @@ static bool vm_net_mock_role_crystal_synthesize_in_memory(
     return true;
 }
 
+/* Apply a prevalidated fixed exchange against one snapshot.  The caller owns
+ * persistence and serializes the native incremental backpack refresh only
+ * after the final role state has committed. */
+static bool vm_net_mock_role_item_exchange_in_memory(
+    vm_net_mock_role_state *role,
+    const vm_net_mock_npc_item_exchange_config *config, u16 *inputSeqOut,
+    u32 *inputRemainingOut, u16 *outputSeqOut)
+{
+    vm_net_mock_role_state before;
+    vm_net_mock_backpack_item_state *input = NULL;
+    vm_net_mock_backpack_item_state *output = NULL;
+    u16 inputSeq = 0;
+    u16 outputSeq = 0;
+    u32 inputRemaining = 0;
+
+    if (inputSeqOut != NULL)
+        *inputSeqOut = 0;
+    if (inputRemainingOut != NULL)
+        *inputRemainingOut = 0;
+    if (outputSeqOut != NULL)
+        *outputSeqOut = 0;
+    if (role == NULL || config == NULL || config->inputItemId == 0 ||
+        config->outputItemId == 0 ||
+        config->inputItemId == config->outputItemId ||
+        config->inputCount == 0 || config->outputCount == 0)
+    {
+        return false;
+    }
+    input = vm_net_mock_role_find_backpack_item(role, config->inputItemId, 0);
+    if (input == NULL || input->count < config->inputCount)
+        return false;
+    before = *role;
+    inputSeq = input->seq;
+    if (!vm_net_mock_role_consume_backpack_item(
+            role, config->inputItemId, inputSeq, config->inputCount,
+            &inputRemaining) ||
+        !vm_net_mock_role_add_backpack_item_to_role_in_memory(
+            role, config->outputItemId, config->outputCount, &outputSeq))
+    {
+        *role = before;
+        return false;
+    }
+    output = vm_net_mock_role_find_backpack_item(role, config->outputItemId,
+                                                  outputSeq);
+    if (output == NULL || output->count == 0)
+    {
+        *role = before;
+        return false;
+    }
+    if (inputSeqOut != NULL)
+        *inputSeqOut = inputSeq;
+    if (inputRemainingOut != NULL)
+        *inputRemainingOut = inputRemaining;
+    if (outputSeqOut != NULL)
+        *outputSeqOut = outputSeq;
+    return true;
+}
+
 static u32 vm_net_mock_build_npc_service_dialog_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -6665,6 +6733,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 crystalSynthesisAcquiredCount = 0;
     u16 crystalSynthesisSourceSeq = 0;
     u16 crystalSynthesisResultSeq = 0;
+    bool itemExchangeRefresh = false;
+    u32 itemExchangeInputItemId = 0;
+    u32 itemExchangeInputRemaining = 0;
+    u32 itemExchangeOutputItemId = 0;
+    u32 itemExchangeOutputTotal = 0;
+    u32 itemExchangeOutputGranted = 0;
+    u16 itemExchangeInputSeq = 0;
+    u16 itemExchangeOutputSeq = 0;
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
 
@@ -6733,6 +6809,13 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 value = transaction.itemId;
                 action = "crystal-synthesis-cancel";
             }
+            else if (transaction.kind ==
+                     VM_MOCK_SERVICE_NPC_TRANSACTION_ITEM_EXCHANGE)
+            {
+                operation = VM_NET_MOCK_NPC_SERVICE_OPEN_ITEM_EXCHANGE_BASE;
+                value = 0;
+                action = "item-exchange-cancel";
+            }
             else
             {
                 operation = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE;
@@ -6775,6 +6858,13 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             value = transaction.itemId;
             serviceValue = operation | value;
         }
+        else if (transaction.kind ==
+                 VM_MOCK_SERVICE_NPC_TRANSACTION_ITEM_EXCHANGE)
+        {
+            operation = VM_NET_MOCK_NPC_SERVICE_SELECT_ITEM_EXCHANGE_BASE;
+            value = transaction.recipeId;
+            serviceValue = operation | value;
+        }
         else
         {
             operation = VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE;
@@ -6789,7 +6879,275 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         vm_net_mock_npc_transaction_context_clear(session);
     }
 
-    if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE ||
+    if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_ITEM_EXCHANGE_BASE ||
+        operation == VM_NET_MOCK_NPC_SERVICE_SELECT_ITEM_EXCHANGE_BASE)
+    {
+        const vm_net_mock_npc_item_exchange_config *exchange = NULL;
+        const vm_net_mock_shop_catalog_item *inputCatalog = NULL;
+        const vm_net_mock_shop_catalog_item *outputCatalog = NULL;
+        vm_net_mock_backpack_item_state *input = NULL;
+        const bool exchangeSelection =
+            operation == VM_NET_MOCK_NPC_SERVICE_SELECT_ITEM_EXCHANGE_BASE;
+
+        if (!vm_net_mock_npc_service_context_has(
+                shopContext, VM_NET_MOCK_NPC_KIND_ITEM_EXCHANGE))
+        {
+            dialogText =
+                "\xce\xef\xc6\xb7\xb6\xd2\xbb\xbb\xb7\xfe\xce\xf1\xce\xb4\xbf\xaa\xc6\xf4\xa1\xa3"; /* 物品兑换服务未开启。 */
+            action = "item-exchange-unauthorized";
+        }
+        else if (!exchangeSelection)
+        {
+            vm_net_mock_npc_item_exchange_config
+                rows[VM_NET_MOCK_NPC_SERVICE_ITEM_EXCHANGE_PAGE_ITEMS];
+            const u32 exchangeCount =
+                vm_net_mock_npc_item_exchange_config_admin_list(
+                    shopContext->scene, shopContext->actorId, NULL, 0);
+            const u32 pageCount =
+                (exchangeCount +
+                 VM_NET_MOCK_NPC_SERVICE_ITEM_EXCHANGE_PAGE_ITEMS - 1u) /
+                VM_NET_MOCK_NPC_SERVICE_ITEM_EXCHANGE_PAGE_ITEMS;
+            const u32 page = value;
+            u32 rowCount = 0;
+
+            if (exchangeCount == 0)
+            {
+                dialogText =
+                    "\xd4\xdd\xce\xb4\xc5\xe4\xd6\xc3\xce\xef\xc6\xb7\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xa1\xa3"; /* 暂未配置物品兑换规则。 */
+                action = "item-exchange-unconfigured";
+            }
+            else if (page >= pageCount)
+            {
+                dialogText =
+                    "\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xd2\xb3\xce\xde\xd0\xa7\xa1\xa3"; /* 兑换规则页无效。 */
+                action = "item-exchange-page-invalid";
+            }
+            else
+            {
+                rowCount = vm_net_mock_npc_item_exchange_config_admin_page(
+                    shopContext->scene, shopContext->actorId,
+                    page * VM_NET_MOCK_NPC_SERVICE_ITEM_EXCHANGE_PAGE_ITEMS,
+                    rows, VM_NET_MOCK_NPC_SERVICE_ITEM_EXCHANGE_PAGE_ITEMS);
+                if (rowCount == 0)
+                {
+                    dialogText =
+                        "\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xd2\xb3\xb2\xbb\xbf\xc9\xd3\xc3\xa1\xa3"; /* 兑换规则页不可用。 */
+                    action = "item-exchange-page-unavailable";
+                }
+                else
+                {
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "\xc7\xeb\xd1\xa1\xd4\xf1\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xa3\xa8\x25\x75\x2f\x25\x75\xa3\xa9\xa1\xa3", /* 请选择兑换规则（%u/%u）。 */
+                             page + 1u, pageCount);
+                    dialogText = dialogTextStorage;
+                    for (u32 rowIndex = 0; rowIndex < rowCount; ++rowIndex)
+                    {
+                        const vm_net_mock_npc_item_exchange_config *row =
+                            &rows[rowIndex];
+                        const vm_net_mock_shop_catalog_item *rowInput =
+                            vm_net_mock_find_shop_catalog_item(row->inputItemId);
+                        const vm_net_mock_shop_catalog_item *rowOutput =
+                            vm_net_mock_find_shop_catalog_item(row->outputItemId);
+
+                        if (rowInput == NULL || rowOutput == NULL ||
+                            optionCount >= VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS)
+                        {
+                            dialogText =
+                                "\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xc5\xe4\xd6\xc3\xce\xde\xd0\xa7\xa1\xa3"; /* 兑换规则配置无效。 */
+                            action = "item-exchange-invalid-config";
+                            optionCount = 0;
+                            break;
+                        }
+                        snprintf(optionNameStorage[optionCount],
+                                 sizeof(optionNameStorage[optionCount]),
+                                 "\xb6\xd2\xbb\xbb\x20\x25\x75\x20\xb8\xf6\x20\x25\x73", /* 兑换 %u 个 %s */
+                                 row->outputCount,
+                                 rowOutput->name);
+                        snprintf(optionDescriptionStorage[optionCount],
+                                 sizeof(optionDescriptionStorage[optionCount]),
+                                 "\xcf\xfb\xba\xc4\x20\x25\x75\x20\xb8\xf6\x20\x25\x73\xa3\xac\xbb\xf1\xb5\xc3\x20\x25\x75\x20\xb8\xf6\x20\x25\x73", /* 消耗 %u 个 %s，获得 %u 个 %s */
+                                 row->inputCount, rowInput->name,
+                                 row->outputCount, rowOutput->name);
+                        optionNames[optionCount] = optionNameStorage[optionCount];
+                        optionDescriptions[optionCount] =
+                            optionDescriptionStorage[optionCount];
+                        optionValues[optionCount] =
+                            VM_NET_MOCK_NPC_SERVICE_SELECT_ITEM_EXCHANGE_BASE |
+                            row->recipeId;
+                        ++optionCount;
+                    }
+                    if (optionCount != 0)
+                    {
+                        if (page > 0 &&
+                            optionCount < VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS)
+                        {
+                            optionNames[optionCount] =
+                                "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
+                            optionDescriptions[optionCount] =
+                                "\xb2\xe9\xbf\xb4\xc9\xcf\xd2\xbb\xd2\xb3\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2"; /* 查看上一页兑换规则 */
+                            optionValues[optionCount++] =
+                                VM_NET_MOCK_NPC_SERVICE_OPEN_ITEM_EXCHANGE_BASE |
+                                (page - 1u);
+                        }
+                        if (page + 1u < pageCount &&
+                            optionCount < VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS)
+                        {
+                            optionNames[optionCount] =
+                                "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
+                            optionDescriptions[optionCount] =
+                                "\xb2\xe9\xbf\xb4\xcf\xc2\xd2\xbb\xd2\xb3\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2"; /* 查看下一页兑换规则 */
+                            optionValues[optionCount++] =
+                                VM_NET_MOCK_NPC_SERVICE_OPEN_ITEM_EXCHANGE_BASE |
+                                (page + 1u);
+                        }
+                        action = transactionCancel ? "item-exchange-cancel"
+                                                   : "item-exchange-list";
+                    }
+                    goto npc_service_serialize;
+                }
+            }
+        }
+        else
+        {
+            exchange = vm_net_mock_npc_item_exchange_config_find_exact(
+                shopContext->scene, shopContext->actorId, value);
+            if (exchange == NULL)
+            {
+                dialogText =
+                    "\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xce\xde\xd0\xa7\xa1\xa3"; /* 兑换规则无效。 */
+                action = "item-exchange-selection-invalid";
+            }
+            else
+            {
+                inputCatalog = vm_net_mock_find_shop_catalog_item(
+                    exchange->inputItemId);
+                outputCatalog = vm_net_mock_find_shop_catalog_item(
+                    exchange->outputItemId);
+                input = vm_net_mock_role_find_backpack_item(
+                    role, exchange->inputItemId, 0);
+                if (inputCatalog == NULL || outputCatalog == NULL)
+                {
+                    dialogText =
+                        "\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xc5\xe4\xd6\xc3\xce\xde\xd0\xa7\xa1\xa3"; /* 兑换规则配置无效。 */
+                    action = "item-exchange-invalid-config";
+                }
+                else if (input == NULL || input->count < exchange->inputCount)
+                {
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "\xb2\xc4\xc1\xcf\xb2\xbb\xd7\xe3\xa3\xba\xd0\xe8\xd2\xaa\x20\x25\x75\x20\xb8\xf6\x20\x25\x73\xa1\xa3", /* 材料不足：需要 %u 个 %s。 */
+                             exchange->inputCount, inputCatalog->name);
+                    dialogText = dialogTextStorage;
+                    action = "item-exchange-material-insufficient";
+                }
+                else if (!transactionConfirm)
+                {
+                    if (!vm_net_mock_npc_transaction_context_begin(
+                            session, role, shopContext,
+                            VM_MOCK_SERVICE_NPC_TRANSACTION_ITEM_EXCHANGE,
+                            exchange->inputItemId, 0, exchange->outputItemId,
+                            exchange->inputCount, exchange->outputCount))
+                    {
+                        dialogText =
+                            "\xb6\xd2\xbb\xbb\xc8\xb7\xc8\xcf\xd0\xc5\xcf\xa2\xce\xde\xd0\xa7\xa1\xa3"; /* 兑换确认信息无效。 */
+                        action = "item-exchange-prompt-invalid";
+                    }
+                    else
+                    {
+                        session->npcTransactionContext.recipeId =
+                            exchange->recipeId;
+                        snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                                 "\xc8\xb7\xc8\xcf\xb6\xd2\xbb\xbb\x20\x25\x75\x20\xb8\xf6\x20\x25\x73\xa3\xac\xbb\xf1\xb5\xc3\x20\x25\x75\x20\xb8\xf6\x20\x25\x73\xa3\xbf", /* 确认兑换 %u 个 %s，获得 %u 个 %s？ */
+                                 exchange->inputCount, inputCatalog->name,
+                                 exchange->outputCount, outputCatalog->name);
+                        dialogText = dialogTextStorage;
+                        optionNames[0] =
+                            "\xc8\xb7\xc8\xcf\xb6\xd2\xbb\xbb"; /* 确认兑换 */
+                        optionDescriptions[0] = dialogTextStorage;
+                        optionValues[0] =
+                            VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION;
+                        optionNames[1] = "\xc8\xa1\xcf\xfb"; /* 取消 */
+                        optionDescriptions[1] =
+                            "\xd4\xdd\xb2\xbb\xb6\xd2\xbb\xbb\xa3\xac\xb7\xb5\xbb\xd8\xb9\xe6\xd4\xf2\xc1\xd0\xb1\xed"; /* 暂不兑换，返回规则列表 */
+                        optionValues[1] =
+                            VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION;
+                        optionCount = 2;
+                        action = "item-exchange-prompt";
+                        goto npc_service_serialize;
+                    }
+                }
+                else if (transaction.kind !=
+                             VM_MOCK_SERVICE_NPC_TRANSACTION_ITEM_EXCHANGE ||
+                         transaction.recipeId != exchange->recipeId ||
+                         transaction.itemId != exchange->inputItemId ||
+                         transaction.selector != exchange->outputItemId ||
+                         transaction.page != exchange->inputCount ||
+                         transaction.quotedPrice != exchange->outputCount)
+                {
+                    dialogText =
+                        "\xb6\xd2\xbb\xbb\xb9\xe6\xd4\xf2\xd2\xd1\xb1\xe4\xb8\xfc\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xa1\xa3"; /* 兑换规则已变更，请重新选择。 */
+                    action = "item-exchange-state-invalid";
+                }
+                else
+                {
+                    vm_net_mock_role_state before = *role;
+                    vm_net_mock_backpack_item_state *output = NULL;
+                    u16 inputSeq = 0;
+                    u16 outputSeq = 0;
+                    u32 inputRemaining = 0;
+
+                    if (!vm_net_mock_role_item_exchange_in_memory(
+                            role, exchange, &inputSeq, &inputRemaining,
+                            &outputSeq))
+                    {
+                        dialogText =
+                            "\xb6\xd2\xbb\xbb\xca\xa7\xb0\xdc\xa3\xba\xb1\xb3\xb0\xfc\xd2\xd1\xb1\xe4\xb8\xfc\xbb\xf2\xd2\xd1\xc2\xfa\xa1\xa3"; /* 兑换失败：背包已变更或已满。 */
+                        action = "item-exchange-mutate-failed";
+                    }
+                    else if (!vm_net_mock_role_db_save("npc-item-exchange"))
+                    {
+                        *role = before;
+                        dialogText =
+                            "\xb6\xd2\xbb\xbb\xb1\xa3\xb4\xe6\xca\xa7\xb0\xdc\xa3\xac\xc7\xeb\xc9\xd4\xba\xf3\xd6\xd8\xca\xd4\xa1\xa3"; /* 兑换保存失败，请稍后重试。 */
+                        action = "item-exchange-persist-failed";
+                    }
+                    else
+                    {
+                        output = vm_net_mock_role_find_backpack_item(
+                            role, exchange->outputItemId, outputSeq);
+                        if (inputSeq == 0 || outputSeq == 0 || output == NULL ||
+                            output->count == 0)
+                        {
+                            *role = before;
+                            if (!vm_net_mock_role_db_save(
+                                    "npc-item-exchange-rollback"))
+                            {
+                                return 0;
+                            }
+                            dialogText =
+                                "\xb6\xd2\xbb\xbb\xd7\xb4\xcc\xac\xd0\xa3\xd1\xe9\xca\xa7\xb0\xdc\xa1\xa3"; /* 兑换状态校验失败。 */
+                            action = "item-exchange-postcondition-failed";
+                        }
+                        else
+                        {
+                            itemExchangeRefresh = true;
+                            itemExchangeInputItemId = exchange->inputItemId;
+                            itemExchangeInputRemaining = inputRemaining;
+                            itemExchangeOutputItemId = exchange->outputItemId;
+                            itemExchangeOutputTotal = output->count;
+                            itemExchangeOutputGranted = exchange->outputCount;
+                            itemExchangeInputSeq = inputSeq;
+                            itemExchangeOutputSeq = outputSeq;
+                            dialogText =
+                                "\xb6\xd2\xbb\xbb\xb3\xc9\xb9\xa6\xa1\xa3"; /* 兑换成功。 */
+                            action = "item-exchange-success";
+                            result = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_CRYSTAL_SYNTHESIS_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_SYNTHESIZE_CRYSTAL_BASE)
     {
         const bool synthesisRequest =
@@ -8642,6 +9000,35 @@ npc_service_serialize:
             return 0;
         }
     }
+    if (itemExchangeRefresh)
+    {
+        vm_net_mock_backpack_item_state *output =
+            vm_net_mock_role_find_backpack_item(
+                role, itemExchangeOutputItemId, itemExchangeOutputSeq);
+        vm_net_mock_reward15_item_row rewardRow;
+
+        if (itemExchangeInputItemId == 0 || itemExchangeInputSeq == 0 ||
+            itemExchangeOutputItemId == 0 || itemExchangeOutputSeq == 0 ||
+            itemExchangeOutputTotal == 0 || itemExchangeOutputGranted == 0 ||
+            output == NULL || output->count != itemExchangeOutputTotal)
+        {
+            return 0;
+        }
+        memset(&rewardRow, 0, sizeof(rewardRow));
+        rewardRow.item = output;
+        rewardRow.acquiredCount = itemExchangeOutputGranted;
+        if (!vm_net_mock_append_backpack_item_count11_object(
+                out, outCap, &pos, &objectCount, itemExchangeInputSeq,
+                itemExchangeInputItemId, itemExchangeInputRemaining) ||
+            !vm_net_mock_append_backpack_reward15_object(
+                out, outCap, &pos, &objectCount, &rewardRow, 1) ||
+            !vm_net_mock_append_backpack_item_count11_object(
+                out, outCap, &pos, &objectCount, itemExchangeOutputSeq,
+                itemExchangeOutputItemId, itemExchangeOutputTotal))
+        {
+            return 0;
+        }
+    }
     if (mailboxClaimRefresh)
     {
         vm_net_mock_reward15_item_row rewardRows[VM_NET_MOCK_REWARD15_MAX_ROWS];
@@ -8730,6 +9117,8 @@ npc_service_serialize:
                ? "success-dialog-only:26/1(return);backpack-on-native-query"
                : crystalSynthesisRefresh
                ? "dialog+source-count+reward+result-count:26/1+7/11+7/15+7/11"
+               : itemExchangeRefresh
+               ? "dialog+input-count+reward+output-count:26/1+7/11+7/15+7/11"
                : result == 1 && (strcmp(action, "shop-buy") == 0 ||
                                   strcmp(action, "weapon-buy") == 0)
                ? "dialog+wallet:26/1+10/26;backpack-on-native-query"

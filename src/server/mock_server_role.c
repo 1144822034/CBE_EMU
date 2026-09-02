@@ -4291,6 +4291,7 @@ typedef struct
     u32 mp;
     u32 attack;
     u32 defense;
+    u32 resist;
 } vm_net_mock_monster_level_reference;
 
 /* Version the formula separately from the mutable monster catalog.  Version
@@ -4304,7 +4305,9 @@ typedef struct
  * like a race against one unlucky counterattack.  Version four makes the
  * expected player profile explicit in seven ten-level stages: new characters
  * are measured as bare, while the expectation transitions toward a complete
- * quality-0 outfit over the mid and late game. */
+ * quality-0 outfit over the mid and late game.  Version seven replaces the
+ * obsolete 100/(100+defense) PvE formula with a capped, level-aware curve and
+ * uses the documented enhancement expectation for each content band. */
 typedef enum
 {
     VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1 = 1,
@@ -4316,7 +4319,9 @@ typedef enum
      * during migrations. */
     VM_NET_MOCK_MONSTER_BALANCE_CURVE_V5 = 5,
     /* V6 is the V11 role-band reward profile. */
-    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6 = 6
+    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6 = 6,
+    /* V7 rebalances PvE mitigation and the matching generated combat stats. */
+    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7 = 7
 } vm_net_mock_monster_balance_curve;
 
 static u32 vm_net_mock_monster_scale_ceil(u32 value, u32 numerator,
@@ -4369,7 +4374,8 @@ vm_net_mock_monster_quality_zero_item_for_slot(u32 level, u32 job, u32 slot)
 }
 
 static bool vm_net_mock_monster_quality_zero_reference_for_job(
-    u32 requestedLevel, u32 requestedJob, vm_net_mock_player_stats *statsOut)
+    u32 requestedLevel, u32 requestedJob, u8 expectedEnhanceLevel,
+    vm_net_mock_player_stats *statsOut)
 {
     vm_net_mock_role_state role;
     u32 level = requestedLevel;
@@ -4399,6 +4405,7 @@ static bool vm_net_mock_monster_quality_zero_reference_for_job(
         if (item == NULL)
             continue;
         role.equippedItems[slot].itemId = item->itemId;
+        role.equippedItems[slot].enhanceLevel = expectedEnhanceLevel;
         role.equippedItems[slot].durability = item->durabilityMax;
         role.equippedItems[slot].durabilityMax = item->durabilityMax;
     }
@@ -4406,8 +4413,9 @@ static bool vm_net_mock_monster_quality_zero_reference_for_job(
     return true;
 }
 
-static void vm_net_mock_monster_level_reference_for_level(
-    u32 requestedLevel, vm_net_mock_monster_level_reference *reference)
+static void vm_net_mock_monster_equipped_reference_for_level(
+    u32 requestedLevel, u8 expectedEnhanceLevel,
+    vm_net_mock_monster_level_reference *reference)
 {
     vm_net_mock_player_stats stats;
 
@@ -4417,7 +4425,7 @@ static void vm_net_mock_monster_level_reference_for_level(
     for (u32 job = 1; job <= 3; ++job)
     {
         if (!vm_net_mock_monster_quality_zero_reference_for_job(
-                requestedLevel, job, &stats))
+                requestedLevel, job, expectedEnhanceLevel, &stats))
         {
             continue;
         }
@@ -4429,7 +4437,16 @@ static void vm_net_mock_monster_level_reference_for_level(
             reference->attack = stats.attack;
         if (reference->defense == 0 || stats.defense < reference->defense)
             reference->defense = stats.defense;
+        if (reference->resist == 0 || stats.resist < reference->resist)
+            reference->resist = stats.resist;
     }
+}
+
+static void vm_net_mock_monster_level_reference_for_level(
+    u32 requestedLevel, vm_net_mock_monster_level_reference *reference)
+{
+    vm_net_mock_monster_equipped_reference_for_level(
+        requestedLevel, 0, reference);
 }
 
 /* V4 deliberately does not make a level-1 player compete with a notional
@@ -4466,6 +4483,8 @@ static void vm_net_mock_monster_bare_reference_for_level(
             reference->attack = stats.attack;
         if (reference->defense == 0 || stats.defense < reference->defense)
             reference->defense = stats.defense;
+        if (reference->resist == 0 || stats.resist < reference->resist)
+            reference->resist = stats.resist;
     }
 }
 
@@ -4544,6 +4563,226 @@ static void vm_net_mock_monster_v4_reference_for_level(
         bare.attack, qualityZero.attack, stage->qualityZeroWeight);
     reference->defense = vm_net_mock_monster_blend_reference_value(
         bare.defense, qualityZero.defense, stage->qualityZeroWeight);
+    reference->resist = vm_net_mock_monster_blend_reference_value(
+        bare.resist, qualityZero.resist, stage->qualityZeroWeight);
+}
+
+/* The expected enhancement profile is intentionally a content expectation,
+ * not an inspection of the active role.  It keeps the PvE curve stable for a
+ * level even when a party contains both a freshly upgraded player and a
+ * veteran, while using only enhancement levels already supported by the
+ * client equipment contract. */
+static u8 vm_net_mock_monster_pve_expected_enhance_for_level(u32 level)
+{
+    if (level <= 20u)
+        return 0;
+    if (level <= 40u)
+        return 4;
+    if (level <= 55u)
+        return 6;
+    if (level <= 65u)
+        return 8;
+    return 10;
+}
+
+/* Picking the conservative per-field reference from three jobs can make one
+ * field dip when a different job receives the next quality-0 item.  Cache a
+ * running maximum so a higher-level content band never gets an easier PvE
+ * breakpoint merely because the representative job changed.  The catalog is
+ * immutable after load; the small cache is therefore safe to reuse for the
+ * service lifetime. */
+static void vm_net_mock_monster_pve_expected_reference_for_level(
+    u32 requestedLevel, vm_net_mock_monster_level_reference *reference)
+{
+    static vm_net_mock_monster_level_reference
+        cached[VM_NET_MOCK_ROLE_LEVEL_CAP + 1];
+    static u32 cacheState = 0; /* 0=empty, 1=building, 2=ready. */
+    vm_net_mock_monster_level_reference running;
+    u32 level = requestedLevel;
+
+    if (reference == NULL)
+        return;
+    if (level == 0)
+        level = 1;
+    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        level = VM_NET_MOCK_ROLE_LEVEL_CAP;
+    if (__atomic_load_n(&cacheState, __ATOMIC_ACQUIRE) != 2u)
+    {
+        if (__sync_bool_compare_and_swap(&cacheState, 0u, 1u))
+        {
+            memset(&running, 0, sizeof(running));
+            for (u32 candidateLevel = 1;
+                 candidateLevel <= VM_NET_MOCK_ROLE_LEVEL_CAP;
+                 ++candidateLevel)
+            {
+                vm_net_mock_monster_level_reference candidate;
+
+                vm_net_mock_monster_equipped_reference_for_level(
+                    candidateLevel,
+                    vm_net_mock_monster_pve_expected_enhance_for_level(
+                        candidateLevel),
+                    &candidate);
+                if (candidate.hp > running.hp)
+                    running.hp = candidate.hp;
+                if (candidate.mp > running.mp)
+                    running.mp = candidate.mp;
+                if (candidate.attack > running.attack)
+                    running.attack = candidate.attack;
+                if (candidate.defense > running.defense)
+                    running.defense = candidate.defense;
+                if (candidate.resist > running.resist)
+                    running.resist = candidate.resist;
+                cached[candidateLevel] = running;
+            }
+            __atomic_store_n(&cacheState, 2u, __ATOMIC_RELEASE);
+        }
+        else
+        {
+            while (__atomic_load_n(&cacheState, __ATOMIC_ACQUIRE) != 2u)
+                ;
+        }
+    }
+    *reference = cached[level];
+}
+
+/* Scale a u32 value by a proper fraction without overflowing when an admin
+ * override supplies a full-width damage or defense value.  The bit-at-a-time
+ * division keeps the remainder below three denominators, and rounds the final
+ * result to the nearest integer. */
+static u32 vm_net_mock_damage_scale_fraction_round(
+    u32 value, uint64_t numerator, uint64_t denominator)
+{
+    uint64_t remainder = 0;
+    u32 result = 0;
+
+    if (denominator == 0 || numerator == 0 || value == 0)
+        return 0;
+    if (numerator >= denominator)
+        return value;
+    for (int bit = 31; bit >= 0; --bit)
+    {
+        uint64_t addend = ((value >> (u32)bit) & 1u) ? numerator : 0u;
+
+        /* If the already-consumed prefix is Q + R/D, consuming the next
+         * source bit yields 2Q + floor((2R + bit*N)/D).  Accumulating Q is
+         * essential: writing a bit at the source-bit position would instead
+         * treat this as a fixed-point fraction and understate low defense. */
+        result *= 2u;
+        remainder = remainder * 2u + addend;
+        if (remainder >= denominator)
+        {
+            /* `2R + bit*N` can reach just under 3D, so a set source bit
+             * can contribute two whole denominator units in this step. */
+            result += (u32)(remainder / denominator);
+            remainder %= denominator;
+        }
+    }
+    if (remainder >= (denominator + 1u) / 2u && result < 0xffffffffu)
+        ++result;
+    return result;
+}
+
+static u32 vm_net_mock_pve_defense_breakpoint_for_level(u32 level)
+{
+    vm_net_mock_monster_level_reference expected;
+    uint64_t scaled = 0;
+
+    vm_net_mock_monster_pve_expected_reference_for_level(level, &expected);
+    scaled = ((uint64_t)expected.defense * 3u + 5u) / 10u;
+    if (scaled < 200u)
+        return 200u;
+    return scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
+}
+
+/* PvE armour mitigation is level-aware, has diminishing returns, and cannot
+ * remove more than 85% of physical damage:
+ *
+ *   K       = max(200, round(expectedDefense(level, expected gear) * 0.30))
+ *   armour  = 85% * defense / (defense + K)
+ *   damage  = max(1, round(raw * (1 - armour)))
+ *
+ * The final integer ratio is (20K + 3D) / (20(D + K)).  PvP has its own
+ * 75%-cap helper in mock_server_battle.c and never calls this function. */
+static u32 vm_net_mock_pve_damage_after_defense(u32 attack, u32 defense,
+                                                u32 contentLevel)
+{
+    uint64_t breakpoint = vm_net_mock_pve_defense_breakpoint_for_level(
+        contentLevel);
+    uint64_t numerator = breakpoint * 20u + (uint64_t)defense * 3u;
+    uint64_t denominator = ((uint64_t)defense + breakpoint) * 20u;
+    u32 damage = 0;
+
+    if (attack == 0)
+        attack = 1;
+    damage = vm_net_mock_damage_scale_fraction_round(
+        attack, numerator, denominator);
+    return damage == 0 ? 1u : damage;
+}
+
+static u32 vm_net_mock_damage_after_resistance(u32 damage, u32 resist)
+{
+    uint64_t reduced = 0;
+
+    if (damage == 0 || resist == 0)
+        return damage;
+    reduced = ((uint64_t)damage * 1000u) / ((uint64_t)1000u + resist);
+    if (reduced == 0)
+        reduced = 1;
+    return reduced > 0xffffffffull ? 0xffffffffu : (u32)reduced;
+}
+
+/* Derive a generated monster's raw attack from the reviewed number of
+ * successful hits rather than preserving the old formula's algebra.  A binary
+ * search remains exact even after integer rounding and works for every legal
+ * administrator defense value. */
+static u32 vm_net_mock_pve_attack_for_target_damage(
+    u32 targetDamage, u32 playerDefense, u32 contentLevel)
+{
+    u32 low = 1;
+    u32 high = VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX;
+
+    if (targetDamage == 0)
+        return 1;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2u;
+
+        if (vm_net_mock_pve_damage_after_defense(
+                middle, playerDefense, contentLevel) >= targetDamage)
+        {
+            high = middle;
+        }
+        else
+        {
+            low = middle + 1u;
+        }
+    }
+    return low;
+}
+
+static u32 vm_net_mock_magic_attack_for_target_damage(u32 targetDamage,
+                                                       u32 playerResist)
+{
+    u32 low = 1;
+    u32 high = VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX;
+
+    if (targetDamage == 0)
+        return 1;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2u;
+
+        if (vm_net_mock_damage_after_resistance(middle, playerResist) >=
+            targetDamage)
+        {
+            high = middle;
+        }
+        else
+        {
+            low = middle + 1u;
+        }
+    }
+    return low;
 }
 
 static void vm_net_mock_monster_family_scale(
@@ -4816,6 +5055,7 @@ vm_net_mock_monster_base_stats_for_entry_curve(
     u32 normalAttack = 0;
     u32 normalDefense = 0;
     const vm_net_mock_monster_balance_stage *stage = NULL;
+    bool normalMonsterUsesMagic = false;
 
     memset(&entry, 0, sizeof(entry));
     if (entryValue != NULL)
@@ -4824,7 +5064,15 @@ vm_net_mock_monster_base_stats_for_entry_curve(
     memset(&stats, 0, sizeof(stats));
     stats.enemyId = entry.enemyId;
     stats.level = level;
-    if (curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4)
+    normalMonsterUsesMagic =
+        entry.family == VM_NET_MOCK_MONSTER_SPIRIT ||
+        entry.family == VM_NET_MOCK_MONSTER_ELEMENTAL;
+    if (curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7)
+    {
+        stage = vm_net_mock_monster_balance_stage_for_level(level);
+        vm_net_mock_monster_pve_expected_reference_for_level(level, &reference);
+    }
+    else if (curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4)
     {
         stage = vm_net_mock_monster_balance_stage_for_level(level);
         vm_net_mock_monster_v4_reference_for_level(level, &reference);
@@ -4890,22 +5138,38 @@ vm_net_mock_monster_base_stats_for_entry_curve(
         u32 sameLevelDamage = 0;
         u32 expectedMp = 0;
 
-        /* V4 uses the ten-level stage profile above.  The first stage is
-         * intentionally based on bare characters; later stages blend toward
-         * real quality-0 equipment, making gear increasingly valuable rather
-         * than simply multiplying every low-level monster HP. */
+        /* V4 uses the ten-level stage profile above.  V7 retains its stable
+         * normal/boss action counts, but measures those counts through the
+         * current capped PvE curve and its documented enhancement profile. */
         normalDefense = vm_net_mock_monster_scale_ceil(reference.attack, 20, 100);
-        sameLevelDamage = vm_net_mock_damage_after_defense(
-            reference.attack, normalDefense);
+        sameLevelDamage = curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7 ?
+                              vm_net_mock_pve_damage_after_defense(
+                                  reference.attack, normalDefense, level) :
+                              vm_net_mock_damage_after_defense(
+                                  reference.attack, normalDefense);
         normalHp = vm_net_mock_monster_scale_ceil(
             sameLevelDamage, stage->normalHits, 1);
         normalMp = 8 + level * 3;
         expectedMp = vm_net_mock_monster_scale_ceil(reference.mp, 20, 100);
         if (expectedMp > normalMp)
             normalMp = expectedMp;
-        normalAttack = vm_net_mock_monster_scale_ceil(
-            reference.hp, 100 + reference.defense,
-            (u32)stage->normalSurvive * 100u);
+        if (curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7)
+        {
+            u32 targetDamage = vm_net_mock_monster_scale_ceil(
+                reference.hp, 1, stage->normalSurvive);
+
+            normalAttack = normalMonsterUsesMagic ?
+                               vm_net_mock_magic_attack_for_target_damage(
+                                   targetDamage, reference.resist) :
+                               vm_net_mock_pve_attack_for_target_damage(
+                                   targetDamage, reference.defense, level);
+        }
+        else
+        {
+            normalAttack = vm_net_mock_monster_scale_ceil(
+                reference.hp, 100 + reference.defense,
+                (u32)stage->normalSurvive * 100u);
+        }
     }
 
     switch ((vm_net_mock_monster_family)entry.family)
@@ -5019,17 +5283,25 @@ vm_net_mock_monster_base_stats_for_entry_curve(
 
             stats.defense = vm_net_mock_monster_scale_ceil(
                 reference.attack, stage->bossDefensePercent, 100);
-            sameLevelDamage = vm_net_mock_damage_after_defense(
-                reference.attack, stats.defense);
+            sameLevelDamage = curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7 ?
+                                  vm_net_mock_pve_damage_after_defense(
+                                      reference.attack, stats.defense, level) :
+                                  vm_net_mock_damage_after_defense(
+                                      reference.attack, stats.defense);
             stats.hp = vm_net_mock_monster_scale_ceil(
                 sameLevelDamage, stage->bossHits, 1);
             stats.mp = 24 + level * 6;
             expectedMp = vm_net_mock_monster_scale_ceil(reference.mp, 50, 100);
             if (expectedMp > stats.mp)
                 stats.mp = expectedMp;
-            stats.attack = vm_net_mock_monster_scale_ceil(
-                reference.hp, 100 + reference.defense,
-                (u32)stage->bossSurvive * 100u);
+            stats.attack = curve >= VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7 ?
+                               vm_net_mock_pve_attack_for_target_damage(
+                                   vm_net_mock_monster_scale_ceil(
+                                       reference.hp, 1, stage->bossSurvive),
+                                   reference.defense, level) :
+                               vm_net_mock_monster_scale_ceil(
+                                   reference.hp, 100 + reference.defense,
+                                   (u32)stage->bossSurvive * 100u);
         }
         stats.exp = 20 + level * 5;
         stats.gold = 25 + level * 4;
@@ -5097,7 +5369,7 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_entry(
     const vm_net_mock_monster_entry *entryValue)
 {
     return vm_net_mock_monster_base_stats_for_entry_curve(
-        entryValue, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6);
+        entryValue, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7);
 }
 
 static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 enemyId)
@@ -6239,6 +6511,10 @@ static bool vm_net_mock_monster_db_load(void)
             "monster-quality-zero-balance-v4",
             VM_NET_MOCK_MONSTER_BALANCE_CURVE_V3,
             VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4) ||
+        !vm_net_mock_monster_balance_migrate_quality_zero_curve(
+            "monster-pve-defense-v7",
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V6,
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V7) ||
         !vm_net_mock_monster_reward_exp_migrate_v2() ||
         !vm_net_mock_monster_reward_exp_migrate_v3() ||
         !vm_net_mock_monster_reward_exp_migrate_v4() ||
@@ -7889,16 +8165,16 @@ static bool vm_net_mock_battle_monster_uses_magic_damage(u32 enemyId)
            family == VM_NET_MOCK_MONSTER_ELEMENTAL;
 }
 
-static u32 vm_net_mock_battle_apply_resistance(u32 damage, u32 resist)
+/* Spiritual and elemental monsters are the service's existing hostile-spell
+ * families.  Their damage deliberately bypasses armour completely: only the
+ * target's resistance participates.  Physical monster attacks use the
+ * level-aware PvE armour formula. */
+static u32 vm_net_mock_battle_enemy_damage_after_pve_mitigation(
+    u32 attack, u32 defense, u32 resist, u32 contentLevel, bool magicDamage)
 {
-    uint64_t reduced = 0;
-
-    if (damage == 0 || resist == 0)
-        return damage;
-    reduced = ((uint64_t)damage * 1000u) / ((uint64_t)1000u + resist);
-    if (reduced == 0)
-        reduced = 1;
-    return reduced > 0xffffffffull ? 0xffffffffu : (u32)reduced;
+    if (magicDamage)
+        return vm_net_mock_damage_after_resistance(attack, resist);
+    return vm_net_mock_pve_damage_after_defense(attack, defense, contentLevel);
 }
 
 static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCurrent,
@@ -7910,7 +8186,8 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
     vm_net_mock_player_stats playerStats;
     u32 attack = 0;
     u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense);
-    u32 damage = vm_net_mock_damage_after_defense(attack, defense);
+    u32 damage = vm_net_mock_pve_damage_after_defense(
+        attack, defense, stats.level);
 
     if (hitOut)
         *hitOut = false;
@@ -7920,20 +8197,22 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
     vm_net_mock_battle_apply_active_stat_modifier(&playerStats);
     attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_PLAYER_ATTACK",
                                         playerStats.attack ? playerStats.attack : 1);
-    damage = vm_net_mock_damage_after_defense(attack, defense);
+    damage = vm_net_mock_pve_damage_after_defense(attack, defense, stats.level);
 
     if (g_vm_net_mock_battle_active_enemy_modifier_current.defense < 0)
     {
         u32 reduction = (u32)(0 - g_vm_net_mock_battle_active_enemy_modifier_current.defense);
         defense = defense > reduction ? defense - reduction : 0;
-        damage = vm_net_mock_damage_after_defense(attack, defense);
+        damage = vm_net_mock_pve_damage_after_defense(
+            attack, defense, stats.level);
     }
     else if (g_vm_net_mock_battle_active_enemy_modifier_current.defense > 0)
     {
         uint64_t raised = (uint64_t)defense +
                           (u32)g_vm_net_mock_battle_active_enemy_modifier_current.defense;
         defense = raised > 0xffffffffull ? 0xffffffffu : (u32)raised;
-        damage = vm_net_mock_damage_after_defense(attack, defense);
+        damage = vm_net_mock_pve_damage_after_defense(
+            attack, defense, stats.level);
     }
 
     if (enemyHpCurrent == 0)
@@ -8046,7 +8325,8 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
                           (u32)g_vm_net_mock_battle_active_enemy_modifier_current.defense;
         defense = raised > 0xffffffffull ? 0xffffffffu : (u32)raised;
     }
-    damage = vm_net_mock_damage_after_defense(rawDamage, defense);
+    damage = vm_net_mock_pve_damage_after_defense(
+        rawDamage, defense, monsterStats.level);
     if (damage < baseDamage)
         damage = baseDamage;
     /* Hostile spells do not use the normal-strike hit roll: actioninfo must
@@ -8107,6 +8387,7 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
     u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack);
     u32 defense = 0;
     u32 damage = 0;
+    bool magicDamage = vm_net_mock_battle_monster_uses_magic_damage(enemyId);
 
     vm_net_mock_role_build_player_stats(role, &playerStats);
     vm_net_mock_battle_apply_active_stat_modifier(&playerStats);
@@ -8119,7 +8400,8 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
         attack = modified <= 0 ? 0 :
                  (modified > 0xffffffffll ? 0xffffffffu : (u32)modified);
     }
-    damage = vm_net_mock_damage_after_defense(attack, defense);
+    damage = vm_net_mock_battle_enemy_damage_after_pve_mitigation(
+        attack, defense, playerStats.resist, stats.level, magicDamage);
 
     if (roleHpCurrent == 0)
         return 0;
@@ -8127,8 +8409,6 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
             &stats, &playerStats,
             vm_net_mock_battle_enemy_attack_roll_salt(enemyId, enemyWireSlot)))
         return 0;
-    if (vm_net_mock_battle_monster_uses_magic_damage(enemyId))
-        damage = vm_net_mock_battle_apply_resistance(damage, playerStats.resist);
     if (damage == 0)
         damage = 1;
     return vm_net_mock_min_u32(damage, roleHpCurrent);

@@ -1428,6 +1428,19 @@ typedef struct
     bool enabled;
 } vm_net_mock_npc_shop_inventory_row;
 
+/* A configured exchange is scoped to one NPC. The client action carries no
+ * item data: the server reads these values again at confirmation time. */
+typedef struct
+{
+    char scene[64];
+    u32 actorId;
+    u32 recipeId;
+    u32 inputItemId;
+    u32 inputCount;
+    u32 outputItemId;
+    u32 outputCount;
+} vm_net_mock_npc_item_exchange_config;
+
 typedef struct
 {
     char scene[64];
@@ -1505,6 +1518,10 @@ static u32 g_vm_net_mock_native_npc_override_count = 0;
 static vm_net_mock_npc_shop_inventory_row
     g_vm_net_mock_npc_shop_inventory[VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX];
 static u32 g_vm_net_mock_npc_shop_inventory_count = 0;
+static vm_net_mock_npc_item_exchange_config
+    g_vm_net_mock_npc_item_exchange_configs[
+        VM_NET_MOCK_NPC_ITEM_EXCHANGE_MAX];
+static u32 g_vm_net_mock_npc_item_exchange_config_count = 0;
 static bool g_vm_net_mock_native_npc_db_loaded = false;
 static bool g_vm_net_mock_native_npc_db_valid = false;
 
@@ -1589,6 +1606,47 @@ static bool vm_net_mock_npc_shop_inventory_db_row(
     return true;
 }
 
+static bool vm_net_mock_npc_item_exchange_config_db_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_npc_item_exchange_config row;
+    u32 number[6];
+
+    (void)contextValue;
+    memset(&row, 0, sizeof(row));
+    memset(number, 0, sizeof(number));
+    if (columnCount != 7 ||
+        g_vm_net_mock_npc_item_exchange_config_count >=
+            VM_NET_MOCK_NPC_ITEM_EXCHANGE_MAX ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0], row.scene,
+                                            sizeof(row.scene)) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &number[0]) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &number[1]) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &number[2]) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &number[3]) ||
+        !vm_mock_mysql_parse_u32(values[5], lengths[5], &number[4]) ||
+        !vm_mock_mysql_parse_u32(values[6], lengths[6], &number[5]) ||
+        number[0] == 0 || number[1] == 0 ||
+        number[1] > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
+        number[2] == 0 || number[3] == 0 || number[4] == 0 ||
+        number[5] == 0 || number[2] == number[4] ||
+        row.scene[0] == 0)
+    {
+        printf("[warn][mock-admin] npc_item_exchange_config_row action=skip-invalid\n");
+        return true;
+    }
+    row.actorId = number[0];
+    row.recipeId = number[1];
+    row.inputItemId = number[2];
+    row.inputCount = number[3];
+    row.outputItemId = number[4];
+    row.outputCount = number[5];
+    g_vm_net_mock_npc_item_exchange_configs[
+        g_vm_net_mock_npc_item_exchange_config_count++] = row;
+    return true;
+}
+
 static bool vm_net_mock_npc_service_options_table_ensure(void);
 
 static bool vm_net_mock_native_npc_db_load(void)
@@ -1599,10 +1657,13 @@ static bool vm_net_mock_native_npc_db_load(void)
     g_vm_net_mock_native_npc_db_valid = false;
     g_vm_net_mock_native_npc_override_count = 0;
     g_vm_net_mock_npc_shop_inventory_count = 0;
+    g_vm_net_mock_npc_item_exchange_config_count = 0;
     memset(g_vm_net_mock_native_npc_overrides, 0,
            sizeof(g_vm_net_mock_native_npc_overrides));
     memset(g_vm_net_mock_npc_shop_inventory, 0,
            sizeof(g_vm_net_mock_npc_shop_inventory));
+    memset(g_vm_net_mock_npc_item_exchange_configs, 0,
+           sizeof(g_vm_net_mock_npc_item_exchange_configs));
 
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_native_npc_overrides ("
@@ -1621,6 +1682,40 @@ static bool vm_net_mock_native_npc_db_load(void)
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id,item_id),"
             "KEY idx_server_npc_shop_inventory_npc(scene,actor_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_npc_item_exchange_configs ("
+            "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+            "input_item_id INT UNSIGNED NOT NULL,input_count INT UNSIGNED NOT NULL,"
+            "output_item_id INT UNSIGNED NOT NULL,output_count INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(scene,actor_id),"
+            "KEY idx_server_npc_item_exchange_actor(scene,actor_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_npc_item_exchange_recipes ("
+            "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+            "recipe_id INT UNSIGNED NOT NULL,"
+            "input_item_id INT UNSIGNED NOT NULL,input_count INT UNSIGNED NOT NULL,"
+            "output_item_id INT UNSIGNED NOT NULL,output_count INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(scene,actor_id,recipe_id),"
+            "KEY idx_server_npc_item_exchange_recipes_npc(scene,actor_id,recipe_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_npc_item_exchange_migrations ("
+            "migration_name VARBINARY(64) NOT NULL,"
+            "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(migration_name)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "INSERT IGNORE INTO server_npc_item_exchange_recipes("
+            "scene,actor_id,recipe_id,input_item_id,input_count,output_item_id,output_count) "
+            "SELECT scene,actor_id,1,input_item_id,input_count,output_item_id,output_count "
+            "FROM server_npc_item_exchange_configs WHERE NOT EXISTS("
+            "SELECT 1 FROM server_npc_item_exchange_migrations "
+            "WHERE migration_name='recipes-v1')") ||
+        !vm_mysql_exec(
+            "INSERT IGNORE INTO server_npc_item_exchange_migrations(migration_name) "
+            "VALUES('recipes-v1')") ||
         !vm_net_mock_npc_service_options_table_ensure() ||
         !vm_mysql_query(
             "SELECT HEX(scene),actor_id,service_kind,enabled "
@@ -1629,16 +1724,21 @@ static bool vm_net_mock_native_npc_db_load(void)
         !vm_mysql_query(
             "SELECT HEX(scene),actor_id,item_id,unit_price,enabled "
             "FROM server_npc_shop_inventory ORDER BY scene,actor_id,item_id",
-            vm_net_mock_npc_shop_inventory_db_row, NULL))
+            vm_net_mock_npc_shop_inventory_db_row, NULL) ||
+        !vm_mysql_query(
+            "SELECT HEX(scene),actor_id,recipe_id,input_item_id,input_count,output_item_id,output_count "
+            "FROM server_npc_item_exchange_recipes ORDER BY scene,actor_id,recipe_id",
+            vm_net_mock_npc_item_exchange_config_db_row, NULL))
     {
         printf("[error][mock-admin] native_npc_db_load failed error=%s\n",
                vm_mysql_last_error());
         return false;
     }
     g_vm_net_mock_native_npc_db_valid = true;
-    printf("[info][mock-admin] native_npc_db_load overrides=%u inventory=%u\n",
+    printf("[info][mock-admin] native_npc_db_load overrides=%u inventory=%u exchanges=%u\n",
            g_vm_net_mock_native_npc_override_count,
-           g_vm_net_mock_npc_shop_inventory_count);
+           g_vm_net_mock_npc_shop_inventory_count,
+           g_vm_net_mock_npc_item_exchange_config_count);
     return true;
 }
 
@@ -5338,6 +5438,255 @@ vm_net_mock_npc_shop_inventory_find_exact(const char *scene, u32 actorId,
     return NULL;
 }
 
+static const vm_net_mock_npc_item_exchange_config *
+vm_net_mock_npc_item_exchange_config_find_exact(const char *scene,
+                                                u32 actorId, u32 recipeId)
+{
+    if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0 ||
+        recipeId == 0 || recipeId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+        return NULL;
+    for (u32 i = 0; i < g_vm_net_mock_npc_item_exchange_config_count; ++i)
+    {
+        const vm_net_mock_npc_item_exchange_config *config =
+            &g_vm_net_mock_npc_item_exchange_configs[i];
+
+        if (config->actorId == actorId && config->recipeId == recipeId &&
+            vm_net_mock_scene_names_equal_exact(config->scene, scene))
+        {
+            return config;
+        }
+    }
+    return NULL;
+}
+
+static bool vm_net_mock_npc_item_exchange_config_admin_save(
+    const char *scene, u32 actorId, u32 recipeId, u32 inputItemId,
+    u32 inputCount, u32 outputItemId, u32 outputCount, u32 *recipeIdOut,
+    const char **errorOut)
+{
+    char sceneHex[64 * 2 + 1];
+    char query[768];
+    int existing = -1;
+    u32 nextRecipeId = 1;
+
+    if (errorOut != NULL)
+        *errorOut = "item exchange configuration is invalid";
+    if (recipeIdOut != NULL)
+        *recipeIdOut = 0;
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 ||
+        recipeId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
+        inputItemId == 0 || outputItemId == 0 ||
+        inputItemId == outputItemId || inputCount == 0 || outputCount == 0 ||
+        inputCount > 1000000u || outputCount > 1000000u ||
+        vm_net_mock_find_shop_catalog_item(inputItemId) == NULL ||
+        vm_net_mock_find_shop_catalog_item(outputItemId) == NULL ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_npc_item_exchange_config_count; ++i)
+    {
+        if (g_vm_net_mock_npc_item_exchange_configs[i].actorId == actorId &&
+            vm_net_mock_scene_names_equal_exact(
+                g_vm_net_mock_npc_item_exchange_configs[i].scene, scene))
+        {
+            if (recipeId != 0 &&
+                g_vm_net_mock_npc_item_exchange_configs[i].recipeId ==
+                    recipeId)
+            {
+                existing = (int)i;
+            }
+            if (g_vm_net_mock_npc_item_exchange_configs[i].recipeId >=
+                nextRecipeId)
+            {
+                if (g_vm_net_mock_npc_item_exchange_configs[i].recipeId >=
+                    VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+                {
+                    if (errorOut != NULL)
+                        *errorOut = "item exchange recipe id capacity reached";
+                    return false;
+                }
+                nextRecipeId =
+                    g_vm_net_mock_npc_item_exchange_configs[i].recipeId + 1;
+            }
+        }
+    }
+    if (recipeId == 0)
+        recipeId = nextRecipeId;
+    if (existing < 0 && recipeId != nextRecipeId)
+    {
+        if (errorOut != NULL)
+            *errorOut = "item exchange recipe no longer exists";
+        return false;
+    }
+    if (existing < 0 && g_vm_net_mock_npc_item_exchange_config_count >=
+                            VM_NET_MOCK_NPC_ITEM_EXCHANGE_MAX)
+    {
+        if (errorOut != NULL)
+            *errorOut = "item exchange configuration capacity reached";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_npc_item_exchange_recipes("
+             "scene,actor_id,recipe_id,input_item_id,input_count,output_item_id,output_count) "
+             "VALUES(X'%s',%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "input_item_id=VALUES(input_item_id),input_count=VALUES(input_count),"
+             "output_item_id=VALUES(output_item_id),output_count=VALUES(output_count)",
+             sceneHex, actorId, recipeId, inputItemId, inputCount,
+             outputItemId, outputCount);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut != NULL)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (existing < 0)
+    {
+        existing = (int)g_vm_net_mock_npc_item_exchange_config_count++;
+        memset(&g_vm_net_mock_npc_item_exchange_configs[existing], 0,
+               sizeof(g_vm_net_mock_npc_item_exchange_configs[existing]));
+        snprintf(g_vm_net_mock_npc_item_exchange_configs[existing].scene,
+                 sizeof(g_vm_net_mock_npc_item_exchange_configs[existing].scene),
+                 "%s", scene);
+        g_vm_net_mock_npc_item_exchange_configs[existing].actorId = actorId;
+        g_vm_net_mock_npc_item_exchange_configs[existing].recipeId = recipeId;
+    }
+    g_vm_net_mock_npc_item_exchange_configs[existing].inputItemId = inputItemId;
+    g_vm_net_mock_npc_item_exchange_configs[existing].inputCount = inputCount;
+    g_vm_net_mock_npc_item_exchange_configs[existing].outputItemId = outputItemId;
+    g_vm_net_mock_npc_item_exchange_configs[existing].outputCount = outputCount;
+    if (errorOut != NULL)
+        *errorOut = "ok";
+    if (recipeIdOut != NULL)
+        *recipeIdOut = recipeId;
+    printf("[info][mock-admin] npc_item_exchange_config_save scene=%s actor=%u recipe=%u input=%u*%u output=%u*%u\n",
+           scene, actorId, recipeId, inputItemId, inputCount, outputItemId,
+           outputCount);
+    return true;
+}
+
+static bool vm_net_mock_npc_item_exchange_config_admin_delete(
+    const char *scene, u32 actorId, u32 recipeId, const char **errorOut)
+{
+    char sceneHex[64 * 2 + 1];
+    char query[512];
+    int existing = -1;
+
+    if (errorOut != NULL)
+        *errorOut = "item exchange configuration not found";
+    if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0 ||
+        recipeId == 0 || recipeId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_npc_item_exchange_config_count; ++i)
+    {
+        if (g_vm_net_mock_npc_item_exchange_configs[i].actorId == actorId &&
+            g_vm_net_mock_npc_item_exchange_configs[i].recipeId == recipeId &&
+            vm_net_mock_scene_names_equal_exact(
+                g_vm_net_mock_npc_item_exchange_configs[i].scene, scene))
+        {
+            existing = (int)i;
+            break;
+        }
+    }
+    if (existing < 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_npc_item_exchange_recipes "
+             "WHERE scene=X'%s' AND actor_id=%u AND recipe_id=%u", sceneHex,
+             actorId, recipeId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut != NULL)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if ((u32)existing + 1 < g_vm_net_mock_npc_item_exchange_config_count)
+    {
+        memmove(&g_vm_net_mock_npc_item_exchange_configs[existing],
+                &g_vm_net_mock_npc_item_exchange_configs[existing + 1],
+                (g_vm_net_mock_npc_item_exchange_config_count -
+                 (u32)existing - 1) *
+                    sizeof(g_vm_net_mock_npc_item_exchange_configs[0]));
+    }
+    --g_vm_net_mock_npc_item_exchange_config_count;
+    memset(&g_vm_net_mock_npc_item_exchange_configs[
+               g_vm_net_mock_npc_item_exchange_config_count], 0,
+           sizeof(g_vm_net_mock_npc_item_exchange_configs[0]));
+    if (errorOut != NULL)
+        *errorOut = "ok";
+    printf("[info][mock-admin] npc_item_exchange_config_delete scene=%s actor=%u recipe=%u\n",
+           scene, actorId, recipeId);
+    return true;
+}
+
+static u32 vm_net_mock_npc_item_exchange_config_admin_list(
+    const char *scene, u32 actorId, vm_net_mock_npc_item_exchange_config *rows,
+    u32 rowCap)
+{
+    u32 count = 0;
+
+    if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0 ||
+        (rows == NULL && rowCap != 0))
+    {
+        return 0;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_npc_item_exchange_config_count; ++i)
+    {
+        const vm_net_mock_npc_item_exchange_config *config =
+            &g_vm_net_mock_npc_item_exchange_configs[i];
+
+        if (config->actorId != actorId ||
+            !vm_net_mock_scene_names_equal_exact(config->scene, scene))
+        {
+            continue;
+        }
+        if (rows != NULL && count < rowCap)
+            rows[count] = *config;
+        ++count;
+    }
+    return count;
+}
+
+static u32 vm_net_mock_npc_item_exchange_config_admin_page(
+    const char *scene, u32 actorId, u32 offset,
+    vm_net_mock_npc_item_exchange_config *rows, u32 rowCap)
+{
+    u32 skipped = 0;
+    u32 count = 0;
+
+    if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0 ||
+        rows == NULL || rowCap == 0)
+    {
+        return 0;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_npc_item_exchange_config_count; ++i)
+    {
+        const vm_net_mock_npc_item_exchange_config *config =
+            &g_vm_net_mock_npc_item_exchange_configs[i];
+
+        if (config->actorId != actorId ||
+            !vm_net_mock_scene_names_equal_exact(config->scene, scene))
+        {
+            continue;
+        }
+        if (skipped < offset)
+        {
+            ++skipped;
+            continue;
+        }
+        if (count >= rowCap)
+            break;
+        rows[count++] = *config;
+    }
+    return count;
+}
+
 static u32 vm_net_mock_npc_shop_inventory_admin_list(
     const char *scene, u32 actorId, vm_net_mock_npc_shop_inventory_row *rows,
     u32 rowCap)
@@ -6370,7 +6719,20 @@ static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
         if (!vm_mysql_exec(query))
             goto failed;
         snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO server_npc_item_exchange_recipes("
+                 "scene,actor_id,recipe_id,input_item_id,input_count,output_item_id,output_count) "
+                 "SELECT X'%s',actor_id,recipe_id,input_item_id,input_count,output_item_id,output_count "
+                 "FROM server_npc_item_exchange_recipes WHERE scene=X'%s' AND actor_id=%u",
+                 canonicalHex, legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
                  "DELETE FROM server_npc_shop_inventory WHERE scene=X'%s' AND actor_id=%u",
+                 legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_npc_item_exchange_recipes WHERE scene=X'%s' AND actor_id=%u",
                  legacyHex, migration->actorId);
         if (!vm_mysql_exec(query))
             goto failed;
@@ -7478,6 +7840,11 @@ static bool vm_net_mock_dynamic_npc_admin_delete_override(
     if (!vm_mysql_exec(query))
         goto failed;
     snprintf(query, sizeof(query),
+             "DELETE FROM server_npc_item_exchange_recipes WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
              "DELETE FROM server_dynamic_npcs WHERE scene=X'%s' AND actor_id=%u",
              sceneHex, actorId);
     if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
@@ -7493,6 +7860,33 @@ static bool vm_net_mock_dynamic_npc_admin_delete_override(
     --g_vm_net_mock_dynamic_npc_override_count;
     memset(&g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count],
            0, sizeof(g_vm_net_mock_dynamic_npc_overrides[0]));
+    for (u32 exchangeIndex = 0;
+         exchangeIndex < g_vm_net_mock_npc_item_exchange_config_count;)
+    {
+        if (g_vm_net_mock_npc_item_exchange_configs[exchangeIndex].actorId ==
+                actorId &&
+            vm_net_mock_scene_names_equal_exact(
+                g_vm_net_mock_npc_item_exchange_configs[exchangeIndex].scene,
+                scene))
+        {
+            if (exchangeIndex + 1 <
+                g_vm_net_mock_npc_item_exchange_config_count)
+            {
+                memmove(&g_vm_net_mock_npc_item_exchange_configs[exchangeIndex],
+                        &g_vm_net_mock_npc_item_exchange_configs[
+                            exchangeIndex + 1],
+                        (g_vm_net_mock_npc_item_exchange_config_count -
+                         exchangeIndex - 1) *
+                            sizeof(g_vm_net_mock_npc_item_exchange_configs[0]));
+            }
+            --g_vm_net_mock_npc_item_exchange_config_count;
+            memset(&g_vm_net_mock_npc_item_exchange_configs[
+                       g_vm_net_mock_npc_item_exchange_config_count],
+                   0, sizeof(g_vm_net_mock_npc_item_exchange_configs[0]));
+            continue;
+        }
+        ++exchangeIndex;
+    }
     if (errorOut)
         *errorOut = "ok";
     printf("[info][mock-admin] dynamic_npc_override_delete scene=%s actor=%u\n",
