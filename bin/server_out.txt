@@ -2,6 +2,37 @@
 [info][mock-service] resource_root=../web/fs/JHOnlineData source=auto
 [info][mock-service] mode=server-only bind=127.0.0.1:19090 admin=0.0.0.0:19091
 [info][mock-service] starting server-only bind=127.0.0.1:19090 admin=0.0.0.0:19091
-[info][mock-service] resource_overlay database=jh_online root=../web/fs/JHOnlineData/.cbe-overlays/jh_online base=immutable
-[error][mock-service] mysql_authority_prepare schema error=MySQL error 1045: Access denied for user 'root'@'182.200.186.55' (using password: YES)
-[error][mock-service] mysql persistence unavailable reason=authority-prepare error=MySQL error 1045: Access denied for user 'root'@'182.200.186.55' (using password: YES)
+[info][mock-service] resource_overlay database=jh_online_release_20260822 root=../web/fs/JHOnlineData/.cbe-overlays/jh_online_release_20260822 base=immutable
+[info][mock-service] mysql_authority_prepare sealed=1 storage=InnoDB marker=mysql-authoritative-v1
+mock_account_cache_init entries=0 source=runtime-lifecycle
+mock_friend_db_mysql_load records=256 source=on-demand
+[info][mock-service] role_count_authority_migration marker=role-count-authority-v3 corrected_accounts=0 max_roles=5 action=already-applied
+[info][network] mock_shop_catalog total=1715 items=230 equips=1485 first=1001 source=item.dsh/equip.dsh
+[info][mock-admin] shop_item_db_load rows=1516 skipped=1
+mock_shop_catalog_loaded total=1715 items=230 equips=1485 source=item.dsh/equip.dsh
+[info][network] mock_equip_catalog total=1485 source=equip.dsh
+[info][mock-admin] task_catalog_db_load rows=20 overridden=14 custom=6 skipped=0 reward_rows=10 reward_tasks=4 reward_skipped=0 scene_target_rows=0 scene_target_skipped=0
+[info][network] mock_task_catalog source=task.dsh+mysql rows=139 declared_rows=138 path=../web/fs/JHOnlineData/task.dsh
+[info][network] mock_xse_validate script=task0.xse strings=17 task_refs=2 direct_dialogs=5 offer_len=0 completed_len=0 idle_len=75
+[info][network] mock_xse_validate script=04¡Ÿ∞≤∫˙Ï≥.xse strings=11 task_refs=1 direct_dialogs=4 offer_len=72 completed_len=44 idle_len=48
+[info][network] mock_xse_validate script=06“∞÷Ì¡÷¡÷≥Â.xse strings=19 task_refs=2 direct_dialogs=7 offer_len=0 completed_len=0 idle_len=60
+[info][network] mock_xse_validate script=–≈œ‰.xse strings=1 task_refs=0 direct_dialogs=1 offer_len=0 completed_len=0 idle_len=28
+[info][network] mock_xse_catalog_validate loaded=4 expected=4 task_refs=5 source=web/fs/JHOnlineData evidence=XSE0+task.dsh
+[info][mock-admin] native_npc_db_load overrides=0 inventory=730
+[info][mock-admin] scene_battle_monster_schema migration=field18-hit-effect-to-native-defeat-effect from=f_blood1.actor to=e_ghostfireR.actor
+[info][mock-admin] scene_battle_monster_schema migration=quantity action=ready default=1 max=5
+[info][mock-admin] dynamic_npc_schema migration=service-option-text action=ready
+[info][mock-admin] dynamic_npc_instance_schema migration=spawn-enemy-id action=ready
+[info][mock-admin] dynamic_npc_instance_schema migration=timer-seconds action=ready
+[info][mock-admin] dynamic_npc_instance_schema migration=entry-copper-cost action=ready
+[error][mysql] reentrant_query_denied phase=result-callback
+[warn][mock-admin] monster_catalog_scene_battle_drafts action=skip error=MySQL query attempted from an active result callback
+[info][network] mock_monster_catalog base=80 scenes=196 spawns=479 scene_added=13 drafts_added=0 rejected=0 total=93 source=SCE2-kind3+task-kill-labels+scene-battle-drafts
+[error][mock-admin] dynamic_npc_instance_target_unresolved scene=c04¡Ÿ∞≤∏Æ_05.sce actor=30001 target_scene=36Ω⁄»’«Ïµ‰_01.sce enemy=3000 action=skip-row reason=direct-challenge-requires-enabled-scene-battle-monster-or-instance-catalog-target direct_scene_target_exists=0 source=parent-load-query
+[info][mock-admin] dynamic_npc_db_load rows=40 skipped=1 quarantined=0 migrated=0 parent_migrated=0
+[info][network] mock_scene_npc_exact_validate scene=c00≈Ó¿≥œ…µ∫_01.sce rows=2 total=2 guojing=0 policy=exact-scene-only
+[info][network] mock_scene_npc_service_validate scene=00≈Ó¿≥œ…µ∫_02.sce rows=3 total=3 blacksmith=1 monkey=1 test_task_npc=0 policy=production-catalog-only
+[info][mock-service] listening=127.0.0.1:19090
+[info][mock-admin] listening=http://0.0.0.0:19091/
+[info][mock-service] concurrency pool=game workers=4 queue=128 state_model=serialized-legacy-context
+[info][mock-service] concurrency pool=admin workers=2 queue=128 state_model=serialized-legacy-context

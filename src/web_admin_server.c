@@ -2973,7 +2973,8 @@ static void vm_mock_admin_render_instance_fields(
     u32 y = seed ? seed->instanceY : 0;
     u32 enemyId = seed ? seed->challengeEnemyId : 0;
     u32 spawnEnemyId = seed ? seed->instanceSpawnEnemyId : 0;
-    u32 timerSeconds = seed ? seed->instanceTimerSeconds : 0;
+    u32 timerMinutes = seed ? seed->instanceTimerMinutes : 0;
+    u32 entryCopperCost = seed ? seed->instanceEntryCopperCost : 0;
     u32 minimumLevel = seed && seed->instanceMinLevel != 0
                            ? seed->instanceMinLevel
                            : 1;
@@ -2989,10 +2990,12 @@ static void vm_mock_admin_render_instance_fields(
         page,
         "</label><label class=\"field\"><span>落点 X</span><input type=\"number\" name=\"instance_x\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
         "<label class=\"field\"><span>落点 Y</span><input type=\"number\" name=\"instance_y\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
-        "<label class=\"field\"><span>副本倒计时（秒）</span><input type=\"number\" name=\"instance_timer_seconds\" min=\"0\" max=\"%u\" value=\"%u\"></label>"
-        "<p class=\"instance-help\">进入副本时写入客户端 min 字段；填 0 显示 00:00。后台不会因客户端归零自动踢出角色。</p></div>"
+        "<label class=\"field\"><span>副本倒计时（分钟）</span><input type=\"number\" name=\"instance_timer_minutes\" min=\"0\" max=\"%u\" value=\"%u\"></label>"
+        "<label class=\"field\"><span>进入费用（铜钱）</span><input type=\"number\" name=\"instance_entry_copper_cost\" min=\"0\" max=\"4294967295\" value=\"%u\"></label>"
+        "<p class=\"instance-help\">进入副本时写入客户端 min 字段；每个数值单位按现实 60 秒递减。填 0 显示 00:00。进入费用填 0 免费；大于 0 时，每次确认进入会扣除相应铜钱，余额不足不能传送。</p></div>"
         "<div class=\"instance-fields\" data-npc-instance-spawn-fields hidden><label class=\"field\"><span>传送后挑战怪物</span>",
-        x, y, VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS, timerSeconds);
+        x, y, VM_NET_MOCK_INSTANCE_TIMER_MAX_MINUTES, timerMinutes,
+        entryCopperCost);
     vm_mock_admin_render_monster_picker_field(
         page, "instance_spawn_enemy_id", spawnEnemyId, false, true, false);
     vm_mock_admin_text_appendf(
@@ -13742,7 +13745,8 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 challengeEnemyId = 0;
     u32 instanceSpawnEnemyId = 0;
     u32 instanceMinLevel = 1;
-    u32 instanceTimerSeconds = 0;
+    u32 instanceTimerMinutes = 0;
+    u32 instanceEntryCopperCost = 0;
     u32 serviceOptionCount = 0;
     bool hasInstanceTeleport = false;
     bool hasInstanceChallenge = false;
@@ -14256,12 +14260,21 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         }
         if (hasInstanceTeleport &&
             !vm_mock_admin_form_u32(
-                body, "instance_timer_seconds",
-                VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS,
-                &instanceTimerSeconds))
+                body, "instance_timer_minutes",
+                VM_NET_MOCK_INSTANCE_TIMER_MAX_MINUTES,
+                &instanceTimerMinutes))
         {
             vm_mock_admin_redirect_content(
-                client, sceneUtf8, "error", "副本倒计时必须是 0 至 86400 秒");
+                client, sceneUtf8, "error", "副本倒计时必须是 0 至 86400 分钟");
+            return;
+        }
+        if (hasInstanceTeleport &&
+            !vm_mock_admin_form_u32(
+                body, "instance_entry_copper_cost", 0xffffffffu,
+                &instanceEntryCopperCost))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error", "副本进入费用必须是有效的铜钱数量");
             return;
         }
         if (hasInstanceTeleport &&
@@ -14399,7 +14412,8 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.challengeEnemyId = challengeEnemyId;
     seed.instanceSpawnEnemyId = instanceSpawnEnemyId;
     seed.instanceMinLevel = (u16)instanceMinLevel;
-    seed.instanceTimerSeconds = instanceTimerSeconds;
+    seed.instanceTimerMinutes = instanceTimerMinutes;
+    seed.instanceEntryCopperCost = instanceEntryCopperCost;
     snprintf(seed.instanceScene, sizeof(seed.instanceScene), "%s",
              instanceRuntimeScene);
     snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", actorResource);

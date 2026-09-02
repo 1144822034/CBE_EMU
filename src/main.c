@@ -22763,9 +22763,10 @@ static void hook_vm_video_code_callback(uc_engine *uc, uint64_t address, uint32_
 }
 
 /* Dream-map number forensics: 0x0104C252 initializes the local countdown
- * object before 0x0104C216 decrements it once per second.  This probe is
- * opt-in and records only the CBE's live arguments; it never changes a
- * register, guest memory, packet, callback, or scheduling decision. */
+ * object.  Its 0x0104C216 update method selects a 60,000 ms cadence for
+ * mode 0 and a 1,000 ms cadence for mode 1.  The probes are opt-in and
+ * record only the CBE's live arguments; they never change a register,
+ * guest memory, packet, callback, or scheduling decision. */
 static bool vm_scene_number_trace_enabled(void)
 {
     const char *setting = getenv("CBE_TRACE_SCENE_NUMBERS");
@@ -22803,6 +22804,110 @@ static void vm_scene_number_timer_init_code_callback(uc_engine *uc,
             "scene_number_timer_init seq=%u module=JianghuOL.CBE "
             "pc=0104c252 timer=%08x seconds=%u caller=%08x\n",
             traceCount, timer, seconds, lr & ~1u);
+    fclose(trace);
+}
+
+/* Capture the call mode used by the CBE's real timer update method.  This is
+ * deliberately bounded and rate-limited: it records the first invocation,
+ * each value/mode change, and at most one unchanged state per wall-clock
+ * second.  Reading the object is evidence only; countdown progression stays
+ * entirely inside the CBE method. */
+static void vm_scene_number_timer_process_code_callback(uc_engine *uc,
+                                                          uint64_t address,
+                                                          uint32_t size,
+                                                          void *user_data)
+{
+    static u32 traceCount = 0;
+    static u32 previousTimer = 0;
+    static u32 previousMode = 0xffffffffu;
+    static u32 previousSeconds = 0xffffffffu;
+    static u32 previousAnchor = 0xffffffffu;
+    static u32 previousWallMs = 0;
+    u32 timer = 0;
+    u32 mode = 0;
+    u32 seconds = 0;
+    u32 anchor = 0;
+    u32 lr = 0;
+    u32 wallMs = 0;
+    u32 cadenceMs = 0;
+    FILE *trace = NULL;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 128u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &timer);
+    (void)uc_reg_read(uc, UC_ARM_REG_R1, &mode);
+    (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    if (timer == 0 ||
+        uc_mem_read(uc, timer + 0x0cu, &anchor, sizeof(anchor)) != UC_ERR_OK ||
+        uc_mem_read(uc, timer + 0x10u, &seconds, sizeof(seconds)) != UC_ERR_OK)
+        return;
+    wallMs = SDL_GetTicks();
+    if (mode == 0)
+        cadenceMs = 60000u;
+    else if (mode == 1)
+        cadenceMs = 1000u;
+    if (traceCount != 0 && timer == previousTimer && mode == previousMode &&
+        seconds == previousSeconds && anchor == previousAnchor &&
+        (u32)(wallMs - previousWallMs) < 1000u)
+        return;
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_timer_process seq=%u module=JianghuOL.CBE "
+            "pc=0104c216 timer=%08x mode=%u cadence_ms=%u seconds=%u "
+            "anchor_ms=%u wall_ms=%u caller=%08x\n",
+            traceCount, timer, mode, cadenceMs, seconds, anchor, wallMs,
+            lr & ~1u);
+    fclose(trace);
+    previousTimer = timer;
+    previousMode = mode;
+    previousSeconds = seconds;
+    previousAnchor = anchor;
+    previousWallMs = wallMs;
+}
+
+/* The dream-map runtime trace showed that its visible value is committed by
+ * the caller at 0x010104EE, rather than by the optional 0x0104C216 object
+ * update path.  At this return PC R0 still contains the CBE timer-manager
+ * millisecond reading and R1 is the value just written by 0x0104C252.  Log
+ * both with the host monotonic clock to measure the actual decrement cadence
+ * without influencing CBE execution. */
+static void vm_scene_number_timer_commit_code_callback(uc_engine *uc,
+                                                         uint64_t address,
+                                                         uint32_t size,
+                                                         void *user_data)
+{
+    static u32 traceCount = 0;
+    u32 cbeTickMs = 0;
+    u32 seconds = 0;
+    u32 timer = 0;
+    u32 lr = 0;
+    FILE *trace = NULL;
+
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (!vm_scene_number_trace_enabled() || traceCount >= 128u)
+        return;
+    (void)uc_reg_read(uc, UC_ARM_REG_R0, &cbeTickMs);
+    (void)uc_reg_read(uc, UC_ARM_REG_R1, &seconds);
+    (void)uc_reg_read(uc, UC_ARM_REG_R4, &timer);
+    (void)uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    trace = fopen("logs/scene-number-draw.log", "ab");
+    if (trace == NULL)
+        return;
+    ++traceCount;
+    fprintf(trace,
+            "scene_number_timer_commit seq=%u module=JianghuOL.CBE "
+            "pc=010104ee timer=%08x seconds=%u cbe_tick_ms=%u "
+            "wall_ms=%u caller=%08x\n",
+            traceCount, timer, seconds, cbeTickMs, SDL_GetTicks(),
+            lr & ~1u);
     fclose(trace);
 }
 
@@ -23183,6 +23288,16 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
 #undef ADD_MANAGER_CODE_HOOK_RANGE
     if (vm_scene_number_trace_enabled())
     {
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_timer_commit_code_callback, NULL,
+                          0x010104EEu, 0x010104EEu);
+        if (err != UC_ERR_OK)
+            return err;
+        err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
+                          vm_scene_number_timer_process_code_callback, NULL,
+                          0x0104C216u, 0x0104C216u);
+        if (err != UC_ERR_OK)
+            return err;
         err = uc_hook_add(uc, &hook, UC_HOOK_CODE,
                           vm_scene_number_timer_init_code_callback, NULL,
                           0x0104C252u, 0x0104C252u);

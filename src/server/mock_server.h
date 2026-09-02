@@ -320,7 +320,10 @@ enum
 
 /* Limit operator input to a practical one-day countdown even though the CBE
  * decoder itself accepts a full u32. */
-#define VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS (24u * 60u * 60u)
+/* `1/27/4.min` is a client countdown-unit value.  The active dream-map path
+ * decrements that value once per real minute, so retain the historical upper
+ * bound while naming the unit truthfully. */
+#define VM_NET_MOCK_INSTANCE_TIMER_MAX_MINUTES (24u * 60u * 60u)
 
 /* A scene-visible role snapshot is shared by the scene bootstrap producer and
  * the social poll encoder.  The session remains opaque at this boundary. */
@@ -752,6 +755,9 @@ bool vm_mock_service_backpack_full_bootstrap_arm(u32 roleId);
 bool vm_mock_service_backpack_full_bootstrap_matches(u32 roleId, u8 stage);
 void vm_mock_service_backpack_full_bootstrap_advance(u32 roleId, u8 stage);
 void vm_mock_service_backpack_full_bootstrap_complete(u32 roleId);
+void vm_mock_service_initial_equipment_bootstrap_arm(u32 roleId);
+bool vm_mock_service_initial_equipment_bootstrap_matches(u32 roleId);
+void vm_mock_service_initial_equipment_bootstrap_complete(u32 roleId);
 const char *vm_mock_service_active_account_id(void);
 bool vm_mock_service_has_active_account(void);
 void vm_mock_service_guild_set_selected(u32 guildId);

@@ -5855,13 +5855,57 @@ vm_net_mock_instance_guide_seed(u32 actorId)
     return NULL;
 }
 
-static u32 vm_net_mock_build_instance_enter_response(
-    const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
+/* The role balance is stored in copper.  Keep the affordability decision
+ * side-effect free so an insufficient entry can fall back to the ordinary
+ * NPC dialog without creating a target, a transient instance session, or a
+ * durable debit. */
+static bool vm_net_mock_instance_entry_copper_prepare_debit(
+    const vm_net_mock_role_state *role, u32 cost,
+    u32 *beforeOut, u32 *afterOut)
 {
+    if (beforeOut != NULL)
+        *beforeOut = 0;
+    if (afterOut != NULL)
+        *afterOut = 0;
+    if (cost == 0)
+    {
+        if (role != NULL)
+        {
+            if (beforeOut != NULL)
+                *beforeOut = role->money;
+            if (afterOut != NULL)
+                *afterOut = role->money;
+        }
+        return true;
+    }
+    if (role == NULL || role->money < cost)
+        return false;
+    if (beforeOut != NULL)
+        *beforeOut = role->money;
+    if (afterOut != NULL)
+        *afterOut = role->money - cost;
+    return true;
+}
+
+static u32 vm_net_mock_build_instance_enter_response(
+    const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap,
+    const char **failureTextOut)
+{
+    static const char insufficientCopperText[] =
+        "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xd0\xe8\xd2\xaa\xd7\xe3\xb9\xbb\xcd\xad\xc7\xae\xb2\xc5\xc4\xdc\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe\xa1\xa3"; /* 铜钱不足，需要足够铜钱才能进入副本。 */
+    static const char debitFailedText[] =
+        "\xb8\xb1\xb1\xbe\xb7\xd1\xd3\xc3\xbf\xdb\xb3\xfd\xca\xa7\xb0\xdc\xa3\xac\xc7\xeb\xc9\xd4\xba\xf3\xd6\xd8\xca\xd4\xa1\xa3"; /* 副本费用扣除失败，请稍后重试。 */
     vm_net_mock_scene_change_target target;
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
     char entryScene[64];
+    u32 copperBefore = 0;
+    u32 copperAfter = 0;
     u32 pos = 0;
 
+    if (failureTextOut != NULL)
+        *failureTextOut = NULL;
     memset(entryScene, 0, sizeof(entryScene));
     if (seed == NULL || seed->instanceScene[0] == 0 ||
         !vm_net_mock_str_ends_with(seed->instanceScene, ".sce") ||
@@ -5876,6 +5920,30 @@ static u32 vm_net_mock_build_instance_enter_response(
                    seed->instanceSpawnEnemyId);
         return 0;
     }
+    if (!vm_net_mock_instance_entry_copper_prepare_debit(
+            role, seed->instanceEntryCopperCost, &copperBefore, &copperAfter))
+    {
+        printf("[info][network] mock_npc_instance_entry_copper_insufficient actor=%u role=%u cost=%u balance=%u action=npc-dialog-no-enter\n",
+               seed->actorId, role ? role->roleId : 0,
+               seed->instanceEntryCopperCost, role ? role->money : 0);
+        if (failureTextOut != NULL)
+            *failureTextOut = insufficientCopperText;
+        return 0;
+    }
+    /* A paid entry must be bound to the same selected service session that
+     * owns the later transient instance.  Free entries retain the historical
+     * standalone-builder behavior used by packet fixtures. */
+    if (seed->instanceEntryCopperCost != 0 &&
+        (session == NULL || role == NULL ||
+         !vm_net_mock_scene_name_is_persistable(role->scene) ||
+         role->x == 0 || role->y == 0))
+    {
+        printf("[error][network] mock_npc_instance_entry_copper_session_unbound actor=%u cost=%u action=no-debit-no-enter\n",
+               seed->actorId, seed->instanceEntryCopperCost);
+        if (failureTextOut != NULL)
+            *failureTextOut = debitFailedText;
+        return 0;
+    }
     memset(&target, 0, sizeof(target));
     snprintf(target.scene, sizeof(target.scene), "%s", entryScene);
     target.x = seed->instanceX;
@@ -5886,6 +5954,24 @@ static u32 vm_net_mock_build_instance_enter_response(
         &target, out, outCap);
     if (pos == 0)
         return 0;
+
+    /* Do not commit the charge before the known-good 30/1 object exists.  A
+     * failed role save restores the in-memory balance and returns the normal
+     * dialog path rather than emitting a paid scene-enter packet. */
+    if (seed->instanceEntryCopperCost != 0)
+    {
+        role->money = copperAfter;
+        if (!vm_net_mock_role_db_save("npc-instance-entry-copper"))
+        {
+            role->money = copperBefore;
+            printf("[error][network] mock_npc_instance_entry_copper_debit_failed actor=%u role=%u cost=%u balance=%u action=rollback-no-enter\n",
+                   seed->actorId, role->roleId,
+                   seed->instanceEntryCopperCost, copperBefore);
+            if (failureTextOut != NULL)
+                *failureTextOut = debitFailedText;
+            return 0;
+        }
+    }
 
     /* The response above is the position-bearing 30/1 that creates the
      * destination scene shell.  Preserve that fact on the pending target so
@@ -5918,15 +6004,19 @@ static u32 vm_net_mock_build_instance_enter_response(
                seed->actorId, target.scene);
     }
     else if (!vm_mock_service_active_transient_instance_configure_timer(
-                 seed->instanceTimerSeconds))
+                 seed->instanceTimerMinutes))
     {
-        printf("[warn][network] mock_npc_instance_timer_unbound actor=%u scene=%s seconds=%u action=emit-zero-min\n",
-               seed->actorId, target.scene, seed->instanceTimerSeconds);
+        printf("[warn][network] mock_npc_instance_timer_unbound actor=%u scene=%s minutes=%u action=emit-zero-min\n",
+               seed->actorId, target.scene, seed->instanceTimerMinutes);
     }
-    printf("[info][network] mock_npc_instance_enter actor=%u configured_scene=%s scene=%s pos=(%u,%u) timer_seconds=%u spawn_enemy=%u source=SCE2-kind3+city-mirror response=30/1 resp=%u position_owner=session-transient evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+    printf("[info][network] mock_npc_instance_enter actor=%u configured_scene=%s scene=%s pos=(%u,%u) timer_minutes=%u entry_copper_cost=%u copper=%u/%u spawn_enemy=%u source=SCE2-kind3+city-mirror response=30/1 resp=%u position_owner=session-transient evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
            seed->actorId, seed->instanceScene, target.scene, target.x, target.y,
-           seed->instanceTimerSeconds,
+           seed->instanceTimerMinutes, seed->instanceEntryCopperCost,
+           copperBefore, copperAfter,
            seed->instanceSpawnEnemyId, pos);
+    vm_autotest_note("mock_npc_instance_enter actor=%u fee_copper=%u balance=%u/%u response=30/1 evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+                     seed->actorId, seed->instanceEntryCopperCost,
+                     copperBefore, copperAfter);
     return pos;
 }
 
@@ -7070,11 +7160,12 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         else if (operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE)
         {
+            const char *entryFailureText = NULL;
             u32 transferLen = vm_net_mock_build_instance_enter_response(
-                instanceSeed, out, outCap);
+                instanceSeed, out, outCap, &entryFailureText);
             if (transferLen != 0)
                 return transferLen;
-            dialogText =
+            dialogText = entryFailureText ? entryFailureText :
                 "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xb5\xe3\xce\xb4\xc5\xe4\xd6\xc3\xa1\xa3"; /* 副本传送点未配置。 */
         }
         else if (operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
@@ -7094,8 +7185,17 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             {
                 optionNames[optionCount] =
                     "\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe"; /* 进入副本 */
+                snprintf(optionDescriptionStorage[optionCount],
+                         sizeof(optionDescriptionStorage[optionCount]),
+                         "%s",
+                         "\xb4\xab\xcb\xcd\xb5\xbd\xb8\xb1\xb1\xbe\xb3\xa1\xbe\xb0"); /* 传送到副本场景 */
+                vm_net_mock_append_npc_option_price_description(
+                    optionDescriptionStorage[optionCount],
+                    sizeof(optionDescriptionStorage[optionCount]),
+                    "\xc8\xeb\xb3\xa1\xb7\xd1\xd3\xc3\xa3\xba", /* 入场费用： */
+                    instanceSeed->instanceEntryCopperCost);
                 optionDescriptions[optionCount] =
-                    "\xb4\xab\xcb\xcd\xb5\xbd\xb8\xb1\xb1\xbe\xb3\xa1\xbe\xb0"; /* 传送到副本场景 */
+                    optionDescriptionStorage[optionCount];
                 optionValues[optionCount] =
                     VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE |
                     instanceSeed->actorId;

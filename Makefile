@@ -108,7 +108,7 @@ CLIENT_LDLIBS := -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
 	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
 SERVER_LDLIBS := -lpthread -liconv -lm -lkernel32 -lws2_32 -ldbghelp
 
-.PHONY: all build client server boundary-check clean
+.PHONY: all build client server boundary-check initial-login-equipped-bootstrap-regression clean
 
 $(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
 
@@ -118,6 +118,9 @@ client: $(CLIENT_TARGET)
 server: $(SERVER_TARGET)
 boundary-check: build
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-service-boundary.ps1 -Client "$(CLIENT_TARGET)" -Server "$(SERVER_TARGET)"
+initial-login-equipped-bootstrap-regression: scripts/initial-login-equipped-bootstrap-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/initial-login-equipped-bootstrap-regression.exe $(SERVER_LDLIBS)
 
 $(CLIENT_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
@@ -170,13 +173,16 @@ LDFLAGS += -Wl,--gc-sections
 SERVER_CFLAGS := $(CFLAGS)
 SERVER_LDLIBS := -lpthread -lm
 
-.PHONY: all build server boundary-check clean
+.PHONY: all build server boundary-check initial-login-equipped-bootstrap-regression clean
 $(SERVER_OBJDIR)/server/mock-server.o: SERVER_CPPFLAGS += -DCBE_SERVER_SPLIT_OBJECTS
 all: build
 build: server
 server: $(SERVER_TARGET)
 boundary-check: build
 	@echo "boundary-check: Linux builds the service target only; run the Windows dual-target check in CI."
+initial-login-equipped-bootstrap-regression: scripts/initial-login-equipped-bootstrap-regression.c
+	mkdir -p "$(SERVER_OBJDIR)"
+	$(CC) $(SERVER_CPPFLAGS) $(CFLAGS) $< $(SERVER_OBJDIR)/gifDecode.o $(SERVER_OBJDIR)/mystd.o $(SERVER_OBJDIR)/mysql-client.o $(SERVER_OBJDIR)/md5.o $(LDFLAGS) -o $(SERVER_OBJDIR)/initial-login-equipped-bootstrap-regression $(SERVER_LDLIBS)
 
 $(SERVER_OBJDIR)/server_main.o: src/server_main.c src/server/mock_server.h \
 	src/main.h src/gifDecode.h src/md5.h src/config.h

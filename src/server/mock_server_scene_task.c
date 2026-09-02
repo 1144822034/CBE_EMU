@@ -6190,6 +6190,31 @@ static bool vm_net_mock_dynamic_npc_instances_ensure_timer_seconds_column(void)
     return true;
 }
 
+static bool vm_net_mock_dynamic_npc_instances_ensure_entry_copper_cost_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_instances' "
+            "AND COLUMN_NAME='entry_copper_cost'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count == 0 && !vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_instances "
+            "ADD COLUMN entry_copper_cost INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER timer_seconds"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_instance_schema migration=entry-copper-cost action=ready\n");
+    return true;
+}
+
 /* Every dynamic-NPC scene key is a client resource key.  Both a placement
  * scene and an instance target must name the exact downloadable SCE file;
  * accepting a bare name here makes a distinct SQL key which later collides
@@ -6323,8 +6348,8 @@ static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
             goto failed;
         snprintf(query, sizeof(query),
                  "INSERT IGNORE INTO server_dynamic_npc_instances("
-                 "scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,minimum_level) "
-                 "SELECT X'%s',actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,minimum_level "
+                 "scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,entry_copper_cost,minimum_level) "
+                 "SELECT X'%s',actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,entry_copper_cost,minimum_level "
                  "FROM server_dynamic_npc_instances WHERE scene=X'%s' AND actor_id=%u",
                  canonicalHex, legacyHex, migration->actorId);
         if (!vm_mysql_exec(query))
@@ -6511,7 +6536,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[15];
+    u32 number[16];
     bool hasInstanceConfiguration = false;
 
     memset(&row, 0, sizeof(row));
@@ -6545,14 +6570,15 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_net_mock_dynamic_npc_decode_hex(values[13], lengths[13],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
-        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[8]) || number[8] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[9]) || number[9] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[10]) || number[10] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[12]) || number[12] > 0xffu ||
-        !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[13]) || number[13] > 1u ||
-        !vm_mock_mysql_parse_u32(values[21], lengths[21], &number[14]) ||
-        number[14] > VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS)
+        !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[8]) || number[8] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[9]) || number[9] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[10]) || number[10] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[11]) || number[11] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[12]) || number[12] > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[13]) || number[13] > 1u ||
+        !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[14]) ||
+        number[14] > VM_NET_MOCK_INSTANCE_TIMER_MAX_MINUTES ||
+        !vm_mock_mysql_parse_u32(values[21], lengths[21], &number[15]))
     {
         if (context != NULL)
             ++context->skipped;
@@ -6576,7 +6602,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.challengeEnemyId = number[10];
     row.seed.instanceSpawnEnemyId = number[11];
     row.seed.instanceMinLevel = (u16)number[12];
-    row.seed.instanceTimerSeconds = number[14];
+    row.seed.instanceTimerMinutes = number[14];
+    row.seed.instanceEntryCopperCost = number[15];
     /* The parent `npc_kind` is now only a compatibility projection.  Instance
      * settings belong to the independent child row and may be used by a
      * multi-service NPC whose first selected service is not the instance
@@ -6585,7 +6612,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                row.seed.instanceX != 0 ||
                                row.seed.instanceY != 0 ||
                                row.seed.instanceSpawnEnemyId != 0 ||
-                               row.seed.instanceTimerSeconds != 0 ||
+                               row.seed.instanceTimerMinutes != 0 ||
+                               row.seed.instanceEntryCopperCost != 0 ||
                                row.seed.challengeEnemyId != 0;
     if (context->scanningParentSceneMigrations)
     {
@@ -6722,8 +6750,12 @@ static bool vm_net_mock_dynamic_npc_db_query_rows(
         "AND sbm.monster_id=COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0) "
         "AND sbm.enabled=1),"
         "COALESCE(server_dynamic_npc_instances.timer_seconds,0),"
-        "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
-        "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
+        "COALESCE(server_dynamic_npc_instances.entry_copper_cost,0) "
+        "FROM server_dynamic_npcs LEFT JOIN ("
+        "SELECT scene,actor_id,GROUP_CONCAT(CONCAT(task_id,':',repeatable) "
+        "ORDER BY task_id SEPARATOR ',') AS bindings "
+        "FROM server_dynamic_npc_tasks GROUP BY scene,actor_id"
+        ") AS task_bindings USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
         "USING(scene,actor_id) ORDER BY scene,actor_id",
         vm_net_mock_dynamic_npc_row, context);
 }
@@ -6779,6 +6811,7 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "challenge_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "spawn_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "timer_seconds INT UNSIGNED NOT NULL DEFAULT 0,"
+            "entry_copper_cost INT UNSIGNED NOT NULL DEFAULT 0,"
             "minimum_level TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
@@ -6786,7 +6819,8 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "CONSTRAINT fk_server_dynamic_npc_instances_npc FOREIGN KEY(scene,actor_id) "
             "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
         !vm_net_mock_dynamic_npc_instances_ensure_spawn_enemy_column() ||
-        !vm_net_mock_dynamic_npc_instances_ensure_timer_seconds_column())
+        !vm_net_mock_dynamic_npc_instances_ensure_timer_seconds_column() ||
+        !vm_net_mock_dynamic_npc_instances_ensure_entry_copper_cost_column())
     {
         printf("[error][mock-admin] dynamic_npc_db_load failed error=%s\n",
                vm_mysql_last_error());
@@ -7198,7 +7232,8 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         !vm_net_mock_str_ends_with(seed->actorResource, ".actor") ||
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
-        seed->instanceTimerSeconds > VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS ||
+        seed->instanceTimerMinutes > VM_NET_MOCK_INSTANCE_TIMER_MAX_MINUTES ||
+        (!hasInstanceTeleport && seed->instanceEntryCopperCost != 0) ||
         (hasInstanceService &&
          ((!hasInstanceTeleport && !hasInstanceChallenge) ||
           (hasInstanceTeleport &&
@@ -7327,13 +7362,14 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     if (hasInstanceService)
     {
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,minimum_level) "
-                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,spawn_enemy_id,timer_seconds,entry_copper_cost,minimum_level) "
+                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
                  "target_scene=VALUES(target_scene),target_x=VALUES(target_x),target_y=VALUES(target_y),"
-                 "challenge_enemy_id=VALUES(challenge_enemy_id),spawn_enemy_id=VALUES(spawn_enemy_id),timer_seconds=VALUES(timer_seconds),minimum_level=VALUES(minimum_level)",
+                 "challenge_enemy_id=VALUES(challenge_enemy_id),spawn_enemy_id=VALUES(spawn_enemy_id),timer_seconds=VALUES(timer_seconds),entry_copper_cost=VALUES(entry_copper_cost),minimum_level=VALUES(minimum_level)",
                  sceneHex, seed->actorId, instanceSceneHex, seed->instanceX,
                  seed->instanceY, seed->challengeEnemyId,
-                 seed->instanceSpawnEnemyId, seed->instanceTimerSeconds,
+                 seed->instanceSpawnEnemyId, seed->instanceTimerMinutes,
+                 seed->instanceEntryCopperCost,
                  seed->instanceMinLevel);
     }
     else
@@ -7385,13 +7421,14 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) timer_seconds=%u challenge_enemy=%u spawn_enemy=%u spawn_source=SCE2-kind3 min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task_count=%u primary_task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) timer_minutes=%u entry_copper_cost=%u challenge_enemy=%u spawn_enemy=%u spawn_source=SCE2-kind3 min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
            seed->serviceOptionName[0] ? seed->serviceOptionName : "-",
            taskBindingCount, seed->taskId, (u32)seed->taskRepeatPolicy,
            seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
-           seed->instanceX, seed->instanceY, seed->instanceTimerSeconds,
+           seed->instanceX, seed->instanceY, seed->instanceTimerMinutes,
+           seed->instanceEntryCopperCost,
            seed->challengeEnemyId, seed->instanceSpawnEnemyId,
            seed->instanceMinLevel, seed->actorResource,
            seed->scriptName[0] ? seed->scriptName : "-");
@@ -9226,6 +9263,10 @@ static void vm_net_mock_remember_scene_change_target(const vm_net_mock_scene_cha
 {
     if (target == NULL || target->scene[0] == 0)
         return;
+    vm_mock_service_active_transient_instance_expiry_exit_completion_discard_if_mismatch(
+        target, "scene-target-replaced");
+    vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_discard_if_mismatch(
+        target, "scene-target-replaced");
     g_vm_net_mock_last_scene_change_target = *target;
     g_vm_net_mock_last_scene_change_target_valid = true;
     vm_mock_service_mark_active_session_scene_pending(target, "scene-target-remember");
@@ -12346,6 +12387,133 @@ static u32 vm_net_mock_build_scene_channel_enter_combo_for_target(const vm_net_m
         return 0;
     objectCount += 1;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}
+
+/* A timed NPC instance owns only a temporary scene session.  Once its
+ * server-side deadline is reached, the next existing scene-sync poll may
+ * deliver the same position-bearing 30/1 scene-entry shape proven by the
+ * delayed map-stone flow.  This deliberately does not manufacture a CBE
+ * callback: the poll's already-registered callback consumes the WT frame. */
+static u32 vm_net_mock_build_active_transient_instance_expiry_exit_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer)
+{
+    vm_net_mock_scene_change_target target;
+    char instanceScene[64];
+    u16 instanceX = 0;
+    u16 instanceY = 0;
+    u32 configuredMinutes = 0;
+    u32 nowMs = scheduler_get_tick_ms();
+    u32 pos = 0;
+
+    if (out == NULL || outCap < 5 || observer == NULL ||
+        observer != vm_mock_service_get_active_client_session() ||
+        !observer->transientInstanceActive ||
+        observer->transientInstanceTimerMinutes == 0 ||
+        !observer->sceneVisibleReady || observer->sceneVisiblePending ||
+        !vm_net_mock_scene_name_is_persistable(observer->transientInstanceScene) ||
+        !vm_net_mock_scene_names_equal_exact(observer->sceneVisibleScene,
+                                             observer->transientInstanceScene))
+    {
+        return 0;
+    }
+    if (vm_mock_service_active_transient_instance_timer_remaining_minutes(
+            observer, nowMs) != 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_scene_name_is_persistable(observer->transientInstanceReturnScene) ||
+        observer->transientInstanceReturnX == 0 ||
+        observer->transientInstanceReturnY == 0 ||
+        vm_net_mock_scene_names_equal_exact(observer->transientInstanceScene,
+                                            observer->transientInstanceReturnScene))
+    {
+        return 0;
+    }
+
+    /* `30/1` is a scene-loader contract, not a battle-cancel packet.  The
+     * player-3 trace reached this point between WT4/2 turns, while the CBE
+     * battle actor cache was still owned by its native 25/5 release path.
+     * Switching scene there lets the destination load but drops its 27/11
+     * NPC nodes.  Retain the expired session until that normal release has
+     * completed; the next ordinary scene-sync poll then performs the same
+     * proven 30/1 -> 2/3 -> 6/1 transition. */
+    if (g_mockBattleSceneMonsterStartActive != 0)
+    {
+        if (!observer->transientInstanceExpiryExitAwaitingBattleClose)
+        {
+            observer->transientInstanceExpiryExitAwaitingBattleClose = true;
+            printf("[info][mock-service] transient_instance_timer_expired_wait_battle_close "
+                   "client=%08x scene=%s pos=(%u,%u) action=defer-30/1 "
+                   "release=native-25/5\n",
+                   observer->clientId, observer->transientInstanceScene,
+                   observer->transientInstanceX, observer->transientInstanceY);
+        }
+        return 0;
+    }
+    if (observer->transientInstanceExpiryExitAwaitingBattleClose)
+    {
+        observer->transientInstanceExpiryExitAwaitingBattleClose = false;
+        printf("[info][mock-service] transient_instance_timer_expired_battle_closed "
+               "client=%08x scene=%s action=deliver-30/1-on-next-poll\n",
+               observer->clientId, observer->transientInstanceScene);
+    }
+
+    memset(&target, 0, sizeof(target));
+    snprintf(instanceScene, sizeof(instanceScene), "%s",
+             observer->transientInstanceScene);
+    instanceX = observer->transientInstanceX;
+    instanceY = observer->transientInstanceY;
+    snprintf(target.scene, sizeof(target.scene), "%s",
+             observer->transientInstanceReturnScene);
+    target.x = observer->transientInstanceReturnX;
+    target.y = observer->transientInstanceReturnY;
+    target.mapType = 2;
+    target.hasSceEntry = true;
+    configuredMinutes = observer->transientInstanceTimerMinutes;
+    /* The timed scene is no longer active once its return has been accepted,
+     * but the CBE will still send its ordinary 2/3 -> 6/1 scene-enter
+     * follow-ups. Preserve only this one target's FB completion provenance so
+     * that final resource response can retire the old instance gate as a
+     * complete transaction rather than replying with a bare 27/4(min=0). */
+    if (!vm_mock_service_active_transient_instance_expiry_exit_completion_begin(
+            &target))
+    {
+        return 0;
+    }
+    pos = vm_net_mock_build_scene_channel_enter_combo_for_target(&target, out, outCap);
+    if (pos == 0)
+    {
+        vm_mock_service_active_transient_instance_expiry_exit_completion_clear(
+            "expiry-exit-response-build-failed");
+        return 0;
+    }
+
+    /* Match the normal direct-enter lifecycle: the position-bearing 30/1 is
+     * remembered so subsequent 2/3 and 6/1 requests complete the target
+     * scene instead of emitting a second scene entry.  The role's durable
+     * position already equals this frozen return anchor, so clearing the
+     * transient session does not overwrite any player state. */
+    target.sceneEnterPosinfoSent = true;
+    vm_net_mock_remember_scene_change_target(&target);
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    vm_mock_service_active_transient_instance_clear_if_departing(
+        target.scene, "instance-timer-expired");
+
+    printf("[info][mock-service] transient_instance_timer_expired_exit client=%08x "
+           "from=%s@(%u,%u) to=%s@(%u,%u) minutes=%u response=30/1 "
+           "delivery=scene-sync-poll evidence=JianghuOL.CBE:0x01012E4C/0x010396D6\n",
+           observer->clientId, instanceScene, instanceX, instanceY,
+           target.scene, target.x, target.y, configuredMinutes);
+    vm_autotest_note("transient_instance_timer_expired_exit client=%08x from=%s "
+                     "to=%s pos=(%u,%u) minutes=%u response=30/1 "
+                     "delivery=scene-sync-poll evidence=JianghuOL:0x01012E4C/0x010396D6\n",
+                     observer->clientId, instanceScene,
+                     target.scene, target.x, target.y, configuredMinutes);
     return pos;
 }
 

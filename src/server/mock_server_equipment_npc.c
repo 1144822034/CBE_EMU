@@ -2858,13 +2858,16 @@ typedef struct vm_mock_service_client_session
 {
     u32 clientId;
     char accountId[64];
-    /* The client sends a real 5/10+7/7(type=1) request followed by separate
-     * 7/7(type=2) and type=3 requests during scene startup.  A full 30/21
-     * cannot share the first response's fixed parser pool, so retain only
-     * this one session/role-bound delivery phase; it never changes client
-     * state or invents an input/request. */
+    /* Same-role return can refresh the backpack grid through the later natural
+     * type-2/type-3 requests.  It is deliberately distinct from the selected
+     * role's first item-manager construction below. */
     u32 backpackFullBootstrapRoleId;
     u8 backpackFullBootstrapStage;
+    /* The selected-role group's first reply owns the native equipped-item
+     * construction path.  The marker is session- and role-bound, consumed by
+     * that one real group request, and is never armed by shop return. */
+    u32 initialEquipmentBootstrapRoleId;
+    bool initialEquipmentBootstrapPending;
     bool roleOnline;
     bool onlinePresenceValid;
     u32 onlineRoleId;
@@ -2900,8 +2903,32 @@ typedef struct vm_mock_service_client_session
     u16 transientInstanceX;
     u16 transientInstanceY;
     u32 transientInstanceStartedTick;
-    u32 transientInstanceTimerSeconds;
+    u32 transientInstanceTimerMinutes;
     u32 transientInstanceTimerStartedMs;
+    /* Preserve the durable world position from immediately before an NPC
+     * instance enters its temporary scene. A timer expiry may only return to
+     * this distinct, server-owned anchor through the existing 30/1 path. */
+    char transientInstanceReturnScene[64];
+    u16 transientInstanceReturnX;
+    u16 transientInstanceReturnY;
+    /* Expiry makes the transient scene inactive immediately, but its existing
+     * 30/1 scene-enter response still has one client-owned resource completion
+     * to finish. Keep only that target identity until WT6/1 serializes the
+     * matching FB + 30/2 completion; do not retain the expired timer or scene
+     * as an active instance. */
+    bool transientInstanceExpiryExitCompletionPending;
+    char transientInstanceExpiryExitScene[64];
+    u16 transientInstanceExpiryExitX;
+    u16 transientInstanceExpiryExitY;
+    /* The CBE explicitly asks for 27/11 once more after the completed
+     * 30/1 -> 6/1 transition.  An expiry return needs that parser-safe
+     * request to reseed the world-scene NPC directory once. */
+    bool transientInstanceExpiryExitNpcReseedPending;
+    char transientInstanceExpiryExitNpcReseedScene[64];
+    /* A deadline may occur while the CBE still owns a battle screen.  Keep
+     * the expired transient session alive only until that native battle
+     * lifecycle returns to the scene; do not inject 30/1 across it. */
+    bool transientInstanceExpiryExitAwaitingBattleClose;
     bool shopSceneNpcReseedPending;
     /* 1 = real shop scene return (30/2 may be required), 2 = fresh mmGame
      * bootstrap only (replay 27/11 without re-entering the scene). */
@@ -3576,6 +3603,49 @@ void vm_mock_service_backpack_full_bootstrap_complete(u32 roleId)
     session->backpackFullBootstrapStage = 0;
 }
 
+void vm_mock_service_initial_equipment_bootstrap_arm(u32 roleId)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || roleId == 0)
+        return;
+
+    /* A fresh role selection replaces the CBE item manager.  Any abandoned
+     * same-role deferred-grid phase belongs to the prior client lifecycle and
+     * must not leak into the selected-role group response. */
+    session->backpackFullBootstrapRoleId = 0;
+    session->backpackFullBootstrapStage = 0;
+    session->initialEquipmentBootstrapRoleId = roleId;
+    session->initialEquipmentBootstrapPending = true;
+}
+
+bool vm_mock_service_initial_equipment_bootstrap_matches(u32 roleId)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && roleId != 0 &&
+           session->initialEquipmentBootstrapPending &&
+           session->initialEquipmentBootstrapRoleId == roleId;
+}
+
+void vm_mock_service_initial_equipment_bootstrap_complete(u32 roleId)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || roleId == 0 ||
+        !session->initialEquipmentBootstrapPending ||
+        session->initialEquipmentBootstrapRoleId != roleId)
+    {
+        return;
+    }
+
+    session->initialEquipmentBootstrapRoleId = 0;
+    session->initialEquipmentBootstrapPending = false;
+}
+
 bool vm_mock_service_session_get_online_view(
     const vm_mock_service_client_session *session,
     vm_mock_service_online_session_view *viewOut)
@@ -3944,8 +4014,19 @@ static bool vm_mock_service_active_transient_instance_begin(const char *scene,
     session->transientInstanceX = x;
     session->transientInstanceY = y;
     session->transientInstanceStartedTick = g_schedulerTick;
-    session->transientInstanceTimerSeconds = 0;
+    session->transientInstanceTimerMinutes = 0;
     session->transientInstanceTimerStartedMs = 0;
+    session->transientInstanceExpiryExitCompletionPending = false;
+    session->transientInstanceExpiryExitScene[0] = 0;
+    session->transientInstanceExpiryExitX = 0;
+    session->transientInstanceExpiryExitY = 0;
+    session->transientInstanceExpiryExitNpcReseedPending = false;
+    session->transientInstanceExpiryExitNpcReseedScene[0] = 0;
+    session->transientInstanceExpiryExitAwaitingBattleClose = false;
+    snprintf(session->transientInstanceReturnScene,
+             sizeof(session->transientInstanceReturnScene), "%s", role->scene);
+    session->transientInstanceReturnX = role->x;
+    session->transientInstanceReturnY = role->y;
     printf("[info][mock-service] transient_instance_begin client=%08x role=%u scene=%s pos=(%u,%u) durable_anchor=%s@(%u,%u) reason=%s\n",
            session->clientId, role->roleId, session->transientInstanceScene,
            session->transientInstanceX, session->transientInstanceY,
@@ -3957,37 +4038,185 @@ static bool vm_mock_service_active_transient_instance_begin(const char *scene,
  * after the instance-enter builder has accepted the same NPC configuration
  * that produced WT30/1. */
 static bool vm_mock_service_active_transient_instance_configure_timer(
-    u32 timerSeconds)
+    u32 timerMinutes)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
 
     if (session == NULL || !session->transientInstanceActive ||
         !vm_net_mock_scene_name_is_safe(session->transientInstanceScene) ||
-        timerSeconds > VM_NET_MOCK_INSTANCE_TIMER_MAX_SECONDS)
+        timerMinutes > VM_NET_MOCK_INSTANCE_TIMER_MAX_MINUTES)
     {
         return false;
     }
-    session->transientInstanceTimerSeconds = timerSeconds;
+    session->transientInstanceTimerMinutes = timerMinutes;
     session->transientInstanceTimerStartedMs = scheduler_get_tick_ms();
-    printf("[info][mock-service] transient_instance_timer_begin client=%08x scene=%s seconds=%u\n",
-           session->clientId, session->transientInstanceScene, timerSeconds);
+    printf("[info][mock-service] transient_instance_timer_begin client=%08x scene=%s minutes=%u\n",
+           session->clientId, session->transientInstanceScene, timerMinutes);
     return true;
 }
 
-static u32 vm_mock_service_active_transient_instance_timer_remaining_seconds(
+static u32 vm_mock_service_active_transient_instance_timer_remaining_minutes(
     const vm_mock_service_client_session *session, u32 nowMs)
 {
-    u32 elapsedSeconds = 0;
+    u32 elapsedMinutes = 0;
 
     if (session == NULL || !session->transientInstanceActive ||
-        session->transientInstanceTimerSeconds == 0)
+        session->transientInstanceTimerMinutes == 0)
     {
         return 0;
     }
-    elapsedSeconds = (nowMs - session->transientInstanceTimerStartedMs) / 1000u;
-    return elapsedSeconds >= session->transientInstanceTimerSeconds ? 0 :
-           session->transientInstanceTimerSeconds - elapsedSeconds;
+    elapsedMinutes = (nowMs - session->transientInstanceTimerStartedMs) / 60000u;
+    return elapsedMinutes >= session->transientInstanceTimerMinutes ? 0 :
+           session->transientInstanceTimerMinutes - elapsedMinutes;
+}
+
+static void vm_mock_service_active_transient_instance_expiry_exit_completion_clear(
+    const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->transientInstanceExpiryExitCompletionPending)
+        return;
+    printf("[info][mock-service] transient_instance_expiry_exit_completion_clear "
+           "client=%08x scene=%s pos=(%u,%u) reason=%s\n",
+           session->clientId, session->transientInstanceExpiryExitScene,
+           session->transientInstanceExpiryExitX,
+           session->transientInstanceExpiryExitY,
+           reason ? reason : "-");
+    session->transientInstanceExpiryExitCompletionPending = false;
+    session->transientInstanceExpiryExitScene[0] = 0;
+    session->transientInstanceExpiryExitX = 0;
+    session->transientInstanceExpiryExitY = 0;
+    session->transientInstanceExpiryExitNpcReseedPending = false;
+    session->transientInstanceExpiryExitNpcReseedScene[0] = 0;
+    session->transientInstanceExpiryExitAwaitingBattleClose = false;
+}
+
+static void vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_clear(
+    const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->transientInstanceExpiryExitNpcReseedPending)
+        return;
+    printf("[info][mock-service] transient_instance_expiry_exit_npc_reseed_clear "
+           "client=%08x scene=%s reason=%s\n",
+           session->clientId, session->transientInstanceExpiryExitNpcReseedScene,
+           reason ? reason : "-");
+    session->transientInstanceExpiryExitNpcReseedPending = false;
+    session->transientInstanceExpiryExitNpcReseedScene[0] = 0;
+}
+
+static bool vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_begin(
+    const char *scene)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !vm_net_mock_scene_name_is_persistable(scene))
+        return false;
+    vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_clear(
+        "replaced-by-expiry-exit");
+    session->transientInstanceExpiryExitNpcReseedPending = true;
+    snprintf(session->transientInstanceExpiryExitNpcReseedScene,
+             sizeof(session->transientInstanceExpiryExitNpcReseedScene), "%s",
+             scene);
+    printf("[info][mock-service] transient_instance_expiry_exit_npc_reseed_begin "
+           "client=%08x scene=%s next=WT25/5+27/11\n",
+           session->clientId, session->transientInstanceExpiryExitNpcReseedScene);
+    return true;
+}
+
+static bool vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_matches(
+    const char *scene)
+{
+    const vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL &&
+           session->transientInstanceExpiryExitNpcReseedPending &&
+           session->transientInstanceExpiryExitNpcReseedScene[0] != 0 &&
+           vm_net_mock_scene_names_equal_exact(
+               scene, session->transientInstanceExpiryExitNpcReseedScene);
+}
+
+static void vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_discard_if_mismatch(
+    const vm_net_mock_scene_change_target *target, const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session != NULL && session->transientInstanceExpiryExitNpcReseedPending &&
+        (target == NULL || !vm_net_mock_scene_names_equal_exact(
+                               target->scene,
+                               session->transientInstanceExpiryExitNpcReseedScene)))
+    {
+        vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_clear(
+            reason ? reason : "scene-target-replaced");
+    }
+}
+
+static bool vm_mock_service_active_transient_instance_expiry_exit_completion_begin(
+    const vm_net_mock_scene_change_target *target)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || target == NULL ||
+        !vm_net_mock_scene_name_is_persistable(target->scene) ||
+        target->x == 0 || target->y == 0)
+    {
+        return false;
+    }
+    vm_mock_service_active_transient_instance_expiry_exit_completion_clear(
+        "replaced-by-expiry-exit");
+    session->transientInstanceExpiryExitCompletionPending = true;
+    snprintf(session->transientInstanceExpiryExitScene,
+             sizeof(session->transientInstanceExpiryExitScene), "%s",
+             target->scene);
+    session->transientInstanceExpiryExitX = target->x;
+    session->transientInstanceExpiryExitY = target->y;
+    printf("[info][mock-service] transient_instance_expiry_exit_completion_begin "
+           "client=%08x scene=%s pos=(%u,%u)\n",
+           session->clientId, session->transientInstanceExpiryExitScene,
+           session->transientInstanceExpiryExitX,
+           session->transientInstanceExpiryExitY);
+    return true;
+}
+
+static bool vm_mock_service_active_transient_instance_expiry_exit_completion_matches(
+    const vm_net_mock_scene_change_target *target)
+{
+    const vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return target != NULL && session != NULL &&
+           session->transientInstanceExpiryExitCompletionPending &&
+           session->transientInstanceExpiryExitScene[0] != 0 &&
+           session->transientInstanceExpiryExitX != 0 &&
+           session->transientInstanceExpiryExitY != 0 &&
+           target->x == session->transientInstanceExpiryExitX &&
+           target->y == session->transientInstanceExpiryExitY &&
+           vm_net_mock_scene_names_equal_exact(
+               target->scene, session->transientInstanceExpiryExitScene);
+}
+
+static void vm_mock_service_active_transient_instance_expiry_exit_completion_discard_if_mismatch(
+    const vm_net_mock_scene_change_target *target, const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session != NULL && session->transientInstanceExpiryExitCompletionPending &&
+        !vm_mock_service_active_transient_instance_expiry_exit_completion_matches(
+            target))
+    {
+        vm_mock_service_active_transient_instance_expiry_exit_completion_clear(
+            reason ? reason : "scene-target-replaced");
+    }
 }
 
 static bool vm_mock_service_active_transient_instance_update_position(
@@ -4023,7 +4252,7 @@ static void vm_mock_service_active_transient_instance_clear_if_departing(
         vm_mock_service_get_active_client_session();
 
     if (session == NULL || !session->transientInstanceActive ||
-        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_name_is_persistable(scene) ||
         vm_net_mock_scene_names_equal_exact(session->transientInstanceScene,
                                             scene))
     {
@@ -4038,8 +4267,12 @@ static void vm_mock_service_active_transient_instance_clear_if_departing(
     session->transientInstanceX = 0;
     session->transientInstanceY = 0;
     session->transientInstanceStartedTick = 0;
-    session->transientInstanceTimerSeconds = 0;
+    session->transientInstanceTimerMinutes = 0;
     session->transientInstanceTimerStartedMs = 0;
+    session->transientInstanceReturnScene[0] = 0;
+    session->transientInstanceReturnX = 0;
+    session->transientInstanceReturnY = 0;
+    session->transientInstanceExpiryExitAwaitingBattleClose = false;
 }
 
 static void vm_mock_service_session_arm_task_prompt_refresh(const char *scene)
@@ -6610,8 +6843,18 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->transientInstanceX = 0;
     session->transientInstanceY = 0;
     session->transientInstanceStartedTick = 0;
-    session->transientInstanceTimerSeconds = 0;
+    session->transientInstanceTimerMinutes = 0;
     session->transientInstanceTimerStartedMs = 0;
+    session->transientInstanceReturnScene[0] = 0;
+    session->transientInstanceReturnX = 0;
+    session->transientInstanceReturnY = 0;
+    session->transientInstanceExpiryExitCompletionPending = false;
+    session->transientInstanceExpiryExitScene[0] = 0;
+    session->transientInstanceExpiryExitX = 0;
+    session->transientInstanceExpiryExitY = 0;
+    session->transientInstanceExpiryExitAwaitingBattleClose = false;
+    session->transientInstanceExpiryExitNpcReseedPending = false;
+    session->transientInstanceExpiryExitNpcReseedScene[0] = 0;
     session->shopSceneNpcReseedPending = false;
     session->shopSceneNpcReseedMode = 0;
     session->shopSceneNpcReseedScene[0] = 0;
@@ -8489,7 +8732,12 @@ typedef struct
     u32 instanceSpawnEnemyId;
     /* Server policy applied only at the selected NPC's WT30/1 instance entry.
      * Zero keeps the client HUD at 00:00. */
-    u32 instanceTimerSeconds;
+    /* The persistent column is still named `timer_seconds` for migration
+     * compatibility, but its value is the client `min` countdown unit. */
+    u32 instanceTimerMinutes;
+    /* Per-entry price in the role's authoritative copper unit.  Zero keeps
+     * the NPC instance teleport free. */
+    u32 instanceEntryCopperCost;
     u16 instanceMinLevel;
     char actorResource[64];
     char displayName[32];

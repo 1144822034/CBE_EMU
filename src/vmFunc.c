@@ -3467,6 +3467,10 @@ static void vm_IMG_WriteResult(u32 resultPtr, u32 pixelsPtr, u16 width, u16 heig
     vm_set_var_byte(resultPtr + 8, needFree);
 }
 
+static u32 g_vm_img_app_data_package = 0;
+static u32 g_vm_img_inner_data_package = 0;
+static u32 g_vm_img_current_data_package = 0;
+
 /* The scene timer shown in the supplied frame is rendered from one of the
  * scene image atlases, not by the host window.  Keep this probe opt-in and
  * observational: it only records the guest's already-issued LCD blit and the
@@ -3598,8 +3602,6 @@ void vM_DrawImageWithClipEx()
         dst_w = LCD_WIDTH;
         dst_h = LCD_HEIGHT;
     }
-    vm_lcd_trace_scene_number_draw(false, (u32)srcInfo, (u32)srcPtr, src_w,
-                                   src_h, srcX, srcY, w, h, dstX, dstY);
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
     vm_scene_number_draw_trace(false, (u32)srcInfo, (u32)srcPtr, src_w, src_h,
                                origSrcX, origSrcY, origW, origH,
@@ -3713,8 +3715,6 @@ void vm_vMDrawImageClipAndAlphaEx()
         dst_w = LCD_WIDTH;
         dst_h = LCD_HEIGHT;
     }
-    vm_lcd_trace_scene_number_draw(true, (u32)srcInfo, (u32)srcPtr, src_w,
-                                   src_h, srcX, srcY, w, h, dstX, dstY);
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
     vm_scene_number_draw_trace(true, (u32)srcInfo, (u32)srcPtr, src_w, src_h,
                                origSrcX, origSrcY, origW, origH,
@@ -4292,7 +4292,6 @@ u32 vm_IMG_CreateImageFormIdEx(u32 imageId, u32 dataPackage, u32 outImage)
     if (data == 0)
         return vm_set_call_result(0);
     u32 imageInfo = vm_IMG_CreateImageFormStream(data, outImage);
-    vm_lcd_trace_scene_resource_create(imageId, dataPackage, imageInfo);
     return imageInfo;
 }
 

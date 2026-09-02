@@ -7976,6 +7976,130 @@ static bool vm_net_mock_append_backpack_grid_full_bootstrap_object(
                                                        true);
 }
 
+/* `mmGameMstarWqvga.cbm:sub_D04` constructs durable worn instances only while
+ * parsing the selected-role startup stream.  The wire rows are keyed by the
+ * fixed equipment slot sequence, not by the mutable backpack sequence. */
+static bool vm_net_mock_build_equipment_login_iteminfo_blob(
+    u8 *out, u32 outCap, const vm_net_mock_role_state *role,
+    u32 *blobLenOut, u8 *rowCountOut)
+{
+    u32 itemInfoLen = 0;
+    u8 rowCount = 0;
+
+    if (blobLenOut != NULL)
+        *blobLenOut = 0;
+    if (rowCountOut != NULL)
+        *rowCountOut = 0;
+    if (out == NULL || blobLenOut == NULL || role == NULL)
+        return false;
+
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        if (role->equippedItems[slot].itemId != 0 &&
+            vm_net_mock_role_equipment_slot_is_usable(role, slot))
+        {
+            ++rowCount;
+        }
+    }
+    if (!vm_net_mock_seq_put_u8(out, outCap, &itemInfoLen, rowCount))
+        return false;
+
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        const vm_net_mock_equipped_item_state *item = &role->equippedItems[slot];
+        u32 itemId = item->itemId;
+
+        if (itemId == 0 || item->durabilityMax == 0 ||
+            !vm_net_mock_role_equipment_slot_is_usable(role, slot))
+        {
+            continue;
+        }
+        if (!vm_net_mock_seq_put_i16(out, outCap, &itemInfoLen, (u16)(slot + 1)) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &itemInfoLen, itemId) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &itemInfoLen, item->durability) ||
+            !vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &itemInfoLen, itemId,
+                (u8)SDL_min(item->enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL,
+                &item->enhanceAffixes))
+        {
+            return false;
+        }
+    }
+
+    *blobLenOut = itemInfoLen;
+    if (rowCountOut != NULL)
+        *rowCountOut = rowCount;
+    return true;
+}
+
+static bool vm_net_mock_append_initial_equipment_login_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *rowCountOut)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 itemInfo[1u + VM_NET_MOCK_NEARBY_EQUIPINFO_MAX_BYTES];
+    u32 itemInfoLen = 0;
+    u32 objectStart = 0;
+    u8 rowCount = 0;
+
+    if (rowCountOut != NULL)
+        *rowCountOut = 0;
+    if (out == NULL || pos == NULL || role == NULL)
+        return false;
+    memset(itemInfo, 0, sizeof(itemInfo));
+    if (!vm_net_mock_build_equipment_login_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), role, &itemInfoLen, &rowCount) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu)
+    {
+        return false;
+    }
+    if (rowCount == 0)
+        return true;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (rowCountOut != NULL)
+        *rowCountOut = rowCount;
+
+    printf("[info][network] mock_initial_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
+           role->roleId, rowCount, itemInfoLen);
+    vm_autotest_note("mock_initial_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
+                     role->roleId, rowCount, itemInfoLen);
+    return true;
+}
+
+static bool vm_net_mock_append_initial_equipment_type3_completion_object(
+    u8 *out, u32 outCap, u32 *pos, u8 equipmentRows)
+{
+    static const u8 emptyItemInfo[] = {0};
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 objectStart = 0;
+
+    if (equipmentRows == 0)
+        return true;
+    if (out == NULL || pos == NULL || role == NULL)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 3) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
+                                    emptyItemInfo, sizeof(emptyItemInfo)))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_initial_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
+           role->roleId, equipmentRows);
+    vm_autotest_note("mock_initial_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
+                     role->roleId, equipmentRows);
+    return true;
+}
+
 static bool vm_net_mock_append_backpack_grid_refresh_object(
     u8 *out, u32 outCap, u32 *pos)
 {
@@ -8030,10 +8154,13 @@ static bool vm_net_mock_append_backpack_reservoir_counts_object(
 static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    bool initialEquipmentBootstrap = false;
     if (out == NULL || pos == NULL || objectCount == NULL)
         return false;
     if (role == NULL)
         return true;
+    initialEquipmentBootstrap =
+        vm_mock_service_initial_equipment_bootstrap_matches(role->roleId);
     if (g_netMockBackpackGridReseedPendingRoleId == role->roleId)
     {
         /* The client has just reached the same-role bootstrap after the mall
@@ -8050,6 +8177,50 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
     }
     if (g_netMockBackpackGridSeededRoleId != role->roleId)
     {
+        if (initialEquipmentBootstrap)
+        {
+            bool appendedReservoirCounts = false;
+            u8 equipmentRows = 0;
+
+            /* The first group/type-1 reply is the only response whose
+             * client parser owns a fresh item manager.  The raw player-3
+             * capture records 30/21, 7/11, type-2 worn rows, then the empty
+             * type-3 completion in this single packet. */
+            if (vm_net_mock_role_backpack_client_grid_count(role) != 0)
+            {
+                if (!vm_net_mock_append_backpack_grid_full_bootstrap_object(
+                        out, outCap, pos))
+                {
+                    return false;
+                }
+                *objectCount = (u8)(*objectCount + 1);
+                if (!vm_net_mock_append_backpack_reservoir_counts_object(
+                        out, outCap, pos, &appendedReservoirCounts))
+                {
+                    return false;
+                }
+                if (appendedReservoirCounts)
+                    *objectCount = (u8)(*objectCount + 1);
+            }
+            if (!vm_net_mock_append_initial_equipment_login_object(
+                    out, outCap, pos, &equipmentRows))
+            {
+                return false;
+            }
+            if (equipmentRows != 0)
+            {
+                *objectCount = (u8)(*objectCount + 1);
+                if (!vm_net_mock_append_initial_equipment_type3_completion_object(
+                        out, outCap, pos, equipmentRows))
+                {
+                    return false;
+                }
+                *objectCount = (u8)(*objectCount + 1);
+            }
+            g_netMockBackpackGridSeededRoleId = role->roleId;
+            vm_mock_service_initial_equipment_bootstrap_complete(role->roleId);
+            return true;
+        }
         /* The CBE itself immediately sends 7/7 type=2 and then type=3 after
          * this group request.  Defer the heavy primary-item construction to
          * those natural request boundaries; no host event is split, replayed

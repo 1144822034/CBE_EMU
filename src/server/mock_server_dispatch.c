@@ -90,6 +90,127 @@ static bool vm_net_mock_append_response_objects(u8 *out, u32 outCap, u32 *pos, u
     return true;
 }
 
+/* A direct NPC-instance 30/1 can race the source scene's queued movement
+ * upload. In the observed player-3 frame the client coalesces that ordinary
+ * 2/1{moveinfo} with the destination's normal 2/3 + 27/11 + 7/42 scene
+ * bootstrap. Neither request changes the other one's contract: the 2/1 is
+ * still only an acknowledgement while the destination is pending, and the
+ * remaining three objects are the established scene-change request.
+ *
+ * Do not split arbitrary mixed request frames. This accepts only the exact
+ * four-object shape, reconstructs the already-supported three-object
+ * scene-change request, and concatenates the two existing WT responses in
+ * request order. Thus the CBE receives the same object parsers it would have
+ * received had its transport flushed the requests separately. */
+static u32 vm_net_mock_build_scene_enter_moveinfo_combo_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_request_object objects[4];
+    u8 moveRequest[512];
+    u8 moveResponse[256];
+    u8 sceneRequest[1024];
+    u8 sceneResponse[8192];
+    u32 offset = 4;
+    u32 sceneRequestLen = 4;
+    u32 moveRequestLen = 0;
+    u32 moveResponseLen = 0;
+    u32 sceneResponseLen = 0;
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u32 i = 0;
+
+    if (request == NULL || out == NULL || requestLen < 9 || outCap < pos ||
+        request[0] != 'W' || request[1] != 'T' ||
+        (u16)(((u16)request[2] << 8) | request[3]) != requestLen)
+    {
+        return 0;
+    }
+    for (i = 0; i < 4; ++i)
+    {
+        if (!vm_net_mock_next_request_object(request, requestLen, &offset,
+                                              &objects[i]))
+        {
+            return 0;
+        }
+    }
+    if (offset != requestLen ||
+        objects[0].major != 1 || objects[0].kind != 2 ||
+        objects[0].subtype != 1 ||
+        !vm_net_mock_request_contains(objects[0].payload,
+                                      objects[0].payloadLen, "moveinfo") ||
+        objects[1].major != 1 || objects[1].kind != 2 ||
+        objects[1].subtype != 3 ||
+        !vm_net_mock_request_contains(objects[1].payload,
+                                      objects[1].payloadLen, "maptype") ||
+        !vm_net_mock_request_contains(objects[1].payload,
+                                      objects[1].payloadLen, "mapID") ||
+        !vm_net_mock_request_contains(objects[1].payload,
+                                      objects[1].payloadLen, "exitID") ||
+        objects[2].major != 1 || objects[2].kind != 0x1b ||
+        objects[2].subtype != 11 || objects[2].payloadLen != 0 ||
+        objects[3].major != 1 || objects[3].kind != 7 ||
+        objects[3].subtype != 42 || objects[3].payloadLen != 0)
+    {
+        return 0;
+    }
+
+    moveRequestLen = vm_net_mock_build_single_object_request(
+        &objects[0], moveRequest, sizeof(moveRequest));
+    if (moveRequestLen == 0)
+        return 0;
+
+    for (i = 1; i < 4; ++i)
+    {
+        u32 objectLen = (u32)objects[i].payloadLen + 5u;
+
+        if (objectLen > 0xffffu ||
+            sceneRequestLen + objectLen > sizeof(sceneRequest) ||
+            sceneRequestLen + objectLen > 0xffffu)
+        {
+            return 0;
+        }
+        sceneRequest[sceneRequestLen++] = objects[i].major;
+        sceneRequest[sceneRequestLen++] = objects[i].kind;
+        sceneRequest[sceneRequestLen++] = objects[i].subtype;
+        sceneRequest[sceneRequestLen++] = (u8)(objectLen >> 8);
+        sceneRequest[sceneRequestLen++] = (u8)objectLen;
+        if (objects[i].payloadLen != 0)
+        {
+            memcpy(sceneRequest + sceneRequestLen, objects[i].payload,
+                   objects[i].payloadLen);
+            sceneRequestLen += objects[i].payloadLen;
+        }
+    }
+    sceneRequest[0] = 'W';
+    sceneRequest[1] = 'T';
+    sceneRequest[2] = (u8)(sceneRequestLen >> 8);
+    sceneRequest[3] = (u8)sceneRequestLen;
+
+    moveResponseLen = vm_net_mock_build_actor_moveinfo_ack_response(
+        moveRequest, moveRequestLen, moveResponse, sizeof(moveResponse));
+    sceneResponseLen = vm_net_mock_build_scene_change_combo_response(
+        sceneRequest, sceneRequestLen, sceneResponse, sizeof(sceneResponse));
+    if (moveResponseLen == 0 || sceneResponseLen == 0 ||
+        !vm_net_mock_append_response_objects(out, outCap, &pos, &objectCount,
+                                             moveResponse, moveResponseLen) ||
+        !vm_net_mock_append_response_objects(out, outCap, &pos, &objectCount,
+                                             sceneResponse, sceneResponseLen))
+    {
+        return 0;
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_scene_enter_moveinfo_combo "
+           "request=2/1+2/3+27/11+7/42 response_objects=%u "
+           "action=preserve-move-ack-and-scene-bootstrap resp=%u\n",
+           (u32)objectCount, pos);
+    vm_autotest_note("mock_scene_enter_moveinfo_combo "
+                     "request=2/1+2/3+27/11+7/42 response_objects=%u "
+                     "action=preserve-move-ack-and-scene-bootstrap resp=%u\n",
+                     (u32)objectCount, pos);
+    return pos;
+}
+
 /*
  * Route one request object through the normal single-object dispatcher and
  * append its complete response-object sequence to an already open response.
@@ -197,6 +318,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
      * Do not advance CBE state here by forcing return values or writing globals.
      */
     u32 hookedLen = 0;
+
+    hookedLen = vm_net_mock_build_scene_enter_moveinfo_combo_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-enter-moveinfo-combo",
+                                  request, requestLen, hookedLen);
+        return hookedLen;
+    }
 
     /*
      * This is a high-frequency, single-object request with a narrow signature.

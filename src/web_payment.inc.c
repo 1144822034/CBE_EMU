@@ -1242,11 +1242,34 @@ static vm_mock_payment_settle_result vm_mock_payment_settle_verified(
         !vm_mysql_exec("START TRANSACTION"))
         return VM_MOCK_PAYMENT_SETTLE_INVALID;
     transaction = true;
-    if (!vm_mock_payment_load_order(callback->payId, true, &order) ||
-        strcmp(order.requestParam, callback->param) != 0 ||
-        order.payType != callback->payType ||
-        order.priceCents != callback->priceCents)
+    if (!vm_mock_payment_load_order(callback->payId, true, &order))
+    {
+        printf("[warn][payment] callback_contract pay_id=%s reason=order-not-found-or-load-failed\n",
+               callback->payId);
+        fflush(stdout);
         goto invalid;
+    }
+    if (strcmp(order.requestParam, callback->param) != 0)
+    {
+        printf("[warn][payment] callback_contract pay_id=%s reason=param-mismatch\n",
+               callback->payId);
+        fflush(stdout);
+        goto invalid;
+    }
+    if (order.payType != callback->payType)
+    {
+        printf("[warn][payment] callback_contract pay_id=%s reason=type-mismatch\n",
+               callback->payId);
+        fflush(stdout);
+        goto invalid;
+    }
+    if (order.priceCents != callback->priceCents)
+    {
+        printf("[warn][payment] callback_contract pay_id=%s reason=price-mismatch\n",
+               callback->payId);
+        fflush(stdout);
+        goto invalid;
+    }
     if (order.credited && order.status == VM_MOCK_PAYMENT_STATUS_CREDITED)
     {
         if (!vm_mysql_exec("COMMIT"))
@@ -1349,6 +1372,9 @@ done:
            result == VM_MOCK_PAYMENT_SETTLE_INVALID ? "warn" : "info",
            source ? source : "-", callback.payId[0] ? callback.payId : "-",
            (u32)result, reason);
+    /* Payment providers retry quickly; make this non-sensitive diagnosis
+     * visible immediately even though the server normally batches stdout. */
+    fflush(stdout);
     memset(config.secretKey, 0, sizeof(config.secretKey));
     memset(signInput, 0, sizeof(signInput));
     return result;

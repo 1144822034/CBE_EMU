@@ -794,6 +794,30 @@ static void vm_net_mock_note_startup_sce_runtime_ready(const char *scene)
     vm_net_mock_arm_startup_sce_install_scene_enter(scene);
 }
 
+/* A direct NPC instance entry establishes an authoritative, per-client
+ * transient scene before its first WT6/1 resource completion.  The observed
+ * remote completion for that exact lifecycle carries the fb-target trio after
+ * the requested resource families, not before them.  Do not infer this from a
+ * scene name or apply it to ordinary portal/resource responses. */
+static bool vm_net_mock_is_active_transient_instance_target(
+    const vm_net_mock_scene_change_target *target)
+{
+    const vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    /* `transientInstanceScene` is established only by the accepted direct
+     * instance-entry builder, which has already validated the target SCE.
+     * The completion path must not run another catalog/resource lookup while
+     * it is serializing the same response. */
+    return target != NULL && session != NULL &&
+           session->transientInstanceActive &&
+           session->transientInstanceX != 0 &&
+           session->transientInstanceY != 0 &&
+           target->scene[0] != 0 && session->transientInstanceScene[0] != 0 &&
+           vm_net_mock_scene_names_equal_exact(
+               target->scene, session->transientInstanceScene);
+}
+
 static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request, u32 requestLen,
                                                               u8 *out, u32 outCap)
 {
@@ -968,8 +992,29 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     if (completePositionedPortalEnter)
     {
         u32 objectStart = 0;
+        bool appendExpiryExitFbCompletion =
+            vm_mock_service_active_transient_instance_expiry_exit_completion_matches(
+                &positionedPortalTarget);
+        bool appendTransientInstanceFbCompletion =
+            vm_net_mock_is_active_transient_instance_target(
+                &positionedPortalTarget) ||
+            appendExpiryExitFbCompletion;
 
-        if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+        /*
+         * The normal direct-enter order predates the instance target contract:
+         * it creates 27/11 before the requested 2/10 + 6/* + 25/5 families.
+         * For an active NPC instance, the captured successful response is:
+         *
+         *  2/10, 6/1, 6/13, 6/14, 25/5,
+         *  27/12, 27/11, 27/4, 30/2.
+         *
+         * Keep the old order for every non-instance target.  A bare 27/4
+         * injected into the old order previously reached the asset-table
+         * parser after the scene had released that table; reproducing the
+         * complete order is the protocol repair, not a HUD-side workaround.
+         */
+        if (!appendTransientInstanceFbCompletion &&
+            !vm_net_mock_append_scene_npc_lifecycle_seed(
                 out, outCap, &pos, &objectCount,
                 positionedPortalTarget.scene, true, true))
         {
@@ -982,6 +1027,21 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                 false, false, false))
         {
             return 0;
+        }
+        if (appendTransientInstanceFbCompletion)
+        {
+            if (!vm_net_mock_append_fb_target_result12_for_scene(
+                    out, outCap, &pos, positionedPortalTarget.scene,
+                    positionedPortalTarget.x, positionedPortalTarget.y) ||
+                !vm_net_mock_append_scene_npc_lifecycle_seed(
+                    out, outCap, &pos, &objectCount,
+                    positionedPortalTarget.scene, true, true) ||
+                !vm_net_mock_append_fb_target_result4_object(
+                    out, outCap, &pos, 1, ""))
+            {
+                return 0;
+            }
+            objectCount += 2;
         }
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
                                          &objectStart))
@@ -1010,9 +1070,33 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         (void)vm_mock_service_mark_active_session_scene_ready_from_role(
             positionedPortalTarget.scene,
             "scene-resource-positioned-portal-followup");
+        if (appendExpiryExitFbCompletion)
+        {
+            /* The target's completion object is now fully serialized.  Clearing
+             * this narrow marker cannot revive the expired instance or timer;
+             * it merely prevents a later ordinary resource refresh from
+             * replaying the FB close family. */
+            vm_mock_service_active_transient_instance_expiry_exit_completion_clear(
+                "scene-resource-expiry-exit-complete");
+            if (!vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_begin(
+                    positionedPortalTarget.scene))
+            {
+                printf("[error][mock-service] transient_instance_expiry_exit_npc_reseed_arm_failed "
+                       "scene=%s\n", positionedPortalTarget.scene);
+            }
+        }
         printf("[info][network] mock_scene_resource_positioned_portal_complete scene=%s pos=(%u,%u) objects=%u resp=%u completion=resources+30/2-no-posinfo\n",
                positionedPortalTarget.scene, positionedPortalTarget.x,
                positionedPortalTarget.y, objectCount, pos);
+        if (appendTransientInstanceFbCompletion)
+        {
+            printf("[info][network] mock_instance_resource_completion "
+                   "scene=%s order=2-10,6-1,6-13,6-14,25-5,27-12,27-11,27-4,30-2 "
+                   "timer=%s evidence=remote-dream-instance-capture\n",
+                   positionedPortalTarget.scene,
+                   appendExpiryExitFbCompletion ?
+                       "expired-exit-completion" : "active-session");
+        }
         vm_autotest_note("mock_scene_resource_positioned_portal_complete scene=%s pos=(%u,%u) objects=%u response=resources+30/2-no-posinfo evidence=JianghuOL.CBE:0x01039770\n",
                          positionedPortalTarget.scene, positionedPortalTarget.x,
                          positionedPortalTarget.y, objectCount);
@@ -4465,6 +4549,7 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          */
         g_netMockBackpackGridSeededRoleId = 0;
         g_netMockBackpackGridReseedPendingRoleId = 0;
+        vm_mock_service_initial_equipment_bootstrap_arm(role->roleId);
         g_netMockShop17ListPending = 0;
         g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
         g_netMockBackpackPreferRoleListAfterShopBuy = 0;
@@ -4486,7 +4571,7 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          * resource/task follow-up; the later sync poll remains a fallback only.
          */
         vm_net_mock_mark_scene_moveinfo_npc_seed_pending(role->scene);
-        printf("[info][network] mock_backpack_grid_reseed role=%u reason=title-role-select next=group-type1-30/21 evidence=JianghuOL.CBE:0x01039952\n",
+        printf("[info][network] mock_backpack_grid_reseed role=%u reason=title-role-select next=group-type1-30/21+7/7-type2+type3 evidence=JianghuOL.CBE:0x01039952+mmGame:0x0D04\n",
                role->roleId);
     }
 

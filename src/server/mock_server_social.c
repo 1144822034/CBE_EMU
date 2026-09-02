@@ -599,15 +599,16 @@ static bool vm_net_mock_append_fb_target_result12_object(u8 *out, u32 outCap, u3
 }
 
 /* JianghuOL.CBE:0x01033CF2 reads fb-target `min` as a four-byte big-endian
- * value.  Emit the field as u32 even for zero.  The value is scoped to the
+ * value.  The dream-map runtime decrements the value once per real minute.
+ * Emit the field as u32 even for zero.  The value is scoped to the
  * active player's authoritative transient instance, not to this shared
  * 1/27/4 builder or a process environment variable. */
-static u32 vm_net_mock_fb_target_remaining_seconds(void)
+static u32 vm_net_mock_fb_target_remaining_minutes(void)
 {
     const vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
 
-    return vm_mock_service_active_transient_instance_timer_remaining_seconds(
+    return vm_mock_service_active_transient_instance_timer_remaining_minutes(
         session, scheduler_get_tick_ms());
 }
 
@@ -615,12 +616,12 @@ static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32
                                                         u8 typeValue, const char *infoText)
 {
     u32 objectStart = 0;
-    u32 remainingSeconds = vm_net_mock_fb_target_remaining_seconds();
+    u32 remainingMinutes = vm_net_mock_fb_target_remaining_minutes();
     if (infoText == NULL)
         infoText = "";
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x1b, 4, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u32(out, outCap, pos, "min", remainingSeconds))
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "min", remainingMinutes))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
@@ -631,9 +632,9 @@ static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32
     if (!vm_net_mock_put_object_string(out, outCap, pos, "info", infoText))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
-    printf("[info][network] mock_fb_target_result4 min_seconds=%u encoding=u32 "
+    printf("[info][network] mock_fb_target_result4 min_minutes=%u encoding=u32 "
            "source=active-instance-session evidence=JianghuOL.CBE:0x01033CF2+0x0104C252\n",
-           remainingSeconds);
+           remainingMinutes);
     return true;
 }
 
@@ -1241,6 +1242,10 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
             return 0;
         objectCount += 1;
     }
+    /* The client must receive its requested 27/4 here before it schedules
+     * the target scene's WT6/1 resource request.  For an expired instance
+     * this is the zero-minute gate; WT6/1 then performs the complete
+     * 27/12 -> 27/11 -> 27/4 -> 30/2 retirement transaction. */
     if (needFb4)
     {
         if (!vm_net_mock_append_fb_target_result4_object(out, outCap, &pos, fb4Type, vm_net_mock_fb_target_info_text()))
@@ -1402,10 +1407,34 @@ static u32 vm_net_mock_build_type27_followup_combo_response(const u8 *request, u
 
     if (needFb11)
     {
-        if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
-                                                           scene,
-                                                           "type27-followup"))
+        if (vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_matches(
+                scene))
+        {
+            u8 npcNum = 0;
+            u32 npcInfoLen = 0;
+
+            /* The first non-empty 27/11 traveled inside the closing scene
+             * bundle.  Player-3 then explicitly requests 27/11 again through
+             * WT25/5 after its 30/2 parser boundary.  Reply with the same
+             * catalog once here rather than the ordinary empty repeat ACK, so
+             * the destination scene—not the expired FB lifecycle—owns the
+             * NPC nodes. */
+            if (!vm_net_mock_append_fb_target_scene_npcs11_object(
+                    out, outCap, &pos, scene, &npcNum, &npcInfoLen))
+            {
+                return 0;
+            }
+            vm_mock_service_active_transient_instance_expiry_exit_npc_reseed_clear(
+                "type27-post-expiry-scene-npc-delivered");
+            printf("[info][network] mock_instance_expiry_exit_npc_reseed "
+                   "scene=%s npcnum=%u npcinfo_len=%u request=WT25/5+27/11\n",
+                   scene ? scene : "-", (u32)npcNum, npcInfoLen);
+        }
+        else if (!vm_net_mock_append_scene_npcs11_once_or_empty(
+                     out, outCap, &pos, scene, "type27-followup"))
+        {
             return 0;
+        }
         objectCount += 1;
     }
 
@@ -4794,6 +4823,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     int socialAppend = 0;
     u8 tradeSubtype = 0;
     u32 teamBattleResponseLen = 0;
+    u32 transientExpiryExitResponseLen = 0;
     bool npcCatalogAppended = false;
     bool taskPromptRefreshAppended = false;
 
@@ -4810,6 +4840,11 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         return 0;
     }
     scene = observer->sceneVisibleScene;
+    transientExpiryExitResponseLen =
+        vm_net_mock_build_active_transient_instance_expiry_exit_response(
+            out, outCap, observer);
+    if (transientExpiryExitResponseLen != 0)
+        return transientExpiryExitResponseLen;
     teamBattleResponseLen =
         vm_net_mock_build_pending_instance_challenge_battle_response(
             out, outCap, observer);
