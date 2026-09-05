@@ -213,9 +213,9 @@ export class ChatPanel extends Container {
    * panel Graphics (shade / chrome / input hit) stay blank — same contract as
    * WorldHud / BattleScreen. Softkeys can still say 发送/返回 while messages
    * float over the map with no panel fill.
+   * Remount even while hidden so the next open() is not blank.
    */
   nudgeAfterGpuResume(): void {
-    if (!this.visible) return;
     this.shade = replaceGraphics(this.shade);
     this.paintShade();
     this.box = replaceGraphics(this.box);
@@ -224,6 +224,7 @@ export class ChatPanel extends Container {
     if (this.toast.gfx.parent) {
       this.toast.gfx = replaceGraphics(this.toast.gfx);
     }
+    if (!this.visible) return;
     this.redraw();
     this.ime.show(this.inputRect());
     this.ime.blur();
@@ -263,6 +264,12 @@ export class ChatPanel extends Container {
       this.pmTarget = null;
     }
     this.visible = true;
+    // Open-after-recover: remount shade/box before paint (hidden panels skip nudge redraw).
+    this.shade = replaceGraphics(this.shade);
+    this.paintShade();
+    this.box = replaceGraphics(this.box);
+    this.inputHit = replaceGraphics(this.inputHit);
+    this.wireInputHit();
     this.redraw();
     this.ime.clear();
     // Mount inert overlay for layout only — keyboard opens when user taps input.
@@ -305,6 +312,8 @@ export class ChatPanel extends Container {
     clearPanelTip(this.toast);
     this.visible = false;
     this.ime.hide();
+    for (const t of this.labels) t.destroy();
+    this.labels = [];
   }
 
   /** Same contract as TitleScreen.releaseIme — drop HTML overlay when leaving chat. */

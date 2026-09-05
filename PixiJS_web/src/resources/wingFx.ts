@@ -3,6 +3,7 @@
  * Not part of CBE .actor pipeline — decorative layer behind the body sprite.
  */
 import { Container, Sprite } from "pixi.js";
+import { MAP_COSMETIC_ATLAS_ENABLED } from "./mapCosmeticAtlas";
 import {
   bindPlistAtlasIfCurrent,
   loadPlistAtlas,
@@ -124,10 +125,42 @@ export class WingOverlay {
     }
   }
 
+  /** Drop atlas GPU; keep wingId for battle suspend / resume. */
+  releaseGpu(): void {
+    if (!this.atlas && !this.sprite) return;
+    this.loadGen++;
+    this.loadInFlight = false;
+    this.atlas = rebindPlistAtlas(this.atlas, null, true);
+    this.phase = 0;
+    this.animAcc = 0;
+    this.root.visible = false;
+    if (this.sprite) {
+      this.root.removeChild(this.sprite);
+      this.sprite.destroy({ texture: false });
+      this.sprite = null;
+    }
+  }
+
   async setWingId(wingId: number): Promise<void> {
     const id = wingId | 0;
     if (!id) {
       this.clear();
+      return;
+    }
+    if (!MAP_COSMETIC_ATLAS_ENABLED) {
+      /* Keep equip id for panels / 功效; skip atlas GPU load. */
+      this.loadGen++;
+      this.loadInFlight = false;
+      this.wingId = id;
+      this.atlas = rebindPlistAtlas(this.atlas, null);
+      this.phase = 0;
+      this.animAcc = 0;
+      this.root.visible = false;
+      if (this.sprite) {
+        this.root.removeChild(this.sprite);
+        this.sprite.destroy({ texture: false });
+        this.sprite = null;
+      }
       return;
     }
     if (!isWingId(id)) {

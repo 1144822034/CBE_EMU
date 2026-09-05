@@ -7,6 +7,74 @@ const cropCache = new Map<string, Texture>();
 /** Decoded RGBA kept for pixel-accurate crops (fuhao flip, digit sheets). */
 const rgbaCache = new Map<string, GifRgba>();
 
+/** Soft/hard GPU caps — crop keys otherwise grow without bound on long sessions. */
+const FULL_CACHE_SOFT = 48;
+const FULL_CACHE_HARD = 64;
+const CROP_CACHE_SOFT = 96;
+const CROP_CACHE_HARD = 128;
+
+/**
+ * HUD sheets that DigitStrip / WorldHud keep bound across remounts.
+ * Never LRU-evict these base textures while the soft/hard trim runs.
+ */
+const PINNED_FULL = new Set([
+  "ui_hpspnum.gif",
+  "time_number.gif",
+  "numberexp.gif",
+  "-num.gif",
+  "+num.gif",
+  "UIsh.gif",
+  "softkey.gif",
+]);
+
+function touchLru<T>(map: Map<string, T>, key: string, value: T): void {
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+}
+
+function trimTextureCache(
+  map: Map<string, Texture>,
+  soft: number,
+  hard: number,
+  pinned?: ReadonlySet<string>,
+): void {
+  if (map.size <= hard) return;
+  for (const [k, tex] of map) {
+    if (map.size <= soft) break;
+    if (pinned?.has(k)) continue;
+    try {
+      tex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+    map.delete(k);
+  }
+}
+
+/**
+ * Drop GPU-bound UI textures after webglcontextrestored.
+ * Keeps decoded RGBA so the next loadUiTexture/loadUiCrop rebuilds from CPU.
+ * Call before WorldHud / SceneView remount Texture chrome.
+ */
+export function invalidateUiGpuTextures(): void {
+  for (const tex of fullCache.values()) {
+    try {
+      tex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+  }
+  fullCache.clear();
+  for (const tex of cropCache.values()) {
+    try {
+      tex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+  }
+  cropCache.clear();
+}
+
 async function loadGifCached(name: string): Promise<GifRgba> {
   const hit = rgbaCache.get(name);
   if (hit) return hit;
@@ -18,7 +86,10 @@ async function loadGifCached(name: string): Promise<GifRgba> {
 /** Decode JHOnlineData LKV2 GIF into a Pixi Texture (nearest-neighbor). */
 export async function loadUiTexture(name: string): Promise<Texture> {
   const hit = fullCache.get(name);
-  if (hit) return hit;
+  if (hit && !hit.destroyed) {
+    touchLru(fullCache, name, hit);
+    return hit;
+  }
   const gif = await loadGifCached(name);
   const canvas = document.createElement("canvas");
   canvas.width = gif.width;
@@ -31,7 +102,8 @@ export async function loadUiTexture(name: string): Promise<Texture> {
   );
   const tex = Texture.from(canvas);
   tex.source.scaleMode = "nearest";
-  fullCache.set(name, tex);
+  touchLru(fullCache, name, tex);
+  trimTextureCache(fullCache, FULL_CACHE_SOFT, FULL_CACHE_HARD, PINNED_FULL);
   return tex;
 }
 
@@ -64,7 +136,10 @@ export async function loadUiCrop(
   const flipX = !!opts?.flipX;
   const key = `${name}@${x},${y},${w},${h}${flipX ? ":fx" : ""}`;
   const hit = cropCache.get(key);
-  if (hit) return hit;
+  if (hit && !hit.destroyed) {
+    touchLru(cropCache, key, hit);
+    return hit;
+  }
   try {
     const gif = await loadGifCached(name);
     if (x < 0 || y < 0 || w <= 0 || h <= 0) return null;
@@ -87,7 +162,8 @@ export async function loadUiCrop(
     canvas.getContext("2d")!.putImageData(new ImageData(rgba, w, h), 0, 0);
     const tex = Texture.from(canvas);
     tex.source.scaleMode = "nearest";
-    cropCache.set(key, tex);
+    touchLru(cropCache, key, tex);
+    trimTextureCache(cropCache, CROP_CACHE_SOFT, CROP_CACHE_HARD);
     return tex;
   } catch (e) {
     console.warn("[ui] crop", name, e);

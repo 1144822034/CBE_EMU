@@ -335,6 +335,7 @@ import {
   buildFestivalExchangeRequest,
   buildRingAcceptRequest,
   buildRingClaimDailyRequest,
+  buildRingRefreshRequest,
   buildRingStatusRequest,
   buildRingSubmitRequest,
   buildYanmenExchangeRequest,
@@ -343,6 +344,7 @@ import {
   parseActivityOp,
   parseRingStatus,
   parseYanmenList,
+  RING_REFRESH_WCOIN,
   type ActivitiesStatus,
   type ActivityOpResult,
   type RingStatus,
@@ -472,6 +474,11 @@ export type SessionCallbacks = {
     y: number,
     opts?: { hasPos?: boolean },
   ) => void | Promise<void>;
+  /**
+   * Soft same-map shell ack (world-boss resync etc.): map already painted —
+   * refresh overlays without remounting SCE / wiping hangup timers.
+   */
+  onSceneSoftResync?: (scene: string) => void | Promise<void>;
   /** Fired when switching roles — UI must drop previous map shell / party HUD. */
   onRoleSwitch?: () => void;
   /** Server landing after scene shell already shown (30/2+pos / 27/12). */
@@ -2863,6 +2870,33 @@ export class GameSession {
       try {
         const r = parseActivityOp(decodeWtPacket(body), 47, 4);
         if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  /** Spend coolmoney to reroll the active ring quest (WT47/5). */
+  async ringRefresh(): Promise<ActivityOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildRingRefreshRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseActivityOp(decodeWtPacket(body), 47, 5);
+        if (r) {
+          if (r.result === 1 && this.mallState) {
+            this.mallState = {
+              ...this.mallState,
+              coolmoney: Math.max(
+                0,
+                (this.mallState.coolmoney ?? 0) - RING_REFRESH_WCOIN,
+              ),
+            };
+          }
+          return r;
+        }
       } catch {
         /* ignore */
       }
@@ -6063,7 +6097,13 @@ export class GameSession {
             this.scene = reload.scene;
             this.inBattle = false;
             // Soft ack without posinfo: load shell only; wait for 30/2+pos / 27/12.
-            if (!(reload.soft && mapShowing)) {
+            // Same-map soft: do NOT remount SCE (keeps hangup timers), but still
+            // notify UI — world-boss overlay used to require a full browser refresh.
+            if (reload.soft && mapShowing) {
+              void Promise.resolve(this.cb.onSceneSoftResync?.(reload.scene)).catch(
+                (e) => console.warn("[session] onSceneSoftResync", e),
+              );
+            } else {
               this.hasServerPos = false;
               this.trackEnterScene(reload.scene, this.x, this.y, false);
             }

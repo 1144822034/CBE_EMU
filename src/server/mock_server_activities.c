@@ -15,6 +15,9 @@ enum
     VM_MOCK_RING_WT_ACCEPT = 2,
     VM_MOCK_RING_WT_SUBMIT = 3,
     VM_MOCK_RING_WT_CLAIM_DAILY = 4,
+    VM_MOCK_RING_WT_REFRESH = 5,
+    /* 刷新当前环任务消耗酷宝（role.wcoin） */
+    VM_MOCK_RING_REFRESH_WCOIN = 10,
     VM_MOCK_ACTIVITIES_EXCHANGE_MAX = 32,
     VM_MOCK_ACTIVITIES_ARENA_VITALITY_PER_ROUND = 20,
     VM_MOCK_ACTIVITIES_VITALITY_DEFAULT = 100,
@@ -28,9 +31,12 @@ enum
     VM_MOCK_RING_TYPE_COLLECT = 5,
     VM_MOCK_RING_TYPE_SUBMIT_MED = 6,
     VM_MOCK_RING_TYPE_SUBMIT_EQUIP = 7,
-    VM_MOCK_RING_TYPE_COUNT = 7,
+    VM_MOCK_RING_TYPE_WORLD_TRUTH = 8,
+    VM_MOCK_RING_TYPE_COUNT = 8,
     /* NPC 药商一次购买步长/一组数量（与常见江湖「一组10个」一致） */
-    VM_MOCK_RING_MED_PER_GROUP = 10
+    VM_MOCK_RING_MED_PER_GROUP = 10,
+    VM_MOCK_RING_TRUTH_MSG_MAX = 48,
+    VM_MOCK_RING_TRUTH_LINE_MAX = 256
 };
 
 /* GBK defaults: 节日使者 / 关隘使者 / 跑环使 */
@@ -127,6 +133,12 @@ static bool g_vm_mock_ring_config_loaded = false;
 static vm_mock_ring_runtime g_vm_mock_ring_rt;
 static u32 g_vm_mock_ring_rng = 0xA11CEu;
 
+/* chatList.txt（GBK）：世界真心话候选句，targetId=1..count */
+static char g_vm_mock_ring_truth_msgs[VM_MOCK_RING_TRUTH_LINE_MAX]
+    [VM_MOCK_RING_TRUTH_MSG_MAX];
+static u32 g_vm_mock_ring_truth_count = 0;
+static bool g_vm_mock_ring_truth_loaded = false;
+
 static u32 vm_mock_activities_day_ymd(void)
 {
     time_t now = time(NULL);
@@ -143,6 +155,110 @@ static u32 vm_mock_activities_rng_next(void)
     g_vm_mock_ring_rng ^= g_vm_mock_ring_rng >> 17;
     g_vm_mock_ring_rng ^= g_vm_mock_ring_rng << 5;
     return g_vm_mock_ring_rng;
+}
+
+static void vm_mock_ring_truth_trim_inplace(char *s)
+{
+    size_t len;
+    size_t i;
+
+    if (s == NULL || s[0] == 0)
+        return;
+    len = strlen(s);
+    while (len > 0 &&
+           (s[len - 1] == '\r' || s[len - 1] == '\n' || s[len - 1] == ' ' ||
+            s[len - 1] == '\t'))
+    {
+        s[len - 1] = 0;
+        --len;
+    }
+    i = 0;
+    while (s[i] == ' ' || s[i] == '\t')
+        ++i;
+    if (i > 0)
+        memmove(s, s + i, strlen(s + i) + 1);
+}
+
+static void vm_mock_ring_truth_load(void)
+{
+    char path[1200];
+    FILE *fp = NULL;
+    char line[256];
+    static const char *fallbackPaths[] = {
+        "web/fs/JHOnlineData/chatList.txt",
+        "../web/fs/JHOnlineData/chatList.txt",
+        "bin/JHOnlineData/chatList.txt",
+        "../bin/JHOnlineData/chatList.txt",
+        "JHOnlineData/chatList.txt"
+    };
+    u32 i;
+
+    if (g_vm_mock_ring_truth_loaded)
+        return;
+    g_vm_mock_ring_truth_loaded = true;
+    g_vm_mock_ring_truth_count = 0;
+    memset(g_vm_mock_ring_truth_msgs, 0, sizeof(g_vm_mock_ring_truth_msgs));
+
+    path[0] = 0;
+    if (vm_net_mock_build_configured_resource_path("chatList.txt", path,
+                                                   sizeof(path)))
+        fp = fopen(path, "rb");
+    for (i = 0; fp == NULL &&
+         i < sizeof(fallbackPaths) / sizeof(fallbackPaths[0]);
+         ++i)
+        fp = fopen(fallbackPaths[i], "rb");
+    if (fp == NULL)
+    {
+        printf("[warn][mock-service] ring_truth_chatlist_missing "
+               "evidence=chatList.txt\n");
+        return;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL &&
+           g_vm_mock_ring_truth_count < VM_MOCK_RING_TRUTH_LINE_MAX)
+    {
+        char *tab;
+        char *msg;
+
+        vm_mock_ring_truth_trim_inplace(line);
+        if (line[0] == 0)
+            continue;
+        tab = strchr(line, '\t');
+        msg = tab ? (tab + 1) : NULL;
+        if (msg == NULL)
+        {
+            /* allow "N message" with spaces */
+            msg = line;
+            while (*msg && *msg != ' ' && *msg != '\t')
+                ++msg;
+            while (*msg == ' ' || *msg == '\t')
+                ++msg;
+        }
+        vm_mock_ring_truth_trim_inplace(msg);
+        if (msg[0] == 0)
+            continue;
+        snprintf(g_vm_mock_ring_truth_msgs[g_vm_mock_ring_truth_count],
+                 sizeof(g_vm_mock_ring_truth_msgs[0]), "%s", msg);
+        g_vm_mock_ring_truth_count += 1;
+    }
+    fclose(fp);
+    printf("[info][mock-service] ring_truth_chatlist loaded=%u source=chatList.txt\n",
+           g_vm_mock_ring_truth_count);
+}
+
+static const char *vm_mock_ring_truth_message(u32 targetId)
+{
+    vm_mock_ring_truth_load();
+    if (targetId == 0 || targetId > g_vm_mock_ring_truth_count)
+        return "";
+    return g_vm_mock_ring_truth_msgs[targetId - 1];
+}
+
+static u32 vm_mock_ring_pick_truth_id(void)
+{
+    vm_mock_ring_truth_load();
+    if (g_vm_mock_ring_truth_count == 0)
+        return 0;
+    return 1u + (vm_mock_activities_rng_next() % g_vm_mock_ring_truth_count);
 }
 
 static bool vm_mock_activities_account_hex(char *hexOut, size_t hexCap)
@@ -175,6 +291,23 @@ static u32 vm_mock_activities_backpack_count(const vm_net_mock_role_state *role,
             total += role->backpackItems[i].count;
     }
     return total;
+}
+
+static vm_net_mock_role_state *vm_mock_activities_role_by_id(u32 roleId)
+{
+    u32 i;
+
+    if (roleId == 0)
+        return NULL;
+    vm_net_mock_role_db_load();
+    if (!g_vm_net_mock_role_db_valid)
+        return NULL;
+    for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == roleId)
+            return &g_vm_net_mock_role_db.roles[i];
+    }
+    return NULL;
 }
 
 static void vm_mock_activities_clip_binary_label(char *label, size_t maxBytes)
@@ -1103,6 +1236,27 @@ static void vm_mock_ring_scene_label(const char *scene, char *out, size_t outCap
     }
 }
 
+/*
+ * 跑环只认可走进的地图 SCE。task.dsh#N 等资源溯源会经
+ * resolve_map_label 兜底变成非空「标签」，不能当作地图。
+ */
+static bool vm_mock_ring_first_scene_is_playable_map(const char *scene)
+{
+    char mapLabel[40];
+
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    if (strstr(scene, ".dsh") != NULL || strstr(scene, ".DSH") != NULL)
+        return false;
+    mapLabel[0] = 0;
+    vm_mock_ring_scene_label(scene, mapLabel, sizeof(mapLabel));
+    if (mapLabel[0] == 0)
+        return false;
+    if (strstr(mapLabel, ".dsh") != NULL || strstr(mapLabel, ".DSH") != NULL)
+        return false;
+    return true;
+}
+
 static void vm_mock_ring_monster_scene(u32 enemyId, char *sceneOut, size_t sceneCap)
 {
     vm_net_mock_monster_admin_row rows[96];
@@ -1117,11 +1271,10 @@ static void vm_mock_ring_monster_scene(u32 enemyId, char *sceneOut, size_t scene
     {
         if (rows[i].enemyId != enemyId)
             continue;
-        if (rows[i].firstScene[0] != 0)
-        {
-            vm_mock_ring_scene_label(rows[i].firstScene, sceneOut, sceneCap);
+        if (!vm_mock_ring_first_scene_is_playable_map(rows[i].firstScene))
             return;
-        }
+        vm_mock_ring_scene_label(rows[i].firstScene, sceneOut, sceneCap);
+        return;
     }
 }
 
@@ -1191,21 +1344,15 @@ static void vm_mock_ring_item_name(u32 itemId, char *nameOut, size_t nameCap)
     snprintf(nameOut, nameCap, "#%u", itemId);
 }
 
-/* 击杀环：须能解析出可读地图名；世界Boss 配置怪一律不进池。 */
+/* 击杀/收集环：须有可走进地图；世界Boss 配置怪一律不进池。 */
 static bool vm_mock_ring_monster_eligible_kill(const vm_net_mock_monster_admin_row *row,
                                               u32 worldBossMonsterId)
 {
-    char mapLabel[40];
-
     if (row == NULL || row->enemyId == 0)
         return false;
     if (worldBossMonsterId != 0 && row->enemyId == worldBossMonsterId)
         return false;
-    if (row->firstScene[0] == 0)
-        return false;
-    mapLabel[0] = 0;
-    vm_mock_ring_scene_label(row->firstScene, mapLabel, sizeof(mapLabel));
-    return mapLabel[0] != 0;
+    return vm_mock_ring_first_scene_is_playable_map(row->firstScene);
 }
 
 static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
@@ -1280,7 +1427,7 @@ static u32 vm_mock_ring_pick_monster_id(bool bossOnly)
     if (matchCount == 0)
     {
         printf("[warn][mock-service] ring_pick_monster empty boss=%u role_lv=%u "
-               "wboss=%u evidence=require-map-skip-wboss\n",
+               "wboss=%u evidence=require-map-skip-task-dsh-wboss\n",
                bossOnly ? 1u : 0u, roleLevel, worldBossId);
         return 0;
     }
@@ -1323,9 +1470,15 @@ static u32 vm_mock_ring_pick_collect_item(void)
     {
         vm_net_mock_monster_admin_row rows[96];
         u32 total = vm_net_mock_monster_admin_list(rows, 96);
+        const vm_mock_world_boss_config *wbCfg =
+            vm_net_mock_world_boss_config_get();
+        u32 worldBossId = (wbCfg != NULL) ? wbCfg->monsterId : 0u;
 
         for (i = 0; i < total && i < 96; ++i)
         {
+            /* 与击杀环同一契约：task.dsh 溯源怪不进收集池 */
+            if (!vm_mock_ring_monster_eligible_kill(&rows[i], worldBossId))
+                continue;
             for (d = 0; d < rows[i].dropCount; ++d)
                 VM_MOCK_RING_COLLECT_ADD(rows[i].drops[d].itemId);
         }
@@ -1372,15 +1525,16 @@ static void vm_mock_ring_collect_drop_hint(u32 itemId, char *hintOut, size_t hin
     total = vm_net_mock_monster_admin_list(rows, 96);
     for (i = 0; i < total && i < 96; ++i)
     {
+        if (!vm_mock_ring_first_scene_is_playable_map(rows[i].firstScene))
+            continue;
         for (d = 0; d < rows[i].dropCount; ++d)
         {
             if (rows[i].drops[d].itemId != itemId)
                 continue;
             sceneLabel[0] = 0;
             mobName[0] = 0;
-            if (rows[i].firstScene[0] != 0)
-                vm_mock_ring_scene_label(rows[i].firstScene, sceneLabel,
-                                         sizeof(sceneLabel));
+            vm_mock_ring_scene_label(rows[i].firstScene, sceneLabel,
+                                     sizeof(sceneLabel));
             if (rows[i].displayName[0] != 0)
                 snprintf(mobName, sizeof(mobName), "%s", rows[i].displayName);
             else
@@ -1476,17 +1630,111 @@ static void vm_mock_ring_item_acquire_hint(u32 itemId, char *hintOut, size_t hin
     snprintf(hintOut, hintCap, "\xc9\xcc\xb5\xea"); /* 商店 */
 }
 
+/*
+ * 进程内只有一份 g_vm_mock_ring_rt：多玩家时会被其他账号的 WT47/接环冲掉。
+ * 进度判定一律以 account_role_ring_daily 为准；仅当活跃会话正是该角色时回写缓存。
+ */
+static void vm_mock_ring_rt_sync_from_row_if_active(const char *accountId,
+                                                    u32 roleId,
+                                                    const vm_mock_ring_daily_ctx *row)
+{
+    const char *activeAccount = g_vm_mock_service_active_account_id;
+    vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
+
+    if (row == NULL || accountId == NULL || accountId[0] == 0)
+        return;
+    if (activeAccount == NULL || activeAccount[0] == 0 ||
+        strcmp(activeAccount, accountId) != 0 || activeRole == NULL ||
+        activeRole->roleId != roleId)
+        return;
+    g_vm_mock_ring_rt.taskType = row->taskType;
+    g_vm_mock_ring_rt.targetId = row->targetId;
+    g_vm_mock_ring_rt.targetCount = row->targetCount ? row->targetCount : 1;
+    g_vm_mock_ring_rt.progress = row->progress;
+    g_vm_mock_ring_rt.active = row->taskActive;
+    snprintf(g_vm_mock_ring_rt.targetNpc, sizeof(g_vm_mock_ring_rt.targetNpc),
+             "%s", row->targetNpc);
+    if (g_vm_mock_ring_rt.active)
+        vm_mock_ring_format_desc();
+}
+
+/* 同名怪接环去重后，战斗胜利可能报到另一 catalog id —— 按显示名对齐。 */
+static void vm_mock_ring_monster_match_label(u32 enemyId, char *nameOut,
+                                             size_t nameCap)
+{
+    vm_net_mock_monster_admin_row rows[96];
+    u32 total;
+    u32 i;
+
+    if (nameOut == NULL || nameCap == 0)
+        return;
+    nameOut[0] = 0;
+    if (enemyId == 0)
+        return;
+    total = vm_net_mock_monster_admin_list(rows, 96);
+    for (i = 0; i < total && i < 96; ++i)
+    {
+        if (rows[i].enemyId != enemyId)
+            continue;
+        if (rows[i].displayName[0] != 0)
+        {
+            snprintf(nameOut, nameCap, "%s", rows[i].displayName);
+            return;
+        }
+        break;
+    }
+    vm_mock_ring_monster_name(enemyId, nameOut, nameCap);
+}
+
+static bool vm_mock_ring_enemy_matches_target(u32 targetId, u32 enemyId)
+{
+    char want[32];
+    char got[32];
+
+    if (targetId == 0 || targetId == enemyId)
+        return true;
+    if (enemyId == 0)
+        return false;
+    want[0] = 0;
+    got[0] = 0;
+    vm_mock_ring_monster_match_label(targetId, want, sizeof(want));
+    vm_mock_ring_monster_match_label(enemyId, got, sizeof(got));
+    if (want[0] == 0 || got[0] == 0)
+        return false;
+    if (want[0] == 'I' && want[1] == 'D')
+        return false;
+    if (got[0] == 'I' && got[1] == 'D')
+        return false;
+    return strcmp(want, got) == 0;
+}
+
+static bool vm_mock_ring_db_set_progress(const char *accountHex, u32 roleId,
+                                         u32 dayYmd, u32 progress)
+{
+    char query[512];
+
+    if (accountHex == NULL || accountHex[0] == 0 || roleId == 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_ring_daily SET progress=%u "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u "
+             "AND task_active=1",
+             progress, accountHex, roleId, dayYmd);
+    return vm_mysql_exec(query);
+}
+
 void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
                                     const char *accountId, u8 victimJob,
                                     u32 victimLevel)
 {
     vm_mock_ring_daily_ctx row;
     char accountHex[160];
-    char query[1024];
+    char query[640];
     u32 dayYmd = vm_mock_activities_day_ymd();
     u8 reqJob = 0;
     u16 reqBracket = 0;
     u16 victimBracket = 0;
+    u32 newProgress;
 
     if (role == NULL)
         return;
@@ -1503,17 +1751,11 @@ void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
     (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
     if (!row.taskActive || row.taskType != VM_MOCK_RING_TYPE_KILL_PLAYER)
         return;
-    g_vm_mock_ring_rt.taskType = row.taskType;
-    g_vm_mock_ring_rt.targetId = row.targetId;
-    g_vm_mock_ring_rt.targetCount = row.targetCount ? row.targetCount : 1;
-    g_vm_mock_ring_rt.progress = row.progress;
-    g_vm_mock_ring_rt.active = row.taskActive;
-    snprintf(g_vm_mock_ring_rt.targetNpc, sizeof(g_vm_mock_ring_rt.targetNpc),
-             "%s", row.targetNpc);
-    if (g_vm_mock_ring_rt.targetId != 0)
+    if (row.targetCount == 0)
+        row.targetCount = 1;
+    if (row.targetId != 0)
     {
-        vm_mock_ring_decode_pvp_target(g_vm_mock_ring_rt.targetId, &reqJob,
-                                       &reqBracket);
+        vm_mock_ring_decode_pvp_target(row.targetId, &reqJob, &reqBracket);
         if (reqJob == 0 || reqJob > 3 || reqBracket == 0)
             return;
         if (victimJob == 0 || victimJob > 3)
@@ -1530,36 +1772,18 @@ void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
             return;
         }
     }
-    g_vm_mock_ring_rt.progress += 1;
-    if (g_vm_mock_ring_rt.progress > g_vm_mock_ring_rt.targetCount)
-        g_vm_mock_ring_rt.progress = g_vm_mock_ring_rt.targetCount;
-    {
-        /* 按胜者账号落库，避免写到 active_account */
-        char npcHex[64];
-        vm_mysql_hex_encode(g_vm_mock_ring_rt.targetNpc,
-                            strlen(g_vm_mock_ring_rt.targetNpc), npcHex,
-                            sizeof(npcHex));
-        snprintf(query, sizeof(query),
-                 "INSERT INTO account_role_ring_daily "
-                 "(account_id,role_id,day_ymd,ring_count,bonus_claimed,task_type,"
-                 "target_id,target_count,progress,target_npc,task_active) "
-                 "VALUES(UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u) "
-                 "ON DUPLICATE KEY UPDATE ring_count=VALUES(ring_count),"
-                 "bonus_claimed=VALUES(bonus_claimed),task_type=VALUES(task_type),"
-                 "target_id=VALUES(target_id),target_count=VALUES(target_count),"
-                 "progress=VALUES(progress),target_npc=VALUES(target_npc),"
-                 "task_active=VALUES(task_active)",
-                 accountHex, role->roleId, dayYmd, (u32)row.ringCount,
-                 (u32)row.bonusClaimed, (u32)g_vm_mock_ring_rt.taskType,
-                 g_vm_mock_ring_rt.targetId, g_vm_mock_ring_rt.targetCount,
-                 g_vm_mock_ring_rt.progress, npcHex,
-                 (u32)g_vm_mock_ring_rt.active);
-        (void)vm_mysql_exec(query);
-    }
+    newProgress = row.progress + 1;
+    if (newProgress > row.targetCount)
+        newProgress = row.targetCount;
+    if (!vm_mock_ring_db_set_progress(accountHex, role->roleId, dayYmd,
+                                      newProgress))
+        return;
+    row.progress = newProgress;
+    vm_mock_ring_rt_sync_from_row_if_active(accountId, role->roleId, &row);
     printf("[info][mock-service] ring_pvp_kill_progress role=%u job=%u lv=%u "
-           "progress=%u/%u evidence=winner-account-hex\n",
-           role->roleId, (u32)victimJob, victimLevel, g_vm_mock_ring_rt.progress,
-           g_vm_mock_ring_rt.targetCount);
+           "progress=%u/%u evidence=winner-account-db-only\n",
+           role->roleId, (u32)victimJob, victimLevel, row.progress,
+           row.targetCount);
 }
 
 /*
@@ -1574,13 +1798,9 @@ static bool vm_mock_ring_apply_pve_kill_for_account(const char *accountId,
 {
     vm_mock_ring_daily_ctx row;
     char accountHex[160];
-    char query[1024];
-    char npcHex[64];
+    char query[640];
     u32 dayYmd = vm_mock_activities_day_ymd();
     u32 newProgress;
-    bool matched = false;
-    const char *activeAccount = g_vm_mock_service_active_account_id;
-    vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
 
     if (accountId == NULL || accountId[0] == 0 || roleId == 0)
         return false;
@@ -1595,62 +1815,77 @@ static bool vm_mock_ring_apply_pve_kill_for_account(const char *accountId,
     (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
     if (!row.taskActive)
         return false;
+    if (row.targetCount == 0)
+        row.targetCount = 1;
     if (row.taskType == VM_MOCK_RING_TYPE_KILL_MOB && !isBoss)
     {
-        if (row.targetId != 0 && row.targetId != enemyId)
+        if (!vm_mock_ring_enemy_matches_target(row.targetId, enemyId))
             return false;
-        matched = true;
         newProgress = row.progress + 1;
-        if (row.targetCount == 0)
-            row.targetCount = 1;
         if (newProgress > row.targetCount)
             newProgress = row.targetCount;
     }
     else if (row.taskType == VM_MOCK_RING_TYPE_KILL_BOSS && isBoss)
     {
-        if (row.targetId != 0 && row.targetId != enemyId)
+        if (!vm_mock_ring_enemy_matches_target(row.targetId, enemyId))
             return false;
-        matched = true;
-        if (row.targetCount == 0)
-            row.targetCount = 1;
         newProgress = row.targetCount;
     }
     else
         return false;
-    if (!matched)
+    if (!vm_mock_ring_db_set_progress(accountHex, roleId, dayYmd, newProgress))
         return false;
     row.progress = newProgress;
-    vm_mysql_hex_encode(row.targetNpc, strlen(row.targetNpc), npcHex,
-                        sizeof(npcHex));
-    snprintf(query, sizeof(query),
-             "INSERT INTO account_role_ring_daily "
-             "(account_id,role_id,day_ymd,ring_count,bonus_claimed,task_type,"
-             "target_id,target_count,progress,target_npc,task_active) "
-             "VALUES(UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u) "
-             "ON DUPLICATE KEY UPDATE ring_count=VALUES(ring_count),"
-             "bonus_claimed=VALUES(bonus_claimed),task_type=VALUES(task_type),"
-             "target_id=VALUES(target_id),target_count=VALUES(target_count),"
-             "progress=VALUES(progress),target_npc=VALUES(target_npc),"
-             "task_active=VALUES(task_active)",
-             accountHex, roleId, dayYmd, (u32)row.ringCount,
-             (u32)row.bonusClaimed, (u32)row.taskType, row.targetId,
-             row.targetCount, row.progress, npcHex, (u32)row.taskActive);
-    (void)vm_mysql_exec(query);
-    if (activeAccount != NULL && activeAccount[0] != 0 &&
-        strcmp(activeAccount, accountId) == 0 && activeRole != NULL &&
-        activeRole->roleId == roleId)
-    {
-        g_vm_mock_ring_rt.taskType = row.taskType;
-        g_vm_mock_ring_rt.targetId = row.targetId;
-        g_vm_mock_ring_rt.targetCount = row.targetCount ? row.targetCount : 1;
-        g_vm_mock_ring_rt.progress = row.progress;
-        g_vm_mock_ring_rt.active = row.taskActive;
-        snprintf(g_vm_mock_ring_rt.targetNpc, sizeof(g_vm_mock_ring_rt.targetNpc),
-                 "%s", row.targetNpc);
-    }
+    vm_mock_ring_rt_sync_from_row_if_active(accountId, roleId, &row);
     printf("[info][mock-service] ring_pve_kill_progress role=%u enemy=%u "
-           "boss=%u progress=%u/%u evidence=account-hex-db\n",
-           roleId, enemyId, isBoss ? 1u : 0u, row.progress, row.targetCount);
+           "boss=%u progress=%u/%u target=%u evidence=account-db+name-match\n",
+           roleId, enemyId, isBoss ? 1u : 0u, row.progress, row.targetCount,
+           row.targetId);
+    return true;
+}
+
+/* Ring collect tasks need task-material drop gating even when the player has
+ * not accepted a matching catalog task row in account_role_tasks. */
+static bool vm_mock_ring_collect_material_remaining(u32 roleId, u32 itemId,
+                                                    u32 *remainingOut)
+{
+    char query[512];
+    vm_mock_ring_daily_ctx row;
+    vm_net_mock_role_state *role;
+    u32 held;
+    u32 need;
+    u32 dayYmd;
+
+    if (remainingOut)
+        *remainingOut = 0;
+    if (roleId == 0 || itemId == 0)
+        return false;
+    if (!vm_mock_activities_ensure_tables())
+        return false;
+
+    dayYmd = vm_mock_activities_day_ymd();
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active FROM account_role_ring_daily "
+             "WHERE role_id=%u AND day_ymd=%u LIMIT 1",
+             roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    if (!row.found || !row.taskActive)
+        return true;
+    if (row.taskType != VM_MOCK_RING_TYPE_COLLECT || row.targetId != itemId)
+        return true;
+
+    role = vm_mock_activities_role_by_id(roleId);
+    held = role ? vm_mock_activities_backpack_count(role, itemId) : 0;
+    if (row.targetCount == 0)
+        row.targetCount = 1;
+    if (held >= row.targetCount)
+        need = 0;
+    else
+        need = row.targetCount - held;
+    if (remainingOut)
+        *remainingOut = need;
     return true;
 }
 
@@ -1664,9 +1899,19 @@ void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss,
     bool shareWithParty =
         reason != NULL && strncmp(reason, "team-battle", 11) == 0;
     u8 i;
+    u32 creditEnemyId = enemyId;
 
     if (shareWithParty && session != NULL)
         team = vm_mock_service_team_find_for_client(session->clientId);
+
+    /* Prefer team-owned enemy id when global battle slot was overwritten. */
+    if (team != NULL && team->active && team->battleEnemyId != 0)
+        creditEnemyId = team->battleEnemyId;
+    if (creditEnemyId == 0)
+        creditEnemyId = enemyId;
+    if (creditEnemyId != 0)
+        isBoss = vm_net_mock_monster_family_for_enemy(creditEnemyId) ==
+                 (u8)VM_NET_MOCK_MONSTER_BOSS;
 
     if (team != NULL && team->active && team->battleMemberCount >= 2)
     {
@@ -1682,7 +1927,7 @@ void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss,
                 member->onlineRoleId == 0)
                 continue;
             (void)vm_mock_ring_apply_pve_kill_for_account(
-                member->accountId, member->onlineRoleId, enemyId, isBoss);
+                member->accountId, member->onlineRoleId, creditEnemyId, isBoss);
         }
         team->ringKillRewardedSerial =
             team->battleSerial ? team->battleSerial : 1;
@@ -1694,30 +1939,126 @@ void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss,
         session->onlineRoleId != 0)
     {
         (void)vm_mock_ring_apply_pve_kill_for_account(
-            session->accountId, session->onlineRoleId, enemyId, isBoss);
+            session->accountId, session->onlineRoleId, creditEnemyId, isBoss);
         return;
     }
     if (role != NULL && g_vm_mock_service_active_account_id != NULL &&
         g_vm_mock_service_active_account_id[0] != 0)
     {
         (void)vm_mock_ring_apply_pve_kill_for_account(
-            g_vm_mock_service_active_account_id, role->roleId, enemyId, isBoss);
+            g_vm_mock_service_active_account_id, role->roleId, creditEnemyId,
+            isBoss);
     }
 }
 
 void vm_mock_activities_on_npc_talk(const char *npcName)
 {
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_ring_daily_ctx row;
+    char accountHex[160];
+    char query[640];
+    u32 dayYmd = vm_mock_activities_day_ymd();
+    const char *accountId = NULL;
+    u32 roleId = 0;
 
-    if (npcName == NULL || !g_vm_mock_ring_rt.active ||
-        g_vm_mock_ring_rt.taskType != VM_MOCK_RING_TYPE_VISIT)
+    if (npcName == NULL || npcName[0] == 0)
         return;
-    if (g_vm_mock_ring_rt.targetNpc[0] != 0 &&
-        strstr(npcName, g_vm_mock_ring_rt.targetNpc) != NULL)
+    if (session != NULL && session->accountId[0] != 0 &&
+        session->onlineRoleId != 0)
     {
-        g_vm_mock_ring_rt.progress = 1;
-        vm_mock_ring_persist_progress(role);
+        accountId = session->accountId;
+        roleId = session->onlineRoleId;
     }
+    else if (role != NULL && g_vm_mock_service_active_account_id != NULL &&
+             g_vm_mock_service_active_account_id[0] != 0)
+    {
+        accountId = g_vm_mock_service_active_account_id;
+        roleId = role->roleId;
+    }
+    if (accountId == NULL || roleId == 0)
+        return;
+    if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
+        return;
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active FROM account_role_ring_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    if (!row.taskActive || row.taskType != VM_MOCK_RING_TYPE_VISIT)
+        return;
+    if (row.targetNpc[0] == 0 || strstr(npcName, row.targetNpc) == NULL)
+        return;
+    if (row.progress >= 1)
+        return;
+    if (!vm_mock_ring_db_set_progress(accountHex, roleId, dayYmd, 1))
+        return;
+    row.progress = 1;
+    if (row.targetCount == 0)
+        row.targetCount = 1;
+    vm_mock_ring_rt_sync_from_row_if_active(accountId, roleId, &row);
+    printf("[info][mock-service] ring_visit_progress role=%u npc=%s "
+           "evidence=account-db-not-global-rt\n",
+           roleId, npcName);
+}
+
+/*
+ * 世界真心话：发言者成功发出世界频道消息且全文匹配目标句后 progress=1。
+ * 只 UPDATE progress，禁止再经 save_runtime 用全局 rt 整行回写。
+ */
+void vm_mock_activities_on_world_chat(const char *accountId, u32 roleId,
+                                      const char *messageGbk)
+{
+    vm_mock_ring_daily_ctx row;
+    char accountHex[160];
+    char query[640];
+    char sent[96];
+    const char *need;
+    u32 dayYmd = vm_mock_activities_day_ymd();
+    u32 done = 1;
+
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0 ||
+        messageGbk == NULL || messageGbk[0] == 0)
+        return;
+    vm_mock_ring_load_config(false);
+    if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
+        return;
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active FROM account_role_ring_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    if (!row.taskActive || row.taskType != VM_MOCK_RING_TYPE_WORLD_TRUTH)
+        return;
+    done = row.targetCount ? row.targetCount : 1;
+    if (row.progress >= done)
+        return;
+
+    snprintf(sent, sizeof(sent), "%s", messageGbk);
+    vm_mock_ring_truth_trim_inplace(sent);
+    need = vm_mock_ring_truth_message(row.targetId);
+    if (need == NULL || need[0] == 0 || strcmp(sent, need) != 0)
+    {
+        printf("[info][mock-service] ring_truth_chat_miss role=%u targetId=%u "
+               "sent_len=%u need_len=%u evidence=exact-world-match\n",
+               roleId, row.targetId, (u32)strlen(sent),
+               need ? (u32)strlen(need) : 0u);
+        return;
+    }
+
+    if (!vm_mock_ring_db_set_progress(accountHex, roleId, dayYmd, done))
+        return;
+    row.progress = done;
+    row.targetCount = done;
+    vm_mock_ring_rt_sync_from_row_if_active(accountId, roleId, &row);
+    printf("[info][mock-service] ring_truth_chat_ok role=%u targetId=%u "
+           "evidence=world-chat-db-only\n",
+           roleId, row.targetId);
 }
 
 static void vm_mock_ring_format_desc(void)
@@ -1867,6 +2208,27 @@ static void vm_mock_ring_format_desc(void)
         }
         break;
     }
+    case VM_MOCK_RING_TYPE_WORLD_TRUTH:
+    {
+        const char *truth = vm_mock_ring_truth_message(g_vm_mock_ring_rt.targetId);
+
+        if (truth != NULL && truth[0] != 0)
+        {
+            /* 世界真心话：世界频道发送「msg」(用小喇叭，发完可提交) */
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xca\xc0\xbd\xe7\xd5\xe6\xd0\xc4\xbb\xb0\xa3\xba"
+                     "\xca\xc0\xbd\xe7\xc6\xb5\xb5\xc0\xb7\xa2\xcb\xcd\xa1\xb8%s\xa1\xb9"
+                     "(\xd3\xc3\xd0\xa1\xc0\xad\xb0\xc7\xa3\xac\xb7\xa2\xcd\xea\xbf\xc9"
+                     "\xcc\xe1\xbd\xbb)",
+                     truth);
+        }
+        else
+        {
+            snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
+                     "\xca\xc0\xbd\xe7\xd5\xe6\xd0\xc4\xbb\xb0");
+        }
+        break;
+    }
     default:
         snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
                  "\xbb\xb7\xc8\xce\xce\xf1"); /* 环任务 */
@@ -1950,6 +2312,19 @@ static void vm_mock_ring_build_desc(void)
     case VM_MOCK_RING_TYPE_SUBMIT_EQUIP:
         g_vm_mock_ring_rt.targetId = vm_mock_ring_pick_equipment_item();
         g_vm_mock_ring_rt.targetCount = 1;
+        break;
+    case VM_MOCK_RING_TYPE_WORLD_TRUTH:
+        g_vm_mock_ring_rt.targetCount = 1;
+        g_vm_mock_ring_rt.targetId = vm_mock_ring_pick_truth_id();
+        if (g_vm_mock_ring_rt.targetId == 0)
+        {
+            type = VM_MOCK_RING_TYPE_VISIT;
+            g_vm_mock_ring_rt.taskType = type;
+            snprintf(g_vm_mock_ring_rt.targetNpc,
+                     sizeof(g_vm_mock_ring_rt.targetNpc), "%s",
+                     visitPool[vm_mock_activities_rng_next() % 3]);
+            g_vm_mock_ring_rt.targetCount = 1;
+        }
         break;
     default:
         break;
@@ -2245,6 +2620,7 @@ static bool vm_mock_ring_task_ready(vm_net_mock_role_state *role)
     case VM_MOCK_RING_TYPE_KILL_MOB:
     case VM_MOCK_RING_TYPE_KILL_BOSS:
     case VM_MOCK_RING_TYPE_KILL_PLAYER:
+    case VM_MOCK_RING_TYPE_WORLD_TRUTH:
         return g_vm_mock_ring_rt.progress >= g_vm_mock_ring_rt.targetCount;
     case VM_MOCK_RING_TYPE_COLLECT:
         return vm_mock_activities_backpack_count(role, g_vm_mock_ring_rt.targetId) >=
@@ -2474,6 +2850,72 @@ static u32 vm_net_mock_build_ring_claim_daily_response(u8 *out, u32 outCap)
                                               VM_MOCK_RING_WT_CLAIM_DAILY, 1, "ok");
 }
 
+/*
+ * 消耗酷宝刷新当前进行中的环任务：不增减当日环数，只重抽目标。
+ * result: 1=ok 2=norole 3=disabled 4=noactive 5=nowcoin 6=savefail
+ */
+static u32 vm_net_mock_build_ring_refresh_response(u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_ring_daily_ctx row;
+    char accountHex[160];
+    char query[640];
+    u32 dayYmd = vm_mock_activities_day_ymd();
+    u32 wcoinBefore = 0;
+    vm_mock_ring_runtime prevRt;
+
+    vm_mock_ring_load_config(false);
+    if (role == NULL)
+        return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                  VM_MOCK_RING_WT_REFRESH, 2,
+                                                  "norole");
+    if (!g_vm_mock_ring_config.enabled)
+        return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                  VM_MOCK_RING_WT_REFRESH, 3,
+                                                  "disabled");
+    memset(&row, 0, sizeof(row));
+    if (vm_mock_activities_account_hex(accountHex, sizeof(accountHex)))
+    {
+        snprintf(query, sizeof(query),
+                 "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+                 "progress,target_npc,task_active FROM account_role_ring_daily "
+                 "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+                 accountHex, role->roleId, dayYmd);
+        (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    }
+    if (!row.taskActive)
+        return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                  VM_MOCK_RING_WT_REFRESH, 4,
+                                                  "noactive");
+
+    wcoinBefore = role->wcoin;
+    if (wcoinBefore < (u32)VM_MOCK_RING_REFRESH_WCOIN)
+        return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                  VM_MOCK_RING_WT_REFRESH, 5,
+                                                  "nowcoin");
+
+    prevRt = g_vm_mock_ring_rt;
+    role->wcoin = wcoinBefore - (u32)VM_MOCK_RING_REFRESH_WCOIN;
+    vm_mock_yanmen_load_config(false);
+    vm_mock_ring_build_desc();
+    if (!vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed) ||
+        !vm_net_mock_role_db_save("ring-refresh-wcoin"))
+    {
+        role->wcoin = wcoinBefore;
+        g_vm_mock_ring_rt = prevRt;
+        (void)vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed);
+        return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                  VM_MOCK_RING_WT_REFRESH, 6,
+                                                  "savefail");
+    }
+    printf("[info][mock-service] ring_refresh role=%u cost=%u wcoin=%u->%u "
+           "ring=%u evidence=wcoin-refresh-keep-count\n",
+           role->roleId, (u32)VM_MOCK_RING_REFRESH_WCOIN, wcoinBefore, role->wcoin,
+           (u32)row.ringCount);
+    return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                              VM_MOCK_RING_WT_REFRESH, 1, "ok");
+}
+
 static bool vm_net_mock_is_activities46_request(const u8 *request, u32 requestLen,
                                                 u8 *subtypeOut)
 {
@@ -2564,6 +3006,8 @@ u32 vm_net_mock_build_ring_protocol_response(const u8 *request, u32 requestLen,
         return vm_net_mock_build_ring_submit_response(out, outCap);
     if (subtype == VM_MOCK_RING_WT_CLAIM_DAILY)
         return vm_net_mock_build_ring_claim_daily_response(out, outCap);
+    if (subtype == VM_MOCK_RING_WT_REFRESH)
+        return vm_net_mock_build_ring_refresh_response(out, outCap);
     return 0;
 }
 

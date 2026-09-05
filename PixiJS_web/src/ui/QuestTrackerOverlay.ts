@@ -1,6 +1,6 @@
 /**
  * Left-side accepted-quest tracker under the map status strip.
- * Own collapse toggle — independent from 修/拍/… status strip.
+ * Collapse toggle above the task plate — independent from 修/拍/… strip.
  */
 import { Container, Graphics } from "pixi.js";
 import { CBE, LCD_WIDTH, makePixelText } from "./constants";
@@ -10,6 +10,7 @@ import type { TaskListRow } from "../net/protocolExtras";
 import type { RingStatus } from "../net/protocolActivities";
 import { NPC_RING_QUEST } from "../net/protocolActivities";
 import { lookupNpcSceneFromDb } from "../resources/npcScenes";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   isQuestTrackerCollapsed,
   toggleQuestTrackerCollapsed,
@@ -24,10 +25,12 @@ const RING_TYPE_KILL_PLAYER = 4;
 const RING_TYPE_COLLECT = 5;
 const RING_TYPE_SUBMIT_MED = 6;
 const RING_TYPE_SUBMIT_EQUIP = 7;
+const RING_TYPE_WORLD_TRUTH = 8;
 
 /**
  * Map-local coords (parent = SceneView.root, already at WORLD_TOP_H).
  * Clear status strip (修/拍/… @ y=4, 17px) — same band as WorldHud PARTY_Y0.
+ * Toggle sits above the task plate.
  */
 const STRIP_BOTTOM = 4 + 17;
 const TRACKER_Y0 = STRIP_BOTTOM + 2;
@@ -36,6 +39,10 @@ const TRACKER_MAX_W = 118;
 const MAX_TASKS = 4;
 const TOGGLE_SIZE = 17;
 const TOGGLE_GAP = 3;
+/** Panel fill / stroke — keep readable but less occlusive on the map. */
+const PANEL_FILL_ALPHA = 0.3;
+const PANEL_STROKE_ALPHA = 0.45;
+const PANEL_INNER_ALPHA = 0.32;
 
 /** Smaller than map HUD UC3 (14→10). */
 const TEXT_SCALE = 10 / UC3_CELL;
@@ -80,6 +87,8 @@ export function formatRingQuestProgress(st: RingStatus): string {
       return `需${target}组`;
     case RING_TYPE_SUBMIT_EQUIP:
       return `需${target}件`;
+    case RING_TYPE_WORLD_TRUTH:
+      return st.progress >= 1 ? "可提交" : "未发送";
     default:
       return st.progress >= target ? "可提交" : `${st.progress}/${target}`;
   }
@@ -99,6 +108,7 @@ function ringShortTitle(st: RingStatus): string {
   if (!desc) return "跑环";
   // Drop leading 击杀N场 / 收集N个 / 提交N组 so the name fits the strip.
   const trimmed = desc
+    .replace(/^世界真心话[：:]/, "")
     .replace(/^击杀\d+[场名]/, "")
     .replace(/^收集\d+个/, "")
     .replace(/^提交\d+组/, "")
@@ -324,19 +334,27 @@ export class QuestTrackerOverlay extends Container {
     return lab;
   }
 
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.visible) this.redraw();
+  }
+
   private redraw(): void {
     this.clearLabels();
     clearPointerHits(this.rowHits);
     this.box.clear();
     this.position.x = TRACKER_X0 + this.partyInset;
     this.toggle.position.set(0, 0);
-    this.content.position.set(TOGGLE_SIZE + TOGGLE_GAP, 0);
+    /* Task plate below the hide/show toggle. */
+    this.content.position.set(0, TOGGLE_SIZE + TOGGLE_GAP);
 
     if (!this.rows.length) return;
 
     const maxW = Math.min(
       TRACKER_MAX_W,
-      LCD_WIDTH - TRACKER_X0 - this.partyInset - TOGGLE_SIZE - TOGGLE_GAP - 48,
+      LCD_WIDTH - TRACKER_X0 - this.partyInset - 48,
     );
     const textX = PAD_X + ACCENT_W + GAP_AFTER_ACCENT;
     const textW = maxW - textX - PAD_X;
@@ -348,12 +366,12 @@ export class QuestTrackerOverlay extends Container {
 
     this.box
       .roundRect(0, 0, maxW, contentH, 3)
-      .fill({ color: 0x061410, alpha: 0.78 })
-      .stroke({ width: 1, color: CBE.borderDim, alpha: 0.7 });
+      .fill({ color: 0x061410, alpha: PANEL_FILL_ALPHA })
+      .stroke({ width: 1, color: CBE.borderDim, alpha: PANEL_STROKE_ALPHA });
     // Soft inner top edge.
     this.box
       .roundRect(1, 1, maxW - 2, contentH - 2, 2)
-      .stroke({ width: 1, color: 0x1a3028, alpha: 0.55 });
+      .stroke({ width: 1, color: 0x1a3028, alpha: PANEL_INNER_ALPHA });
 
     let y = PAD_Y;
     for (let i = 0; i < this.rows.length; i++) {

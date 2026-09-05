@@ -253,6 +253,7 @@ static void vm_mock_admin_append_tabs(vm_mock_admin_text *page, const char *acti
         {"activities", "节日/跑环"},
         {"updates", "游戏内容更新管理"},
         {"servers", "服务器列表"},
+        {"maintenance", "服务器维护"},
     };
     size_t i = 0;
 
@@ -6966,6 +6967,11 @@ static void vm_mock_admin_render_world_boss_page(char *response, size_t response
 static void vm_mock_admin_handle_world_boss_action(vm_mock_service_socket client,
                                                    const char *action,
                                                    const char *body);
+static void vm_mock_admin_render_maintenance_page(char *response, size_t responseCap,
+                                                  const char *query);
+static void vm_mock_admin_handle_maintenance_action(vm_mock_service_socket client,
+                                                    const char *action,
+                                                    const char *body);
 static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
                                              const char *query);
 static void vm_mock_admin_handle_ladder_action(vm_mock_service_socket client,
@@ -7092,6 +7098,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "servers") == 0)
     {
         vm_mock_admin_render_servers_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "maintenance") == 0)
+    {
+        vm_mock_admin_render_maintenance_page(response, responseCap, query);
         return;
     }
     (void)vm_mock_admin_form_value(query, "account", selectedAccount, sizeof(selectedAccount));
@@ -8010,6 +8021,7 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
 #include "web_admin_combat.inc.c"
 #include "web_admin_arena.inc.c"
 #include "web_admin_world_boss.inc.c"
+#include "web_admin_maintenance.inc.c"
 #include "web_admin_ladder.inc.c"
 #include "web_admin_fruit.inc.c"
 #include "web_admin_guess.inc.c"
@@ -10569,6 +10581,12 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "world-boss-force-despawn") == 0)
     {
         vm_mock_admin_handle_world_boss_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "maintenance-start") == 0 ||
+        strcmp(action, "maintenance-stop") == 0)
+    {
+        vm_mock_admin_handle_maintenance_action(client, action, body);
         return;
     }
     if (strcmp(action, "save-ladder-config") == 0 ||

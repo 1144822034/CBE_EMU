@@ -1,4 +1,5 @@
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -68,6 +69,13 @@ export class ApproachPrompt extends Container {
   private clearLabels(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

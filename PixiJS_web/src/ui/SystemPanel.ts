@@ -1,4 +1,5 @@
 import { Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -245,6 +246,8 @@ const STATUS_LABEL_W = 48;
  * All list data is server-driven; local DSH only supplies names/quality paint.
  */
 export class SystemPanel extends Container {
+  /** Full-LCD dim behind chrome — must remount after GL restore like `box`. */
+  private dim = new Graphics();
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   /** Transient UI sprites (jin/yin/tong); cleared each redraw. */
@@ -315,15 +318,38 @@ export class SystemPanel extends Container {
     super();
     this.visible = false;
     this.eventMode = "static";
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-        .fill({ color: 0x000000, alpha: 0.35 }),
-    );
-    this.addChild(this.box, this.brokenGlowGfx);
+    this.paintDim();
+    this.addChild(this.dim, this.box, this.brokenGlowGfx);
     preloadPageNavTextures(() => {
       if (this.visible) this.redraw();
     });
+  }
+
+  private paintDim(): void {
+    this.dim
+      .clear()
+      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+      .fill({ color: 0x000000, alpha: 0.35 });
+  }
+
+  /**
+   * Remount long-lived Graphics. Required after GL restore even while hidden —
+   * open() otherwise paints 属性/背包 chrome onto dead GPU geometry.
+   */
+  private remountChrome(): void {
+    this.dim = replaceGraphics(this.dim);
+    this.paintDim();
+    this.box = replaceGraphics(this.box);
+    this.brokenGlowGfx = replaceGraphics(this.brokenGlowGfx);
+    if (this.toast.gfx.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+  }
+
+  /** webglcontextrestored: remount panel Graphics; redraw only if open. */
+  nudgeAfterGpuResume(): void {
+    this.remountChrome();
+    if (this.visible) this.redraw();
   }
 
   open(kind: SystemKind, _hint = ""): void {
@@ -340,6 +366,8 @@ export class SystemPanel extends Container {
     this.categoryIndex = kind === "enhance" ? 1 : 0;
     this.selected = null;
     this.clearTip();
+    // Open-after-recover: Graphics may have died while this panel was hidden.
+    this.remountChrome();
     this.visible = true;
     if (kind === "bag") this.ensureMoneyIcons();
     if (kind === "equip") {
@@ -377,7 +405,15 @@ export class SystemPanel extends Container {
     const cacheKey = `${name}#d3`;
     if (cacheKey === this.equipActorKey && this.equipActorTex) return;
     this.equipActorKey = cacheKey;
+    const prevTex = this.equipActorTex;
     this.equipActorTex = null;
+    if (prevTex) {
+      try {
+        prevTex.destroy(true);
+      } catch {
+        /* ignore */
+      }
+    }
     void loadActor(name)
       .then((loaded) => {
         if (this.equipActorKey !== cacheKey) return;
@@ -497,6 +533,24 @@ export class SystemPanel extends Container {
     this.stopBrokenGlowAnim();
     this.brokenGlowGfx.clear();
     this.brokenSlotRects = [];
+    // Unpin panel UC3 / UI sprites while hidden (VRAM); open() redraws fresh.
+    for (const t of this.labels) t.destroy();
+    this.labels = [];
+    for (const s of this.uiSprites) s.destroy({ children: true });
+    this.uiSprites = [];
+    for (const h of this.hitSprites) h.destroy();
+    this.hitSprites = [];
+    clearPointerHits(this.rowHits);
+    this.box.clear();
+    if (this.equipActorTex) {
+      try {
+        this.equipActorTex.destroy(true);
+      } catch {
+        /* ignore */
+      }
+      this.equipActorTex = null;
+      this.equipActorKey = "";
+    }
   }
 
   /** Left/right: bag/mall category tab, equip-detail page, or mall buy qty. */

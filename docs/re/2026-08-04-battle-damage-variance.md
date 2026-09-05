@@ -15,7 +15,7 @@ pierce 软上限后普攻数值稳定，同一目标每次飘字完全相同，�
 
 ## 修改点
 
-- `mock_server_role.c`：`vm_net_mock_battle_apply_damage_variance`
+- `mock_server_role.c`：`vm_net_mock_battle_apply_damage_variance`（后曾仅决斗路径调用；2026-09-04 起 PvE 再次接入，见 `2026-09-04-pve-damage-variance.md`）
 - `mock_server_battle.c`：切磋伤害路径
 
 ## 验证

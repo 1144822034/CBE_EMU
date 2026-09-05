@@ -1,4 +1,5 @@
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import { CBE, LCD_WIDTH, WORLD_TOP_H, makePixelText } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import type { ArenaHud as ArenaHudState } from "../net/protocolArena";
@@ -15,6 +16,7 @@ export class ArenaHud extends Container {
   private bg = new Graphics();
   private line: BitmapLabel;
   private lastKey = "";
+  private lastState: ArenaHudState | null = null;
 
   constructor() {
     super();
@@ -29,7 +31,15 @@ export class ArenaHud extends Container {
     this.addChild(this.line);
   }
 
+  /** webglcontextrestored: remount strip fill then re-apply last state. */
+  nudgeAfterGpuResume(): void {
+    this.bg = replaceGraphics(this.bg);
+    this.lastKey = "";
+    if (this.visible && this.lastState) this.apply(this.lastState);
+  }
+
   apply(state: ArenaHudState | null): void {
+    this.lastState = state;
     if (!state) {
       this.visible = false;
       this.lastKey = "";

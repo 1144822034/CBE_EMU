@@ -3,6 +3,7 @@
  * Temporary client catalog (86001–86048); later gate by server unlock.
  */
 import { Container, Sprite } from "pixi.js";
+import { MAP_COSMETIC_ATLAS_ENABLED } from "./mapCosmeticAtlas";
 import {
   bindPlistAtlasIfCurrent,
   loadPlistAtlas,
@@ -178,10 +179,41 @@ export class ChenghaoOverlay {
     }
   }
 
+  /** Drop atlas GPU; keep titleId for battle suspend / resume. */
+  releaseGpu(): void {
+    if (!this.atlas && !this.sprite) return;
+    this.loadGen++;
+    this.loadInFlight = false;
+    this.atlas = rebindPlistAtlas(this.atlas, null, true);
+    this.phase = 0;
+    this.animAcc = 0;
+    this.root.visible = false;
+    if (this.sprite) {
+      this.root.removeChild(this.sprite);
+      this.sprite.destroy({ texture: false });
+      this.sprite = null;
+    }
+  }
+
   async setTitleId(titleId: number): Promise<void> {
     const id = titleId | 0;
     if (!id) {
       this.clear();
+      return;
+    }
+    if (!MAP_COSMETIC_ATLAS_ENABLED) {
+      this.loadGen++;
+      this.loadInFlight = false;
+      this.titleId = id;
+      this.atlas = rebindPlistAtlas(this.atlas, null);
+      this.phase = 0;
+      this.animAcc = 0;
+      this.root.visible = false;
+      if (this.sprite) {
+        this.root.removeChild(this.sprite);
+        this.sprite.destroy({ texture: false });
+        this.sprite = null;
+      }
       return;
     }
     if (!isChenghaoId(id)) {

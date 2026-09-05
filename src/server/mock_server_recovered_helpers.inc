@@ -154,55 +154,7 @@ static void vm_mock_service_clear_inflight_scene_transfer_globals(const char *re
 #define VM_NET_MOCK_BATTLE_SKILL_DAMAGE_VARIANCE_PERCENT 8u
 #endif
 
-static u32 vm_net_mock_battle_apply_damage_variance(u32 damage)
-{
-    const vm_net_mock_combat_formula_config *combatCfg =
-        vm_net_mock_combat_formula_config_get();
-    u32 variancePct = combatCfg ? combatCfg->naVariancePercent : 5u;
-    u32 span;
-    u32 roll;
-    u32 pct;
-    uint64_t scaled;
-
-    if (damage == 0)
-        return 0;
-    if (vm_net_mock_battle_combat_rolls_disabled())
-        return damage;
-    if (variancePct > 50u)
-        variancePct = 50u;
-    span = variancePct * 2u + 1u;
-    roll = vm_net_mock_battle_combat_rand() % span;
-    pct = (100u - variancePct) + roll;
-    scaled = ((uint64_t)damage * (uint64_t)pct + 50ull) / 100ull;
-    if (scaled == 0)
-        scaled = 1;
-    return scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
-}
-
-static u32 vm_net_mock_battle_apply_skill_damage_variance(u32 damage)
-{
-    const vm_net_mock_combat_formula_config *combatCfg =
-        vm_net_mock_combat_formula_config_get();
-    u32 variancePct = combatCfg ? combatCfg->skillVariancePercent : 8u;
-    u32 span;
-    u32 roll;
-    u32 pct;
-    uint64_t scaled;
-
-    if (damage == 0)
-        return 0;
-    if (vm_net_mock_battle_combat_rolls_disabled())
-        return damage;
-    if (variancePct > 50u)
-        variancePct = 50u;
-    span = variancePct * 2u + 1u;
-    roll = vm_net_mock_battle_combat_rand() % span;
-    pct = (100u - variancePct) + roll;
-    scaled = ((uint64_t)damage * (uint64_t)pct + 50ull) / 100ull;
-    if (scaled == 0)
-        scaled = 1;
-    return scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
-}
+/* NA / skill variance live in mock_server_role.c (PvE + duel share them). */
 
 static u32 vm_net_mock_battle_job_skill_primary_bonus_percent(u32 job)
 {

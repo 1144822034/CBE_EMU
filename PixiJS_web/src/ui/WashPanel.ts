@@ -8,6 +8,7 @@
  * (No HTML center softkey above the D-pad.)
  */
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -355,6 +356,16 @@ export class WashPanel extends Container {
     }
     this.redraw();
     return "back";
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.toast.gfx.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
   }
 
   redraw(): void {

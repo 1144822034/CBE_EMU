@@ -8,6 +8,7 @@
  *   Plist `part` is only an atlas split; we pick the part that contains the face.
  */
 import { Container, Sprite } from "pixi.js";
+import { MAP_COSMETIC_ATLAS_ENABLED } from "./mapCosmeticAtlas";
 import {
   bindPlistAtlasIfCurrent,
   loadPlistAtlas,
@@ -173,10 +174,41 @@ export class MountOverlay {
     }
   }
 
+  /** Drop atlas GPU; keep mountId for battle suspend / resume. */
+  releaseGpu(): void {
+    if (!this.atlas && !this.sprite) return;
+    this.loadGen++;
+    this.loadingKey = "";
+    this.atlas = rebindPlistAtlas(this.atlas, null, true);
+    this.phase = 0;
+    this.animAcc = 0;
+    this.root.visible = false;
+    if (this.sprite) {
+      this.root.removeChild(this.sprite);
+      this.sprite.destroy({ texture: false });
+      this.sprite = null;
+    }
+  }
+
   async setMountId(mountId: number): Promise<void> {
     const id = mountId | 0;
     if (!id) {
       this.clear();
+      return;
+    }
+    if (!MAP_COSMETIC_ATLAS_ENABLED) {
+      this.mountId = id;
+      this.atlas = rebindPlistAtlas(this.atlas, null);
+      this.phase = 0;
+      this.animAcc = 0;
+      this.sheetKey = "";
+      this.loadingKey = "";
+      this.root.visible = false;
+      if (this.sprite) {
+        this.root.removeChild(this.sprite);
+        this.sprite.destroy({ texture: false });
+        this.sprite = null;
+      }
       return;
     }
     if (!isMountId(id)) {

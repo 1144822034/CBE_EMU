@@ -1,4 +1,5 @@
 import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -22,6 +23,18 @@ import {
 const JOBS = ["天机", "幻剑", "鬼道"];
 /** Full-body front stand (CBE dir=3), keyed by actor resource. */
 const bodyCache = new Map<string, Texture>();
+
+/** Free role-select previews when leaving the role screen (enter world / logout). */
+export function clearRoleBodyCache(): void {
+  for (const tex of bodyCache.values()) {
+    try {
+      tex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+  }
+  bodyCache.clear();
+}
 
 /** Leave a strip under the CBE panel so footer tip is not clipped by the frame. */
 const PANEL_TOP = 40;
@@ -96,6 +109,15 @@ export class RoleScreen extends Container {
       PANEL_H,
       CBE.bgDeep,
     );
+  }
+
+  /** webglcontextrestored: remount banner/frame Graphics then redraw rows. */
+  nudgeAfterGpuResume(): void {
+    this.bannerGfx = replaceGraphics(this.bannerGfx);
+    drawLocBanner(this.bannerGfx, this, "选择人物登录", 8);
+    this.frame = replaceGraphics(this.frame);
+    this.paintFrame();
+    if (this.visible) this.redraw();
   }
 
   setRoles(roles: RoleRow[]): void {
@@ -189,6 +211,18 @@ export class RoleScreen extends Container {
     this.confirmHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.setTip("OK键删除 · 需输入角色名");
     this.onDeleteConfirmChange?.(false);
+  }
+
+  /** Leave role select: drop preview sprites so bodyCache can free GPU. */
+  releaseBodyPreviews(): void {
+    clearRoleBodyCache();
+    this.rowsHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+  }
+
+  /** Re-enter role select after body GPU was released. */
+  remountAfterShow(): void {
+    this.redraw();
+    void this.prefetchBodies();
   }
 
   get selected(): RoleRow | null {

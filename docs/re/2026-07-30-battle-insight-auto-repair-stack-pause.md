@@ -16,7 +16,8 @@
 | 叠加 | 已激活时可再使用 828：在剩余结束时刻上再加 60 分钟；倍率保持 20 |
 | 离线 | 与经验卡相同：掉线写入 `paused_remaining_sec`、清 `expires_unix`；选角登录再恢复墙钟结束时刻 |
 | 遇怪数量 | 心得激活时场景遇怪固定 3 只（见 `2026-07-31-battle-insight-fixed-enemy-count.md`） |
-| 未改 | 挂机场次升至 200、背包满自动出售仍 unresolved |
+| 背包满自动出售 | 心得激活且背包无法接受掉落时，按丢弃价 `floor(商店价/10)` 折算铜钱（装备与其它物品相同）；日志 `mock_battle_insight_auto_sell` |
+| 经验 +20% | 怪物战奖励：先应用经验卡倍数，再叠加 `基础经验×20%`（可与双倍/四倍等叠加）；日志 `mock_battle_exp_modifier … insight_bonus_percent=20` |
 
 ## 修改点
 

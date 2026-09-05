@@ -314,7 +314,11 @@ export class BattlePartyHud extends Container {
     while (slot.portrait.children.length > 1) {
       const c = slot.portrait.children[slot.portrait.children.length - 1]!;
       slot.portrait.removeChild(c);
-      c.destroy({ children: true });
+      try {
+        c.destroy({ children: true, texture: true, textureSource: true });
+      } catch {
+        /* ignore */
+      }
     }
     try {
       const loaded = await loadActor(actorName);

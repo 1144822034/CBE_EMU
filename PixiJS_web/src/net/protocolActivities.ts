@@ -38,6 +38,10 @@ export const RING_WT_KIND = 47;
 export const NPC_FESTIVAL_EXCHANGE = 0xf7000001;
 export const NPC_YANMEN_EXCHANGE = 0xf7000002;
 export const NPC_RING_QUEST = 0xf7000003;
+/** 跑环使者：刷新当前环（消耗酷宝，客户端先确认） */
+export const NPC_RING_REFRESH = 0xf7000005;
+/** 与服务端 VM_MOCK_RING_REFRESH_WCOIN 一致 */
+export const RING_REFRESH_WCOIN = 10;
 
 export type FestivalExchangeRow = {
   exchangeId: number;
@@ -173,6 +177,12 @@ export function buildRingClaimDailyRequest(): Uint8Array {
   return b.finish();
 }
 
+export function buildRingRefreshRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, RING_WT_KIND, 5);
+  return b.finish();
+}
+
 export function parseActivitiesStatus(packet: WtPacket): ActivitiesStatus | null {
   const obj = packet.objects.find(
     (o) => o.kind === ACTIVITIES_WT_KIND && o.subtype === 1,
@@ -243,6 +253,10 @@ export function activityMsgTip(code: string | undefined, ok: string): string {
       return "今日满环奖励已领取";
     case "notfull":
       return "未满20环";
+    case "nowcoin":
+      return "酷宝不足";
+    case "savefail":
+      return "保存失败请重试";
     default:
       return code?.trim() || "操作失败";
   }

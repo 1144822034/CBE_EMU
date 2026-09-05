@@ -16,6 +16,7 @@
     "patch:cap-android8": "node scripts/patch-capacitor-android8.mjs",
     "cap:sync": "npm run patch:cap-android8 && npx cap sync android",
     "build:android": "npm run build && npm run cap:sync && node scripts/assemble-android.mjs",
+    "build:android:nofx": "node scripts/build-android-nofx.mjs",
     "electron": "electron .",
     "build:exe": "npm run build && node scripts/build-electron-exe.mjs",
     "smoke": "node scripts/smoke-decode.mjs && tsx scripts/smoke-scene.ts && tsx scripts/smoke-protocol.ts && tsx scripts/smoke-actor.ts",

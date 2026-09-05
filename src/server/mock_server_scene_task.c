@@ -2067,6 +2067,123 @@ static bool vm_net_mock_sce_combat_spawn_bindings_replace(
     return true;
 }
 
+/*
+ * Drop one binding tile (MySQL + cache). Does not touch disk .sce.
+ * Used by world-boss legacy cleanup after DB-overlay migration.
+ */
+bool vm_net_mock_sce_combat_spawn_bindings_delete_at(
+    const char *scene, u16 x, u16 y, const char **errorOut)
+{
+    char sceneHex[160];
+    char query[384];
+    u32 write = 0;
+    u32 removed = 0;
+    vm_net_mock_sce_combat_spawn_binding scratch[VM_NET_MOCK_SCE_COMBAT_BINDING_MAX];
+
+    if (errorOut)
+        *errorOut = "地图刷怪绑定删除失败";
+    if (scene == NULL || scene[0] == 0 || x == 0 || y == 0)
+        return false;
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) ==
+        0)
+    {
+        if (errorOut)
+            *errorOut = "场景名编码失败";
+        return false;
+    }
+    vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_scene_combat_spawns WHERE scene=UNHEX('%s') "
+             "AND x=%u AND y=%u",
+             sceneHex, (u32)x, (u32)y);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = "地图刷怪绑定删除失败";
+        return false;
+    }
+    memset(scratch, 0, sizeof(scratch));
+    for (u32 i = 0; i < g_vm_net_mock_sce_combat_spawn_binding_count; ++i)
+    {
+        const vm_net_mock_sce_combat_spawn_binding *row =
+            &g_vm_net_mock_sce_combat_spawn_bindings[i];
+        if (row->x == x && row->y == y &&
+            vm_net_mock_scene_names_equal_loose(row->scene, scene))
+        {
+            ++removed;
+            continue;
+        }
+        if (write < VM_NET_MOCK_SCE_COMBAT_BINDING_MAX)
+            scratch[write++] = *row;
+    }
+    memcpy(g_vm_net_mock_sce_combat_spawn_bindings, scratch,
+           sizeof(g_vm_net_mock_sce_combat_spawn_bindings));
+    g_vm_net_mock_sce_combat_spawn_binding_count = write;
+    if (removed > 0)
+        vm_net_mock_monster_resource_labels_invalidate();
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+/*
+ * Drop wire≠real binding rows for a real monster id (world-boss leftovers).
+ * Natural wild (wire==real) is kept. Never writes .sce.
+ */
+bool vm_net_mock_sce_combat_spawn_bindings_purge_real_remaps(
+    u32 monsterId, u32 *removedOut, const char **errorOut)
+{
+    char query[256];
+    u32 write = 0;
+    u32 removed = 0;
+    vm_net_mock_sce_combat_spawn_binding scratch[VM_NET_MOCK_SCE_COMBAT_BINDING_MAX];
+
+    if (removedOut)
+        *removedOut = 0;
+    if (errorOut)
+        *errorOut = "地图刷怪绑定清理失败";
+    if (monsterId == 0 || monsterId > 65535u)
+        return false;
+    vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_scene_combat_spawns WHERE real_actor_id=%u "
+             "AND wire_actor_id<>real_actor_id",
+             monsterId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = "地图刷怪绑定清理失败";
+        return false;
+    }
+    memset(scratch, 0, sizeof(scratch));
+    for (u32 i = 0; i < g_vm_net_mock_sce_combat_spawn_binding_count; ++i)
+    {
+        const vm_net_mock_sce_combat_spawn_binding *row =
+            &g_vm_net_mock_sce_combat_spawn_bindings[i];
+        if (row->realActorId == (u16)monsterId &&
+            row->wireActorId != row->realActorId)
+        {
+            ++removed;
+            continue;
+        }
+        if (write < VM_NET_MOCK_SCE_COMBAT_BINDING_MAX)
+            scratch[write++] = *row;
+    }
+    memcpy(g_vm_net_mock_sce_combat_spawn_bindings, scratch,
+           sizeof(g_vm_net_mock_sce_combat_spawn_bindings));
+    g_vm_net_mock_sce_combat_spawn_binding_count = write;
+    if (removedOut)
+        *removedOut = removed;
+    if (removed > 0)
+        vm_net_mock_monster_resource_labels_invalidate();
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] scene_combat_spawn_bindings_purge_remaps "
+           "monster=%u removed=%u\n",
+           monsterId, removed);
+    return true;
+}
+
 static void vm_net_mock_sce_combat_spawn_apply_bindings(
     const char *scene, vm_net_mock_sce_combat_spawn_located *rows, u32 count)
 {
@@ -11213,6 +11330,7 @@ bool vm_net_mock_runtime_remove_combat_spawn_at(
     vm_net_mock_sce_combat_spawn kept[VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX];
     u32 existing = 0;
     u32 keptCount = 0;
+    u32 dropped = 0;
     const char *saveError = NULL;
 
     if (errorOut)
@@ -11230,9 +11348,19 @@ bool vm_net_mock_runtime_remove_combat_spawn_at(
     for (u32 i = 0; i < existing; ++i)
     {
         if (spawns[i].x == x && spawns[i].y == y)
+        {
+            ++dropped;
             continue;
+        }
         if (keptCount < VM_NET_MOCK_SCE_COMBAT_ADMIN_MAX)
             kept[keptCount++] = spawns[i];
+    }
+    /* No-op must not rewrite disk .sce (world-boss used to touch every map). */
+    if (dropped == 0)
+    {
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
     }
     if (!vm_net_mock_sce_combat_spawn_admin_save_all(scene, kept, keptCount,
                                                      0, 0, true, &saveError))

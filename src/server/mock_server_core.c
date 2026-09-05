@@ -4868,6 +4868,7 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_YANMEN_EXCHANGE          0xf7000002u
 #define VM_NET_MOCK_NPC_SERVICE_RING_QUEST               0xf7000003u
 #define VM_NET_MOCK_NPC_SERVICE_LADDER_CHALLENGE         0xf7000004u
+#define VM_NET_MOCK_NPC_SERVICE_RING_REFRESH             0xf7000005u
 #define VM_NET_MOCK_MARRY_MIN_DEGREE                     3000u
 #define VM_NET_MOCK_YUELAO_ACTOR_ID                      20093u
 /* ParseNPCDialogData main-text paint uses #0xc8 including NUL. */
@@ -4890,6 +4891,99 @@ enum
 #define VM_NET_MOCK_HUNT_ORDER_SHOP_PRICE         50u
 /* Initiator cooldown after a successful nearby spar start. */
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
+#define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC    (VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS / 1000u)
+/*
+ * Nearby-spar initiate CD is owned by roleId, not the TCP session.
+ * Session-local scheduler ticks were cleared on offline (session_mark_offline
+ * zeroed sparInitiateReadyMs), so logout→login bypassed the 5-minute gate.
+ * Wall-clock unix survives reconnect and account restore without a MySQL
+ * column (5 min is ephemeral; process restart drops remaining CD).
+ */
+enum { VM_NET_MOCK_SPAR_INITIATE_CD_SLOTS = 512 };
+
+typedef struct
+{
+    u32 roleId;
+    u32 readyUnix; /* earliest unix when role may initiate again; 0 = empty */
+} vm_net_mock_spar_initiate_cd_entry;
+
+static vm_net_mock_spar_initiate_cd_entry
+    g_vm_net_mock_spar_initiate_cd[VM_NET_MOCK_SPAR_INITIATE_CD_SLOTS];
+
+static void vm_net_mock_spar_initiate_cd_arm(u32 roleId)
+{
+    u32 now;
+    u32 ready;
+    u32 i;
+    u32 freeIdx = VM_NET_MOCK_SPAR_INITIATE_CD_SLOTS;
+    u32 victimIdx = 0;
+    u32 victimReady = 0xffffffffu;
+
+    if (roleId == 0)
+        return;
+    now = (u32)time(NULL);
+    if (now > 0xffffffffu - VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC)
+        ready = 0xffffffffu;
+    else
+        ready = now + VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC;
+
+    for (i = 0; i < (u32)VM_NET_MOCK_SPAR_INITIATE_CD_SLOTS; ++i)
+    {
+        vm_net_mock_spar_initiate_cd_entry *e = &g_vm_net_mock_spar_initiate_cd[i];
+        if (e->roleId == roleId)
+        {
+            e->readyUnix = ready;
+            return;
+        }
+        if (e->roleId == 0 || e->readyUnix <= now)
+        {
+            if (freeIdx == (u32)VM_NET_MOCK_SPAR_INITIATE_CD_SLOTS)
+                freeIdx = i;
+        }
+        else if (e->readyUnix < victimReady)
+        {
+            victimReady = e->readyUnix;
+            victimIdx = i;
+        }
+    }
+    if (freeIdx == (u32)VM_NET_MOCK_SPAR_INITIATE_CD_SLOTS)
+        freeIdx = victimIdx;
+    g_vm_net_mock_spar_initiate_cd[freeIdx].roleId = roleId;
+    g_vm_net_mock_spar_initiate_cd[freeIdx].readyUnix = ready;
+}
+
+static bool vm_net_mock_spar_initiate_cd_active(u32 roleId, u32 *readyUnixOut,
+                                                 u32 *nowUnixOut)
+{
+    u32 now;
+    u32 i;
+
+    if (readyUnixOut)
+        *readyUnixOut = 0;
+    if (nowUnixOut)
+        *nowUnixOut = 0;
+    if (roleId == 0)
+        return false;
+    now = (u32)time(NULL);
+    if (nowUnixOut)
+        *nowUnixOut = now;
+    for (i = 0; i < (u32)VM_NET_MOCK_SPAR_INITIATE_CD_SLOTS; ++i)
+    {
+        vm_net_mock_spar_initiate_cd_entry *e = &g_vm_net_mock_spar_initiate_cd[i];
+        if (e->roleId != roleId)
+            continue;
+        if (e->readyUnix <= now)
+        {
+            e->roleId = 0;
+            e->readyUnix = 0;
+            return false;
+        }
+        if (readyUnixOut)
+            *readyUnixOut = e->readyUnix;
+        return true;
+    }
+    return false;
+}
 /* OPEN_CATEGORY value layout (low 24 bits):
  *   [7:0]  selector (equip category 1..10 or medicine 0xfe)
  *   [11:8] level band (0=band menu, 1=1-20, 2=21-40, 3=41-60, 4=61-70)

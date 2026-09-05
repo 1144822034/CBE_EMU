@@ -5030,6 +5030,35 @@ static bool vm_net_mock_append_chat_message_object(
  * Contract mirrors unimplemented reject notice: 25/12 clear + 1/3/3 system tip.
  * Message is GBK so CBE chat renders it; Pixi matches the「其他地方登录」marker.
  */
+static u32 vm_net_mock_build_maintenance_kick_notice_response(u8 *out, u32 outCap)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    /* 服务器维护中，请稍后再试 */
+    static const char tipGbk[] =
+        "\xB7\xFE\xCE\xF1\xC6\xF7\xCE\xAC\xBB\xA4\xD6\xD0\xA3\xAC\xC7\xEB\xC9\xD4"
+        "\xBA\xF3\xD4\xD9\xCA\xD4";
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_info_banner_clear12_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_chat_message_object(out, outCap, &pos,
+                                                VM_MOCK_CHAT_TYPE_SYSTEM, 0,
+                                                systemNameGbk, tipGbk))
+    {
+        return 0;
+    }
+    ++objectCount;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][mock-service] maintenance_kick_notice resp=%u "
+           "delivery=25/12+1/3/3\n",
+           pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_account_kick_notice_response(u8 *out, u32 outCap)
 {
     static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
@@ -7072,6 +7101,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         return 0;
     vm_mock_arena_tick();
     vm_mock_world_boss_tick();
+    vm_mock_service_maintenance_tick();
     vm_mock_arena_catchup_phase_tip_session(observer);
     vm_mock_auction_tick();
     vm_mock_guess_tick();
@@ -8039,6 +8069,13 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
                  privateTarget, deliveryType, source, sourceName, chat.message))
     {
         recipientCount = 1;
+    }
+
+    if (systemMessage == NULL && deliveryType == VM_MOCK_CHAT_TYPE_WORLD &&
+        source->accountId[0] != 0 && source->onlineRoleId != 0)
+    {
+        vm_mock_activities_on_world_chat(source->accountId, source->onlineRoleId,
+                                         chat.message);
     }
 
     printf("[info][network] mock_chat_send source=%08x/%u request=%u/%u delivery_type=%s ack=%s sender_echo=%u send_to=%u recipients=%u bytes=%u resp=%u evidence=JianghuOL.CBE:0x01015FAC/0x010126C6\n",

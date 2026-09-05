@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-31T15:10:59.454Z",
+  "generatedAt": "2026-09-03T03:14:23.280Z",
   "assetRootHint": "web/fs/JHOnlineData",
   "defaultScene": "01桃花岛_01.sce",
   "scenes": [
@@ -171,6 +171,7 @@
     "b_31扩充军备.sce",
     "b_36节日庆典.sce",
     "b_黑龙潭.sce",
+    "b_c04比武擂台.sce",
     "c00蓬莱仙岛_01.sce",
     "c00蓬莱仙岛_03.sce",
     "c04比武擂台.sce",

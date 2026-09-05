@@ -7,6 +7,7 @@ import {
   TextStyle,
   Texture,
 } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import {
@@ -1021,6 +1022,17 @@ export class FruitPanel extends Container {
         }),
       );
     }
+  }
+
+  /** webglcontextrestored: remount amount chrome / tip Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    if (this.amountBox.parent) {
+      this.amountBox = replaceGraphics(this.amountBox);
+    }
+    if (this.toast.gfx.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

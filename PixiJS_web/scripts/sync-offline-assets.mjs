@@ -117,40 +117,35 @@ if (fs.existsSync(arenaSfxSrc)) {
   );
 }
 
-/* Pixi map wings (TexturePacker plist+png): not in CBE JHOnlineData pack. */
-const chibangSrc = path.join(pixiRoot, "assets", "chibang");
-const chibangDest = path.join(dataDest, "chibang");
-if (fs.existsSync(chibangSrc)) {
-  copyDir(chibangSrc, chibangDest);
-  console.log(`[sync-offline-assets] chibang ← ${chibangSrc}`);
-} else {
-  console.warn(
-    "[sync-offline-assets] missing assets/chibang (map wings skipped)",
-  );
-}
-
-/* Pixi map mounts (TexturePacker plist+png). */
-const zuoqiSrc = path.join(pixiRoot, "assets", "zuoqi");
-const zuoqiDest = path.join(dataDest, "zuoqi");
-if (fs.existsSync(zuoqiSrc)) {
-  copyDir(zuoqiSrc, zuoqiDest);
-  console.log(`[sync-offline-assets] zuoqi ← ${zuoqiSrc}`);
-} else {
-  console.warn(
-    "[sync-offline-assets] missing assets/zuoqi (map mounts skipped)",
-  );
-}
-
-/* Pixi designation FX titles (TexturePacker plist+png). */
-const chenghaoSrc = path.join(pixiRoot, "assets", "chenghao");
-const chenghaoDest = path.join(dataDest, "chenghao");
-if (fs.existsSync(chenghaoSrc)) {
-  copyDir(chenghaoSrc, chenghaoDest);
-  console.log(`[sync-offline-assets] chenghao ← ${chenghaoSrc}`);
-} else {
-  console.warn(
-    "[sync-offline-assets] missing assets/chenghao (title FX skipped)",
-  );
+/* Pixi map wings / mounts / animated titles — skip when PIXI_SKIP_COSMETIC_ASSETS=1
+ * (无特效 APK). Sheets live in assets.bak_cosmetics/ when disabled. */
+const skipCosmeticAssets = process.env.PIXI_SKIP_COSMETIC_ASSETS === "1";
+for (const name of ["chibang", "zuoqi", "chenghao"]) {
+  const src = path.join(pixiRoot, "assets", name);
+  const dest = path.join(dataDest, name);
+  if (skipCosmeticAssets) {
+    if (fs.existsSync(dest)) {
+      fs.rmSync(dest, { recursive: true, force: true });
+      console.log(
+        `[sync-offline-assets] removed ${name} (PIXI_SKIP_COSMETIC_ASSETS=1)`,
+      );
+    }
+    continue;
+  }
+  if (fs.existsSync(src)) {
+    copyDir(src, dest);
+    console.log(`[sync-offline-assets] ${name} ← ${src}`);
+  } else {
+    /* Remove stale copies so APK / public do not keep old atlases. */
+    if (fs.existsSync(dest)) {
+      fs.rmSync(dest, { recursive: true, force: true });
+      console.log(`[sync-offline-assets] removed stale ${name} (backed up under assets.bak_cosmetics)`);
+    } else {
+      console.warn(
+        `[sync-offline-assets] missing assets/${name} (map ${name} skipped; see assets.bak_cosmetics)`,
+      );
+    }
+  }
 }
 
 /* Pixi 水果机 UI（luckyFruit plist+png）。 */

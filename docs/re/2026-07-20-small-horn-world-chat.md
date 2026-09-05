@@ -81,13 +81,13 @@ CREATE TABLE IF NOT EXISTS world_chat_messages (
 
 ### 登录历史
 
-- session 首次进入可见场景时查询 `message_id DESC LIMIT 30`，再按
-  `message_id ASC` 入队，所以客户端看到的是最近 30 条、旧到新的顺序。
+- session 首次进入可见场景时查询 `message_id DESC LIMIT 10`，再按
+  `message_id ASC` 入队，所以客户端看到的是最近 10 条、旧到新的顺序。
 - 历史项保留持久角色 id、发送者 GBK 名字和正文，通过现有
   `1/3/3 type=0` 场景轮询分批下发。
 - 每个登录生命周期只加载一次；返回标题重新登录时 offline reset 会重新
   允许加载。
-- chat FIFO 从 16 提升到 64，能同时容纳 30 条历史、欢迎消息和登录期间的
+- chat FIFO 从 16 提升到 64，能同时容纳 10 条历史、欢迎消息和登录期间的
   实时消息；单次轮询最多发送 **10** 条（对齐主回调对象上限；2026-07-30 由 4
   上调，历史滚到底更快）。
 

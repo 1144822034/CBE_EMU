@@ -2,7 +2,7 @@ import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
 import type { LoadedScene } from "../resources/loader";
 import { formatCombatSpawnNameplate } from "../resources/monsterLevels";
 import { ActorLayer } from "../game/ActorLayer";
-import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale } from "../ui/constants";
+import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale, CBE } from "../ui/constants";
 import { BitmapLabel } from "../ui/BitmapLabel";
 import { sceneAssetCandidates } from "../net/protocol";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
@@ -48,6 +48,7 @@ import {
 } from "../resources/mountFx";
 import {
   ChenghaoOverlay,
+  chenghaoLabel,
   parseChenghaoId,
 } from "../resources/chenghaoFx";
 import {
@@ -94,6 +95,8 @@ export class SceneView {
     rgba: Uint8ClampedArray;
   } | null = null;
   private decorSprites: Sprite[] = [];
+  /** Shared stand textures keyed by actorResource (many trees → one GPU upload). */
+  private decorTexByActor = new Map<string, Texture>();
   private decorPaintGen = 0;
   private player: Container;
   private playerSprite: Sprite | null = null;
@@ -177,9 +180,12 @@ export class SceneView {
   private lastGuildLine = "";
   private nameLabel = new BitmapLabel();
   private lastName = "";
+  private lastRedName = false;
+  /** Raw args for setPlayerNameplate remount after GL restore. */
+  private lastNameplateTitle = "";
+  private lastNameplateGif: string | null | undefined = undefined;
   private lastTitleGif: string | null = null;
   private lastTitleText = "";
-  private lastRedName = false;
   /** One rainbow gem per worn +16 piece (local player). */
   private plus16Sparkles = new Plus16Sparkles();
   /** Optional chibang wing atlas behind/on the body sprite. */
@@ -188,6 +194,8 @@ export class SceneView {
   private mountOverlay = new MountOverlay();
   /** Optional chenghao animated title above the nameplate. */
   private chenghaoOverlay = new ChenghaoOverlay();
+  /** True after battle enter dropped local map cosmetic GPU until resume. */
+  private mapCosmeticGpuSuspended = false;
   private xiuBadge = new Container();
   private paiBadge = new Container();
   private leiBadge = new Container();
@@ -461,11 +469,24 @@ export class SceneView {
     this.mapPreview = null;
     this.portals = [];
     this.decorations = [];
+    this.clearDecorSprites();
+  }
+
+  /** Drop decor sprites without destroying shared textures, then free the cache. */
+  private clearDecorSprites(): void {
     for (const spr of this.decorSprites) {
       this.world.removeChild(spr);
-      spr.destroy({ texture: true });
+      spr.destroy({ texture: false });
     }
     this.decorSprites = [];
+    for (const tex of this.decorTexByActor.values()) {
+      try {
+        tex.destroy(true);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.decorTexByActor.clear();
   }
 
   /** Upload map pixels to a fresh BufferImageSource sprite (load + GPU resume). */
@@ -594,11 +615,7 @@ export class SceneView {
 
   private paintDecorations(): void {
     const gen = ++this.decorPaintGen;
-    for (const spr of this.decorSprites) {
-      this.world.removeChild(spr);
-      spr.destroy({ texture: true });
-    }
-    this.decorSprites = [];
+    this.clearDecorSprites();
     void this.mountDecorations(gen);
   }
 
@@ -606,23 +623,27 @@ export class SceneView {
   private async mountDecorations(gen: number): Promise<void> {
     const list = this.decorations;
     if (!list.length) return;
-    const cache = new Map<string, LoadedActor>();
+    const actorCache = new Map<string, LoadedActor>();
     for (const d of list) {
       if (gen !== this.decorPaintGen) return;
-      let actor = cache.get(d.actorResource);
+      let actor = actorCache.get(d.actorResource);
       if (!actor) {
         try {
           actor = await loadActor(d.actorResource);
-          cache.set(d.actorResource, actor);
+          actorCache.set(d.actorResource, actor);
         } catch (e) {
           console.warn("[scene] decor actor", d.actorResource, e);
           continue;
         }
       }
       if (gen !== this.decorPaintGen) return;
-      const composed = composeMapActor(actor, 3, false, 0);
-      if (!composed) continue;
-      const tex = rgbaToTexture(composed.width, composed.height, composed.rgba);
+      let tex = this.decorTexByActor.get(d.actorResource);
+      if (!tex || tex.destroyed) {
+        const composed = composeMapActor(actor, 3, false, 0);
+        if (!composed) continue;
+        tex = rgbaToTexture(composed.width, composed.height, composed.rgba);
+        this.decorTexByActor.set(d.actorResource, tex);
+      }
       const spr = new Sprite(tex);
       spr.anchor.set(0.5, 1);
       spr.scale.set(ACTOR_DISPLAY_SCALE);
@@ -733,8 +754,8 @@ export class SceneView {
       if (this.lastName) {
         void this.setPlayerNameplate(
           this.lastName,
-          this.lastTitleText || undefined,
-          this.lastTitleGif ?? undefined,
+          this.lastNameplateTitle,
+          this.lastNameplateGif,
           this.lastRedName,
         );
       }
@@ -804,11 +825,42 @@ export class SceneView {
     return this.mountOverlay.currentMountId;
   }
 
+  /** Battle / VRAM: unload local wing/mount/chenghao atlases; keep equip ids. */
+  releaseMapCosmeticGpu(): void {
+    if (this.mapCosmeticGpuSuspended) return;
+    this.wingOverlay.releaseGpu();
+    this.mountOverlay.releaseGpu();
+    this.chenghaoOverlay.releaseGpu();
+    this.applyMountBodyLift();
+    this.mapCosmeticGpuSuspended = true;
+  }
+
+  /** Reload map cosmetics after battle if they were suspended. */
+  async resumeMapCosmeticGpu(): Promise<boolean> {
+    if (!this.mapCosmeticGpuSuspended) return false;
+    this.mapCosmeticGpuSuspended = false;
+    const wing = this.wingOverlay.currentWingId;
+    const mount = this.mountOverlay.currentMountId;
+    if (wing) await this.setPlayerWing(wing, false);
+    if (mount) await this.setPlayerMount(mount, false);
+    if (this.lastName) {
+      await this.setPlayerNameplate(
+        this.lastName,
+        this.lastNameplateTitle,
+        this.lastNameplateGif,
+        this.lastRedName,
+      );
+    }
+    return true;
+  }
+
   private applyMountBodyLift(): void {
     if (!this.playerSprite) return;
-    this.playerSprite.y = this.mountOverlay.currentMountId
-      ? -MOUNT_BODY_LIFT
-      : 0;
+    /* Atlas off: keep feet on ground even when equip id is set. */
+    this.playerSprite.y =
+      this.mountOverlay.root.visible && this.mountOverlay.currentMountId
+        ? -MOUNT_BODY_LIFT
+        : 0;
   }
 
   setPlayerPos(x: number, y: number): void {
@@ -834,6 +886,8 @@ export class SceneView {
   ): Promise<void> {
     this.lastName = name.slice(0, 8);
     this.lastRedName = redName;
+    this.lastNameplateTitle = titleLabel;
+    this.lastNameplateGif = titleGif;
     const chenghaoId =
       parseChenghaoId(titleGif) || parseChenghaoId(titleLabel) || 0;
     const gif = chenghaoId
@@ -867,7 +921,25 @@ export class SceneView {
 
     if (chenghaoId) {
       await this.chenghaoOverlay.setTitleId(chenghaoId);
-      this.titleBadge.addChild(this.chenghaoOverlay.root);
+      if (this.chenghaoOverlay.root.visible) {
+        this.titleBadge.addChild(this.chenghaoOverlay.root);
+        this.titleBadge.visible = true;
+        this.layoutNameplate();
+        return;
+      }
+      /* Atlas disabled: fall back to text name so 称号仍可见. */
+      this.chenghaoOverlay.clear();
+      const lab = new BitmapLabel();
+      await lab.setText(chenghaoLabel(chenghaoId).slice(0, 8), CBE.inkChat, {
+        uc3: true,
+        smooth: false,
+        outline: true,
+        outlineThin: true,
+      });
+      lab.anchor.set(0.5, 1);
+      lab.scale.set(NAMEPLATE_SCALE);
+      this.titleTextLabel = lab;
+      this.titleBadge.addChild(lab);
       this.titleBadge.visible = true;
       this.layoutNameplate();
       return;
@@ -1560,6 +1632,14 @@ export class SceneView {
     this.applyPlayerFrame(true);
     const body = this.playerSprite as Sprite | null;
     if (body) body.visible = true;
+    if (this.lastName) {
+      void this.setPlayerNameplate(
+        this.lastName,
+        this.lastNameplateTitle,
+        this.lastNameplateGif,
+        this.lastRedName,
+      );
+    }
     this.actors.nudgeAfterGpuResume();
 
     // Status badge plates are Graphics — UC3 glyphs return via refreshAllUc3Labels

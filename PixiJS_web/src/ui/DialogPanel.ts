@@ -4,6 +4,7 @@ import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
+import { replaceGraphics } from "../render/gpuResume";
 
 /** Visible option rows per page (hangup skill list / long NPC menus). */
 const OPTION_PAGE_SIZE = 7;
@@ -19,6 +20,7 @@ export type MedicineBuyQtyState = {
 };
 
 export class DialogPanel extends Container {
+  private dim = new Graphics();
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
@@ -34,13 +36,26 @@ export class DialogPanel extends Container {
     super();
     this.visible = false;
     this.eventMode = "none";
-    const dim = new Graphics()
+    this.paintDim();
+    this.dim.eventMode = "static";
+    this.dim.on("pointertap", (e) => e.stopPropagation());
+    this.addChild(this.dim);
+    this.addChild(this.box);
+  }
+
+  private paintDim(): void {
+    this.dim
+      .clear()
       .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
       .fill({ color: 0x000000, alpha: 0.4 });
-    dim.eventMode = "static";
-    dim.on("pointertap", (e) => e.stopPropagation());
-    this.addChild(dim);
-    this.addChild(this.box);
+  }
+
+  private remountChrome(): void {
+    this.dim = replaceGraphics(this.dim);
+    this.paintDim();
+    this.dim.eventMode = "static";
+    this.dim.on("pointertap", (e) => e.stopPropagation());
+    this.box = replaceGraphics(this.box);
   }
 
   hide(): void {
@@ -49,6 +64,8 @@ export class DialogPanel extends Container {
     this.dialog = null;
     this.medicineBuy = null;
     this.eventMode = "none";
+    for (const t of this.labels) t.destroy();
+    this.labels = [];
   }
 
   show(dialog: NpcDialog): void {
@@ -56,6 +73,7 @@ export class DialogPanel extends Container {
     this.dialog = dialog;
     this.cursorIndex = 0;
     this.eventMode = "static";
+    this.remountChrome();
     this.visible = true;
     void this.redraw();
   }
@@ -70,6 +88,7 @@ export class DialogPanel extends Container {
     };
     this.cursorIndex = 0;
     this.eventMode = "static";
+    this.remountChrome();
     this.visible = true;
     void this.redraw();
   }
@@ -129,6 +148,13 @@ export class DialogPanel extends Container {
     }
     this.hide();
     this.onClose?.();
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics; redraw if open. */
+  nudgeAfterGpuResume(): void {
+    this.remountChrome();
+    if (this.visible) void this.redraw();
   }
 
   private async redraw(): Promise<void> {

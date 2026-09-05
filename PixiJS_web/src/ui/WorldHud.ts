@@ -5,7 +5,6 @@ import {
   LCD_WIDTH,
   WORLD_BOTTOM_H,
   WORLD_TOP_H,
-  drawLocBanner,
   makePixelText,
 } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
@@ -24,7 +23,7 @@ import {
 } from "../resources/actor";
 import { fetchResourceBytes } from "../resources/loader";
 import { lookupSMapAlias } from "../resources/smap";
-import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   createPanelTipState,
   drawPanelTipOverlay,
@@ -134,11 +133,19 @@ export class WorldHud extends Container {
   onPartyChanged: ((mateCount: number) => void) | null = null;
 
   private locText: BitmapLabel;
+  private locBannerGfx = new Graphics();
   private portraitHost = new Container();
   private portraitFrameHost = new Container();
   private tiaoHost = new Container();
   private hpFill = new Graphics();
   private spFill = new Graphics();
+  /** Opaque HUD bands (die after GL restore — remount in nudge). */
+  private topDeepGfx = new Graphics();
+  private topStatusGfx = new Graphics();
+  private topBelowGfx = new Graphics();
+  private softBgGfx = new Graphics();
+  private softFxGfx = new Graphics();
+  private chatBgGfx = new Graphics();
   private iconSlots: Container[] = [];
   private expHost = new Container();
   private expFill: Sprite | null = null;
@@ -159,6 +166,11 @@ export class WorldHud extends Container {
   private partySlots: PartySlot[] = [];
   private partyTiao: Texture | null = null;
   private handkuangTex: Texture | null = null;
+  /** Soft-row GIF sprites (menu / hang / home) — remount after GL restore. */
+  private softArtSprites: Sprite[] = [];
+  private tiaoChrome: Sprite | null = null;
+  private lastLevel = 1;
+  private lastExp01 = 0.1;
 
   /**
    * Dream 29* instance countdown (CBE local timer; no WT packet).
@@ -200,23 +212,15 @@ export class WorldHud extends Container {
     this.bottom.eventMode = "static";
 
     // Location floats on deep/map tint; status is the opaque olive band.
-    this.top.addChild(
-      new Graphics().rect(0, 0, LCD_WIDTH, STATUS_BG_Y).fill({ color: CBE.bgDeep }),
-    );
-    this.top.addChild(
-      new Graphics()
-        .rect(0, STATUS_BG_Y, LCD_WIDTH, STATUS_BG_H)
-        .fill({ color: CBE.bgHudRow }),
-    );
-    this.top.addChild(
-      new Graphics()
-        .rect(0, STATUS_BG_Y + STATUS_BG_H, LCD_WIDTH, WORLD_TOP_H - STATUS_BG_Y - STATUS_BG_H)
-        .fill({ color: CBE.bgDeep }),
-    );
+    this.paintTopBands();
+    this.top.addChild(this.topDeepGfx, this.topStatusGfx, this.topBelowGfx);
 
-    const bannerGfx = new Graphics();
-    this.top.addChild(bannerGfx);
-    this.locText = drawLocBanner(bannerGfx, this.top, "场景", 2);
+    this.top.addChild(this.locBannerGfx);
+    this.paintLocBanner();
+    this.locText = makePixelText("场景", 12, CBE.ink);
+    this.locText.anchor.set(0.5, 0.5);
+    this.locText.position.set(Math.round(LCD_WIDTH / 2), Math.round(2 + 24 / 2));
+    this.top.addChild(this.locText);
 
     // handkuang.gif portrait frame (same asset as equip slots); art in mountArt.
     this.portraitFrameHost.position.set(PORTRAIT_FRAME_X, PORTRAIT_FRAME_Y);
@@ -252,27 +256,8 @@ export class WorldHud extends Container {
     this.top.addChild(this.expHost);
 
     // Soft row + chat (reference: no bag counter on soft bar)
-    this.bottom.addChild(
-      new Graphics().rect(0, 0, LCD_WIDTH, SOFT_H).fill({ color: CBE.bgPanel }),
-    );
-    const softFx = new Graphics();
-    softFx
-      .moveTo(2, 4)
-      .lineTo(2, 2)
-      .lineTo(14, 2)
-      .stroke({ width: 1, color: CBE.borderBright });
-    softFx
-      .moveTo(LCD_WIDTH - 2, 4)
-      .lineTo(LCD_WIDTH - 2, 2)
-      .lineTo(LCD_WIDTH - 14, 2)
-      .stroke({ width: 1, color: CBE.borderBright });
-    this.bottom.addChild(softFx);
-
-    this.bottom.addChild(
-      new Graphics()
-        .rect(0, SOFT_H, LCD_WIDTH, WORLD_BOTTOM_H - SOFT_H)
-        .fill({ color: CBE.chatBg }),
-    );
+    this.paintSoftBands();
+    this.bottom.addChild(this.softBgGfx, this.softFxGfx, this.chatBgGfx);
 
     this.hangLabel = makePixelText("挂机", 12, 0xffffff);
     this.hangLabel.anchor.set(0.5, 0.5);
@@ -312,6 +297,41 @@ export class WorldHud extends Container {
   async mountArt(): Promise<void> {
     if (this.artReady) return;
     this.artReady = true;
+    await this.remountTextureChrome();
+  }
+
+  /**
+   * Rebuild UIsh / EXP / softkey / tiao / dream-timer Sprites from CPU RGBA.
+   * Required after webglcontextrestored — nudgeTextureSource leaves fake-alive blacks.
+   */
+  async remountTextureChrome(): Promise<void> {
+    for (const slot of this.iconSlots) {
+      slot.removeChildren().forEach((c) => c.destroy({ children: true }));
+    }
+    if (this.tiaoChrome) {
+      try {
+        if (this.tiaoChrome.parent) this.tiaoHost.removeChild(this.tiaoChrome);
+        this.tiaoChrome.destroy({ texture: false });
+      } catch {
+        /* ignore */
+      }
+      this.tiaoChrome = null;
+    }
+    this.expHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.expFill = null;
+    this.expDigits = null;
+    for (const s of this.softArtSprites) {
+      try {
+        if (s.parent) s.parent.removeChild(s);
+        s.destroy({ texture: false });
+      } catch {
+        /* ignore */
+      }
+    }
+    this.softArtSprites = [];
+    this.dreamTimerHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.dreamTimerIcon = null;
+    this.dreamTimerDigits = null;
 
     this.handkuangTex = await tryLoadUiTexture("handkuang.gif");
     if (this.handkuangTex) {
@@ -323,7 +343,8 @@ export class WorldHud extends Container {
 
     const tiao = await tryLoadUiTexture("tiao.gif");
     if (tiao) {
-      this.tiaoHost.addChildAt(uiSprite(tiao), 0);
+      this.tiaoChrome = uiSprite(tiao);
+      this.tiaoHost.addChildAt(this.tiaoChrome, 0);
       this.partyTiao = tiao;
     }
 
@@ -331,17 +352,14 @@ export class WorldHud extends Container {
       const tex = await tryLoadUiTexture(ICON_FILES[i]!);
       if (!tex) continue;
       const slot = this.iconSlots[i]!;
-      slot.removeChildren().forEach((c) => c.destroy());
       slot.addChild(uiSprite(tex));
     }
 
-    // uiexp 39×13 left badge; level digits in pocket; exp0/exp1 track
     const uiexp = await tryLoadUiTexture("uiexp.gif");
     if (uiexp) this.expHost.addChild(uiSprite(uiexp));
     this.expDigits = await DigitStrip.expNum();
     if (this.expDigits) {
       this.expHost.addChild(this.expDigits.root);
-      // Pocket sits in left of uiexp; cell 5×6
       this.expDigits.setText("01", 3, 3);
     }
     const track = await tryLoadUiTexture("exp0.gif");
@@ -363,6 +381,7 @@ export class WorldHud extends Container {
       spr.eventMode = "none";
       spr.position.set(2, 3);
       this.bottom.addChild(spr);
+      this.softArtSprites.push(spr);
     }
     const hangBg = await tryLoadUiTexture("UI7.gif");
     const hangX = HANG_BTN_X;
@@ -371,10 +390,19 @@ export class WorldHud extends Container {
       spr.eventMode = "none";
       spr.position.set(hangX, 0);
       this.bottom.addChild(spr);
+      this.softArtSprites.push(spr);
     }
+    // Always re-add: remount puts hangBg after hangLabel and would cover 「挂机」.
     this.hangLabel.eventMode = "none";
     this.hangLabel.position.set(hangX + HANG_BTN_W / 2, SOFT_H / 2);
     this.bottom.addChild(this.hangLabel);
+    void this.hangLabel.show("挂机", 0xffffff, {
+      fontSize: 12,
+      outline: false,
+      uc3: true,
+      smooth: false,
+      crisp: true,
+    });
 
     const home = await tryLoadUiTexture("UIxia3.gif");
     if (home) {
@@ -382,12 +410,14 @@ export class WorldHud extends Container {
       spr.eventMode = "none";
       spr.position.set(LCD_WIDTH - 27, 3);
       this.bottom.addChild(spr);
+      this.softArtSprites.push(spr);
     }
     // Art mounts after hit targets — re-raise so pointer reaches softkeys / chat.
     this.bottom.addChild(this.chatHit, this.menuHit, this.hangHit, this.homeHit);
 
     await this.mountDreamTimerArt();
-    this.setLevel(1, 0.1);
+    this.setLevel(this.lastLevel, this.lastExp01);
+    this.refreshChatStrip();
   }
 
   async setPortraitActor(actorName: string): Promise<void> {
@@ -409,7 +439,13 @@ export class WorldHud extends Container {
       );
       const tex = Texture.from(canvas);
       tex.source.scaleMode = "nearest";
-      this.portraitHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+      this.portraitHost.removeChildren().forEach((c) => {
+        try {
+          c.destroy({ children: true, texture: true, textureSource: true });
+        } catch {
+          /* ignore */
+        }
+      });
       const spr = new Sprite(tex);
       spr.width = PORTRAIT_INNER;
       spr.height = PORTRAIT_INNER;
@@ -467,6 +503,9 @@ export class WorldHud extends Container {
   }
 
   private async mountDreamTimerArt(): Promise<void> {
+    this.dreamTimerHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.dreamTimerIcon = null;
+    this.dreamTimerDigits = null;
     const tex = await tryLoadUiTexture("ui_timer.gif");
     if (tex) {
       this.dreamTimerIcon = uiSprite(tex);
@@ -480,6 +519,7 @@ export class WorldHud extends Container {
       this.dreamTimerHost.addChild(this.dreamTimerDigits.root);
     }
     this.layoutDreamTimer();
+    if (this.dreamTimerHost.visible) this.paintDreamTimer();
   }
 
   private async loadDreamHudTtlMs(): Promise<number> {
@@ -532,32 +572,110 @@ export class WorldHud extends Container {
     this.spFill.clear().rect(x, WorldHud.SP_Y, spW, WorldHud.FILL_H).fill({ color: 0x38a0e0 });
   }
 
+  private paintTopBands(): void {
+    this.topDeepGfx
+      .clear()
+      .rect(0, 0, LCD_WIDTH, STATUS_BG_Y)
+      .fill({ color: CBE.bgDeep });
+    this.topStatusGfx
+      .clear()
+      .rect(0, STATUS_BG_Y, LCD_WIDTH, STATUS_BG_H)
+      .fill({ color: CBE.bgHudRow });
+    this.topBelowGfx
+      .clear()
+      .rect(
+        0,
+        STATUS_BG_Y + STATUS_BG_H,
+        LCD_WIDTH,
+        WORLD_TOP_H - STATUS_BG_Y - STATUS_BG_H,
+      )
+      .fill({ color: CBE.bgDeep });
+  }
+
+  private paintLocBanner(): void {
+    const y = 2;
+    const h = 24;
+    this.locBannerGfx
+      .clear()
+      .rect(0, y, LCD_WIDTH, h)
+      .fill({ color: CBE.titlePill });
+    this.locBannerGfx
+      .moveTo(0, y + h)
+      .lineTo(LCD_WIDTH, y + h)
+      .stroke({ width: 1, color: CBE.border });
+    this.locBannerGfx
+      .moveTo(0, y)
+      .lineTo(LCD_WIDTH, y)
+      .stroke({ width: 1, color: CBE.borderDim });
+  }
+
+  private paintSoftBands(): void {
+    this.softBgGfx
+      .clear()
+      .rect(0, 0, LCD_WIDTH, SOFT_H)
+      .fill({ color: CBE.bgPanel });
+    this.softFxGfx.clear();
+    this.softFxGfx
+      .moveTo(2, 4)
+      .lineTo(2, 2)
+      .lineTo(14, 2)
+      .stroke({ width: 1, color: CBE.borderBright });
+    this.softFxGfx
+      .moveTo(LCD_WIDTH - 2, 4)
+      .lineTo(LCD_WIDTH - 2, 2)
+      .lineTo(LCD_WIDTH - 14, 2)
+      .stroke({ width: 1, color: CBE.borderBright });
+    this.chatBgGfx
+      .clear()
+      .rect(0, SOFT_H, LCD_WIDTH, WORLD_BOTTOM_H - SOFT_H)
+      .fill({ color: CBE.chatBg });
+  }
+
   /**
-   * webglcontextrestored: tiao frames may recover; Graphics fills / canvas
-   * portraits often stay blank until nodes are replaced and redrawn.
+   * webglcontextrestored: remount Graphics bands + UI GIF Texture chrome
+   * (icons / EXP / softkeys / tiao). nudgeTextureSource alone leaves blacks.
    */
   nudgeAfterGpuResume(): void {
-    try {
-      nudgeTextureSource(this.partyTiao);
-      nudgeTextureSource(this.handkuangTex);
-      for (const c of this.tiaoHost.children) {
-        nudgeTextureSource((c as Sprite).texture as Texture | undefined);
-      }
-    } catch {
-      /* ignore */
-    }
+    this.topDeepGfx = replaceGraphics(this.topDeepGfx);
+    this.topStatusGfx = replaceGraphics(this.topStatusGfx);
+    this.topBelowGfx = replaceGraphics(this.topBelowGfx);
+    this.paintTopBands();
+    this.locBannerGfx = replaceGraphics(this.locBannerGfx);
+    this.paintLocBanner();
+    this.softBgGfx = replaceGraphics(this.softBgGfx);
+    this.softFxGfx = replaceGraphics(this.softFxGfx);
+    this.chatBgGfx = replaceGraphics(this.chatBgGfx);
+    this.paintSoftBands();
     this.hpFill = replaceGraphics(this.hpFill);
     this.spFill = replaceGraphics(this.spFill);
-    // Fills must sit above the tiao.gif chrome.
     this.tiaoHost.addChild(this.hpFill, this.spFill);
     this.setVitals(this.lastHp, this.lastMaxHp, this.lastMp, this.lastMaxMp);
     for (const slot of this.partySlots) {
       slot.hpFill = replaceGraphics(slot.hpFill);
       slot.spFill = replaceGraphics(slot.spFill);
     }
-    this.setParty(this.lastParty);
-    if (this.lastPortraitActor) {
-      void this.setPortraitActor(this.lastPortraitActor);
+    if (this.toast.gfx.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    const finishParty = (): void => {
+      /* Rebuild party strip so handkuang/tiao sprites are not dead UiAssets. */
+      this.partyHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+      this.partySlots = [];
+      this.setParty(this.lastParty);
+      if (this.lastPortraitActor) {
+        void this.setPortraitActor(this.lastPortraitActor);
+      }
+      this.refreshChatStrip();
+    };
+    if (this.artReady) {
+      void this.remountTextureChrome()
+        .then(finishParty)
+        .catch((e) => {
+          console.warn("[hud] texture chrome remount", e);
+          finishParty();
+        });
+    } else {
+      finishParty();
     }
   }
 
@@ -703,7 +821,13 @@ export class WorldHud extends Container {
       );
       const tex = Texture.from(canvas);
       tex.source.scaleMode = "nearest";
-      slot.portrait.removeChildren().forEach((c) => c.destroy({ children: true }));
+      slot.portrait.removeChildren().forEach((c) => {
+        try {
+          c.destroy({ children: true, texture: true, textureSource: true });
+        } catch {
+          /* ignore */
+        }
+      });
       const spr = new Sprite(tex);
       spr.width = PARTY_FACE;
       spr.height = PARTY_FACE;
@@ -715,8 +839,10 @@ export class WorldHud extends Container {
 
   setLevel(level: number, exp01: number): void {
     const lv = Math.max(0, Math.min(99, level | 0));
-    this.expDigits?.setText(String(lv).padStart(2, "0"), 3, 3);
     const frac = Math.min(1, Math.max(0, exp01));
+    this.lastLevel = lv;
+    this.lastExp01 = frac;
+    this.expDigits?.setText(String(lv).padStart(2, "0"), 3, 3);
     // exp1.gif is 200×2; scale width by fraction
     if (this.expFill) this.expFill.width = Math.max(1, Math.floor(200 * frac));
   }

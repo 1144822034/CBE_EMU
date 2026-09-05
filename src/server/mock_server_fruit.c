@@ -31,6 +31,7 @@ enum
 typedef struct
 {
     u8 enabled;
+    u8 showEntry;
     u8 currencyType;
     u32 creditsPerUnit;
     u32 minInsert;
@@ -71,6 +72,7 @@ static void vm_mock_fruit_apply_defaults(void)
 
     memset(&g_vm_mock_fruit_config, 0, sizeof(g_vm_mock_fruit_config));
     g_vm_mock_fruit_config.enabled = 1;
+    g_vm_mock_fruit_config.showEntry = 1;
     g_vm_mock_fruit_config.currencyType = VM_MOCK_FRUIT_CURRENCY_GOLD;
     g_vm_mock_fruit_config.creditsPerUnit = 10;
     g_vm_mock_fruit_config.minInsert = 1;
@@ -117,16 +119,18 @@ static bool vm_mock_fruit_config_row(void *contextValue, unsigned int columnCoun
     if (values[0] && vm_mock_mysql_parse_u32(values[0], lengths[0], &tmp))
         cfg->enabled = (u8)tmp;
     if (values[1] && vm_mock_mysql_parse_u32(values[1], lengths[1], &tmp))
-        cfg->currencyType = (u8)tmp;
+        cfg->showEntry = (u8)tmp;
     if (values[2] && vm_mock_mysql_parse_u32(values[2], lengths[2], &tmp))
-        cfg->creditsPerUnit = tmp;
+        cfg->currencyType = (u8)tmp;
     if (values[3] && vm_mock_mysql_parse_u32(values[3], lengths[3], &tmp))
-        cfg->minInsert = tmp;
+        cfg->creditsPerUnit = tmp;
     if (values[4] && vm_mock_mysql_parse_u32(values[4], lengths[4], &tmp))
-        cfg->maxInsert = tmp;
+        cfg->minInsert = tmp;
     if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
-        cfg->bonusChance = (u8)tmp;
+        cfg->maxInsert = tmp;
     if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
+        cfg->bonusChance = (u8)tmp;
+    if (values[7] && vm_mock_mysql_parse_u32(values[7], lengths[7], &tmp))
         cfg->bonusExtraPercent = (u8)tmp;
     return true;
 }
@@ -186,6 +190,7 @@ static bool vm_mock_fruit_ensure_tables(void)
             "CREATE TABLE IF NOT EXISTS server_fruit_config ("
             "id TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "show_entry TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "currency_type TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "credits_per_unit INT UNSIGNED NOT NULL DEFAULT 10,"
             "min_insert INT UNSIGNED NOT NULL DEFAULT 1,"
@@ -193,8 +198,12 @@ static bool vm_mock_fruit_ensure_tables(void)
             "bonus_chance TINYINT UNSIGNED NOT NULL DEFAULT 8,"
             "bonus_extra_percent TINYINT UNSIGNED NOT NULL DEFAULT 50,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
-            "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY (id)) ENGINE=InnoDB") ||
-        !vm_mysql_exec(
+            "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY (id)) ENGINE=InnoDB"))
+        return false;
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_fruit_config ADD COLUMN "
+        "show_entry TINYINT UNSIGNED NOT NULL DEFAULT 1");
+    if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_fruit_wheel ("
             "slot_index TINYINT UNSIGNED NOT NULL,"
             "fruit_id TINYINT UNSIGNED NOT NULL DEFAULT 0,"
@@ -205,8 +214,11 @@ static bool vm_mock_fruit_ensure_tables(void)
         return false;
     (void)vm_mysql_exec(
         "INSERT IGNORE INTO server_fruit_config "
-        "(id,enabled,currency_type,credits_per_unit,min_insert,max_insert,"
-        "bonus_chance,bonus_extra_percent) VALUES (1,1,0,10,1,999,8,50)");
+        "(id,enabled,show_entry,currency_type,credits_per_unit,min_insert,"
+        "max_insert,bonus_chance,bonus_extra_percent) "
+        "VALUES (1,1,1,0,10,1,999,8,50)");
+    (void)vm_mysql_exec(
+        "UPDATE server_fruit_config SET show_entry=0 WHERE enabled=0");
     if (!vm_mock_fruit_seed_default_wheel_rows())
         return false;
     ready = true;
@@ -223,9 +235,9 @@ static void vm_mock_fruit_load_config(bool force)
     if (!vm_mock_fruit_ensure_tables())
         return;
     if (vm_mysql_query(
-            "SELECT enabled,currency_type,credits_per_unit,min_insert,max_insert,"
-            "bonus_chance,bonus_extra_percent FROM server_fruit_config WHERE id=1 "
-            "LIMIT 1",
+            "SELECT enabled,show_entry,currency_type,credits_per_unit,min_insert,"
+            "max_insert,bonus_chance,bonus_extra_percent FROM server_fruit_config "
+            "WHERE id=1 LIMIT 1",
             vm_mock_fruit_config_row, &g_vm_mock_fruit_config))
     {
         (void)vm_mysql_query(
@@ -260,9 +272,9 @@ void vm_mock_fruit_admin_reload_config(void)
     vm_mock_fruit_load_config(true);
 }
 
-bool vm_mock_fruit_admin_save_config(u8 enabled, u8 currencyType, u32 creditsPerUnit,
-                                     u32 minInsert, u32 maxInsert, u8 bonusChance,
-                                     u8 bonusExtraPercent)
+bool vm_mock_fruit_admin_save_config(u8 enabled, u8 showEntry, u8 currencyType,
+                                     u32 creditsPerUnit, u32 minInsert, u32 maxInsert,
+                                     u8 bonusChance, u8 bonusExtraPercent)
 {
     char query[768];
 
@@ -271,16 +283,17 @@ bool vm_mock_fruit_admin_save_config(u8 enabled, u8 currencyType, u32 creditsPer
     snprintf(
         query, sizeof(query),
         "INSERT INTO server_fruit_config "
-        "(id,enabled,currency_type,credits_per_unit,min_insert,max_insert,"
-        "bonus_chance,bonus_extra_percent) VALUES "
-        "(1,%u,%u,%u,%u,%u,%u,%u) "
+        "(id,enabled,show_entry,currency_type,credits_per_unit,min_insert,"
+        "max_insert,bonus_chance,bonus_extra_percent) VALUES "
+        "(1,%u,%u,%u,%u,%u,%u,%u,%u) "
         "ON DUPLICATE KEY UPDATE "
-        "enabled=VALUES(enabled),currency_type=VALUES(currency_type),"
+        "enabled=VALUES(enabled),show_entry=VALUES(show_entry),"
+        "currency_type=VALUES(currency_type),"
         "credits_per_unit=VALUES(credits_per_unit),min_insert=VALUES(min_insert),"
         "max_insert=VALUES(max_insert),bonus_chance=VALUES(bonus_chance),"
         "bonus_extra_percent=VALUES(bonus_extra_percent)",
-        (u32)enabled, (u32)currencyType, creditsPerUnit, minInsert, maxInsert,
-        (u32)bonusChance, (u32)bonusExtraPercent);
+        (u32)enabled, (u32)showEntry, (u32)currencyType, creditsPerUnit, minInsert,
+        maxInsert, (u32)bonusChance, (u32)bonusExtraPercent);
     if (!vm_mysql_exec(query))
         return false;
     g_vm_mock_fruit_config_loaded = false;
@@ -819,7 +832,9 @@ static u32 vm_net_mock_build_fruit_status_response(u8 *out, u32 outCap)
                                     cfg ? cfg->maxInsert : 999) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "hasWin", winChips > 0 ? 1u : 0u) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "enabled",
-                                    cfg && cfg->enabled ? 1u : 0u))
+                                    cfg && cfg->enabled ? 1u : 0u) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "showEntry",
+                                    cfg && cfg->enabled && cfg->showEntry ? 1u : 0u))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     return vm_mock_fruit_finish_packet(out, pos, 1);

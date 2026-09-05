@@ -27,8 +27,8 @@ typedef struct
 
     /* Skill / duel modifiers */
     u32 jobSkillAttackBonusPercent; /* PvE skill +%; default 5 */
-    u32 naVariancePercent;          /* duel NA ±%; default 5 */
-    u32 skillVariancePercent;       /* duel skill ±%; default 8 */
+    u32 naVariancePercent;          /* NA ±% PvE+duel; default 5 */
+    u32 skillVariancePercent;       /* skill ±% PvE+duel; default 8 */
     u32 duelJobBonusTianjiPercent;  /* job 1; default 10 */
     u32 duelJobBonusHuanjianPercent;/* job 2; default 8 */
     u32 duelJobBonusGuidaoPercent;  /* job 3; default 12 */

@@ -20,7 +20,7 @@
 | spawn/claim/despawn | 只改 DB + `g_vm_mock_world_boss_rt`；**不** `inject`/`remove` 写盘 |
 | WT18 | ACTIVE 同图时内存 splice 一行 kind=3（wire=250）；不落盘；content_version stamp 打破 clientmiss |
 | Pixi | `GET /api/world-boss-active` + `[WBOSS:*]` 聊天 overlay；Boss 不再 `forceReload` SCE |
-| 一次性清理 | 启用后首次 tick：`legacy-db-overlay` 扫 binding/SCE 残留（不广播 despawn） |
+| 一次性清理 | 启用后首次 tick：`legacy-db-overlay` **只**清 MySQL wire≠real binding（`sce_write=0`）；**不**改磁盘 `.sce` |
 
 ## 改点
 
@@ -40,6 +40,13 @@
 - CBE：进 Boss 图 WT18 叠包可见；despawn 后重下无残留。
 - `make -j2`。
 
+## 回归（2026-09-01）
+
+曾漏网：`clear_orphan_spawns` 仍调 `runtime_remove_*` → `admin_save_all`，despawn/legacy
+会改写户外图（例：`27深渊沼泽_04.sce`）。已改为 binding-only purge；`remove_at` 在
+dropped==0 时也不再写盘。
+
 ## 仍开放
 
-- 历史已污染的户外 `.sce` 依赖进程首次 tick 的 one-shot 清理；若清理前有人只读旧 fs 副本，需再触发 Admin 清除或重启服务。
+- 历史已污染的户外 `.sce` **不会**被自动回写修复；需从库存 `bin/JHOnlineData` 拷回
+  `web/fs/JHOnlineData`，或 Admin 手工编辑战斗点后发布。

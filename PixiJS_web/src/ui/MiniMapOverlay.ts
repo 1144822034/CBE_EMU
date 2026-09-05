@@ -1,4 +1,5 @@
 import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import { CBE, LCD_WIDTH, WORLD_TOP_H } from "./constants";
 import { mapBlocksAt, type MapPreview } from "../resources/map";
 
@@ -30,6 +31,15 @@ export class MiniMapOverlay extends Container {
     this.position.set(x, y);
     this.frame.clear();
     this.frame.rect(0, 0, this.mapW, this.mapH).stroke({ width: 2, color: 0xe02020 });
+  }
+
+  /** webglcontextrestored: remount frame/dots; force bitmap rebuild next update. */
+  nudgeAfterGpuResume(): void {
+    this.frame = replaceGraphics(this.frame);
+    this.dots = replaceGraphics(this.dots);
+    if (!this.visible) return;
+    this.layoutChrome();
+    this.lastKey = "";
   }
 
   /**

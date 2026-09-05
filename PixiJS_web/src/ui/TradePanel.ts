@@ -4,6 +4,7 @@
  * ② 确认交易 unlocks only after both sides locked/submitted.
  */
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -95,6 +96,17 @@ export class TradePanel extends Container {
       if (this.visible && this.mode === "money") this.redraw();
     };
     this.ime.onSubmit = () => this.commitMoney();
+  }
+
+  /** webglcontextrestored: remount panel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    this.inputHit = replaceGraphics(this.inputHit);
+    this.inputHit.eventMode = "static";
+    this.inputHit.cursor = "text";
+    this.inputHit.removeAllListeners();
+    this.inputHit.on("pointertap", () => this.focusMoneyInput());
+    if (this.visible) this.redraw();
   }
 
   softkeys(): { left: string; right: string } {

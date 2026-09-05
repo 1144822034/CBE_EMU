@@ -37,6 +37,12 @@ Agent 复用：`.codex/skills/pixijs-android-apk/SKILL.md`。
 
 Manifest：`WAKE_LOCK`、`FOREGROUND_SERVICE`/`_DATA_SYNC`/`_SPECIAL_USE`、`POST_NOTIFICATIONS`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`、`usesCleartextTraffic`
 
+## 2026-09-01 出包
+
+`versionCode` **55** / `1.0.55`，`client_code_version` **36**，服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **36**。  
+含黑屏根因闭合（全量 overlay nudge、会话保留 softReload、native peer cap）。  
+APK：`PixiJS_web/android/app/release/jh_ol.apk`（约 57.1 MB）。覆盖安装会清 WebView（versionCode 变化）。
+
 ## 2026-08-31 出包
 
 `versionCode` **54** / `1.0.54`，`client_code_version` **35**（未升登录门禁；非特别指定不改），服端同为 **35**。  
@@ -53,6 +59,10 @@ APK：`android/app/release/jh_ol.apk`；PC：`electron-release/江湖OL-1.0.48-p
 
 `versionCode` **44** / `1.0.44`，`client_code_version` **24**，服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **24**。  
 含比武禁自动/物品 + 20s 超时普攻。APK：`android/app/release/jh_ol.apk`；PC：`electron-release/江湖OL-1.0.44-portable.exe`。
+
+## 2026-08-31 黑屏根因闭合
+
+见 [`2026-08-31-pixi-black-screen-root-fix.md`](2026-08-31-pixi-black-screen-root-fix.md)：全量 overlay Graphics nudge、softReload 会话保留重进世界、native peer 妆容 cap 收紧。出包仍走本文 `build:android` 流程。
 
 ## 2026-08-19 出包
 

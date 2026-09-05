@@ -2643,6 +2643,7 @@ static void vm_net_mock_battle_arm_subtype10_multi_pve_start(
     g_mockBattleLastIndex = 0;
     g_vm_net_mock_battle_rewarded_serial = 0;
     g_vm_net_mock_battle_rewarded_exp = 0;
+    g_vm_net_mock_battle_rewarded_auto_sell_gold = 0;
     memset(g_vm_net_mock_battle_rewarded_drops, 0,
            sizeof(g_vm_net_mock_battle_rewarded_drops));
     g_vm_net_mock_battle_rewarded_drop_result_count = 0;
@@ -2754,12 +2755,16 @@ static bool vm_net_mock_battle_roll_percent(u32 percent)
 }
 
 /* Commit a successful drop roll into the battle result cache / backpack.
- * Equipment units are one backpack row each; stackables share one row. */
+ * Equipment units are one backpack row each; stackables share one row.
+ * When battle insight is active and the bag cannot accept a unit, auto-sell
+ * that unit for catalog copper (see vm_net_mock_battle_insight_try_auto_sell_drop). */
 static u8 vm_net_mock_battle_commit_drop_grant(
     u32 itemId, u32 grantedCount, u32 enemyCount,
     vm_net_mock_battle_drop_result *results, u8 resultCount)
 {
     u16 grantedSeq = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 resolvedUnits = 0;
 
     if (itemId == 0 || grantedCount == 0 || results == NULL ||
         resultCount >= VM_NET_MOCK_BATTLE_DROP_RESULT_MAX)
@@ -2776,15 +2781,29 @@ static u8 vm_net_mock_battle_commit_drop_grant(
              ++unit)
         {
             u16 oneSeq = 0;
+            u32 soldGold = 0;
 
-            if (!vm_net_mock_role_add_backpack_item(itemId, 1, &oneSeq))
+            if (vm_net_mock_role_add_backpack_item(itemId, 1, &oneSeq))
+            {
+                results[resultCount].itemId = itemId;
+                results[resultCount].seq = oneSeq;
+                results[resultCount].count = 1;
+                results[resultCount].enhanceLevel = 0;
+                ++resultCount;
+                ++grantedEquipUnits;
+                ++resolvedUnits;
+                continue;
+            }
+            if (!vm_net_mock_battle_insight_try_auto_sell_drop(
+                    role, itemId, 1, &soldGold))
+            {
                 break;
-            results[resultCount].itemId = itemId;
-            results[resultCount].seq = oneSeq;
-            results[resultCount].count = 1;
-            results[resultCount].enhanceLevel = 0;
-            ++resultCount;
+            }
+            g_vm_net_mock_battle_rewarded_auto_sell_gold =
+                vm_net_mock_add_capped_u32(
+                    g_vm_net_mock_battle_rewarded_auto_sell_gold, soldGold);
             ++grantedEquipUnits;
+            ++resolvedUnits;
         }
         if (grantedEquipUnits != 0)
         {
@@ -2794,15 +2813,34 @@ static u8 vm_net_mock_battle_commit_drop_grant(
         }
         return resultCount;
     }
-    if (!vm_net_mock_role_add_backpack_item(itemId, grantedCount, &grantedSeq))
-        return resultCount;
-    results[resultCount].itemId = itemId;
-    results[resultCount].seq = grantedSeq;
-    results[resultCount].count = grantedCount;
-    results[resultCount].enhanceLevel = 0;
-    ++resultCount;
-    vm_net_mock_task_progress_after_battle(
-        g_vm_net_mock_battle_enemy_id_current, enemyCount, itemId, grantedCount);
+    if (vm_net_mock_role_add_backpack_item(itemId, grantedCount, &grantedSeq))
+    {
+        results[resultCount].itemId = itemId;
+        results[resultCount].seq = grantedSeq;
+        results[resultCount].count = grantedCount;
+        results[resultCount].enhanceLevel = 0;
+        ++resultCount;
+        resolvedUnits = grantedCount;
+    }
+    else
+    {
+        u32 soldGold = 0;
+
+        if (vm_net_mock_battle_insight_try_auto_sell_drop(
+                role, itemId, grantedCount, &soldGold))
+        {
+            g_vm_net_mock_battle_rewarded_auto_sell_gold =
+                vm_net_mock_add_capped_u32(
+                    g_vm_net_mock_battle_rewarded_auto_sell_gold, soldGold);
+            resolvedUnits = grantedCount;
+        }
+    }
+    if (resolvedUnits != 0)
+    {
+        vm_net_mock_task_progress_after_battle(
+            g_vm_net_mock_battle_enemy_id_current, enemyCount, itemId,
+            resolvedUnits);
+    }
     return resultCount;
 }
 
@@ -2882,6 +2920,7 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
          */
         g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
         g_vm_net_mock_battle_rewarded_exp = 1;
+        g_vm_net_mock_battle_rewarded_auto_sell_gold = 0;
         g_vm_net_mock_battle_reward_rate_suppressed_serial =
             g_mockBattleOperateSessionSerial;
         memset(g_vm_net_mock_battle_rewarded_drops, 0,
@@ -3291,6 +3330,11 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
                 if (marriageMult > 1u)
                     rewardGold = vm_net_mock_mul_capped_u32(rewardGold, marriageMult);
             }
+        }
+        if (g_vm_net_mock_battle_rewarded_auto_sell_gold != 0)
+        {
+            rewardGold = vm_net_mock_add_capped_u32(
+                rewardGold, g_vm_net_mock_battle_rewarded_auto_sell_gold);
         }
     }
     roleMp = vm_net_mock_battle_apply_mp_recovery_once(role, roleMp, recoverMp,
@@ -4064,9 +4108,9 @@ enum
     VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX = 4,
     VM_MOCK_SERVICE_CHAT_NOTICE_MAX = 64,
     /* Per scene-sync/login packet.  Raised 4→10 so login world-history
-     * (up to 30) reaches the bottom faster within MAIN_BUSINESS_OBJECT_MAX. */
+     * (up to 10) reaches the bottom faster within MAIN_BUSINESS_OBJECT_MAX. */
     VM_MOCK_SERVICE_CHAT_POLL_MAX = 10,
-    VM_MOCK_SERVICE_WORLD_CHAT_HISTORY_MAX = 30,
+    VM_MOCK_SERVICE_WORLD_CHAT_HISTORY_MAX = 10,
     VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX = 10,
     VM_MOCK_SERVICE_TEAM_MAX = 16,
     VM_MOCK_SERVICE_TEAM_MEMBER_MAX = 3,
@@ -4283,6 +4327,8 @@ typedef struct vm_mock_service_client_session
      * already cleared so drop-no-account alone would leave CBE/Pixi hanging.
      */
     bool accountKickedPending;
+    /* Set by maintenance mass-kick: next poll delivers tip then closes TCP. */
+    bool maintenanceKickPending;
     u32 onlineRoleId;
     char onlineRoleName[32];
     char onlineRoleTitle[32];
@@ -4532,8 +4578,6 @@ typedef struct vm_mock_service_client_session
     bool sparInviteReplyActive;
     u32 sparInviteSourceClientId;
     u32 sparInviteSourceWireId;
-    /* Earliest scheduler_get_tick_ms() when this client may initiate spar again. */
-    u32 sparInitiateReadyMs;
     bool sparBattleReadyPending;
     u32 sparBattlePeerClientId;
     u32 sparBattlePeerWireId;
@@ -8726,16 +8770,18 @@ static bool vm_mock_world_chat_queue_recent(
     u32 *queuedOut)
 {
     vm_mock_world_chat_history_context context;
-    const char query[] =
-        "SELECT source_role_id,HEX(source_name),HEX(message) FROM ("
-        "SELECT message_id,source_role_id,source_name,message "
-        "FROM world_chat_messages ORDER BY message_id DESC LIMIT 30"
-        ") AS recent ORDER BY message_id ASC";
+    char query[512];
 
     if (queuedOut)
         *queuedOut = 0;
     if (target == NULL || !vm_mock_world_chat_table_ensure())
         return false;
+    snprintf(query, sizeof(query),
+             "SELECT source_role_id,HEX(source_name),HEX(message) FROM ("
+             "SELECT message_id,source_role_id,source_name,message "
+             "FROM world_chat_messages ORDER BY message_id DESC LIMIT %u"
+             ") AS recent ORDER BY message_id ASC",
+             (unsigned)VM_MOCK_SERVICE_WORLD_CHAT_HISTORY_MAX);
     memset(&context, 0, sizeof(context));
     context.target = target;
     if (!vm_mysql_query(query, vm_mock_world_chat_history_row, &context))
@@ -10195,7 +10241,6 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sparInviteReplyActive = false;
     session->sparInviteSourceClientId = 0;
     session->sparInviteSourceWireId = 0;
-    session->sparInitiateReadyMs = 0;
     session->sparBattleReadyPending = false;
     session->sparBattlePeerClientId = 0;
     session->sparBattlePeerWireId = 0;
@@ -13836,7 +13881,6 @@ static bool vm_net_mock_sce_edge_portal_patch_landing(
     int match = -1;
     u8 record[256];
     u32 recordLen = 0;
-    const char *publishError = NULL;
 
     if (errorOut)
         *errorOut = "更新落脚点失败";
@@ -13883,12 +13927,8 @@ static bool vm_net_mock_sce_edge_portal_patch_landing(
             data, &len, VM_NET_MOCK_SCE_EDIT_DECODE_MAX, located[match].offset,
             located[match].end, record, recordLen) ||
         !vm_net_mock_write_scene_resource_bytes(targetScene, data, len,
-                                                errorOut) ||
-        !vm_net_mock_publish_scene_resource(targetScene, &publishError))
+                                                errorOut))
     {
-        if (errorOut && publishError != NULL && *errorOut != NULL &&
-            strcmp(*errorOut, "ok") == 0)
-            *errorOut = publishError;
         free(data);
         free(located);
         return false;

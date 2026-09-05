@@ -5792,8 +5792,12 @@ static u32 vm_net_mock_battle_role_defense_default(void)
  * Miss/dodge returns damage 0; actioninfo keeps a child with valueA=0 and
  * child_flag=3 (dodge). Crit sets child_flag=2 (crit).
  * Hit that would mitigate to 0 still floors to 1; do not coerce miss.
- * Env: CBE_BATTLE_DISABLE_COMBAT_ROLLS=1 restores always-hit pre-roll path;
- *      CBE_BATTLE_FORCE_HIT / FORCE_MISS / FORCE_CRIT override rolls.
+ * Damage variance (before crit; PvE + duel share admin percents):
+ *   NA / monster NA counter ±na_variance_percent (default 5)
+ *   offensive skill / monster skill ±skill_variance_percent (default 8)
+ * Env: CBE_BATTLE_DISABLE_COMBAT_ROLLS=1 restores always-hit pre-roll path
+ *      and disables variance; CBE_BATTLE_FORCE_HIT / FORCE_MISS / FORCE_CRIT
+ *      override hit/crit rolls.
  */
 static u32 vm_net_mock_battle_combat_rand(void)
 {
@@ -5971,6 +5975,56 @@ static u32 vm_net_mock_battle_apply_crit_damage(u32 damage)
     return boosted > 0xffffffffull ? 0xffffffffu : (u32)boosted;
 }
 
+static u32 vm_net_mock_battle_apply_damage_variance(u32 damage)
+{
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 variancePct = combatCfg ? combatCfg->naVariancePercent : 5u;
+    u32 span;
+    u32 roll;
+    u32 pct;
+    uint64_t scaled;
+
+    if (damage == 0)
+        return 0;
+    if (vm_net_mock_battle_combat_rolls_disabled())
+        return damage;
+    if (variancePct > 50u)
+        variancePct = 50u;
+    span = variancePct * 2u + 1u;
+    roll = vm_net_mock_battle_combat_rand() % span;
+    pct = (100u - variancePct) + roll;
+    scaled = ((uint64_t)damage * (uint64_t)pct + 50ull) / 100ull;
+    if (scaled == 0)
+        scaled = 1;
+    return scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
+}
+
+static u32 vm_net_mock_battle_apply_skill_damage_variance(u32 damage)
+{
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 variancePct = combatCfg ? combatCfg->skillVariancePercent : 8u;
+    u32 span;
+    u32 roll;
+    u32 pct;
+    uint64_t scaled;
+
+    if (damage == 0)
+        return 0;
+    if (vm_net_mock_battle_combat_rolls_disabled())
+        return damage;
+    if (variancePct > 50u)
+        variancePct = 50u;
+    span = variancePct * 2u + 1u;
+    roll = vm_net_mock_battle_combat_rand() % span;
+    pct = (100u - variancePct) + roll;
+    scaled = ((uint64_t)damage * (uint64_t)pct + 50ull) / 100ull;
+    if (scaled == 0)
+        scaled = 1;
+    return scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
+}
+
 static u32 vm_net_mock_damage_after_resist(u32 damage, u32 resist)
 {
     const vm_net_mock_combat_formula_config *combatCfg =
@@ -6116,6 +6170,7 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
     damage = vm_net_mock_damage_after_defense(attack, defense);
     if (damage == 0)
         damage = 1;
+    damage = vm_net_mock_battle_apply_damage_variance(damage);
     critical = vm_net_mock_battle_roll_crit(playerStats.crit);
     if (critical)
         damage = vm_net_mock_battle_apply_crit_damage(damage);
@@ -6232,6 +6287,7 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     damage = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_DAMAGE", damage);
     if (damage == 0)
         damage = 1;
+    damage = vm_net_mock_battle_apply_skill_damage_variance(damage);
     critical = vm_net_mock_battle_roll_crit(playerStats.crit);
     if (critical)
         damage = vm_net_mock_battle_apply_crit_damage(damage);
@@ -6305,6 +6361,10 @@ static u32 vm_net_mock_battle_enemy_damage_to_role_ex(u32 enemyId,
     }
     if (damage == 0)
         damage = 1;
+    if (skillMitigateWithResist)
+        damage = vm_net_mock_battle_apply_skill_damage_variance(damage);
+    else
+        damage = vm_net_mock_battle_apply_damage_variance(damage);
     critical = vm_net_mock_battle_roll_crit(monsterCrit);
     if (critical)
     {
@@ -6353,6 +6413,7 @@ static u32 vm_net_mock_battle_enemy_skill_remitigate_to_role(u32 enemyId,
     damage = vm_net_mock_damage_after_resist(attack, resist);
     if (damage == 0)
         damage = 1;
+    damage = vm_net_mock_battle_apply_skill_damage_variance(damage);
     if (keepCrit)
         damage = vm_net_mock_battle_apply_crit_damage(damage);
     {
@@ -11247,6 +11308,50 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
            "price=%u money=%u bag_rows=%u evidence=full-catalog-value-not-discard-1/10\n",
            role->roleId, backpackSeq, itemId, price, role->money,
            role->backpackItemCount);
+    return true;
+}
+
+/*
+ * item.dsh 828: while battle insight is active, monster drops that cannot
+ * enter the bag are auto-sold for catalog copper instead of being lost.
+ * All shop-listed rows use the same discard refund floor(price/10).
+ */
+static u32 vm_net_mock_battle_insight_drop_auto_sell_unit_price(u32 itemId)
+{
+    const vm_net_mock_shop_catalog_item *catalog = NULL;
+
+    if (itemId == 0)
+        return 0;
+    catalog = vm_net_mock_find_shop_catalog_item(itemId);
+    if (catalog == NULL)
+        return 0;
+    return catalog->price / 10u;
+}
+
+static bool vm_net_mock_battle_insight_try_auto_sell_drop(
+    vm_net_mock_role_state *role, u32 itemId, u32 count, u32 *soldGoldOut)
+{
+    u32 unitPrice = 0;
+    u32 sellGold = 0;
+
+    if (soldGoldOut)
+        *soldGoldOut = 0;
+    if (role == NULL || itemId == 0 || count == 0)
+        return false;
+    if (vm_net_mock_role_active_battle_exp_bonus_percent(role) == 0)
+        return false;
+    unitPrice = vm_net_mock_battle_insight_drop_auto_sell_unit_price(itemId);
+    if (unitPrice == 0)
+        return false;
+    sellGold = vm_net_mock_mul_capped_u32(unitPrice, count);
+    if (sellGold == 0)
+        return false;
+    if (soldGoldOut)
+        *soldGoldOut = sellGold;
+    printf("[info][network] mock_battle_insight_auto_sell role=%u item=%u "
+           "count=%u unit_price=%u gold=%u reason=bag-full "
+           "evidence=item.dsh:828\n",
+           role->roleId, itemId, count, unitPrice, sellGold);
     return true;
 }
 

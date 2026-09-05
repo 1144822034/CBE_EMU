@@ -2,6 +2,7 @@
  * Task list: accepted (6/1) vs candidates (6/14), detail / abandon / accept.
  */
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -247,6 +248,13 @@ export class TaskPanel extends Container {
     lab.position.set(px, py);
     this.addChild(lab);
     this.labels.push(lab);
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

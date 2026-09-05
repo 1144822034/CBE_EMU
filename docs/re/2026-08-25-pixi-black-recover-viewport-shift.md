@@ -33,3 +33,10 @@
 1. 息屏亮屏 / focus recover：LCD 居中，无左上黑边；D-pad 可用。
 2. 不应再刷 `restoreContext: context not lost`。
 3. 偶发 alphaMode：strip 或 soft reload，不应永久黑。
+
+## 续（2026-09-02）fitPhoneWrap 抖动跳过未修 shell
+
+| 现象 | 画面缩到左上，右侧/下方大块黑 |
+|------|------------------------------|
+| 根因 | `heightJitterOnly` 提前 return 时未清 IME `translate`、未重钉 canvas `inset:0` + `100%` |
+| 修复 | `stabilizeShellViewport`：`ensureStageFlexCenter` + `ensureCanvasFillsPhoneWrap` + 可选 `repairShellViewportAlignment`；`fitPhoneWrap` 每次结束/抖动跳过都调用；`showPhase` 进世界/战斗等再稳一次 |

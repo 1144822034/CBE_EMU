@@ -1,4 +1,5 @@
 import { Container, Graphics, Rectangle } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -95,6 +96,16 @@ export class FestivalPanel extends Container {
     lbl.y = y;
     this.addChild(lbl);
     this.labels.push(lbl);
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.toast?.gfx?.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

@@ -107,6 +107,17 @@ static void vm_mock_service_team_battle_note_roster_disconnect(
 #include "mock_server_recovered_helpers.inc"
 #include "mock_server_scene_task.c"
 
+static void vm_mock_service_maintenance_tick(void);
+bool vm_mock_service_maintenance_blocks_login(void);
+const char *vm_mock_service_maintenance_login_message_gbk(void);
+void vm_mock_maintenance_admin_get(u8 *activeOut, u32 *lastNoticeUnixOut,
+                                   u8 *kickDoneOut, u32 *kickAtUnixOut,
+                                   u32 *onlineCountOut, u32 *secondsLeftOut);
+bool vm_mock_maintenance_admin_start(char *msgOut, size_t msgCap);
+bool vm_mock_maintenance_admin_stop(char *msgOut, size_t msgCap);
+
+#include "mock_server_maintenance.c"
+
 /* World boss + ladder (after scene_task combat spawn helpers). */
 static void vm_mock_world_boss_tick(void);
 bool vm_mock_world_boss_try_claim_encounter(const char *scene, u32 wireId,
@@ -145,7 +156,11 @@ static void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
                                            u32 victimLevel);
 static void vm_mock_activities_on_kill_progress(u32 enemyId, bool isBoss,
                                                 const char *reason);
+static bool vm_mock_ring_collect_material_remaining(u32 roleId, u32 itemId,
+                                                    u32 *remainingOut);
 static void vm_mock_activities_on_npc_talk(const char *npcName);
+static void vm_mock_activities_on_world_chat(const char *accountId, u32 roleId,
+                                             const char *messageGbk);
 static const char *vm_mock_festival_welcome_text(void);
 static u32 vm_net_mock_build_activities_protocol_response(const u8 *request,
                                                           u32 requestLen,

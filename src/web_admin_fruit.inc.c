@@ -29,6 +29,15 @@ static const char *vm_mock_admin_fruit_slot_label(u32 slot)
     return kLabels[slot];
 }
 
+static u32 vm_mock_admin_fruit_access_mode(const vm_mock_fruit_config *cfg)
+{
+    if (cfg == NULL || !cfg->enabled)
+        return 0u;
+    if (!cfg->showEntry)
+        return 2u;
+    return 1u;
+}
+
 static void vm_mock_admin_render_fruit_page(char *response, size_t responseCap,
                                            const char *query)
 {
@@ -36,6 +45,7 @@ static void vm_mock_admin_render_fruit_page(char *response, size_t responseCap,
     char status[16];
     char message[256];
     const vm_mock_fruit_config *cfg;
+    u32 accessMode;
     u32 slot;
 
     vm_mock_admin_text_init(&page, response, responseCap);
@@ -44,6 +54,7 @@ static void vm_mock_admin_render_fruit_page(char *response, size_t responseCap,
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
     cfg = vm_net_mock_fruit_config_get();
+    accessMode = vm_mock_admin_fruit_access_mode(cfg);
 
     vm_mock_admin_text_appendf(
         &page,
@@ -60,8 +71,11 @@ static void vm_mock_admin_render_fruit_page(char *response, size_t responseCap,
         "table{border-collapse:collapse;width:100%%}th,td{padding:6px;border-bottom:1px solid #eee;font-size:12px}"
         "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px;margin-top:8px}"
         ".slot-name{color:#667085;white-space:nowrap}"
+        ".hint{color:#667085;font-size:13px;line-height:1.5}"
         "</style></head><body><h1>娱乐 · 水果机</h1>"
-        "<p>投币货币与 24 格轮盘倍率/权重可在后台热更新；开奖算法仍在服务端执行，客户端无法改奖。</p>");
+        "<p class=\"hint\">投币货币与 24 格轮盘倍率/权重可在后台热更新；开奖算法仍在服务端执行，客户端无法改奖。"
+        "「只关闭入口显示」时娱乐列表不显示水果机，但已打开面板或直连仍可游玩；"
+        "「全面关闭」时所有水果机操作返回暂未开放。</p>");
     vm_mock_admin_append_tabs(&page, "fruit");
 
     if (status[0] && message[0])
@@ -73,8 +87,10 @@ static void vm_mock_admin_render_fruit_page(char *response, size_t responseCap,
         "<form method=\"post\" action=\"/action\">"
         "<input type=\"hidden\" name=\"action\" value=\"save-fruit-config\">"
         "<div class=\"grid\">"
-        "<div><label>启用</label><select name=\"enabled\">"
-        "<option value=\"1\"%s>开</option><option value=\"0\"%s>关</option></select></div>"
+        "<div><label>开放模式</label><select name=\"access_mode\">"
+        "<option value=\"1\"%s>开</option>"
+        "<option value=\"2\"%s>只关闭入口显示</option>"
+        "<option value=\"0\"%s>全面关闭</option></select></div>"
         "<div><label>投币货币</label><select name=\"currency_type\">"
         "<option value=\"0\"%s>金币</option>"
         "<option value=\"1\"%s>酷宝</option></select></div>"
@@ -85,8 +101,9 @@ static void vm_mock_admin_render_fruit_page(char *response, size_t responseCap,
         "<div><label>送灯概率%%</label><input name=\"bonus_chance\" value=\"%u\"></div>"
         "<div><label>送灯额外+%%</label><input name=\"bonus_extra_percent\" value=\"%u\"></div>"
         "</div><button type=\"submit\">保存基础配置</button></form></section>",
-        cfg && cfg->enabled ? " selected" : "",
-        cfg && !cfg->enabled ? " selected" : "",
+        accessMode == 1u ? " selected" : "",
+        accessMode == 2u ? " selected" : "",
+        accessMode == 0u ? " selected" : "",
         cfg && cfg->currencyType == 0 ? " selected" : "",
         cfg && cfg->currencyType == 1 ? " selected" : "",
         cfg ? cfg->creditsPerUnit : 10u,
@@ -155,7 +172,9 @@ static void vm_mock_admin_handle_fruit_action(vm_mock_service_socket client,
 {
     if (strcmp(action, "save-fruit-config") == 0)
     {
-        u32 enabled = 1;
+        u32 accessMode = 1;
+        u8 enabled = 1;
+        u8 showEntry = 1;
         u32 currencyType = 0;
         u32 creditsPerUnit = 10;
         u32 minInsert = 1;
@@ -164,7 +183,7 @@ static void vm_mock_admin_handle_fruit_action(vm_mock_service_socket client,
         u32 bonusExtra = 50;
         char errMsg[384];
 
-        if (!vm_mock_admin_form_u32(body, "enabled", 1u, &enabled) ||
+        if (!vm_mock_admin_form_u32(body, "access_mode", 2u, &accessMode) ||
             !vm_mock_admin_form_u32(body, "currency_type", 1u, &currencyType) ||
             !vm_mock_admin_form_u32(body, "credits_per_unit", 100000u,
                                     &creditsPerUnit) ||
@@ -177,13 +196,28 @@ static void vm_mock_admin_handle_fruit_action(vm_mock_service_socket client,
             vm_mock_admin_redirect_fruit(client, "error", "表单数值无效");
             return;
         }
+        if (accessMode == 0u)
+        {
+            enabled = 0;
+            showEntry = 0;
+        }
+        else if (accessMode == 2u)
+        {
+            enabled = 1;
+            showEntry = 0;
+        }
+        else
+        {
+            enabled = 1;
+            showEntry = 1;
+        }
         if (minInsert == 0 || maxInsert < minInsert || creditsPerUnit == 0)
         {
             vm_mock_admin_redirect_fruit(client, "error", "投币范围或兑换比例无效");
             return;
         }
         if (vm_mock_fruit_admin_save_config(
-                (u8)enabled, (u8)currencyType, creditsPerUnit, minInsert,
+                enabled, showEntry, (u8)currencyType, creditsPerUnit, minInsert,
                 maxInsert, (u8)bonusChance, (u8)bonusExtra))
         {
             vm_mock_admin_redirect_fruit(client, "ok", "水果机基础配置已保存");

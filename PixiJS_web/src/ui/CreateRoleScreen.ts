@@ -1,4 +1,5 @@
 import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -31,6 +32,18 @@ const SEXES = ["男", "女"];
 type Field = "sex" | "job" | "name";
 
 const bodyCache = new Map<string, Texture>();
+
+/** Free create-role previews after leaving the form (enter world / back to role). */
+export function clearCreateRoleBodyCache(): void {
+  for (const tex of bodyCache.values()) {
+    try {
+      tex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+  }
+  bodyCache.clear();
+}
 
 /** Leave a strip under the CBE panel so footer tip is not clipped by the frame. */
 const PANEL_TOP = 40;
@@ -101,6 +114,18 @@ export class CreateRoleScreen extends Container {
     );
   }
 
+  /** webglcontextrestored: remount banner/frame Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.bannerGfx = replaceGraphics(this.bannerGfx);
+    drawLocBanner(this.bannerGfx, this, "创建角色", 8);
+    this.frame = replaceGraphics(this.frame);
+    this.paintFrame();
+    if (this.toast.gfx.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
+  }
+
   open(): void {
     this.openGen += 1;
     this.field = "sex";
@@ -118,6 +143,8 @@ export class CreateRoleScreen extends Container {
     this.openGen += 1;
     clearPanelTip(this.toast);
     this.ime.hide();
+    clearCreateRoleBodyCache();
+    this.previewHost.removeChildren().forEach((c) => c.destroy({ children: true }));
   }
 
   /** Drop name HTML overlay when leaving create-role (showPhase / cancel). */

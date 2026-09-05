@@ -156,11 +156,11 @@ static void vm_mock_admin_render_combat_page(char *response, size_t responseCap,
         &page, "PvE 技能职业加成%%", "job_skill_attack_bonus_percent",
         cfg ? cfg->jobSkillAttackBonusPercent : 5, "玩家技能最终伤害额外加成");
     vm_mock_admin_combat_field(
-        &page, "决斗普攻浮动±%%", "na_variance_percent",
-        cfg ? cfg->naVariancePercent : 5, "决斗普攻伤害随机浮动幅度");
+        &page, "普攻浮动±%%", "na_variance_percent",
+        cfg ? cfg->naVariancePercent : 5, "PvE/决斗普攻伤害随机浮动幅度");
     vm_mock_admin_combat_field(
-        &page, "决斗技能浮动±%%", "skill_variance_percent",
-        cfg ? cfg->skillVariancePercent : 8, "决斗技能伤害随机浮动幅度");
+        &page, "技能浮动±%%", "skill_variance_percent",
+        cfg ? cfg->skillVariancePercent : 8, "PvE/决斗技能伤害随机浮动幅度");
     vm_mock_admin_combat_field(
         &page, "决斗天机主属性加成%%", "duel_job_bonus_tianji_percent",
         cfg ? cfg->duelJobBonusTianjiPercent : 10, "职业 1");

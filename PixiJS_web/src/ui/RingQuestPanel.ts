@@ -1,4 +1,5 @@
 import { Container, Graphics, Rectangle } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -33,6 +34,7 @@ const RING_TYPE_KILL_BOSS = 3;
 const RING_TYPE_KILL_PLAYER = 4;
 const RING_TYPE_COLLECT = 5;
 const RING_TYPE_SUBMIT_MED = 6;
+const RING_TYPE_WORLD_TRUTH = 8;
 const RING_MED_PER_GROUP = 10;
 
 function wrapText(text: string, maxChars: number): string[] {
@@ -66,6 +68,8 @@ function progressLine(st: RingStatus): string {
       const need = target * RING_MED_PER_GROUP;
       return `需交：${target}组(每组${RING_MED_PER_GROUP}个,共${need}个)`;
     }
+    case RING_TYPE_WORLD_TRUTH:
+      return st.progress >= 1 ? "进度：已发送(可提交)" : "进度：未发送(世界频道)";
     default:
       return `进度：${st.progress}/${target}`;
   }
@@ -137,6 +141,16 @@ export class RingQuestPanel extends Container {
     lbl.y = y;
     this.addChild(lbl);
     this.labels.push(lbl);
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.toast?.gfx?.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

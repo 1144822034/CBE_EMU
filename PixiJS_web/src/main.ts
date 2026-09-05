@@ -1,5 +1,6 @@
 import { actorResourceForJobSex, uiActorResourceForJobSex } from "./resources/actor";
 import { clearUc3TexCache, refreshAllUc3Labels } from "./ui/BitmapLabel";
+import { invalidateUiGpuTextures } from "./ui/UiAssets";
 import { applyUc3FontId, currentUc3FontId, loadUc3Font } from "./resources/uc3Font";
 import { UC3_FONT_OPTIONS, type Uc3FontId } from "./resources/uiFontPreference";
 import { Application, Graphics, Rectangle } from "pixi.js";
@@ -78,7 +79,9 @@ import { RingQuestPanel } from "./ui/RingQuestPanel";
 import {
   NPC_FESTIVAL_EXCHANGE,
   NPC_RING_QUEST,
+  NPC_RING_REFRESH,
   NPC_YANMEN_EXCHANGE,
+  RING_REFRESH_WCOIN,
   activityMsgTip,
   type RingStatus,
 } from "./net/protocolActivities";
@@ -125,11 +128,13 @@ import {
   imeShellClearLockSize,
   imeShellIsActive,
   imeShellLockedSize,
+  ensureCanvasFillsPhoneWrap,
+  ensureStageFlexCenter,
   forceShellWrapCenteringAnchors,
-  repairShellViewportAlignment,
   resetShellViewportLayout,
   SHELL_WRAP_CENTER_TRANSFORM,
   shellViewportSnapshot,
+  stabilizeShellViewport,
 } from "./ui/imeShell";
 import { dismissOverlayIme } from "./ui/dismissOverlayIme";
 import type { RoleRow } from "./net/protocol";
@@ -601,6 +606,11 @@ async function main(): Promise<void> {
         imeShellIsActive() && dW < 16 && sh < prevH && dH > 48;
       if (heightJitterOnly || imeKeyboardShrink) {
         syncTouchBarWidth();
+        syncLcdResolution(lcdCssScaleFromWrap());
+        stabilizeShellViewport({
+          canvas: rendererReady ? (app.canvas as HTMLCanvasElement) : null,
+          allowRepair: !imeShellIsActive(),
+        });
         return;
       }
     }
@@ -611,6 +621,10 @@ async function main(): Promise<void> {
     wrap.style.height = `${Math.floor(LCD_HEIGHT * s)}px`;
     syncTouchBarWidth();
     syncLcdResolution(s);
+    stabilizeShellViewport({
+      canvas: rendererReady ? (app.canvas as HTMLCanvasElement) : null,
+      allowRepair: !imeShellIsActive(),
+    });
   };
   fitPhoneWrap();
   if (touchChromeToggle) {
@@ -704,8 +718,10 @@ async function main(): Promise<void> {
   } else if (touchChromeToggle) {
     wrap.appendChild(touchChromeToggle);
   }
+  ensureStageFlexCenter();
   forceShellWrapCenteringAnchors();
   wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
+  ensureCanvasFillsPhoneWrap(app.canvas as HTMLCanvasElement);
 
   const shell = new PhoneShell(app);
   const touch = new TouchControls();
@@ -1825,7 +1841,12 @@ async function main(): Promise<void> {
     roles.visible = p === "role";
     createRole.visible = p === "create-role";
     // Role delete-confirm ChatIme sits mid-LCD; leave role without cancel left it up.
-    if (p !== "role") roles.cancelDeleteConfirm();
+    if (p !== "role") {
+      roles.cancelDeleteConfirm();
+      roles.releaseBodyPreviews();
+    } else {
+      roles.remountAfterShow();
+    }
     // Chat deferred focus / create-role async redraw can remount HTML <input>
     // after the Pixi layer is hidden — always release when leaving those phases.
     if (p !== "chat") chatPanel.releaseIme();
@@ -1868,16 +1889,29 @@ async function main(): Promise<void> {
       p === "guild" ||
       p === "map";
     menu.visible = p === "menu";
+    if (p === "menu") menu.nudgeAfterGpuResume();
+    else menu.hide();
     battle.visible = p === "battle";
-    dialog.visible = p === "dialog";
-    system.visible = p === "system";
-    enhanceUi.visible = p === "enhance";
+    if (p === "battle") {
+      view.releaseMapCosmeticGpu();
+      view.actors.releaseAllPeerCosmeticGpu();
+    }
+    if (p === "dialog") dialog.visible = true;
+    else dialog.hide();
+    if (p === "system") system.visible = true;
+    else system.hide();
+    if (p === "enhance") enhanceUi.visible = true;
+    else enhanceUi.hide();
     washUi.visible = p === "wash";
     social.visible = p === "social";
     taskUi.visible = p === "quest";
     if (p !== "quest") taskUi.hide();
-    chatPanel.visible = p === "chat";
-    if (p === "chat") chatPanel.selfRoleId = session.selectedRoleId >>> 0;
+    if (p === "chat") {
+      chatPanel.visible = true;
+      chatPanel.selfRoleId = session.selectedRoleId >>> 0;
+    } else {
+      chatPanel.hide();
+    }
     tradeUi.visible = p === "trade";
     guildUi.visible = p === "guild";
     worldMap.visible = p === "map";
@@ -1913,6 +1947,12 @@ async function main(): Promise<void> {
     if (p === "world") {
       syncWorldWalkInput();
       syncWorldStatusBadges();
+      const needPeerCosmetics = view.actors.needsPeerCosmeticGpuResume();
+      void view.resumeMapCosmeticGpu().then((resumedLocal) => {
+        if (resumedLocal || needPeerCosmetics) {
+          view.actors.refreshPeerCosmeticsVisibility();
+        }
+      });
     }
 
     if (p === "splash") shell.setSoftkeys({ left: "确定", right: "" });
@@ -1959,6 +1999,44 @@ async function main(): Promise<void> {
     // Expanded entertainment stays topmost — softkeys control the player.
     if (entertainWeb.isExpanded()) {
       shell.setSoftkeys({ left: "最小化", right: "关闭" });
+    }
+    // Panel / menu transitions can leave IME pan or canvas CSS stale → LCD top-left.
+    if (
+      p === "world" ||
+      p === "battle" ||
+      p === "menu" ||
+      p === "dialog" ||
+      p === "system" ||
+      p === "enhance" ||
+      p === "wash" ||
+      p === "social" ||
+      p === "quest" ||
+      p === "chat" ||
+      p === "trade" ||
+      p === "guild" ||
+      p === "map"
+    ) {
+      requestAnimationFrame(() => {
+        if (!rendererReady) return;
+        if (imeShellIsActive()) {
+          stabilizeShellViewport({
+            canvas: app.canvas as HTMLCanvasElement,
+            allowRepair: false,
+          });
+          return;
+        }
+        const skewed = shellViewportSnapshot().misaligned;
+        if (skewed) {
+          wrap.dataset.fitW = "0";
+          wrap.dataset.fitH = "0";
+          fitPhoneWrap();
+        } else {
+          stabilizeShellViewport({
+            canvas: app.canvas as HTMLCanvasElement,
+            allowRepair: true,
+          });
+        }
+      });
     }
   };
 
@@ -2380,6 +2458,10 @@ async function main(): Promise<void> {
       hud.setIdentity("", "", "");
       cachedRingStatus = null;
       questTracker.setTasks([]);
+    },
+    onSceneSoftResync: (scene) => {
+      console.info(`[world-boss] soft-resync scene=${scene}`);
+      void syncWorldBossOverlayFromApi("soft-resync");
     },
     onEnterScene: async (scene, x, y, opts) => {
       const hasPos = opts?.hasPos !== false;
@@ -3536,7 +3618,7 @@ async function main(): Promise<void> {
       if (guessStatus && !guessStatus.enabled) {
         entries = entries.filter((e) => e.nativePanel !== "guess");
       }
-      if (fruitStatus && !fruitStatus.enabled) {
+      if (fruitStatus && (!fruitStatus.showEntry || !fruitStatus.enabled)) {
         entries = entries.filter((e) => e.nativePanel !== "fruit");
       }
       entertainPanel.open(entries);
@@ -5198,6 +5280,8 @@ async function main(): Promise<void> {
     chatPanel.setEntries(hud.getChatEntries());
     const tipPrefix = type === 7 ? "私聊" : "已发送";
     showGameTip(`${tipPrefix} · ${text.slice(0, 12)}`);
+    /* 世界真心话环：服务端已按全文匹配记进度，刷追踪条 */
+    if (type === 0 && cachedRingStatus?.taskActive) void syncRingQuestTracker();
     return true;
   };
   social.onAction = (kind, action, row) => {
@@ -5868,6 +5952,26 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (action === 284) {
+      dialog.hide();
+      void session.ringRefresh().then(async (r) => {
+        const tip = !r
+          ? "刷新失败"
+          : r.result === 1
+            ? activityMsgTip(r.message, "已刷新跑环")
+            : activityMsgTip(r.message, "刷新失败");
+        hud.pushChat(`[系]${tip}`);
+        showGameTip(tip);
+        if (r?.result === 1) {
+          applyCachedRingStatus(await session.fetchRingStatus());
+          void syncRingQuestTracker();
+        }
+        showPhase("world");
+        syncWorldWalkInput();
+        shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      });
+      return;
+    }
     if (action === 280) {
       dialog.hide();
       skillForgetDialogOpen = false;
@@ -6023,6 +6127,19 @@ async function main(): Promise<void> {
     if ((value >>> 0) === NPC_RING_QUEST) {
       dialog.hide();
       void openRingQuestPanel();
+      return;
+    }
+    if ((value >>> 0) === NPC_RING_REFRESH) {
+      dialog.hide();
+      dialog.show({
+        title: "刷新跑环",
+        body: `确认消耗${RING_REFRESH_WCOIN}酷宝刷新当前跑环任务？\n不消耗今日环数`,
+        options: [
+          { label: "确认刷新", action: 284, value: 1 },
+          { label: "取消", action: 101, value: 0 },
+        ],
+      });
+      showPhase("dialog");
       return;
     }
     if ((value >>> 0) === NPC_LADDER_CHALLENGE) {
@@ -7689,7 +7806,9 @@ dialog.hide();
     });
   };
 
-  /** Open overlay panels use paintCbePanel Graphics — same blank-after-restore as HUD fills. */
+  /** Open overlay panels use paintCbePanel Graphics — same blank-after-restore as HUD fills.
+   * Always remount (including hidden); each panel redraws only if visible.
+   */
   const nudgeOverlayPanelsAfterGpuResume = (): void => {
     const tryNudge = (label: string, fn: () => void): void => {
       try {
@@ -7698,96 +7817,36 @@ dialog.hide();
         console.warn(`[gl] ${label} nudge`, e);
       }
     };
-    tryNudge("chatPanel", () => {
-      if (chatPanel.visible) chatPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("menu", () => {
-      if (menu.visible) menu.nudgeAfterGpuResume();
-    });
-    tryNudge("dialog", () => {
-      if (dialog.visible) dialog.nudgeAfterGpuResume();
-    });
-    tryNudge("approach", () => {
-      if (approach.visible) approach.nudgeAfterGpuResume();
-    });
-    tryNudge("system", () => {
-      if (system.visible) system.nudgeAfterGpuResume();
-    });
-    tryNudge("enhanceUi", () => {
-      if (enhanceUi.visible) enhanceUi.nudgeAfterGpuResume();
-    });
-    tryNudge("washUi", () => {
-      if (washUi.visible) washUi.nudgeAfterGpuResume();
-    });
-    tryNudge("social", () => {
-      if (social.visible) social.nudgeAfterGpuResume();
-    });
-    tryNudge("arenaHud", () => {
-      if (arenaHud.visible) arenaHud.nudgeAfterGpuResume();
-    });
-    tryNudge("arenaPanel", () => {
-      if (arenaPanel.visible) arenaPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("wagerPanel", () => {
-      if (wagerPanel.visible) wagerPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("ladderPanel", () => {
-      if (ladderPanel.visible) ladderPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("guessPanel", () => {
-      if (guessPanel.visible) guessPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("fruitPanel", () => {
-      if (fruitPanel.visible) fruitPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("festivalPanel", () => {
-      if (festivalPanel.visible) festivalPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("yanmenPanel", () => {
-      if (yanmenPanel.visible) yanmenPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("ringQuestPanel", () => {
-      if (ringQuestPanel.visible) ringQuestPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("auctionPanel", () => {
-      if (auctionPanel.visible) auctionPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("entertainPanel", () => {
-      if (entertainPanel.visible) entertainPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("wingPanel", () => {
-      if (wingPanel.visible) wingPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("mountPanel", () => {
-      if (mountPanel.visible) mountPanel.nudgeAfterGpuResume();
-    });
-    tryNudge("taskUi", () => {
-      if (taskUi.visible) taskUi.nudgeAfterGpuResume();
-    });
-    tryNudge("tradeUi", () => {
-      if (tradeUi.visible) tradeUi.nudgeAfterGpuResume();
-    });
-    tryNudge("guildUi", () => {
-      if (guildUi.visible) guildUi.nudgeAfterGpuResume();
-    });
-    tryNudge("worldMap", () => {
-      if (worldMap.visible) worldMap.nudgeAfterGpuResume();
-    });
-    tryNudge("miniMap", () => {
-      if (miniMap.visible) miniMap.nudgeAfterGpuResume();
-    });
-    tryNudge("questTracker", () => {
-      if (questTracker.visible) questTracker.nudgeAfterGpuResume();
-    });
-    tryNudge("title", () => {
-      if (title.visible) title.nudgeAfterGpuResume();
-    });
-    tryNudge("roles", () => {
-      if (roles.visible) roles.nudgeAfterGpuResume();
-    });
-    tryNudge("createRole", () => {
-      if (createRole.visible) createRole.nudgeAfterGpuResume();
-    });
+    tryNudge("chatPanel", () => chatPanel.nudgeAfterGpuResume());
+    tryNudge("menu", () => menu.nudgeAfterGpuResume());
+    tryNudge("dialog", () => dialog.nudgeAfterGpuResume());
+    tryNudge("approach", () => approach.nudgeAfterGpuResume());
+    tryNudge("system", () => system.nudgeAfterGpuResume());
+    tryNudge("enhanceUi", () => enhanceUi.nudgeAfterGpuResume());
+    tryNudge("washUi", () => washUi.nudgeAfterGpuResume());
+    tryNudge("social", () => social.nudgeAfterGpuResume());
+    tryNudge("arenaHud", () => arenaHud.nudgeAfterGpuResume());
+    tryNudge("arenaPanel", () => arenaPanel.nudgeAfterGpuResume());
+    tryNudge("wagerPanel", () => wagerPanel.nudgeAfterGpuResume());
+    tryNudge("ladderPanel", () => ladderPanel.nudgeAfterGpuResume());
+    tryNudge("guessPanel", () => guessPanel.nudgeAfterGpuResume());
+    tryNudge("fruitPanel", () => fruitPanel.nudgeAfterGpuResume());
+    tryNudge("festivalPanel", () => festivalPanel.nudgeAfterGpuResume());
+    tryNudge("yanmenPanel", () => yanmenPanel.nudgeAfterGpuResume());
+    tryNudge("ringQuestPanel", () => ringQuestPanel.nudgeAfterGpuResume());
+    tryNudge("auctionPanel", () => auctionPanel.nudgeAfterGpuResume());
+    tryNudge("entertainPanel", () => entertainPanel.nudgeAfterGpuResume());
+    tryNudge("wingPanel", () => wingPanel.nudgeAfterGpuResume());
+    tryNudge("mountPanel", () => mountPanel.nudgeAfterGpuResume());
+    tryNudge("taskUi", () => taskUi.nudgeAfterGpuResume());
+    tryNudge("tradeUi", () => tradeUi.nudgeAfterGpuResume());
+    tryNudge("guildUi", () => guildUi.nudgeAfterGpuResume());
+    tryNudge("worldMap", () => worldMap.nudgeAfterGpuResume());
+    tryNudge("miniMap", () => miniMap.nudgeAfterGpuResume());
+    tryNudge("questTracker", () => questTracker.nudgeAfterGpuResume());
+    tryNudge("title", () => title.nudgeAfterGpuResume());
+    tryNudge("roles", () => roles.nudgeAfterGpuResume());
+    tryNudge("createRole", () => createRole.nudgeAfterGpuResume());
   };
 
   // alphaMode/TEX_NULL: swallow frame so ticker lives, but must not soft-OK forever.
@@ -7828,6 +7887,11 @@ dialog.hide();
           scanBroken: true,
           extra: { stripped, storm: alphaModeStormCount },
         });
+        try {
+          invalidateUiGpuTextures();
+        } catch (e) {
+          console.warn("[gl] ui texture invalidate", e);
+        }
         try {
           // Town remount during battle contended GL after the map-mask fix and
           // left the fight stage black; nudge only the visible band.
@@ -8089,8 +8153,6 @@ dialog.hide();
       // Flex-center #phone-wrap (no absolute inset / -50%). Soft reset + force
       // anchors; light transform kick only when still skewed (no canvas hide).
       resetShellViewportLayout();
-      forceShellWrapCenteringAnchors();
-      wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
       fitPhoneWrap();
@@ -8099,29 +8161,14 @@ dialog.hide();
       } catch {
         /* ignore */
       }
-      try {
-        const canvas = app.canvas as HTMLCanvasElement;
-        canvas.style.position = "absolute";
-        canvas.style.left = "0";
-        canvas.style.top = "0";
-        canvas.style.right = "0";
-        canvas.style.bottom = "0";
-        canvas.style.width = "100%";
-        canvas.style.height = "100%";
-      } catch {
-        /* ignore */
+      const skewed = stabilizeShellViewport({
+        canvas: app.canvas as HTMLCanvasElement,
+        allowRepair: true,
+      });
+      if (skewed) {
+        console.warn("[gl] shell still misaligned after refit", shellViewportSnapshot());
       }
-      let after = shellViewportSnapshot();
-      if (after.misaligned) {
-        repairShellViewportAlignment();
-        forceShellWrapCenteringAnchors();
-        wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
-        after = shellViewportSnapshot();
-        if (after.misaligned) {
-          console.warn("[gl] shell still misaligned after refit", after);
-        }
-      }
-      return after.misaligned;
+      return skewed;
     };
     try {
       const stillLostBefore = isGlContextLost();
@@ -8165,6 +8212,11 @@ dialog.hide();
         alphaModeStormCount > 0
       ) {
         clearUc3TexCache();
+        try {
+          invalidateUiGpuTextures();
+        } catch (e) {
+          console.warn("[gl] ui texture invalidate", e);
+        }
         try {
           await Promise.race([
             refreshAllUc3Labels(),
@@ -8359,8 +8411,6 @@ dialog.hide();
     // Soft reset only (pre-08-28). Full repair/kick here + recover refit
     // double-hit the compositor on every resume and froze input.
     resetShellViewportLayout();
-    forceShellWrapCenteringAnchors();
-    wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
     wrap.dataset.fitW = "0";
     wrap.dataset.fitH = "0";
     fitPhoneWrap();
@@ -8376,8 +8426,6 @@ dialog.hide();
   window.addEventListener("focus", () => {
     setTextureGcEnabled(true);
     resetShellViewportLayout();
-    forceShellWrapCenteringAnchors();
-    wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
     wrap.dataset.fitW = "0";
     wrap.dataset.fitH = "0";
     fitPhoneWrap();

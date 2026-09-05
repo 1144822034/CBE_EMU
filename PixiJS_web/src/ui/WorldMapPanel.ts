@@ -1,4 +1,5 @@
 import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -256,6 +257,13 @@ export class WorldMapPanel extends Container {
     clearPointerHits(this.rowHits);
     for (const c of this.graph.removeChildren()) c.destroy();
     this.box.clear();
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

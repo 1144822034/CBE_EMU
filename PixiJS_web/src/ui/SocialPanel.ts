@@ -2,6 +2,7 @@
  * Surrounding players / team / friends panels (CBE softkey list style).
  */
 import { Container, Graphics, Sprite, type Texture } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -699,6 +700,16 @@ export class SocialPanel extends Container {
       return acts;
     }
     return ["返回"];
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.toast?.gfx?.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

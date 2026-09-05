@@ -65,8 +65,20 @@ export function getOrCreatePoseTexture(
 
 export function evictPoseTextures(inUseKeys?: ReadonlySet<string>): void {
   if (poseTexCache.size <= POSE_CACHE_HARD) return;
+  trimPoseTextures(POSE_CACHE_SOFT, inUseKeys);
+}
+
+/**
+ * Drop idle pose GPU after distant-peer LOD releases live keys.
+ * Unlike {@link evictPoseTextures}, runs even when under the hard cap.
+ */
+export function trimPoseTextures(
+  soft = POSE_CACHE_SOFT,
+  inUseKeys?: ReadonlySet<string>,
+): void {
+  if (poseTexCache.size <= soft) return;
   for (const [k, tex] of poseTexCache) {
-    if (poseTexCache.size <= POSE_CACHE_SOFT) break;
+    if (poseTexCache.size <= soft) break;
     if (livePoseKeys.has(k) || inUseKeys?.has(k)) continue;
     try {
       tex.destroy(true);

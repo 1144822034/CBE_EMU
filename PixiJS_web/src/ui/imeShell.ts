@@ -177,6 +177,59 @@ export function forceShellWrapCenteringAnchors(): void {
   wrap.style.flex = "0 0 auto";
 }
 
+/**
+ * WebView GL recover sometimes drops #stage flex centering — LCD pins top-left.
+ * Re-assert the index.html contract (no inline transform on stage).
+ */
+export function ensureStageFlexCenter(): void {
+  const stage = document.getElementById("stage");
+  if (!stage) return;
+  stage.style.display = "flex";
+  stage.style.alignItems = "center";
+  stage.style.justifyContent = "center";
+  stage.style.position = "relative";
+  stage.style.overflow = "hidden";
+}
+
+/**
+ * Pixi canvas must fill #phone-wrap after resize / context restore.
+ * Without inset+100% the bitmap can paint only the top-left corner of the wrap.
+ */
+export function ensureCanvasFillsPhoneWrap(canvas: HTMLCanvasElement | null): void {
+  if (!canvas) return;
+  canvas.style.position = "absolute";
+  canvas.style.left = "0";
+  canvas.style.top = "0";
+  canvas.style.right = "0";
+  canvas.style.bottom = "0";
+  canvas.style.width = "100%";
+  canvas.style.height = "100%";
+  canvas.style.display = "block";
+}
+
+/**
+ * Clear IME pan / compositor skew without a full fitPhoneWrap (safe on jitter skip).
+ * Returns true when geometry was or still is misaligned.
+ */
+export function stabilizeShellViewport(opts?: {
+  canvas?: HTMLCanvasElement | null;
+  allowRepair?: boolean;
+}): boolean {
+  ensureStageFlexCenter();
+  forceShellWrapCenteringAnchors();
+  ensureCanvasFillsPhoneWrap(opts?.canvas ?? null);
+  if (activeCount > 0) return shellViewportSnapshot().misaligned;
+  const snap = shellViewportSnapshot();
+  if (!opts?.allowRepair || !snap.misaligned) {
+    if (!snap.misaligned) {
+      const wrap = document.getElementById("phone-wrap");
+      if (wrap) wrap.style.transform = SHELL_WRAP_CENTER_TRANSFORM;
+    }
+    return snap.misaligned;
+  }
+  return repairShellViewportAlignment();
+}
+
 function applyWrapTransform(ox: number, oy: number): void {
   const wrap = document.getElementById("phone-wrap");
   if (!wrap) return;

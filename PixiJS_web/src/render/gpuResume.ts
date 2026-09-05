@@ -30,6 +30,26 @@ export function replaceGraphics(old: Graphics): Graphics {
   return next;
 }
 
+/**
+ * Overlay panel contract after context restore:
+ * `box = replaceGraphics(box);` always (even while hidden), then `redraw()` if visible.
+ *
+ * UC3 labels return via refreshAllUc3Labels; paintCbePanel Graphics do not.
+ * Hidden panels must still remount — otherwise the next open() paints on dead
+ * Graphics and shows bare text over the map (属性/菜单/对话「面板丢失」).
+ * Prefer remount-on-open as a second line of defense.
+ *
+ * See main.nudgeOverlayPanelsAfterGpuResume.
+ */
+export function remountGraphicsThen(
+  gfx: Graphics,
+  redraw: () => void,
+): Graphics {
+  const next = replaceGraphics(gfx);
+  redraw();
+  return next;
+}
+
 const WHITE_RGBA = new Uint8ClampedArray([255, 255, 255, 255]);
 
 /** 1×1 white texture scaled to (width×height) — stencil/color mask that remounts. */

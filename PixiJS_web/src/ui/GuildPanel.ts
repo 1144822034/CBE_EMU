@@ -2,6 +2,7 @@
  * Guild hub: list / detail / members / applications (CBE softkey lists).
  */
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -393,6 +394,16 @@ export class GuildPanel extends Container {
     } else {
       this.hubLabels = ["其他帮派", "创建帮派", "返回"];
     }
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.toast.gfx.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

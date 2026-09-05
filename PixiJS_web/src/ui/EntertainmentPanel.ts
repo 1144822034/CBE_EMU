@@ -5,6 +5,7 @@ import { Container, Graphics } from "pixi.js";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   listShellBounds,
   paintListShellBody,
@@ -158,6 +159,13 @@ export class EntertainmentPanel extends Container {
     t.position.set(x, y);
     this.box.addChild(t);
     this.labels.push(t);
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

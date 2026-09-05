@@ -32,5 +32,13 @@ LCD 黑屏经 recover / strip 后画面已能出来（或即将出来），随�
 ## 验证
 
 1. 城镇黑屏后：应见 recover / strip / recover-ok，**不应**立刻 `[gl] soft reload` 回标题。
-2. 真·持续 BLANK_ALIVE（strip 后仍每帧 alphaMode）：数秒后仍可 `alphaMode-storm` reload（预期会丢会话）。
+2. 真·持续 BLANK_ALIVE（strip 后仍每帧 alphaMode）：数秒后仍可 `alphaMode-storm` reload；自 2026-08-31 起应走会话保留重进（见下节），不再必然停在标题。
 3. `webglcontextlost` 假恢复仍 blank：连续两次 failed-recover 后才 soft reload。
+
+## 续记：2026-08-31 硬重载改为会话保留
+
+根因闭合见 `2026-08-31-pixi-black-screen-root-fix.md` Track B。
+
+`softReloadGl` 仍 `location.reload()`，但 reload 前写入 `sessionStorage`（`pix_gl_session_resume`，TTL 90s）。冷启动若快照有效则自动 login→server→role→世界，**不应再停在标题 splash**。过期/失败仍回 splash。
+
+验证增补：连续 failed-recover 触发 soft reload 后，应见 `[gl] session resume` 并回到城镇（或进角后进战斗），无需手点登录选角。

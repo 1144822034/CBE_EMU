@@ -68,11 +68,11 @@ static vm_mock_world_boss_orphan
     g_vm_mock_world_boss_orphans[VM_MOCK_WORLD_BOSS_ORPHAN_MAX];
 static u32 g_vm_mock_world_boss_orphan_count = 0;
 
-/* scene_task.c (same TU) — legacy SCE residual cleanup only. */
-bool vm_net_mock_runtime_remove_combat_spawn_at(
+/* scene_task.c (same TU) — binding-only purge; never write disk .sce. */
+bool vm_net_mock_sce_combat_spawn_bindings_delete_at(
     const char *scene, u16 x, u16 y, const char **errorOut);
-bool vm_net_mock_runtime_remove_combat_spawns_matching_boss(
-    const char *scene, u32 monsterId, u32 *removedOut, const char **errorOut);
+bool vm_net_mock_sce_combat_spawn_bindings_purge_real_remaps(
+    u32 monsterId, u32 *removedOut, const char **errorOut);
 bool vm_net_mock_sce_decoded_append_combat_spawn(
     u8 *data, u32 *lenInOut, u32 dataCap, u16 x, u16 y, u32 realActorId,
     u32 wireActorId, const char **errorOut);
@@ -148,37 +148,9 @@ static void vm_mock_world_boss_load_outdoor_scenes(void)
 }
 
 /*
- * Track every SCE inject so preview / restart / failed respawn cannot leave
- * live kind=3 rows on old maps. Same TU as scene_task bindings cache.
+ * Orphan tile list retained for in-process notify batching when clearing
+ * leftover bindings. DB-overlay spawn no longer records inject tiles.
  */
-static void vm_mock_world_boss_orphan_remember(const char *scene, u16 x, u16 y)
-{
-    if (scene == NULL || scene[0] == 0 || x == 0 || y == 0)
-        return;
-    for (u32 i = 0; i < g_vm_mock_world_boss_orphan_count; ++i)
-    {
-        if (g_vm_mock_world_boss_orphans[i].x == x &&
-            g_vm_mock_world_boss_orphans[i].y == y &&
-            vm_net_mock_scene_names_equal_loose(
-                g_vm_mock_world_boss_orphans[i].scene, scene))
-            return;
-    }
-    if (g_vm_mock_world_boss_orphan_count >= VM_MOCK_WORLD_BOSS_ORPHAN_MAX)
-    {
-        /* Drop oldest; clear-all still sweeps bindings by real id. */
-        memmove(&g_vm_mock_world_boss_orphans[0],
-                &g_vm_mock_world_boss_orphans[1],
-                (VM_MOCK_WORLD_BOSS_ORPHAN_MAX - 1u) *
-                    sizeof(g_vm_mock_world_boss_orphans[0]));
-        g_vm_mock_world_boss_orphan_count = VM_MOCK_WORLD_BOSS_ORPHAN_MAX - 1u;
-    }
-    snprintf(g_vm_mock_world_boss_orphans[g_vm_mock_world_boss_orphan_count].scene,
-             sizeof(g_vm_mock_world_boss_orphans[0].scene), "%s", scene);
-    g_vm_mock_world_boss_orphans[g_vm_mock_world_boss_orphan_count].x = x;
-    g_vm_mock_world_boss_orphans[g_vm_mock_world_boss_orphan_count].y = y;
-    ++g_vm_mock_world_boss_orphan_count;
-}
-
 static void vm_mock_world_boss_orphan_forget(const char *scene, u16 x, u16 y)
 {
     u32 w = 0;
@@ -249,10 +221,12 @@ static void vm_mock_world_boss_clear_orphan_spawns(const char *reason,
 {
     vm_mock_world_boss_orphan batch[VM_MOCK_WORLD_BOSS_ORPHAN_MAX];
     u32 batchCount = 0;
-    u32 cleared = 0;
+    u32 bindCleared = 0;
+    u32 remapPurged = 0;
+    const char *err = NULL;
 
     memset(batch, 0, sizeof(batch));
-    /* Merge remembered injects + binding-table remaps (covers preview orphans). */
+    /* Notify/resync targets: remembered tiles + live runtime home. */
     for (u32 i = 0; i < g_vm_mock_world_boss_orphan_count &&
                     batchCount < VM_MOCK_WORLD_BOSS_ORPHAN_MAX;
          ++i)
@@ -310,46 +284,38 @@ static void vm_mock_world_boss_clear_orphan_spawns(const char *reason,
         }
     }
 
+    /*
+     * DB overlay contract: never rewrite disk .sce here.
+     * Only strip leftover wire≠real bindings from the old inject path.
+     */
+    if (g_vm_mock_world_boss_config.monsterId != 0)
+    {
+        err = NULL;
+        if (vm_net_mock_sce_combat_spawn_bindings_purge_real_remaps(
+                g_vm_mock_world_boss_config.monsterId, &remapPurged, &err))
+            bindCleared += remapPurged;
+        else
+            printf("[warn][mock-service] world_boss_binding_purge "
+                   "reason=%s monster=%u err=%s\n",
+                   reason ? reason : "-", g_vm_mock_world_boss_config.monsterId,
+                   err ? err : "-");
+    }
     for (u32 i = 0; i < batchCount; ++i)
     {
-        const char *err = NULL;
         char sceneGbk[128];
-        u32 plateRemoved = 0;
-        bool plateSwept = false;
 
-        if (!vm_net_mock_runtime_remove_combat_spawn_at(
+        err = NULL;
+        if (vm_net_mock_sce_combat_spawn_bindings_delete_at(
                 batch[i].scene, batch[i].x, batch[i].y, &err))
         {
-            printf("[warn][mock-service] world_boss_orphan_remove "
+            /* ok even when row already gone */
+        }
+        else
+        {
+            printf("[warn][mock-service] world_boss_binding_delete "
                    "reason=%s scene=%s pos=(%u,%u) err=%s\n",
                    reason ? reason : "-", batch[i].scene, (u32)batch[i].x,
                    (u32)batch[i].y, err ? err : "-");
-            /* Still try nameplate residual sweep once per scene. */
-        }
-        else
-            ++cleared;
-        for (u32 j = 0; j < i; ++j)
-        {
-            if (vm_net_mock_scene_names_equal_loose(batch[j].scene,
-                                                    batch[i].scene))
-            {
-                plateSwept = true;
-                break;
-            }
-        }
-        if (!plateSwept && g_vm_mock_world_boss_config.monsterId != 0)
-        {
-            err = NULL;
-            plateRemoved = 0;
-            if (vm_net_mock_runtime_remove_combat_spawns_matching_boss(
-                    batch[i].scene, g_vm_mock_world_boss_config.monsterId,
-                    &plateRemoved, &err) &&
-                plateRemoved > 0)
-            {
-                printf("[info][mock-service] world_boss_plate_residual_clear "
-                       "reason=%s scene=%s removed=%u\n",
-                       reason ? reason : "-", batch[i].scene, plateRemoved);
-            }
         }
         vm_mock_world_boss_queue_scene_resync_for(batch[i].scene);
         if (notifyClients)
@@ -365,8 +331,8 @@ static void vm_mock_world_boss_clear_orphan_spawns(const char *reason,
     memset(g_vm_mock_world_boss_orphans, 0,
            sizeof(g_vm_mock_world_boss_orphans));
     printf("[info][mock-service] world_boss_orphan_clear reason=%s "
-           "targets=%u cleared=%u notify=%u\n",
-           reason ? reason : "-", batchCount, cleared,
+           "targets=%u bindings=%u notify=%u sce_write=0\n",
+           reason ? reason : "-", batchCount, bindCleared,
            notifyClients ? 1u : 0u);
 }
 
@@ -483,7 +449,7 @@ static void vm_mock_world_boss_load_runtime(bool force)
            g_vm_mock_world_boss_rt.wireId, g_vm_mock_world_boss_rt.hourKey);
 }
 
-/* One-shot: scrub historical SCE/binding injects after switching to DB overlay. */
+/* One-shot: scrub historical wire≠real bindings after DB overlay (no .sce). */
 static void vm_mock_world_boss_legacy_sce_cleanup_once(void)
 {
     if (g_vm_mock_world_boss_legacy_sce_cleared)
@@ -1201,7 +1167,7 @@ static bool vm_mock_world_boss_spawn_now(u32 hourKey, bool adminPureRandom,
         g_vm_mock_world_boss_rt.spawnIndex = spawnIndex;
         g_vm_mock_world_boss_rt.hourKey = hourKey;
         g_vm_mock_world_boss_rt.spawnUnix = (u32)time(NULL);
-        vm_mock_world_boss_orphan_remember(scene, x, y);
+        /* DB overlay only — do not orphan-track for SCE remove/write. */
         vm_mock_world_boss_save_runtime();
         memset(sceneGbk, 0, sizeof(sceneGbk));
         vm_mock_world_boss_resolve_map_label_gbk(scene, sceneGbk,

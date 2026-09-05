@@ -77,7 +77,13 @@ const env = {
 console.log("[assemble-android] JAVA_HOME=", javaHome, "major=", javaMajor(javaHome));
 console.log("[assemble-android] gradle=", gradleBat);
 
-const r = spawnSync(gradleBat, ["assembleDebug", "--no-daemon"], {
+/**
+ * Always `clean` before assembleDebug.
+ * Incremental packageDebug can leave multi‑MB zero holes in the APK zip
+ * (seen as ~57MB file with only ~23MB real entries after deleting large
+ * assets such as chibang/zuoqi/chenghao). Evidence: gap after zsly1.gif.
+ */
+const r = spawnSync(gradleBat, ["clean", "assembleDebug", "--no-daemon"], {
   cwd: androidDir,
   env,
   stdio: "inherit",
@@ -100,7 +106,10 @@ const srcApk = path.join(
   "app-debug.apk",
 );
 const releaseDir = path.join(androidDir, "app", "release");
-const dstApk = path.join(releaseDir, "jh_ol.apk");
+const outName = process.argv[2] && process.argv[2].endsWith(".apk")
+  ? process.argv[2]
+  : "jh_ol.apk";
+const dstApk = path.join(releaseDir, outName);
 if (!fs.existsSync(srcApk)) {
   console.error("[assemble-android] missing", srcApk);
   process.exit(1);

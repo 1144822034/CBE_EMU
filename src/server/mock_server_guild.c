@@ -2096,6 +2096,8 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
     {
         u32 sourceLevel = sourceRole->level ? sourceRole->level : 1;
         u32 targetLevel = targetSeed.level ? targetSeed.level : 1;
+        u32 sparReadyUnix = 0;
+        u32 sparNowUnix = 0;
 
         if (sourceSession->onlineLevel != 0 &&
             sourceSession->onlineLevel > sourceLevel)
@@ -2123,16 +2125,16 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
                    actorId, sourceSession->clientId, sourceRole->roleId,
                    sourceRole->pkPoints);
         }
-        else if (sourceSession->sparInitiateReadyMs != 0 &&
-                 scheduler_get_tick_ms() < sourceSession->sparInitiateReadyMs)
+        else if (vm_net_mock_spar_initiate_cd_active(sourceRole->roleId,
+                                                    &sparReadyUnix,
+                                                    &sparNowUnix))
         {
             result = 9; /* initiator cooldown */
             printf("[info][network] mock_spar_request_reject actor=%u "
-                   "source=%08x reason=initiate-cooldown ready_ms=%u now_ms=%u "
-                   "result=9\n",
-                   actorId, sourceSession->clientId,
-                   sourceSession->sparInitiateReadyMs,
-                   scheduler_get_tick_ms());
+                   "source=%08x role=%u reason=initiate-cooldown "
+                   "ready_unix=%u now_unix=%u result=9\n",
+                   actorId, sourceSession->clientId, sourceRole->roleId,
+                   sparReadyUnix, sparNowUnix);
         }
         else if (vm_mock_service_session_duel_blocks_spar(sourceSession->clientId) ||
             vm_mock_service_session_duel_blocks_spar(targetSeed.session->clientId) ||
@@ -2159,8 +2161,7 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
                 "\xb5\xd6\xb5\xb2\xc1\xcb\xd2\xbb\xb4\xce\xc7\xd0\xb4\xe8"; /* 替身人偶生效，抵挡了一次切磋 */
 
             result = 8; /* substitute doll blocked entry */
-            sourceSession->sparInitiateReadyMs =
-                scheduler_get_tick_ms() + VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS;
+            vm_net_mock_spar_initiate_cd_arm(sourceRole->roleId);
             (void)vm_mock_service_session_enqueue_system_message(
                 sourceSession, dollBlockTipGbk);
             (void)vm_mock_service_session_enqueue_system_message(
@@ -2181,8 +2182,7 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
             {
                 result = 1;
                 started = true;
-                sourceSession->sparInitiateReadyMs =
-                    scheduler_get_tick_ms() + VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS;
+                vm_net_mock_spar_initiate_cd_arm(sourceRole->roleId);
                 /* Initiator gains PK on start (win/loss irrelevant); cap 100.
                  * Mark dirty only — never sync role_db_save on this hot path
                  * (MySQL DELETE+INSERT can stall 4/14+4/10 and leave the peer

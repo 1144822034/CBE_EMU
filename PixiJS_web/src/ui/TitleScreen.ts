@@ -1,4 +1,5 @@
 import { Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -194,6 +195,19 @@ export class TitleScreen extends Container {
     } else {
       this.tipBoot.stop();
       this.stopIntro();
+    }
+  }
+
+  /** webglcontextrestored: remount title Graphics chrome for the active mode. */
+  nudgeAfterGpuResume(): void {
+    if (this.mode === "login" || this.mode === "register") {
+      if (this.loginGfx) this.loginGfx = replaceGraphics(this.loginGfx);
+      if (this.visible) this.redrawLogin();
+    } else if (this.mode === "servers") {
+      if (this.serverGfx) this.serverGfx = replaceGraphics(this.serverGfx);
+      if (this.visible) this.redrawServers();
+    } else if (this.visible) {
+      this.redrawMenu();
     }
   }
 

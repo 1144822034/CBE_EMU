@@ -9569,6 +9569,8 @@ static bool g_vm_net_mock_role_db_loaded = false;
 static bool g_vm_net_mock_role_db_valid = false;
 static u32 g_vm_net_mock_battle_rewarded_serial = 0;
 static u32 g_vm_net_mock_battle_rewarded_exp = 0;
+/* Copper credited when battle-insight auto-sells a drop because the bag is full. */
+static u32 g_vm_net_mock_battle_rewarded_auto_sell_gold = 0;
 /* Set to the battle serial when EXP/drops were suppressed by the settlement
  * interval gate so companion gold payout can stay zero for that battle. */
 static u32 g_vm_net_mock_battle_reward_rate_suppressed_serial = 0;

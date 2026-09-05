@@ -954,6 +954,27 @@ export class BattleScreen extends Container {
     this.units = [];
     this.fxHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    /* Drop battle GPU — hide used to leave mapSprite + poseTexCache pinned and
+     * VRAM climbed across hangup fights until WebView contextlost. */
+    for (const tex of this.poseTexCache.values()) {
+      try {
+        tex.destroy(true);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.poseTexCache.clear();
+    if (this.mapSprite) {
+      try {
+        if (this.mapSprite.parent) this.mapSprite.parent.removeChild(this.mapSprite);
+        this.mapSprite.destroy({ texture: true, textureSource: true });
+      } catch {
+        /* ignore */
+      }
+      this.mapSprite = null;
+    }
+    this.mapPixels = null;
+    this.mapHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.refreshAutoBannerVisibility();
   }
 

@@ -40,7 +40,9 @@ import {
   poseTextureKey,
   rebindPoseTextureKey,
   releasePoseTextureKey,
+  trimPoseTextures,
 } from "../render/poseTextureCache";
+import { LCD_WIDTH, MAP_VIEW_H } from "../ui/constants";
 
 /**
  * Only the nearest N peers keep wing / mount / animated chenghao GPU
@@ -54,12 +56,18 @@ const PEER_HEAVY_CAP = (() => {
         Capacitor?: { isNativePlatform?: () => boolean };
       }
     ).Capacitor;
-    if (cap?.isNativePlatform?.()) return 4;
+    if (cap?.isNativePlatform?.()) return 2;
   } catch {
     /* ignore */
   }
-  return 6;
+  return 3;
 })();
+
+/**
+ * Peers outside the map viewport (+pad) drop body pose GPU; nameplate stays.
+ * Camera is feet-centered on the local player (`setViewer`).
+ */
+const PEER_POSE_LOD_PAD = 64;
 
 const NPC_CYAN = 0x80e8ff;
 const PEER_GREEN = 0xa8e6a1;
@@ -160,6 +168,11 @@ type Marker = {
   phase: number;
   /** Key into shared poseTextureCache (do not destroy on replace). */
   poseKey: string;
+  /**
+   * Peer outside map viewport: body sprite dropped + pose key released.
+   * Nameplate / title stub remain.
+   */
+  poseLod: boolean;
   animate: boolean;
   source: "catalog" | "sce" | "peer";
   /** True while walking (map walk pose); flap-only idle uses false. */
@@ -711,12 +724,34 @@ export class ActorLayer {
    * Stored eq* ids are kept; overlays only mount when preference is on.
    * Also reloads e_deity sheet (gif stock ↔ png hi-res).
    */
+  /** True after battle enter dropped peer cosmetic GPU until refresh. */
+  private peerCosmeticGpuSuspended = false;
+
   refreshPeerCosmeticsVisibility(): void {
+    this.peerCosmeticGpuSuspended = false;
     for (const m of this.markers.values()) {
       if (m.kind !== "peer") continue;
       this.applyPeerCosmeticsVisual(m);
     }
     void this.reloadDeityMarkersForFxPref();
+  }
+
+  needsPeerCosmeticGpuResume(): boolean {
+    return this.peerCosmeticGpuSuspended;
+  }
+
+  /**
+   * Battle / VRAM pressure: drop peer wing/mount/chenghao GPU immediately.
+   * eq* ids stay on markers; refreshPeerCosmeticsVisibility rebuilds on world.
+   */
+  releaseAllPeerCosmeticGpu(): void {
+    for (const m of this.markers.values()) {
+      if (m.kind !== "peer") continue;
+      m.wing?.releaseGpu();
+      m.mount?.releaseGpu();
+      m.chenghao?.releaseGpu();
+    }
+    this.peerCosmeticGpuSuspended = true;
   }
 
   /** Swap e_deity.gif ↔ e_deity.png for map markers when特效 pref changes. */
@@ -736,6 +771,11 @@ export class ActorLayer {
   }
 
   private applyPeerCosmeticsVisual(m: Marker): void {
+    if (m.poseLod) {
+      m.wing?.clear();
+      m.mount?.clear();
+      return;
+    }
     if (!isPeerCosmeticsVisible()) {
       if (!(ActorLayer as unknown as { _prefWarn?: boolean })._prefWarn) {
         (ActorLayer as unknown as { _prefWarn?: boolean })._prefWarn = true;
@@ -784,6 +824,12 @@ export class ActorLayer {
   }
 
   private applyPeerHeavyCosmetics(m: Marker, allow: boolean): void {
+    if (m.poseLod) {
+      m.wing?.clear();
+      m.mount?.clear();
+      m.chenghao?.clear();
+      return;
+    }
     if (!allow) {
       m.wing?.clear();
       m.mount?.clear();
@@ -804,10 +850,58 @@ export class ActorLayer {
     if (!isPeerCosmeticsVisible()) return;
     const allow = this.peerHeavyAllowed();
     for (const m of this.markers.values()) {
-      if (m.kind !== "peer") continue;
+      if (m.kind !== "peer" || m.poseLod) continue;
       if (!(m.eqWing || m.eqMount || m.eqChenghao)) continue;
       this.applyPeerHeavyCosmetics(m, allow.has(m.id));
     }
+  }
+
+  /** True when peer feet sit inside the map camera frustum (+pad). */
+  private peerPoseNear(m: Marker): boolean {
+    const dx = Math.abs(m.x - this.viewerX);
+    const dy = Math.abs(m.y - this.viewerY);
+    return (
+      dx <= LCD_WIDTH / 2 + PEER_POSE_LOD_PAD &&
+      dy <= MAP_VIEW_H / 2 + PEER_POSE_LOD_PAD
+    );
+  }
+
+  /**
+   * Far peers: drop body Sprite + release pose live-key (VRAM).
+   * Near again: remount via applyFrame. Nameplate stays either way.
+   */
+  private setPeerPoseLod(m: Marker, far: boolean): void {
+    if (m.kind !== "peer") return;
+    if (far === m.poseLod) return;
+    m.poseLod = far;
+    if (far) {
+      if (m.sprite) {
+        try {
+          if (m.sprite.parent) m.sprite.parent.removeChild(m.sprite);
+          m.sprite.destroy({ texture: false });
+        } catch {
+          /* ignore */
+        }
+        m.sprite = null;
+      }
+      if (m.poseKey) {
+        releasePoseTextureKey(m.poseKey);
+        m.poseKey = "";
+      }
+      m.wing?.clear();
+      m.mount?.clear();
+      return;
+    }
+    if (m.loaded) this.applyFrame(m);
+    this.applyPeerCosmeticsVisual(m);
+  }
+
+  private refreshPeerPoseLod(): void {
+    for (const m of this.markers.values()) {
+      if (m.kind !== "peer") continue;
+      this.setPeerPoseLod(m, !this.peerPoseNear(m));
+    }
+    trimPoseTextures();
   }
 
   /** DevTools / CDP probe: peer cosmetics vs markers. */
@@ -887,6 +981,7 @@ export class ActorLayer {
     this.heavyBudgetAcc += dt;
     if (this.heavyBudgetAcc >= 500) {
       this.heavyBudgetAcc = 0;
+      this.refreshPeerPoseLod();
       this.refreshPeerHeavyCosmetics();
     }
     for (const m of this.markers.values()) {
@@ -917,6 +1012,7 @@ export class ActorLayer {
     if (!stepWalk && !stepIdle) return;
     for (const m of this.markers.values()) {
       if (!m.loaded || !m.animate) continue;
+      if (m.kind === "peer" && m.poseLod) continue;
       if (m.kind === "peer" && !m.moving && !m.peerMoveQueue.length) continue;
       const moving = m.moving || m.peerMoveQueue.length > 0;
       const steps = moving ? stepWalk : stepIdle;
@@ -1226,6 +1322,7 @@ export class ActorLayer {
         dir: 1 + ((Math.random() * 4) | 0),
         phase: 0,
         poseKey: "",
+        poseLod: false,
         animate,
         source,
         moving: false,
@@ -1324,11 +1421,15 @@ export class ActorLayer {
         const parts = loaded.animations[0]?.parts.length ?? 0;
         const anims = loaded.animations.length;
         m.animate = animate && (parts > 1 || anims > 1);
-        this.applyFrame(m);
+        if (kind === "peer" && !this.peerPoseNear(m)) {
+          m.poseLod = true;
+        } else {
+          this.applyFrame(m);
+        }
       } catch (e) {
         console.warn("[actor-layer] load failed", actorName, e);
       }
-    } else if (m.loaded && !m.sprite) {
+    } else if (m.loaded && !m.sprite && !(kind === "peer" && m.poseLod)) {
       this.applyFrame(m);
     }
   }
@@ -1457,7 +1558,9 @@ export class ActorLayer {
     m.mount.setBodyDisplayHeight(bodyH);
     m.mount.setFacing(m.dir, false);
     m.mount.setMoving(m.moving);
-    if (m.sprite) m.sprite.y = -MOUNT_BODY_LIFT;
+    if (m.sprite) {
+      m.sprite.y = m.mount.root.visible ? -MOUNT_BODY_LIFT : 0;
+    }
     this.layoutNameplate(m);
     this.syncPeerWingDepth(m);
   }
@@ -1514,7 +1617,33 @@ export class ActorLayer {
       await m.chenghao.setTitleId(chenghaoId);
       if (this.markers.get(m.id) !== m) return;
       if (m.titleGifKey !== key) return;
-      m.titleBadge.addChild(m.chenghao.root);
+      if (m.chenghao.root.visible) {
+        m.titleBadge.addChild(m.chenghao.root);
+        m.titleBadge.visible = true;
+        this.layoutNameplate(m);
+        return;
+      }
+      /* Atlas off: text fallback keeps 称号 name without GPU sheet. */
+      m.chenghao.clear();
+      const lab = new BitmapLabel();
+      await lab.setText(chenghaoLabel(chenghaoId).slice(0, 8), 0xf8dc00, {
+        uc3: true,
+        smooth: false,
+        outline: true,
+        outlineThin: true,
+      });
+      if (this.markers.get(m.id) !== m || m.root.destroyed) {
+        lab.destroy();
+        return;
+      }
+      if (m.titleGifKey !== key) {
+        lab.destroy();
+        return;
+      }
+      lab.anchor.set(0.5, 1);
+      lab.scale.set(NAMEPLATE_SCALE);
+      m.titleTextLabel = lab;
+      m.titleBadge.addChild(lab);
       m.titleBadge.visible = true;
       this.layoutNameplate(m);
       return;
@@ -1625,6 +1754,7 @@ export class ActorLayer {
 
   private applyFrame(m: Marker): void {
     if (!m.loaded) return;
+    if (m.kind === "peer" && m.poseLod) return;
     // SCE map sprites (ghostfire): partMode=frames flickers on phase even when idle.
     // Peers use walk pose while 1/2/2 timeline is playing.
     const moving =
@@ -1743,6 +1873,10 @@ export class ActorLayer {
       } catch {
         /* ignore */
       }
+      // Title GIF sprites share UiAssets cache — bust key and rebuild after invalidate.
+      m.titleGifKey = "";
+      if (m.kind === "peer") void this.refreshPeerTitle(m);
+      else void this.refreshTitleBadge(m, m.classicTitle, m.classicTitleGif);
     }
   }
 }

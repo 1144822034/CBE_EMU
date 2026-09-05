@@ -116,6 +116,7 @@ export type FruitStatus = {
   copper: number;
   currencyType: number;
   enabled: boolean;
+  showEntry: boolean;
   creditsPerGold: number;
   minInsertGold: number;
   maxInsertGold: number;
@@ -246,6 +247,11 @@ export function parseFruitStatus(packet: WtPacket): FruitStatus | null {
   );
   if (!obj) return null;
   const copper = fieldU32(obj, "copper");
+  const enabled = fieldU32(obj, "enabled") !== 0;
+  const showEntryRaw = findField(obj, "showEntry");
+  const showEntry = showEntryRaw
+    ? fieldU32(obj, "showEntry") !== 0
+    : enabled;
   return {
     credits: fieldU32(obj, "credits"),
     winChips: fieldU32(obj, "winChips"),
@@ -253,7 +259,8 @@ export function parseFruitStatus(packet: WtPacket): FruitStatus | null {
     wcoin: fieldU32(obj, "wcoin"),
     copper,
     currencyType: fieldU32(obj, "currencyType"),
-    enabled: fieldU32(obj, "enabled") !== 0,
+    enabled,
+    showEntry,
     creditsPerGold: fieldU32(obj, "creditsPerGold") || FRUIT_CREDITS_PER_GOLD,
     minInsertGold: fieldU32(obj, "minInsertGold") || FRUIT_MIN_INSERT_GOLD,
     maxInsertGold: fieldU32(obj, "maxInsertGold") || FRUIT_MAX_INSERT_GOLD,

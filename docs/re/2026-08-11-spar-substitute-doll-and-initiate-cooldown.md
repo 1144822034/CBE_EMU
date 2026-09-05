@@ -14,9 +14,10 @@ status: fixed
    - 发起方 tip / `4/14 result=8`：`对方替身人偶生效，无法切磋`
    - 被切磋方系统提示：`替身人偶生效，抵挡了一次切磋`
 3. **发起冷却**
-   - 成功开战，或**人偶抵挡**（result=8）：发起方 `sparInitiateReadyMs = now + 5min`
+   - 成功开战，或**人偶抵挡**（result=8）：发起方 `spar_initiate_cd[roleId].readyUnix = now + 5min`
    - 冷却中再发起 → `4/14 result=9`：`切磋冷却中，请稍后再试`
    - 忙碌拒绝等其它失败路径 **不**开冷却
+   - 冷却按 **roleId** 墙钟保存（进程内表），下线再登录不清除；见 `docs/re/2026-09-04-spar-initiate-cooldown-survive-relogin.md`
 
 ## 修改
 

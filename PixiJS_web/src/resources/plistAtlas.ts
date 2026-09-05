@@ -44,7 +44,7 @@ const pngRetain = new Map<string, number>();
 const pngBase = new Map<string, Texture>();
 const unloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
 /** Delay so brief face/act churn does not thrash GPU re-upload. */
-const UNLOAD_DELAY_MS = isNativePlatform() ? 30_000 : 2500;
+const UNLOAD_DELAY_MS = isNativePlatform() ? 8_000 : 2500;
 
 /** atlas cache key → pngUrl (for sync eviction on idle unload). */
 const cacheKeysByPng = new Map<string, Set<string>>();
@@ -113,19 +113,25 @@ function scheduleGpuUnload(pngUrl: string): void {
     pngUrl,
     setTimeout(() => {
       unloadTimers.delete(pngUrl);
-      if ((pngRetain.get(pngUrl) ?? 0) > 0) return;
-      const base = pngBase.get(pngUrl);
-      pngBase.delete(pngUrl);
-      evictAtlasCacheForPng(pngUrl);
-      if (!base || base.destroyed) return;
-      try {
-        const src = base.source;
-        if (src && !src.destroyed) src.unload();
-      } catch (e) {
-        console.warn("[plist] source.unload", e);
-      }
+      unloadPngGpuNow(pngUrl);
     }, UNLOAD_DELAY_MS),
   );
+}
+
+/** Drop PNG GPU immediately when retain count is already zero (battle / suspend). */
+function unloadPngGpuNow(pngUrl: string): void {
+  cancelScheduledUnload(pngUrl);
+  if ((pngRetain.get(pngUrl) ?? 0) > 0) return;
+  const base = pngBase.get(pngUrl);
+  pngBase.delete(pngUrl);
+  evictAtlasCacheForPng(pngUrl);
+  if (!base || base.destroyed) return;
+  try {
+    const src = base.source;
+    if (src && !src.destroyed) src.unload();
+  } catch (e) {
+    console.warn("[plist] source.unload", e);
+  }
 }
 
 /** Re-touch GPU after idle unload / context restore while overlays still retain. */
@@ -158,7 +164,10 @@ export function retainPlistAtlas(atlas: LoadedPlistAtlas | null | undefined): vo
 }
 
 /** Drop one display hold; GPU unload only when nobody retains the PNG. */
-export function releasePlistAtlas(atlas: LoadedPlistAtlas | null | undefined): void {
+export function releasePlistAtlas(
+  atlas: LoadedPlistAtlas | null | undefined,
+  immediate = false,
+): void {
   if (!atlas?.pngUrl) return;
   const url = atlas.pngUrl;
   const n = (pngRetain.get(url) ?? 0) - 1;
@@ -169,7 +178,8 @@ export function releasePlistAtlas(atlas: LoadedPlistAtlas | null | undefined): v
     } catch {
       /* ignore */
     }
-    scheduleGpuUnload(url);
+    if (immediate) unloadPngGpuNow(url);
+    else scheduleGpuUnload(url);
   } else {
     pngRetain.set(url, n);
   }
@@ -179,10 +189,11 @@ export function releasePlistAtlas(atlas: LoadedPlistAtlas | null | undefined): v
 export function rebindPlistAtlas(
   prev: LoadedPlistAtlas | null | undefined,
   next: LoadedPlistAtlas | null | undefined,
+  immediateRelease = false,
 ): LoadedPlistAtlas | null {
   if (prev === next) return next ?? null;
   if (next) retainPlistAtlas(next);
-  if (prev) releasePlistAtlas(prev);
+  if (prev) releasePlistAtlas(prev, immediateRelease);
   return next ?? null;
 }
 

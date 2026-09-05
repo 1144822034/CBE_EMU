@@ -440,6 +440,7 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
     vm_net_mock_battle_reset_last_operate_target();
     g_vm_net_mock_battle_rewarded_serial = 0;
     g_vm_net_mock_battle_rewarded_exp = 0;
+    g_vm_net_mock_battle_rewarded_auto_sell_gold = 0;
     memset(g_vm_net_mock_battle_rewarded_drops, 0,
            sizeof(g_vm_net_mock_battle_rewarded_drops));
     g_vm_net_mock_battle_rewarded_drop_result_count = 0;
@@ -7671,6 +7672,11 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
                         g_vm_net_mock_battle_enemy_id_current)),
                 vm_net_mock_battle_enemy_count_current());
         }
+        if (g_vm_net_mock_battle_rewarded_auto_sell_gold != 0)
+        {
+            displayGoldGain = vm_net_mock_add_capped_u32(
+                displayGoldGain, g_vm_net_mock_battle_rewarded_auto_sell_gold);
+        }
         if (rewardAlreadyGranted && role != NULL)
         {
             preExp = (role->exp >= displayExpGain) ? (role->exp - displayExpGain)
@@ -14214,6 +14220,7 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     }
     g_vm_net_mock_battle_rewarded_serial = 0;
     g_vm_net_mock_battle_rewarded_exp = 0;
+    g_vm_net_mock_battle_rewarded_auto_sell_gold = 0;
     memset(g_vm_net_mock_battle_rewarded_drops, 0,
            sizeof(g_vm_net_mock_battle_rewarded_drops));
     g_vm_net_mock_battle_rewarded_drop_result_count = 0;
@@ -14889,6 +14896,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     vm_net_mock_battle_reset_last_operate_target();
     g_vm_net_mock_battle_rewarded_serial = 0;
     g_vm_net_mock_battle_rewarded_exp = 0;
+    g_vm_net_mock_battle_rewarded_auto_sell_gold = 0;
     memset(g_vm_net_mock_battle_rewarded_drops, 0,
            sizeof(g_vm_net_mock_battle_rewarded_drops));
     g_vm_net_mock_battle_rewarded_drop_result_count = 0;

@@ -2003,6 +2003,16 @@ static bool vm_net_mock_task_material_drop_policy(u32 roleId, u32 itemId,
         if (taskRemaining > remaining)
             remaining = taskRemaining;
     }
+    {
+        u32 ringRemaining = 0;
+
+        if (vm_mock_ring_collect_material_remaining(roleId, itemId,
+                                                    &ringRemaining) &&
+            ringRemaining > remaining)
+        {
+            remaining = ringRemaining;
+        }
+    }
     if (isTaskMaterialOut)
         *isTaskMaterialOut = true;
     if (remainingOut)
@@ -4581,6 +4591,16 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                     "\xc3\xbf\xc8\xd5\xb6\xe0\xbb\xb7\xbd\xb1\xc0\xf8"; /* 每日多环奖励 */
                 serviceOptionValues[serviceOptionCount] =
                     VM_NET_MOCK_NPC_SERVICE_RING_QUEST;
+                serviceOptionCount += 1;
+            }
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xcb\xa2\xd0\xc2\xc5\xdc\xbb\xb7"; /* 刷新跑环 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xcf\xfb\xba\xc410\xbf\xe1\xb1\xa6"; /* 消耗10酷宝 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_RING_REFRESH;
                 serviceOptionCount += 1;
             }
         }
@@ -7890,6 +7910,17 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         dialogText =
             "\xc7\xeb\xb4\xf2\xbf\xaa\xc5\xdc\xbb\xb7\xc8\xce\xce\xf1"
             "\xc3\xe6\xb0\xe5\xa1\xa3"; /* 请打开跑环任务面板。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_RING_REFRESH)
+    {
+        action = "ring-refresh";
+        dialogText =
+            "\xcb\xa2\xd0\xc2\xb5\xb1\xc7\xb0\xc5\xdc\xbb\xb7\xd0\xe8\xd2\xaa"
+            "\xcf\xfb\xba\xc410\xbf\xe1\xb1\xa6\xa1\xa3"; /* 刷新当前跑环需要消耗10酷宝。 */
         optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
         optionDescriptions[optionCount] = "";
         optionValues[optionCount] = 0;

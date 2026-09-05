@@ -4,6 +4,7 @@
  * docs/re/2026-08-02-equipment-enhance-transfer-29-5.md, screenshots.
  */
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -362,6 +363,8 @@ export class EnhancePanel extends Container {
     this.equip = null;
     this.slots = [];
     this.busy = false;
+    for (const t of this.labels) t.destroy();
+    this.labels = [];
   }
 
   private recomputeLocalRate(): void {
@@ -419,6 +422,16 @@ export class EnhancePanel extends Container {
     }
     const maxScroll = Math.max(0, len - vs);
     this.listScroll = Math.max(0, Math.min(this.listScroll, maxScroll));
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
+  nudgeAfterGpuResume(): void {
+    this.box = replaceGraphics(this.box);
+    if (this.toast?.gfx?.parent) {
+      this.toast.gfx = replaceGraphics(this.toast.gfx);
+    }
+    if (this.visible) this.redraw();
   }
 
   private redraw(): void {

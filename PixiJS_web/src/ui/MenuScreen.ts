@@ -4,6 +4,7 @@
  * items exceed PAGE_ROWS — the menu never shifts upward.
  */
 import { Container, Graphics } from "pixi.js";
+import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
   LCD_HEIGHT,
@@ -119,6 +120,7 @@ export class MenuScreen extends Container {
   private menuCursor = 0;
   private subParent: MenuNode | null = null;
   private scrollHost = new Container();
+  private dim = new Graphics();
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
@@ -129,10 +131,8 @@ export class MenuScreen extends Container {
 
   constructor() {
     super();
-    const dim = new Graphics()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.35 });
-    this.addChild(dim);
+    this.paintDim();
+    this.addChild(this.dim);
     this.scrollHost.eventMode = "none";
     this.addChild(this.scrollHost);
     this.addChild(this.box);
@@ -140,6 +140,19 @@ export class MenuScreen extends Container {
     preloadMenuScrollTexture(() => this.redraw());
     preloadPageNavTextures(() => this.redraw());
     this.reset();
+  }
+
+  private paintDim(): void {
+    this.dim
+      .clear()
+      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+      .fill({ color: 0x000000, alpha: 0.35 });
+  }
+
+  private remountChrome(): void {
+    this.dim = replaceGraphics(this.dim);
+    this.paintDim();
+    this.box = replaceGraphics(this.box);
   }
 
   reset(): void {
@@ -262,6 +275,23 @@ export class MenuScreen extends Container {
     void lab.setText(text, color, { outline: false });
     this.addChild(lab);
     this.labels.push(lab);
+  }
+
+
+  /** webglcontextrestored: remount paintCbePanel Graphics; redraw if open. */
+  nudgeAfterGpuResume(): void {
+    this.remountChrome();
+    if (this.visible) this.redraw();
+  }
+
+  /** Leave menu: drop UC3 labels so they do not pin glyph cache while world runs. */
+  hide(): void {
+    this.visible = false;
+    for (const t of this.labels) t.destroy();
+    this.labels = [];
+    clearPointerHits(this.rowHits);
+    this.scrollHost.removeChildren();
+    this.box.clear();
   }
 
   private redraw(): void {
