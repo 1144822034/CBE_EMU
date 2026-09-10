@@ -1,29 +1,29 @@
 # 组队：队友不在队长场景时自动离队
 
-## 需求
+> **2026-09-06 修订**：跨图策略已改为「队长切图队友跟随、队员禁自行切图」。  
+> 本文仅保留 auto-leave 作为**安全网**说明；权威契约见  
+> [`2026-09-06-team-follow-leader-scene.md`](./2026-09-06-team-follow-leader-scene.md)。
 
-组队后若队友与队长不在同一场景（换图 / 传送石 / 跨图重登），该队友自动离队，避免跨图幽灵队伍与遇怪/收编不一致。
+## 原需求（历史）
 
-## 契约
+组队后若队友与队长不在同一场景，该队友自动离队，避免跨图幽灵队伍。
 
-- 离队名册变更仍走 `1/5/7 {id}`（`TEAM_LEAVE` / 主动离队同路径）。
-- 主动 `1/5/6` 离队：请求响应带 `5/7`；自动离队无请求，须给**离队者本人**也入队 `TEAM_LEAVE`。
-- 队长不因换图被踢；只移除非队长且不在队长场景的席位。
+## 当前行为
+
+- 离队名册变更仍走 `1/5/7 {id}`（`TEAM_LEAVE`）。
+- 队长换图时：先 `team_queue_follow` 拉队友，**不再**因队长先落地而踢人。
+- auto-leave 仍在 `vm_mock_service_session_mark_scene_ready`（场景名变化）触发，但跳过：
+  - `pendingTeamFollowSceneEnter`
+  - `sceneVisiblePending`（在途）
+- 仍会踢：队员既无跟随在途、可见场景又与队长不一致的异常席位（例如断线重登落到错误图）。
 
 ## 触发
 
-`vm_mock_service_session_mark_scene_ready`：本连接可见场景名变化（含首次建立）后调用
-`vm_mock_service_team_auto_leave_off_leader_scene`。
+`vm_mock_service_session_mark_scene_ready` → `vm_mock_service_team_auto_leave_off_leader_scene`。
 
-判定与组队开战收编一致：`team_member_same_scene_presence`（`sceneVisible`，商城座可回落 `onlineScene`）。传送中（无 presence scene）不踢，等 scene-ready。
+判定：`team_member_same_scene_presence`（`sceneVisible`，商城座可回落 `onlineScene`）。
 
-## 修改
+## 验证（安全网）
 
-- `src/server/mock_server_equipment_npc.c`：`team_auto_leave_off_leader_scene` + scene-ready 挂钩
-
-## 验证
-
-1. 双人同图组队；队员传送石去另一图 → 双方收到 `5/7`，队员 HUD 离队；日志 `team_auto_leave ... reason=scene-mismatch`。
-2. 队长换图、队员留原图 → 队员被踢离队；队长仍在队（单人席）。
-3. 同图进商城（visible 仍挂队伍图）→ 不离队。
-4. `make -j2 server`。
+1. 队员被强制不同图且无 follow 臂（异常路径）→ `team_auto_leave ... reason=scene-mismatch`。
+2. 正常队长切图跟随路径 → 无 auto-leave，见 follow 文档。

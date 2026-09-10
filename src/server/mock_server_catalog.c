@@ -252,6 +252,8 @@ static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
                                     u32 *result_out);
 static bool vm_net_mock_shop_admin_db_load(void);
 static void vm_net_mock_ensure_hunt_order_catalog_item(void);
+static void vm_net_mock_ensure_force_pk_proof_catalog_item(void);
+static void vm_net_mock_ensure_star_sky_stone_catalog_item(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
@@ -1662,6 +1664,8 @@ static u32 vm_net_mock_load_shop_catalog(void)
      * and surface the database error through the admin log. */
     (void)vm_net_mock_shop_admin_db_load();
     vm_net_mock_ensure_hunt_order_catalog_item();
+    vm_net_mock_ensure_force_pk_proof_catalog_item();
+    vm_net_mock_ensure_star_sky_stone_catalog_item();
 
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
@@ -1892,6 +1896,142 @@ static void vm_net_mock_ensure_hunt_order_catalog_item(void)
             &err))
     {
         printf("[warn][network] mock_hunt_order_shop_seed_failed error=%s\n",
+               err ? err : "?");
+    }
+}
+
+/* Pixi 自定义 848 强制PK证明：注入商城目录并默认上架（酷宝）. */
+static void vm_net_mock_ensure_force_pk_proof_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xc7\xbf\xd6\xc6\x50\x4b\xd6\xa4\xc3\xf7"; /* 强制PK证明 */
+    static const u8 descGbk[] =
+        "\xb7\xa2\xc6\xf0\xc7\xbf\xd6\xc6\x50\x4b\xca\xb1\xcf\xfa\xba\xc4"
+        "\x31\xb8\xf6\xa1\xa3\xc4\xcd\xbe\xc3\x31\xa1\xa3"; /* 发起强制PK时消耗1个。耐久1。 */
+    const char *err = NULL;
+    vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
+    u32 i = 0;
+
+    memset(&one, 0, sizeof(one));
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID, nameGbk, sizeof(nameGbk) - 1,
+                descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_FORCE_PK_PROOF_SHOP_PRICE,
+                99, 1, 1, false, 14))
+        {
+            printf("[warn][network] mock_force_pk_proof_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+    }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
+    {
+        printf("[info][network] mock_force_pk_proof_catalog_bound item=%u price=%u "
+               "enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    if (!vm_net_mock_shop_admin_save(
+            VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID,
+            item->price ? item->price : VM_NET_MOCK_FORCE_PK_PROOF_SHOP_PRICE, true,
+            &err))
+    {
+        printf("[warn][network] mock_force_pk_proof_shop_seed_failed error=%s\n",
+               err ? err : "?");
+    }
+}
+
+/* Pixi 自定义 849 星空石：注入商城目录并默认上架（酷宝）. */
+static void vm_net_mock_ensure_star_sky_stone_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xd0\xc7\xbf\xd5\xca\xaf"; /* 星空石 */
+    static const u8 descGbk[] =
+        "\xc0\xb4\xd7\xd4\xd3\xee\xd6\xe6\xd0\xc7\xbf\xd5\xb5\xc4\xc9\xf1"
+        "\xca\xaf\x2c\xd7\xd4\xb4\xf8\xca\xb1\xbf\xd5\xbb\xd8\xcb\xdd\xb5"
+        "\xc4\xc4\xe6\xcc\xec\xd0\xa7\xb9\xfb\x21"; /* 来自宇宙星空的神石,自带时空回溯的逆天效果! */
+    const char *err = NULL;
+    vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
+    u32 i = 0;
+
+    memset(&one, 0, sizeof(one));
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId ==
+            VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID, nameGbk, sizeof(nameGbk) - 1,
+                descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_STAR_SKY_STONE_SHOP_PRICE,
+                99, 1, 1, false, 14))
+        {
+            printf("[warn][network] mock_star_sky_stone_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+    }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
+    {
+        printf("[info][network] mock_star_sky_stone_catalog_bound item=%u price=%u "
+               "enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    if (!vm_net_mock_shop_admin_save(
+            VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID,
+            item->price ? item->price : VM_NET_MOCK_STAR_SKY_STONE_SHOP_PRICE, true,
+            &err))
+    {
+        printf("[warn][network] mock_star_sky_stone_shop_seed_failed error=%s\n",
                err ? err : "?");
     }
 }
@@ -2384,6 +2524,8 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 811:
     case 845: /* 三十倍经验卡（自定义，克隆自 811） */
     case 847: /* 江湖追杀令：走 43/2 对仇人使用，禁止通用 7/1 扣耐久 */
+    case 848: /* 强制PK证明：由 4/14 force=1 扣，禁止通用 7/1 */
+    case 849: /* 星空石：走 29/13 重置洗练次数，禁止通用 7/1 */
     case 813: /* chest keys must not fall into generic 7/1 category-10 consume */
     case 814:
     case 815:
@@ -3161,11 +3303,12 @@ static bool vm_net_mock_seq_put_item_common_extra(
      *   first i16  = stackRuntimeByte
      *   second i16 = 0
      *
-     * Slot layout when L>=1:
-     *   1) L>=4: four milestone lines unlock 4/8/12/16 (config + wash)
-     *   2) then M(L)-base for 护甲/物攻 with base>0 (unlock=1),
-     *      until CLIENT_CAP
-     */
+ * Slot layout:
+ *   1) four milestone lines unlock 4/8/12/16 (config + wash) — always for
+ *      equipment so clients can gray-paint unlock > enhance (incl. +0..+3)
+ *   2) then M(L)-base for 护甲/物攻 with base>0 (unlock=1) when L>=1,
+ *      until CLIENT_CAP
+ */
     const vm_net_mock_equipment_catalog_item *equip = NULL;
     u8 level = enhanceLevel;
     u8 attrCount = 0;
@@ -3185,30 +3328,30 @@ static bool vm_net_mock_seq_put_item_common_extra(
     {
         firstWire = level;
         secondWire = (u16)VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
-        if (level >= 4)
+        /* Always wire four milestone slots so Pixi/CBE can gray-paint
+         * unlock > enhance (including +0..+3). Combat still only applies
+         * unlock <= enhance via add_unlocked_milestones. */
+        for (i = 0; i < VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS; ++i)
         {
-            for (i = 0; i < VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS; ++i)
-            {
-                u8 realUnlock = vm_net_mock_enhance_unlock_for_index(i);
-                u8 type = 0;
-                u8 flag = 0;
-                u16 wireValue = 0;
-                u8 washed = 0;
+            u8 realUnlock = vm_net_mock_enhance_unlock_for_index(i);
+            u8 type = 0;
+            u8 flag = 0;
+            u16 wireValue = 0;
+            u8 washed = 0;
 
-                if (!vm_net_mock_equip_enhance_resolve_milestone(
-                        equip, i, wash, &type, &flag, &wireValue))
-                    continue;
-                if (wash != NULL && wash->slots[i].washed != 0 &&
-                    wash->slots[i].type >= 1 && wash->slots[i].type <= 10)
-                    washed = 1;
-                unlocks[attrCount] =
-                    vm_net_mock_equip_enhance_wire_unlock(type, realUnlock);
-                types[attrCount] = vm_net_mock_equip_enhance_wire_type(type);
-                /* PixiJS: bit0=%  bit7=washed; CBE typically treats flag as 0/1. */
-                flags[attrCount] = (u8)((flag & 1u) | (washed ? 0x80u : 0u));
-                values[attrCount] = wireValue;
-                attrCount++;
-            }
+            if (!vm_net_mock_equip_enhance_resolve_milestone(
+                    equip, i, wash, &type, &flag, &wireValue))
+                continue;
+            if (wash != NULL && wash->slots[i].washed != 0 &&
+                wash->slots[i].type >= 1 && wash->slots[i].type <= 10)
+                washed = 1;
+            unlocks[attrCount] =
+                vm_net_mock_equip_enhance_wire_unlock(type, realUnlock);
+            types[attrCount] = vm_net_mock_equip_enhance_wire_type(type);
+            /* PixiJS: bit0=%  bit7=washed; CBE typically treats flag as 0/1. */
+            flags[attrCount] = (u8)((flag & 1u) | (washed ? 0x80u : 0u));
+            values[attrCount] = wireValue;
+            attrCount++;
         }
         /*
          * M(L) 护甲/物攻：强化缩放相对基值的增量，接在里程碑后面。

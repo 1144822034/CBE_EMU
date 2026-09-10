@@ -99,8 +99,12 @@ const MONSTER_LEVEL_OVERRIDES: Record<number, number> = {};
 const MONSTER_ACTOR_OVERRIDES: Record<number, string> = {};
 /** UTF-8 display names by REAL catalog id. */
 const MONSTER_NAME_BY_ID: Record<number, string> = {};
-/** SCE wire keep-ids that must never own a nameplate by themselves. */
-const KEEP_WIRE_IDS = new Set([200, 250]);
+/**
+ * SCE wire keep-id for custom/FB remaps (ParseMinfo-safe placeholder).
+ * Only #250 — #200 is stock 炼狱鬼火 (华山洞窟); treating it as keep-wire
+ * made nameplates fall through to same-actor #51 蓝灯鬼.
+ */
+const KEEP_WIRE_IDS = new Set([250]);
 
 export type CombatSpawnRealBinding = {
   scene: string;
@@ -217,7 +221,8 @@ function sceneKeyLoose(scene: string): string {
 /**
  * Resolve SCE wire id → catalog REAL id for nameplates / hangup.
  * Prefer binding at (scene,x,y); else unanimous wire on that scene; else
- * keep-id (#200/#250) matched by battle .actor or SCE/catalog name; else wire.
+ * unique SCE/catalog name; else keep-id #250 matched by battle .actor;
+ * else wire (stock ids including #200 keep themselves).
  */
 export function resolveCombatEnemyRealId(opts: {
   scene?: string;

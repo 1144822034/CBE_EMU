@@ -53,7 +53,7 @@ import { PhoneShell } from "./ui/PhoneShell";
 import { TitleScreen } from "./ui/TitleScreen";
 import { RoleScreen } from "./ui/RoleScreen";
 import { CreateRoleScreen } from "./ui/CreateRoleScreen";
-import { WorldHud, sceneDisplayName } from "./ui/WorldHud";
+import { WorldHud, sceneDisplayName, TEAM_MEMBER_MAX } from "./ui/WorldHud";
 import { MenuScreen, type MenuLeaf } from "./ui/MenuScreen";
 import { BattleScreen, flushBattleSleepsForBackground } from "./ui/BattleScreen";
 import { DialogPanel } from "./ui/DialogPanel";
@@ -150,6 +150,7 @@ import {
   isBattleMedicineOrFlask,
   isCrystalFragment,
   isDreamBadge,
+  isStarSkyStone,
   NpcServiceOpcode,
   npcServiceOpcode,
 } from "./net/protocolExtras";
@@ -853,7 +854,7 @@ async function main(): Promise<void> {
   let ringTrackerFetchGen = 0;
 
   const refreshQuestTracker = () => {
-    questTracker.setPartyInset(hud.partyOverlayInset());
+    questTracker.setPartyOffsetY(hud.partyOverlayOffsetY());
     questTracker.setTasks(
       buildQuestTrackerRows(session.acceptedTasks, { ring: cachedRingStatus }),
     );
@@ -1302,11 +1303,21 @@ async function main(): Promise<void> {
   };
 
   const openArenaPanel = async (job?: number, bracket?: number) => {
-    const j = job && job > 0 ? job : (activeRole ? activeRole.jobIndex + 1 : 1);
-    const b =
+    let j = job && job > 0 ? job : (activeRole ? activeRole.jobIndex + 1 : 1);
+    let b =
       bracket && bracket > 0
         ? bracket
         : bracketForLevel(session.level || activeRole?.level || 1);
+    if (bracket == null || bracket <= 0) {
+      const st =
+        session.arenaStatus ?? (await session.fetchArenaStatus());
+      if (st?.activeBracket === 77) {
+        j = 0;
+        b = 77;
+      }
+    } else if (bracket === 77) {
+      j = 0;
+    }
     /* Drop NPC dialog hits before/while rank fetch so taps cannot re-fire options. */
     dialog.hide();
     closeApproach(false);
@@ -2325,6 +2336,8 @@ async function main(): Promise<void> {
       const money = session.characterStats?.money ?? session.gold;
       system.setBagMeta(money, cap);
       void session.openBag();
+      // 同部位装备对比需要穿戴快照（勿清空，避免详情闪一下无对比）
+      void session.openWornEquipment();
       // 金钱/容量以 1/1/21 汇总为准（铜拆金/银/铜）
       void session.openCharacterStats().then(() => {
         if (session.characterStats) {
@@ -2706,7 +2719,9 @@ async function main(): Promise<void> {
             ? "好友邀请"
             : inv.kind === "guild"
               ? "入帮邀请"
-              : "交易邀请";
+              : inv.kind === "spar"
+                ? "切磋邀请"
+                : "交易邀请";
       const body =
         inv.kind === "team"
           ? `${inv.name} 邀请你组队`
@@ -2714,7 +2729,9 @@ async function main(): Promise<void> {
             ? `${inv.name} 邀请加你为好友`
             : inv.kind === "guild"
               ? `${inv.name} 邀请你加入帮派${inv.guildName ? `「${inv.guildName}」` : ""}`
-              : `${inv.name} 邀请交易`;
+              : inv.kind === "spar"
+                ? `${inv.name}请求和你切磋,确定切磋?`
+                : `${inv.name} 邀请交易`;
       const acceptAction =
         inv.kind === "team"
           ? 220
@@ -2722,7 +2739,9 @@ async function main(): Promise<void> {
             ? 230
             : inv.kind === "guild"
               ? 258
-              : 242;
+              : inv.kind === "spar"
+                ? 262
+                : 242;
       const refuseAction =
         inv.kind === "team"
           ? 221
@@ -2730,7 +2749,9 @@ async function main(): Promise<void> {
             ? 231
             : inv.kind === "guild"
               ? 259
-              : 243;
+              : inv.kind === "spar"
+                ? 263
+                : 243;
       dialog.show({
         title,
         body,
@@ -2776,8 +2797,8 @@ async function main(): Promise<void> {
         hud.pushChat(`[切]${n.tip}`);
         setChromeStatus(n.tip, n.result !== 1);
         if (social.visible && n.tip) social.showTip(n.tip);
-        if (n.result === 1) {
-          /* Server awards +20 on initiate (cap 100); mirror for local red-name. */
+        /* Only force-PK start awards +20 PK (server); mirror for red-name plate. */
+        if (n.result === 1 && n.tip.includes("强制PK")) {
           session.pkPoints = Math.min(
             PK_POINTS_MAX,
             (session.pkPoints | 0) + 20,
@@ -3573,7 +3594,7 @@ async function main(): Promise<void> {
     void openTaskList();
   };
   hud.onPartyChanged = () => {
-    questTracker.setPartyInset(hud.partyOverlayInset());
+    questTracker.setPartyOffsetY(hud.partyOverlayOffsetY());
   };
 
   view.onPaiTap = () => {
@@ -3952,6 +3973,11 @@ async function main(): Promise<void> {
   };
   view.onPortalEnter = (portal) => {
     if (session.inBattle || phase !== "world") return;
+    if (session.isTeamMemberNotLeader()) {
+      hud.pushChat("[系]队员不能切图");
+      showGameTip("队员不能切图");
+      return;
+    }
     closeApproach(false);
     // exitID = source portal entryId (SCE 0x07). Destination landing is the
     // paired reverse door: dest edge portal with the same entryId → its spawn.
@@ -4013,6 +4039,11 @@ async function main(): Promise<void> {
   /** Dream badge combine: pick target equip then 29/12. */
   let dreamBadgeCombineOpen = false;
   let pendingDreamBadge: import("./net/protocolExtras").BagItem | null = null;
+  /** 星空石：选装备 → 选档位 → 29/13 重置 wash_count. */
+  let starSkyStonePickEquipOpen = false;
+  let starSkyStonePickTierOpen = false;
+  let pendingStarSkyStone: import("./net/protocolExtras").BagItem | null = null;
+  let pendingStarSkyEquip: import("./net/protocolExtras").BagItem | null = null;
 
   const returnFromSkillForgetDialog = (): void => {
     skillForgetDialogOpen = false;
@@ -4055,6 +4086,103 @@ async function main(): Promise<void> {
       session.characterStats?.backpackCapacity ||
       Math.max(20, session.bagItems.length);
     system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+  };
+
+  const returnFromStarSkyStone = (): void => {
+    starSkyStonePickEquipOpen = false;
+    starSkyStonePickTierOpen = false;
+    pendingStarSkyStone = null;
+    pendingStarSkyEquip = null;
+    showPhase("system");
+    system.open("bag");
+    system.setBag(session.bagItems);
+    const cap =
+      session.characterStats?.backpackCapacity ||
+      Math.max(20, session.bagItems.length);
+    system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+  };
+
+  const openStarSkyStoneEquipDialog = (
+    stone: import("./net/protocolExtras").BagItem,
+  ): void => {
+    pendingStarSkyStone = stone;
+    pendingStarSkyEquip = null;
+    starSkyStonePickTierOpen = false;
+    starSkyStonePickEquipOpen = true;
+    const equips = session.bagItems.filter(
+      (it) => it.kind === "equip" && (it.enhance | 0) >= 4,
+    );
+    if (equips.length === 0) {
+      starSkyStonePickEquipOpen = false;
+      pendingStarSkyStone = null;
+      showGameTip("没有可重置的装备（需强化≥+4）");
+      return;
+    }
+    const options = [
+      ...equips.map((it) => ({
+        label: `${(it.name || `#${it.itemId}`).slice(0, 8)}+${it.enhance | 0}`,
+        action: 292,
+        value: it.seq,
+      })),
+      { label: "取消", action: 293, value: 0 },
+    ];
+    dialog.show({
+      title: "星空石·选装备",
+      body: "选择要重置洗练次数的装备",
+      options,
+    });
+    showPhase("dialog");
+  };
+
+  const openStarSkyStoneTierDialog = async (
+    equip: import("./net/protocolExtras").BagItem,
+  ): Promise<void> => {
+    pendingStarSkyEquip = equip;
+    starSkyStonePickEquipOpen = false;
+    starSkyStonePickTierOpen = true;
+    showGameTip(`读取 ${equip.name} 洗练档…`);
+    const info = await session.openEnhanceWash(equip.seq);
+    if (!info || info.result !== 1) {
+      starSkyStonePickTierOpen = false;
+      pendingStarSkyEquip = null;
+      showGameTip(info?.result === 3 ? "装备不存在" : "无法读取洗练档");
+      returnFromStarSkyStone();
+      return;
+    }
+    const enhance = equip.enhance | 0;
+    const unlocked = (info.tiers.length
+      ? info.tiers
+      : [4, 8, 12, 16].map((u) => ({
+          unlock: u,
+          washed: 0,
+          type: 0,
+          flag: 0,
+          value: 0,
+          washCount: 0,
+          nextGold: 5,
+        }))
+    ).filter((t) => (t.unlock | 0) <= enhance);
+    if (unlocked.length === 0) {
+      starSkyStonePickTierOpen = false;
+      pendingStarSkyEquip = null;
+      showGameTip("没有已解锁的洗练档");
+      returnFromStarSkyStone();
+      return;
+    }
+    const options = [
+      ...unlocked.map((t) => ({
+        label: `+${t.unlock} 次数${t.washCount | 0}`,
+        action: 294,
+        value: t.unlock | 0,
+      })),
+      { label: "取消", action: 295, value: 0 },
+    ];
+    dialog.show({
+      title: "星空石·选档位",
+      body: `${(equip.name || "装备").slice(0, 10)} 重置哪一档次数？`,
+      options,
+    });
+    showPhase("dialog");
   };
 
   const openDreamBadgeCombineDialog = (
@@ -4723,6 +4851,14 @@ async function main(): Promise<void> {
   };
 
   const closeWashToBag = async (tip?: string) => {
+    if (washUi.hasPendingReplace()) {
+      const seq = washUi.getEquipSeq();
+      const unlock = washUi.getSelectedUnlock();
+      if (seq) {
+        await session.applyEnhanceWash(seq, unlock, false);
+      }
+      washUi.clearReplaceConfirm();
+    }
     washUi.close();
     await session.openBag();
     system.open("bag");
@@ -4731,6 +4867,7 @@ async function main(): Promise<void> {
   };
 
   const refreshWashPreview = async () => {
+    if (washUi.hasPendingReplace()) return;
     const seq = washUi.getEquipSeq();
     const unlock = washUi.getSelectedUnlock();
     const crystal = washUi.getSelectedCrystalId();
@@ -4750,6 +4887,42 @@ async function main(): Promise<void> {
               : "预览失败",
       );
     }
+  };
+
+  const reopenWashAfterAttempt = async (
+    seq: number,
+    unlock: number,
+    crystal: number,
+    count: number,
+  ) => {
+    await session.openBag();
+    washUi.setBag(session.bagItems);
+    const fresh = session.bagItems.find((b) => b.seq === seq);
+    const reopen = await session.openEnhanceWash(seq);
+    if (reopen && reopen.result === 1 && fresh) {
+      washUi.openWash(fresh, session.bagItems, reopen, {
+        keepUnlock: unlock,
+        keepCrystalId: crystal,
+        keepCrystalCount: count,
+      });
+    }
+  };
+
+  const decideWashReplace = async (apply: boolean) => {
+    const seq = washUi.getEquipSeq();
+    const unlock = washUi.getSelectedUnlock();
+    const crystal = washUi.getSelectedCrystalId();
+    const count = washUi.getSelectedCrystalCount();
+    if (!seq) return;
+    showGameTip(apply ? "替换属性…" : "保留当前…");
+    const res = await session.applyEnhanceWash(seq, unlock, apply);
+    washUi.clearReplaceConfirm();
+    await reopenWashAfterAttempt(seq, unlock, crystal, count);
+    washUi.setTip(res.message);
+    showGameTip(res.message);
+    if (crystal) void refreshWashPreview();
+    else washUi.setPreview(0, 0);
+    shell.setSoftkeys(washUi.softkeys());
   };
 
   const openRecastFlow = async (bag: import("./net/protocolExtras").BagItem) => {
@@ -4773,6 +4946,14 @@ async function main(): Promise<void> {
       void closeWashToBag();
       return;
     }
+    if (action === "accept_replace") {
+      void decideWashReplace(true);
+      return;
+    }
+    if (action === "reject_replace") {
+      void decideWashReplace(false);
+      return;
+    }
     if (action === "pick_crystal" || action === "back") {
       shell.setSoftkeys(washUi.softkeys());
       if (action === "back" && washUi.getSelectedCrystalId()) {
@@ -4782,46 +4963,28 @@ async function main(): Promise<void> {
     }
     if (action === "submit") {
       void (async () => {
+        if (washUi.hasPendingReplace()) return;
         const seq = washUi.getEquipSeq();
         const unlock = washUi.getSelectedUnlock();
         const crystal = washUi.getSelectedCrystalId();
         const count = washUi.getSelectedCrystalCount();
         showGameTip("洗练中…");
         const res = await session.confirmEnhanceWash(seq, unlock, crystal, count);
-        await session.openBag();
-        washUi.setBag(session.bagItems);
-        const fresh = session.bagItems.find((b) => b.seq === seq);
-        const reopen = await session.openEnhanceWash(seq);
-        if (reopen && reopen.result === 1 && fresh) {
-          washUi.openWash(fresh, session.bagItems, reopen, {
-            keepUnlock: unlock,
-            keepCrystalId: crystal,
-            keepCrystalCount: count,
-          });
-        }
+        await reopenWashAfterAttempt(seq, unlock, crystal, count);
         if (res.ok) {
-          const attrNames: Record<number, string> = {
-            1: "力量",
-            2: "敏捷",
-            3: "智慧",
-            4: "物攻",
-            5: "护甲",
-            6: "躲闪",
-            7: "命中",
-            8: "暴击",
-            9: "气血",
-            10: "法力",
-          };
-          const name = attrNames[res.attrType ?? 0] ?? `属性${res.attrType ?? 0}`;
-          const pct = res.attrFlag ? "%" : "";
-          const tip =
-            res.attrType && res.attrValue != null
-              ? `洗练成功 ${name}+${res.attrValue}${pct}`
-              : res.message;
-          showGameTip(tip);
-          washUi.setTip(tip);
-          if (crystal) void refreshWashPreview();
-          else washUi.setPreview(0, 0);
+          washUi.showReplaceConfirm({
+            unlock: res.unlock || unlock,
+            oldWashed: res.oldWashed ?? 0,
+            oldType: res.oldType ?? 0,
+            oldFlag: res.oldFlag ?? 0,
+            oldValue: res.oldValue ?? 0,
+            newType: res.attrType ?? 0,
+            newFlag: res.attrFlag ?? 0,
+            newValue: res.attrValue ?? 0,
+          });
+          washUi.setTip("请选择是否替换");
+          showGameTip("洗练成功，确认是否替换");
+          shell.setSoftkeys(washUi.softkeys());
         } else {
           washUi.setTip(res.message);
           showGameTip(res.message);
@@ -4968,13 +5131,18 @@ async function main(): Promise<void> {
       if (!bag) return;
       if (action === "use") {
         void (async () => {
-          /* 江湖追杀令：打开恩怨选目标，不直接 7/1. */
+          /* 江湖追杀令：打开恩怨「击杀我」选目标，不直接 7/1. */
           if (bag.itemId === 847) {
             system.hide();
             showPhase("social");
-            social.openEnmity(session.enmityRows, session.enmityDir, bag.seq, 1, 1);
-            void session.openEnmity(0, 1);
+            social.openEnmity(session.enmityRows, 1, bag.seq, 1, 1);
+            void session.openEnmity(1, 1);
             showGameTip("请选择仇人使用追杀令");
+            return;
+          }
+          /* 星空石：选装备→选档位→29/13，不直接 7/1. */
+          if (isStarSkyStone(bag.itemId)) {
+            openStarSkyStoneEquipDialog(bag);
             return;
           }
           showGameTip(`使用 ${bag.name}…`);
@@ -5295,6 +5463,10 @@ async function main(): Promise<void> {
       return;
     }
     if (action === "invite_team" && row?.id) {
+      if (session.teamMembers.length >= TEAM_MEMBER_MAX) {
+        showGameTip("队伍已满（最多3人）");
+        return;
+      }
       void session.teamInvite(row.id);
       hud.pushChat(`[队]已邀请 ${row.name}`);
       showGameTip(`组队邀请 ${row.name}`);
@@ -5351,17 +5523,39 @@ async function main(): Promise<void> {
         showGameTip("等级不足25级无法切磋");
         return;
       }
+      social.hide();
+      void session.sparChallenge(row.id, false).then(() => {
+        showPhase("world");
+      });
+      showGameTip(`切磋邀请 ${row.name}`);
+      return;
+    }
+    if (action === "force_pk" && row?.id) {
+      const leaf = (session.scene || "").split(/[/\\]/).pop() || "";
+      const city =
+        /^c\d/i.test(leaf) ||
+        (/^[1-9]/.test(leaf) && (leaf.charCodeAt(1) || 0) >= 0x80);
+      if (city) {
+        hud.pushChat("[系]城镇中无法强制PK");
+        showGameTip("城镇中无法强制PK");
+        return;
+      }
+      if ((session.level | 0) < 25) {
+        hud.pushChat("[系]等级不足25级无法强制PK");
+        showGameTip("等级不足25级无法强制PK");
+        return;
+      }
       if ((session.pkPoints | 0) >= PK_POINTS_MAX) {
-        hud.pushChat("[系]PK值已满，无法发起切磋");
-        showGameTip("PK值已满，无法发起切磋");
+        hud.pushChat("[系]PK值已满，无法发起强制PK");
+        showGameTip("PK值已满，无法发起强制PK");
         return;
       }
       social.hide();
-      void session.sparChallenge(row.id).then(() => {
+      void session.sparChallenge(row.id, true).then(() => {
         if (session.inBattle) showPhase("battle");
         else showPhase("world");
       });
-      showGameTip(`切磋 ${row.name}`);
+      showGameTip(`强制PK ${row.name}`);
       return;
     }
     if (action === "guild_invite" && row?.id) {
@@ -5807,6 +6001,14 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (action === 262 || action === 263) {
+      dialog.hide();
+      void session.sparReply(action === 262).then(() => {
+        if (session.inBattle) showPhase("battle");
+        else showPhase("world");
+      });
+      return;
+    }
     if (action === 258 || action === 259) {
       dialog.hide();
       void session.guildInviteReply(action === 258).then(() => showPhase("world"));
@@ -5941,6 +6143,62 @@ async function main(): Promise<void> {
     if (action === 291 && dreamBadgeCombineOpen) {
       dialog.hide();
       returnFromDreamBadgeCombine();
+      return;
+    }
+    if (action === 292 && starSkyStonePickEquipOpen) {
+      dialog.hide();
+      const stone = pendingStarSkyStone;
+      const equip = session.bagItems.find((it) => it.seq === (value | 0));
+      if (!stone || !equip || equip.kind !== "equip") {
+        showGameTip("装备无效");
+        returnFromStarSkyStone();
+        return;
+      }
+      void openStarSkyStoneTierDialog(equip);
+      return;
+    }
+    if (action === 293 && starSkyStonePickEquipOpen) {
+      dialog.hide();
+      returnFromStarSkyStone();
+      return;
+    }
+    if (action === 294 && starSkyStonePickTierOpen) {
+      dialog.hide();
+      const stone = pendingStarSkyStone;
+      const equip = pendingStarSkyEquip;
+      const unlock = value | 0;
+      starSkyStonePickTierOpen = false;
+      pendingStarSkyStone = null;
+      pendingStarSkyEquip = null;
+      if (!stone || !equip) {
+        returnFromStarSkyStone();
+        return;
+      }
+      void (async () => {
+        showGameTip(`重置 +${unlock} 洗练次数…`);
+        const fb = await session.resetEnhanceWashCount(
+          stone.seq,
+          equip.seq,
+          unlock,
+        );
+        if (fb.ok) await session.openBag();
+        system.setBag(session.bagItems);
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(20, session.bagItems.length);
+        system.setBagMeta(
+          session.characterStats?.money ?? session.gold,
+          cap,
+        );
+        showGameTip(fb.message || (fb.ok ? "重置成功" : "重置失败"));
+        showPhase("system");
+        system.open("bag");
+      })();
+      return;
+    }
+    if (action === 295 && starSkyStonePickTierOpen) {
+      dialog.hide();
+      returnFromStarSkyStone();
       return;
     }
     if (action === 261) {
@@ -6190,6 +6448,11 @@ dialog.hide();
     if (phase === "map") shell.setSoftkeys(labels);
   };
   worldMap.onTeleport = (args) => {
+    if (session.isTeamMemberNotLeader()) {
+      worldMap.showTip("队员不能传送", 1800);
+      showGameTip("队员不能传送");
+      return;
+    }
     worldMap.showTip(`传送中…${args.alias}`);
     view.inputEnabled = false;
     void session

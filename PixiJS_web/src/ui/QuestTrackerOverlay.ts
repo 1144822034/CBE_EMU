@@ -30,6 +30,7 @@ const RING_TYPE_WORLD_TRUTH = 8;
 /**
  * Map-local coords (parent = SceneView.root, already at WORLD_TOP_H).
  * Clear status strip (修/拍/… @ y=4, 17px) — same band as WorldHud PARTY_Y0.
+ * When party strip is visible, shift down by mateCount * PARTY_SLOT_H (not right).
  * Toggle sits above the task plate.
  */
 const STRIP_BOTTOM = 4 + 17;
@@ -217,7 +218,8 @@ export class QuestTrackerOverlay extends Container {
   private rows: QuestTrackerRow[] = [];
   private collapsed = isQuestTrackerCollapsed();
   private worldActive = false;
-  private partyInset = 0;
+  /** Extra map-local Y under party mate slots (0 when solo). */
+  private partyOffsetY = 0;
 
   constructor() {
     super();
@@ -256,13 +258,15 @@ export class QuestTrackerOverlay extends Container {
     this.applyVisibility();
   }
 
-  /** Shift right when party portraits occupy the left column. */
-  setPartyInset(px: number): void {
+  /**
+   * Sit below the world party strip so mate portraits/HP do not cover the tracker.
+   * Pass WorldHud.partyOverlayOffsetY() (mateCount * slot height).
+   */
+  setPartyOffsetY(px: number): void {
     const next = Math.max(0, px | 0);
-    if (next === this.partyInset) return;
-    this.partyInset = next;
-    this.position.x = TRACKER_X0 + this.partyInset;
-    this.redraw();
+    if (next === this.partyOffsetY) return;
+    this.partyOffsetY = next;
+    this.position.y = TRACKER_Y0 + this.partyOffsetY;
   }
 
   setTasks(rows: QuestTrackerRow[]): void {
@@ -345,7 +349,8 @@ export class QuestTrackerOverlay extends Container {
     this.clearLabels();
     clearPointerHits(this.rowHits);
     this.box.clear();
-    this.position.x = TRACKER_X0 + this.partyInset;
+    this.position.x = TRACKER_X0;
+    this.position.y = TRACKER_Y0 + this.partyOffsetY;
     this.toggle.position.set(0, 0);
     /* Task plate below the hide/show toggle. */
     this.content.position.set(0, TOGGLE_SIZE + TOGGLE_GAP);
@@ -354,7 +359,7 @@ export class QuestTrackerOverlay extends Container {
 
     const maxW = Math.min(
       TRACKER_MAX_W,
-      LCD_WIDTH - TRACKER_X0 - this.partyInset - 48,
+      LCD_WIDTH - TRACKER_X0 - 48,
     );
     const textX = PAD_X + ACCENT_W + GAP_AFTER_ACCENT;
     const textW = maxW - textX - PAD_X;

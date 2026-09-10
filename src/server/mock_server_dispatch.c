@@ -356,6 +356,14 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             !vm_net_mock_is_actor_other_only10_request(request, requestLen) &&
             !vm_net_mock_is_actor_moveinfo_upload_request(request, requestLen))
         {
+            hookedLen = vm_net_mock_try_deliver_pending_team_follow_scene_enter(
+                out, outCap, "wt-dispatch");
+            if (hookedLen)
+            {
+                vm_net_log_handled_packet("builtin-team-follow-scene-enter",
+                                          request, requestLen, hookedLen);
+                return hookedLen;
+            }
             hookedLen = vm_net_mock_try_deliver_pending_shop_return_scene_enter(
                 out, outCap, "wt-dispatch");
             if (hookedLen)
@@ -1325,6 +1333,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_equipment_enhance_wash_apply_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-equipment-enhance-wash-apply",
+                                  request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_crystal_combine_response(request, requestLen,
                                                           out, outCap);
     if (hookedLen)
@@ -1348,6 +1365,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-dream-badge-combine", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_star_sky_stone_wash_reset_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-star-sky-stone-wash-reset", request,
                                   requestLen, hookedLen);
         return hookedLen;
     }

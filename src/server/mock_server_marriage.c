@@ -86,6 +86,14 @@ static u32 vm_net_mock_build_marriage32_response(const u8 *request, u32 requestL
             "\xc4\xe3\xc9\xd0\xd3\xd0\xc5\xe4\xc5\xb6"); /* 你尚无配偶 */
     }
 
+    if (vm_mock_service_active_session_team_transfer_blocked())
+    {
+        /* GBK: 队员不能传送。 */
+        return vm_net_mock_build_marriage_teleport_ack(
+            out, outCap, 0,
+            "\xb6\xd3\xd3\xd1\xb2\xbb\xc4\xdc\xb4\xab\xcb\xcd\xa1\xa3");
+    }
+
     spouse = NULL;
     for (cand = g_vm_mock_service_client_sessions; cand != NULL; cand = cand->next)
     {

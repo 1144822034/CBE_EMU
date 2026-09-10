@@ -203,7 +203,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `guild_members`：角色与帮派的一对一成员关系及职位。
 - `guild_applications`：待处理、已同意或已拒绝的入帮申请。
 - `server_shop_items`：后台覆盖的商品价格和上下架状态；没有记录的物品继续使用 DSH 默认价格并默认上架。
-- `server_monsters`：后台保存的怪物等级、类型、战斗属性、奖励和掉落覆盖；没有记录的怪物继续使用服务端目录默认公式。
+- `server_monsters`：后台保存的怪物等级、类型、战斗属性、显示名称、奖励和掉落覆盖；没有记录的怪物继续使用服务端目录默认公式与 SCE 名称。
 - `account_role_state_payload_backup`：旧二进制快照的只读迁移备份，不参与正常保存。
 
 服务启动时会连接 MySQL 并验证这些表。首次完成关系表迁移后，服务会在

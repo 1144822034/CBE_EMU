@@ -8329,17 +8329,15 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
             return;
         }
     }
-    else if (vm_mock_admin_form_value(body, "display_name", displayUtf8,
-                                      sizeof(displayUtf8)) &&
-             displayUtf8[0] != 0)
+    else if (!vm_mock_admin_form_value(body, "display_name", displayUtf8,
+                                       sizeof(displayUtf8)) ||
+             displayUtf8[0] == 0 ||
+             !vm_mock_admin_utf8_to_gbk_text(displayUtf8, row.displayName,
+                                             sizeof(row.displayName), false))
     {
-        if (!vm_mock_admin_utf8_to_gbk_text(displayUtf8, row.displayName,
-                                            sizeof(row.displayName), false))
-        {
-            vm_mock_admin_redirect_monster(client, row.enemyId, "error",
-                                           "显示名称无效或编码失败");
-            return;
-        }
+        vm_mock_admin_redirect_monster(client, row.enemyId, "error",
+                                       "显示名称无效或编码失败");
+        return;
     }
     for (u8 slot = 0; slot < VM_NET_MOCK_MONSTER_DROP_MAX; ++slot)
     {
@@ -11079,7 +11077,7 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
     }
     /* Public catalog for Pixi map nameplates / battle visuals (gateway proxy):
      * overrides=levels, actors, names (UTF-8), reals=wire→real spawn bindings.
-     * Nameplates must key by REAL id, never SCE keep-id wire (#200/#250). */
+     * Nameplates must key by REAL id, never SCE keep-id wire (#250). */
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, "/api/monster-levels") == 0)
     {

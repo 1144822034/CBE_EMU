@@ -109,10 +109,25 @@ export function buildTeamRosterRequest(): Uint8Array {
   return b.finish();
 }
 
-/** Spar / 切磋: 1/4/14 { id }. Server starts duel immediately if peer idle. */
-export function buildSparRequest(actorId: number): Uint8Array {
+/** Spar / 切磋 invite: 1/4/14 { id } — peer must accept via 4/16. */
+/** Force PK: 1/4/14 { id, force:1 } — direct start; consumes 强制PK证明. */
+export function buildSparRequest(actorId: number, forcePk = false): Uint8Array {
   const b = new WtBuilder();
-  b.object(1, 4, 14).u32("id", actorId >>> 0);
+  const o = b.object(1, 4, 14).u32("id", actorId >>> 0);
+  if (forcePk) o.u8("force", 1);
+  return b.finish();
+}
+
+/** Spar invite reply: 1/4/16 { id, result 1|2 } (+ inline 4/9 ready when accept). */
+export function buildSparInviteReply(
+  sourceWireId: number,
+  accept: boolean,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 4, 16)
+    .u32("id", sourceWireId >>> 0)
+    .u8("result", accept ? 1 : 2);
+  if (accept) b.object(1, 4, 9).u32("id", sourceWireId >>> 0);
   return b.finish();
 }
 
@@ -279,6 +294,7 @@ export type SocialInvite =
   | { kind: "team"; id: number; name: string }
   | { kind: "friend"; id: number; name: string }
   | { kind: "trade"; id: number; name: string }
+  | { kind: "spar"; id: number; name: string }
   | { kind: "guild"; id: number; name: string; guildId: number; guildName: string };
 
 export type SocialNotice =
@@ -1012,24 +1028,58 @@ export function parseGuildCreatePackets(packet: WtPacket): GuildCreateUpdate {
   return out;
 }
 
-/** 4/14 spar ack result (1=ok, 3=busy, 4=not found, 6=level, 7=city, …). */
+/** 4/14 spar/force-PK ack; 4/15 invite; 4/17 result tip. */
+export function parseSparPackets(packet: WtPacket): {
+  invite?: SocialInvite;
+  notice?: SocialNotice;
+} {
+  const out: { invite?: SocialInvite; notice?: SocialNotice } = {};
+  for (const obj of packet.objects) {
+    if (obj.kind !== 4) continue;
+    if (obj.subtype === 14) {
+      const result = fieldNum(obj, "result");
+      const forceStarted = packet.objects.some(
+        (o) => o.kind === 4 && o.subtype === 10,
+      );
+      let tip = "切磋请求已发送";
+      if (result === 1)
+        tip = forceStarted ? "强制PK开始" : "切磋请求已发送";
+      else if (result === 2) tip = "战斗中无法切磋";
+      else if (result === 3) tip = "对方忙碌或无法切磋";
+      else if (result === 4) tip = "目标不存在";
+      else if (result === 5) tip = "超出范围";
+      else if (result === 6) tip = "等级不足25级无法切磋";
+      else if (result === 7) tip = "城镇中无法切磋";
+      else if (result === 8) tip = "对方替身人偶生效，无法强制PK";
+      else if (result === 9) tip = "强制PK冷却中，请稍后再试";
+      else if (result === 10) tip = "PK值已满，无法发起强制PK";
+      else if (result === 11) tip = "缺少强制PK证明";
+      else if (result >= 12) tip = "当前状态无法切磋";
+      out.notice = { kind: "spar_result", result, tip };
+    } else if (obj.subtype === 15) {
+      const id = fieldNum(obj, "id");
+      const name = findField(obj, "name")
+        ? decodeFieldString(findField(obj, "name")!).replace(/\0+$/g, "")
+        : "?";
+      if (id) out.invite = { kind: "spar", id, name };
+    } else if (obj.subtype === 17) {
+      const result = fieldNum(obj, "result");
+      const name = findField(obj, "name")
+        ? decodeFieldString(findField(obj, "name")!).replace(/\0+$/g, "")
+        : "";
+      const tip =
+        result === 1
+          ? `${name || "对方"}同意切磋`
+          : `${name || "对方"}不同意和你切磋`;
+      out.notice = { kind: "spar_result", result, tip };
+    }
+  }
+  return out;
+}
+
+/** @deprecated prefer parseSparPackets — kept for smoke callers. */
 export function parseSparAck(packet: WtPacket): SocialNotice | null {
-  const obj = packet.objects.find((o) => o.kind === 4 && o.subtype === 14);
-  if (!obj) return null;
-  const result = fieldNum(obj, "result");
-  let tip = "切磋请求已发送";
-  if (result === 1) tip = "切磋开始";
-  else if (result === 2) tip = "战斗中无法切磋";
-  else if (result === 3) tip = "对方忙碌或无法切磋";
-  else if (result === 4) tip = "目标不存在";
-  else if (result === 5) tip = "超出范围";
-  else if (result === 6) tip = "等级不足25级无法切磋";
-  else if (result === 7) tip = "城镇中无法切磋";
-  else if (result === 8) tip = "对方替身人偶生效，无法切磋";
-  else if (result === 9) tip = "切磋冷却中，请稍后再试";
-  else if (result === 10) tip = "PK值已满，无法发起切磋";
-  else if (result >= 11) tip = "当前状态无法切磋";
-  return { kind: "spar_result", result, tip };
+  return parseSparPackets(packet).notice ?? null;
 }
 
 /** Demo helper for smoke: build a tagged groupinfo blob field value. */

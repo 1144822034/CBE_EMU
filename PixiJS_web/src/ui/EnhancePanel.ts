@@ -137,12 +137,14 @@ export class EnhancePanel extends Container {
     this.destPick = null;
     this.busy = false;
     const slot = source.equipSlot;
+    const quality = source.quality | 0;
     this.destCandidates = bag.filter(
       (it) =>
         it.kind === "equip" &&
         it.seq > 0 &&
         it.seq !== source.seq &&
         it.equipSlot === slot &&
+        (it.quality | 0) === quality &&
         (it.enhance | 0) < (source.enhance | 0),
     );
     this.visible = true;
@@ -157,6 +159,7 @@ export class EnhancePanel extends Container {
     }
     if (this.mode === "transferPick" && this.equip) {
       const slot = this.equip.equipSlot;
+      const quality = this.equip.quality | 0;
       const srcEnhance = this.equip.enhance | 0;
       this.destCandidates = bag.filter(
         (it) =>
@@ -164,6 +167,7 @@ export class EnhancePanel extends Container {
           it.seq > 0 &&
           it.seq !== this.equip!.seq &&
           it.equipSlot === slot &&
+          (it.quality | 0) === quality &&
           (it.enhance | 0) < srcEnhance,
       );
       if (this.listCursor >= this.destCandidates.length) {
@@ -706,7 +710,7 @@ export class EnhancePanel extends Container {
       .stroke({ width: 1, color: CBE.borderDim });
 
     if (!this.destCandidates.length) {
-      this.addAttr("(无符合条件的同类装备)", x + 14, listTop + 4, CBE.inkMint);
+      this.addAttr("(无同品质同类可转移装备)", x + 14, listTop + 4, CBE.inkMint);
     } else {
       this.ensureListVisible(this.destCandidates.length, visible);
       const pageStart = this.listScroll;
@@ -811,7 +815,7 @@ export class EnhancePanel extends Container {
   }
 
   private paintLine(line: EquipPaintLine, x: number, y: number): void {
-    if (line.kind === "text") {
+    if (line.kind === "text" || line.kind === "milestone") {
       this.addAttr(line.text, x, y, line.color);
       return;
     }

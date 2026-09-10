@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS `server_combat_formula_config` (
   `resist_cap_percent` INT UNSIGNED NOT NULL DEFAULT 70,
   `job_skill_attack_bonus_percent` INT UNSIGNED NOT NULL DEFAULT 5,
   `na_variance_percent` INT UNSIGNED NOT NULL DEFAULT 5,
-  `skill_variance_percent` INT UNSIGNED NOT NULL DEFAULT 8,
+  `skill_variance_percent` INT UNSIGNED NOT NULL DEFAULT 3,
   `duel_job_bonus_tianji_percent` INT UNSIGNED NOT NULL DEFAULT 10,
   `duel_job_bonus_huanjian_percent` INT UNSIGNED NOT NULL DEFAULT 8,
   `duel_job_bonus_guidao_percent` INT UNSIGNED NOT NULL DEFAULT 12,

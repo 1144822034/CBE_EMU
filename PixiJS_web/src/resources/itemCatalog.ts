@@ -249,6 +249,44 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
       durabilityMax: 1,
     });
   }
+  if (!itemCache.has(848)) {
+    itemCache.set(848, {
+      id: 848,
+      name: "强制PK证明",
+      desc: "发起强制PK时消耗1个。耐久1。",
+      category: 14,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 30,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
+  if (!itemCache.has(849)) {
+    itemCache.set(849, {
+      id: 849,
+      name: "星空石",
+      desc: "来自宇宙星空的神石,自带时空回溯的逆天效果!",
+      category: 14,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 100,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
   return itemCache;
 }
 

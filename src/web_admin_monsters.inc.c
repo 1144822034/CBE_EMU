@@ -318,7 +318,8 @@ static void vm_mock_admin_render_monster_page(char *response,
     vm_mock_admin_text_appendf(
         &page,
         "</div><p class=\"hint\">保存后立即影响普通场景战斗、副本挑战、挂机战斗和结算。"
-        "显示名称写入目录表；地图刷怪点名牌需在场景设计里重新保存刷怪点后才会刷新。"
+        "显示名称写入 <code>server_monsters.display_name</code>；自定义怪同时更新目录表。"
+        "地图刷怪点名牌需在场景设计里重新保存刷怪点后才会刷新。"
         "%s</p><div class=\"actions\"><button type=\"submit\">保存怪物属性</button></div></form>",
         edit->custom
             ? "自定义怪物可留空战斗 Actor；地图刷怪/开战需要外观时再补。"

@@ -18,6 +18,12 @@ export const EQUIP_DETAIL_YELLOW = 0xffff00;
 export const EQUIP_DETAIL_GRAY = 0x808080;
 /** Red for washed (洗练) milestone rows. */
 export const EQUIP_DETAIL_WASHED = 0xff2020;
+/** Bag vs worn: candidate lower than worn. */
+export const EQUIP_COMPARE_LOWER = 0x00ff00;
+/** Bag vs worn: candidate higher than worn. */
+export const EQUIP_COMPARE_HIGHER = 0xff2020;
+/** Bag vs worn: equal. */
+export const EQUIP_COMPARE_EQUAL = 0xffffff;
 
 export type EquipPaintLine =
   | { kind: "text"; text: string; color: number }
@@ -27,7 +33,37 @@ export type EquipPaintLine =
       value: string;
       keyColor: number;
       valueColor: number;
+    }
+  | {
+      kind: "milestone";
+      unlock: number;
+      text: string;
+      color: number;
     };
+
+export type EquipCompareMark = {
+  text: string;
+  color: number;
+};
+
+/** Numeric detail keys that support bag↔worn compare. */
+const COMPARE_ATTR_KEYS = [
+  "等级",
+  "强化",
+  "力量",
+  "敏捷",
+  "智慧",
+  "物攻",
+  "护甲",
+  "躲闪",
+  "命中",
+  "暴击",
+  "抗性",
+  "气血",
+  "法力",
+] as const;
+
+type CompareAttrKey = (typeof COMPARE_ATTR_KEYS)[number];
 
 const ATTR_NAMES: Record<number, string> = {
   1: "力量",
@@ -191,6 +227,149 @@ function milestoneValue(
   }
 }
 
+/** Effective combat totals (物攻/护甲 include M(L) enhance). */
+export function equipEffectiveStats(it: BagItem): Map<CompareAttrKey, number> {
+  const out = new Map<CompareAttrKey, number>();
+  const cat = lookupItemSync(it.itemId);
+  if (!cat || cat.kind !== "equip") return out;
+  const enhance = it.enhance | 0;
+  const attackBase = cat.attack ?? 0;
+  const armorBase = cat.armor ?? 0;
+  const attackDelta =
+    enhance >= 1 && attackBase > 0 ? attackEnhanceDelta(attackBase, enhance) : 0;
+  const armorDelta =
+    enhance >= 1 && armorBase > 0 ? armorEnhanceDelta(armorBase, enhance) : 0;
+  out.set("等级", cat.level | 0);
+  out.set("强化", enhance);
+  out.set("力量", cat.strength ?? 0);
+  out.set("敏捷", cat.agility ?? 0);
+  out.set("智慧", cat.wisdom ?? 0);
+  out.set("物攻", attackBase + attackDelta);
+  out.set("护甲", armorBase + armorDelta);
+  out.set("躲闪", cat.dodge ?? 0);
+  out.set("命中", cat.hit ?? 0);
+  out.set("暴击", cat.crit ?? 0);
+  out.set("抗性", cat.resist ?? 0);
+  out.set("气血", cat.hpChange ?? 0);
+  out.set("法力", cat.mpChange ?? 0);
+  return out;
+}
+
+/** Parse `[物攻]:` → `物攻`. */
+export function equipKvAttrName(key: string): string | null {
+  const m = /^\[(.+)\]:$/.exec(key);
+  return m?.[1] ?? null;
+}
+
+export function equipCompareMark(candidate: number, worn: number): EquipCompareMark {
+  const d = candidate - worn;
+  if (d === 0) return { text: "=", color: EQUIP_COMPARE_EQUAL };
+  if (d > 0) return { text: `+${d}`, color: EQUIP_COMPARE_HIGHER };
+  return { text: `${d}`, color: EQUIP_COMPARE_LOWER };
+}
+
+/**
+ * Bag equip detail vs currently worn same-slot piece.
+ * Keys: 等级/强化/力量/… plus milestone tiers as `ms:4` / `ms:8` / …
+ */
+export function buildEquipCompareMarks(
+  candidate: BagItem,
+  worn: BagItem,
+): Map<string, EquipCompareMark> {
+  const a = equipEffectiveStats(candidate);
+  const b = equipEffectiveStats(worn);
+  const out = new Map<string, EquipCompareMark>();
+  for (const key of COMPARE_ATTR_KEYS) {
+    const cv = a.get(key) ?? 0;
+    const wv = b.get(key) ?? 0;
+    // Meta always comparable; combat rows only when candidate shows them (non-zero).
+    if (key === "等级" || key === "强化") {
+      out.set(key, equipCompareMark(cv, wv));
+      continue;
+    }
+    if (cv !== 0) out.set(key, equipCompareMark(cv, wv));
+  }
+
+  // 强化附加 / 洗练档：按 +4/+8/+12/+16 同档对比
+  if ((candidate.enhance | 0) >= 4) {
+    const candTiers = resolveMilestoneTiers(candidate);
+    const wornTiers = resolveMilestoneTiers(worn);
+    const wornEnhance = worn.enhance | 0;
+    for (const unlock of [4, 8, 12, 16] as const) {
+      const cand = candTiers.get(unlock);
+      if (!cand) continue;
+      const wornTier = wornTiers.get(unlock);
+      const wornActive = !!wornTier && wornEnhance >= unlock;
+      out.set(`ms:${unlock}`, milestoneCompareMark(cand, wornActive ? wornTier! : null));
+    }
+  }
+  return out;
+}
+
+function milestoneCompareMark(
+  cand: ResolvedMilestone,
+  worn: ResolvedMilestone | null,
+): EquipCompareMark {
+  if (!worn) {
+    // 对方未解锁该档：整档视为多出
+    return equipCompareMark(cand.value, 0);
+  }
+  const candPct = cand.flag & 1;
+  const wornPct = worn.flag & 1;
+  if (cand.type !== worn.type || candPct !== wornPct) {
+    // 不同类型：右侧展示穿戴档「属性名+value」，便于对照
+    const name = ATTR_NAMES[worn.type] ?? "?";
+    const pct = wornPct !== 0 ? "%" : "";
+    return { text: `${name}+${worn.value}${pct}`, color: EQUIP_DETAIL_YELLOW };
+  }
+  return equipCompareMark(cand.value, worn.value);
+}
+
+type ResolvedMilestone = {
+  unlock: number;
+  type: number;
+  flag: number;
+  value: number;
+  washed: boolean;
+};
+
+/** Resolve +4/+8/+12/+16 rows from wire attrs or catalog defaults. */
+function resolveMilestoneTiers(it: BagItem): Map<number, ResolvedMilestone> {
+  const out = new Map<number, ResolvedMilestone>();
+  const cat = lookupItemSync(it.itemId);
+  if (!cat || cat.kind !== "equip") return out;
+
+  const fromWire =
+    it.enhanceAttrs?.filter(
+      (a) => a.unlock === 4 || a.unlock === 8 || a.unlock === 12 || a.unlock === 16,
+    ) ?? [];
+  if (fromWire.length > 0) {
+    for (const a of fromWire) {
+      out.set(a.unlock, {
+        unlock: a.unlock,
+        type: a.type,
+        flag: a.flag & 1,
+        value: a.value | 0,
+        washed: isWashedMilestone(cat, a),
+      });
+    }
+    return out;
+  }
+
+  const slot = cat.equipSlot ?? -1;
+  if (slot < 0 || slot >= MILESTONES.length) return out;
+  const defs = MILESTONES[slot]!;
+  for (let i = 0; i < defs.length; i++) {
+    const unlock = (i + 1) * 4;
+    const def = defs[i]!;
+    const type = milestoneType(cat, i, def.type);
+    const flag = def.flag & 1;
+    const value = milestoneValue(cat, unlock, type, flag);
+    out.set(unlock, { unlock, type, flag, value, washed: false });
+  }
+  return out;
+}
+
 /** Main combat attrs from equip.dsh (only non-zero columns), CBE order.
  * 物攻/护甲 append M(L) enhance delta: `[物攻]:+576(+1725)`.
  */
@@ -248,7 +427,8 @@ function enhanceLines(cat: ItemCatalogRow, enhance: number, attrs?: BagEnhanceAt
       const locked = a.unlock > enhance;
       const washed = isWashedMilestone(cat, a);
       out.push({
-        kind: "text",
+        kind: "milestone",
+        unlock: a.unlock,
         text: `(+${a.unlock}) ${name}+${a.value}${pct}`,
         color: locked
           ? EQUIP_DETAIL_GRAY
@@ -272,7 +452,8 @@ function enhanceLines(cat: ItemCatalogRow, enhance: number, attrs?: BagEnhanceAt
     const pct = def.flag !== 0 ? "%" : "";
     const locked = unlock > enhance;
     out.push({
-      kind: "text",
+      kind: "milestone",
+      unlock,
       text: `(+${unlock}) ${name}+${value}${pct}`,
       color: locked ? EQUIP_DETAIL_GRAY : EQUIP_DETAIL_YELLOW,
     });
@@ -431,10 +612,9 @@ export function buildEquipDetailLines(
     ...mainStatLines(cat, qColor, enhance),
   );
 
-  // L>=4: 四档里程碑。物攻/护甲 M(L) 缩放已并入主属性行。
-  if (enhance >= 4) {
-    lines.push(...enhanceLines(cat, enhance, it.enhanceAttrs));
-  }
+  // 四档里程碑始终展示；unlock > enhance 时灰显（含 +0..+3）。
+  // 物攻/护甲 M(L) 缩放已并入主属性行。
+  lines.push(...enhanceLines(cat, enhance, it.enhanceAttrs));
 
   return lines;
 }

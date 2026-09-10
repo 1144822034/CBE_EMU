@@ -151,7 +151,7 @@ static void vm_mock_service_clear_inflight_scene_transfer_globals(const char *re
 #define VM_NET_MOCK_BATTLE_DAMAGE_VARIANCE_PERCENT 5u
 #endif
 #ifndef VM_NET_MOCK_BATTLE_SKILL_DAMAGE_VARIANCE_PERCENT
-#define VM_NET_MOCK_BATTLE_SKILL_DAMAGE_VARIANCE_PERCENT 8u
+#define VM_NET_MOCK_BATTLE_SKILL_DAMAGE_VARIANCE_PERCENT 3u
 #endif
 
 /* NA / skill variance live in mock_server_role.c (PvE + duel share them). */

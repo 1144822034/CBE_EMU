@@ -493,8 +493,22 @@ static u32 vm_net_mock_enhance_wash_rand_below(u32 bound)
     return vm_net_mock_enhance_wash_rand_u32() % bound;
 }
 
-static bool vm_net_mock_enhance_wash_roll_attr(u8 *typeOut, u8 *flagOut,
-                                               u16 *valueOut)
+/*
+ * Pool valueMax scaled by equip.dsh 品质 (5 tiers 0..4):
+ *   Q0 → 1/5, Q1 → 2/5, Q2 → 3/5, Q3 → 4/5, Q4+ → 5/5.
+ * valueMin is unchanged; if min > scaled max, roll collapses to scaled max.
+ */
+static u32 vm_net_mock_enhance_wash_pool_scaled_max(u32 valueMax, u8 quality)
+{
+    u8 q = quality;
+
+    if (q > 4)
+        q = 4;
+    return (valueMax * ((u32)q + 1u)) / 5u;
+}
+
+static bool vm_net_mock_enhance_wash_roll_attr(u8 quality, u8 *typeOut,
+                                               u8 *flagOut, u16 *valueOut)
 {
     u32 i;
     u32 totalWeight = 0;
@@ -520,6 +534,8 @@ static bool vm_net_mock_enhance_wash_roll_attr(u8 *typeOut, u8 *flagOut,
     {
         const vm_net_mock_enhance_attr_pool_cfg *row =
             &g_vm_net_mock_enhance_attr_pool[i];
+        u32 vmax;
+        u32 vmin;
         u32 span;
         u32 value;
 
@@ -528,8 +544,12 @@ static bool vm_net_mock_enhance_wash_roll_attr(u8 *typeOut, u8 *flagOut,
         cursor += row->weight;
         if (pick >= cursor)
             continue;
-        span = row->valueMax - row->valueMin;
-        value = row->valueMin;
+        vmax = vm_net_mock_enhance_wash_pool_scaled_max(row->valueMax, quality);
+        vmin = row->valueMin;
+        if (vmin > vmax)
+            vmin = vmax;
+        span = vmax - vmin;
+        value = vmin;
         if (span > 0)
             value += vm_net_mock_enhance_wash_rand_below(span + 1u);
         if (value > 65535u)
@@ -543,6 +563,54 @@ static bool vm_net_mock_enhance_wash_roll_attr(u8 *typeOut, u8 *flagOut,
         return true;
     }
     return false;
+}
+
+/*
+ * First obtain of an equipment instance:
+ *   20% — roll +4/+8/+12/+16 from the wash attr pool (washed=1, washCount=0)
+ *   80% — keep empty wash → resolve uses config default + quality formula
+ * Call only when no inherited wash pointer is supplied (trade/equip/warehouse/
+ * auction must pass existing wash and must not re-roll).
+ */
+static bool vm_net_mock_enhance_wash_seed_initial(
+    vm_net_mock_enhance_wash_state *wash, u32 itemId, u32 instanceId, u16 seq)
+{
+    u8 i;
+    u8 rolled = 0;
+    u8 quality = 0;
+    const vm_net_mock_equipment_catalog_item *equip =
+        vm_net_mock_find_equipment_catalog_item(itemId);
+
+    if (wash == NULL)
+        return false;
+    if (equip != NULL)
+        quality = equip->quality;
+    vm_net_mock_enhance_wash_clear(wash);
+    vm_net_mock_enhance_wash_rand_mix(
+        itemId ^ (instanceId * 0x85ebca6bu) ^ ((u32)seq << 16) ^
+        ((u32)time(NULL)) ^ (g_schedulerTick * 1664525u) ^
+        ((u32)quality << 24));
+    /* 0..19 → seed (20%); 20..99 → default config (80%). */
+    if (vm_net_mock_enhance_wash_rand_below(100u) >= 20u)
+        return false;
+    for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+    {
+        u8 type = 0;
+        u8 flag = 0;
+        u16 value = 0;
+
+        vm_net_mock_enhance_wash_rand_mix(((u32)i + 1u) * 0x9e3779b9u ^ itemId ^
+                                          instanceId ^ ((u32)seq << 8));
+        if (!vm_net_mock_enhance_wash_roll_attr(quality, &type, &flag, &value))
+            continue;
+        wash->slots[i].washed = 1;
+        wash->slots[i].type = type;
+        wash->slots[i].flag = flag;
+        wash->slots[i].value = value;
+        wash->slots[i].washCount = 0;
+        rolled++;
+    }
+    return rolled > 0;
 }
 
 static u32 vm_net_mock_enhance_wash_next_gold(u16 washCount)

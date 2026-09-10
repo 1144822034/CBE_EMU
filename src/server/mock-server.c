@@ -64,6 +64,11 @@ static void vm_mock_service_account_note_durable_role_write(
     bool durablePositionCommitted,
     const char *reason);
 
+/* Defined in mock_server_activities.c (included later); panel 活力 uses same
+ * account_role_vitality as festival exchange. */
+static void vm_mock_activities_vitality_wire(vm_net_mock_role_state *role,
+                                             u32 *energyOut, u32 *energyMaxOut);
+
 #include "mock_server_role.c"
 
 /* Death recovery owns the role mutation in mock_server_equipment_npc.c, while
@@ -131,6 +136,7 @@ bool vm_mock_ladder_battle_is_active(void);
 u32 vm_mock_ladder_damage_scale_percent(void);
 void vm_mock_ladder_on_battle_end(bool victory);
 bool vm_mock_ladder_npc_offers(const char *npcName);
+static void vm_mock_activities_on_ladder_victory(vm_net_mock_role_state *role);
 
 #include "mock_server_world_boss.c"
 #include "mock_server_ladder.c"
@@ -147,8 +153,6 @@ static bool vm_mock_festival_npc_offers(const char *npcName);
 static bool vm_mock_yanmen_npc_offers(const char *npcName);
 static bool vm_mock_ring_npc_offers(const char *npcName);
 static void vm_mock_activities_arena_round_vitality(vm_mock_service_duel *duel);
-static void vm_mock_activities_vitality_wire(vm_net_mock_role_state *role,
-                                             u32 *energyOut, u32 *energyMaxOut);
 static void vm_mock_activities_on_pve_victory(const char *scene, u32 enemyId,
                                               bool isBoss);
 static void vm_mock_activities_on_pvp_kill(vm_net_mock_role_state *role,
@@ -176,6 +180,7 @@ static u32 vm_net_mock_build_ring_protocol_response(const u8 *request,
 
 /* Pixi arena (defined in mock_server_arena.c after guild). */
 static bool vm_mock_arena_npc_offers_entry(const char *npcName);
+static bool vm_mock_arena_npc_offers_rank(const char *npcName);
 static bool vm_mock_arena_wager_npc_offers(const char *npcName);
 static bool vm_mock_arena_is_arena_scene(const char *scene);
 static bool vm_mock_arena_peer_visible(

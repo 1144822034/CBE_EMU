@@ -1821,7 +1821,10 @@ static void vm_net_mock_sce_combat_spawn_bindings_ensure_loaded(void)
 /*
  * Catalog label key for an SCE spawn: when wire≠real (custom/world-boss remap),
  * the nameplate belongs to REAL.  Wire stock ids must not inherit that name.
- * Keep-ids #200/#250 without a binding:
+ * Keep-id is only #250 (FB/custom remap).  #200 is stock 炼狱鬼火 — never
+ * treat it as a placeholder (same-actor fallback used to steal #51 蓝灯鬼).
+ * Legacy dream rows that still wire=#200 resolve via bindings only.
+ * Keep-id #250 without a binding:
  *   1) unique match by SCE displayName (task-only / labeled catalog),
  *   2) unique match by battle .actor,
  * else keep wire (do not poison keep-id slots with Boss names).
@@ -1864,8 +1867,7 @@ static u32 vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
         return posReal;
     if (!wireAmbiguous && wireHits >= 1u && wireReal != 0)
         return wireReal;
-    if (wireActorId != 200u &&
-        wireActorId != (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
+    if (wireActorId != (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
         return wireActorId;
 
     if (sceDisplayName != NULL && sceDisplayName[0] != 0)
@@ -1903,10 +1905,16 @@ static u32 vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
             u32 candidate = g_vm_net_mock_monster_entries[i].enemyId;
             const char *name = NULL;
 
-            if (candidate == 0 || candidate == 200u ||
+            if (candidate == 0 ||
                 candidate == (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
                 continue;
-            if (g_vm_net_mock_monster_resource_labels[i].displayName[0] != 0)
+            if (g_vm_net_mock_monster_overrides[i].used &&
+                g_vm_net_mock_monster_overrides[i].displayName[0] != 0)
+                name = g_vm_net_mock_monster_overrides[i].displayName;
+            else if (g_vm_net_mock_monster_custom[i] &&
+                     g_vm_net_mock_monster_custom_names[i][0] != 0)
+                name = g_vm_net_mock_monster_custom_names[i];
+            else if (g_vm_net_mock_monster_resource_labels[i].displayName[0] != 0)
                 name = g_vm_net_mock_monster_resource_labels[i].displayName;
             if (name == NULL || strcmp(name, sceDisplayName) != 0)
                 continue;
@@ -1932,7 +1940,7 @@ static u32 vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
             u32 candidate = g_vm_net_mock_monster_entries[i].enemyId;
             const char *actor = NULL;
 
-            if (candidate == 0 || candidate == 200u ||
+            if (candidate == 0 ||
                 candidate == (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
                 continue;
             if (g_vm_net_mock_monster_overrides[i].used &&
@@ -2295,9 +2303,10 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
     }
     /*
      * Admin maps store real catalog ids while SCE keeps a ParseMinfo wire
-     * (often #200).  Resolve to the real id when unique/unanimous.  Never
-     * silently return the wire keep-id on a split scene — that hid 204→200
-     * formula HP (1400) and made admin overrides look "ignored".
+     * (#250 keep-id; legacy rows may still use #200).  Resolve to the real
+     * id when unique/unanimous.  Never silently return the wire keep-id on a
+     * split scene — that hid 204→200 formula HP (1400) and made admin
+     * overrides look "ignored".
      */
     if (wireOnlyCount >= 1u && wireOnly != 0 &&
         (wireOnlyCount == 1u || wireRealUnanimous))
@@ -2319,7 +2328,7 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
     }
     /*
      * Pixi challenge/hangup 4/1 sends catalog challenge_enemy_id (e.g. 204),
-     * which is not an SCE wire (#200).  On wire/real split scenes the miss
+     * which is not an SCE wire (#250).  On wire/real split scenes the miss
      * path used to refuse or, with borrowed spawn pos, steal the floor bind.
      */
     if (vm_net_mock_monster_enemy_id_known(wireActorId))
@@ -2474,7 +2483,16 @@ static bool vm_net_mock_monster_battle_left_appearance(
     if (monsterIndex < 0)
         return false;
 
-    if (g_vm_net_mock_monster_custom[monsterIndex] &&
+    if (g_vm_net_mock_monster_overrides[monsterIndex].used &&
+        g_vm_net_mock_monster_overrides[monsterIndex].displayName[0] != 0)
+    {
+        if (nameOut != NULL && nameCap > 0)
+        {
+            snprintf(nameOut, nameCap, "%s",
+                     g_vm_net_mock_monster_overrides[monsterIndex].displayName);
+        }
+    }
+    else if (g_vm_net_mock_monster_custom[monsterIndex] &&
         g_vm_net_mock_monster_custom_names[monsterIndex][0] != 0)
     {
         if (nameOut != NULL && nameCap > 0)
@@ -2572,7 +2590,12 @@ static u32 vm_net_mock_monster_admin_list(
             rows[i].dropCount = VM_NET_MOCK_MONSTER_DROP_MAX;
         rows[i].overridden = override->used;
         rows[i].custom = g_vm_net_mock_monster_custom[i];
-        if (g_vm_net_mock_monster_custom[i] &&
+        if (override->used && override->displayName[0] != 0)
+        {
+            snprintf(rows[i].displayName, sizeof(rows[i].displayName), "%s",
+                     override->displayName);
+        }
+        else if (g_vm_net_mock_monster_custom[i] &&
             g_vm_net_mock_monster_custom_names[i][0] != 0)
         {
             snprintf(rows[i].displayName, sizeof(rows[i].displayName), "%s",
@@ -9260,6 +9283,25 @@ static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request,
     if (outCap < pos || (subtype != 2 && subtype != 3))
         return 0;
 
+    if (vm_mock_service_active_session_team_transfer_blocked())
+    {
+        /* GBK: 队员不能传送。 */
+        static const char memberNoTeleportGbk[] =
+            "\xb6\xd3\xd3\xd1\xb2\xbb\xc4\xdc\xb4\xab\xcb\xcd\xa1\xa3";
+        vm_mock_service_client_session *blockedSession =
+            vm_mock_service_get_active_client_session();
+        if (blockedSession != NULL)
+            (void)vm_mock_service_session_enqueue_system_message(
+                blockedSession, memberNoTeleportGbk);
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[info][network] mock_teleport_stone_transfer client=%08x "
+               "subtype=%u action=reject-non-leader response=empty-wt+system "
+               "evidence=team-member-no-transfer\n",
+               blockedSession ? blockedSession->clientId : 0,
+               subtype);
+        return pos;
+    }
+
     if (subtype == 2)
     {
         /*
@@ -9549,6 +9591,27 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
         return 0;
     }
 
+    if (vm_mock_service_active_session_team_transfer_blocked())
+    {
+        /* GBK: 队员不能传送。 */
+        static const char memberNoTeleportGbk[] =
+            "\xb6\xd3\xd3\xd1\xb2\xbb\xc4\xdc\xb4\xab\xcb\xcd\xa1\xa3";
+        vm_mock_service_client_session *blockedSession =
+            vm_mock_service_get_active_client_session();
+        if (blockedSession != NULL)
+            (void)vm_mock_service_session_enqueue_system_message(
+                blockedSession, memberNoTeleportGbk);
+        {
+            u32 rejectPos = 5;
+            vm_net_mock_finish_wt_packet(out, rejectPos, 0);
+            printf("[info][network] mock_teleport_stone_confirmed_exit client=%08x "
+                   "action=reject-non-leader response=empty-wt+system "
+                   "evidence=team-member-no-transfer\n",
+                   blockedSession ? blockedSession->clientId : 0);
+            return rejectPos;
+        }
+    }
+
     provisionalTarget = g_vm_net_mock_teleport_stone_confirm_target;
     if (!vm_net_mock_refine_teleport_stone_confirmed_target(
             &provisionalTarget, exitId, &target, &posSource))
@@ -9748,6 +9811,24 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
 
     if (outCap < pos || !vm_net_mock_is_teleport_stone_map_transfer_request(request, requestLen))
         return 0;
+
+    if (vm_mock_service_active_session_team_transfer_blocked())
+    {
+        /* GBK: 队员不能传送。 */
+        static const char memberNoTeleportGbk[] =
+            "\xb6\xd3\xd3\xd1\xb2\xbb\xc4\xdc\xb4\xab\xcb\xcd\xa1\xa3";
+        vm_mock_service_client_session *blockedSession =
+            vm_mock_service_get_active_client_session();
+        if (blockedSession != NULL)
+            (void)vm_mock_service_session_enqueue_system_message(
+                blockedSession, memberNoTeleportGbk);
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[info][network] mock_teleport_stone_map_confirm client=%08x "
+               "action=reject-non-leader response=empty-wt+system "
+               "evidence=team-member-no-transfer\n",
+               blockedSession ? blockedSession->clientId : 0);
+        return pos;
+    }
 
     if (!vm_net_mock_get_teleport_stone_map_target(request, requestLen, &target, &curId, &objId,
                                                    &source, &posSource, &smapRow, &sceneCount,

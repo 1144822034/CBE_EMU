@@ -4497,7 +4497,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 break;
             }
         }
-        /* Pixi 比武擂台：NPC 名含配置关键字时提供进场/离场/排行 */
+        /* Pixi 比武擂台：NPC 名含配置关键字时提供进场/离场（排行见英雄榜） */
         if (vm_mock_arena_npc_offers_entry(matchedSeed->displayName[0]
                                                ? matchedSeed->displayName
                                                : matchedSeed->scriptName))
@@ -4522,6 +4522,12 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                     VM_NET_MOCK_NPC_SERVICE_ARENA_LEAVE;
                 serviceOptionCount += 1;
             }
+        }
+        /* 英雄榜 NPC：比武排行榜（查看/领奖） */
+        if (vm_mock_arena_npc_offers_rank(matchedSeed->displayName[0]
+                                              ? matchedSeed->displayName
+                                              : matchedSeed->scriptName))
+        {
             if (serviceOptionCount + usedSlots < dialogCap)
             {
                 serviceOptionNames[serviceOptionCount] =
@@ -11433,6 +11439,26 @@ static u32 vm_net_mock_build_task_transport_confirm_execute_response(
 
     if (out == NULL || outCap < pos)
         return 0;
+
+    if (vm_mock_service_active_session_team_transfer_blocked())
+    {
+        /* GBK: 队员不能传送。 */
+        static const char memberNoTeleportGbk[] =
+            "\xb6\xd3\xd3\xd1\xb2\xbb\xc4\xdc\xb4\xab\xcb\xcd\xa1\xa3";
+        vm_mock_service_client_session *blockedSession =
+            vm_mock_service_get_active_client_session();
+        if (blockedSession != NULL)
+            (void)vm_mock_service_session_enqueue_system_message(
+                blockedSession, memberNoTeleportGbk);
+        g_vm_net_mock_task_transport_pending_valid = false;
+        g_vm_net_mock_task_transport_pending_task_id = 0;
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[info][network] mock_task_transport phase=confirm client=%08x "
+               "action=reject-non-leader response=empty-wt+system "
+               "evidence=team-member-no-transfer\n",
+               blockedSession ? blockedSession->clientId : 0);
+        return pos;
+    }
 
     memset(&target, 0, sizeof(target));
     if (g_vm_net_mock_task_transport_pending_valid &&

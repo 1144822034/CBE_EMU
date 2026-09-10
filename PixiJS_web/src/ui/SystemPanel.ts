@@ -46,8 +46,10 @@ import {
   loadActor,
 } from "../resources/actor";
 import {
+  buildEquipCompareMarks,
   buildEquipDetailLines,
   EQUIP_DETAIL_YELLOW,
+  equipKvAttrName,
   type EquipPaintLine,
 } from "./equipDetail";
 import {
@@ -496,10 +498,22 @@ export class SystemPanel extends Container {
 
   setWorn(items: BagItem[]): void {
     this.wornItems = items;
-    if (this.visible && this.kind === "equip") {
+    if (!this.visible) return;
+    if (this.kind === "equip") {
       if (this.mode === "list" || this.mode === "actions") {
         this.selected = this.wornBySlot(this.equipFocusSlot);
       }
+      this.redraw();
+      return;
+    }
+    // Bag equip detail needs worn snapshot for same-slot compare.
+    if (
+      this.kind === "bag" &&
+      this.mode === "actions" &&
+      this.selected &&
+      isBag(this.selected) &&
+      this.selected.kind === "equip"
+    ) {
       this.redraw();
     }
   }
@@ -2026,6 +2040,7 @@ export class SystemPanel extends Container {
 
   /**
    * CBE 装备详情（截图）：品质色标题、[等级]/主属性黄值、强化附加亮/灰、底栏操作。
+   * 同部位已穿戴时右侧显示对比：= / +m(红) / -n(绿)。
    * 属性能一页装下则不分页。
    */
   private drawBagEquipDetail(x: number, y: number, w: number, h: number): void {
@@ -2051,6 +2066,10 @@ export class SystemPanel extends Container {
     const bodyBottom = actionTop - 4;
     const rowH = 16;
     const lines = buildEquipDetailLines(it);
+    const slot = it.equipSlot >= 0 ? it.equipSlot : lookupItemSync(it.itemId)?.equipSlot ?? -1;
+    const worn = slot >= 0 ? this.wornBySlot(slot) : null;
+    const marks = worn ? buildEquipCompareMarks(it, worn) : null;
+    const hasCompare = !!marks && marks.size > 0;
     const fitRows = Math.max(1, Math.floor((bodyBottom - bodyTop) / rowH));
     // 能一页显示全则不分页；否则按可容纳行数翻页
     const rowsPerPage = lines.length <= fitRows ? lines.length || 1 : fitRows;
@@ -2060,16 +2079,30 @@ export class SystemPanel extends Container {
     const start = page * rowsPerPage;
     const pageLines = lines.slice(start, start + rowsPerPage);
 
+    const compareRightX = x + w - 10;
     let ly = bodyTop;
     for (const line of pageLines) {
-      const rows = this.paintEquipLine(line, x + 14, ly);
+      const rows = this.paintEquipLine(line, x + 14, ly, hasCompare ? 80 : 0);
+      if (marks) {
+        let mark: { text: string; color: number } | undefined;
+        if (line.kind === "kv") {
+          const name = equipKvAttrName(line.key);
+          mark = name ? marks.get(name) : undefined;
+        } else if (line.kind === "milestone") {
+          mark = marks.get(`ms:${line.unlock}`);
+        }
+        if (mark) {
+          this.addAttrTextRight(mark.text, compareRightX, ly, mark.color, 78);
+        }
+      }
       ly += rowH * Math.max(1, rows);
     }
 
     if (pageCount > 1) {
+      // With compare column on the right, keep page hint centered so it does not cover deltas.
       this.addLabelCentered(
         `⇦ ${page + 1}/${pageCount} ⇨`,
-        LCD_WIDTH / 2 + 70,
+        hasCompare ? LCD_WIDTH / 2 : LCD_WIDTH / 2 + 70,
         bodyTop + Math.floor(fitRows * rowH * 0.45),
         CBE.ink,
       );
@@ -2132,25 +2165,27 @@ export class SystemPanel extends Container {
     }
   }
 
-  private paintEquipLine(line: EquipPaintLine, x: number, y: number): number {
-    if (line.kind === "text") {
-      this.addAttrText(line.text, x, y, line.color);
+  private paintEquipLine(
+    line: EquipPaintLine,
+    x: number,
+    y: number,
+    rightReserve = 0,
+  ): number {
+    const maxW = Math.max(40, LCD_WIDTH - x - 16 - rightReserve);
+    if (line.kind === "text" || line.kind === "milestone") {
+      this.addAttrText(line.text, x, y, line.color, maxW);
       return wrapChars(line.text).length;
     }
     // Same-color key+value → one Label (merge); two-tone keeps two Labels.
     if (line.keyColor === line.valueColor) {
       const merged = `${line.key}${line.value}`;
-      this.addAttrText(merged, x, y, line.keyColor);
+      this.addAttrText(merged, x, y, line.keyColor, maxW);
       return wrapChars(merged).length;
     }
-    this.addAttrText(line.key, x, y, line.keyColor);
+    this.addAttrText(line.key, x, y, line.keyColor, maxW);
     // UC3 16×16 — old 12/7 system-font estimate put yellow values on top of keys.
-    this.addAttrText(
-      line.value,
-      x + measureUiTextWidth(line.key),
-      y,
-      line.valueColor,
-    );
+    const keyW = measureUiTextWidth(line.key);
+    this.addAttrText(line.value, x + keyW, y, line.valueColor, Math.max(24, maxW - keyW));
     return Math.max(wrapChars(line.key).length, wrapChars(line.value).length);
   }
 
@@ -2325,7 +2360,10 @@ export class SystemPanel extends Container {
       { label: "命中", value: String(s.hit) },
       { label: "暴击", value: String(s.crit) },
       { label: "抗性", value: String(s.resist) },
-      { label: "活力", value: String(s.endurance) },
+      {
+        label: "活力",
+        value: `${s.vitality ?? 0}/${s.vitalityMax ?? 0}`,
+      },
     ];
   }
 
@@ -2560,11 +2598,17 @@ export class SystemPanel extends Container {
   }
 
   /** Attr-panel / list rows — plain fill, no stroke (clearest on LCD stretch). */
-  private addAttrText(text: string, x: number, y: number, color: number): void {
+  private addAttrText(
+    text: string,
+    x: number,
+    y: number,
+    color: number,
+    maxWidth = LCD_WIDTH - x - 16,
+  ): void {
     const t = new BitmapLabel();
     t.eventMode = "none";
     t.position.set(x, y);
-    void t.setText(text, color, { outline: false, maxWidth: LCD_WIDTH - x - 16 });
+    void t.setText(text, color, { outline: false, maxWidth });
     this.addChild(t);
     this.labels.push(t);
   }

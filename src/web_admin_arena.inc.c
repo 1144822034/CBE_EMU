@@ -84,7 +84,7 @@ static u32 vm_mock_admin_arena_form_hm(const char *body, const char *nameHour,
     return hour * 60u + minute;
 }
 
-/* Per-day bracket: 0=rest, 10/50/70. Builds mask from non-rest days. */
+/* Per-day bracket: 0=rest, 10/50/70, 77=70大乱斗. Builds mask from non-rest days. */
 static void vm_mock_admin_arena_form_weekday_brackets(const char *body,
                                                       u16 outBrackets[7],
                                                       u32 *maskOut)
@@ -108,8 +108,8 @@ static void vm_mock_admin_arena_form_weekday_brackets(const char *body,
     {
         snprintf(key, sizeof(key), "bracket_wd_%u", i);
         value = 0;
-        (void)vm_mock_admin_form_u32(body, key, 70u, &value);
-        if (value != 10u && value != 50u && value != 70u)
+        (void)vm_mock_admin_form_u32(body, key, 77u, &value);
+        if (value != 10u && value != 50u && value != 70u && value != 77u)
             value = 0;
         outBrackets[i] = (u16)value;
         if (value != 0)
@@ -127,9 +127,11 @@ static void vm_mock_admin_arena_append_bracket_options(vm_mock_admin_text *page,
         "<option value=\"0\"%s>休息</option>"
         "<option value=\"10\"%s>10-49级</option>"
         "<option value=\"50\"%s>50-69级</option>"
-        "<option value=\"70\"%s>70级+</option>",
+        "<option value=\"70\"%s>70级+(分职业)</option>"
+        "<option value=\"77\"%s>70大乱斗(三职业同场)</option>",
         selected == 0 ? " selected" : "", selected == 10 ? " selected" : "",
-        selected == 50 ? " selected" : "", selected == 70 ? " selected" : "");
+        selected == 50 ? " selected" : "", selected == 70 ? " selected" : "",
+        selected == 77 ? " selected" : "");
 }
 
 static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
@@ -206,7 +208,7 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
             "<section class=\"card\"><h2>运行状态</h2>"
             "<p>session=%u status=%u 参与者=%u 今日段位=%u</p>"
             "<p class=\"muted\">status: 0空闲 1进场 2比赛 3已结算；段位 0=休息 / "
-            "10=10-49 / 50=50-69 / 70=70+</p></section>",
+            "10=10-49 / 50=50-69 / 70=70分职业 / 77=70大乱斗</p></section>",
             vm_net_mock_arena_runtime_session_id(),
             (u32)vm_net_mock_arena_runtime_status(),
             vm_net_mock_arena_runtime_participant_count(), (u32)todayBracket);
@@ -235,7 +237,7 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
     {
         static const char *const weekdayNames[7] = {
             "周日", "周一", "周二", "周三", "周四", "周五", "周六"};
-        static const u16 defaultBrackets[7] = {0, 70, 50, 10, 70, 50, 10};
+        static const u16 defaultBrackets[7] = {77, 70, 50, 10, 70, 50, 77};
         u32 wd;
         vm_mock_admin_text_appendf(
             &page,
@@ -290,9 +292,11 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<option value=\"0\"%s>不生效</option>"
         "<option value=\"1\"%s>生效(+ATK%%)</option></select></div>"
         "</div><button type=\"submit\">保存配置</button></form>"
-        "<p class=\"muted\">每天只开一个等级段；场地按职业分流：天机→基准图，"
-        "幻剑→基准50，鬼道→基准70。默认周一70/周二50-69/周三10-49/周四70/"
-        "周五50-69/周六10-49/周日休息；进场 20:20–20:29，比赛 20:30–21:00。"
+        "<p class=\"muted\">每天只开一个日程键；普通日场地按职业分流：天机→基准图，"
+        "幻剑→基准50，鬼道→基准70。<b>77=周末大乱斗</b>：仅70级+，三人职业同进"
+        "基准70图、互见互打，机制同70级比武（含连杀播报），奖励用职业0×段位77单独配。"
+        "默认周一70/周二50-69/周三10-49/周四70/周五50-69/周六日大乱斗；"
+        "进场 20:20–20:29，比赛 20:30–21:00。"
         "战斗规则默认：伤害加深开、禁回血、允许闪躲、神力丸不生效；"
         "增益/封魔/战斗物品仍固定禁用。"
         "</p></section>",
@@ -314,12 +318,14 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
 
     vm_mock_admin_text_appendf(
         &page,
-        "<section class=\"card\"><h2>排行奖励 (职业×段位×名次1-5)</h2>"
+        "<section class=\"card\"><h2>排行奖励</h2>"
+        "<p class=\"muted\">普通：职业1-3 × 段位10/50/70 × 名次1-5。"
+        "大乱斗：职业填 <b>0</b>、段位填 <b>77</b>、名次1-5（全职业共用）。</p>"
         "<form method=\"post\" action=\"/action\" class=\"grid2\">"
         "<input type=\"hidden\" name=\"action\" value=\"save-arena-reward\">"
-        "<div><label>职业(1天机2幻剑3鬼道)</label>"
+        "<div><label>职业(1天机2幻剑3鬼道；大乱斗填0)</label>"
         "<input name=\"job\" value=\"1\"></div>"
-        "<div><label>段位(10=10-49 / 50=50-69 / 70=70+)</label>"
+        "<div><label>段位(10/50/70；大乱斗77)</label>"
         "<input name=\"bracket\" value=\"10\"></div>"
         "<div><label>名次(1-5)</label><input name=\"rank_pos\" value=\"1\"></div>"
         "<div><label>经验</label><input name=\"reward_exp\" value=\"0\"></div>"
@@ -434,13 +440,13 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
     char kwGbk[32];
     const vm_mock_arena_config *cfg;
 
-    weekdayBrackets[0] = 0;
+    weekdayBrackets[0] = 77;
     weekdayBrackets[1] = 70;
     weekdayBrackets[2] = 50;
     weekdayBrackets[3] = 10;
     weekdayBrackets[4] = 70;
     weekdayBrackets[5] = 50;
-    weekdayBrackets[6] = 10;
+    weekdayBrackets[6] = 77;
 
     if (strcmp(action, "save-arena-config") == 0)
     {
@@ -520,7 +526,7 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         u32 itemCount = 0;
         u32 equipId = 0;
         (void)vm_mock_admin_form_u32(body, "job", 3u, &job);
-        (void)vm_mock_admin_form_u32(body, "bracket", 70u, &bracket);
+        (void)vm_mock_admin_form_u32(body, "bracket", 77u, &bracket);
         (void)vm_mock_admin_form_u32(body, "rank_pos", 5u, &rankPos);
         (void)vm_mock_admin_form_u32(body, "reward_exp", 0xffffffffu, &exp);
         (void)vm_mock_admin_form_u32(body, "reward_money", 0xffffffffu, &money);

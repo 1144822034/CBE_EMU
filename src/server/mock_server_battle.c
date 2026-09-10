@@ -8651,16 +8651,23 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
         {
             rawDamage = sourceStats.attack ? sourceStats.attack : 1;
         }
-        /* 比武：admin allow_combat_pill=1 时套用大力丸/神力丸 ATK%（与 PvE 同口径）。 */
+        /* 比武：admin allow_combat_pill=1 时套用大力丸/神力丸 ATK%（与 PvE 同口径）。
+         * 必须按攻击方 session.accountId 查 effect：回合由后提交方 resolve 时
+         * active_account 是对方，用 active 查会把神力丸加成间歇弄丢（表现为
+         * 同场暴击高低差远超 ±skill_variance，甚至非暴击高于暴击）。 */
         if (duel->arenaMode)
         {
             const vm_mock_arena_config *pillCfg = vm_net_mock_arena_config_get();
 
             if (pillCfg != NULL && pillCfg->allowCombatPill != 0)
             {
+                const char *sourceAccountId =
+                    (source != NULL && source->accountId[0] != '\0')
+                        ? source->accountId
+                        : NULL;
                 u32 pillBonusPercent =
-                    vm_net_mock_role_active_combat_pill_attack_bonus_percent(
-                        sourceRole);
+                    vm_net_mock_role_combat_pill_attack_bonus_percent_for(
+                        sourceAccountId, sourceRole);
 
                 if (pillBonusPercent != 0)
                 {
@@ -8669,6 +8676,13 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
                         100ull;
                     rawDamage =
                         boosted > 0xffffffffull ? 0xffffffffu : (u32)boosted;
+                    printf("[info][mock-service] arena_duel_combat_pill "
+                           "serial=%u actor=%u role=%u account=%s bonus=%u%% "
+                           "evidence=owner-account-scoped-effect\n",
+                           duel->serial, sourceIndex,
+                           sourceRole ? sourceRole->roleId : 0u,
+                           sourceAccountId ? sourceAccountId : "-",
+                           pillBonusPercent);
                 }
             }
         }
@@ -9224,7 +9238,8 @@ static bool vm_mock_service_duel_resolve_committed_round(
         duel->terminalPendingMask = duel->startedMask;
         duel->terminalNotBeforeTick = g_schedulerTick + delayTicks;
         vm_mock_service_duel_arm_both_exits(duel);
-        if (!duel->arenaMode && !duel->wagerMode)
+        /* Ring kill-player credit: friendly 切磋 only (not force-PK / arena / wager). */
+        if (!duel->arenaMode && !duel->wagerMode && duel->friendlyMode)
         {
             int seat;
             for (seat = 0; seat < 2; ++seat)
@@ -14590,7 +14605,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         /*
          * forceNonScene (instance / dream followup 4/10) must keep the armed
          * enemy id (already remapped when pending was armed).  Scene starts
-         * must remap wire→real; never silently fight as SCE keep-id #200.
+         * must remap wire→real; never silently fight as SCE keep-id #250.
          */
         if (!forceNonSceneStart)
             requestedEnemyId = vm_net_mock_sce_combat_spawn_remap_battle_enemy(
@@ -14760,7 +14775,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     {
         /*
          * HP/MP/name must come from the remapped catalog/custom id (e.g. 204),
-         * not the SCE wire keep-id (often #200).  Hangup already passes
+         * not the SCE wire keep-id (#250).  Hangup already passes
          * requestedEnemyId; challenge/4/10 used enemyWireId and ignored admin
          * overrides for remapped dream/instance enemies (UI stayed at formula
          * 1400 while server_monsters said 10000).

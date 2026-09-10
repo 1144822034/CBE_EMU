@@ -28,7 +28,7 @@ typedef struct
     /* Skill / duel modifiers */
     u32 jobSkillAttackBonusPercent; /* PvE skill +%; default 5 */
     u32 naVariancePercent;          /* NA ±% PvE+duel; default 5 */
-    u32 skillVariancePercent;       /* skill ±% PvE+duel; default 8 */
+    u32 skillVariancePercent;       /* skill ±% PvE+duel; default 3 */
     u32 duelJobBonusTianjiPercent;  /* job 1; default 10 */
     u32 duelJobBonusHuanjianPercent;/* job 2; default 8 */
     u32 duelJobBonusGuidaoPercent;  /* job 3; default 12 */
@@ -69,7 +69,7 @@ static void vm_net_mock_combat_formula_config_set_defaults(
     cfg->resistCapPercent = 70;
     cfg->jobSkillAttackBonusPercent = 5;
     cfg->naVariancePercent = 5;
-    cfg->skillVariancePercent = 8;
+    cfg->skillVariancePercent = 3;
     cfg->duelJobBonusTianjiPercent = 10;
     cfg->duelJobBonusHuanjianPercent = 8;
     cfg->duelJobBonusGuidaoPercent = 12;
@@ -234,7 +234,7 @@ static bool vm_net_mock_combat_formula_ensure_table(void)
             "resist_cap_percent INT UNSIGNED NOT NULL DEFAULT 70,"
             "job_skill_attack_bonus_percent INT UNSIGNED NOT NULL DEFAULT 5,"
             "na_variance_percent INT UNSIGNED NOT NULL DEFAULT 5,"
-            "skill_variance_percent INT UNSIGNED NOT NULL DEFAULT 8,"
+            "skill_variance_percent INT UNSIGNED NOT NULL DEFAULT 3,"
             "duel_job_bonus_tianji_percent INT UNSIGNED NOT NULL DEFAULT 10,"
             "duel_job_bonus_huanjian_percent INT UNSIGNED NOT NULL DEFAULT 8,"
             "duel_job_bonus_guidao_percent INT UNSIGNED NOT NULL DEFAULT 12,"
@@ -274,6 +274,14 @@ static bool vm_net_mock_combat_formula_ensure_table(void)
     {
         return false;
     }
+    /* 2026-09-06: skill variance default 8 → 3. Only rewrite still-at-old-default
+     * rows so admin custom values survive. */
+    (void)vm_mysql_exec(
+        "UPDATE server_combat_formula_config SET skill_variance_percent=3 "
+        "WHERE id=1 AND skill_variance_percent=8");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_combat_formula_config MODIFY COLUMN "
+        "skill_variance_percent INT UNSIGNED NOT NULL DEFAULT 3");
     ready = true;
     return true;
 }

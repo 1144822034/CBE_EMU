@@ -171,7 +171,8 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
         "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px;cursor:pointer}"
         "h2{font-size:17px;margin:0 0 12px}"
         "</style></head><body><h1>节日使者 / 雁门关 / 跑环</h1>"
-        "<p>比武每回合+20活力；节日使者在场景内对话选「活力兑换」；雁门关打怪掉木料石材；跑环使接随机环任务。</p>");
+        "<p>比武每回合+20活力；跑环每完成一环+5活力；天梯挑战成功+5活力；"
+        "节日使者在场景内对话选「活力兑换」；雁门关打怪掉木料石材；跑环使接随机环任务。</p>");
     vm_mock_admin_append_tabs(&page, "activities");
 
     if (status[0] && message[0])

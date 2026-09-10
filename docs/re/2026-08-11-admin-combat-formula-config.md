@@ -26,7 +26,7 @@
 | crit_damage_percent | 150 | 暴击倍率 |
 | resist_cap_percent | 70 | 抗性减伤硬顶 |
 | job_skill_attack_bonus_percent | 5 | PvE 技能职业加成 |
-| na / skill_variance_percent | 5 / 8 | 普攻/技能伤害浮动 ±%（PvE + 决斗，暴击前） |
+| na / skill_variance_percent | 5 / 3 | 普攻/技能伤害浮动 ±%（PvE + 决斗，暴击前） |
 | duel_job_bonus_* | 天机10 / 幻剑8 / 鬼道12 | 决斗主属性加成 |
 | skill_vs_na_floor_percent | 90 | 单体技能相对普攻保底 |
 | monster_*_default | hit100 / 其余0 | 怪物副属性；仍可被 `CBE_BATTLE_MONSTER_*` 覆盖 |

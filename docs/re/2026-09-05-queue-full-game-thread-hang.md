@@ -43,29 +43,39 @@ queue_full_forensics ... workers=32 queued=256 evidence=worker-occupancy
 
 | 候选 | 机制 | 下次快照判据 |
 |------|------|----------------|
-| A. 锁外 `recv_all` 拖死 | 单次 `SO_RCVTIMEO` 按 `recv()` 重置；合法大 `requestLen`（上限 128KiB）+ 慢速/半开可拖数十分钟 | `game_occupied=1` 且 `protocol_holder=-`，`game_job_age_ms` 大 |
+| A. 锁外 `recv_all` 拖死 | ~~单次 SO_RCVTIMEO 可被慢速重置~~ → **已加整帧绝对 deadline** | 若仍假死且 `holder=-`：看是否还有非 IO 路径；应出现 `socket_io_deadline` |
 | B. 等协议锁 | GameThread 阻塞 `pthread_mutex_lock`；holder 为 admin/其它 | `game_occupied=1`，`protocol_holder=admin-…`，`hold_ms` 大 |
 | C. 持锁内阻塞 | `holder=game-handle`，锁内 MySQL/同步 I/O 不归 | `protocol_holder=game-handle`，`hold_ms≈game_job_age_ms` |
 
 历史同类：`docs/re/2026-08-30-admin-dispatch-protocol-lock-mysql.md`、`docs/re/2026-08-16-admin-busy-mysql-protocol-lock-hang.md`。
 
-## 本轮修改（仅取证，不改业务契约）
+## 修改
 
-1. GameThread 完成后把 TLS 帧取证 **export → job → import** 回调用方 TLS，worker `last_source` / timing 恢复有效。  
-2. 新 job 开始时清空 worker `lastSource` / timing，避免上一单污染。  
+### 取证（此前）
+
+1. GameThread 完成后把 TLS 帧取证 **export → job → import** 回调用方 TLS。  
+2. 新 job 开始时清空 worker `lastSource` / timing。  
 3. `queue_full_forensics` 增加：`protocol_holder`、`protocol_hold_ms`、`game_thread`、`game_occupied`、`game_job_age_ms`、`game_last_source`。
 
-## 明确不做（本轮）
+### 契约修复（2026-09-05 续）
 
-- 不抬队列、不重试、不伪造成功。  
-- 不加 `recv_all` 绝对 deadline / GameThread watchdog（需本轮新快照确认候选 A/B/C 后再改真正阻塞点）。
+4. **`recv_all` / `send_all` 整帧绝对 deadline** = `VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS`（10s）。  
+   - 违反点：仅靠 per-call `SO_RCVTIMEO`，慢速/半开可把单次 `handle_client`（进而 GameThread FIFO）拖到数十分钟。  
+   - 行为：超时返回失败（与原 recv/send 失败相同 → 关连接、释放 FIFO）；限频日志 `socket_io_deadline op=recv|send ... evidence=absolute-frame-io-timeout`。  
+   - 最坏仍可能多约一个 SO_*TIMEO（检查后进入阻塞 call），远小于假死窗口。
+
+## 明确不做
+
+- 不抬队列当根因修复、不重试、不伪造成功。  
+- GameThread 等协议锁限时 / hang watchdog：等新快照确认候选 B/C 后再改。
 
 ## 验证
 
-- [ ] `make -j2`
-- [ ] 部署后正常路径：`last_source` 应为真实 handler（如 `scene_sync_poll`），不再长期全员 `malformed`
-- [ ] 再假死时：用新 `queue_full_forensics` 一行判定 A/B/C；必要时 `gdb thread apply all bt` 对 GameThread
+- [x] `make -j2`（部署前再跑）
+- [ ] 正常路径：完整帧应在 10s 内完成；`last_source` 为真实 handler
+- [ ] 慢速/半开：应见 `socket_io_deadline`，不应再出现数十分钟 `game_job_age_ms` 且 `holder=-`
+- [ ] 若仍假死：用 `queue_full_forensics` 判 B/C
 
 ## 仍未知
 
-本次现场无 `protocol_lock_holder`、无 gdb/MySQL PROCESSLIST；卡点是 recv 还是协议锁仍 unresolved。
+那次现场是 A/B/C 哪条仍 unresolved；本修复覆盖源码可证的候选 A 契约漏洞。

@@ -4889,7 +4889,15 @@ enum
 #define VM_NET_MOCK_HUNT_ORDER_ITEM_ID            847u
 #define VM_NET_MOCK_HUNT_ORDER_DURABILITY         1u
 #define VM_NET_MOCK_HUNT_ORDER_SHOP_PRICE         50u
-/* Initiator cooldown after a successful nearby spar start. */
+/* Pixi 自定义：强制PK证明 — 发起强制PK消耗1；耐久1。 */
+#define VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID        848u
+#define VM_NET_MOCK_FORCE_PK_PROOF_DURABILITY     1u
+#define VM_NET_MOCK_FORCE_PK_PROOF_SHOP_PRICE     30u
+/* Pixi 自定义：星空石 — 重置指定装备洗练档位次数；耐久1。 */
+#define VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID        849u
+#define VM_NET_MOCK_STAR_SKY_STONE_DURABILITY     1u
+#define VM_NET_MOCK_STAR_SKY_STONE_SHOP_PRICE     100u
+/* Initiator cooldown after a successful nearby force-PK start (or doll block). */
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC    (VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS / 1000u)
 /*
@@ -5020,6 +5028,28 @@ typedef struct
 {
     vm_net_mock_enhance_wash_slot slots[VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT];
 } vm_net_mock_enhance_wash_state;
+
+/*
+ * PixiJS-only: after a successful 29/9 roll, attrs stay pending until 29/14
+ * accept/reject. Cost + wash_count already applied on 29/9. Not persisted.
+ */
+typedef struct
+{
+    u8 pending; /* 1 = awaiting player replace decision */
+    u16 equipSeq;
+    u8 unlockLevel; /* 4/8/12/16 */
+    u8 newType;
+    u8 newFlag;
+    u16 newValue;
+} vm_net_mock_enhance_wash_pending;
+
+static void vm_net_mock_enhance_wash_pending_clear(
+    vm_net_mock_enhance_wash_pending *p)
+{
+    if (p == NULL)
+        return;
+    memset(p, 0, sizeof(*p));
+}
 
 static void vm_net_mock_enhance_wash_clear(vm_net_mock_enhance_wash_state *wash)
 {
@@ -5223,6 +5253,8 @@ typedef struct
     u32 equippedEnhanceInstanceIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_enhance_wash_state equippedEnhanceWash[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    /* Ephemeral wash replace confirm (29/9 → 29/14); not MySQL-backed. */
+    vm_net_mock_enhance_wash_pending enhanceWashPending;
 } vm_net_mock_role_state;
 
 /* Timed special-item effects are intentionally kept outside the binary role

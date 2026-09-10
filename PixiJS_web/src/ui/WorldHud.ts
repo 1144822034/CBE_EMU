@@ -1,4 +1,4 @@
-import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
 import {
   CBE,
   LCD_HEIGHT,
@@ -104,7 +104,10 @@ const MAP_STATUS_STRIP_BOTTOM = 4 + 17;
 const PARTY_Y0 = WORLD_TOP_H + MAP_STATUS_STRIP_BOTTOM + 2;
 const PARTY_SLOT_H = 30;
 const PARTY_FACE = PORTRAIT_INNER;
-const PARTY_MAX = 3;
+/** Other mates only (excludes self). Team cap = 1 leader + 2 members. */
+const PARTY_MAX = 2;
+/** Total roster size including self — mirror VM_MOCK_SERVICE_TEAM_MEMBER_MAX. */
+export const TEAM_MEMBER_MAX = 3;
 
 type PartySlot = {
   root: Container;
@@ -129,7 +132,7 @@ export class WorldHud extends Container {
   onPortrait: (() => void) | null = null;
   /** Tap party-strip mate portrait → that player's info. */
   onPartyMate: ((mateId: number) => void) | null = null;
-  /** Fired after party strip show/hide (quest tracker inset). */
+  /** Fired after party strip show/hide (quest tracker Y offset). */
   onPartyChanged: ((mateCount: number) => void) | null = null;
 
   private locText: BitmapLabel;
@@ -345,7 +348,18 @@ export class WorldHud extends Container {
     if (tiao) {
       this.tiaoChrome = uiSprite(tiao);
       this.tiaoHost.addChildAt(this.tiaoChrome, 0);
-      this.partyTiao = tiao;
+      /*
+       * tiao.gif is 66×19 but x≥58 carries leftover red/cyan stubs (sheet junk).
+       * Self HUD hides them under UIsh icons; party strip must crop them off.
+       */
+      const cropW = Math.min(58, tiao.width);
+      this.partyTiao = new Texture({
+        source: tiao.source,
+        frame: new Rectangle(0, 0, cropW, tiao.height),
+      });
+      this.partyTiao.source.scaleMode = "nearest";
+    } else {
+      this.partyTiao = null;
     }
 
     for (let i = 0; i < 5; i++) {
@@ -713,12 +727,12 @@ export class WorldHud extends Container {
   }
 
   /**
-   * Left pixels occupied by party strip (portrait + tiao bars).
-   * Quest tracker / similar overlays shift right when non-zero.
+   * Map-local Y the quest tracker should clear below party slots.
+   * 0 when solo / strip hidden.
    */
-  partyOverlayInset(): number {
+  partyOverlayOffsetY(): number {
     if (!this.partyHost.visible) return 0;
-    return TIAO_X + WorldHud.FILL_X + WorldHud.FILL_W + 4;
+    return this.lastParty.length * PARTY_SLOT_H;
   }
 
   private makePartySlot(index: number): PartySlot {

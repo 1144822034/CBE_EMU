@@ -265,12 +265,52 @@ static void vm_mock_service_socket_close(vm_mock_service_socket sock)
 #endif
 }
 
+static int vm_mock_service_io_deadline_exceeded(u32 startMs, u32 limitMs)
+{
+    u32 nowMs = scheduler_get_tick_ms();
+    u32 elapsedMs = nowMs >= startMs ? nowMs - startMs : 0;
+    return elapsedMs >= limitMs;
+}
+
+/* Rate-limited: half-open / slow-drip clients must not spam stdout while
+ * GameThread drops the frame and frees the FIFO slot. */
+static void vm_mock_service_socket_io_deadline_note(const char *op,
+                                                    u32 progress,
+                                                    u32 need)
+{
+    static u32 s_lastMs = 0;
+    u32 nowMs = scheduler_get_tick_ms();
+
+    if (s_lastMs != 0 && nowMs >= s_lastMs && (nowMs - s_lastMs) < 2000u)
+        return;
+    s_lastMs = nowMs;
+    printf("[warn][mock-service] socket_io_deadline op=%s progress=%u need=%u "
+           "limit_ms=%u evidence=absolute-frame-io-timeout\n",
+           op ? op : "-",
+           progress,
+           need,
+           (u32)VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS);
+    fflush(stdout);
+}
+
 static int vm_mock_service_send_all(vm_mock_service_socket sock, const u8 *data, u32 len)
 {
     u32 sent = 0;
+    u32 startMs = scheduler_get_tick_ms();
+
     while (sent < len)
     {
-        int rc = send(sock, (const char *)(data + sent), (int)(len - sent), 0);
+        int rc;
+
+        /* SO_SNDTIMEO is per-send; absolute wall clock enforces one-frame budget
+         * so a slow/half-open peer cannot occupy GameThread for minutes. */
+        if (vm_mock_service_io_deadline_exceeded(
+                startMs, (u32)VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS))
+        {
+            vm_mock_service_socket_io_deadline_note("send", sent, len);
+            return 0;
+        }
+        rc = send(sock, (const char *)(data + sent), (int)(len - sent), 0);
         if (rc <= 0)
             return 0;
         sent += (u32)rc;
@@ -281,9 +321,21 @@ static int vm_mock_service_send_all(vm_mock_service_socket sock, const u8 *data,
 static int vm_mock_service_recv_all(vm_mock_service_socket sock, u8 *data, u32 len)
 {
     u32 got = 0;
+    u32 startMs = scheduler_get_tick_ms();
+
     while (got < len)
     {
-        int rc = recv(sock, (char *)(data + got), (int)(len - got), 0);
+        int rc;
+
+        /* Same absolute budget as send: per-recv SO_RCVTIMEO alone allows
+         * drip-fed bodies (up to requestCap) to stretch for tens of minutes. */
+        if (vm_mock_service_io_deadline_exceeded(
+                startMs, (u32)VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS))
+        {
+            vm_mock_service_socket_io_deadline_note("recv", got, len);
+            return 0;
+        }
+        rc = recv(sock, (char *)(data + got), (int)(len - got), 0);
         if (rc <= 0)
             return 0;
         got += (u32)rc;
@@ -2744,13 +2796,15 @@ static bool vm_net_mock_service_ensure_resource_root(void)
 
 enum
 {
-    /* ~80 concurrent phones: data + scene-poll short connects.  Default 32
-     * (was 12); env CBE_MOCK_SERVICE_WORKERS clamps to MAX. */
-    VM_MOCK_SERVICE_WORKER_DEFAULT = 32,
+    /* Concurrent phones: data + scene-poll short connects.  Default 128 / MAX 256;
+     * env CBE_MOCK_SERVICE_WORKERS clamps to MAX. Architecture B still serializes
+     * handle_client on one GameThread — more workers mainly cover session-idle
+     * occupancy and accept bursts waiting on the FIFO. */
+    VM_MOCK_SERVICE_WORKER_DEFAULT = 128,
     VM_MOCK_SERVICE_WORKER_MIN = 2,
-    VM_MOCK_SERVICE_WORKER_MAX = 64,
-    /* Login/reconnect storms with ~80 clients need headroom above worker count. */
-    VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX = 256,
+    VM_MOCK_SERVICE_WORKER_MAX = 256,
+    /* Login/reconnect storms need headroom above worker count. */
+    VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX = 512,
     /*
      * After a WT data frame, wait briefly for another CBMS on the same TCP
      * (client data-session reuse).  Keep short: long idle holds starve the

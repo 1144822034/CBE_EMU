@@ -30,6 +30,7 @@ export {
   buildFriendDeleteRequest,
   buildTeamRosterRequest,
   buildSparRequest,
+  buildSparInviteReply,
   buildTradeRequest,
   buildTradeReplyRequest,
   buildTradeCancelRequest,
@@ -1355,7 +1356,7 @@ export function parseEnhanceTransferConfirm(
 
 /** Transfer fee display (product): 48金65银. */
 
-/** PixiJS-only enhance wash (29/7..9). */
+/** PixiJS-only enhance wash (29/7..9 + 29/14 replace confirm). */
 export type EnhanceWashTier = {
   unlock: number;
   washed: number;
@@ -1388,9 +1389,24 @@ export type EnhanceWashConfirmResult = {
   unlock: number;
   rate: number;
   money: number;
+  /** New rolled attrs (pending until 29/14 apply). */
   attrType?: number;
   attrFlag?: number;
   attrValue?: number;
+  /** Current attrs before replace decision. */
+  oldWashed?: number;
+  oldType?: number;
+  oldFlag?: number;
+  oldValue?: number;
+  tiers?: EnhanceWashTier[];
+};
+
+export type EnhanceWashApplyResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  unlock: number;
+  apply: number;
   tiers?: EnhanceWashTier[];
 };
 
@@ -1415,6 +1431,20 @@ export function buildEnhanceWashMaterialRequest(
     .u8("unlock", unlock & 0xff)
     .u32("crystal", crystalItemId >>> 0)
     .u8("count", count & 0xff);
+  return b.finish();
+}
+
+/** 29/14: apply=1 replace with rolled attrs; apply=0 keep current. */
+export function buildEnhanceWashApplyRequest(
+  equipSeq: number,
+  unlock: number,
+  apply: boolean,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 14)
+    .u16("equipseq", equipSeq & 0xffff)
+    .u8("unlock", unlock & 0xff)
+    .u8("apply", apply ? 1 : 0);
   return b.finish();
 }
 
@@ -1511,13 +1541,17 @@ export function parseEnhanceWashConfirmResult(
     return {
       result,
       ok: true,
-      message: "洗练成功",
+      message: "洗练成功，请确认是否替换",
       unlock,
       rate,
       money,
       attrType: fieldU32(obj, "attrtype"),
       attrFlag: fieldU32(obj, "attrflag"),
       attrValue: fieldU32(obj, "attrvalue"),
+      oldWashed: fieldU32(obj, "oldwashed"),
+      oldType: fieldU32(obj, "oldtype"),
+      oldFlag: fieldU32(obj, "oldflag"),
+      oldValue: fieldU32(obj, "oldvalue"),
       tiers,
     };
   }
@@ -1541,6 +1575,32 @@ export function parseEnhanceWashConfirmResult(
     money,
     tiers,
   };
+}
+
+export function parseEnhanceWashApplyResult(
+  packet: WtPacket,
+): EnhanceWashApplyResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 14);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const unlock = fieldU32(obj, "unlock");
+  const apply = fieldU32(obj, "apply");
+  const tiers = parseEnhanceWashTiers(findField(obj, "tiers"));
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: apply ? "已替换为新属性" : "已保留当前属性",
+      unlock,
+      apply,
+      tiers,
+    };
+  }
+  let message = "确认失败";
+  if (result === 2) message = "没有待确认的洗练";
+  else if (result === 3) message = "装备不存在";
+  else if (result === 5) message = "确认信息不匹配";
+  return { result, ok: false, message, unlock, apply, tiers };
 }
 
 /** PixiJS-only 玄晶合成: 3×N级 → 1×(N+1)级；16级不可合成. */
@@ -1774,6 +1834,95 @@ export function parseDreamBadgeCombineResult(
     destItemId,
     remaining,
     destCount,
+  };
+}
+
+/** Pixi 自定义 849 星空石 — 重置指定装备洗练档位次数。29/13. */
+export const STAR_SKY_STONE_ITEM_ID = 849;
+
+export function isStarSkyStone(itemId: number): boolean {
+  return (itemId | 0) === STAR_SKY_STONE_ITEM_ID;
+}
+
+export type StarSkyStoneWashResetResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  stoneSeq: number;
+  equipSeq: number;
+  unlock: number;
+  remaining: number;
+  washCount: number;
+  tiers?: EnhanceWashTier[];
+};
+
+export function buildStarSkyStoneWashResetRequest(
+  stoneSeq: number,
+  equipSeq: number,
+  unlock: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 13)
+    .u16("stoneseq", stoneSeq & 0xffff)
+    .u16("equipseq", equipSeq & 0xffff)
+    .u8("unlock", unlock & 0xff);
+  return b.finish();
+}
+
+function starSkyStoneWashResetFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "星空石不足";
+    case 3:
+      return "装备不存在";
+    case 4:
+      return "该档位未解锁";
+    case 5:
+      return "档位无效";
+    case 6:
+      return "扣除星空石失败";
+    case 7:
+      return "该档洗练次数已为0";
+    default:
+      return "重置失败";
+  }
+}
+
+export function parseStarSkyStoneWashResetResult(
+  packet: WtPacket,
+): StarSkyStoneWashResetResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 13);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const stoneSeq = fieldU32(obj, "stoneseq");
+  const equipSeq = fieldU32(obj, "equipseq");
+  const unlock = fieldU32(obj, "unlock");
+  const remaining = fieldU32(obj, "remaining");
+  const washCount = fieldU32(obj, "washcount");
+  const tiers = parseEnhanceWashTiers(findField(obj, "tiers"));
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: `+${unlock}档洗练次数已重置`,
+      stoneSeq,
+      equipSeq,
+      unlock,
+      remaining,
+      washCount,
+      tiers: tiers.length ? tiers : undefined,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: starSkyStoneWashResetFailMessage(result),
+    stoneSeq,
+    equipSeq,
+    unlock,
+    remaining,
+    washCount,
+    tiers: tiers.length ? tiers : undefined,
   };
 }
 
@@ -3010,6 +3159,9 @@ export type CharacterStats = {
   agility: number;
   wisdom: number;
   endurance: number;
+  /** Festival / arena vitality currency (account_role_vitality). */
+  vitality: number;
+  vitalityMax: number;
   /** Full build_player_stats attack (jobPrimary + equip). */
   attack: number;
   /** Full defense (bare + equip.armor). */
@@ -3261,6 +3413,9 @@ export function preferEnhanceAttrs(
   const aLen = a?.length ?? 0;
   const bLen = b?.length ?? 0;
   if (aLen !== bLen) return aLen > bLen ? a : b;
+  // Equal length, neither washed: keep `a` (wire) when present. Call sites
+  // pass pending/prev as `b` after unequip so washed-bit wins above; when the
+  // server finally wires bit7, wire and pending agree.
   return a ?? b;
 }
 
@@ -3611,6 +3766,8 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
     agility: fieldU32(obj, "agility"),
     wisdom: fieldU32(obj, "wisdom"),
     endurance: fieldU32(obj, "endurance"),
+    vitality: fieldU32(obj, "vitality"),
+    vitalityMax: fieldU32(obj, "vitalityMax"),
     attack: fieldU32(obj, "attack"),
     armor: fieldU32(obj, "defense"),
     hit: fieldU32(obj, "hit"),

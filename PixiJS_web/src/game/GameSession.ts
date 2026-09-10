@@ -55,9 +55,11 @@ import {
   buildEnhanceTransferConfirmRequest,
   buildEnhanceWashOpenRequest,
   buildEnhanceWashMaterialRequest,
+  buildEnhanceWashApplyRequest,
   buildCrystalCombineRequest,
   buildCrystalFragmentCombineRequest,
   buildDreamBadgeCombineRequest,
+  buildStarSkyStoneWashResetRequest,
   parseEnhanceOpenResult,
   parseEnhancePreviewResult,
   parseEnhanceConfirmResult,
@@ -66,9 +68,11 @@ import {
   parseEnhanceWashOpenResult,
   parseEnhanceWashPreviewResult,
   parseEnhanceWashConfirmResult,
+  parseEnhanceWashApplyResult,
   parseCrystalCombineResult,
   parseCrystalFragmentCombineResult,
   parseDreamBadgeCombineResult,
+  parseStarSkyStoneWashResetResult,
   buildSkillForgetRequest,
   parseSkillForgetResult,
   SKILL_FORGET_COST_COPPER,
@@ -81,6 +85,7 @@ import {
   isCrystalFragment,
   isDreamBadge,
   isDreamBadgeEquipId,
+  STAR_SKY_STONE_ITEM_ID,
   isEnhanceCrystal,
   type EnhanceOpenResult,
   type EnhancePreviewResult,
@@ -90,7 +95,9 @@ import {
   type EnhanceWashOpenResult,
   type EnhanceWashPreviewResult,
   type EnhanceWashConfirmResult,
+  type EnhanceWashApplyResult,
   type CrystalCombineResult,
+  type StarSkyStoneWashResetResult,
   type SkillForgetResult,
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
@@ -144,6 +151,7 @@ import {
   buildFriendReplyRequest,
   buildFriendDeleteRequest,
   buildSparRequest,
+  buildSparInviteReply,
   buildTradeRequest,
   buildTradeReplyRequest,
   buildTradeCancelRequest,
@@ -375,7 +383,7 @@ import {
   parseFriendInvitePackets,
   parseGuildInvitePackets,
   parseTradePackets,
-  parseSparAck,
+  parseSparPackets,
   parseGuildCreatePackets,
   FRIEND_PAGE_SIZE,
   type FriendRow,
@@ -690,6 +698,8 @@ export class GameSession {
   private loadedScene = "";
   /** While set, ignore poll/soft reloads for any other scene leaf. */
   private sceneTransferExpected: string | null = null;
+  /** Guard nested poll while settling leader-follow catalog. */
+  private teamFollowSettleInFlight = false;
   hp = 500;
   hpMax = 500;
   mp = 200;
@@ -1251,6 +1261,14 @@ export class GameSession {
     }
   }
 
+  /** True when in a multi-member party and this seat is not the leader. */
+  isTeamMemberNotLeader(): boolean {
+    const selfId = this.selectedRoleId >>> 0;
+    if (this.teamMembers.length < 2 || !selfId) return false;
+    const leader = this.teamLeaderId >>> 0;
+    return leader !== 0 && leader !== selfId;
+  }
+
   /**
    * Walk-into portal: optional 2/10 Type=1 then 2/3+27/11+7/42 (empty gate),
    * then post-enter 25/5+2/3+27/11+7/42 for nonempty NPC catalog.
@@ -1261,6 +1279,10 @@ export class GameSession {
     opts?: { prelude?: boolean; mapType?: number },
   ): Promise<void> {
     if (!this.transport || this.inBattle) return;
+    if (this.isTeamMemberNotLeader()) {
+      this.setPhase("inworld", "队员不能切图");
+      return;
+    }
     const mapType = opts?.mapType ?? 2;
     this.stopPoll();
     this.sceneTransferExpected = mapId;
@@ -1477,6 +1499,9 @@ export class GameSession {
   ): Promise<{ ok: boolean; cost: number; detail: string }> {
     if (!this.transport || this.inBattle) {
       return { ok: false, cost: 0, detail: "不可传送" };
+    }
+    if (this.isTeamMemberNotLeader()) {
+      return { ok: false, cost: 0, detail: "队员不能传送" };
     }
     const expectedScene = ensureSceneFile(targetScene.trim());
     if (!expectedScene || !exitId) {
@@ -4520,8 +4545,10 @@ export class GameSession {
             ? worn.durability
             : (lookupItemSync(worn.itemId)?.durabilityMax ?? 0);
         this.pendingBagEquipDurability.set(eq.seq, dur >>> 0);
+        // Prefer washed snapshot from worn; 7/8 may also carry same-packet
+        // 7/7 type=1 with live wash — preferEnhanceAttrs keeps bit7 either way.
         if (worn.enhanceAttrs?.length) {
-          this.pendingBagEquipEnhance.set(eq.seq, worn.enhanceAttrs);
+          this.pendingBagEquipEnhance.set(eq.seq, worn.enhanceAttrs.map((a) => ({ ...a })));
         }
       }
     }
@@ -4540,7 +4567,10 @@ export class GameSession {
           : (lookupItemSync(worn.itemId)?.durabilityMax ?? 0);
       this.pendingBagEquipDurability.set(bagSeq, dur >>> 0);
       if (worn.enhanceAttrs?.length) {
-        this.pendingBagEquipEnhance.set(bagSeq, worn.enhanceAttrs);
+        this.pendingBagEquipEnhance.set(
+          bagSeq,
+          worn.enhanceAttrs.map((a) => ({ ...a })),
+        );
       }
     }
     const bodies = await this.transport.exchange(
@@ -5082,6 +5112,48 @@ export class GameSession {
   }
 
   /**
+   * PixiJS-only: 29/14 accept/reject pending wash attrs.
+   * Cost and wash_count already applied on 29/9 success.
+   */
+  async applyEnhanceWash(
+    seq: number,
+    unlock: number,
+    apply: boolean,
+  ): Promise<EnhanceWashApplyResult> {
+    if (!this.transport) {
+      return {
+        result: 0,
+        ok: false,
+        message: "未连接",
+        unlock,
+        apply: apply ? 1 : 0,
+      };
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildEnhanceWashApplyRequest(seq, unlock, apply),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseEnhanceWashApplyResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return {
+      result: 0,
+      ok: false,
+      message: "确认无响应",
+      unlock,
+      apply: apply ? 1 : 0,
+    };
+  }
+
+  /**
    * PixiJS-only: 3×N级玄晶 → 1×(N+1)级.
    * Pre-checks count/space; server 29/10 is authoritative.
    */
@@ -5253,8 +5325,62 @@ export class GameSession {
     return fail("合成无响应");
   }
 
+  /**
+   * PixiJS-only: 星空石(849) 重置指定装备洗练档位次数。
+   * Server 29/13 is authoritative; attrs keep, only washCount → 0.
+   */
+  async resetEnhanceWashCount(
+    stoneSeq: number,
+    equipSeq: number,
+    unlock: number,
+  ): Promise<StarSkyStoneWashResetResult> {
+    const fail = (
+      message: string,
+      result = 0,
+    ): StarSkyStoneWashResetResult => ({
+      result,
+      ok: false,
+      message,
+      stoneSeq,
+      equipSeq,
+      unlock,
+      remaining: 0,
+      washCount: 0,
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(stoneSeq > 0) || !(equipSeq > 0)) return fail("参数无效");
+    if (unlock !== 4 && unlock !== 8 && unlock !== 12 && unlock !== 16) {
+      return fail("档位无效", 5);
+    }
+    const stone = this.bagItems.find(
+      (it) => it.seq === stoneSeq && it.itemId === STAR_SKY_STONE_ITEM_ID,
+    );
+    if (!stone || (stone.count | 0) < 1) return fail("星空石不足", 2);
+    const equip = this.bagItems.find((it) => it.seq === equipSeq);
+    if (!equip || equip.kind !== "equip") return fail("装备不存在", 3);
+    if ((equip.enhance | 0) < unlock) return fail("该档位未解锁", 4);
+    const bodies = await this.transport.exchange(
+      0,
+      buildStarSkyStoneWashResetRequest(stoneSeq, equipSeq, unlock),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseStarSkyStoneWashResetResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("重置无响应");
+  }
+
   async teamInvite(actorId: number): Promise<void> {
     if (!this.transport) return;
+    /* Cap matches VM_MOCK_SERVICE_TEAM_MEMBER_MAX (1 leader + 2 members). */
+    if (this.teamMembers.length >= 3) return;
     const bodies = await this.transport.exchange(0, buildTeamInviteRequest(actorId));
     this.handleBodies(bodies);
   }
@@ -5328,6 +5454,9 @@ export class GameSession {
   /** Warp to spouse (WT 1/32/1). Server returns scene-enter or 32/2 fail tip. */
   async spouseTeleport(): Promise<{ ok: boolean; tip: string }> {
     if (!this.transport) return { ok: false, tip: "未连接服务器" };
+    if (this.isTeamMemberNotLeader()) {
+      return { ok: false, tip: "队员不能传送" };
+    }
     const bodies = await this.transport.exchange(0, buildSpouseTeleportRequest());
     let tip = "";
     let fail = false;
@@ -5415,17 +5544,41 @@ export class GameSession {
     this.handleBodies(bodies);
   }
 
-  async sparChallenge(actorId: number): Promise<void> {
+  async sparChallenge(actorId: number, forcePk = false): Promise<void> {
     if (!this.transport || this.inBattle) return;
     if (this.isArenaScene()) {
-      this.setPhase("inworld", "比武擂台内不可手动切磋");
+      this.setPhase(
+        "inworld",
+        forcePk ? "比武擂台内不可强制PK" : "比武擂台内不可手动切磋",
+      );
       return;
     }
-    const bodies = await this.transport.exchange(0, buildSparRequest(actorId));
+    const bodies = await this.transport.exchange(
+      0,
+      buildSparRequest(actorId, forcePk),
+    );
     this.handleBodies(bodies);
-    // Same as confirmChallenge: 4/10 may be deferred to scene-sync poll when
-    // the spar ack response only carried 4/14 (or inline append failed).
-    if (!this.inBattle) {
+    // Force-PK may inline 4/10; invite-only 4/14 needs no poll for battle.
+    if (forcePk && !this.inBattle) {
+      await this.pollOnce();
+    }
+  }
+
+  async sparReply(accept: boolean): Promise<void> {
+    if (!this.transport) return;
+    const inv = this.pendingSocialInvite;
+    if (!inv || inv.kind !== "spar") {
+      this.setPhase("inworld", "no pending spar invite");
+      return;
+    }
+    const id = inv.id;
+    this.pendingSocialInvite = null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildSparInviteReply(id, accept),
+    );
+    this.handleBodies(bodies);
+    if (accept && !this.inBattle) {
       await this.pollOnce();
     }
   }
@@ -5827,11 +5980,13 @@ export class GameSession {
     await this.transport.ensureConnected();
     if (this.pollTimer == null || !this.selectedRoleId) return;
     try {
+      const sceneBefore = this.scene || "";
       const bodies = await this.transport.exchange(
         CBMS_FLAG_SCENE_POLL,
         new Uint8Array(0),
       );
       this.handleBodies(bodies);
+      await this.maybeSettleTeamFollowEnter(sceneBefore);
     } catch (e) {
       console.warn("[session] prepareLiveExchange", reason, e);
       throw e;
@@ -5914,31 +6069,78 @@ export class GameSession {
   }
 
   private async pollOnce(): Promise<void> {
-    if (!this.transport) return;
+    if (!this.transport || this.teamFollowSettleInFlight) return;
     const runPoll = () =>
       this.transport!.exchange(CBMS_FLAG_SCENE_POLL, new Uint8Array(0));
     try {
+      const sceneBefore = this.scene || "";
       const bodies = await runPoll();
       this.handleBodies(bodies);
       this.pollFailStreak = 0;
       if (!this.inBattle) {
         this.setPhase("inworld", `heartbeat ok · ${this.transport.mode}`);
       }
+      await this.maybeSettleTeamFollowEnter(sceneBefore);
     } catch (e) {
       this.pollFailStreak++;
       try {
         await this.ensureLiveSocket();
+        const sceneBefore = this.scene || "";
         const bodies = await runPoll();
         this.handleBodies(bodies);
         this.pollFailStreak = 0;
         if (!this.inBattle) {
           this.setPhase("inworld", `heartbeat ok · ${this.transport!.mode}`);
         }
+        await this.maybeSettleTeamFollowEnter(sceneBefore);
         return;
       } catch {
         /* fall through */
       }
       this.setPhase("poll-error", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * Leader transfer fans out poll 30/1 to mates.  Same post-enter catalog
+   * settle as map-stone / instance enter so NPC 27/11 is not left empty.
+   */
+  private async maybeSettleTeamFollowEnter(sceneBefore: string): Promise<void> {
+    if (!this.transport || this.inBattle || this.sceneTransferExpected) return;
+    if (this.teamFollowSettleInFlight) return;
+    if (this.teamMembers.length < 2) return;
+    const landed = ensureSceneFile(this.scene || "");
+    if (!landed) return;
+    if (sceneBefore && sceneKeysMatch(sceneBefore, landed)) return;
+    this.teamFollowSettleInFlight = true;
+    this.setPhase("team-follow", `跟随队长 → ${landed}`);
+    try {
+      await this.awaitEnterScene();
+      const catalogBodies = await this.transport.exchange(
+        0,
+        buildSceneChangePostEnterFollowupRequest(landed, 0, 2),
+      );
+      this.handleBodies(catalogBodies);
+      await this.awaitEnterScene();
+      if (!this.npcs.length) {
+        const completeBodies = await this.transport.exchange(
+          0,
+          buildSceneChangeRequest(landed, 0, 2),
+        );
+        this.handleBodies(completeBodies);
+        await this.awaitEnterScene();
+        const wt6Bodies = await this.transport.exchange(
+          0,
+          buildSceneNpcCatalogFollowupRequest(),
+        );
+        this.handleBodies(wt6Bodies);
+        await this.awaitEnterScene();
+      }
+      this.setPhase("inworld", `team-follow ${this.scene} @${this.x},${this.y}`);
+    } catch (e) {
+      console.warn("[session] team-follow catalog settle", e);
+    } finally {
+      this.teamFollowSettleInFlight = false;
     }
   }
 
@@ -6328,8 +6530,12 @@ export class GameSession {
         this.guildListUi = true;
       }
 
-      const sparAck = parseSparAck(packet);
-      if (sparAck) this.cb.onSocialNotice?.(sparAck);
+      const sparPkt = parseSparPackets(packet);
+      if (sparPkt.invite) {
+        this.pendingSocialInvite = sparPkt.invite;
+        this.cb.onSocialInvite?.(sparPkt.invite);
+      }
+      if (sparPkt.notice) this.cb.onSocialNotice?.(sparPkt.notice);
 
       const group = parseGroupPackets(packet);
       if (group.invite) {

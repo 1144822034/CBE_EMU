@@ -1,9 +1,10 @@
 /**
  * PixiJS-only equipment enhance wash (洗练) panel.
- * Protocol: WT 29/7 open, 29/8 preview, 29/9 confirm.
+ * Protocol: WT 29/7 open, 29/8 preview, 29/9 confirm, 29/14 apply/keep.
  *
  * Controls: ↑↓ select tier · ←→ adjust +16 crystal count · left soft=wash ·
  * D-pad OK=crystal · right=close
+ * After a successful roll: show current vs new; left=替换 · right=保留
  * +16 档：←→ 加减十六级玄晶数量（最多 3，3 颗 100%）.
  * (No HTML center softkey above the D-pad.)
  */
@@ -44,7 +45,20 @@ export type WashAction =
   | "submit"
   | "cancel"
   | "pick_crystal"
-  | "back";
+  | "back"
+  | "accept_replace"
+  | "reject_replace";
+
+export type WashReplaceOffer = {
+  unlock: number;
+  oldWashed: number;
+  oldType: number;
+  oldFlag: number;
+  oldValue: number;
+  newType: number;
+  newFlag: number;
+  newValue: number;
+};
 
 const ATTR_NAMES: Record<number, string> = {
   1: "力量",
@@ -62,8 +76,22 @@ const ATTR_NAMES: Record<number, string> = {
 const UNLOCKS = [4, 8, 12, 16] as const;
 const SELECT_BG = 0x5a5a5a;
 const INK_CYAN = 0x29faff;
+const INK_RED = 0xff4444;
 
-type Mode = "main" | "pickCrystal";
+type Mode = "main" | "pickCrystal" | "replaceConfirm";
+
+function formatWashAttr(
+  type: number,
+  flag: number,
+  value: number,
+  washed?: number,
+): string {
+  const name = ATTR_NAMES[type] ?? `属性${type || "?"}`;
+  const pct = flag ? "%" : "";
+  const tag =
+    washed === undefined ? "" : washed ? "[洗]" : "[默]";
+  return `${tag}${name}+${value}${pct}`;
+}
 
 export class WashPanel extends Container {
   private box = new Graphics();
@@ -78,6 +106,7 @@ export class WashPanel extends Container {
   private crystalCount = 0;
   private rate = 0;
   private money = 0;
+  private replaceOffer: WashReplaceOffer | null = null;
   private toast: PanelTipState = createPanelTipState();
   private listCursor = 0;
 
@@ -94,6 +123,9 @@ export class WashPanel extends Container {
   softkeys(): { left: string; right: string } {
     if (this.mode === "pickCrystal") {
       return { left: "确定", right: "返回" };
+    }
+    if (this.mode === "replaceConfirm") {
+      return { left: "替换", right: "保留" };
     }
     // 不设 center：避免方向键上方多出中软按钮；玄晶走 D-pad 中键/OK。
     return { left: "洗练", right: "关闭" };
@@ -116,6 +148,7 @@ export class WashPanel extends Container {
     this.bag = bag;
     this.openInfo = info;
     this.mode = "main";
+    this.replaceOffer = null;
     this.rate = 0;
     this.money = 0;
     const unlocked = this.unlockedTiers();
@@ -157,6 +190,24 @@ export class WashPanel extends Container {
     this.redraw();
   }
 
+  /** Enter replace-confirm after a successful 29/9 roll (attrs still pending). */
+  showReplaceConfirm(offer: WashReplaceOffer): void {
+    this.replaceOffer = offer;
+    this.unlock = offer.unlock;
+    this.mode = "replaceConfirm";
+    this.redraw();
+  }
+
+  clearReplaceConfirm(): void {
+    this.replaceOffer = null;
+    if (this.mode === "replaceConfirm") this.mode = "main";
+    this.redraw();
+  }
+
+  hasPendingReplace(): boolean {
+    return this.mode === "replaceConfirm" && this.replaceOffer != null;
+  }
+
   showTip(text: string, ms = 1200): void {
     showPanelTip(this.toast, text, () => this.redraw(), ms);
   }
@@ -176,6 +227,8 @@ export class WashPanel extends Container {
     this.openInfo = null;
     this.crystalId = 0;
     this.crystalCount = 0;
+    this.replaceOffer = null;
+    this.mode = "main";
     clearPanelTip(this.toast);
     this.clearLabels();
   }
@@ -183,6 +236,7 @@ export class WashPanel extends Container {
   /** ↑↓：主界面选档；选玄晶界面移动光标。 */
   move(delta: number): void {
     if (!this.visible) return;
+    if (this.mode === "replaceConfirm") return;
     if (this.mode === "pickCrystal") {
       const rows = this.crystals();
       if (!rows.length) return;
@@ -384,6 +438,12 @@ export class WashPanel extends Container {
       return;
     }
 
+    if (this.mode === "replaceConfirm" && this.replaceOffer) {
+      this.drawReplaceConfirm(x, y, w, h);
+      drawPanelTipOverlay(this, this.toast);
+      return;
+    }
+
     const q = qualityColor(this.equip.quality);
     this.addAttr(`洗练 ${this.equip.name}`, x + 8, y + 4, q);
     this.addAttr(
@@ -442,6 +502,57 @@ export class WashPanel extends Container {
     drawPanelTipOverlay(this, this.toast);
   }
 
+  private drawReplaceConfirm(x: number, y: number, w: number, h: number): void {
+    const offer = this.replaceOffer!;
+    const q = qualityColor(this.equip!.quality);
+    this.addAttr(`洗练结果 +${offer.unlock}`, x + 8, y + 4, q);
+    this.addAttr("是否替换属性？", x + 8, y + 22, EQUIP_DETAIL_YELLOW);
+    this.addAttr("当前属性", x + 10, y + 44, CBE.inkLabel);
+    this.addAttr(
+      formatWashAttr(
+        offer.oldType,
+        offer.oldFlag,
+        offer.oldValue,
+        offer.oldWashed,
+      ),
+      x + 10,
+      y + 60,
+      EQUIP_DETAIL_YELLOW,
+    );
+    this.addAttr("新属性", x + 10, y + 82, CBE.inkLabel);
+    this.addAttr(
+      formatWashAttr(offer.newType, offer.newFlag, offer.newValue, 1),
+      x + 10,
+      y + 98,
+      INK_RED,
+    );
+    this.addAttr(
+      "左软替换  右软保留",
+      x + 8,
+      y + h - 16,
+      CBE.inkLabel,
+    );
+    const hitReplace = attachRowPointerHit(
+      this,
+      x + 6,
+      y + 118,
+      (w - 16) / 2,
+      18,
+      () => this.onAction?.("accept_replace"),
+    );
+    const hitKeep = attachRowPointerHit(
+      this,
+      x + 6 + (w - 16) / 2,
+      y + 118,
+      (w - 16) / 2,
+      18,
+      () => this.onAction?.("reject_replace"),
+    );
+    this.rowHits.push(hitReplace, hitKeep);
+    this.addAttr("【替换】", x + 14, y + 122, INK_CYAN);
+    this.addAttr("【保留】", x + 14 + (w - 16) / 2, y + 122, INK_CYAN);
+  }
+
   private drawPickCrystal(x: number, y: number, w: number, h: number): void {
     const title =
       this.unlock === 16
@@ -488,6 +599,9 @@ export class WashPanel extends Container {
   }
 
   handleSoftLeft(): WashAction {
+    if (this.mode === "replaceConfirm") {
+      return "accept_replace";
+    }
     if (this.mode === "pickCrystal") {
       return this.confirmCrystalPick();
     }
@@ -503,6 +617,9 @@ export class WashPanel extends Container {
   }
 
   handleSoftMid(): WashAction {
+    if (this.mode === "replaceConfirm") {
+      return "accept_replace";
+    }
     if (this.mode === "pickCrystal") {
       return this.confirmCrystalPick();
     }
@@ -515,6 +632,9 @@ export class WashPanel extends Container {
   }
 
   handleSoftRight(): WashAction {
+    if (this.mode === "replaceConfirm") {
+      return "reject_replace";
+    }
     if (this.mode === "pickCrystal") {
       this.mode = "main";
       this.redraw();
@@ -554,7 +674,10 @@ export class WashPanel extends Container {
   }
 
   softRight(): void {
-    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
+    if (this.mode !== "replaceConfirm" &&
+        tryDismissPanelTipOnSoftRight(this.toast)) {
+      return;
+    }
     const a = this.handleSoftRight();
     if (a === "cancel") this.onClose?.();
     else this.onAction?.(a);

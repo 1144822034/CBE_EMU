@@ -231,8 +231,8 @@ static void vm_mock_enmity_record_duel_result(vm_mock_service_duel *duel)
 
     if (duel == NULL)
         return;
-    /* 恩怨仅累计普通切磋；擂台 / 赌战不计。 */
-    if (duel->arenaMode || duel->wagerMode)
+    /* 恩怨仅累计强制PK；友好切磋 / 擂台 / 赌战不计。 */
+    if (duel->arenaMode || duel->wagerMode || duel->friendlyMode)
         return;
     /* Only record when exactly one seat is dead. */
     if (duel->hp[0] == 0 && duel->hp[1] > 0)

@@ -29,7 +29,7 @@ export type ArenaStatus = {
   enabled: boolean;
   status: number;
   canEnter: boolean;
-  /** Today's open bracket: 0=rest, 10/50/70. */
+  /** Today's open bracket: 0=rest, 10/50/70, 77=70 FFA. */
   activeBracket: number;
   dayYmd: number;
   minute: number;
@@ -534,6 +534,7 @@ export function bracketForLevel(level: number): number {
 }
 
 export function bracketLabel(bracket: number): string {
+  if (bracket === 77) return "70大乱斗";
   if (bracket === 70) return "70级";
   if (bracket === 50) return "50-69";
   if (bracket === 10) return "10-49";

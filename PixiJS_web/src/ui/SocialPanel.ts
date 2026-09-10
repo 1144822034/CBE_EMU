@@ -78,6 +78,7 @@ export type SocialAction =
   | "trade"
   | "private_chat"
   | "spar"
+  | "force_pk"
   | "guild_invite"
   | "leave_team"
   | "refresh"
@@ -670,6 +671,7 @@ export class SocialPanel extends Container {
         "交易",
         "发起私聊",
         "切磋",
+        "强制PK",
         "入帮",
       ];
       if (this.kind === "friends") {
@@ -684,7 +686,7 @@ export class SocialPanel extends Container {
     if (this.kind === "enmity") {
       const row = this.rows[this.listCursor];
       if (!row || row.id === 0) return ["返回"];
-      return ["玩家信息", "查看装备", "切磋", "返回"];
+      return ["玩家信息", "查看装备", "切磋", "强制PK", "返回"];
     }
     if (this.kind === "titles") {
       return ["装备称号", "返回"];
@@ -1297,6 +1299,8 @@ function labelToAction(label: string): SocialAction {
       return "private_chat";
     case "切磋":
       return "spar";
+    case "强制PK":
+      return "force_pk";
     case "入帮":
       return "guild_invite";
     case "传送到身边":

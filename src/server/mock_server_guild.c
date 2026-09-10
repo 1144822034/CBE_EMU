@@ -883,11 +883,46 @@ static bool vm_net_mock_is_nearby_team_invite_request(const u8 *request, u32 req
                                                        NULL, false, 0, actorIdOut);
 }
 
+static bool vm_net_mock_parse_nearby_spar_request(const u8 *request, u32 requestLen,
+                                                   u32 *actorIdOut, u8 *forceOut)
+{
+    u32 offset = 4;
+    u32 actorId = 0;
+    u8 force = 0;
+    vm_net_mock_request_object object;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (forceOut)
+        *forceOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen ||
+        object.major != 1 || object.kind != 4 || object.subtype != 14 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id",
+                                          &actorId) ||
+        actorId == 0)
+    {
+        return false;
+    }
+    /* Optional Pixi field: force=1 → 强制PK direct start; absent/0 → 切磋 invite. */
+    (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                           "force", &force);
+    if (force > 1)
+        force = 1;
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    if (forceOut)
+        *forceOut = force;
+    return true;
+}
+
 static bool vm_net_mock_is_nearby_spar_request(const u8 *request, u32 requestLen,
                                                 u32 *actorIdOut)
 {
-    return vm_net_mock_is_nearby_actor_action_request(request, requestLen, 4, 14,
-                                                       NULL, false, 0, actorIdOut);
+    return vm_net_mock_parse_nearby_spar_request(request, requestLen, actorIdOut,
+                                                   NULL);
 }
 
 static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 requestLen,
@@ -2048,46 +2083,47 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
     vm_net_mock_scene_role_seed targetSeed;
     vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
+    const char *sourceAccountId = g_vm_mock_service_active_account_id;
     const char *scene = vm_net_mock_current_scene_name();
     vm_mock_service_duel *duel = NULL;
     u32 actorId = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 result = 4; /* net_handle_login_or_name_result: player not found. */
+    u8 forcePk = 0;
     bool started = false;
+    bool invited = false;
     u32 startLen = 0;
 
     memset(&targetSeed, 0, sizeof(targetSeed));
     if (out == NULL || outCap < pos ||
-        !vm_net_mock_is_nearby_spar_request(request, requestLen, &actorId))
+        !vm_net_mock_parse_nearby_spar_request(request, requestLen, &actorId,
+                                                 &forcePk))
     {
         return 0;
     }
     /*
-     * Product rule (2026-08-07): spar no longer waits for peer 4/15/4/16
-     * consent.  If the target is online in the same scene and neither side
-     * is duel-busy, begin the duel immediately.  Inviter gets 4/14 result=1
-     * plus mirrored 4/10 start; peer start stays on startPendingMask for
-     * their next scene-sync poll (same as accepted 4/16+4/9 path).
-     *
-     * Gates: town/city maps forbid spar (same city key as hangup forbid);
-     * either seat below level 25 cannot spar or be sparred.
+     * 2026-09-05 product split:
+     * - force=0 切磋: enqueue SPAR_INVITE → peer 4/15 → 4/16 consent (old chain).
+     *   No substitute doll / force-PK proof / PK / cooldown / death penalty.
+     * - force=1 强制PK: direct duel_begin (2026-08-07 path) + consume proof,
+     *   doll / PK / cooldown / death penalty remain.
      */
     if (vm_mock_arena_spar_forbidden_on_scene(scene))
     {
         result = 7; /* arena: manual spar disabled */
         printf("[info][network] mock_spar_request_reject actor=%u source=%08x "
-               "scene=%s reason=arena-map result=7\n",
+               "scene=%s reason=arena-map result=7 force=%u\n",
                actorId, sourceSession ? sourceSession->clientId : 0,
-               scene ? scene : "-");
+               scene ? scene : "-", forcePk);
     }
     else if (vm_net_mock_scene_is_city_hangup_forbidden(scene))
     {
         result = 7; /* town / city */
         printf("[info][network] mock_spar_request_reject actor=%u source=%08x "
-               "scene=%s reason=city-map result=7\n",
+               "scene=%s reason=city-map result=7 force=%u\n",
                actorId, sourceSession ? sourceSession->clientId : 0,
-               scene ? scene : "-");
+               scene ? scene : "-", forcePk);
     }
     else if (sourceSession != NULL && sourceRole != NULL &&
              vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
@@ -2098,6 +2134,7 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
         u32 targetLevel = targetSeed.level ? targetSeed.level : 1;
         u32 sparReadyUnix = 0;
         u32 sparNowUnix = 0;
+        bool busy = false;
 
         if (sourceSession->onlineLevel != 0 &&
             sourceSession->onlineLevel > sourceLevel)
@@ -2112,91 +2149,145 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
             result = 6; /* level gate */
             printf("[info][network] mock_spar_request_reject actor=%u "
                    "source=%08x/%u lv=%u target=%08x/%u lv=%u "
-                   "reason=level-lt-25 result=6\n",
+                   "reason=level-lt-25 result=6 force=%u\n",
                    actorId, sourceSession->clientId, sourceRole->roleId,
                    sourceLevel, targetSeed.session->clientId,
-                   targetSeed.session->onlineRoleId, targetLevel);
-        }
-        else if (sourceRole->pkPoints >= (u32)VM_NET_MOCK_PK_POINTS_MAX)
-        {
-            result = 10; /* initiator pk cap */
-            printf("[info][network] mock_spar_request_reject actor=%u "
-                   "source=%08x/%u pk=%u reason=pk-cap result=10\n",
-                   actorId, sourceSession->clientId, sourceRole->roleId,
-                   sourceRole->pkPoints);
-        }
-        else if (vm_net_mock_spar_initiate_cd_active(sourceRole->roleId,
-                                                    &sparReadyUnix,
-                                                    &sparNowUnix))
-        {
-            result = 9; /* initiator cooldown */
-            printf("[info][network] mock_spar_request_reject actor=%u "
-                   "source=%08x role=%u reason=initiate-cooldown "
-                   "ready_unix=%u now_unix=%u result=9\n",
-                   actorId, sourceSession->clientId, sourceRole->roleId,
-                   sparReadyUnix, sparNowUnix);
-        }
-        else if (vm_mock_service_session_duel_blocks_spar(sourceSession->clientId) ||
-            vm_mock_service_session_duel_blocks_spar(targetSeed.session->clientId) ||
-            vm_mock_service_session_trade_blocks_invite(sourceSession->clientId) ||
-            vm_mock_service_session_trade_blocks_invite(targetSeed.session->clientId) ||
-            !targetSeed.session->roleOnline ||
-            !targetSeed.session->sceneVisibleReady ||
-            targetSeed.session->sceneVisiblePending)
-        {
-            result = 3; /* busy / not idle */
-            printf("[warn][network] mock_spar_request_busy actor=%u source=%08x "
-                   "target=%08x reason=not-idle\n",
-                   actorId, sourceSession->clientId,
-                   targetSeed.session->clientId);
-        }
-        else if (vm_mock_service_session_try_consume_spar_substitute_doll(
-                     targetSeed.session))
-        {
-            static const char dollBlockTipGbk[] =
-                "\xb6\xd4\xb7\xbd\xcc\xe6\xc9\xed\xc8\xcb\xc5\xbc\xc9\xfa\xd0\xa7"
-                "\xa3\xac\xce\xde\xb7\xa8\xc7\xd0\xb4\xe8"; /* 对方替身人偶生效，无法切磋 */
-            static const char dollSelfTipGbk[] =
-                "\xcc\xe6\xc9\xed\xc8\xcb\xc5\xbc\xc9\xfa\xd0\xa7\xa3\xac"
-                "\xb5\xd6\xb5\xb2\xc1\xcb\xd2\xbb\xb4\xce\xc7\xd0\xb4\xe8"; /* 替身人偶生效，抵挡了一次切磋 */
-
-            result = 8; /* substitute doll blocked entry */
-            vm_net_mock_spar_initiate_cd_arm(sourceRole->roleId);
-            (void)vm_mock_service_session_enqueue_system_message(
-                sourceSession, dollBlockTipGbk);
-            (void)vm_mock_service_session_enqueue_system_message(
-                targetSeed.session, dollSelfTipGbk);
-            printf("[info][network] mock_spar_request_reject actor=%u "
-                   "source=%08x target=%08x reason=substitute-doll item=%u "
-                   "cooldown_ms=%u result=8\n",
-                   actorId, sourceSession->clientId,
-                   targetSeed.session->clientId,
-                   VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID,
-                   VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS);
+                   targetSeed.session->onlineRoleId, targetLevel, forcePk);
         }
         else
         {
-            duel = vm_mock_service_duel_begin(sourceSession, targetSeed.session,
-                                             NULL);
-            if (duel != NULL)
+            busy = vm_mock_service_session_duel_blocks_spar(sourceSession->clientId) ||
+                   vm_mock_service_session_duel_blocks_spar(targetSeed.session->clientId) ||
+                   vm_mock_service_session_trade_blocks_invite(sourceSession->clientId) ||
+                   vm_mock_service_session_trade_blocks_invite(targetSeed.session->clientId) ||
+                   !targetSeed.session->roleOnline ||
+                   !targetSeed.session->sceneVisibleReady ||
+                   targetSeed.session->sceneVisiblePending;
+        }
+
+        if (result == 4 && forcePk == 0)
+        {
+            /* Friendly 切磋: invite only. */
+            if (busy)
             {
-                result = 1;
-                started = true;
-                vm_net_mock_spar_initiate_cd_arm(sourceRole->roleId);
-                /* Initiator gains PK on start (win/loss irrelevant); cap 100.
-                 * Mark dirty only — never sync role_db_save on this hot path
-                 * (MySQL DELETE+INSERT can stall 4/14+4/10 and leave the peer
-                 * late while the initiator sits on duel_round_defer). */
-                vm_net_mock_role_add_pk_initiate_points(sourceRole, "spar-initiate");
-                sourceSession->onlinePkPoints = sourceRole->pkPoints;
+                result = 3;
+                printf("[warn][network] mock_spar_invite_busy actor=%u source=%08x "
+                       "target=%08x reason=not-idle\n",
+                       actorId, sourceSession->clientId,
+                       targetSeed.session->clientId);
             }
             else
             {
+                invited = vm_mock_service_session_enqueue_social_notice(
+                    targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE,
+                    0, sourceSession, sourceRole, sourceAccountId);
+                result = invited ? 1 : 3;
+                printf("[info][network] mock_spar_invite actor=%u source=%08x/%u "
+                       "target=%08x/%u queued=%u result=%u "
+                       "evidence=JianghuOL.CBE:0x0102E624+0x0101258A(subtype14/15)\n",
+                       actorId, sourceSession->clientId, sourceRole->roleId,
+                       targetSeed.session->clientId,
+                       targetSeed.session->onlineRoleId,
+                       invited ? 1u : 0u, result);
+            }
+        }
+        else if (result == 4 && forcePk != 0)
+        {
+            if (sourceRole->pkPoints >= (u32)VM_NET_MOCK_PK_POINTS_MAX)
+            {
+                result = 10;
+                printf("[info][network] mock_force_pk_reject actor=%u "
+                       "source=%08x/%u pk=%u reason=pk-cap result=10\n",
+                       actorId, sourceSession->clientId, sourceRole->roleId,
+                       sourceRole->pkPoints);
+            }
+            else if (vm_net_mock_spar_initiate_cd_active(sourceRole->roleId,
+                                                        &sparReadyUnix,
+                                                        &sparNowUnix))
+            {
+                result = 9;
+                printf("[info][network] mock_force_pk_reject actor=%u "
+                       "source=%08x role=%u reason=initiate-cooldown "
+                       "ready_unix=%u now_unix=%u result=9\n",
+                       actorId, sourceSession->clientId, sourceRole->roleId,
+                       sparReadyUnix, sparNowUnix);
+            }
+            else if (busy)
+            {
                 result = 3;
-                printf("[warn][network] mock_spar_request_begin_failed actor=%u "
-                       "source=%08x target=%08x reason=duel-slot-or-scene-busy\n",
+                printf("[warn][network] mock_force_pk_busy actor=%u source=%08x "
+                       "target=%08x reason=not-idle\n",
                        actorId, sourceSession->clientId,
                        targetSeed.session->clientId);
+            }
+            else if (vm_mock_service_session_try_consume_spar_substitute_doll(
+                         targetSeed.session))
+            {
+                static const char dollBlockTipGbk[] =
+                    "\xb6\xd4\xb7\xbd\xcc\xe6\xc9\xed\xc8\xcb\xc5\xbc\xc9\xfa\xd0\xa7"
+                    "\xa3\xac\xce\xde\xb7\xa8\xc7\xbf\xd6\xc6\x50\x4b"; /* 对方替身人偶生效，无法强制PK */
+                static const char dollSelfTipGbk[] =
+                    "\xcc\xe6\xc9\xed\xc8\xcb\xc5\xbc\xc9\xfa\xd0\xa7\xa3\xac"
+                    "\xb5\xd6\xb5\xb2\xc1\xcb\xd2\xbb\xb4\xce\xc7\xbf\xd6\xc6\x50\x4b"; /* 替身人偶生效，抵挡了一次强制PK */
+
+                result = 8;
+                vm_net_mock_spar_initiate_cd_arm(sourceRole->roleId);
+                (void)vm_mock_service_session_enqueue_system_message(
+                    sourceSession, dollBlockTipGbk);
+                (void)vm_mock_service_session_enqueue_system_message(
+                    targetSeed.session, dollSelfTipGbk);
+                printf("[info][network] mock_force_pk_reject actor=%u "
+                       "source=%08x target=%08x reason=substitute-doll item=%u "
+                       "cooldown_ms=%u result=8\n",
+                       actorId, sourceSession->clientId,
+                       targetSeed.session->clientId,
+                       VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID,
+                       VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS);
+            }
+            else if (!vm_mock_service_session_has_force_pk_proof(sourceSession))
+            {
+                result = 11; /* missing 强制PK证明 */
+                printf("[info][network] mock_force_pk_reject actor=%u "
+                       "source=%08x/%u reason=no-force-pk-proof item=%u "
+                       "result=11\n",
+                       actorId, sourceSession->clientId, sourceRole->roleId,
+                       VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID);
+            }
+            else
+            {
+                duel = vm_mock_service_duel_begin(sourceSession, targetSeed.session,
+                                                 NULL);
+                if (duel != NULL &&
+                    !vm_mock_service_session_try_consume_force_pk_proof(
+                        sourceSession))
+                {
+                    vm_mock_service_duel_cancel_for_client(
+                        sourceSession->clientId, "force-pk-proof-consume-failed");
+                    duel = NULL;
+                    result = 11;
+                    printf("[warn][network] mock_force_pk_consume_failed actor=%u "
+                           "source=%08x/%u item=%u result=11\n",
+                           actorId, sourceSession->clientId, sourceRole->roleId,
+                           VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID);
+                }
+                else if (duel != NULL)
+                {
+                    result = 1;
+                    started = true;
+                    duel->friendlyMode = false;
+                    vm_net_mock_spar_initiate_cd_arm(sourceRole->roleId);
+                    vm_net_mock_role_add_pk_initiate_points(sourceRole,
+                                                           "force-pk-initiate");
+                    sourceSession->onlinePkPoints = sourceRole->pkPoints;
+                }
+                else
+                {
+                    result = 3;
+                    printf("[warn][network] mock_force_pk_begin_failed actor=%u "
+                           "source=%08x target=%08x reason=duel-slot-or-scene-busy\n",
+                           actorId, sourceSession->clientId,
+                           targetSeed.session->clientId);
+                }
             }
         }
     }
@@ -2222,10 +2313,6 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
                                                          sourceSession);
         if (startLen > 5 && pos + (startLen - 5) <= outCap)
         {
-            /* startBuf is a full WT: magic+len+count+objects. Append objects.
-             * out still only has the 4/14 ack object — never read leftover
-             * out[4] from a recycled response buffer (that made count=1 and
-             * dropped the inline 4/10, so only the peer entered battle). */
             u8 startCount = startBuf[4];
             u32 copyLen = startLen - 5;
             memcpy(out + pos, startBuf + 5, copyLen);
@@ -2234,15 +2321,13 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
         }
         else
         {
-            /* build_duel_start_response already cleared inviter pending; put
-             * it back so the next scene-sync poll can deliver 4/10. */
             if (startLen > 5 && activeDuel != NULL &&
                 inviterIndex >= 0 && inviterIndex <= 1)
             {
                 u8 inviterBit = (u8)(1u << inviterIndex);
                 activeDuel->startPendingMask |= inviterBit;
                 activeDuel->startedMask &= (u8)~inviterBit;
-                printf("[warn][network] mock_spar_request_inline_start_dropped "
+                printf("[warn][network] mock_force_pk_inline_start_dropped "
                        "actor=%u source=%08x restore_pending bit=%u "
                        "startLen=%u pos=%u outCap=%u\n",
                        actorId, sourceSession->clientId, inviterBit,
@@ -2258,15 +2343,18 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
     }
 
     printf("[info][network] mock_spar_request actor=%u source=%08x/%u "
-           "target=%08x/%u scene=%s started=%u start_inline=%u result=%u resp=%u "
-           "policy=direct-if-idle evidence=JianghuOL.CBE:0x0102E624;mmBattle:0x66CC\n",
+           "target=%08x/%u scene=%s force=%u started=%u invited=%u "
+           "start_inline=%u result=%u resp=%u "
+           "evidence=JianghuOL.CBE:0x0102E624;mmBattle:0x66CC\n",
            actorId,
            sourceSession ? sourceSession->clientId : 0,
            sourceRole ? sourceRole->roleId : 0,
            targetSeed.session ? targetSeed.session->clientId : 0,
            targetSeed.session ? targetSeed.session->onlineRoleId : 0,
            scene ? scene : "-",
+           forcePk,
            started ? 1u : 0u,
+           invited ? 1u : 0u,
            startLen > 5 ? 1u : 0u,
            result,
            pos);
@@ -2384,6 +2472,8 @@ static u32 vm_net_mock_build_spar_invite_reply_response(
                    "target=%08x ready_inline=1 evidence=duel-slot-or-scene-busy\n",
                    source->clientId, responder->clientId);
         }
+        else
+            duel->friendlyMode = true;
         accepted = duel != NULL;
     }
     if (source != NULL)
@@ -2487,6 +2577,8 @@ static u32 vm_net_mock_build_spar_ready_response(
                                                  responder->sceneVisibleScene))
     {
         duel = vm_mock_service_duel_begin(source, responder, NULL);
+        if (duel != NULL)
+            duel->friendlyMode = true;
     }
     if (duel != NULL)
         pos = vm_net_mock_build_duel_start_response(out, outCap, responder);

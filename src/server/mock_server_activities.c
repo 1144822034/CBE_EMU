@@ -20,8 +20,10 @@ enum
     VM_MOCK_RING_REFRESH_WCOIN = 10,
     VM_MOCK_ACTIVITIES_EXCHANGE_MAX = 32,
     VM_MOCK_ACTIVITIES_ARENA_VITALITY_PER_ROUND = 20,
-    VM_MOCK_ACTIVITIES_VITALITY_DEFAULT = 100,
-    VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT = 200,
+    VM_MOCK_ACTIVITIES_RING_VITALITY_REWARD = 5,
+    VM_MOCK_ACTIVITIES_LADDER_VITALITY_REWARD = 5,
+    VM_MOCK_ACTIVITIES_VITALITY_DEFAULT = 0,
+    VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT = 10000,
     VM_MOCK_RING_DAILY_MAX_DEFAULT = 20,
     VM_MOCK_RING_KEY_RATE_DEFAULT = 5,
     VM_MOCK_RING_TYPE_VISIT = 1,
@@ -354,8 +356,8 @@ static bool vm_mock_activities_ensure_tables(void)
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS account_role_vitality ("
             "account_id VARBINARY(63) NOT NULL,role_id INT UNSIGNED NOT NULL,"
-            "vitality INT UNSIGNED NOT NULL DEFAULT 100,"
-            "vitality_max INT UNSIGNED NOT NULL DEFAULT 200,"
+            "vitality INT UNSIGNED NOT NULL DEFAULT 0,"
+            "vitality_max INT UNSIGNED NOT NULL DEFAULT 10000,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(account_id,role_id)) "
             "ENGINE=InnoDB") ||
@@ -439,6 +441,14 @@ static bool vm_mock_activities_ensure_tables(void)
             "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(account_id,role_id,day_ymd)) "
             "ENGINE=InnoDB"))
         return false;
+    /* Soft migrate: old rows kept vitality_max=200; raise floor to current default. */
+    (void)vm_mysql_exec(
+        "ALTER TABLE account_role_vitality "
+        "MODIFY COLUMN vitality INT UNSIGNED NOT NULL DEFAULT 0,"
+        "MODIFY COLUMN vitality_max INT UNSIGNED NOT NULL DEFAULT 10000");
+    (void)vm_mysql_exec(
+        "UPDATE account_role_vitality SET vitality_max=10000 "
+        "WHERE vitality_max < 10000");
     ready = true;
     return true;
 }
@@ -821,6 +831,16 @@ static void vm_mock_activities_vitality_load(vm_net_mock_role_state *role,
                  "VALUES(UNHEX('%s'),%u,%u,%u)",
                  accountHex, role->roleId, VM_MOCK_ACTIVITIES_VITALITY_DEFAULT,
                  VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT);
+        (void)vm_mysql_exec(query);
+    }
+    else if (row.vitalityMax < (u32)VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT)
+    {
+        row.vitalityMax = VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT;
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_vitality SET vitality_max=%u "
+                 "WHERE account_id=UNHEX('%s') AND role_id=%u",
+                 row.vitalityMax, accountHex, role->roleId);
+        (void)vm_mysql_exec(query);
     }
     if (vitalityOut)
         *vitalityOut = row.vitality;
@@ -898,6 +918,14 @@ void vm_mock_activities_arena_round_vitality(vm_mock_service_duel *duel)
             (void)vm_mock_activities_vitality_add(
                 role, VM_MOCK_ACTIVITIES_ARENA_VITALITY_PER_ROUND);
     }
+}
+
+static void vm_mock_activities_on_ladder_victory(vm_net_mock_role_state *role)
+{
+    if (role == NULL)
+        return;
+    (void)vm_mock_activities_vitality_add(
+        role, VM_MOCK_ACTIVITIES_LADDER_VITALITY_REWARD);
 }
 
 static bool vm_mock_activities_scene_is_yanmen(const char *scene)
@@ -2134,17 +2162,18 @@ static void vm_mock_ring_format_desc(void)
         }
         break;
     case VM_MOCK_RING_TYPE_KILL_PLAYER:
+        /* 切磋战胜…玩家（友好切磋胜利计进度，非强制PK） */
         if (g_vm_mock_ring_rt.targetId == 0)
         {
             snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
-                     "\xbb\xf7\xc9\xb1\xc8\xce\xd2\xe2\xcd\xe6\xbc\xd2");
+                     "\xc7\xd0\xb4\xe8\xd5\xbd\xca\xa4\xc8\xce\xd2\xe2\xcd\xe6\xbc\xd2");
             break;
         }
         vm_mock_ring_decode_pvp_target(g_vm_mock_ring_rt.targetId, &pvpJob,
                                        &pvpBracket);
         snprintf(g_vm_mock_ring_rt.desc, sizeof(g_vm_mock_ring_rt.desc),
-                 "\xbb\xf7\xc9\xb1%u\xc3\xfb%s(%s)\xcd\xe6\xbc\xd2", count,
-                 vm_mock_ring_job_name_gbk(pvpJob),
+                 "\xc7\xd0\xb4\xe8\xd5\xbd\xca\xa4%u\xc3\xfb%s(%s)\xcd\xe6\xbc\xd2",
+                 count, vm_mock_ring_job_name_gbk(pvpJob),
                  vm_mock_ring_bracket_label_gbk(pvpBracket));
         break;
     case VM_MOCK_RING_TYPE_COLLECT:
@@ -2384,6 +2413,8 @@ static u32 vm_net_mock_build_activities_status_response(u8 *out, u32 outCap)
         stone = vm_mock_activities_backpack_count(role,
                                                   g_vm_mock_yanmen_config.stoneItemId);
     }
+    if (vitalityMax < (u32)VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT)
+        vitalityMax = VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT;
     for (i = 0; i < g_vm_mock_festival_exchange_count; ++i)
     {
         const vm_mock_festival_exchange *ex = &g_vm_mock_festival_exchanges[i];
@@ -2798,6 +2829,8 @@ static u32 vm_net_mock_build_ring_submit_response(u8 *out, u32 outCap)
     row.ringCount += 1;
     g_vm_mock_ring_rt.active = 0;
     g_vm_mock_ring_rt.progress = 0;
+    (void)vm_mock_activities_vitality_add(role,
+                                          VM_MOCK_ACTIVITIES_RING_VITALITY_REWARD);
     (void)vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed);
     vm_net_mock_role_db_save("ring-submit");
     return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,

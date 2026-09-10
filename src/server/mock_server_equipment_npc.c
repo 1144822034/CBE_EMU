@@ -99,11 +99,22 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     {
         u16 newEnhance = backpackItem->enhanceLevel;
         u16 oldEnhance = role->equippedEnhanceLevels[slot];
+        u32 newInstanceId = backpackItem->enhanceInstanceId;
+        u32 oldInstanceId = role->equippedEnhanceInstanceIds[slot];
         vm_net_mock_enhance_wash_state newWash;
         vm_net_mock_enhance_wash_state oldWash;
 
         vm_net_mock_enhance_wash_copy(&newWash, &backpackItem->enhanceWash);
         vm_net_mock_enhance_wash_copy(&oldWash, &role->equippedEnhanceWash[slot]);
+        newInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+            role, newInstanceId, newItemId);
+        oldInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+            role, oldInstanceId, oldItemId);
+        vm_net_mock_enhance_wash_coalesce_from_record(
+            role->roleId, newInstanceId, newItemId, newEnhance, backpackSeq,
+            &newWash);
+        vm_net_mock_enhance_wash_coalesce_from_record(
+            role->roleId, oldInstanceId, oldItemId, oldEnhance, 0, &oldWash);
         if (newEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             newEnhance = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         if (oldEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
@@ -111,10 +122,24 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
         backpackItem->itemId = oldItemId;
         backpackItem->count = 1;
         backpackItem->enhanceLevel = oldEnhance;
+        backpackItem->enhanceInstanceId = oldInstanceId;
         vm_net_mock_enhance_wash_copy(&backpackItem->enhanceWash, &oldWash);
         role->equippedItemIds[slot] = newItemId;
         role->equippedEnhanceLevels[slot] = newEnhance;
+        role->equippedEnhanceInstanceIds[slot] = newInstanceId;
         vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot], &newWash);
+        if (!vm_net_mock_enhance_wash_is_empty(&oldWash))
+        {
+            (void)vm_net_mock_enhance_wash_record_relocate_seq(
+                role->roleId, oldInstanceId, 0, backpackSeq, oldItemId,
+                oldEnhance, &oldWash);
+        }
+        if (!vm_net_mock_enhance_wash_is_empty(&newWash))
+        {
+            (void)vm_net_mock_enhance_wash_record_upsert(
+                role->roleId, newInstanceId, 0, newItemId, newEnhance, &newWash,
+                0);
+        }
     }
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-equip-swap");
@@ -238,19 +263,41 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
     }
 
     {
+        u16 unequipEnhance = role->equippedEnhanceLevels[slot];
+        u32 unequipInstanceId = role->equippedEnhanceInstanceIds[slot];
         vm_net_mock_enhance_wash_state unequipWash;
+
         vm_net_mock_enhance_wash_copy(&unequipWash, &role->equippedEnhanceWash[slot]);
-        if (!vm_net_mock_role_add_backpack_item_enhanced(
-                itemId, 1, role->equippedEnhanceLevels[slot], &seq, &unequipWash))
+        unequipInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+            role, unequipInstanceId, itemId);
+        /*
+         * Keep the same item_instance_id across wear↔bag.  The old
+         * add_backpack_item_enhanced(..., instanceId=0) path minted a new id
+         * and dropped the wash-record key, so a later empty in-memory wash
+         * could not coalesce and 17/1 reopened as default yellow milestones.
+         */
+        vm_net_mock_enhance_wash_coalesce_from_record(
+            role->roleId, unequipInstanceId, itemId, unequipEnhance, 0,
+            &unequipWash);
+        if (!vm_net_mock_role_add_backpack_item_to_role(
+                role, itemId, 1, unequipEnhance, &seq, NULL, &unequipWash,
+                unequipInstanceId))
         {
             if (reasonOut)
                 *reasonOut = "bag-full";
             return false;
         }
+        if (!vm_net_mock_enhance_wash_is_empty(&unequipWash))
+        {
+            (void)vm_net_mock_enhance_wash_record_relocate_seq(
+                role->roleId, unequipInstanceId, 0, seq, itemId, unequipEnhance,
+                &unequipWash);
+        }
     }
 
     role->equippedItemIds[slot] = 0;
     role->equippedEnhanceLevels[slot] = 0;
+    role->equippedEnhanceInstanceIds[slot] = 0;
     vm_net_mock_enhance_wash_clear(&role->equippedEnhanceWash[slot]);
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-unequip");
@@ -334,6 +381,42 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
     objectCount = 1;
 
     /*
+     * Unequip (type=4): same-packet 7/7 type=1 carries live wash bit7 so Pixi
+     * openBag merge does not briefly paint default yellow milestones.
+     * Keep under event-7 object cap; skip rather than fail the 7/8 ack.
+     */
+    /*
+     * Unequip (type=4): same-packet 7/7 type=1 carries live wash bit7 so Pixi
+     * openBag merge does not briefly paint default yellow milestones.
+     * Cap is the same event-7 limit as enhance sync (10 objects).
+     */
+    if (result == 1 && parsed.type == 4 && seq != 0 && itemId != 0 &&
+        (u32)objectCount + 1u <= 10u)
+    {
+        u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_SCRATCH];
+        u32 itemInfoLen = 0;
+        u16 enhanceLevel = 0;
+        vm_net_mock_backpack_item_state *bagRow =
+            role != NULL ? vm_net_mock_role_find_backpack_item(role, itemId, seq)
+                         : NULL;
+
+        if (bagRow != NULL)
+            enhanceLevel = bagRow->enhanceLevel;
+        if (vm_net_mock_build_item_use_iteminfo_blob(
+                itemInfo, sizeof(itemInfo), seq, itemId, 1, enhanceLevel,
+                &itemInfoLen) &&
+            vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 7,
+                                         &objectStart) &&
+            vm_net_mock_put_object_u8(out, outCap, &pos, "type", 1) &&
+            vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo,
+                                       (u16)itemInfoLen))
+        {
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount = (u8)(objectCount + 1u);
+        }
+    }
+
+    /*
      * 7/8 moves the row and re-runs wear-apply (0x010337c0 → 0x0100FED8).
      * Do NOT append same-packet live 1/1/14: that object is mmShop:0x9DE's
      * actor-state family.  Injecting it on mmGame then opening the mall
@@ -343,33 +426,38 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
      */
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
-    printf("[info][network] mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s vitals_arm=%u actorinfo=%u actorinfo_len=%u resp=%s evidence=JianghuOL.CBE:0x01033544+0x0100FED8+0x0100FA88(live)\n",
-           parsed.type,
-           parsed.itemId,
-           parsed.seq,
-           itemId,
-           seq ? seq : parsed.seq,
-           slot,
-           oldItemId,
-           result,
-           reason ? reason : "-",
-           vitalsArmed ? 1u : 0u,
-           actorinfoAppended ? 1u : 0u,
-           actorInfoLen,
-           actorinfoAppended ? "7/8+1/1/14" : "7/8");
-    vm_autotest_note("mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s vitals_arm=%u actorinfo=%u response=%s evidence=JianghuOL.CBE:0x01033544+0x0100FA88(live)\n",
-                     parsed.type,
-                     parsed.itemId,
-                     parsed.seq,
-                     itemId,
-                     seq ? seq : parsed.seq,
-                     slot,
-                     oldItemId,
-                     result,
-                     reason ? reason : "-",
-                     vitalsArmed ? 1u : 0u,
-                     actorinfoAppended ? 1u : 0u,
-                     actorinfoAppended ? "7/8+1/1/14" : "7/8");
+    {
+        const char *respTag =
+            actorinfoAppended ? "7/8+1/1/14"
+                              : (objectCount > 1 ? "7/8+7/7" : "7/8");
+        printf("[info][network] mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s vitals_arm=%u actorinfo=%u actorinfo_len=%u resp=%s evidence=JianghuOL.CBE:0x01033544+0x0100FED8+0x0100FA88(live)\n",
+               parsed.type,
+               parsed.itemId,
+               parsed.seq,
+               itemId,
+               seq ? seq : parsed.seq,
+               slot,
+               oldItemId,
+               result,
+               reason ? reason : "-",
+               vitalsArmed ? 1u : 0u,
+               actorinfoAppended ? 1u : 0u,
+               actorInfoLen,
+               respTag);
+        vm_autotest_note("mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s vitals_arm=%u actorinfo=%u response=%s evidence=JianghuOL.CBE:0x01033544+0x0100FA88(live)\n",
+                         parsed.type,
+                         parsed.itemId,
+                         parsed.seq,
+                         itemId,
+                         seq ? seq : parsed.seq,
+                         slot,
+                         oldItemId,
+                         result,
+                         reason ? reason : "-",
+                         vitalsArmed ? 1u : 0u,
+                         actorinfoAppended ? 1u : 0u,
+                         respTag);
+    }
     return pos;
 }
 
@@ -1390,6 +1478,12 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
         result = 5;
         reason = "slot-mismatch";
     }
+    else if (sourceCatalog->quality != destCatalog->quality)
+    {
+        /* 不同品质不可互相转移（equip.dsh 品质列） */
+        result = 5;
+        reason = "quality-mismatch";
+    }
     else
     {
         sourceLevel = (u8)SDL_min(source->enhanceLevel,
@@ -1603,6 +1697,7 @@ static u32 vm_net_mock_equipment_enhance_wash_success_rate(
  * Crystal rate: unit_rate(unlock, tier) — tier > unlock → 100%.
  * +16 档可用 1..3 颗十六级玄晶叠成功率（3 颗 = 100%）.
  * Gold: 5*(washCount+1) 金 per attempt on that equip+tier.
+ * Success (29/9): consume + wash_count++ + roll; attrs stay pending until 29/14.
  */
 static u32 vm_net_mock_build_equipment_enhance_wash_response(
     const u8 *request,
@@ -1628,6 +1723,10 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
     u8 rolledType = 0;
     u8 rolledFlag = 0;
     u16 rolledValue = 0;
+    u8 oldType = 0;
+    u8 oldFlag = 0;
+    u16 oldValue = 0;
+    u8 oldWashed = 0;
     const char *reason = "ok";
     u8 tiersBlob[4 * 12];
     u32 tiersLen = 0;
@@ -1748,9 +1847,23 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
                 {
                     unlockIndex =
                         vm_net_mock_enhance_index_for_unlock(parsed.unlockLevel);
+                    /* New roll replaces any undecided pending (cost already paid). */
+                    vm_net_mock_enhance_wash_pending_clear(
+                        &role->enhanceWashPending);
+                    if (unlockIndex >= 0)
+                    {
+                        oldWashed =
+                            equipment->enhanceWash.slots[unlockIndex].washed
+                                ? 1u
+                                : 0u;
+                        (void)vm_net_mock_equip_enhance_resolve_milestone(
+                            catalog, (u8)unlockIndex, &equipment->enhanceWash,
+                            &oldType, &oldFlag, &oldValue);
+                    }
                     if (washSucceeded && unlockIndex >= 0)
                     {
                         if (!vm_net_mock_enhance_wash_roll_attr(
+                                catalog != NULL ? catalog->quality : 0,
                                 &rolledType, &rolledFlag, &rolledValue))
                         {
                             result = 5;
@@ -1761,13 +1874,17 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
                         {
                             vm_net_mock_enhance_wash_slot *slot =
                                 &equipment->enhanceWash.slots[unlockIndex];
-                            slot->washed = 1;
-                            slot->type = rolledType;
-                            slot->flag = rolledFlag;
-                            slot->value = rolledValue;
+                            /* Consume attempt: count++ now; attrs wait for 29/14. */
                             if (slot->washCount < 0xffffu)
                                 slot->washCount += 1;
-                            reason = "wash-ok";
+                            role->enhanceWashPending.pending = 1;
+                            role->enhanceWashPending.equipSeq = parsed.equipSeq;
+                            role->enhanceWashPending.unlockLevel =
+                                parsed.unlockLevel;
+                            role->enhanceWashPending.newType = rolledType;
+                            role->enhanceWashPending.newFlag = rolledFlag;
+                            role->enhanceWashPending.newValue = rolledValue;
+                            reason = "wash-ok-pending-replace";
                         }
                     }
                     else if (!washSucceeded)
@@ -1822,20 +1939,28 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
         {
             u32 i;
             u32 poolCount = vm_net_mock_enhance_attr_pool_admin_count();
+            u8 poolQuality = catalog != NULL ? catalog->quality : 0;
             for (i = 0; i < poolCount; ++i)
             {
                 const vm_net_mock_enhance_attr_pool_cfg *row =
                     vm_net_mock_enhance_attr_pool_admin_row_at(i);
+                u32 scaledMax;
+                u32 wireMin;
                 if (row == NULL || !row->enabled)
                     continue;
                 if (poolLen + 6u > sizeof(poolBlob))
                     break;
+                scaledMax = vm_net_mock_enhance_wash_pool_scaled_max(
+                    row->valueMax, poolQuality);
+                wireMin = row->valueMin;
+                if (wireMin > scaledMax)
+                    wireMin = scaledMax;
                 poolBlob[poolLen++] = row->attrType;
                 poolBlob[poolLen++] = row->flag;
-                poolBlob[poolLen++] = (u8)((row->valueMin >> 8) & 0xff);
-                poolBlob[poolLen++] = (u8)(row->valueMin & 0xff);
-                poolBlob[poolLen++] = (u8)((row->valueMax >> 8) & 0xff);
-                poolBlob[poolLen++] = (u8)(row->valueMax & 0xff);
+                poolBlob[poolLen++] = (u8)((wireMin >> 8) & 0xff);
+                poolBlob[poolLen++] = (u8)(wireMin & 0xff);
+                poolBlob[poolLen++] = (u8)((scaledMax >> 8) & 0xff);
+                poolBlob[poolLen++] = (u8)(scaledMax & 0xff);
             }
         }
     }
@@ -1882,6 +2007,14 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
                                            rolledFlag) ||
                 !vm_net_mock_put_object_u16(out, outCap, &pos, "attrvalue",
                                            rolledValue) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "oldwashed",
+                                           oldWashed) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "oldtype",
+                                           oldType) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "oldflag",
+                                           oldFlag) ||
+                !vm_net_mock_put_object_u16(out, outCap, &pos, "oldvalue",
+                                           oldValue) ||
                 !vm_net_mock_put_object_raw(out, outCap, &pos, "tiers",
                                             tiersBlob, (u16)tiersLen))
             {
@@ -1949,6 +2082,215 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
            parsed.crystalItemId, parsed.crystalCount, successRate, moneyCost,
            result, washSucceeded ? 1 : 0, rolledType, rolledFlag, rolledValue,
            inventorySynced ? 1 : 0, reason, parsed.subtype);
+    return pos;
+}
+
+/*
+ * PixiJS-only 洗练属性替换确认: 1/29/14 { equipseq, unlock, apply }.
+ * apply=1 → write pending rolled attrs; apply=0 → keep current attrs.
+ * Cost and wash_count already applied on the preceding 29/9 success.
+ * result: 1=ok, 2=no pending, 3=equip missing, 5=mismatch/bad unlock.
+ */
+static u32 vm_net_mock_build_equipment_enhance_wash_apply_response(
+    const u8 *request,
+    u32 requestLen,
+    u8 *out,
+    u32 outCap)
+{
+    u32 offset = 4;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u32 equipSeqValue = 0;
+    u32 unlockValue = 0;
+    u32 applyValue = 0;
+    u16 equipSeq = 0;
+    u8 unlockLevel = 0;
+    u8 apply = 0;
+    int unlockIndex = -1;
+    const char *reason = "ok";
+    u8 tiersBlob[4 * 12];
+    u32 tiersLen = 0;
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *equipment = NULL;
+    const vm_net_mock_equipment_catalog_item *catalog = NULL;
+
+    memset(tiersBlob, 0, sizeof(tiersBlob));
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 14 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "equipseq", &equipSeqValue) &&
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "seq", &equipSeqValue))
+    {
+        return 0;
+    }
+    if (equipSeqValue == 0 || equipSeqValue > 0xffffu)
+        return 0;
+    equipSeq = (u16)equipSeqValue;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "unlock", &unlockValue) ||
+        (unlockValue != 4 && unlockValue != 8 && unlockValue != 12 &&
+         unlockValue != 16))
+    {
+        return 0;
+    }
+    unlockLevel = (u8)unlockValue;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "apply", &applyValue) ||
+        applyValue > 1u)
+    {
+        return 0;
+    }
+    apply = (u8)applyValue;
+
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+    {
+        result = 3;
+        reason = "no-role";
+    }
+    else if (!role->enhanceWashPending.pending)
+    {
+        result = 2;
+        reason = "no-pending";
+    }
+    else if (role->enhanceWashPending.equipSeq != equipSeq ||
+             role->enhanceWashPending.unlockLevel != unlockLevel)
+    {
+        result = 5;
+        reason = "pending-mismatch";
+    }
+    else
+    {
+        equipment = vm_net_mock_role_find_backpack_item(role, 0, equipSeq);
+        if (equipment != NULL)
+            catalog = vm_net_mock_find_equipment_catalog_item(equipment->itemId);
+        unlockIndex = vm_net_mock_enhance_index_for_unlock(unlockLevel);
+        if (equipment == NULL || catalog == NULL || unlockIndex < 0)
+        {
+            result = 3;
+            reason = "equipment-not-found";
+            vm_net_mock_enhance_wash_pending_clear(&role->enhanceWashPending);
+        }
+        else if (apply)
+        {
+            vm_net_mock_enhance_wash_slot *slot =
+                &equipment->enhanceWash.slots[unlockIndex];
+            slot->washed = 1;
+            slot->type = role->enhanceWashPending.newType;
+            slot->flag = role->enhanceWashPending.newFlag;
+            slot->value = role->enhanceWashPending.newValue;
+            {
+                u32 washInstanceId =
+                    vm_net_mock_role_ensure_equipment_instance_id(
+                        role, equipment->enhanceInstanceId, equipment->itemId);
+                equipment->enhanceInstanceId = washInstanceId;
+                (void)vm_net_mock_enhance_wash_record_upsert(
+                    role->roleId, washInstanceId, equipment->seq,
+                    equipment->itemId, equipment->enhanceLevel,
+                    &equipment->enhanceWash, unlockLevel);
+            }
+            vm_net_mock_enhance_wash_pending_clear(&role->enhanceWashPending);
+            vm_net_mock_role_mark_inventory_dirty("equipment-enhance-wash-apply");
+            reason = "applied";
+        }
+        else
+        {
+            vm_net_mock_enhance_wash_pending_clear(&role->enhanceWashPending);
+            reason = "kept-current";
+        }
+    }
+
+    if (equipment != NULL && catalog != NULL)
+    {
+        u8 i;
+        for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+        {
+            u8 unlock = vm_net_mock_enhance_unlock_for_index(i);
+            u8 type = 0;
+            u8 flag = 0;
+            u16 value = 0;
+            u16 washCount = equipment->enhanceWash.slots[i].washCount;
+            u8 washed = equipment->enhanceWash.slots[i].washed ? 1u : 0u;
+            u32 nextGold = vm_net_mock_enhance_wash_next_gold(washCount);
+
+            (void)vm_net_mock_equip_enhance_resolve_milestone(
+                catalog, i, &equipment->enhanceWash, &type, &flag, &value);
+            if (tiersLen + 12u > sizeof(tiersBlob))
+                break;
+            tiersBlob[tiersLen++] = unlock;
+            tiersBlob[tiersLen++] = washed;
+            tiersBlob[tiersLen++] = type;
+            tiersBlob[tiersLen++] = flag;
+            tiersBlob[tiersLen++] = (u8)((value >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(value & 0xff);
+            tiersBlob[tiersLen++] = (u8)((washCount >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(washCount & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 24) & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 16) & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(nextGold & 0xff);
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 14,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "equipseq", equipSeq) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "unlock", unlockLevel) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "apply", apply))
+    {
+        return 0;
+    }
+    if (result == 1 && tiersLen > 0)
+    {
+        if (!vm_net_mock_put_object_raw(out, outCap, &pos, "tiers", tiersBlob,
+                                         (u16)tiersLen))
+            return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    if (result == 1 && apply && role != NULL && equipment != NULL)
+    {
+        bool listResynced = false;
+        u16 crystalSeqs[1];
+        u32 crystalIds[1];
+        u32 crystalRemainings[1];
+
+        memset(crystalSeqs, 0, sizeof(crystalSeqs));
+        memset(crystalIds, 0, sizeof(crystalIds));
+        memset(crystalRemainings, 0, sizeof(crystalRemainings));
+        (void)vm_net_mock_append_equipment_enhance_inventory_sync(
+            out, outCap, &pos, &objectCount, crystalIds, crystalSeqs,
+            crystalRemainings, 0, equipSeq, equipment->itemId,
+            (u8)SDL_min(equipment->enhanceLevel,
+                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+            true, false, false, role->money, &listResynced);
+        if (listResynced)
+        {
+            vm_net_mock_arm_enhance_backpack_list_resync(
+                equipSeq, equipment->itemId,
+                (u8)SDL_min(equipment->enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                true);
+        }
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_equipment_enhance_wash_apply seq=%u unlock=%u "
+           "apply=%u result=%u reason=%s resp=29/14\n",
+           equipSeq, unlockLevel, apply, result, reason);
     return pos;
 }
 
@@ -2423,6 +2765,234 @@ static u32 vm_net_mock_build_dream_badge_combine_response(
         "mock_dream_badge_combine seq=%u src=%u dest=%u result=%u "
         "reason=%s evidence=pixijs-only-29/12-player-pick\n",
         srcSeq, srcItemId, destItemId, result, reason);
+    return pos;
+}
+
+/*
+ * PixiJS-only 星空石重置洗练次数: 1/29/13 { stoneseq, equipseq, unlock }.
+ * Consume 1× item 849 → set enhance_wash.slots[tier].washCount = 0.
+ * Does not clear washed attrs. Tier must be unlocked (enhance >= unlock).
+ * result: 1=ok, 2=stone missing/wrong, 3=equip missing, 4=tier locked,
+ *         5=bad unlock, 6=consume failed, 7=count already 0.
+ */
+static u32 vm_net_mock_build_star_sky_stone_wash_reset_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 offset = 4;
+    u32 stoneSeqValue = 0;
+    u32 equipSeqValue = 0;
+    u32 unlockValue = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u16 stoneSeq = 0;
+    u16 equipSeq = 0;
+    u8 unlockLevel = 0;
+    int unlockIndex = -1;
+    u32 stoneRemaining = 0;
+    u16 washCount = 0;
+    const char *reason = "ok";
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *stone = NULL;
+    vm_net_mock_backpack_item_state *equipment = NULL;
+    const vm_net_mock_equipment_catalog_item *catalog = NULL;
+    u8 tiersBlob[4 * 12];
+    u32 tiersLen = 0;
+
+    memset(tiersBlob, 0, sizeof(tiersBlob));
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 13 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "stoneseq", &stoneSeqValue) ||
+        stoneSeqValue == 0 || stoneSeqValue > 0xffffu)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "equipseq", &equipSeqValue) ||
+        equipSeqValue == 0 || equipSeqValue > 0xffffu)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "unlock", &unlockValue) ||
+        (unlockValue != 4 && unlockValue != 8 && unlockValue != 12 &&
+         unlockValue != 16))
+    {
+        /* Still ACK with result so client can tip. */
+        result = 5;
+        reason = "bad-unlock";
+        unlockLevel = (u8)(unlockValue & 0xffu);
+    }
+    else
+        unlockLevel = (u8)unlockValue;
+
+    stoneSeq = (u16)stoneSeqValue;
+    equipSeq = (u16)equipSeqValue;
+    unlockIndex = vm_net_mock_enhance_index_for_unlock(unlockLevel);
+
+    role = vm_net_mock_active_role();
+    if (result == 1 && role == NULL)
+    {
+        result = 2;
+        reason = "no-role";
+    }
+    else if (result == 1)
+    {
+        vm_net_mock_role_normalize_backpack(role);
+        stone = vm_net_mock_role_find_backpack_item(role, 0, stoneSeq);
+        equipment = vm_net_mock_role_find_backpack_item(role, 0, equipSeq);
+        if (stone == NULL || stone->count == 0 ||
+            stone->itemId != VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID)
+        {
+            result = 2;
+            reason = "stone-not-found";
+        }
+        else if (equipment == NULL)
+        {
+            result = 3;
+            reason = "equipment-not-found";
+        }
+        else
+        {
+            catalog = vm_net_mock_find_equipment_catalog_item(equipment->itemId);
+            if (catalog == NULL)
+            {
+                result = 3;
+                reason = "not-equipment";
+            }
+            else if (unlockIndex < 0)
+            {
+                result = 5;
+                reason = "bad-unlock-index";
+            }
+            else if (equipment->enhanceLevel < unlockLevel)
+            {
+                result = 4;
+                reason = "tier-locked";
+            }
+            else
+            {
+                washCount = equipment->enhanceWash.slots[unlockIndex].washCount;
+                if (washCount == 0)
+                {
+                    result = 7;
+                    reason = "count-already-zero";
+                }
+            }
+        }
+    }
+
+    if (result == 1 && role != NULL && stone != NULL && equipment != NULL &&
+        unlockIndex >= 0)
+    {
+        if (!vm_net_mock_role_consume_backpack_item(
+                role, VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID, stoneSeq, 1u,
+                &stoneRemaining))
+        {
+            result = 6;
+            reason = "consume-failed";
+        }
+        else
+        {
+            equipment = vm_net_mock_role_find_backpack_item(role, 0, equipSeq);
+            if (equipment == NULL)
+            {
+                (void)vm_net_mock_role_add_backpack_item_to_role(
+                    role, VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID, 1, 0, NULL,
+                    "star-sky-stone-reset-rollback", NULL, 0);
+                result = 3;
+                reason = "equipment-missing-after-consume";
+                stoneRemaining += 1u;
+            }
+            else
+            {
+                equipment->enhanceWash.slots[unlockIndex].washCount = 0;
+                washCount = 0;
+                reason = "wash-count-reset-ok";
+                if (role->enhanceWashPending.pending &&
+                    role->enhanceWashPending.equipSeq == equipSeq &&
+                    role->enhanceWashPending.unlockLevel == unlockLevel)
+                {
+                    vm_net_mock_enhance_wash_pending_clear(
+                        &role->enhanceWashPending);
+                }
+                vm_net_mock_role_mark_inventory_dirty(
+                    "star-sky-stone-wash-reset");
+            }
+        }
+    }
+
+    if (equipment != NULL && catalog != NULL)
+    {
+        u8 i;
+        for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+        {
+            u8 unlock = vm_net_mock_enhance_unlock_for_index(i);
+            u8 type = 0;
+            u8 flag = 0;
+            u16 value = 0;
+            u16 slotWash = equipment->enhanceWash.slots[i].washCount;
+            u8 washed = equipment->enhanceWash.slots[i].washed ? 1u : 0u;
+            u32 nextGold = vm_net_mock_enhance_wash_next_gold(slotWash);
+
+            (void)vm_net_mock_equip_enhance_resolve_milestone(
+                catalog, i, &equipment->enhanceWash, &type, &flag, &value);
+            if (tiersLen + 12u > sizeof(tiersBlob))
+                break;
+            tiersBlob[tiersLen++] = unlock;
+            tiersBlob[tiersLen++] = washed;
+            tiersBlob[tiersLen++] = type;
+            tiersBlob[tiersLen++] = flag;
+            tiersBlob[tiersLen++] = (u8)((value >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(value & 0xff);
+            tiersBlob[tiersLen++] = (u8)((slotWash >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(slotWash & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 24) & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 16) & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(nextGold & 0xff);
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 13,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "stoneseq", stoneSeq) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "equipseq", equipSeq) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "unlock", unlockLevel) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining",
+                                    stoneRemaining) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "washcount", washCount))
+    {
+        return 0;
+    }
+    if (tiersLen > 0 &&
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "tiers", tiersBlob,
+                                    (u16)tiersLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_star_sky_stone_wash_reset stone_seq=%u "
+           "equip_seq=%u unlock=%u washcount=%u remain=%u result=%u reason=%s "
+           "resp=29/13\n",
+           stoneSeq, equipSeq, (u32)unlockLevel, (u32)washCount, stoneRemaining,
+           result, reason);
+    vm_autotest_note(
+        "mock_star_sky_stone_wash_reset stone=%u equip=%u unlock=%u "
+        "result=%u reason=%s evidence=pixijs-only-29/13\n",
+        stoneSeq, equipSeq, (u32)unlockLevel, result, reason);
     return pos;
 }
 
@@ -4486,6 +5056,16 @@ typedef struct vm_mock_service_client_session
     char pendingShopReturnSceneEnterScene[64];
     u16 pendingShopReturnSceneEnterX;
     u16 pendingShopReturnSceneEnterY;
+    /*
+     * Leader scene transfer fans out a forced 30/1 to other seats.  Armed here
+     * so auto-leave skips in-transit members and poll/dispatch can deliver the
+     * enter on that client's own sticky session (not the leader's globals).
+     */
+    bool pendingTeamFollowSceneEnter;
+    u32 pendingTeamFollowSceneEnterEarliestTick;
+    char pendingTeamFollowSceneEnterScene[64];
+    u16 pendingTeamFollowSceneEnterX;
+    u16 pendingTeamFollowSceneEnterY;
     /* One kind-2 30/1 per mmShop exit; blocks re-arm after rehydrate loops. */
     bool shopReturnKind2Completed;
     /* After map-side revival outside the shop-return WT6/1 object budget,
@@ -5020,6 +5600,12 @@ typedef struct
     bool wagerMode;
     bool wagerSettled;
     u32 wagerChallengeId;
+    /*
+     * Friendly 切磋 (invite/consent): no death penalty, PK, enmity, substitute
+     * doll, or initiate cooldown. Ring kill-player progress credits on win.
+     * Force-PK keeps false (no ring credit).
+     */
+    bool friendlyMode;
 } vm_mock_service_duel;
 
 static vm_mock_service_team g_vm_mock_service_teams[VM_MOCK_SERVICE_TEAM_MAX];
@@ -6469,6 +7055,139 @@ static bool vm_mock_service_session_try_consume_spar_substitute_doll(
     return consumed;
 }
 
+static bool vm_mock_service_session_has_force_pk_proof(
+    vm_mock_service_client_session *session)
+{
+    vm_mock_service_account_state *account = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_mock_service_account_state *savedActive = g_vm_mock_service_active_account;
+    const char *savedActiveId = g_vm_mock_service_active_account_id;
+    u32 savedClientId = g_vm_mock_service_active_client_id;
+    bool found = false;
+
+    if (session == NULL || session->accountId[0] == 0 || session->onlineRoleId == 0)
+        return false;
+
+    if (savedActive != NULL)
+        vm_mock_service_account_capture(savedActive);
+    account = vm_mock_service_account_find_or_create(session->accountId);
+    if (account == NULL)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return false;
+    }
+    vm_mock_service_account_restore(account);
+    g_vm_mock_service_active_client_id = session->clientId;
+    if (vm_mock_service_account_ensure_role_db_loaded(account) &&
+        g_vm_net_mock_role_db_valid)
+    {
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            if (g_vm_net_mock_role_db.roles[i].roleId == session->onlineRoleId)
+            {
+                role = &g_vm_net_mock_role_db.roles[i];
+                break;
+            }
+        }
+        found = role != NULL &&
+                vm_net_mock_role_find_backpack_item(
+                    role, VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID, 0) != NULL;
+    }
+    vm_mock_service_account_capture(account);
+    if (savedActive != NULL)
+        vm_mock_service_account_restore(savedActive);
+    else
+        vm_mock_service_account_restore(NULL);
+    g_vm_mock_service_active_account_id = savedActiveId;
+    g_vm_mock_service_active_client_id = savedClientId;
+    return found;
+}
+
+static bool vm_mock_service_session_try_consume_force_pk_proof(
+    vm_mock_service_client_session *session)
+{
+    vm_mock_service_account_state *account = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_mock_service_account_state *savedActive = g_vm_mock_service_active_account;
+    const char *savedActiveId = g_vm_mock_service_active_account_id;
+    u32 savedClientId = g_vm_mock_service_active_client_id;
+    bool consumed = false;
+
+    if (session == NULL || session->accountId[0] == 0 || session->onlineRoleId == 0)
+        return false;
+
+    if (savedActive != NULL)
+        vm_mock_service_account_capture(savedActive);
+    account = vm_mock_service_account_find_or_create(session->accountId);
+    if (account == NULL)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return false;
+    }
+    vm_mock_service_account_restore(account);
+    g_vm_mock_service_active_client_id = session->clientId;
+    if (!vm_mock_service_account_ensure_role_db_loaded(account) ||
+        !g_vm_net_mock_role_db_valid)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return false;
+    }
+
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == session->onlineRoleId)
+        {
+            role = &g_vm_net_mock_role_db.roles[i];
+            break;
+        }
+    }
+    if (role != NULL &&
+        vm_net_mock_role_find_backpack_item(
+            role, VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID, 0) != NULL &&
+        vm_net_mock_role_consume_backpack_item_amount(
+            role, VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID, 1, NULL, 0, NULL))
+    {
+        vm_net_mock_role_mark_inventory_dirty("force-pk-proof");
+        if (g_vm_net_mock_role_position_dirty || g_vm_net_mock_role_inventory_dirty)
+            vm_net_mock_role_db_save("force-pk-proof");
+        session->backpackListResyncPending = true;
+        session->backpackListResyncPhase = 1;
+        session->backpackListResyncListOnly = true;
+        session->backpackListResyncTick = g_schedulerTick;
+        g_netMockBackpackGridSeededRoleId = 0;
+        consumed = true;
+        printf("[info][mock-service] force_pk_proof_consume client=%08x "
+               "role=%u item=%u durability=%u evidence=item:848\n",
+               session->clientId, role->roleId,
+               VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID,
+               VM_NET_MOCK_FORCE_PK_PROOF_DURABILITY);
+    }
+
+    vm_mock_service_account_capture(account);
+    if (savedActive != NULL)
+        vm_mock_service_account_restore(savedActive);
+    else
+        vm_mock_service_account_restore(NULL);
+    g_vm_mock_service_active_account_id = savedActiveId;
+    g_vm_mock_service_active_client_id = savedClientId;
+    return consumed;
+}
+
 static void vm_mock_service_session_apply_spar_death_penalty(
     vm_mock_service_client_session *session,
     const char *reason)
@@ -6644,7 +7363,15 @@ static void vm_mock_service_duel_arm_observer_exit(
     observer->sparResultNotBeforeTick = 0;
     (void)battleMp;
     (void)targetMp;
-    if (observer->sparExitWasDead && !(duel->arenaMode) && !(duel->wagerMode))
+    if (observer->sparExitWasDead && duel->friendlyMode)
+    {
+        /* Friendly 切磋: keep lose tip, but no exp/money/respawn penalty. */
+        observer->sparDeathExpPenalty = 0;
+        observer->sparDeathMoneyPenalty = 0;
+        observer->sparExitRecoverHp =
+            targetHp > battleHp ? (targetHp - battleHp) : (targetHp ? targetHp : 1);
+    }
+    else if (observer->sparExitWasDead && !(duel->arenaMode) && !(duel->wagerMode))
     {
         vm_mock_service_session_apply_spar_death_penalty(
             observer, "spar-defeat");
@@ -8597,13 +9324,24 @@ static const char *vm_mock_service_session_take_spar_result_text(
     }
     else if (session->sparExitWasDead)
     {
-        snprintf(sparLoseBuf, sizeof(sparLoseBuf),
-                 "\xcc\xf8\xd5\xbd\xca\xa7\xb0\xdc"
-                 " \xbe\xad\xd1\xe9-%u"
-                 " \xbd\xf0\xc7\xae-%u",
-                 session->sparDeathExpPenalty,
-                 session->sparDeathMoneyPenalty);
-        text = sparLoseBuf;
+        if (session->sparDeathExpPenalty == 0 &&
+            session->sparDeathMoneyPenalty == 0)
+        {
+            /* Friendly 切磋失败：无经验/金钱损失文案。 */
+            static const char sparLosePlainGbk[] =
+                "\xc7\xd0\xb4\xe8\xca\xa7\xb0\xdc"; /* 切磋失败 */
+            text = sparLosePlainGbk;
+        }
+        else
+        {
+            snprintf(sparLoseBuf, sizeof(sparLoseBuf),
+                     "\xcc\xf8\xd5\xbd\xca\xa7\xb0\xdc"
+                     " \xbe\xad\xd1\xe9-%u"
+                     " \xbd\xf0\xc7\xae-%u",
+                     session->sparDeathExpPenalty,
+                     session->sparDeathMoneyPenalty);
+            text = sparLoseBuf;
+        }
     }
     else
         text = sparWinGbk;
@@ -8853,6 +9591,36 @@ static bool vm_mock_service_active_session_team_encounter_blocked(void)
     return !vm_mock_service_team_is_leader(team, session->clientId);
 }
 
+/*
+ * Multi-member parties: only the leader may portal / map-stone / spouse-warp.
+ * Members stay on the leader's map via team-follow 30/1 (see team-follow RE).
+ */
+static bool vm_mock_service_active_session_team_transfer_blocked(void)
+{
+    return vm_mock_service_active_session_team_encounter_blocked();
+}
+
+static void vm_mock_service_session_clear_team_follow_scene_enter(
+    vm_mock_service_client_session *session,
+    const char *reason)
+{
+    if (session == NULL || !session->pendingTeamFollowSceneEnter)
+        return;
+    session->pendingTeamFollowSceneEnter = false;
+    session->pendingTeamFollowSceneEnterEarliestTick = 0;
+    session->pendingTeamFollowSceneEnterScene[0] = 0;
+    session->pendingTeamFollowSceneEnterX = 0;
+    session->pendingTeamFollowSceneEnterY = 0;
+    printf("[info][mock-service] team_follow_clear client=%08x reason=%s\n",
+           session->clientId,
+           reason ? reason : "-");
+}
+
+static void vm_mock_service_team_queue_follow_leader_scene(
+    vm_mock_service_client_session *leader,
+    const vm_net_mock_scene_change_target *target,
+    const char *reason);
+
 static bool vm_mock_service_session_on_dream_instance(const vm_mock_service_client_session *session)
 {
     return session != NULL &&
@@ -9083,6 +9851,8 @@ static bool vm_mock_service_team_remove_member(vm_mock_service_client_session *l
 
     leaderLeaves = team->leaderClientId == leaver->clientId;
     leaver->pendingTeamBattleSerial = 0;
+    vm_mock_service_session_clear_team_follow_scene_enter(leaver,
+                                                          reason ? reason : "team-leave");
     vm_mock_service_team_notify_leave(team, leaver);
     if (team->battleActive)
         vm_mock_service_team_battle_note_roster_disconnect(team, leaver, reason);
@@ -9671,6 +10441,16 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
                target ? target->y : 0,
                reason ? reason : "-");
     }
+    /*
+     * Leader-led transfer: pull teammates onto the same landing instead of
+     * dissolving the party when scenes diverge.  Skip the fan-out when this
+     * pending mark itself is already a follow arm (avoid recursion).
+     */
+    if (target != NULL &&
+        (reason == NULL || strcmp(reason, "team-follow") != 0))
+    {
+        vm_mock_service_team_queue_follow_leader_scene(session, target, reason);
+    }
 }
 
 static void vm_mock_service_team_auto_leave_off_leader_scene(
@@ -9718,6 +10498,13 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
     session->sceneVisibleY = y;
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
+    if (session->pendingTeamFollowSceneEnter &&
+        vm_net_mock_scene_names_equal_loose(session->pendingTeamFollowSceneEnterScene,
+                                             scene))
+    {
+        vm_mock_service_session_clear_team_follow_scene_enter(session,
+                                                              "scene-ready");
+    }
     if (changed)
         vm_mock_service_session_reset_movement_rate(session, "scene-ready");
     becameOnline = !session->roleOnline;
@@ -9771,9 +10558,10 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
                reason ? reason : "-");
     }
     /*
-     * Party is map-local: once this seat's visible scene name changes (or is
-     * first established), drop any teammate who is not on the leader's map.
-     * Covers member teleport-away and leader changing maps while others stay.
+     * Party follow: when this seat's visible scene name changes, reconcile
+     * roster.  Leader landing pulls mates (team_queue_follow); only a
+     * non-leader who is stranded off the leader map without a follow arm
+     * still auto-leaves (5/7).
      */
     if (sceneNameChanged)
         vm_mock_service_team_auto_leave_off_leader_scene(session, "scene-mismatch");
@@ -10207,6 +10995,11 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->pendingShopReturnSceneEnterScene[0] = 0;
     session->pendingShopReturnSceneEnterX = 0;
     session->pendingShopReturnSceneEnterY = 0;
+    session->pendingTeamFollowSceneEnter = false;
+    session->pendingTeamFollowSceneEnterEarliestTick = 0;
+    session->pendingTeamFollowSceneEnterScene[0] = 0;
+    session->pendingTeamFollowSceneEnterX = 0;
+    session->pendingTeamFollowSceneEnterY = 0;
     session->shopReturnKind2Completed = false;
     session->pendingMapActorVitalsSync = false;
     session->pendingMapActorVitalsSyncFreshShell = false;
@@ -11560,8 +12353,9 @@ static const char *vm_mock_service_session_team_presence_scene(
 
 /*
  * When any seat finishes entering a map, remove non-leader members who are no
- * longer on the leader's scene.  Uses the same presence rules as team battle
- * collect (visible, else recent onlineScene for shop seats).
+ * longer on the leader's scene — unless they are mid team-follow (pending or
+ * sceneVisiblePending).  Leader-led transfers keep the roster and pull mates
+ * via pendingTeamFollowSceneEnter instead of dissolving the party.
  */
 static void vm_mock_service_team_auto_leave_off_leader_scene(
     vm_mock_service_client_session *session,
@@ -11581,6 +12375,28 @@ static void vm_mock_service_team_auto_leave_off_leader_scene(
     leader = vm_mock_service_find_client_session(team->leaderClientId);
     if (leader == NULL)
         return;
+
+    /*
+     * Leader just landed on a new map: pull mates instead of kicking them.
+     * Historical map-local dissolve treated this as scene-mismatch and sent
+     * 5/7 (client tip「成员离开 <id>」) — that is exactly what follow replaces.
+     */
+    if (vm_mock_service_team_is_leader(team, session->clientId))
+    {
+        vm_net_mock_scene_change_target followTarget;
+
+        memset(&followTarget, 0, sizeof(followTarget));
+        snprintf(followTarget.scene, sizeof(followTarget.scene), "%s",
+                 session->sceneVisibleScene);
+        followTarget.x = session->sceneVisibleX;
+        followTarget.y = session->sceneVisibleY;
+        followTarget.mapType = 2;
+        followTarget.hasSceEntry = true;
+        vm_mock_service_team_queue_follow_leader_scene(
+            session, &followTarget, reason ? reason : "leader-scene-ready");
+        return;
+    }
+
     leaderScene = vm_mock_service_session_team_presence_scene(leader);
     if (leaderScene == NULL)
         return;
@@ -11592,6 +12408,9 @@ static void vm_mock_service_team_auto_leave_off_leader_scene(
         const char *memberScene = NULL;
 
         if (member == NULL || member->clientId == team->leaderClientId)
+            continue;
+        /* In-transit follow / any pending enter: do not kick yet. */
+        if (member->pendingTeamFollowSceneEnter || member->sceneVisiblePending)
             continue;
         memberScene = vm_mock_service_session_team_presence_scene(member);
         if (memberScene == NULL)
@@ -11630,6 +12449,133 @@ static void vm_mock_service_team_auto_leave_off_leader_scene(
                leaderScene,
                memberScene ? memberScene : "-",
                reason ? reason : "scene-mismatch");
+    }
+}
+
+/*
+ * Arm a poll/dispatch 30/1 for every non-leader seat that is not already on
+ * the leader's destination.  Marks them scene-pending so auto-leave skips
+ * them until they land.
+ */
+static void vm_mock_service_team_queue_follow_leader_scene(
+    vm_mock_service_client_session *leader,
+    const vm_net_mock_scene_change_target *target,
+    const char *reason)
+{
+    vm_mock_service_team *team = NULL;
+    vm_net_mock_scene_change_target followTarget;
+    u16 x = 0;
+    u16 y = 0;
+    /* GBK: 跟随队长切图 */
+    static const char followTipGbk[] =
+        "\xb8\xfa\xcb\xe6\xb6\xd3\xb3\xa4\xc7\xd0\xcd\xbc";
+
+    if (leader == NULL || target == NULL ||
+        !vm_net_mock_scene_name_is_safe(target->scene))
+    {
+        return;
+    }
+    team = vm_mock_service_team_find_for_client(leader->clientId);
+    if (team == NULL || !team->active || team->memberCount < 2)
+        return;
+    if (!vm_mock_service_team_is_leader(team, leader->clientId))
+        return;
+
+    followTarget = *target;
+    x = target->x;
+    y = target->y;
+    /*
+     * Portal 2/3 often marks pending before entry coords resolve (x=y=0).
+     * Still arm follow: fall back to SCE spawn, then leader footfall, then
+     * a safe default — otherwise scene-ready auto-leave kicks mates (5/7).
+     */
+    if (x == 0 || y == 0)
+    {
+        u16 spawnX = 0;
+        u16 spawnY = 0;
+        if (vm_net_mock_get_scene_reasonable_spawn_from_sce(followTarget.scene,
+                                                             &spawnX,
+                                                             &spawnY,
+                                                             NULL) &&
+            spawnX != 0 && spawnY != 0)
+        {
+            x = spawnX;
+            y = spawnY;
+        }
+        else if (leader->sceneVisibleX != 0 && leader->sceneVisibleY != 0 &&
+                 vm_net_mock_scene_names_equal_loose(leader->sceneVisibleScene,
+                                                      followTarget.scene))
+        {
+            x = leader->sceneVisibleX;
+            y = leader->sceneVisibleY;
+        }
+        else
+        {
+            x = 120;
+            y = 120;
+        }
+        printf("[info][mock-service] team_follow_resolve_pos leader=%08x "
+               "scene=%s pos=(%u,%u) reason=%s evidence=zero-target-fallback\n",
+               leader->clientId,
+               followTarget.scene,
+               x,
+               y,
+               reason ? reason : "-");
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(followTarget.scene, &x, &y);
+    if (x == 0 || y == 0)
+    {
+        printf("[warn][mock-service] team_follow_skip leader=%08x scene=%s "
+               "reason=unresolved-pos via=%s\n",
+               leader->clientId,
+               followTarget.scene,
+               reason ? reason : "-");
+        return;
+    }
+    followTarget.x = x;
+    followTarget.y = y;
+    followTarget.mapType = followTarget.mapType ? followTarget.mapType : 2;
+    followTarget.hasSceEntry = true;
+
+    for (u8 i = 0; i < team->memberCount; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(team->memberClientIds[i]);
+
+        if (member == NULL || member->clientId == team->leaderClientId)
+            continue;
+        if (vm_mock_service_team_member_same_scene_presence(member,
+                                                            followTarget.scene) &&
+            !member->sceneVisiblePending &&
+            !member->pendingTeamFollowSceneEnter)
+        {
+            continue;
+        }
+
+        /*
+         * Refresh an already-armed follow to the latest leader landing (coords
+         * may have been provisional on the first pending mark).
+         */
+        vm_mock_service_session_mark_scene_pending(member, &followTarget,
+                                                   "team-follow");
+        member->pendingTeamFollowSceneEnter = true;
+        member->pendingTeamFollowSceneEnterEarliestTick = g_schedulerTick;
+        snprintf(member->pendingTeamFollowSceneEnterScene,
+                 sizeof(member->pendingTeamFollowSceneEnterScene),
+                 "%s",
+                 followTarget.scene);
+        member->pendingTeamFollowSceneEnterX = followTarget.x;
+        member->pendingTeamFollowSceneEnterY = followTarget.y;
+        (void)vm_mock_service_session_enqueue_system_message(member, followTipGbk);
+        printf("[info][mock-service] team_follow_queue leader=%08x member=%08x/%u "
+               "scene=%s pos=(%u,%u) reason=%s evidence=leader-transfer-keep-party\n",
+               leader->clientId,
+               member->clientId,
+               member->onlineRoleId,
+               followTarget.scene,
+               followTarget.x,
+               followTarget.y,
+               reason ? reason : "-");
     }
 }
 

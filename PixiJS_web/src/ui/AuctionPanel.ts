@@ -1168,7 +1168,7 @@ export class AuctionPanel extends Container {
   }
 
   private paintEquipLine(line: EquipPaintLine, x: number, y: number): number {
-    if (line.kind === "text") {
+    if (line.kind === "text" || line.kind === "milestone") {
       this.addLabel(line.text, x, y, line.color);
       return wrapChars(line.text).length;
     }

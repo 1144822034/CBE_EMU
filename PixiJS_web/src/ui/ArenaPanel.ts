@@ -28,7 +28,8 @@ import {
 } from "./listPanelShell";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
-const BRACKETS = [10, 50, 70];
+/** 10/50/70 = 分职业段位；77 = 周末70大乱斗（全职业一榜）. */
+const BRACKETS = [10, 50, 70, 77];
 const TAB_BG = 0x375946;
 /** Single-line rank rows. */
 const LIST_PAGE = 8;
@@ -79,6 +80,8 @@ export class ArenaPanel extends Container {
   }
 
   get job(): number {
+    /* FFA board uses job=0 on the wire. */
+    if (this.bracket === 77) return 0;
     return this.jobIndex + 1;
   }
 
@@ -86,16 +89,24 @@ export class ArenaPanel extends Container {
     return BRACKETS[this.bracketIndex] ?? 10;
   }
 
+  get isFfa(): boolean {
+    return this.bracket === 77;
+  }
+
   open(page: ArenaRankPage | null, job?: number, bracket?: number): void {
-    if (job && job >= 1 && job <= 3) this.jobIndex = job - 1;
     if (bracket) {
       const i = BRACKETS.indexOf(bracket);
       if (i >= 0) this.bracketIndex = i;
     }
+    if (this.bracket === 77) {
+      /* keep jobIndex for UI cycle after leaving FFA */
+    } else if (job && job >= 1 && job <= 3) {
+      this.jobIndex = job - 1;
+    }
     this.page = page;
     this.listCursor = 0;
     this.listScroll = 0;
-    this.tabFocus = "bracket";
+    this.tabFocus = this.bracket === 77 ? "bracket" : "bracket";
     this.visible = true;
     this.redraw();
   }
@@ -148,13 +159,22 @@ export class ArenaPanel extends Container {
     else this.switchBracket(dir);
   }
 
-  /** 左软键：在「职业 / 段位」焦点间切换 */
+  /** 左软键：在「职业 / 段位」焦点间切换（大乱斗无职业榜） */
   toggleTabFocus(): void {
+    if (this.isFfa) {
+      this.tabFocus = "bracket";
+      this.redraw();
+      return;
+    }
     this.tabFocus = this.tabFocus === "job" ? "bracket" : "job";
     this.redraw();
   }
 
   switchJob(dir: -1 | 1): void {
+    if (this.isFfa) {
+      this.switchBracket(dir);
+      return;
+    }
     this.jobIndex = (this.jobIndex + dir + JOBS.length) % JOBS.length;
     this.listCursor = 0;
     this.listScroll = 0;
@@ -203,6 +223,9 @@ export class ArenaPanel extends Container {
   }
 
   softkeys(): { left: string; mid: string; right: string } {
+    if (this.isFfa) {
+      return { left: "段位", mid: "确定", right: "关闭" };
+    }
     return {
       left: this.tabFocus === "job" ? "段位" : "职业",
       mid: "确定",
@@ -328,20 +351,33 @@ export class ArenaPanel extends Container {
 
     const jobY = 32;
     const tabH = 18;
-    this.drawTabs(
-      8,
-      jobY,
-      LCD_WIDTH - 16,
-      tabH,
-      JOBS,
-      this.jobIndex,
-      this.tabFocus === "job",
-      (i) => this.selectJob(i),
-    );
+    if (this.isFfa) {
+      this.drawTabs(
+        8,
+        jobY,
+        LCD_WIDTH - 16,
+        tabH,
+        ["全职业"],
+        0,
+        false,
+        () => undefined,
+      );
+    } else {
+      this.drawTabs(
+        8,
+        jobY,
+        LCD_WIDTH - 16,
+        tabH,
+        JOBS,
+        this.jobIndex,
+        this.tabFocus === "job",
+        (i) => this.selectJob(i),
+      );
+    }
 
     const brY = jobY + tabH + 4;
     const brLabels = BRACKETS.map((b) =>
-      b === 70 ? "70" : bracketLabel(b),
+      b === 77 ? "乱斗" : b === 70 ? "70" : bracketLabel(b),
     );
     this.drawTabs(
       8,
@@ -354,7 +390,9 @@ export class ArenaPanel extends Container {
       (i) => this.selectBracket(i),
     );
 
-    const bucketHint = `${JOBS[this.jobIndex]} · ${bracketLabel(this.bracket)}`;
+    const bucketHint = this.isFfa
+      ? `大乱斗 · ${bracketLabel(this.bracket)}`
+      : `${JOBS[this.jobIndex]} · ${bracketLabel(this.bracket)}`;
     const infoY = brY + tabH + 4;
     this.addLabel(bucketHint, 12, infoY, CBE.inkMint);
     const mineReward = formatArenaRewardLine(

@@ -1,4 +1,4 @@
 CD /D %~dp0
 dir
-scripts/bump-versions.bat 39 64 1.0.64
+scripts/bump-versions.bat 41 66 1.0.66
 pause

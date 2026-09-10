@@ -1180,6 +1180,11 @@ static u32 vm_net_mock_build_current_scene_repeat_scene_change_response(const u8
     return pos;
 }
 
+static u32 vm_net_mock_build_team_transfer_reject_notice_response(
+    u8 *out,
+    u32 outCap,
+    const char *tipGbk);
+
 static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     bool needSkill = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
@@ -1202,6 +1207,32 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     if (outCap < pos)
         return 0;
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
+    if (vm_mock_service_active_session_team_transfer_blocked())
+    {
+        vm_mock_service_client_session *blockedSession =
+            vm_mock_service_get_active_client_session();
+        bool sameSceneAck =
+            blockedSession != NULL &&
+            blockedSession->sceneVisibleReady &&
+            !blockedSession->sceneVisiblePending &&
+            vm_net_mock_scene_name_is_safe(blockedSession->sceneVisibleScene) &&
+            vm_net_mock_scene_names_equal_loose(blockedSession->sceneVisibleScene,
+                                                target.scene);
+
+        if (!sameSceneAck)
+        {
+            /* GBK: 队员不能切图。 */
+            static const char memberNoSceneGbk[] =
+                "\xb6\xd3\xd3\xd1\xb2\xbb\xc4\xdc\xc7\xd0\xcd\xbc\xa1\xa3";
+            u32 rejectLen = vm_net_mock_build_team_transfer_reject_notice_response(
+                out, outCap, memberNoSceneGbk);
+            printf("[info][network] mock_scene_change client=%08x "
+                   "action=reject-non-leader scene=%s evidence=team-member-no-transfer\n",
+                   blockedSession ? blockedSession->clientId : 0,
+                   target.scene);
+            return rejectLen;
+        }
+    }
     resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
                                                                missingResource,
                                                                sizeof(missingResource));
@@ -4453,7 +4484,7 @@ static bool vm_net_mock_build_scene_monster_moveinfo_blob_ex(
      * ActorSceneNode+0x88. Battle.cbm subtype 5 then reads HP/MP from
      * node+0xB4/+0xB8/+0xBC/+0xC0, i.e. blob+44/+48/+52/+56.
      *
-     * actorId must be the client's live-node wire id (FB remaps keep #200).
+     * actorId must be the client's live-node wire id (FB remaps keep #250).
      * statsEnemyId may be the binding real id so custom HP seeds that node.
      */
     vm_net_mock_store_le32(state, 44, enemyHp);
@@ -5030,6 +5061,31 @@ static bool vm_net_mock_append_chat_message_object(
  * Contract mirrors unimplemented reject notice: 25/12 clear + 1/3/3 system tip.
  * Message is GBK so CBE chat renders it; Pixi matches the「其他地方登录」marker.
  */
+static u32 vm_net_mock_build_team_transfer_reject_notice_response(
+    u8 *out,
+    u32 outCap,
+    const char *tipGbk)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < pos || tipGbk == NULL || tipGbk[0] == 0)
+        return 0;
+    if (!vm_net_mock_append_info_banner_clear12_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_chat_message_object(out, outCap, &pos,
+                                                VM_MOCK_CHAT_TYPE_SYSTEM, 0,
+                                                systemNameGbk, tipGbk))
+    {
+        return 0;
+    }
+    ++objectCount;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}
+
 static u32 vm_net_mock_build_maintenance_kick_notice_response(u8 *out, u32 outCap)
 {
     static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
@@ -6849,6 +6905,91 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
     return pos;
 }
 
+/*
+ * Forced teammate enter after leader portal / map-stone.  Same 30/1 contract as
+ * shop-return deferred kind-2 / spouse teleport; delivered on that seat's poll.
+ */
+static u32 vm_net_mock_try_deliver_pending_team_follow_scene_enter(
+    u8 *out,
+    u32 outCap,
+    const char *via)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_scene_change_target target;
+    u32 pos = 0;
+
+    if (out == NULL || outCap < 5 || session == NULL ||
+        !session->pendingTeamFollowSceneEnter)
+    {
+        return 0;
+    }
+    if (g_schedulerTick == session->pendingTeamFollowSceneEnterEarliestTick)
+        return 0;
+    if (session->mmShopShellActive)
+    {
+        printf("[info][mock-service] team_follow_hold client=%08x "
+               "reason=mmShop-open via=%s\n",
+               session->clientId,
+               via ? via : "-");
+        return 0;
+    }
+    if (!vm_net_mock_scene_name_is_safe(session->pendingTeamFollowSceneEnterScene) ||
+        session->pendingTeamFollowSceneEnterX == 0 ||
+        session->pendingTeamFollowSceneEnterY == 0)
+    {
+        vm_mock_service_session_clear_team_follow_scene_enter(session,
+                                                              "invalid-target");
+        return 0;
+    }
+
+    memset(&target, 0, sizeof(target));
+    snprintf(target.scene, sizeof(target.scene), "%s",
+             session->pendingTeamFollowSceneEnterScene);
+    target.x = session->pendingTeamFollowSceneEnterX;
+    target.y = session->pendingTeamFollowSceneEnterY;
+    target.mapType = 2;
+    target.hasSceEntry = true;
+    vm_net_mock_adjust_safe_player_pos_for_scene(target.scene, &target.x, &target.y);
+
+    pos = vm_net_mock_build_scene_channel_enter_combo_for_target(&target, out, outCap);
+    if (pos == 0)
+    {
+        printf("[warn][mock-service] team_follow_build_failed client=%08x "
+               "scene=%s pos=(%u,%u) keep_pending=1 via=%s\n",
+               session->clientId,
+               target.scene,
+               target.x,
+               target.y,
+               via ? via : "-");
+        return 0;
+    }
+
+    session->pendingTeamFollowSceneEnter = false;
+    session->pendingTeamFollowSceneEnterEarliestTick = 0;
+    session->pendingTeamFollowSceneEnterScene[0] = 0;
+    session->pendingTeamFollowSceneEnterX = 0;
+    session->pendingTeamFollowSceneEnterY = 0;
+
+    vm_net_mock_remember_scene_change_target(&target);
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                      "team-follow");
+    g_vm_net_mock_scene_moveinfo_npc_wait_post_enter = true;
+    vm_mock_service_session_clear_scene_npc_catalog_seeded(
+        session, "team-follow-enter");
+
+    printf("[info][network] mock_team_follow_enter client=%08x scene=%s "
+           "pos=(%u,%u) via=%s response=30/1 evidence=leader-transfer-follow\n",
+           session->clientId,
+           target.scene,
+           target.x,
+           target.y,
+           via ? via : "-");
+    return pos;
+}
+
 static u32 vm_net_mock_try_deliver_pending_shop_return_scene_enter(
     u8 *out,
     u32 outCap,
@@ -7149,6 +7290,10 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
             vm_mock_service_session_arm_coolmall_open_from_host_flag(coolSess);
         }
     }
+    teamBattleResponseLen = vm_net_mock_try_deliver_pending_team_follow_scene_enter(
+        out, outCap, "scene-poll");
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
     teamBattleResponseLen = vm_net_mock_try_deliver_pending_shop_return_scene_enter(
         out, outCap, "scene-poll");
     if (teamBattleResponseLen != 0)
@@ -8723,7 +8868,7 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
         enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
     /*
      * Trial (user 2026-08-03): send real catalog id as subtype-10 leftId
-     * (e.g. 204) instead of wire-safe #200.  Name/HP still from real enemyId.
+     * (e.g. 204) instead of wire-safe #250.  Name/HP still from real enemyId.
      * If Battle.cbm lacks a template for custom ids, expect portrait/crash —
      * revert to wire leftId with runtime evidence.
      */

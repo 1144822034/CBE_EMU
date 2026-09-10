@@ -940,6 +940,7 @@ void vm_mock_ladder_on_battle_end(bool victory)
     }
     prevBest = vm_mock_ladder_role_best_floor(role);
     (void)vm_mock_ladder_persist_best_floor(role, floor);
+    vm_mock_activities_on_ladder_victory(role);
     playerName = vm_mock_ladder_player_name_gbk(role);
     if (floor > prevBest && (floor % 10u) == 0 &&
         vm_mock_ladder_claim_daily_ten_lead(floor, role->roleId))
