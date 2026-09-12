@@ -36,6 +36,7 @@ import {
   type RoleRow,
   type ServerRow,
 } from "../net/protocol";
+import { encodeWireString } from "../net/gbk";
 import { BUNDLED_CLIENT_CODE_VERSION } from "../net/bundledCodeVersion";
 import {
   buildBattleEscapeRequest,
@@ -60,6 +61,7 @@ import {
   buildCrystalFragmentCombineRequest,
   buildDreamBadgeCombineRequest,
   buildStarSkyStoneWashResetRequest,
+  buildRenameCardRequest,
   parseEnhanceOpenResult,
   parseEnhancePreviewResult,
   parseEnhanceConfirmResult,
@@ -73,6 +75,7 @@ import {
   parseCrystalFragmentCombineResult,
   parseDreamBadgeCombineResult,
   parseStarSkyStoneWashResetResult,
+  parseRenameCardResult,
   buildSkillForgetRequest,
   parseSkillForgetResult,
   SKILL_FORGET_COST_COPPER,
@@ -86,6 +89,8 @@ import {
   isDreamBadge,
   isDreamBadgeEquipId,
   STAR_SKY_STONE_ITEM_ID,
+  RENAME_CARD_ITEM_ID,
+  isRenameCard,
   isEnhanceCrystal,
   type EnhanceOpenResult,
   type EnhancePreviewResult,
@@ -98,6 +103,7 @@ import {
   type EnhanceWashApplyResult,
   type CrystalCombineResult,
   type StarSkyStoneWashResetResult,
+  type RenameCardResult,
   type SkillForgetResult,
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
@@ -177,6 +183,7 @@ import {
   buildTeleportStoneListRequest,
   buildMapTeleportPrepareRequest,
   buildMapTeleportConfirmedExitRequest,
+  buildMapTeleportFreeExitRequest,
   TELEPORT_STONE_ITEM_ID,
   parseMapTeleportConfirm,
   npcServiceOpcode,
@@ -564,6 +571,18 @@ export type SessionCallbacks = {
   onHangup?: (msg: string) => void;
 };
 
+/**
+ * Pixi client hangup map-side gap after settle leave.
+ * Align with reward gate (`CBE_BATTLE_REWARD_MIN_INTERVAL_MS` default 8000)
+ * and hangup-loop-after-exit pacing so fights are evenly spaced — not paired.
+ */
+const HANGUP_ENCOUNTER_INTERVAL_MS = 8000;
+/**
+ * Soft-fail retry (no monster / tear-down-only). Keep short so a single miss
+ * does not become interval+retry ≈ 13s (see 2026-09-12 paired-battles doc).
+ */
+const HANGUP_ENCOUNTER_RETRY_MS = 1500;
+
 export class GameSession {
   transport: GameTransport | null = null;
   servers: ServerRow[] = [];
@@ -641,14 +660,24 @@ export class GameSession {
    * same source as map-corner「修」buff list.
    */
   private battleInsightExpireAtMs = 0;
+  /** True after at least one 7/31 / iteminfo parse this session. */
+  private battleInsightStatusKnown = false;
   /**
    * Player intent to keep hangup running across disconnect/relogin / between fights.
    */
   hangupDesired = false;
   /** Delay between client-driven hangup encounters (ms). */
   private hangupEncounterTimer: ReturnType<typeof setTimeout> | null = null;
-  /** performance.now() when the next hangup 4/1 is due (0 = none). */
+  /**
+   * Wall-clock (Date.now) when the next hangup 4/1 is due (0 = none).
+   * Prefer Date over performance.now — WebView may freeze the latter while
+   * FGS keepalive still advances wall time.
+   */
   private hangupEncounterDueAt = 0;
+  /** Earliest wall time for the next hangup fight (leave + interval). */
+  private hangupEncounterEarliestAt = 0;
+  /** Serialize hangup 4/1 so setTimeout + FGS keepalive cannot double-fire. */
+  private hangupEncounterInFlight = false;
   /**
    * main.ts wires battle auto / settle confirm here — native FGS keepalive
    * must drive them while Chromium starves setTimeout (document.hidden).
@@ -1497,6 +1526,41 @@ export class GameSession {
     exitId: number,
     targetScene: string,
   ): Promise<{ ok: boolean; cost: number; detail: string }> {
+    return this.requestMapTeleportInternal(
+      curTeleportId,
+      objTeleportId,
+      exitId,
+      targetScene,
+      false,
+    );
+  }
+
+  /**
+   * Scene n_telestone free in-region teleport: same 16/4 arm + 16/2+16/3
+   * deferred enter, but no item 800 consume.
+   */
+  async requestRegionFreeTeleport(
+    curTeleportId: number,
+    objTeleportId: number,
+    exitId: number,
+    targetScene: string,
+  ): Promise<{ ok: boolean; cost: number; detail: string }> {
+    return this.requestMapTeleportInternal(
+      curTeleportId,
+      objTeleportId,
+      exitId,
+      targetScene,
+      true,
+    );
+  }
+
+  private async requestMapTeleportInternal(
+    curTeleportId: number,
+    objTeleportId: number,
+    exitId: number,
+    targetScene: string,
+    free: boolean,
+  ): Promise<{ ok: boolean; cost: number; detail: string }> {
     if (!this.transport || this.inBattle) {
       return { ok: false, cost: 0, detail: "不可传送" };
     }
@@ -1508,26 +1572,29 @@ export class GameSession {
       return { ok: false, cost: 0, detail: "目标场景无效" };
     }
 
-    // Resolve stone BEFORE 16/4 — bag open after confirm can race server target.
-    let stone = this.bagItems.find(
-      (i) => i.itemId === TELEPORT_STONE_ITEM_ID && i.count >= 1 && i.seq > 0,
-    );
-    if (!stone) {
-      await this.openBag();
+    let stone: { itemId: number; count: number; seq: number } | undefined;
+    if (!free) {
+      // Resolve stone BEFORE 16/4 — bag open after confirm can race server target.
       stone = this.bagItems.find(
         (i) => i.itemId === TELEPORT_STONE_ITEM_ID && i.count >= 1 && i.seq > 0,
       );
-    }
-    if (!stone) {
-      return { ok: false, cost: 1, detail: "传送石不够" };
+      if (!stone) {
+        await this.openBag();
+        stone = this.bagItems.find(
+          (i) => i.itemId === TELEPORT_STONE_ITEM_ID && i.count >= 1 && i.seq > 0,
+        );
+      }
+      if (!stone) {
+        return { ok: false, cost: 1, detail: "传送石不够" };
+      }
     }
 
     this.stopPoll();
     this.transferIgnoredScene = null;
     this.sceneTransferExpected = expectedScene;
     this.setPhase(
-      "map-teleport",
-      `16/4 cur=${curTeleportId} obj=${objTeleportId} exit=${exitId} → ${expectedScene}`,
+      free ? "region-free-teleport" : "map-teleport",
+      `16/4 cur=${curTeleportId} obj=${objTeleportId} exit=${exitId} → ${expectedScene}${free ? " free" : ""}`,
     );
     this.beginExpectLanding(expectedScene);
 
@@ -1538,7 +1605,7 @@ export class GameSession {
         buildMapTeleportPrepareRequest(curTeleportId, objTeleportId),
       );
       this.handleBodies(prepBodies);
-      let cost = 1;
+      let cost = free ? 0 : 1;
       let sawConfirm = false;
       for (const body of prepBodies) {
         const packet = ingestPacket(body);
@@ -1546,7 +1613,7 @@ export class GameSession {
         const conf = parseMapTeleportConfirm(packet);
         if (conf) {
           sawConfirm = true;
-          cost = conf.value || 1;
+          if (!free) cost = conf.value || 1;
           if (conf.result !== 0) {
             return { ok: false, cost, detail: `确认失败 result=${conf.result}` };
           }
@@ -1561,8 +1628,10 @@ export class GameSession {
           detail: `16/4无确认 cur=${curTeleportId} obj=${objTeleportId}`,
         };
       }
-      if (stone.count < cost) {
-        return { ok: false, cost, detail: "传送石不够" };
+      if (!free) {
+        if (!stone || stone.count < cost) {
+          return { ok: false, cost, detail: "传送石不够" };
+        }
       }
 
       // Drop prior map NPCs only once exit is armed (avoid wiping on confirm fail).
@@ -1572,31 +1641,39 @@ export class GameSession {
 
       const comboBodies = await this.transport.exchange(
         0,
-        buildMapTeleportConfirmedExitRequest(exitId, cost, stone.seq, cost),
+        free
+          ? buildMapTeleportFreeExitRequest(exitId, 1)
+          : buildMapTeleportConfirmedExitRequest(exitId, cost, stone!.seq, cost),
       );
       this.handleBodies(comboBodies);
 
-      // Combo success = inventory ack (7/1 and/or 7/7). Empty WT or lone 16/2
-      // means confirmed-exit-combo missed and deferred 30/1 was not armed.
+      // Paid combo success = inventory ack (7/1 and/or 7/7). Free combo returns
+      // empty WT while arming deferred 30/1 — treat that as success.
       let comboKinds = "";
       let sawItemAck = false;
+      let sawAnyObject = false;
       for (const body of comboBodies) {
         if (!body || body.length < 5) continue;
         const packet = ingestPacket(body);
         if (!packet) continue;
         for (const o of packet.objects) {
+          sawAnyObject = true;
           comboKinds += `${comboKinds ? "," : ""}${o.kind}/${o.subtype}`;
           if (o.kind === 7 && (o.subtype === 1 || o.subtype === 7 || o.subtype === 11)) {
             sawItemAck = true;
           }
         }
       }
-      if (!sawItemAck) {
+      if (!free && !sawItemAck) {
         return {
           ok: false,
           cost,
           detail: `扣石组合包未生效(${comboKinds || `empty×${comboBodies.length}`})`,
         };
+      }
+      if (free && sawAnyObject && !comboKinds.includes("16/") && comboKinds !== "") {
+        // Unexpected non-empty payload on free path — still try landing.
+        console.warn("[session] region-free-teleport combo", comboKinds);
       }
 
       // Server refuses deferred enter on the same 100ms scheduler tick as the
@@ -1668,11 +1745,14 @@ export class GameSession {
         );
       }
 
-      this.setPhase("inworld", `map-teleport ${this.scene} @${this.x},${this.y}`);
+      this.setPhase(
+        "inworld",
+        `${free ? "region-free" : "map-teleport"} ${this.scene} @${this.x},${this.y}`,
+      );
       return { ok: true, cost, detail: "ok" };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      this.setPhase("map-teleport-error", msg);
+      this.setPhase(free ? "region-free-teleport-error" : "map-teleport-error", msg);
       this.landingWait = null;
       return { ok: false, cost: 0, detail: msg };
     } finally {
@@ -1687,6 +1767,12 @@ export class GameSession {
    * combat-spawn refresh). Do not call when only syncing live/suppressed lists.
    */
   adoptSceneCombatSpawns(monsters: NpcActor[]): void {
+    // Post-battle forceReload can briefly yield an empty combatSpawns list —
+    // never wipe a good seed catalog or hangup will no-monster until retry.
+    if (!monsters.length && this.sceneMonsterCatalog.length) {
+      this.sceneMonsters = [];
+      return;
+    }
     const copy = monsters.map((m) => ({ ...m }));
     this.sceneMonsterCatalog = copy;
     this.sceneMonsters = monsters.map((m) => ({ ...m }));
@@ -1737,13 +1823,22 @@ export class GameSession {
         /^e_/i.test(n.actorResource) ||
         (/^e_/i.test(n.name) && n.actorId < 100000),
     );
+    /** Pixi world-boss map overlay id — hangup must never pick this node.
+     * Do NOT use `>= 0x70000000`: outdoor SCE kind=3 also uses 0x70000000+i. */
+    const WORLD_BOSS_OVERLAY_ID = 0x70ffffff;
+    const isWorldBossOverlay = (n: NpcActor) =>
+      ((n.actorId >>> 0) === WORLD_BOSS_OVERLAY_ID) ||
+      /世界BOSS|世界Boss/i.test(n.name || "");
+    const hangupPool = (pool: NpcActor[]) =>
+      pool.filter((n) => !isWorldBossOverlay(n));
     if (!id) {
       // Live SCE first; if every spawn is post-battle-suppressed, reuse map
       // seeds (same species/home). Never invent hard-coded 9001 (formula Lv45).
+      // Hangup nearest: exclude world-boss overlay so AFK only farms trash.
       encounter =
-        pickNearest(this.sceneMonsters) ||
-        pickNearest(this.sceneMonsterCatalog) ||
-        pickNearest(catalogMonsters);
+        pickNearest(hangupPool(this.sceneMonsters)) ||
+        pickNearest(hangupPool(this.sceneMonsterCatalog)) ||
+        pickNearest(hangupPool(catalogMonsters));
       if (encounter) {
         id = encounter.battleActorId ?? encounter.actorId;
         index = id;
@@ -1852,12 +1947,28 @@ export class GameSession {
       buildBattleStartRequest(id, index, battleX, battleY),
     );
     this.handleBodies(bodies);
-    // Clear optimistic lock if no battle-start object arrived.
+    // Prefer parseBattleStart (same as handleBodies) over raw subtype — a
+    // tear-down-prefixed WT can confuse a naive 4/5 scan and falsely fail,
+    // which stacked hangup retry (8s+5s≈13s).
     const started = bodies.some((b) => {
       const p = ingestPacket(b);
-      return p?.objects.some(
-        (o) => o.kind === 4 && (o.subtype === 5 || o.subtype === 10),
-      );
+      if (!p) return false;
+      if (
+        p.objects.some(
+          (o) => o.kind === 4 && (o.subtype === 5 || o.subtype === 10),
+        )
+      ) {
+        return true;
+      }
+      return !!parseBattleStart(p, {
+        roleName: this.roleName,
+        partyMembers: this.teamMembers.map((m) => ({
+          id: m.id,
+          name: m.name,
+          jobIndex: m.jobIndex,
+          sex: m.sexGroup >= 1 ? (m.sexGroup - 1) & 1 : 0,
+        })),
+      });
     });
     if (!started) {
       this.inBattle = false;
@@ -2080,7 +2191,7 @@ export class GameSession {
   /** Persist / clear hangup intent (player wants AFK hangup across disconnect). */
   clearHangupDesired(): void {
     this.hangupDesired = false;
-    this.clearHangupEncounterTimer();
+    this.clearHangupEncounterState();
     clearHangupResumeStorage();
     void this.refreshNativeKeepAlive();
   }
@@ -2099,18 +2210,31 @@ export class GameSession {
     this.hangupEncounterDueAt = 0;
   }
 
+  private clearHangupEncounterState(): void {
+    this.clearHangupEncounterTimer();
+    this.hangupEncounterInFlight = false;
+    this.hangupEncounterEarliestAt = 0;
+  }
+
   /**
    * After leaving a hangup fight, wait then start the next collide-style 4/1.
    * Server does not deliver hangup battles for Pixi.
+   * Interval is map-side only (armed from onLeftBattleForHangup after settle).
    */
-  scheduleNextHangupEncounter(delayMs = 4000): void {
+  scheduleNextHangupEncounter(
+    delayMs = HANGUP_ENCOUNTER_INTERVAL_MS,
+  ): void {
     this.clearHangupEncounterTimer();
     if (!this.hangupDesired) return;
-    const delay = Math.max(500, delayMs | 0);
-    this.hangupEncounterDueAt = performance.now() + delay;
+    const now = Date.now();
+    const earliest = this.hangupEncounterEarliestAt;
+    const want = Math.max(500, delayMs | 0);
+    // Retries must not fire before the map-side interval from leave.
+    const delay =
+      earliest > now ? Math.max(want, earliest - now) : want;
+    this.hangupEncounterDueAt = now + delay;
     this.hangupEncounterTimer = setTimeout(() => {
       this.hangupEncounterTimer = null;
-      this.hangupEncounterDueAt = 0;
       void this.tickHangupEncounter("schedule");
     }, delay);
   }
@@ -2122,22 +2246,51 @@ export class GameSession {
       return;
     }
     this.hangupActive = true;
-    this.scheduleNextHangupEncounter(4000);
+    this.hangupEncounterEarliestAt =
+      Date.now() + HANGUP_ENCOUNTER_INTERVAL_MS;
+    this.scheduleNextHangupEncounter(HANGUP_ENCOUNTER_INTERVAL_MS);
   }
 
   private async tickHangupEncounter(reason: string): Promise<void> {
     if (!this.hangupDesired || this.inBattle || !this.transport) return;
+    if (this.hangupEncounterInFlight) return;
     if (isCitySceneKey(this.scene || this.loadedScene || "")) {
       this.hangupActive = false;
       this.clearHangupDesired();
       this.cb.onChat?.([{ type: 5, text: "[挂]城内不能挂机" }]);
       return;
     }
+    const now = Date.now();
+    if (
+      this.hangupEncounterEarliestAt > 0 &&
+      now < this.hangupEncounterEarliestAt
+    ) {
+      this.scheduleNextHangupEncounter(
+        this.hangupEncounterEarliestAt - now,
+      );
+      return;
+    }
+    this.hangupEncounterInFlight = true;
+    // Claim the slot before await so FGS keepalive cannot start a twin 4/1.
+    this.clearHangupEncounterTimer();
     this.hangupActive = true;
+    // Live SCE may still be in the 10s post-battle suppress window — hangup
+    // must keep using seed catalog (same species/home), not an empty live pool.
+    if (!this.sceneMonsters.length && this.sceneMonsterCatalog.length) {
+      this.sceneMonsters = this.sceneMonsterCatalog.map((m) => ({ ...m }));
+    }
     console.info("[session] hangup encounter", reason);
-    const ok = await this.startBattleNearPlayer(this.x | 0, this.y | 0);
-    if (!ok && this.hangupDesired) {
-      this.scheduleNextHangupEncounter(5000);
+    try {
+      const ok = await this.startBattleNearPlayer(this.x | 0, this.y | 0);
+      // Only retry when we did not enter battle — never arm a second timer
+      // while a twin race already owns inBattle.
+      if (!ok && this.hangupDesired && !this.inBattle) {
+        this.scheduleNextHangupEncounter(HANGUP_ENCOUNTER_RETRY_MS);
+      } else if (ok) {
+        this.hangupEncounterEarliestAt = 0;
+      }
+    } finally {
+      this.hangupEncounterInFlight = false;
     }
   }
 
@@ -2205,6 +2358,8 @@ export class GameSession {
     this.hangupActive = true;
     this.setPhase("hangup", "client collide-loop");
     this.cb.onChat?.([{ type: 5, text: "[挂]已开始挂机" }]);
+    /* Warm 战斗心得 remain so hangup settle can show 有效时间 without「修」. */
+    void this.requestBuffStatus();
     if (this.inBattle) return;
     await this.tickHangupEncounter("start");
   }
@@ -3419,12 +3574,17 @@ export class GameSession {
     };
     const pending = this.pendingEncounterVisual;
     // Collide/tap/F set this for the current 4/1; hangup leaves it null.
-    // Prefer it unconditionally so wire→catalog remap cannot pick another SCE kind.
+    // Prefer it when it matches the battle enemy id. If server remapped
+    // (world boss etc.), use catalog actor for the remapped id instead of
+    // the outdoor trash sprite that armed the collide.
     if (pending?.actorResource) {
-      return {
-        actorResource: pending.actorResource,
-        name: pending.name || name,
-      };
+      const pendingId = (pending.battleActorId ?? 0) >>> 0;
+      if (!id || !pendingId || pendingId === id) {
+        return {
+          actorResource: pending.actorResource,
+          name: pending.name || name,
+        };
+      }
     }
     const matchPos = (n: NpcActor) =>
       opts?.x != null &&
@@ -3888,12 +4048,21 @@ export class GameSession {
           ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
         };
       } else {
-        const { enhanceAttrs: _drop, ...rest } = next;
-        next = { ...rest, enhance: 0 };
+        // +0: wire is authority (defaults or first-obtain seed). Pending only
+        // fills when wire omitted attrs (unequip race). Never preferEnhanceAttrs
+        // here — that would resurrect pre-recast wash onto enhance=0 wire.
+        const attrs = next.enhanceAttrs?.length
+          ? next.enhanceAttrs
+          : pendingAttrs;
+        next = {
+          ...next,
+          enhance: 0,
+          ...(attrs.length ? { enhanceAttrs: attrs } : {}),
+        };
       }
     } else if (prev?.kind === "equip" && wireEnhance > 0) {
       // Preserve wash attrs across reopen when wire truncates extras but
-      // level still matches an enhanced equip. Recast (enhance=0) drops them.
+      // level still matches an enhanced equip. Recast (enhance=0) skips this.
       const attrs = preferEnhanceAttrs(next.enhanceAttrs, prev.enhanceAttrs);
       if (attrs && attrs.length) {
         next = {
@@ -3905,8 +4074,9 @@ export class GameSession {
         next = { ...next, enhance: wireEnhance };
       }
     } else if (wireEnhance === 0 && next.kind === "equip") {
-      const { enhanceAttrs: _drop, ...rest } = next;
-      next = { ...rest, enhance: 0 };
+      // Keep wire milestone rows at +0 (gray defaults / first-obtain seed).
+      // Stripping them forced local yellow fallback until 强化+1 revealed seed.
+      next = { ...next, enhance: 0 };
     }
     return next;
   }
@@ -4016,11 +4186,23 @@ export class GameSession {
     if (!this.transport) return "未连接服务器";
     const bodies = await this.transport.exchange(0, buildExpCardStatusRequest());
     this.handleBodies(bodies);
+    this.battleInsightStatusKnown = true;
     const info = parseExpCardStatusInfo(bodies);
     if (!info.trim()) {
       this.battleInsightExpireAtMs = 0;
     }
     return info || "当前没有生效的增益物品";
+  }
+
+  /**
+   * Hangup settle: ensure 有效时间 is known without requiring map「修」tap.
+   * Uses wall-clock cache after the first 7/31 fetch.
+   */
+  async ensureBattleInsightRemainSec(): Promise<number> {
+    if (!this.battleInsightStatusKnown) {
+      await this.requestBuffStatus();
+    }
+    return this.getBattleInsightRemainingSec();
   }
 
   /** Remaining seconds for 战斗心得 — matches「修」status tip. */
@@ -4035,6 +4217,7 @@ export class GameSession {
   private noteBattleInsightFromStatus(info: string): void {
     const sec = parseBattleInsightRemainSecFromStatus(info);
     if (sec === null) return;
+    this.battleInsightStatusKnown = true;
     if (sec <= 0) {
       this.battleInsightExpireAtMs = 0;
       return;
@@ -5377,6 +5560,63 @@ export class GameSession {
     return fail("重置无响应");
   }
 
+  /**
+   * PixiJS-only: 角色改名卡(852) 修改当前角色名。
+   * Server 29/15 is authoritative; consumes 1 card on success.
+   */
+  async renameCharacter(
+    cardSeq: number,
+    name: string,
+  ): Promise<RenameCardResult> {
+    const fail = (message: string, result = 0): RenameCardResult => ({
+      result,
+      ok: false,
+      message,
+      cardSeq,
+      remaining: 0,
+      name: "",
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(cardSeq > 0)) return fail("参数无效");
+    const trimmed = name.trim();
+    if (!trimmed) return fail("请输入角色名", 3);
+    if (trimmed.length > 14) return fail("角色名过长", 4);
+    if (encodeWireString(trimmed).length >= 32) return fail("角色名过长", 4);
+    if (trimmed === this.roleName) return fail("与当前名称相同", 5);
+    if (this.roles.some((r) => r.roleId !== this.selectedRoleId && r.name === trimmed)) {
+      return fail("名已被注册", 6);
+    }
+    const card = this.bagItems.find(
+      (it) => it.seq === cardSeq && it.itemId === RENAME_CARD_ITEM_ID,
+    );
+    if (!card || (card.count | 0) < 1) return fail("改名卡不足", 2);
+    const bodies = await this.transport.exchange(
+      0,
+      buildRenameCardRequest(cardSeq, trimmed),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseRenameCardResult(packet);
+        if (parsed) {
+          if (parsed.ok && parsed.name) {
+            this.roleName = parsed.name;
+            this.roles = this.roles.map((r) =>
+              r.roleId === this.selectedRoleId ? { ...r, name: parsed.name } : r,
+            );
+            this.cb.onRoles(this.roles);
+          }
+          return parsed;
+        }
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("改名无响应");
+  }
+
   async teamInvite(actorId: number): Promise<void> {
     if (!this.transport) return;
     /* Cap matches VM_MOCK_SERVICE_TEAM_MEMBER_MAX (1 leader + 2 members). */
@@ -6041,6 +6281,7 @@ export class GameSession {
    */
   private async driveBackgroundHangup(): Promise<void> {
     if (!this.hangupDesired || this.inBattle || !this.transport) return;
+    if (this.hangupEncounterInFlight) return;
     if (
       typeof document !== "undefined" &&
       document.visibilityState === "visible"
@@ -6048,8 +6289,7 @@ export class GameSession {
       return;
     }
     const dueAt = this.hangupEncounterDueAt;
-    if (dueAt <= 0 || performance.now() < dueAt) return;
-    this.clearHangupEncounterTimer();
+    if (dueAt <= 0 || Date.now() < dueAt) return;
     await this.tickHangupEncounter("native-keepalive");
   }
 

@@ -124,6 +124,15 @@ if (postjectCli) {
 }
 
 console.log(`[gateway:exe] done → ${exePath}`);
+try {
+  copyFileSync(join(root, "gateway.conf"), join(outDir, "gateway.conf"));
+  console.log("[gateway:exe] copied gateway.conf next to exe");
+} catch (e) {
+  console.warn("[gateway:exe] could not copy gateway.conf", e?.message || e);
+}
 console.log(
   "[gateway:exe] run: gateway-release\\ws-gateway.exe  [wsPort] [tcpHost] [tcpPort] [listenHost]",
+);
+console.log(
+  "[gateway:exe] edit gateway-release\\gateway.conf for ports / admin (or PIX_* env)",
 );

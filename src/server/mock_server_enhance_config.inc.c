@@ -14,6 +14,8 @@ typedef struct
     u8 attrType;
     u8 flag;
     u8 enabled;
+    /* Default milestone value by equip.dsh 品质 0..4 (white..max). */
+    u16 valueQ[5];
 } vm_net_mock_enhance_milestone_cfg;
 
 typedef struct
@@ -37,6 +39,17 @@ static vm_net_mock_enhance_attr_pool_cfg
 static u32 g_vm_net_mock_enhance_attr_pool_count = 0;
 static bool g_vm_net_mock_enhance_attr_pool_db_loaded = false;
 static bool g_vm_net_mock_enhance_attr_pool_db_valid = false;
+
+/* Wash runtime knobs (MySQL server_enhance_wash_settings). */
+typedef struct
+{
+    u8 qualityScaleEnabled; /* valueMax × (Q+1)/5 when 1 */
+    u8 firstSeedPercent;    /* first-obtain pool roll chance 0..100 */
+} vm_net_mock_enhance_wash_settings;
+
+static vm_net_mock_enhance_wash_settings g_vm_net_mock_enhance_wash_settings = {
+    1, 20};
+static bool g_vm_net_mock_enhance_wash_settings_loaded = false;
 
 /* Built-in defaults matching legacy static slot tables. */
 static const vm_net_mock_enhance_milestone_cfg
@@ -100,16 +113,48 @@ static const vm_net_mock_enhance_attr_pool_cfg
         {VM_NET_MOCK_EQUIP_ATTR_MP, 1, 5, 25, 1, 1},
 };
 
+
+/* Expand legacy quality formulas into value_q0..q4 for one milestone row. */
+static void vm_net_mock_enhance_milestone_fill_legacy_values(
+    u8 equipSlot, u8 unlockLevel, u8 attrType, u8 flag, u16 valueQ[5])
+{
+    u8 q;
+
+    if (valueQ == NULL)
+        return;
+    for (q = 0; q < 5; ++q)
+    {
+        vm_net_mock_equipment_catalog_item fake;
+
+        memset(&fake, 0, sizeof(fake));
+        fake.slot = equipSlot;
+        fake.quality = q;
+        fake.category = 7; /* sword; value path only uses slot/quality/type */
+        valueQ[q] = vm_net_mock_equip_enhance_milestone_value(
+            &fake, unlockLevel, attrType, flag);
+    }
+}
+
 static void vm_net_mock_enhance_config_fill_builtin_milestones(void)
 {
     u32 n = (u32)(sizeof(g_vm_net_mock_enhance_milestone_builtin) /
                   sizeof(g_vm_net_mock_enhance_milestone_builtin[0]));
+    u32 i;
+
     if (n > VM_NET_MOCK_ENHANCE_MILESTONE_CFG_MAX)
         n = VM_NET_MOCK_ENHANCE_MILESTONE_CFG_MAX;
     memcpy(g_vm_net_mock_enhance_milestones,
            g_vm_net_mock_enhance_milestone_builtin,
            n * sizeof(g_vm_net_mock_enhance_milestones[0]));
     g_vm_net_mock_enhance_milestone_count = n;
+    for (i = 0; i < n; ++i)
+    {
+        vm_net_mock_enhance_milestone_cfg *row =
+            &g_vm_net_mock_enhance_milestones[i];
+        vm_net_mock_enhance_milestone_fill_legacy_values(
+            row->equipSlot, row->unlockLevel, row->attrType, row->flag,
+            row->valueQ);
+    }
 }
 
 static void vm_net_mock_enhance_config_fill_builtin_pool(void)
@@ -131,6 +176,9 @@ static bool vm_net_mock_enhance_milestone_db_row(void *context_value,
 {
     u32 *loaded = (u32 *)context_value;
     u32 slot = 0, unlock = 0, type = 0, flag = 0, enabled = 1;
+    u32 qv[5] = {0, 0, 0, 0, 0};
+    u8 qi;
+    bool hasValues = false;
     vm_net_mock_enhance_milestone_cfg *dst;
 
     (void)lengths;
@@ -146,6 +194,20 @@ static bool vm_net_mock_enhance_milestone_db_row(void *context_value,
     {
         return true;
     }
+    if (column_count >= 10)
+    {
+        hasValues = true;
+        for (qi = 0; qi < 5; ++qi)
+        {
+            if (!vm_mock_mysql_parse_u32(values[5 + qi], lengths[5 + qi],
+                                         &qv[qi]) ||
+                qv[qi] > 65535u)
+            {
+                hasValues = false;
+                break;
+            }
+        }
+    }
     if (g_vm_net_mock_enhance_milestone_count >=
         VM_NET_MOCK_ENHANCE_MILESTONE_CFG_MAX)
         return true;
@@ -156,6 +218,18 @@ static bool vm_net_mock_enhance_milestone_db_row(void *context_value,
     dst->attrType = (u8)type;
     dst->flag = (u8)flag;
     dst->enabled = enabled != 0 ? 1 : 0;
+    if (hasValues &&
+        !(qv[0] == 0 && qv[1] == 0 && qv[2] == 0 && qv[3] == 0 && qv[4] == 0))
+    {
+        for (qi = 0; qi < 5; ++qi)
+            dst->valueQ[qi] = (u16)qv[qi];
+    }
+    else
+    {
+        vm_net_mock_enhance_milestone_fill_legacy_values(
+            dst->equipSlot, dst->unlockLevel, dst->attrType, dst->flag,
+            dst->valueQ);
+    }
     if (loaded != NULL)
         ++(*loaded);
     return true;
@@ -201,7 +275,8 @@ static bool vm_net_mock_enhance_attr_pool_db_row(void *context_value,
 static bool vm_net_mock_enhance_config_seed_milestones_if_empty(void)
 {
     u32 i;
-    char query[384];
+    char query[512];
+    u16 valueQ[5];
 
     for (i = 0; i < (u32)(sizeof(g_vm_net_mock_enhance_milestone_builtin) /
                           sizeof(g_vm_net_mock_enhance_milestone_builtin[0]));
@@ -209,12 +284,27 @@ static bool vm_net_mock_enhance_config_seed_milestones_if_empty(void)
     {
         const vm_net_mock_enhance_milestone_cfg *row =
             &g_vm_net_mock_enhance_milestone_builtin[i];
+        vm_net_mock_enhance_milestone_fill_legacy_values(
+            row->equipSlot, row->unlockLevel, row->attrType, row->flag, valueQ);
         snprintf(query, sizeof(query),
                  "INSERT IGNORE INTO server_enhance_milestones"
-                 "(equip_slot,unlock_level,attr_type,flag,enabled) "
-                 "VALUES(%u,%u,%u,%u,%u)",
+                 "(equip_slot,unlock_level,attr_type,flag,enabled,"
+                 "value_q0,value_q1,value_q2,value_q3,value_q4) "
+                 "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,%u)",
                  row->equipSlot, row->unlockLevel, row->attrType, row->flag,
-                 row->enabled);
+                 row->enabled, valueQ[0], valueQ[1], valueQ[2], valueQ[3],
+                 valueQ[4]);
+        if (!vm_mysql_exec(query))
+            return false;
+        /* Existing installs: backfill zeroed value columns once. */
+        snprintf(query, sizeof(query),
+                 "UPDATE server_enhance_milestones SET "
+                 "value_q0=%u,value_q1=%u,value_q2=%u,value_q3=%u,value_q4=%u "
+                 "WHERE equip_slot=%u AND unlock_level=%u AND "
+                 "value_q0=0 AND value_q1=0 AND value_q2=0 AND "
+                 "value_q3=0 AND value_q4=0",
+                 valueQ[0], valueQ[1], valueQ[2], valueQ[3], valueQ[4],
+                 row->equipSlot, row->unlockLevel);
         if (!vm_mysql_exec(query))
             return false;
     }
@@ -244,6 +334,205 @@ static bool vm_net_mock_enhance_config_seed_pool_if_empty(void)
     return true;
 }
 
+
+static bool vm_net_mock_enhance_milestone_column_count_row(
+    void *context_value, unsigned int column_count, const char *const *values,
+    const size_t *lengths)
+{
+    u32 *count = (u32 *)context_value;
+    u32 parsed = 0;
+
+    (void)column_count;
+    if (count == NULL || values == NULL || values[0] == NULL)
+        return true;
+    if (vm_mock_mysql_parse_u32(values[0], lengths ? lengths[0] : 0, &parsed))
+        *count = parsed;
+    return true;
+}
+
+static bool vm_net_mock_enhance_milestone_ensure_value_columns(void)
+{
+    static const char *kCols[5] = {
+        "value_q0", "value_q1", "value_q2", "value_q3", "value_q4"
+    };
+    u8 i;
+
+    for (i = 0; i < 5; ++i)
+    {
+        u32 count = 0;
+        char probe[320];
+        char alterSql[256];
+
+        snprintf(probe, sizeof(probe),
+                 "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                 "WHERE TABLE_SCHEMA=DATABASE() AND "
+                 "TABLE_NAME='server_enhance_milestones' AND COLUMN_NAME='%s'",
+                 kCols[i]);
+        if (!vm_mysql_query(probe, vm_net_mock_enhance_milestone_column_count_row,
+                            &count))
+        {
+            printf("[error][mock-admin] enhance milestone column probe %s "
+                   "error=%s\n",
+                   kCols[i], vm_mysql_last_error());
+            return false;
+        }
+        if (count != 0)
+            continue;
+        snprintf(alterSql, sizeof(alterSql),
+                 "ALTER TABLE server_enhance_milestones ADD COLUMN %s "
+                 "INT UNSIGNED NOT NULL DEFAULT 0 AFTER %s",
+                 kCols[i], i == 0 ? "enabled" : kCols[i - 1]);
+        if (!vm_mysql_exec(alterSql))
+        {
+            printf("[error][mock-admin] enhance milestone add column %s "
+                   "error=%s\n",
+                   kCols[i], vm_mysql_last_error());
+            return false;
+        }
+        printf("[info][mock-admin] enhance milestone added column %s\n",
+               kCols[i]);
+    }
+    return true;
+}
+
+static bool vm_net_mock_enhance_wash_settings_row(void *contextValue,
+                                                  unsigned int columnCount,
+                                                  const char *const *values,
+                                                  const size_t *lengths)
+{
+    vm_net_mock_enhance_wash_settings *cfg =
+        (vm_net_mock_enhance_wash_settings *)contextValue;
+    u32 scale = 1;
+    u32 percent = 20;
+
+    (void)columnCount;
+    if (cfg == NULL || values == NULL || lengths == NULL || values[0] == NULL)
+        return false;
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &scale))
+        return false;
+    if (columnCount >= 2 && values[1] != NULL)
+    {
+        if (!vm_mock_mysql_parse_u32(values[1], lengths[1], &percent))
+            return false;
+    }
+    cfg->qualityScaleEnabled = scale ? 1u : 0u;
+    if (percent > 100u)
+        percent = 100u;
+    cfg->firstSeedPercent = (u8)percent;
+    return true;
+}
+
+static bool vm_net_mock_enhance_wash_settings_ensure_first_seed_column(void)
+{
+    u32 count = 0;
+
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND "
+            "TABLE_NAME='server_enhance_wash_settings' AND "
+            "COLUMN_NAME='first_seed_percent'",
+            vm_net_mock_enhance_milestone_column_count_row, &count))
+        return false;
+    if (count != 0)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
+            "first_seed_percent TINYINT UNSIGNED NOT NULL DEFAULT 20 "
+            "AFTER quality_scale_enabled"))
+    {
+        printf("[error][mock-admin] enhance wash first_seed_percent add "
+               "error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    printf("[info][mock-admin] enhance wash added column first_seed_percent\n");
+    return true;
+}
+
+static bool vm_net_mock_enhance_wash_settings_ensure_table(void)
+{
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_enhance_wash_settings ("
+            "id TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "quality_scale_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "first_seed_percent TINYINT UNSIGNED NOT NULL DEFAULT 20,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(id)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
+        return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_first_seed_column())
+        return false;
+    if (!vm_mysql_exec(
+            "INSERT IGNORE INTO server_enhance_wash_settings "
+            "(id,quality_scale_enabled,first_seed_percent) VALUES (1,1,20)"))
+        return false;
+    return true;
+}
+
+static void vm_net_mock_enhance_wash_settings_set_defaults(
+    vm_net_mock_enhance_wash_settings *cfg)
+{
+    if (cfg == NULL)
+        return;
+    cfg->qualityScaleEnabled = 1;
+    cfg->firstSeedPercent = 20;
+}
+
+static void vm_net_mock_enhance_wash_settings_load(bool force)
+{
+    if (g_vm_net_mock_enhance_wash_settings_loaded && !force)
+        return;
+    vm_net_mock_enhance_wash_settings_set_defaults(
+        &g_vm_net_mock_enhance_wash_settings);
+    if (!vm_net_mock_enhance_wash_settings_ensure_table())
+    {
+        g_vm_net_mock_enhance_wash_settings_loaded = true;
+        return;
+    }
+    (void)vm_mysql_query(
+        "SELECT quality_scale_enabled,first_seed_percent "
+        "FROM server_enhance_wash_settings WHERE id=1 LIMIT 1",
+        vm_net_mock_enhance_wash_settings_row,
+        &g_vm_net_mock_enhance_wash_settings);
+    g_vm_net_mock_enhance_wash_settings_loaded = true;
+}
+
+static u8 vm_net_mock_enhance_wash_quality_scale_enabled(void)
+{
+    vm_net_mock_enhance_wash_settings_load(false);
+    return g_vm_net_mock_enhance_wash_settings.qualityScaleEnabled;
+}
+
+static u8 vm_net_mock_enhance_wash_first_seed_percent(void)
+{
+    vm_net_mock_enhance_wash_settings_load(false);
+    return g_vm_net_mock_enhance_wash_settings.firstSeedPercent;
+}
+
+static bool vm_net_mock_enhance_wash_settings_admin_save(u8 qualityScaleEnabled,
+                                                         u8 firstSeedPercent)
+{
+    char query[320];
+
+    if (firstSeedPercent > 100u)
+        return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_table())
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_enhance_wash_settings "
+             "(id,quality_scale_enabled,first_seed_percent) VALUES (1,%u,%u) "
+             "ON DUPLICATE KEY UPDATE "
+             "quality_scale_enabled=VALUES(quality_scale_enabled),"
+             "first_seed_percent=VALUES(first_seed_percent)",
+             qualityScaleEnabled ? 1u : 0u, (u32)firstSeedPercent);
+    if (!vm_mysql_exec(query))
+        return false;
+    g_vm_net_mock_enhance_wash_settings_loaded = false;
+    vm_net_mock_enhance_wash_settings_load(true);
+    return true;
+}
+
 static bool vm_net_mock_enhance_config_db_load(void)
 {
     u32 milestoneLoaded = 0;
@@ -252,6 +541,7 @@ static bool vm_net_mock_enhance_config_db_load(void)
     if (g_vm_net_mock_enhance_milestone_db_loaded &&
         g_vm_net_mock_enhance_attr_pool_db_loaded)
     {
+        vm_net_mock_enhance_wash_settings_load(false);
         return g_vm_net_mock_enhance_milestone_db_valid &&
                g_vm_net_mock_enhance_attr_pool_db_valid;
     }
@@ -270,10 +560,16 @@ static bool vm_net_mock_enhance_config_db_load(void)
             "attr_type TINYINT UNSIGNED NOT NULL,"
             "flag TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "value_q0 INT UNSIGNED NOT NULL DEFAULT 0,"
+            "value_q1 INT UNSIGNED NOT NULL DEFAULT 0,"
+            "value_q2 INT UNSIGNED NOT NULL DEFAULT 0,"
+            "value_q3 INT UNSIGNED NOT NULL DEFAULT 0,"
+            "value_q4 INT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(equip_slot,unlock_level)"
             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4") ||
+        !vm_net_mock_enhance_milestone_ensure_value_columns() ||
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_enhance_attr_pool ("
             "attr_type TINYINT UNSIGNED NOT NULL,"
@@ -291,14 +587,17 @@ static bool vm_net_mock_enhance_config_db_load(void)
                vm_mysql_last_error());
         vm_net_mock_enhance_config_fill_builtin_milestones();
         vm_net_mock_enhance_config_fill_builtin_pool();
+        vm_net_mock_enhance_wash_settings_load(true);
         return false;
     }
 
     (void)vm_net_mock_enhance_config_seed_milestones_if_empty();
     (void)vm_net_mock_enhance_config_seed_pool_if_empty();
+    vm_net_mock_enhance_wash_settings_load(true);
 
     if (!vm_mysql_query(
-            "SELECT equip_slot,unlock_level,attr_type,flag,enabled "
+            "SELECT equip_slot,unlock_level,attr_type,flag,enabled,"
+            "value_q0,value_q1,value_q2,value_q3,value_q4 "
             "FROM server_enhance_milestones ORDER BY equip_slot,unlock_level",
             vm_net_mock_enhance_milestone_db_row, &milestoneLoaded) ||
         !vm_mysql_query(
@@ -320,9 +619,12 @@ static bool vm_net_mock_enhance_config_db_load(void)
 
     g_vm_net_mock_enhance_milestone_db_valid = true;
     g_vm_net_mock_enhance_attr_pool_db_valid = true;
-    printf("[info][mock-admin] enhance_config_db_load milestones=%u pool=%u\n",
+    printf("[info][mock-admin] enhance_config_db_load milestones=%u pool=%u "
+           "quality_scale=%u first_seed=%u%%\n",
            g_vm_net_mock_enhance_milestone_count,
-           g_vm_net_mock_enhance_attr_pool_count);
+           g_vm_net_mock_enhance_attr_pool_count,
+           (u32)g_vm_net_mock_enhance_wash_settings.qualityScaleEnabled,
+           (u32)g_vm_net_mock_enhance_wash_settings.firstSeedPercent);
     return true;
 }
 
@@ -330,11 +632,13 @@ static bool vm_net_mock_enhance_config_admin_reload(void)
 {
     g_vm_net_mock_enhance_milestone_db_loaded = false;
     g_vm_net_mock_enhance_attr_pool_db_loaded = false;
+    g_vm_net_mock_enhance_wash_settings_loaded = false;
     return vm_net_mock_enhance_config_db_load();
 }
 
 static bool vm_net_mock_enhance_milestone_lookup(u8 equipSlot, u8 unlockLevel,
-                                                u8 *typeOut, u8 *flagOut)
+                                                u8 *typeOut, u8 *flagOut,
+                                                u16 valueQOut[5])
 {
     u32 i;
 
@@ -350,10 +654,28 @@ static bool vm_net_mock_enhance_milestone_lookup(u8 equipSlot, u8 unlockLevel,
                 *typeOut = row->attrType;
             if (flagOut)
                 *flagOut = row->flag;
+            if (valueQOut != NULL)
+            {
+                u8 qi;
+                for (qi = 0; qi < 5; ++qi)
+                    valueQOut[qi] = row->valueQ[qi];
+            }
             return true;
         }
     }
     return false;
+}
+
+static u16 vm_net_mock_enhance_milestone_value_for_quality(const u16 valueQ[5],
+                                                           u8 quality)
+{
+    u8 tier = quality;
+
+    if (valueQ == NULL)
+        return 1;
+    if (tier > 4)
+        tier = 4;
+    return valueQ[tier];
 }
 
 static u32 vm_net_mock_enhance_attr_pool_admin_count(void)
@@ -386,27 +708,59 @@ vm_net_mock_enhance_milestone_admin_row_at(u32 index)
     return &g_vm_net_mock_enhance_milestones[index];
 }
 
-static bool vm_net_mock_enhance_milestone_admin_upsert(u8 equipSlot,
-                                                       u8 unlockLevel,
-                                                       u8 attrType, u8 flag,
-                                                       u8 enabled)
+static bool vm_net_mock_enhance_milestone_admin_upsert_row(
+    u8 equipSlot, u8 unlockLevel, u8 attrType, u8 flag, u8 enabled,
+    const u16 valueQ[5])
 {
-    char query[384];
+    char query[640];
 
     if (equipSlot > 7 ||
         (unlockLevel != 4 && unlockLevel != 8 && unlockLevel != 12 &&
          unlockLevel != 16) ||
-        attrType < 1 || attrType > 10 || flag > 1)
+        attrType < 1 || attrType > 10 || flag > 1 || valueQ == NULL)
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_enhance_milestones"
-             "(equip_slot,unlock_level,attr_type,flag,enabled) "
-             "VALUES(%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "(equip_slot,unlock_level,attr_type,flag,enabled,"
+             "value_q0,value_q1,value_q2,value_q3,value_q4) "
+             "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
              "attr_type=VALUES(attr_type),flag=VALUES(flag),"
-             "enabled=VALUES(enabled)",
-             equipSlot, unlockLevel, attrType, flag, enabled ? 1u : 0u);
-    if (!vm_mysql_exec(query))
+             "enabled=VALUES(enabled),"
+             "value_q0=VALUES(value_q0),value_q1=VALUES(value_q1),"
+             "value_q2=VALUES(value_q2),value_q3=VALUES(value_q3),"
+             "value_q4=VALUES(value_q4)",
+             equipSlot, unlockLevel, attrType, flag, enabled ? 1u : 0u,
+             valueQ[0], valueQ[1], valueQ[2], valueQ[3], valueQ[4]);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_net_mock_enhance_milestone_admin_upsert(u8 equipSlot,
+                                                       u8 unlockLevel,
+                                                       u8 attrType, u8 flag,
+                                                       u8 enabled,
+                                                       const u16 valueQ[5])
+{
+    if (!vm_net_mock_enhance_milestone_admin_upsert_row(
+            equipSlot, unlockLevel, attrType, flag, enabled, valueQ))
         return false;
+    return vm_net_mock_enhance_config_admin_reload();
+}
+
+static bool vm_net_mock_enhance_milestone_admin_save_all(
+    const vm_net_mock_enhance_milestone_cfg *rows, u32 rowCount)
+{
+    u32 i;
+
+    if (rows == NULL || rowCount == 0)
+        return false;
+    for (i = 0; i < rowCount; ++i)
+    {
+        const vm_net_mock_enhance_milestone_cfg *row = &rows[i];
+        if (!vm_net_mock_enhance_milestone_admin_upsert_row(
+                row->equipSlot, row->unlockLevel, row->attrType, row->flag,
+                row->enabled, row->valueQ))
+            return false;
+    }
     return vm_net_mock_enhance_config_admin_reload();
 }
 
@@ -496,12 +850,15 @@ static u32 vm_net_mock_enhance_wash_rand_below(u32 bound)
 /*
  * Pool valueMax scaled by equip.dsh 品质 (5 tiers 0..4):
  *   Q0 → 1/5, Q1 → 2/5, Q2 → 3/5, Q3 → 4/5, Q4+ → 5/5.
+ * Admin switch quality_scale_enabled=0 → always use full valueMax.
  * valueMin is unchanged; if min > scaled max, roll collapses to scaled max.
  */
 static u32 vm_net_mock_enhance_wash_pool_scaled_max(u32 valueMax, u8 quality)
 {
     u8 q = quality;
 
+    if (!vm_net_mock_enhance_wash_quality_scale_enabled())
+        return valueMax;
     if (q > 4)
         q = 4;
     return (valueMax * ((u32)q + 1u)) / 5u;
@@ -567,8 +924,9 @@ static bool vm_net_mock_enhance_wash_roll_attr(u8 quality, u8 *typeOut,
 
 /*
  * First obtain of an equipment instance:
- *   20% — roll +4/+8/+12/+16 from the wash attr pool (washed=1, washCount=0)
- *   80% — keep empty wash → resolve uses config default + quality formula
+ *   first_seed_percent% — roll +4/+8/+12/+16 from wash attr pool
+ *                         (washed=1, washCount=0)
+ *   otherwise — keep empty wash → resolve uses config default + quality formula
  * Call only when no inherited wash pointer is supplied (trade/equip/warehouse/
  * auction must pass existing wash and must not re-roll).
  */
@@ -578,6 +936,7 @@ static bool vm_net_mock_enhance_wash_seed_initial(
     u8 i;
     u8 rolled = 0;
     u8 quality = 0;
+    u8 seedPercent = 0;
     const vm_net_mock_equipment_catalog_item *equip =
         vm_net_mock_find_equipment_catalog_item(itemId);
 
@@ -585,13 +944,16 @@ static bool vm_net_mock_enhance_wash_seed_initial(
         return false;
     if (equip != NULL)
         quality = equip->quality;
+    seedPercent = vm_net_mock_enhance_wash_first_seed_percent();
     vm_net_mock_enhance_wash_clear(wash);
     vm_net_mock_enhance_wash_rand_mix(
         itemId ^ (instanceId * 0x85ebca6bu) ^ ((u32)seq << 16) ^
         ((u32)time(NULL)) ^ (g_schedulerTick * 1664525u) ^
         ((u32)quality << 24));
-    /* 0..19 → seed (20%); 20..99 → default config (80%). */
-    if (vm_net_mock_enhance_wash_rand_below(100u) >= 20u)
+    /* 0 → never seed; 100 → always; else roll < percent. */
+    if (seedPercent == 0 ||
+        (seedPercent < 100u &&
+         vm_net_mock_enhance_wash_rand_below(100u) >= seedPercent))
         return false;
     for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
     {
@@ -608,9 +970,15 @@ static bool vm_net_mock_enhance_wash_seed_initial(
         wash->slots[i].flag = flag;
         wash->slots[i].value = value;
         wash->slots[i].washCount = 0;
-        rolled++;
+        ++rolled;
     }
-    return rolled > 0;
+    if (rolled == 0)
+        return false;
+    printf("[info][mock-service] enhance_wash_seed_initial item=%u inst=%u "
+           "seq=%u quality=%u rolled=%u seed_percent=%u\n",
+           itemId, instanceId, (u32)seq, (u32)quality, (u32)rolled,
+           (u32)seedPercent);
+    return true;
 }
 
 static u32 vm_net_mock_enhance_wash_next_gold(u16 washCount)
@@ -656,20 +1024,37 @@ static bool vm_net_mock_equip_enhance_resolve_milestone(
         return true;
     }
 
-    if (!vm_net_mock_enhance_milestone_lookup(item->slot, unlock, &type, &flag))
     {
-        /* Fallback: legacy static tables. */
-        const vm_net_mock_equip_enhance_attr_def *defs = NULL;
-        u8 knownCount = 0;
-        defs = vm_net_mock_equip_enhance_attrs_for_slot(item->slot, &knownCount);
-        if (defs == NULL || slotIndex >= knownCount)
-            return false;
-        type = defs[slotIndex].type;
-        flag = defs[slotIndex].flag;
-    }
+        u16 valueQ[5];
+        bool fromCfg = false;
 
-    type = vm_net_mock_equip_enhance_milestone_type(item, slotIndex, type);
-    value = vm_net_mock_equip_enhance_milestone_value(item, unlock, type, flag);
+        memset(valueQ, 0, sizeof(valueQ));
+        fromCfg = vm_net_mock_enhance_milestone_lookup(item->slot, unlock, &type,
+                                                       &flag, valueQ);
+        if (!fromCfg)
+        {
+            /* Fallback: legacy static tables. */
+            const vm_net_mock_equip_enhance_attr_def *defs = NULL;
+            u8 knownCount = 0;
+            defs = vm_net_mock_equip_enhance_attrs_for_slot(item->slot,
+                                                           &knownCount);
+            if (defs == NULL || slotIndex >= knownCount)
+                return false;
+            type = defs[slotIndex].type;
+            flag = defs[slotIndex].flag;
+            vm_net_mock_enhance_milestone_fill_legacy_values(
+                item->slot, unlock, type, flag, valueQ);
+        }
+
+        type = vm_net_mock_equip_enhance_milestone_type(item, slotIndex, type);
+        /* Prefer configured quality table; fall back to hardcoded formula. */
+        if (valueQ[0] || valueQ[1] || valueQ[2] || valueQ[3] || valueQ[4])
+            value = vm_net_mock_enhance_milestone_value_for_quality(
+                valueQ, item->quality);
+        else
+            value = vm_net_mock_equip_enhance_milestone_value(item, unlock, type,
+                                                             flag);
+    }
     if (typeOut)
         *typeOut = type;
     if (flagOut)

@@ -12,6 +12,7 @@ import {
 import { BitmapLabel } from "./BitmapLabel";
 import { tryLoadUiTexture } from "./UiAssets";
 import type { ServerRow } from "../net/protocol";
+import type { GatewayZoneRow } from "../net/zones";
 import {
   actorPartKeyframeCount,
   composeActorPartKeyframe,
@@ -22,13 +23,14 @@ import { TipBootLayer } from "./TipBootLayer";
 import { LoginIme } from "./LoginIme";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
-type Mode = "splash" | "login" | "register" | "servers";
+type Mode = "splash" | "login" | "register" | "password" | "servers" | "zones";
 type LoginField = "user" | "pass" | "pass2";
 
 const LS_USER = "pixi.jh.account";
 const LS_PASS = "pixi.jh.password";
 const AUTH_FIELDS_LOGIN: LoginField[] = ["user", "pass"];
 const AUTH_FIELDS_REGISTER: LoginField[] = ["user", "pass", "pass2"];
+const AUTH_FIELDS_PASSWORD: LoginField[] = ["user", "pass", "pass2"];
 
 /** Leave a strip under the server panel so footer tip clears the CBE frame. */
 const TIP_STRIP_H = 24;
@@ -38,7 +40,7 @@ const MENU_CELL_W = 73;
 const MENU_CELL_H = 19;
 
 /**
- * Title flow: 江湖支招 tip → ui_title.actor → menu → login/register → servers.
+ * Title flow: tip → menu → login/register → gateway zones → title servers.
  */
 export class TitleScreen extends Container {
   private mode: Mode = "splash";
@@ -48,25 +50,34 @@ export class TitleScreen extends Container {
   private menuLayer = new Container();
   private loginLayer = new Container();
   private serverLayer = new Container();
+  private zoneLayer = new Container();
   private menuCursor = 0;
   private serverCursor = 0;
+  private zoneCursor = 0;
   private menuLabels: BitmapLabel[] = [];
   private menuSprites: Sprite[] = [];
   private serverRows: BitmapLabel[] = [];
   private serverHits: Container[] = [];
+  private zoneRows: BitmapLabel[] = [];
+  private zoneHits: Container[] = [];
   private loginLabels: BitmapLabel[] = [];
   private loginHits: Container[] = [];
   private servers: ServerRow[] = [];
+  private zones: GatewayZoneRow[] = [];
   private status: BitmapLabel;
   private tipText: BitmapLabel;
+  private zoneTip: BitmapLabel;
   private loginTip: BitmapLabel;
   private serverGfx = new Graphics();
+  private zoneGfx = new Graphics();
   private loginGfx = new Graphics();
   private loginBannerLabel: BitmapLabel | null = null;
   private loginField: LoginField = "user";
   private userValue = "";
   private passValue = "";
   private pass2Value = "";
+  /** Account name while in password-change mode (userValue holds old password). */
+  private passwordAccount = "";
   private caretVisible = true;
   private caretTimer: number | null = null;
   private ime = new LoginIme();
@@ -83,22 +94,29 @@ export class TitleScreen extends Container {
   onOpenRegister: (() => void) | null = null;
   onSubmitLogin: ((user: string, password: string) => void) | null = null;
   onSubmitRegister: ((user: string, password: string) => void) | null = null;
+  onSubmitPassword:
+    | ((currentPassword: string, newPassword: string) => void)
+    | null = null;
   onCancelLogin: (() => void) | null = null;
+  onCancelPassword: (() => void) | null = null;
   onConfirmServer: (() => void) | null = null;
+  onConfirmZone: (() => void) | null = null;
 
   private readonly menuItems = ["开始游戏", "登陆游戏", "江湖赞助", "游戏退出"];
 
   constructor() {
     super();
-    this.addChild(this.splash, this.loginLayer, this.serverLayer);
+    this.addChild(this.splash, this.loginLayer, this.serverLayer, this.zoneLayer);
     this.splash.addChild(this.introLayer, this.menuLayer, this.tipBoot);
     this.loginLayer.visible = false;
     this.serverLayer.visible = false;
+    this.zoneLayer.visible = false;
     this.menuLayer.visible = false;
 
     this.status = makePixelText("", 11, CBE.inkBody);
     this.status.position.set(8, LCD_HEIGHT - 48);
     this.tipText = makePixelText("", 11, CBE.ink);
+    this.zoneTip = makePixelText("", 11, CBE.ink);
     this.loginTip = makePixelText("", 11, CBE.inkTip);
     this.menuLayer.addChild(this.status);
 
@@ -112,7 +130,8 @@ export class TitleScreen extends Container {
     };
     this.ime.onSubmit = () => this.confirm();
     this.ime.onFocusField = (field) => {
-      if (this.mode !== "register" && field === "pass2") return;
+      if (this.mode !== "register" && this.mode !== "password" && field === "pass2")
+        return;
       if (this.loginField === field) return;
       this.loginField = field;
       this.redrawLogin();
@@ -173,17 +192,35 @@ export class TitleScreen extends Container {
     this.redrawMenu();
     this.buildLoginChrome();
     this.buildServerChrome();
+    this.buildZoneChrome();
     this.playBootSequence();
   }
 
   setMode(mode: Mode): void {
+    const prevMode = this.mode;
+    const leavingPassword = prevMode === "password" && mode !== "password";
+    if (leavingPassword) this.restoreCredentialsAfterPassword();
     this.mode = mode;
     this.splash.visible = mode === "splash";
-    this.loginLayer.visible = mode === "login" || mode === "register";
+    this.loginLayer.visible =
+      mode === "login" || mode === "register" || mode === "password";
     this.serverLayer.visible = mode === "servers";
-    if (mode === "login" || mode === "register") {
+    this.zoneLayer.visible = mode === "zones";
+    if (mode === "login" || mode === "register" || mode === "password") {
       if (mode === "login" && this.loginField === "pass2") this.loginField = "user";
       if (mode === "register") this.pass2Value = "";
+      if (mode === "password") {
+        if (prevMode !== "password") {
+          this.passwordAccount = this.userValue.trim();
+        }
+        this.userValue = "";
+        this.passValue = "";
+        this.pass2Value = "";
+        this.loginField = "user";
+      }
+      this.ime.setAuthKind(
+        mode === "password" ? "password" : mode === "register" ? "register" : "login",
+      );
       this.refreshLoginBanner();
       this.startCaret();
       this.redrawLogin();
@@ -200,12 +237,15 @@ export class TitleScreen extends Container {
 
   /** webglcontextrestored: remount title Graphics chrome for the active mode. */
   nudgeAfterGpuResume(): void {
-    if (this.mode === "login" || this.mode === "register") {
+    if (this.mode === "login" || this.mode === "register" || this.mode === "password") {
       if (this.loginGfx) this.loginGfx = replaceGraphics(this.loginGfx);
       if (this.visible) this.redrawLogin();
     } else if (this.mode === "servers") {
       if (this.serverGfx) this.serverGfx = replaceGraphics(this.serverGfx);
       if (this.visible) this.redrawServers();
+    } else if (this.mode === "zones") {
+      if (this.zoneGfx) this.zoneGfx = replaceGraphics(this.zoneGfx);
+      if (this.visible) this.redrawZones();
     } else if (this.visible) {
       this.redrawMenu();
     }
@@ -221,6 +261,15 @@ export class TitleScreen extends Container {
     this.ime.hide();
   }
 
+  /** Leave password-change UI without showing login (e.g. back to world). */
+  exitPasswordMode(): void {
+    if (this.mode !== "password") return;
+    this.restoreCredentialsAfterPassword();
+    this.mode = "login";
+    this.loginLayer.visible = false;
+    this.releaseIme();
+  }
+
   getMode(): Mode {
     return this.mode;
   }
@@ -231,20 +280,48 @@ export class TitleScreen extends Container {
     this.redrawServers();
   }
 
+  setZones(zones: GatewayZoneRow[], preferredZoneId = 0): void {
+    this.zones = zones;
+    const pref =
+      preferredZoneId > 0
+        ? zones.findIndex((z) => z.zoneId === preferredZoneId)
+        : -1;
+    this.zoneCursor = pref >= 0 ? pref : 0;
+    this.redrawZones();
+  }
+
   setStatus(text: string): void {
     this.status.text = text;
     this.tipText.text = text;
+    this.zoneTip.text = text;
     this.loginTip.text = text;
   }
 
   setCredentials(user: string, password: string): void {
-    this.userValue = user;
-    this.passValue = password;
-    this.persistCredentials();
+    if (this.mode === "password") {
+      this.passwordAccount = user;
+    } else {
+      this.userValue = user;
+      this.passValue = password;
+    }
+    try {
+      localStorage.setItem(LS_USER, user);
+      localStorage.setItem(LS_PASS, password);
+    } catch {
+      /* ignore */
+    }
     if (this.mode === "login" || this.mode === "register") this.redrawLogin();
   }
 
+  /** Account used for password-change API (not the old-password field). */
+  getPasswordAccount(): string {
+    return this.passwordAccount || this.userValue.trim();
+  }
+
   getCredentials(): { user: string; password: string } {
+    if (this.mode === "password") {
+      return { user: this.passwordAccount, password: "" };
+    }
     return { user: this.userValue, password: this.passValue };
   }
 
@@ -254,9 +331,13 @@ export class TitleScreen extends Container {
       this.menuCursor =
         (this.menuCursor + delta + this.menuItems.length) % this.menuItems.length;
       this.redrawMenu();
-    } else if (this.mode === "login" || this.mode === "register") {
+    } else if (this.mode === "login" || this.mode === "register" || this.mode === "password") {
       this.cycleAuthField(delta);
-    } else if (this.servers.length) {
+    } else if (this.mode === "zones" && this.zones.length) {
+      this.zoneCursor =
+        (this.zoneCursor + delta + this.zones.length) % this.zones.length;
+      this.redrawZones();
+    } else if (this.mode === "servers" && this.servers.length) {
       this.serverCursor =
         (this.serverCursor + delta + this.servers.length) % this.servers.length;
       this.redrawServers();
@@ -275,7 +356,7 @@ export class TitleScreen extends Container {
       }
       const item = this.menuItems[this.menuCursor];
       if (item === "开始游戏") {
-        // 不再访客空凭据直连；与登陆一样先登录账号。
+        // 选区 → 登录（与登陆游戏同一路径）。
         (this.onStartGame ?? this.onOpenLogin)?.();
       } else if (item === "登陆游戏") {
         this.onOpenLogin?.();
@@ -286,7 +367,32 @@ export class TitleScreen extends Container {
       }
       return;
     }
-    if (this.mode === "login" || this.mode === "register") {
+    if (this.mode === "login" || this.mode === "register" || this.mode === "password") {
+      if (this.mode === "password") {
+        const currentPassword = this.userValue;
+        const newPassword = this.passValue;
+        if (!currentPassword || !newPassword) {
+          this.setStatus("请输入旧密码和新密码");
+          this.redrawLogin();
+          return;
+        }
+        if (!this.pass2Value) {
+          this.setStatus("请再次输入新密码");
+          this.loginField = "pass2";
+          this.redrawLogin();
+          this.focusLoginField("pass2", true);
+          return;
+        }
+        if (newPassword !== this.pass2Value) {
+          this.setStatus("两次输入的新密码不一致");
+          this.loginField = "pass2";
+          this.redrawLogin();
+          this.focusLoginField("pass2", true);
+          return;
+        }
+        this.onSubmitPassword?.(currentPassword, newPassword);
+        return;
+      }
       const user = this.userValue.trim();
       const password = this.passValue;
       if (!user || !password) {
@@ -319,6 +425,10 @@ export class TitleScreen extends Container {
       this.onSubmitLogin?.(user, password);
       return;
     }
+    if (this.mode === "zones") {
+      this.onConfirmZone?.();
+      return;
+    }
     this.onConfirmServer?.();
   }
 
@@ -327,11 +437,16 @@ export class TitleScreen extends Container {
       this.onOpenLogin?.();
       return;
     }
+    if (this.mode === "password") {
+      this.onCancelPassword?.();
+      return;
+    }
     this.onCancelLogin?.();
   }
 
   typeKey(key: string, ev?: KeyboardEvent): boolean {
-    if (this.mode !== "login" && this.mode !== "register") return false;
+    if (this.mode !== "login" && this.mode !== "register" && this.mode !== "password")
+      return false;
     if (key === "tab") {
       this.cycleAuthField(ev?.shiftKey ? -1 : 1);
       return true;
@@ -365,7 +480,8 @@ export class TitleScreen extends Container {
   }
 
   async pasteClipboard(): Promise<void> {
-    if (this.mode !== "login" && this.mode !== "register") return;
+    if (this.mode !== "login" && this.mode !== "register" && this.mode !== "password")
+      return;
     try {
       const text = (await navigator.clipboard.readText()).replace(/[\r\n]/g, "");
       if (!text) return;
@@ -381,6 +497,10 @@ export class TitleScreen extends Container {
 
   get selectedServer(): ServerRow | null {
     return this.servers[this.serverCursor] ?? null;
+  }
+
+  get selectedZone(): GatewayZoneRow | null {
+    return this.zones[this.zoneCursor] ?? null;
   }
 
   destroy(options?: Parameters<Container["destroy"]>[0]): void {
@@ -406,6 +526,7 @@ export class TitleScreen extends Container {
   }
 
   private authFields(): LoginField[] {
+    if (this.mode === "password") return AUTH_FIELDS_PASSWORD;
     return this.mode === "register" ? AUTH_FIELDS_REGISTER : AUTH_FIELDS_LOGIN;
   }
 
@@ -473,12 +594,27 @@ export class TitleScreen extends Container {
   }
 
   private persistCredentials(): void {
+    if (this.mode === "password") return;
     try {
       localStorage.setItem(LS_USER, this.userValue);
       localStorage.setItem(LS_PASS, this.passValue);
     } catch {
       /* ignore */
     }
+  }
+
+  private restoreCredentialsAfterPassword(): void {
+    const account = this.passwordAccount;
+    this.passwordAccount = "";
+    try {
+      this.userValue = account || localStorage.getItem(LS_USER) || "";
+      this.passValue = localStorage.getItem(LS_PASS) || "";
+    } catch {
+      this.userValue = account;
+      this.passValue = "";
+    }
+    this.pass2Value = "";
+    this.ime.setAuthKind("login");
   }
 
   private startCaret(): void {
@@ -502,15 +638,17 @@ export class TitleScreen extends Container {
     this.menuLabels = [];
     this.menuSprites = [];
     const startY = 224;
+    const rowH = 26;
 
     const useSheet =
       !!this.menuSheet &&
+      this.menuItems.length === 4 &&
       this.menuSheet.width === MENU_CELL_W * 2 &&
       this.menuSheet.height === MENU_CELL_H * 4;
 
     this.menuItems.forEach((label, i) => {
       const hi = i === this.menuCursor;
-      const y = startY + i * 26;
+      const y = startY + i * rowH;
       if (useSheet && this.menuSheet) {
         const cell = new Texture({
           source: this.menuSheet.source,
@@ -572,7 +710,12 @@ export class TitleScreen extends Container {
   }
 
   private refreshLoginBanner(): void {
-    const title = this.mode === "register" ? "江湖注册" : "账号登录";
+    const title =
+      this.mode === "register"
+        ? "江湖注册"
+        : this.mode === "password"
+          ? "修改密码"
+          : "账号登录";
     this.loginBannerLabel?.show(title, CBE.ink, { outline: false, smooth: false });
   }
 
@@ -584,14 +727,20 @@ export class TitleScreen extends Container {
     this.loginGfx.clear();
 
     const registering = this.mode === "register";
+    const changingPw = this.mode === "password";
+    const threeFields = registering || changingPw;
     const boxX = 14;
     const boxY = 48;
     const boxW = LCD_WIDTH - 24;
-    const boxH = registering ? 248 : 200;
+    const boxH = threeFields ? 248 : 200;
     paintCbePanel(this, this.loginGfx, boxX, boxY, boxW, boxH, CBE.bgPanel);
 
     const hint = makePixelText(
-      registering ? "点输入框 · 确定注册" : "点输入框 · 确定登录",
+      changingPw
+        ? "点输入框 · 确定修改"
+        : registering
+          ? "点输入框 · 确定注册"
+          : "点输入框 · 确定登录",
       11,
       CBE.inkMint,
     );
@@ -606,34 +755,65 @@ export class TitleScreen extends Container {
     const userBox = { x: boxX + 12, y: userY + 20, w: fieldW, h: 26 };
     const passBox = { x: boxX + 12, y: passY + 20, w: fieldW, h: 26 };
     const pass2Box = { x: boxX + 12, y: pass2Y + 20, w: fieldW, h: 26 };
-    this.drawField("账号", this.userValue, "user", boxX + 12, userY, fieldW);
-    this.drawField(
-      "密码",
-      "*".repeat(this.passValue.length),
-      "pass",
-      boxX + 12,
-      passY,
-      fieldW,
-    );
-    if (registering) {
+    if (changingPw) {
       this.drawField(
-        "确认密码",
+        "旧密码",
+        "*".repeat(this.userValue.length),
+        "user",
+        boxX + 12,
+        userY,
+        fieldW,
+      );
+      this.drawField(
+        "新密码",
+        "*".repeat(this.passValue.length),
+        "pass",
+        boxX + 12,
+        passY,
+        fieldW,
+      );
+      this.drawField(
+        "确认新密码",
         "*".repeat(this.pass2Value.length),
         "pass2",
         boxX + 12,
         pass2Y,
         fieldW,
       );
+    } else {
+      this.drawField("账号", this.userValue, "user", boxX + 12, userY, fieldW);
+      this.drawField(
+        "密码",
+        "*".repeat(this.passValue.length),
+        "pass",
+        boxX + 12,
+        passY,
+        fieldW,
+      );
+      if (registering) {
+        this.drawField(
+          "确认密码",
+          "*".repeat(this.pass2Value.length),
+          "pass2",
+          boxX + 12,
+          pass2Y,
+          fieldW,
+        );
+      }
     }
 
-    const noteY = registering ? boxY + 206 : boxY + 160;
-    const linkY = registering ? boxY + 224 : boxY + 178;
+    const noteY = threeFields ? boxY + 206 : boxY + 160;
+    const linkY = threeFields ? boxY + 224 : boxY + 178;
     const note = makePixelText(
-      registering
-        ? "账号4-32位，密码6位"
-        : this.userValue || this.passValue
-          ? "将使用上方账号登录"
-          : "输入已有账号密码登录",
+      changingPw
+        ? this.passwordAccount
+          ? `账号 ${this.passwordAccount}`
+          : "密码须为6-63位"
+        : registering
+          ? "账号4-32位，密码6位"
+          : this.userValue || this.passValue
+            ? "将使用上方账号登录"
+            : "输入已有账号密码登录",
       11,
       CBE.inkBody,
     );
@@ -641,7 +821,15 @@ export class TitleScreen extends Container {
     this.loginLayer.addChild(note);
     this.loginLabels.push(note);
 
-    if (!registering) {
+    if (changingPw) {
+      const backBtn = makePixelText("返回游戏", 12, CBE.inkTip);
+      backBtn.position.set(boxX + 12, linkY);
+      backBtn.eventMode = "static";
+      backBtn.cursor = "pointer";
+      backBtn.on("pointertap", () => this.onCancelPassword?.());
+      this.loginLayer.addChild(backBtn);
+      this.loginLabels.push(backBtn);
+    } else if (!registering) {
       const regBtn = makePixelText("没有账号？点此注册", 12, CBE.inkTip);
       regBtn.position.set(boxX + 12, linkY);
       regBtn.eventMode = "static";
@@ -662,9 +850,14 @@ export class TitleScreen extends Container {
     // HTML overlays sit on the boxes so phone taps open the soft keyboard.
     // Guard: caret can fire after title was only hidden (visible=false) while
     // mode still "login"/"register" — never remount overlays onto the world scene.
-    if ((this.mode === "login" || this.mode === "register") && this.visible) {
+    if (
+      (this.mode === "login" ||
+        this.mode === "register" ||
+        this.mode === "password") &&
+      this.visible
+    ) {
       this.ime.show(
-        registering
+        threeFields
           ? { user: userBox, pass: passBox, pass2: pass2Box }
           : { user: userBox, pass: passBox },
       );
@@ -772,6 +965,77 @@ export class TitleScreen extends Container {
         attachRowPointerHit(this.serverLayer, boxX + 4, y - 2, boxW - 8, 20, () => {
           this.serverCursor = idx;
           this.redrawServers();
+          this.confirm();
+        }),
+      );
+    });
+  }
+
+  private buildZoneChrome(): void {
+    this.zoneLayer.removeChildren();
+    this.zoneLayer.addChild(
+      new Graphics().rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgDeep }),
+    );
+    const bannerGfx = new Graphics();
+    this.zoneLayer.addChild(bannerGfx);
+    drawLocBanner(bannerGfx, this.zoneLayer, "选择区服网关", 10);
+    this.zoneGfx = new Graphics();
+    this.zoneLayer.addChild(this.zoneGfx);
+    this.zoneTip.position.set(12, LCD_HEIGHT - SOFTKEY_H - TIP_STRIP_H + 5);
+    this.zoneLayer.addChild(this.zoneTip);
+  }
+
+  private redrawZones(): void {
+    for (const r of this.zoneRows) r.destroy();
+    this.zoneRows = [];
+    clearPointerHits(this.zoneHits);
+    this.zoneGfx.clear();
+
+    const boxX = 8;
+    const boxY = 44;
+    const boxW = LCD_WIDTH - 16;
+    const boxH = LCD_HEIGHT - SOFTKEY_H - boxY - TIP_STRIP_H;
+    paintCbePanel(this, this.zoneGfx, boxX, boxY, boxW, boxH, CBE.bgDeep);
+
+    this.zoneGfx.rect(boxX + 2, boxY + 2, boxW - 4, 24).fill({ color: CBE.bgPanel });
+    this.zoneGfx
+      .moveTo(boxX + boxW - 56, boxY + 2)
+      .lineTo(boxX + boxW - 56, boxY + 26)
+      .stroke({ width: 1, color: CBE.borderDim });
+
+    const h1 = makePixelText("区服", 12, CBE.ink);
+    h1.position.set(boxX + 12, boxY + 6);
+    const h2 = makePixelText("状态", 12, CBE.ink);
+    h2.position.set(boxX + boxW - 44, boxY + 6);
+    this.zoneLayer.addChild(h1, h2);
+    this.zoneRows.push(h1, h2);
+
+    if (!this.zones.length) {
+      const empty = makePixelText("暂无区服目录", 12, CBE.inkBody);
+      empty.position.set(boxX + 12, boxY + 40);
+      this.zoneLayer.addChild(empty);
+      this.zoneRows.push(empty);
+      return;
+    }
+
+    this.zones.forEach((z, i) => {
+      const y = boxY + 32 + i * 22;
+      if (i === this.zoneCursor) {
+        this.zoneGfx.rect(boxX + 4, y - 2, boxW - 8, 20).fill({ color: CBE.select });
+      }
+      const name = makePixelText(z.name || `区服${z.zoneId}`, 12, CBE.inkLabel);
+      name.position.set(boxX + 12, y);
+      name.eventMode = "none";
+      const st = makePixelText(z.label || "推荐", 12, CBE.ink);
+      st.position.set(boxX + boxW - 44, y);
+      st.eventMode = "none";
+      this.zoneLayer.addChild(name, st);
+      this.zoneRows.push(name, st);
+      const idx = i;
+      this.zoneHits.push(
+        attachRowPointerHit(this.zoneLayer, boxX + 4, y - 2, boxW - 8, 20, () => {
+          this.zoneCursor = idx;
+          this.redrawZones();
           this.confirm();
         }),
       );

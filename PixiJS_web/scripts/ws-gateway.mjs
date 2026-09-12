@@ -2,11 +2,13 @@
  * Minimal WebSocket ↔ TCP CBMS bridge (+ HTTP proxy for monster levels).
  * Usage:
  *   node scripts/ws-gateway.mjs [listenWsPort=19092] [tcpHost=127.0.0.1] [tcpPort=19090] [listenHost=0.0.0.0]
- * Env:
+ * Config file (optional): PixiJS_web/gateway.conf — see that file for keys.
+ *   PIX_GATEWAY_CONFIG=/path/to/gateway.conf
+ * Env (override config):
  *   PIX_GATEWAY_HOST / PIX_GATEWAY_PORT — listen bind (default 0.0.0.0:19092)
  *   PIX_TCP_HOST / PIX_TCP_PORT — mock-server (default 127.0.0.1:19090)
  *   PIX_ADMIN_HOST / PIX_ADMIN_PORT — admin HTTP for /api/* proxy
- *     (monster-levels, npc-scenes, recharge/create, register; default same host as TCP, port 19091)
+ *     (monster-levels, npc-scenes, zones, recharge/create, register; default same host as TCP, port 19091)
  *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 30000; 0=off)
  *   PIX_GATEWAY_KEEPALIVE_IDLE_MS — silence before synth poll (default 2200)
  *   PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS — mock TCP read budget per CBMS (default 60000)
@@ -18,31 +20,121 @@
  *   PIX_GATEWAY_WS_PER_IP_MAX — max new WS handshakes per IPv4 per 60s (default
  *     24; 0=off). Rejects excess with close code 1008 before opening mock TCP.
  *
- * Each CBMS request opens a short-lived TCP to the mock service (CBE host model).
- * Do NOT close the WebSocket on a single TCP failure — the browser session must
- * stay up so the client can retry login/select/role without "live: not connected".
- *
- * After the client arms SCENE_POLL (in-world), this process can run a Node
- * interval and synthesize idle scene-polls so Android WebView timer freezes do
- * not cause server heartbeat-timeout. See docs/re/2026-08-10-pixi-gateway-idle-keepalive.md.
- *
- * Default: keepalive 30s + orphan 2min. Set either env to 0 to disable; then
- * WS close without CBMS DISCONNECT immediately forwards DISCONNECT to mock.
+ * Priority: CLI argv / env > gateway.conf > built-in defaults.
  */
+import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 
+/** Script dir (node .mjs) or exe dir (SEA). Avoid import.meta in CJS/SEA. */
+function gatewayBaseDirs() {
+  const dirs = [];
+  try {
+    if (typeof import.meta !== "undefined" && import.meta.url) {
+      dirs.push(path.dirname(fileURLToPath(import.meta.url)));
+    }
+  } catch {
+    /* SEA / CJS: import.meta empty */
+  }
+  if (typeof __dirname !== "undefined" && __dirname) {
+    dirs.push(__dirname);
+  }
+  try {
+    dirs.push(path.dirname(process.execPath));
+  } catch {
+    /* ignore */
+  }
+  dirs.push(process.cwd());
+  return [...new Set(dirs.filter(Boolean))];
+}
+
+/** @returns {Record<string, string>} */
+function loadGatewayConfFile() {
+  const candidates = [];
+  if (process.env.PIX_GATEWAY_CONFIG) {
+    candidates.push(process.env.PIX_GATEWAY_CONFIG);
+  }
+  for (const dir of gatewayBaseDirs()) {
+    candidates.push(path.join(dir, "gateway.conf"));
+    candidates.push(path.join(dir, "..", "gateway.conf"));
+  }
+  /** @type {Record<string, string>} */
+  const out = {};
+  const seen = new Set();
+  for (const file of candidates) {
+    const abs = path.resolve(file);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    try {
+      if (!fs.existsSync(abs)) continue;
+      const text = fs.readFileSync(abs, "utf8");
+      let applied = 0;
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+        const eq = line.indexOf("=");
+        if (eq <= 0) continue;
+        const key = line.slice(0, eq).trim();
+        const value = line.slice(eq + 1).trim();
+        if (!key || !value) continue;
+        out[key] = value;
+        applied += 1;
+      }
+      console.log(
+        `[ws-gateway] config_file path=${abs} applied=${applied} (env/argv still override)`,
+      );
+      break;
+    } catch (err) {
+      console.warn(
+        `[ws-gateway] config_file read failed path=${abs}`,
+        err?.message || err,
+      );
+    }
+  }
+  return out;
+}
+
+const fileCfg = loadGatewayConfFile();
+
+function cfg(key, envName, fallback) {
+  if (process.env[envName] !== undefined && process.env[envName] !== "") {
+    return process.env[envName];
+  }
+  if (fileCfg[key] !== undefined && fileCfg[key] !== "") {
+    return fileCfg[key];
+  }
+  return fallback;
+}
+
 const listenPort = Number(
-  process.env.PIX_GATEWAY_PORT || process.argv[2] || 19092,
+  process.env.PIX_GATEWAY_PORT || process.argv[2] || cfg("listen_port", "PIX_GATEWAY_PORT", "19092"),
 );
-const tcpHost = process.env.PIX_TCP_HOST || process.argv[3] || "127.0.0.1";
-const tcpPort = Number(process.env.PIX_TCP_PORT || process.argv[4] || 19090);
+const tcpHost =
+  process.env.PIX_TCP_HOST ||
+  process.argv[3] ||
+  cfg("tcp_host", "PIX_TCP_HOST", "127.0.0.1");
+const tcpPort = Number(
+  process.env.PIX_TCP_PORT ||
+    process.argv[4] ||
+    cfg("tcp_port", "PIX_TCP_PORT", "19090"),
+);
 const listenHost =
-  process.env.PIX_GATEWAY_HOST || process.argv[5] || "0.0.0.0";
-const adminHost = process.env.PIX_ADMIN_HOST || tcpHost || "127.0.0.1";
-const adminPort = Number(process.env.PIX_ADMIN_PORT || 19091);
+  process.env.PIX_GATEWAY_HOST ||
+  process.argv[5] ||
+  cfg("listen_host", "PIX_GATEWAY_HOST", "0.0.0.0");
+const adminHost =
+  process.env.PIX_ADMIN_HOST ||
+  cfg("admin_host", "PIX_ADMIN_HOST", "") ||
+  tcpHost ||
+  "127.0.0.1";
+const adminPort = Number(
+  process.env.PIX_ADMIN_PORT ||
+    cfg("admin_port", "PIX_ADMIN_PORT", "19091"),
+);
 
 const CBMS_META_CLIENT_IPV4_TAG = 0xfe;
 
@@ -417,12 +509,20 @@ const server = http.createServer((req, res) => {
     proxyAdminApi(req, res, "/api/npc-scenes", { methods: ["GET"] });
     return;
   }
+  if (path === "/api/zones") {
+    proxyAdminApi(req, res, "/api/zones", { methods: ["GET"] });
+    return;
+  }
   if (path === "/api/recharge/create") {
     proxyAdminApi(req, res, "/api/recharge/create", { methods: ["POST"] });
     return;
   }
   if (path === "/api/register") {
     proxyAdminApi(req, res, "/api/register", { methods: ["POST"] });
+    return;
+  }
+  if (path === "/user/password") {
+    proxyAdminApi(req, res, "/user/password", { methods: ["POST"] });
     return;
   }
   if (path === "/healthz") {
@@ -475,10 +575,16 @@ server.listen(listenPort, listenHost, () => {
     `[ws-gateway] http /api/npc-scenes -> http://${adminHost}:${adminPort}/api/npc-scenes`,
   );
   console.log(
+    `[ws-gateway] http /api/zones -> http://${adminHost}:${adminPort}/api/zones`,
+  );
+  console.log(
     `[ws-gateway] http /api/recharge/create -> http://${adminHost}:${adminPort}/api/recharge/create`,
   );
   console.log(
     `[ws-gateway] http /api/register -> http://${adminHost}:${adminPort}/api/register`,
+  );
+  console.log(
+    `[ws-gateway] http /user/password -> http://${adminHost}:${adminPort}/user/password`,
   );
   if (tips.length) {
     console.log(`[ws-gateway] phone / LAN: ${tips.join("  ")}`);

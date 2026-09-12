@@ -3342,6 +3342,64 @@ static void vm_net_mock_session_bind_instance_hangup_enemy(
            seed->actorId, seed->challengeEnemyId, seed->instanceScene);
 }
 
+/*
+ * Map-drag / save-npc-position: only touch pos_x/pos_y.
+ * Full admin_save DELETE+reinserts server_dynamic_npc_tasks and can drop
+ * bindings or trip FK noise; coordinate edits must not rewrite task rows.
+ */
+static bool vm_net_mock_dynamic_npc_admin_save_position(
+    const char *scene,
+    u32 actorId,
+    u16 x,
+    u16 y,
+    const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene) * 2 + 1];
+    char query[512];
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "invalid npc position";
+    if (!vm_net_mock_dynamic_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 || x == 0 ||
+        y == 0)
+    {
+        return false;
+    }
+    existing = vm_net_mock_dynamic_npc_find_override(scene, actorId);
+    if (existing < 0)
+    {
+        if (errorOut)
+            *errorOut = "NPC 尚未落库，请先完整保存后再拖动坐标";
+        return false;
+    }
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) ==
+        0)
+    {
+        if (errorOut)
+            *errorOut = "NPC scene encoding failed";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE server_dynamic_npcs SET pos_x=%u,pos_y=%u "
+             "WHERE scene=X'%s' AND actor_id=%u",
+             (u32)x, (u32)y, sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    g_vm_net_mock_dynamic_npc_overrides[existing].seed.x = x;
+    g_vm_net_mock_dynamic_npc_overrides[existing].seed.y = y;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] dynamic_npc_save_position scene=%s actor=%u "
+           "pos=(%u,%u) action=pos-only evidence=no-task-rewrite\n",
+           scene, actorId, (u32)x, (u32)y);
+    return true;
+}
+
 static bool vm_net_mock_dynamic_npc_admin_save(
     const char *scene,
     const vm_net_mock_scene_npcinfo_seed *seed,
@@ -3379,16 +3437,26 @@ static bool vm_net_mock_dynamic_npc_admin_save(
      * Persist path writes server_dynamic_npc_tasks from boundTasks[] after a
      * full DELETE — leaving boundTaskCount=0 silently wiped「可接取任务」.
      * Mirror primary → boundTasks before MySQL (or clear when unbound).
+     *
+     * Do NOT clear boundTasks when taskId==0 but bindings are already present:
+     * save-npc-position reuses the live seed and a stale primary=0 used to wipe
+     * every binding on each map drag (then FK re-insert looked like a save error /
+     * in-game task submit tip after the NPC lost its delivery binding).
      */
     if (normalized.taskId == 0)
     {
-        normalized.boundTaskCount = 0;
-        memset(normalized.boundTasks, 0, sizeof(normalized.boundTasks));
-        vm_net_mock_seed_sync_primary_bound_task(&normalized);
+        if (normalized.boundTaskCount != 0)
+            vm_net_mock_seed_sync_primary_bound_task(&normalized);
+        else
+        {
+            memset(normalized.boundTasks, 0, sizeof(normalized.boundTasks));
+            vm_net_mock_seed_sync_primary_bound_task(&normalized);
+        }
     }
-    else if (!vm_net_mock_seed_add_bound_task(
-                 &normalized, normalized.taskId, normalized.taskRepeatable,
-                 normalized.taskDailyAcceptLimit))
+    if (normalized.taskId != 0 &&
+        !vm_net_mock_seed_add_bound_task(
+            &normalized, normalized.taskId, normalized.taskRepeatable,
+            normalized.taskDailyAcceptLimit))
     {
         if (errorOut)
             *errorOut = "NPC 可接取任务绑定失败";
@@ -6696,6 +6764,9 @@ static bool vm_net_mock_is_teleport_stone_transfer_request(const u8 *request, u3
     return true;
 }
 
+static bool vm_net_mock_region_teleport_stone_resolve_exit(
+    u32 exitId, vm_net_mock_scene_change_target *target);
+
 static void vm_net_mock_get_teleport_stone_target(const u8 *request, u32 requestLen,
                                                   vm_net_mock_scene_change_target *target)
 {
@@ -6704,11 +6775,22 @@ static void vm_net_mock_get_teleport_stone_target(const u8 *request, u32 request
     const char *targetScene = vm_net_mock_default_scene_name();
 
     memset(target, 0, sizeof(*target));
-    if (sceneOverride != NULL && sceneOverride[0] != 0 && vm_net_mock_scene_name_is_safe(sceneOverride))
-        targetScene = sceneOverride;
-
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitID", &exitId);
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitid", &exitId);
+
+    /*
+     * Scene n_telestone free path (no prior 16/4): 16/1.exitinfo rows use the
+     * absolute sMap row id.  Resolve that row inside the player's current
+     * wMap region before falling back to the legacy single default target.
+     */
+    if (exitId != 0 &&
+        vm_net_mock_region_teleport_stone_resolve_exit(exitId, target))
+    {
+        return;
+    }
+
+    if (sceneOverride != NULL && sceneOverride[0] != 0 && vm_net_mock_scene_name_is_safe(sceneOverride))
+        targetScene = sceneOverride;
 
     snprintf(target->scene, sizeof(target->scene), "%s", vm_net_mock_normalize_scene_name_for_enter(targetScene));
     target->x = VM_NET_MOCK_ROLE_INITIAL_X;
@@ -7716,32 +7798,266 @@ static const char *vm_net_mock_teleport_stone_display_label(void)
     return vm_net_mock_env_str("CBE_TELEPORT_STONE_LABEL", defaultLabel);
 }
 
+/*
+     * Must cover the full authored sMap.dsh leaf set (currently 135 rows).
+     * Cap 48 truncated from 终南山_02 onward, so free n_telestone resolve for
+     * 剑阁 (row ids 100–103 / 13剑阁_*.sce) and later regions failed the same-
+     * wMap gate, armed no deferred 30/1, and Pixi reported 进图超时.
+     * Align with VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX.
+     */
+enum { VM_NET_MOCK_REGION_TELES_MAX = 192 };
+
+typedef struct
+{
+    u32 rowId;
+    u32 parentWorldId;
+    char scene[64];
+    char label[64];
+} vm_net_mock_region_tele_exit;
+
+static bool vm_net_mock_load_smap_region_tele_exits(
+    vm_net_mock_region_tele_exit *exits, u32 exitCap, u32 *exitCountOut)
+{
+    char path[256];
+    u8 data[16384];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 headerBytes = 0;
+    u32 pos = 0;
+    u32 exitCount = 0;
+
+    if (exitCountOut)
+        *exitCountOut = 0;
+    if (exits == NULL || exitCap == 0 ||
+        !vm_net_mock_open_server_data_resource("sMap.dsh", ".dsh", NULL,
+                                               path, sizeof(path)))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (columnCount < 12 || columnCount > 64 || rowCount > 10000 ||
+        16u + headerBytes > len)
+    {
+        return false;
+    }
+    pos = 16u + headerBytes;
+    for (u32 row = 0; row < rowCount && pos + 4 <= len && exitCount < exitCap; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        vm_net_mock_region_tele_exit entry;
+        bool valid = true;
+
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            return false;
+        memset(&entry, 0, sizeof(entry));
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+            {
+                valid = false;
+                break;
+            }
+            if (col == 0)
+                entry.rowId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 1)
+                valid = vm_net_mock_copy_dsh_string_field(entry.scene,
+                                                           sizeof(entry.scene),
+                                                           value, valueLen) &&
+                        valid;
+            else if (col == 2)
+                (void)vm_net_mock_copy_dsh_string_field(entry.label,
+                                                         sizeof(entry.label),
+                                                         value, valueLen);
+            else if (col == 11)
+                entry.parentWorldId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            rowPos += valueLen;
+        }
+        if (valid && entry.rowId != 0 && entry.parentWorldId != 0 &&
+            vm_net_mock_scene_name_is_download_key(entry.scene))
+        {
+            if (entry.label[0] == 0)
+            {
+                size_t sceneLen = strlen(entry.scene);
+                if (sceneLen > 4 &&
+                    strcmp(entry.scene + sceneLen - 4, ".sce") == 0)
+                {
+                    sceneLen -= 4;
+                }
+                if (sceneLen >= sizeof(entry.label))
+                    sceneLen = sizeof(entry.label) - 1;
+                memcpy(entry.label, entry.scene, sceneLen);
+                entry.label[sceneLen] = 0;
+            }
+            exits[exitCount++] = entry;
+        }
+        pos = rowEnd;
+    }
+    if (exitCountOut)
+        *exitCountOut = exitCount;
+    return exitCount != 0;
+}
+
+static bool vm_net_mock_find_region_tele_parent_world(
+    const vm_net_mock_region_tele_exit *exits, u32 exitCount,
+    const char *scene, u32 *worldIdOut)
+{
+    if (exits == NULL || scene == NULL || scene[0] == 0 || worldIdOut == NULL)
+        return false;
+    *worldIdOut = 0;
+    for (u32 i = 0; i < exitCount; ++i)
+    {
+        if (vm_net_mock_scene_names_equal_loose(exits[i].scene, scene))
+        {
+            *worldIdOut = exits[i].parentWorldId;
+            return exits[i].parentWorldId != 0;
+        }
+    }
+    return false;
+}
+
+/*
+ * Free in-region stone transfer: exitID is an absolute sMap row belonging to
+ * the same wMap group as the player's current scene.
+ */
+static bool vm_net_mock_region_teleport_stone_resolve_exit(
+    u32 exitId, vm_net_mock_scene_change_target *target)
+{
+    vm_net_mock_region_tele_exit exits[VM_NET_MOCK_REGION_TELES_MAX];
+    u32 exitCount = 0;
+    u32 currentWorldId = 0;
+    u32 targetWorldId = 0;
+    const char *currentScene = NULL;
+    const char *posSource = "-";
+    bool foundTarget = false;
+
+    if (target == NULL || exitId == 0)
+        return false;
+    if (!vm_net_mock_load_smap_region_tele_exits(exits, VM_NET_MOCK_REGION_TELES_MAX,
+                                                 &exitCount))
+    {
+        return false;
+    }
+    currentScene = vm_net_mock_current_scene_name();
+    if (!vm_net_mock_find_region_tele_parent_world(exits, exitCount, currentScene,
+                                                   &currentWorldId))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < exitCount; ++i)
+    {
+        if (exits[i].rowId == exitId)
+        {
+            targetWorldId = exits[i].parentWorldId;
+            foundTarget = true;
+            break;
+        }
+    }
+    if (!foundTarget || targetWorldId == 0 || targetWorldId != currentWorldId)
+        return false;
+    if (!vm_net_mock_get_teleport_stone_smap_row_target(exitId, target, &posSource))
+        return false;
+    printf("[info][network] mock_teleport_stone_region_free_resolve exit=%u world=%u scene=%s pos=(%u,%u) pos_source=%s evidence=sMap.dsh+n_telestone-16/1\n",
+           exitId, currentWorldId, target->scene, target->x, target->y, posSource);
+    return true;
+}
+
 static bool vm_net_mock_build_teleport_stone_exitinfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
 {
     u32 pos = 0;
-    const char *label = vm_net_mock_teleport_stone_display_label();
-    u32 exitId = vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID", VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID);
+    vm_net_mock_region_tele_exit exits[VM_NET_MOCK_REGION_TELES_MAX];
+    u32 exitCount = 0;
+    u32 regionCount = 0;
+    u32 currentWorldId = 0;
+    const char *currentScene = NULL;
+    u8 count = 0;
 
     if (out == NULL || blobLenOut == NULL)
         return false;
-    if (exitId > 0xffff)
-        exitId = VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID;
 
     /*
-     * mmGameMstarWqvga.cbm:sub_11CE parses 16/1 exitinfo as:
-     *   u8 count, repeated u32 exitId, len16 string label, u32 reserved.
+     * Prefer the authored regional list (same parent wMap as the player's
+     * current sMap leaf).  Env overrides keep the legacy single-entry smoke
+     * path used by older autotests.
      */
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
-        return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, exitId))
-        return false;
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, label))
-        return false;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 0))
-        return false;
+    if (getenv("CBE_TELEPORT_STONE_EXIT_ID") == NULL &&
+        getenv("CBE_TELEPORT_STONE_LABEL") == NULL &&
+        vm_net_mock_load_smap_region_tele_exits(exits, VM_NET_MOCK_REGION_TELES_MAX,
+                                                 &exitCount))
+    {
+        currentScene = vm_net_mock_current_scene_name();
+        if (vm_net_mock_find_region_tele_parent_world(exits, exitCount, currentScene,
+                                                      &currentWorldId))
+        {
+            for (u32 i = 0; i < exitCount; ++i)
+            {
+                if (exits[i].parentWorldId == currentWorldId)
+                    regionCount++;
+            }
+            if (regionCount > 0xffu)
+                regionCount = 0xffu;
+            if (regionCount != 0 &&
+                vm_net_mock_seq_put_u8(out, outCap, &pos, (u8)regionCount))
+            {
+                bool ok = true;
+                for (u32 i = 0; i < exitCount && ok; ++i)
+                {
+                    if (exits[i].parentWorldId != currentWorldId)
+                        continue;
+                    if (count >= regionCount)
+                        break;
+                    ok = vm_net_mock_seq_put_u32(out, outCap, &pos, exits[i].rowId) &&
+                         vm_net_mock_seq_put_string(out, outCap, &pos, exits[i].label) &&
+                         vm_net_mock_seq_put_u32(out, outCap, &pos, 0);
+                    count++;
+                }
+                if (ok && count == regionCount)
+                {
+                    *blobLenOut = pos;
+                    printf("[info][network] mock_teleport_stone_exitinfo region_world=%u entries=%u scene=%s evidence=sMap.dsh-same-wMap\n",
+                           currentWorldId, (u32)count,
+                           currentScene ? currentScene : "-");
+                    return true;
+                }
+                pos = 0;
+            }
+        }
+    }
 
-    *blobLenOut = pos;
-    return true;
+    {
+        const char *label = vm_net_mock_teleport_stone_display_label();
+        u32 exitId = vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID",
+                                          VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID);
+
+        if (exitId > 0xffff)
+            exitId = VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID;
+
+        /*
+         * mmGameMstarWqvga.cbm:sub_11CE parses 16/1 exitinfo as:
+         *   u8 count, repeated u32 exitId, len16 string label, u32 reserved.
+         */
+        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+            return false;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, exitId))
+            return false;
+        if (!vm_net_mock_seq_put_string(out, outCap, &pos, label))
+            return false;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 0))
+            return false;
+
+        *blobLenOut = pos;
+        return true;
+    }
 }
 
 /*
@@ -8500,7 +8816,7 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
     u32 objectStart = 0;
-    u8 exitInfo[128];
+    u8 exitInfo[2048];
     u32 exitInfoLen = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_net_mock_backpack_item_state *teleportStone =
@@ -8509,6 +8825,7 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
              : NULL;
     u32 teleportStoneCount = teleportStone ? teleportStone->count : 0;
     u32 wcoin = vm_net_mock_role_wcoin_balance(role);
+    u32 entryCount = 0;
 
     if (outCap < pos)
         return 0;
@@ -8517,6 +8834,7 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
         return 0;
     if (exitInfoLen == 0 || exitInfoLen > 0xffff)
         return 0;
+    entryCount = exitInfo[0];
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, 1, &objectStart))
         return 0;
@@ -8526,15 +8844,14 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_packet(out, pos, 1);
     g_vm_net_mock_last_teleport_stone_list_tick = g_schedulerTick;
 
-    printf("[info][network] mock_teleport_stone_list entries=1 exit=%u label=%s role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
-           vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID",
-                               VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID),
-           vm_net_mock_teleport_stone_display_label(),
+    printf("[info][network] mock_teleport_stone_list entries=%u role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE+sMap.dsh-region\n",
+           entryCount,
            role ? role->roleId : 0,
            teleportStoneCount,
            wcoin,
            exitInfoLen);
-    vm_autotest_note("mock_teleport_stone_list entries=1 role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
+    vm_autotest_note("mock_teleport_stone_list entries=%u role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE+sMap.dsh-region\n",
+                     entryCount,
                      role ? role->roleId : 0,
                      teleportStoneCount,
                      wcoin,
@@ -9620,7 +9937,32 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
                exitId, provisionalTarget.scene, provisionalTarget.exitId);
         return 0;
     }
-    printf("[info][network] mock_teleport_stone_confirmed_exit_resolve exit=%u provisional_scene=%s provisional_row=%u final_scene=%s pos=(%u,%u) pos_source=%s changed=%u evidence=JianghuOL.CBE:0x0103573A(wMap ids)+0x01018F66(exitID)\n",
+    /*
+     * Free path (no 7/1): n_telestone / region-map free transfer must stay
+     * inside the player's current wMap group.  Paid map UI still allows any
+     * selected world node and always sends item 800.
+     */
+    if (itemObjectLen == 0)
+    {
+        vm_net_mock_scene_change_target regionCheck;
+
+        memset(&regionCheck, 0, sizeof(regionCheck));
+        if (!vm_net_mock_region_teleport_stone_resolve_exit(exitId, &regionCheck) ||
+            !vm_net_mock_scene_names_equal_loose(regionCheck.scene, target.scene))
+        {
+            printf("[info][network] mock_teleport_stone_confirmed_exit_reject_free_cross_region exit=%u scene=%s evidence=n_telestone-same-wMap-only\n",
+                   exitId, target.scene);
+            g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+            {
+                u32 rejectPos = 5;
+                vm_net_mock_finish_wt_packet(out, rejectPos, 0);
+                return rejectPos;
+            }
+        }
+        target = regionCheck;
+        posSource = "region-free-smap-row";
+    }
+    printf("[info][network] mock_teleport_stone_confirmed_exit_resolve exit=%u provisional_scene=%s provisional_row=%u final_scene=%s pos=(%u,%u) pos_source=%s changed=%u free=%u evidence=JianghuOL.CBE:0x0103573A(wMap ids)+0x01018F66(exitID)\n",
            exitId,
            provisionalTarget.scene,
            provisionalTarget.exitId,
@@ -9631,7 +9973,8 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
            vm_net_mock_scene_names_equal_loose(provisionalTarget.scene,
                                                target.scene)
                ? 0u
-               : 1u);
+               : 1u,
+           itemObjectLen == 0 ? 1u : 0u);
 
     if (itemObjectLen != 0)
     {

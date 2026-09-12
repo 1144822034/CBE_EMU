@@ -10,7 +10,7 @@ import {
 } from "./cbms";
 
 /** Live gateway on this machine's LAN IP (PixiJS web / APK). */
-//export const FIXED_LIVE_GATEWAY = "ws://116.211.150.66:19092";
+//export const FIXED_LIVE_GATEWAY = "ws://116.211.150.66:19093";
 export const FIXED_LIVE_GATEWAY = "ws://192.1.1.1:19092";
 
 export type TransportMode = "live";
@@ -25,8 +25,8 @@ export interface GameTransport {
 
 /**
  * Live WS gateway URL.
- * Default is fixed production host; `?gateway=` / `localStorage.pix_gateway`
- * remain debug overrides only.
+ * Priority: `?gateway=` / `localStorage.pix_gateway` (zone pick) /
+ * FIXED_LIVE_GATEWAY (bootstrap + catalog-empty fallback).
  */
 export function defaultLiveGatewayUrl(): string {
   if (typeof window === "undefined") return FIXED_LIVE_GATEWAY;
@@ -41,6 +41,17 @@ export function defaultLiveGatewayUrl(): string {
   }
   return FIXED_LIVE_GATEWAY;
 }
+
+export {
+  defaultZoneCatalogUrl,
+  loadGatewayZoneCatalog,
+  applyGatewayZone,
+  resolveGatewayZoneSelection,
+  readStoredZoneId,
+  type GatewayZoneRow,
+  type GatewayZoneCatalog,
+} from "./zones";
+
 
 /** Live WS ↔ TCP gateway (`npm run gateway` on the game host). */
 export class LiveTransport implements GameTransport {

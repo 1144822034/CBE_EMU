@@ -12826,12 +12826,24 @@ static u32 vm_net_mock_build_battle_auto11_flag_response(const u8 *request, u32 
          g_mockHangupStopAfterBattle != 0 ||
          g_mockBattleAutoPrefer != 0);
     /*
+     * Well-formed 4/11 is a known contract — never return 0 (that falls
+     * through to unimplemented-handler-notice「功能暂未实现(1/4/11)」).
+     * Same gate pattern as mock_battle_escape_ignore empty-ack.
+     *
      * Explicit off (type=0) must work for the whole fight and on the map
-     * while hangup is still armed between fights.  Restricting to battle
-     * screen left map-side type=0 ignored after settlement_exit prefer_kept.
+     * while hangup is still armed between fights.  Idle map-side type=0
+     * with nothing to clear → empty-ack (no tip).
      */
-    if (!inBattle && !hangupCancelOk)
-        return 0;
+    if (!inBattle && type == 0 && !hangupCancelOk)
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[info][network] mock_battle_auto11_flag type=0 "
+               "reason=no-prefer-no-hangup action=empty-ack "
+               "evidence=reject-notice-avoid\n");
+        vm_autotest_note("mock_battle_auto11_flag type=0 "
+                         "response=empty-ack evidence=map-idle-type0\n");
+        return pos;
+    }
 
     if (type == 1)
     {
@@ -12839,12 +12851,14 @@ static u32 vm_net_mock_build_battle_auto11_flag_response(const u8 *request, u32 
         u32 seedOperate = 0;
         u32 hangupField = 0;
 
-        if (!inBattle)
-            return 0;
         /*
          * Optional Pixi fields (CBE omits both):
          *   Operate → remember LastOperate for poll synth
          *   hangup=0 → prefer without HangupLoop / auto-encounter
+         *
+         * Map-side type=1 is valid: Pixi re-arms prefer after settle /
+         * soft-reload / hangup start before the session is armed again.
+         * Seed prefer + Operate; ACK flag only — do not arm synth off-map.
          */
         if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
                                                "Operate", &seedOperate))
@@ -12883,85 +12897,102 @@ static u32 vm_net_mock_build_battle_auto11_flag_response(const u8 *request, u32 
             g_mockBattleAutoPreferNoHangup = 1;
         else
             g_mockBattleAutoPreferNoHangup = 0;
-        /*
-         * Same in-fight cast machine as hangup/challenge start:
-         *   prefer=1 + HangupStyleFlagOk + arm poll synth → auto_choose_operate
-         * Do NOT inline operate-only on this 4/11 reply (hangup never does).
-         * Only encounter entry differs: manual 4/1 vs hangup timed start.
-         */
         g_mockBattleAutoPrefer = 1;
-        if (vm_net_mock_active_session_in_team_battle())
-            vm_net_mock_battle_auto_pull_team_vitals();
-        g_mockBattleAutoHangupStyleFlagOk = 1;
-        g_mockBattleAutoSuppressNext12 = 1;
-        g_mockBattleAutoFlagPendingArmed = 0;
-        g_mockBattleAutoFlagPendingNotBeforeMs = 0;
-        /*
-         * Party softkey hangup never reaches the server (client tip).  Leader
-         * turning auto on in a team fight arms the same HangupLoop* re-entry
-         * that button hangup would have used.  Pixi hangup=0 skips this.
-         */
-        if (vm_net_mock_active_session_in_team_battle() &&
-            !vm_mock_service_active_session_team_encounter_blocked() &&
-            g_mockHangupLoopActive == 0 &&
-            g_mockBattleAutoPreferNoHangup == 0)
+        if (!inBattle)
         {
-            g_mockHangupLoopActive = 1;
-            g_mockHangupLoopScheduleAfterExit = 0;
-            g_mockHangupLoopPendingArmed = 0;
-            g_mockHangupLoopNotBeforeMs = 0;
-            g_mockHangupStopAfterBattle = 0;
-            /* GBK: 已开始挂机 */
-            {
-                static const char startHangupGbk[] =
-                    "\xd2\xd1\xbf\xaa\xca\xbc\xb9\xd2\xbb\xfa";
-                (void)vm_net_mock_hangup_append_system_chat_object(
-                    out, outCap, &pos, &objectCount, startHangupGbk);
-            }
             printf("[info][network] mock_battle_auto11_flag type=1 "
-                   "action=team-leader-hangup-arm "
-                   "evidence=client-blocks-party-hangup-button\n");
-        }
-        if (vm_net_mock_battle_auto_in_turn_gap())
-        {
-            u32 nowMs = scheduler_get_tick_ms();
-
-            if (nowMs < g_mockBattleAutoNextActNotBeforeMs)
-                remainMs = g_mockBattleAutoNextActNotBeforeMs - nowMs;
-            g_mockBattleAutoPendingArmed = 1;
-            printf("[info][network] mock_battle_auto11_flag type=1 "
-                   "action=hangup-style-arm defer remain_ms=%u actions_last=%u "
-                   "armed=%u enemyhp=%u rolehp=%u prefer=1 pending=1 "
-                   "hangup_style=1 team=%u hangup=%u "
-                   "evidence=same-cast-machine-as-hangup\n",
-                   remainMs,
-                   g_mockBattleLastRoundActionCount,
-                   g_mockBattleOperateSessionArmed ? 1 : 0,
-                   g_mockBattleEnemyHpCurrent,
-                   g_mockBattleRoleHpCurrent,
-                   vm_net_mock_active_session_in_team_battle() ? 1 : 0,
-                   g_mockHangupLoopActive ? 1 : 0);
+                   "action=map-side-prefer-seed last=%u operate=%u "
+                   "prefer=1 hangup_style=0 nohangup=%u "
+                   "evidence=reject-notice-avoid+cross-fight-rearm\n",
+                   g_mockBattleLastOperateValid ? 1 : 0,
+                   g_mockBattleLastOperateValid ? g_mockBattleLastOperate : 0,
+                   g_mockBattleAutoPreferNoHangup ? 1 : 0);
+            vm_autotest_note("mock_battle_auto11_flag type=1 prefer=1 "
+                             "response=4/11 map-side-prefer-seed "
+                             "evidence=reject-notice-avoid\n");
+            /* Fall through: ACK 4/11 type=1 (flag-ack shape). */
         }
         else
         {
-            vm_net_mock_battle_auto_arm_pending("auto11-hangup-style");
-            printf("[info][network] mock_battle_auto11_flag type=1 "
-                   "action=hangup-style-arm last=%u operate=%u armed=%u "
-                   "enemyhp=%u rolehp=%u prefer=1 pending=%u hangup_style=1 "
-                   "team=%u hangup=%u evidence=same-cast-machine-as-hangup\n",
-                   g_mockBattleLastOperateValid ? 1 : 0,
-                   g_mockBattleLastOperateValid ? g_mockBattleLastOperate : 0,
-                   g_mockBattleOperateSessionArmed ? 1 : 0,
-                   g_mockBattleEnemyHpCurrent,
-                   g_mockBattleRoleHpCurrent,
-                   g_mockBattleAutoPendingArmed ? 1 : 0,
-                   vm_net_mock_active_session_in_team_battle() ? 1 : 0,
-                   g_mockHangupLoopActive ? 1 : 0);
+            /*
+             * Same in-fight cast machine as hangup/challenge start:
+             *   prefer=1 + HangupStyleFlagOk + arm poll synth → auto_choose_operate
+             * Do NOT inline operate-only on this 4/11 reply (hangup never does).
+             * Only encounter entry differs: manual 4/1 vs hangup timed start.
+             */
+            if (vm_net_mock_active_session_in_team_battle())
+                vm_net_mock_battle_auto_pull_team_vitals();
+            g_mockBattleAutoHangupStyleFlagOk = 1;
+            g_mockBattleAutoSuppressNext12 = 1;
+            g_mockBattleAutoFlagPendingArmed = 0;
+            g_mockBattleAutoFlagPendingNotBeforeMs = 0;
+            /*
+             * Party softkey hangup never reaches the server (client tip).  Leader
+             * turning auto on in a team fight arms the same HangupLoop* re-entry
+             * that button hangup would have used.  Pixi hangup=0 skips this.
+             */
+            if (vm_net_mock_active_session_in_team_battle() &&
+                !vm_mock_service_active_session_team_encounter_blocked() &&
+                g_mockHangupLoopActive == 0 &&
+                g_mockBattleAutoPreferNoHangup == 0)
+            {
+                g_mockHangupLoopActive = 1;
+                g_mockHangupLoopScheduleAfterExit = 0;
+                g_mockHangupLoopPendingArmed = 0;
+                g_mockHangupLoopNotBeforeMs = 0;
+                g_mockHangupStopAfterBattle = 0;
+                /* GBK: 已开始挂机 */
+                {
+                    static const char startHangupGbk[] =
+                        "\xd2\xd1\xbf\xaa\xca\xbc\xb9\xd2\xbb\xfa";
+                    (void)vm_net_mock_hangup_append_system_chat_object(
+                        out, outCap, &pos, &objectCount, startHangupGbk);
+                }
+                printf("[info][network] mock_battle_auto11_flag type=1 "
+                       "action=team-leader-hangup-arm "
+                       "evidence=client-blocks-party-hangup-button\n");
+            }
+            if (vm_net_mock_battle_auto_in_turn_gap())
+            {
+                u32 nowMs = scheduler_get_tick_ms();
+
+                if (nowMs < g_mockBattleAutoNextActNotBeforeMs)
+                    remainMs = g_mockBattleAutoNextActNotBeforeMs - nowMs;
+                g_mockBattleAutoPendingArmed = 1;
+                printf("[info][network] mock_battle_auto11_flag type=1 "
+                       "action=hangup-style-arm defer remain_ms=%u actions_last=%u "
+                       "armed=%u enemyhp=%u rolehp=%u prefer=1 pending=1 "
+                       "hangup_style=1 team=%u hangup=%u "
+                       "evidence=same-cast-machine-as-hangup\n",
+                       remainMs,
+                       g_mockBattleLastRoundActionCount,
+                       g_mockBattleOperateSessionArmed ? 1 : 0,
+                       g_mockBattleEnemyHpCurrent,
+                       g_mockBattleRoleHpCurrent,
+                       vm_net_mock_active_session_in_team_battle() ? 1 : 0,
+                       g_mockHangupLoopActive ? 1 : 0);
+            }
+            else
+            {
+                vm_net_mock_battle_auto_arm_pending("auto11-hangup-style");
+                printf("[info][network] mock_battle_auto11_flag type=1 "
+                       "action=hangup-style-arm last=%u operate=%u armed=%u "
+                       "enemyhp=%u rolehp=%u prefer=1 pending=%u hangup_style=1 "
+                       "team=%u hangup=%u evidence=same-cast-machine-as-hangup\n",
+                       g_mockBattleLastOperateValid ? 1 : 0,
+                       g_mockBattleLastOperateValid ? g_mockBattleLastOperate : 0,
+                       g_mockBattleOperateSessionArmed ? 1 : 0,
+                       g_mockBattleEnemyHpCurrent,
+                       g_mockBattleRoleHpCurrent,
+                       g_mockBattleAutoPendingArmed ? 1 : 0,
+                       vm_net_mock_active_session_in_team_battle() ? 1 : 0,
+                       g_mockHangupLoopActive ? 1 : 0);
+            }
+            vm_autotest_note("mock_battle_auto11_flag type=1 prefer=1 "
+                             "response=4/11 hangup-style-arm "
+                             "evidence=same-cast-machine-as-hangup\n");
+            /* Fall through: ACK 4/11 type=1 (flag-ack shape). */
         }
-        vm_autotest_note("mock_battle_auto11_flag type=1 prefer=1 "
-                         "response=4/11 hangup-style-arm "
-                         "evidence=same-cast-machine-as-hangup\n");
-        /* Fall through: ACK 4/11 type=1 (flag-ack shape). */
     }
     else
     {
@@ -13863,27 +13894,63 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
             u32 wireId = reqId != 0 ? reqId : requestedEnemyId;
             u32 remapped = vm_net_mock_sce_combat_spawn_remap_battle_enemy(
                 scene, wireId, reqPosX, reqPosY);
-            if (remapped != 0)
-                requestedEnemyId = remapped;
-            else if (wireId != 0)
-                requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(wireId);
-            sceneMonsterIndex = reqIndex < 25 ? reqIndex : 0;
-            sceneMonsterPosX = reqPosX;
-            sceneMonsterPosY = reqPosY;
-            hangupMoveinfoWireId = wireId != 0 ? wireId : requestedEnemyId;
-            useSceneMonsterStart = true;
-            targetSource = "request-live-node";
-            if (activeSession != NULL &&
-                vm_net_mock_scene_name_is_safe(scene))
+            u32 worldBossId = vm_mock_world_boss_configured_monster_id();
+            u32 autoEnemyKeep = requestedEnemyId;
+            /*
+             * Hangup must never open world-boss combat (manual collide/claim
+             * only). Strip world-boss runtime remap; if the client nearest
+             * node is the boss overlay itself, keep automonster.dsh enemy.
+             */
+            if (remapped != 0 && worldBossId != 0 && remapped == worldBossId)
             {
-                activeSession->lastSceneMonsterLiveValid = true;
-                snprintf(activeSession->lastSceneMonsterLiveScene,
-                         sizeof(activeSession->lastSceneMonsterLiveScene),
-                         "%s", scene);
-                activeSession->lastSceneMonsterLiveActorId = hangupMoveinfoWireId;
-                activeSession->lastSceneMonsterLiveIndex = sceneMonsterIndex;
-                activeSession->lastSceneMonsterLiveX = sceneMonsterPosX;
-                activeSession->lastSceneMonsterLiveY = sceneMonsterPosY;
+                printf("[info][network] mock_hangup_skip_world_boss "
+                       "scene=%s wire=%u pos=(%u,%u) boss=%u "
+                       "evidence=hangup-excludes-world-boss\n",
+                       scene ? scene : "-", wireId, reqPosX, reqPosY,
+                       worldBossId);
+                remapped = 0;
+            }
+            if (worldBossId != 0 &&
+                (wireId == worldBossId ||
+                 wireId == 0x70ffffffu /* Pixi WORLD_BOSS_OVERLAY_ID */))
+            {
+                printf("[info][network] mock_hangup_skip_world_boss "
+                       "scene=%s wire=%u pos=(%u,%u) boss=%u keep_auto=%u "
+                       "action=keep-automonster "
+                       "evidence=hangup-excludes-world-boss\n",
+                       scene ? scene : "-", wireId, reqPosX, reqPosY,
+                       worldBossId, autoEnemyKeep);
+                requestedEnemyId = autoEnemyKeep;
+                /* Do not bind live-node to boss overlay tile. */
+            }
+            else
+            {
+                if (remapped != 0)
+                    requestedEnemyId = remapped;
+                else if (wireId != 0)
+                    requestedEnemyId =
+                        vm_net_mock_normalize_battle_enemy_id(wireId);
+                sceneMonsterIndex = reqIndex < 25 ? reqIndex : 0;
+                sceneMonsterPosX = reqPosX;
+                sceneMonsterPosY = reqPosY;
+                hangupMoveinfoWireId =
+                    wireId != 0 ? wireId : requestedEnemyId;
+                useSceneMonsterStart = true;
+                targetSource = "request-live-node";
+                if (activeSession != NULL &&
+                    vm_net_mock_scene_name_is_safe(scene))
+                {
+                    activeSession->lastSceneMonsterLiveValid = true;
+                    snprintf(activeSession->lastSceneMonsterLiveScene,
+                             sizeof(activeSession->lastSceneMonsterLiveScene),
+                             "%s", scene);
+                    activeSession->lastSceneMonsterLiveActorId =
+                        hangupMoveinfoWireId;
+                    activeSession->lastSceneMonsterLiveIndex =
+                        sceneMonsterIndex;
+                    activeSession->lastSceneMonsterLiveX = sceneMonsterPosX;
+                    activeSession->lastSceneMonsterLiveY = sceneMonsterPosY;
+                }
             }
             printf("[info][network] mock_hangup_battle_request_live "
                    "id=%u index=%u pos=(%u,%u) operate=%u enemy=%u "
@@ -13920,12 +13987,21 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
             activeSession->lastSceneMonsterLiveScene, liveWire,
             activeSession->lastSceneMonsterLiveX,
             activeSession->lastSceneMonsterLiveY);
+        u32 worldBossId = vm_mock_world_boss_configured_monster_id();
+        if (worldBossId != 0 && liveRemap == worldBossId)
+            liveRemap = 0;
+        if (worldBossId != 0 &&
+            (liveWire == worldBossId || liveWire == 0x70ffffffu ||
+             requestedEnemyId == worldBossId))
+        {
+            /* Hangup: ignore boss live-node; keep automonster enemy. */
+        }
         /*
          * Challenge stores the ParseMinfo-safe wire id on the live node.
          * Hangup automonster / instance bind may request the remapped catalog
          * id (#203).  Match either wire==requested or remap(wire)==requested.
          */
-        if (liveWire == requestedEnemyId || liveRemap == requestedEnemyId)
+        else if (liveWire == requestedEnemyId || liveRemap == requestedEnemyId)
         {
             sceneMonsterIndex = activeSession->lastSceneMonsterLiveIndex;
             sceneMonsterPosX = activeSession->lastSceneMonsterLiveX;
@@ -14626,6 +14702,29 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                      bossEnemyId != 0)
                 requestedEnemyId = bossEnemyId;
         }
+        {
+            u32 worldBossId = vm_mock_world_boss_configured_monster_id();
+            /*
+             * Manual world-boss fight must paint Boss catalog actor (not the
+             * nearby outdoor trash wire used for map collide). Force subtype-10
+             * enemy template from remapped monsterId.
+             */
+            if (worldBossId != 0 && requestedEnemyId == worldBossId)
+            {
+                useSceneMonsterStart = false;
+                battleStartSubtype = 10;
+                seedSceneMonsterMoveinfo = false;
+                prefillEnemyTemplate = true;
+                moveinfoEnemyId = worldBossId;
+                sceneMonsterTargetSource = "world-boss-catalog";
+                printf("[info][network] mock_challenge_world_boss_form "
+                       "scene=%s wire=%u boss=%u pos=(%u,%u) "
+                       "action=subtype10-catalog-actor "
+                       "evidence=manual-world-boss-appearance\n",
+                       remapScene ? remapScene : "-", wireEnemyId, worldBossId,
+                       posx, posy);
+            }
+        }
         if (!forceNonSceneStart && wireEnemyId != 0 && requestedEnemyId == 0)
         {
             /* GBK: 刷怪绑定失败，已拒绝按线号开战。 */
@@ -14687,7 +14786,8 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                 activeSession->lastSceneMonsterLiveY = posy;
             }
         }
-        moveinfoEnemyId = wireEnemyId;
+        if (moveinfoEnemyId == 0)
+            moveinfoEnemyId = wireEnemyId;
     }
     /* Scene-monster start: clear leftover 斗/banner before subtype-5. */
     if (!forceNonSceneStart && useSceneMonsterStart)

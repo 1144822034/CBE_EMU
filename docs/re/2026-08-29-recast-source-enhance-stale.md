@@ -44,8 +44,9 @@ Wire 已正确下发源 `enhance=0`，但本地合并用 `a || b` 把 **0 当成
 
 1. `protocolExtras.ts`：7/7 与 17/1↔grid 合并以 wire `enhance` 为准（含 0）；
    `enhance===0` 时不再用 `preferEnhanceAttrs` 复活旧洗练词条。
-2. `GameSession.applyBagEquipDurability`：同上；仅在 `wireEnhance>0` 时保留
-   截断 extras 的洗练属性。
+2. `GameSession.applyBagEquipDurability`：同上；仅在 `wireEnhance>0` 时用
+   `preferEnhanceAttrs` 补截断 extras。`enhance===0` 仍保留 **wire** 里程碑
+   （默认档 / 首获 seed）；勿整段丢弃（见 `2026-09-12-enhance-plus1-default-attrs-look-random.md`）。
 3. `enhanceTransferConfirm` 成功后 `applyEnhanceTransferBagLevels`：按
    `29/6` 的 `curlevels/curleveld` 写源/目标（对齐 CBE `0x010287C0`）。
 

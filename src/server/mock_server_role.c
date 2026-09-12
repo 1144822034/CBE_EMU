@@ -2480,8 +2480,108 @@ static bool vm_mock_service_account_copy_password(const char *username,
 
 enum
 {
-    VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT = 3
+    VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT_DEFAULT = 3,
+    VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT_MAX = 9999
 };
+
+typedef struct
+{
+    u32 dailyLimit;
+} vm_mock_service_register_config;
+
+static vm_mock_service_register_config g_vm_mock_service_register_config;
+static bool g_vm_mock_service_register_config_loaded = false;
+
+static void vm_mock_service_register_config_set_defaults(
+    vm_mock_service_register_config *cfg)
+{
+    if (cfg == NULL)
+        return;
+    cfg->dailyLimit = VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT_DEFAULT;
+}
+
+static bool vm_mock_service_register_config_row(void *contextValue,
+                                                unsigned int columnCount,
+                                                const char *const *values,
+                                                const size_t *lengths)
+{
+    vm_mock_service_register_config *cfg =
+        (vm_mock_service_register_config *)contextValue;
+    u32 limit = VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT_DEFAULT;
+
+    (void)columnCount;
+    if (cfg == NULL || values == NULL || lengths == NULL || values[0] == NULL)
+        return false;
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &limit))
+        return false;
+    if (limit > VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT_MAX)
+        limit = VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT_MAX;
+    cfg->dailyLimit = limit;
+    return true;
+}
+
+static bool vm_mock_service_register_config_ensure_table(void)
+{
+    static bool ready = false;
+
+    if (ready)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_registration_config ("
+            "id TINYINT UNSIGNED NOT NULL,"
+            "daily_limit INT UNSIGNED NOT NULL DEFAULT 3,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(id)) ENGINE=InnoDB"))
+        return false;
+    if (!vm_mysql_exec(
+            "INSERT IGNORE INTO server_registration_config (id,daily_limit) "
+            "VALUES (1,3)"))
+        return false;
+    ready = true;
+    return true;
+}
+
+static bool vm_mock_service_register_config_load(bool force)
+{
+    if (g_vm_mock_service_register_config_loaded && !force)
+        return true;
+    vm_mock_service_register_config_set_defaults(
+        &g_vm_mock_service_register_config);
+    if (!vm_mock_service_register_config_ensure_table())
+        return false;
+    (void)vm_mysql_query(
+        "SELECT daily_limit FROM server_registration_config WHERE id=1 LIMIT 1",
+        vm_mock_service_register_config_row,
+        &g_vm_mock_service_register_config);
+    g_vm_mock_service_register_config_loaded = true;
+    return true;
+}
+
+u32 vm_mock_service_register_daily_limit(void)
+{
+    (void)vm_mock_service_register_config_load(false);
+    return g_vm_mock_service_register_config.dailyLimit;
+}
+
+bool vm_mock_service_register_daily_limit_admin_save(u32 dailyLimit)
+{
+    char query[256];
+
+    if (dailyLimit > VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT_MAX)
+        return false;
+    if (!vm_mock_service_register_config_ensure_table())
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_registration_config (id,daily_limit) "
+             "VALUES (1,%u) ON DUPLICATE KEY UPDATE "
+             "daily_limit=VALUES(daily_limit)",
+             dailyLimit);
+    if (!vm_mysql_exec(query))
+        return false;
+    g_vm_mock_service_register_config_loaded = false;
+    return vm_mock_service_register_config_load(true);
+}
 
 static u32 vm_mock_service_local_day_ymd(void)
 {
@@ -2578,6 +2678,11 @@ static u32 vm_mock_service_register_daily_count(u32 dayYmd)
     return used;
 }
 
+u32 vm_mock_service_register_daily_used_today(void)
+{
+    return vm_mock_service_register_daily_count(vm_mock_service_local_day_ymd());
+}
+
 static void vm_mock_service_register_daily_release(void)
 {
     u32 dayYmd = vm_mock_service_local_day_ymd();
@@ -2598,22 +2703,25 @@ static bool vm_mock_service_register_daily_try_reserve(void)
     u32 dayYmd = vm_mock_service_local_day_ymd();
     u32 affected = 0;
     u32 count = 0;
+    u32 limit = vm_mock_service_register_daily_limit();
     char query[384];
 
     if (dayYmd == 0 || !vm_mock_service_register_daily_ensure_table())
+        return false;
+    if (limit == 0)
         return false;
 
     snprintf(query, sizeof(query),
              "INSERT INTO server_registration_daily(day_ymd,register_count) "
              "VALUES(%u,1) ON DUPLICATE KEY UPDATE "
              "register_count=IF(register_count<%u,register_count+1,register_count)",
-             dayYmd, VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT);
+             dayYmd, limit);
     if (!vm_mock_service_register_daily_exec_affected(query, &affected) ||
         affected == 0)
         return false;
 
     count = vm_mock_service_register_daily_count(dayYmd);
-    if (count == 0 || count > VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT)
+    if (count == 0 || count > limit)
     {
         vm_mock_service_register_daily_release();
         return false;
@@ -2681,7 +2789,7 @@ static bool vm_mock_service_account_register_user(const char *username,
            "daily_used=%u/%u\n",
            username ? username : "-", vm_mock_service_local_day_ymd(),
            vm_mock_service_register_daily_count(vm_mock_service_local_day_ymd()),
-           VM_MOCK_SERVICE_REGISTER_DAILY_LIMIT);
+           vm_mock_service_register_daily_limit());
     return true;
 }
 
@@ -10627,6 +10735,53 @@ static void vm_net_mock_copy_role_name(char *out, size_t outCap, const char *nam
         snprintf(out, outCap, "%s", vm_net_mock_default_role_name());
 }
 
+/*
+ * Global role-name uniqueness against account_roles (all accounts).
+ * excludeRoleId=0 checks every row; otherwise ignore that role_id (self-rename).
+ * Returns false on encode/query failure; takenOut true when another role owns name.
+ */
+static bool vm_net_mock_account_roles_name_taken(const char *nameGbk,
+                                                 u32 excludeRoleId,
+                                                 bool *takenOut)
+{
+    char nameHex[32 * 2 + 1];
+    char query[256];
+    size_t nameLen = 0;
+    vm_mock_mysql_authority_count_context ctx;
+
+    if (takenOut)
+        *takenOut = false;
+    if (nameGbk == NULL || nameGbk[0] == 0)
+        return false;
+    nameLen = strlen(nameGbk);
+    if (nameLen == 0 || nameLen >= 32u)
+        return false;
+    if (vm_mysql_hex_encode(nameGbk, nameLen, nameHex, sizeof(nameHex)) == 0)
+        return false;
+    memset(&ctx, 0, sizeof(ctx));
+    if (excludeRoleId != 0)
+    {
+        snprintf(query, sizeof(query),
+                 "SELECT COUNT(*) FROM account_roles WHERE role_name=X'%s' "
+                 "AND role_id<>%u",
+                 nameHex, excludeRoleId);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "SELECT COUNT(*) FROM account_roles WHERE role_name=X'%s'",
+                 nameHex);
+    }
+    if (!vm_mysql_query(query, vm_mock_mysql_authority_count_row, &ctx) ||
+        ctx.invalid || !ctx.found)
+    {
+        return false;
+    }
+    if (takenOut)
+        *takenOut = ctx.value != 0;
+    return true;
+}
+
 static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_create_request *request,
                                                   u32 *actorIdOut,
                                                   u8 *resultOut)
@@ -10648,6 +10803,37 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
         g_vm_net_mock_role_db.roleCount >= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
         return true;
+    }
+
+    /* result=2: 名已被注册 — account-local list + global account_roles. */
+    if (request->name[0] != 0)
+    {
+        bool nameTaken = false;
+        u32 i = 0;
+
+        for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            if (g_vm_net_mock_role_db.roles[i].name[0] != 0 &&
+                strcmp(g_vm_net_mock_role_db.roles[i].name, request->name) == 0)
+            {
+                if (resultOut)
+                    *resultOut = 2;
+                return true;
+            }
+        }
+        if (!vm_net_mock_account_roles_name_taken(request->name, 0, &nameTaken))
+        {
+            printf("[warn][network] mock_role_create_name_check_failed name=%s "
+                   "error=%s\n",
+                   request->name, vm_mysql_last_error());
+            return true; /* result stays 1 = create failed */
+        }
+        if (nameTaken)
+        {
+            if (resultOut)
+                *resultOut = 2;
+            return true;
+        }
     }
 
     actorId = vm_net_mock_role_db_next_role_id();
@@ -11975,7 +12161,9 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID ||
         itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
         itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
-        itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID)
+        itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
+        itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
+        itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID)
     {
         u32 freeSlots = role->backpackCapacity > itemCount
                             ? (u32)role->backpackCapacity - itemCount
@@ -11987,8 +12175,9 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                 : (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
                            itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
                            itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
-                           itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID
-                       ? VM_NET_MOCK_STAR_SKY_STONE_DURABILITY
+                           itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
+                           itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID
+                       ? VM_NET_MOCK_RENAME_CARD_DURABILITY
                        : VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY);
         const char *saveReason =
             itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID
@@ -12001,13 +12190,16 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                      ? "backpack-add-force-pk-proof"
                                      : (itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID
                                             ? "backpack-add-star-sky-stone"
-                                            : "backpack-add-warehouse-pass"))));
+                                            : (itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID
+                                                   ? "backpack-add-rename-card"
+                                                   : "backpack-add-warehouse-pass")))));
 
-        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石：耐久1，叠加入已有堆或新行。 */
+        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡：耐久1，叠加入已有堆或新行。 */
         if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
             itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
             itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
-            itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID)
+            itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
+            itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID)
         {
             vm_net_mock_backpack_item_state *existing =
                 vm_net_mock_role_find_backpack_item(role, itemId, 0);

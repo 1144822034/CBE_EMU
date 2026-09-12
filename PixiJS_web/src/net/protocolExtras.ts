@@ -164,6 +164,25 @@ export function buildMapTeleportConfirmedExitRequest(
   return b.finish();
 }
 
+/**
+ * Scene n_telestone free transfer after 16/4 arm: 16/2+16/3 without 7/1.
+ * Server confirmed-exit-combo accepts itemObjectLen=0 and defers 30/1.
+ */
+export function buildMapTeleportFreeExitRequest(
+  exitId: number,
+  type = 1,
+): Uint8Array {
+  const t = Math.max(1, type & 0xff);
+  const b = new WtBuilder();
+  b.object(1, 16, 2)
+    .u32("exitID", exitId >>> 0)
+    .u8("type", t);
+  b.object(1, 16, 3)
+    .u32("exitID", exitId >>> 0)
+    .u8("type", t);
+  return b.finish();
+}
+
 /** Teleport stone backpack id (ConsumeInventoryItem / mall 秘宝). */
 export const TELEPORT_STONE_ITEM_ID = 800;
 
@@ -1923,6 +1942,84 @@ export function parseStarSkyStoneWashResetResult(
     remaining,
     washCount,
     tiers: tiers.length ? tiers : undefined,
+  };
+}
+
+/** Pixi 自定义 852 角色改名卡 — 使用后输入新名。29/15. */
+export const RENAME_CARD_ITEM_ID = 852;
+
+export function isRenameCard(itemId: number): boolean {
+  return (itemId | 0) === RENAME_CARD_ITEM_ID;
+}
+
+export type RenameCardResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  cardSeq: number;
+  remaining: number;
+  name: string;
+};
+
+export function buildRenameCardRequest(
+  cardSeq: number,
+  name: string,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 15)
+    .u16("cardseq", cardSeq & 0xffff)
+    .string("name", name);
+  return b.finish();
+}
+
+function renameCardFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "改名卡不足";
+    case 3:
+      return "请输入角色名";
+    case 4:
+      return "角色名过长";
+    case 5:
+      return "与当前名称相同";
+    case 6:
+      return "名已被注册";
+    case 7:
+      return "扣除改名卡失败";
+    case 8:
+      return "改名保存失败";
+    default:
+      return "改名失败";
+  }
+}
+
+export function parseRenameCardResult(
+  packet: WtPacket,
+): RenameCardResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 15);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const cardSeq = fieldU32(obj, "cardseq");
+  const remaining = fieldU32(obj, "remaining");
+  const nameRaw = findField(obj, "name");
+  const name = nameRaw ? decodeFieldString(nameRaw).replace(/\0+$/g, "") : "";
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: name ? `角色名已改为${name}` : "改名成功",
+      cardSeq,
+      remaining,
+      name,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: renameCardFailMessage(result),
+    cardSeq,
+    remaining,
+    name,
   };
 }
 

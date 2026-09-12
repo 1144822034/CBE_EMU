@@ -191,7 +191,7 @@ export async function paintHangupPanel(
     y,
     tex.battles,
     "战斗场次",
-    `${tally.completed}/${tally.maximum}`,
+    `${tally.completed}`,
   );
   paintStat(
     rightX,
@@ -233,7 +233,7 @@ export async function paintHangupPanel(
     ? {
         time: formatBattleInsightRemainMmSs(remainSec),
         exp: "+20%",
-        battles: "200",
+        battles: "不限次",
       }
     : { time: "00:00", exp: "+0%", battles: "0" };
 

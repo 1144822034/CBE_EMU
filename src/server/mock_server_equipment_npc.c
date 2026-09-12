@@ -6641,6 +6641,222 @@ static vm_mock_service_client_session *vm_mock_service_get_active_client_session
     return vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
 }
 
+/*
+ * PixiJS-only 角色改名卡: 1/29/15 { cardseq, name }.
+ * Consume 1× item 852 → set role->name + onlineRoleName (GBK ≤31).
+ * result: 1=ok, 2=card missing/wrong, 3=empty name, 4=too long,
+ *         5=same name, 6=name taken, 7=consume failed, 8=persist failed.
+ * Placed after session struct so onlineRoleName sync can dereference fields.
+ */
+static u32 vm_net_mock_build_rename_card_response(const u8 *request,
+                                                   u32 requestLen, u8 *out,
+                                                   u32 outCap)
+{
+    u32 offset = 4;
+    u32 cardSeqValue = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u16 cardSeq = 0;
+    u32 cardRemaining = 0;
+    char newName[32];
+    char before[32];
+    size_t nameLen = 0;
+    const char *reason = "ok";
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *card = NULL;
+    vm_mock_service_client_session *session = NULL;
+    u32 i = 0;
+
+    newName[0] = 0;
+    before[0] = 0;
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 15 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "cardseq", &cardSeqValue) ||
+        cardSeqValue == 0 || cardSeqValue > 0xffffu)
+    {
+        return 0;
+    }
+    cardSeq = (u16)cardSeqValue;
+    if (!vm_net_mock_get_object_string_field(object.payload, object.payloadLen,
+                                              "name", newName, sizeof(newName)))
+    {
+        result = 3;
+        reason = "missing-name";
+    }
+    else
+    {
+        nameLen = strlen(newName);
+        while (nameLen > 0 &&
+               (newName[nameLen - 1] == ' ' || newName[nameLen - 1] == '\t'))
+        {
+            newName[--nameLen] = 0;
+        }
+        {
+            size_t lead = 0;
+            while (newName[lead] == ' ' || newName[lead] == '\t')
+                ++lead;
+            if (lead > 0)
+            {
+                memmove(newName, newName + lead, nameLen - lead + 1);
+                nameLen -= lead;
+            }
+        }
+        if (nameLen == 0)
+        {
+            result = 3;
+            reason = "empty-name";
+        }
+        else if (nameLen >= 32u)
+        {
+            result = 4;
+            reason = "name-too-long";
+        }
+    }
+
+    role = vm_net_mock_active_role();
+    if (result == 1 && role == NULL)
+    {
+        result = 2;
+        reason = "no-role";
+    }
+    else if (result == 1)
+    {
+        vm_net_mock_role_normalize_backpack(role);
+        card = vm_net_mock_role_find_backpack_item(role, 0, cardSeq);
+        if (card == NULL || card->count == 0 ||
+            card->itemId != VM_NET_MOCK_RENAME_CARD_ITEM_ID)
+        {
+            result = 2;
+            reason = "card-not-found";
+        }
+        else if (strcmp(role->name, newName) == 0)
+        {
+            result = 5;
+            reason = "same-name";
+        }
+        else
+        {
+            bool nameTaken = false;
+
+            for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+            {
+                if (g_vm_net_mock_role_db.roles[i].roleId == role->roleId)
+                    continue;
+                if (g_vm_net_mock_role_db.roles[i].name[0] != 0 &&
+                    strcmp(g_vm_net_mock_role_db.roles[i].name, newName) == 0)
+                {
+                    result = 6;
+                    reason = "name-taken-account";
+                    break;
+                }
+            }
+            if (result == 1)
+            {
+                if (!vm_net_mock_account_roles_name_taken(newName, role->roleId,
+                                                          &nameTaken))
+                {
+                    result = 8;
+                    reason = "name-check-failed";
+                }
+                else if (nameTaken)
+                {
+                    result = 6;
+                    reason = "name-taken-global";
+                }
+            }
+            if (result == 1)
+            {
+                session = g_vm_mock_service_client_sessions;
+                while (session != NULL)
+                {
+                    if (session->onlineRoleId != 0 &&
+                        session->onlineRoleId != role->roleId &&
+                        session->onlineRoleName[0] != 0 &&
+                        strcmp(session->onlineRoleName, newName) == 0)
+                    {
+                        result = 6;
+                        reason = "name-taken-online";
+                        break;
+                    }
+                    session = session->next;
+                }
+            }
+        }
+    }
+
+    if (result == 1 && role != NULL && card != NULL)
+    {
+        snprintf(before, sizeof(before), "%s", role->name);
+        if (!vm_net_mock_role_consume_backpack_item(
+                role, VM_NET_MOCK_RENAME_CARD_ITEM_ID, cardSeq, 1u,
+                &cardRemaining))
+        {
+            result = 7;
+            reason = "consume-failed";
+        }
+        else
+        {
+            memset(role->name, 0, sizeof(role->name));
+            memcpy(role->name, newName, nameLen);
+            role->name[nameLen] = 0;
+            if (!vm_net_mock_role_db_save_role("rename-card", role->roleId))
+            {
+                snprintf(role->name, sizeof(role->name), "%s", before);
+                (void)vm_net_mock_role_add_backpack_item_to_role(
+                    role, VM_NET_MOCK_RENAME_CARD_ITEM_ID, 1, 0, NULL,
+                    "rename-card-rollback", NULL, 0);
+                cardRemaining += 1u;
+                result = 8;
+                reason = "persist-failed";
+            }
+            else
+            {
+                session = vm_mock_service_get_active_client_session();
+                if (session != NULL && session->onlineRoleId == role->roleId)
+                {
+                    snprintf(session->onlineRoleName,
+                             sizeof(session->onlineRoleName), "%s", role->name);
+                }
+                vm_net_mock_role_mark_inventory_dirty("rename-card");
+                reason = "rename-ok";
+            }
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 15,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "cardseq", cardSeq) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining",
+                                    cardRemaining) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "name",
+                                       result == 1 ? newName : ""))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_rename_card card_seq=%u remain=%u result=%u "
+           "reason=%s name=%s before=%s resp=29/15\n",
+           cardSeq, cardRemaining, result, reason,
+           result == 1 ? newName : "-", before[0] ? before : "-");
+    vm_autotest_note(
+        "mock_rename_card card=%u result=%u reason=%s evidence=pixijs-only-29/15\n",
+        cardSeq, result, reason);
+    return pos;
+}
+
 /* GBK: 请更新客户端 */
 static const char g_vm_net_mock_login_update_required_gbk[] =
     "\xc7\xeb\xb8\xfc\xd0\xc2\xbf\xcd\xbb\xa7\xb6\xcb";
@@ -13183,6 +13399,26 @@ static bool vm_mock_service_account_set_role_name(const char *accountId,
             *messageOut = "role not found";
         vm_mock_service_close_account_role_db_for_management(state, true);
         return false;
+    }
+    if (strcmp(role->name, nameGbk) != 0)
+    {
+        bool nameTaken = false;
+
+        if (!vm_net_mock_account_roles_name_taken(nameGbk, role->roleId,
+                                                  &nameTaken))
+        {
+            if (messageOut)
+                *messageOut = "角色名检查失败";
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return false;
+        }
+        if (nameTaken)
+        {
+            if (messageOut)
+                *messageOut = "角色名已被占用";
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return false;
+        }
     }
     snprintf(before, sizeof(before), "%s", role->name);
     memset(role->name, 0, sizeof(role->name));

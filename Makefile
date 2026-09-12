@@ -88,7 +88,8 @@ $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_serve
 	src/web_admin_chests.inc.c \
 	src/web_admin_enhance.inc.c src/web_admin_combat.inc.c src/web_admin_arena.inc.c \
 	src/web_admin_world_boss.inc.c src/web_admin_maintenance.inc.c src/web_admin_ladder.inc.c \
-	src/web_admin_activities.inc.c \
+	src/web_admin_activities.inc.c src/web_admin_gateways.inc.c \
+	src/server/mock_server_gateway_zones.inc.c \
 	src/server/mock_server_arena_wager.inc.c \
 	src/server/mock_server_enhance_config.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
@@ -142,7 +143,8 @@ $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_serve
 	src/web_admin_chests.inc.c src/web_admin_enhance.inc.c src/web_admin_combat.inc.c \
 	src/web_admin_arena.inc.c \
 	src/web_admin_world_boss.inc.c src/web_admin_maintenance.inc.c src/web_admin_ladder.inc.c \
-	src/web_admin_activities.inc.c \
+	src/web_admin_activities.inc.c src/web_admin_gateways.inc.c \
+	src/server/mock_server_gateway_zones.inc.c \
 	src/server/mock_server_arena_wager.inc.c \
 	src/server/mock_server_enhance_config.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h

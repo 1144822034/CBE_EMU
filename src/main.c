@@ -7353,6 +7353,167 @@ static void vm_autotest_note(const char *fmt, ...)
     fflush(g_autotestStateFile);
 }
 
+/*
+ * Optional mock-server.conf (key=value). Applied only for env vars that are
+ * still unset, so priority stays: CLI > env > config file > defaults.
+ * See bin/mock-server.conf.
+ */
+static void vm_mock_config_trim(char *text)
+{
+    char *start;
+    size_t len;
+
+    if (text == NULL)
+        return;
+    start = text;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')
+        ++start;
+    if (start != text)
+        memmove(text, start, strlen(start) + 1);
+    len = strlen(text);
+    while (len > 0 &&
+           (text[len - 1] == ' ' || text[len - 1] == '\t' ||
+            text[len - 1] == '\r' || text[len - 1] == '\n'))
+    {
+        text[len - 1] = 0;
+        --len;
+    }
+}
+
+static int vm_mock_config_env_unset(const char *name)
+{
+    const char *value = getenv(name);
+    return value == NULL || value[0] == 0;
+}
+
+static void vm_mock_config_setenv_if_unset(const char *name, const char *value)
+{
+    if (name == NULL || name[0] == 0 || value == NULL ||
+        !vm_mock_config_env_unset(name))
+        return;
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 0);
+#endif
+}
+
+static const char *vm_mock_config_env_name_for_key(const char *key)
+{
+    if (key == NULL || key[0] == 0)
+        return NULL;
+    if (strcmp(key, "service_bind") == 0 ||
+        strcmp(key, "mock_service_bind") == 0)
+        return "CBE_MOCK_SERVICE_BIND";
+    if (strcmp(key, "service_port") == 0 ||
+        strcmp(key, "mock_service_port") == 0)
+        return "CBE_MOCK_SERVICE_PORT";
+    if (strcmp(key, "admin_bind") == 0 || strcmp(key, "mock_admin_bind") == 0)
+        return "CBE_MOCK_ADMIN_BIND";
+    if (strcmp(key, "admin_port") == 0 || strcmp(key, "mock_admin_port") == 0)
+        return "CBE_MOCK_ADMIN_PORT";
+    if (strcmp(key, "mysql_host") == 0)
+        return "CBE_MYSQL_HOST";
+    if (strcmp(key, "mysql_port") == 0)
+        return "CBE_MYSQL_PORT";
+    if (strcmp(key, "mysql_user") == 0)
+        return "CBE_MYSQL_USER";
+    if (strcmp(key, "mysql_password") == 0)
+        return "CBE_MYSQL_PASSWORD";
+    if (strcmp(key, "mysql_database") == 0)
+        return "CBE_MYSQL_DATABASE";
+    if (strcmp(key, "resource_root") == 0)
+        return "CBE_RESOURCE_ROOT";
+    if (strncmp(key, "CBE_", 4) == 0)
+        return key;
+    return NULL;
+}
+
+static int vm_mock_config_load_file(const char *path)
+{
+    FILE *fp = NULL;
+    char line[512];
+    int applied = 0;
+
+    if (path == NULL || path[0] == 0)
+        return 0;
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        char *eq = NULL;
+        char *key = NULL;
+        char *value = NULL;
+        const char *envName = NULL;
+
+        vm_mock_config_trim(line);
+        if (line[0] == 0 || line[0] == '#' || line[0] == ';')
+            continue;
+        eq = strchr(line, '=');
+        if (eq == NULL)
+            continue;
+        *eq = 0;
+        key = line;
+        value = eq + 1;
+        vm_mock_config_trim(key);
+        vm_mock_config_trim(value);
+        envName = vm_mock_config_env_name_for_key(key);
+        if (envName == NULL || value[0] == 0)
+            continue;
+        if (!vm_mock_config_env_unset(envName))
+            continue;
+        vm_mock_config_setenv_if_unset(envName, value);
+        ++applied;
+    }
+    fclose(fp);
+    printf("[info][mock-service] config_file path=%s applied=%d "
+           "(env/cli still override)\n",
+           path, applied);
+    return 1;
+}
+
+static void vm_mock_config_apply(int argc, char *args[])
+{
+    const char *explicitPath = NULL;
+    static const char *defaults[] = {
+        "mock-server.conf",
+        "bin/mock-server.conf",
+    };
+    int i = 0;
+
+    if (argc > 0 && args != NULL)
+    {
+        for (i = 1; i < argc; ++i)
+        {
+            if (strncmp(args[i], "--mock-config=", 14) == 0 &&
+                args[i][14] != 0)
+            {
+                explicitPath = args[i] + 14;
+                break;
+            }
+        }
+    }
+    if (explicitPath == NULL)
+    {
+        const char *envPath = getenv("CBE_MOCK_CONFIG");
+        if (envPath != NULL && envPath[0] != 0)
+            explicitPath = envPath;
+    }
+    if (explicitPath != NULL)
+    {
+        if (!vm_mock_config_load_file(explicitPath))
+            printf("[warn][mock-service] config_file missing path=%s\n",
+                   explicitPath);
+        return;
+    }
+    for (i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); ++i)
+    {
+        if (vm_mock_config_load_file(defaults[i]))
+            return;
+    }
+}
+
 static void vm_mock_service_init_config(int argc, char *args[])
 {
 #ifdef CBE_CLIENT_ONLY
@@ -7445,6 +7606,9 @@ static void vm_mock_service_init_config(int argc, char *args[])
            explicitEndpoint ? "endpoint" :
            (listApplied ? "server-list" : "default"));
 #else
+    /* File defaults before getenv so unset keys pick up mock-server.conf. */
+    vm_mock_config_apply(argc, args);
+
     const char *envOnly = getenv("CBE_MOCK_SERVICE_ONLY");
     const char *envEndpoint = getenv("CBE_MOCK_SERVICE");
     const char *envBind = getenv("CBE_MOCK_SERVICE_BIND");

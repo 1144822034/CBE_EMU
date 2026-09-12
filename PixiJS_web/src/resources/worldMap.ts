@@ -228,8 +228,8 @@ export function neighborId(
 /**
  * Map UI may teleport to any selected node (item 800). DSH neighbor links can
  * be sparse — when the directed link is 0, pick the geometrically nearest
- * other node in that direction. Scene teleport-stone NPC (16/1) stays the
- * restricted destination list.
+ * other node in that direction. Scene teleport-stone NPC opens the same
+ * regional map for the current wMap only (free).
  */
 export function nearestNodeInDir<T extends { id: number; x: number; y: number }>(
   nodes: T[],

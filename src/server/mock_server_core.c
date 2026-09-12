@@ -4897,6 +4897,10 @@ enum
 #define VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID        849u
 #define VM_NET_MOCK_STAR_SKY_STONE_DURABILITY     1u
 #define VM_NET_MOCK_STAR_SKY_STONE_SHOP_PRICE     100u
+/* Pixi 自定义：角色改名卡 — 使用后输入新名；耐久1。避开雁门旧别名 850/851。 */
+#define VM_NET_MOCK_RENAME_CARD_ITEM_ID           852u
+#define VM_NET_MOCK_RENAME_CARD_DURABILITY        1u
+#define VM_NET_MOCK_RENAME_CARD_SHOP_PRICE        100u
 /* Initiator cooldown after a successful nearby force-PK start (or doll block). */
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC    (VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS / 1000u)

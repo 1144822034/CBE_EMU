@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS `server_registration_daily` (
   PRIMARY KEY (`day_ymd`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `server_registration_config` (
+  `id` TINYINT UNSIGNED NOT NULL,
+  `daily_limit` INT UNSIGNED NOT NULL DEFAULT 3,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+
+INSERT IGNORE INTO `server_registration_config` (`id`, `daily_limit`) VALUES (1, 3);
+
 CREATE TABLE IF NOT EXISTS `server_login_servers` (
   `server_id` INT UNSIGNED NOT NULL,
   `display_name` VARBINARY(31) NOT NULL,
@@ -108,6 +117,34 @@ INSERT IGNORE INTO `server_login_servers`
   (`server_id`, `display_name`, `status_label`, `display_color`, `sort_order`, `enabled`)
 VALUES
   (1, X'BDADBAFED2BBC7F8', X'CDC6BCF6', 16777215, 0, 1);
+
+-- Physical gateway zones (Pixi host-layer). Not title WT 1/1/12 rows.
+CREATE TABLE IF NOT EXISTS `server_gateway_zones` (
+  `zone_id` INT UNSIGNED NOT NULL,
+  `display_name` VARBINARY(63) NOT NULL,
+  `status_label` VARBINARY(63) NOT NULL,
+  `ws_url` VARBINARY(191) NOT NULL,
+  `account_web_url` VARBINARY(191) NOT NULL,
+  `sort_order` INT UNSIGNED NOT NULL DEFAULT 0,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `is_default` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`zone_id`),
+  KEY `idx_server_gateway_zones_visible` (`enabled`, `sort_order`, `zone_id`)
+) ENGINE=InnoDB;
+
+-- UTF-8: 江湖归来 / 推荐 / ws://192.1.1.1:19092. Empty-install seed only.
+INSERT IGNORE INTO `server_gateway_zones`
+  (`zone_id`, `display_name`, `status_label`, `ws_url`, `account_web_url`,
+   `sort_order`, `enabled`, `is_default`)
+VALUES
+  (1,
+   X'E6B19FE6B996E5BD92E69DA5',
+   X'E68EA8E88D90',
+   X'77733A2F2F3139322E312E312E313A3139303932',
+   X'',
+   0, 1, 1);
 
 CREATE TABLE IF NOT EXISTS `world_chat_messages` (
   `message_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -757,6 +794,11 @@ CREATE TABLE IF NOT EXISTS `server_enhance_milestones` (
   `attr_type` TINYINT UNSIGNED NOT NULL COMMENT '1力..10法力',
   `flag` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0值 1%',
   `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `value_q0` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '品质0默认档数值',
+  `value_q1` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '品质1默认档数值',
+  `value_q2` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '品质2默认档数值',
+  `value_q3` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '品质3默认档数值',
+  `value_q4` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '品质4默认档数值',
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`equip_slot`, `unlock_level`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

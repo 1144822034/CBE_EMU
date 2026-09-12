@@ -250,9 +250,11 @@ static void vm_mock_admin_append_tabs(vm_mock_admin_text *page, const char *acti
         {"ladder", "天梯"},
         {"fruit", "水果机"},
         {"guess", "猜猜看"},
+        {"auction", "拍卖行"},
         {"activities", "节日/跑环"},
         {"updates", "游戏内容更新管理"},
         {"servers", "服务器列表"},
+        {"gateways", "区服网关"},
         {"maintenance", "服务器维护"},
     };
     size_t i = 0;
@@ -6942,6 +6944,12 @@ static void vm_mock_admin_render_servers_page(char *response,
     }
 }
 
+static void vm_mock_admin_render_gateways_page(char *response,
+                                               size_t responseCap,
+                                               const char *query);
+static void vm_mock_admin_handle_gateway_zone_action(
+    vm_mock_service_socket client, const char *action, const char *body);
+
 static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
                                             const char *query);
 static void vm_mock_admin_handle_chest_action(vm_mock_service_socket client,
@@ -6992,6 +7000,11 @@ static void vm_mock_admin_render_guess_page(char *response, size_t responseCap,
 static void vm_mock_admin_handle_guess_action(vm_mock_service_socket client,
                                               const char *action,
                                               const char *body);
+static void vm_mock_admin_render_auction_page(char *response, size_t responseCap,
+                                              const char *query);
+static void vm_mock_admin_handle_auction_action(vm_mock_service_socket client,
+                                                const char *action,
+                                                const char *body);
 
 static void vm_mock_admin_render_mapedit_page(char *response,
                                               size_t responseCap,
@@ -7090,6 +7103,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_guess_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "auction") == 0)
+    {
+        vm_mock_admin_render_auction_page(response, responseCap, query);
+        return;
+    }
     if (strcmp(tab, "activities") == 0)
     {
         vm_mock_admin_render_activities_page(response, responseCap, query);
@@ -7098,6 +7116,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "servers") == 0)
     {
         vm_mock_admin_render_servers_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "gateways") == 0)
+    {
+        vm_mock_admin_render_gateways_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "maintenance") == 0)
@@ -7141,6 +7164,28 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
     vm_mock_admin_append_tabs(&page, "accounts");
+    {
+        u32 regLimit = vm_mock_service_register_daily_limit();
+        u32 regUsed = vm_mock_service_register_daily_used_today();
+
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\" style=\"margin-bottom:16px;flex:none\">"
+            "<h2>每日注册上限</h2>"
+            "<p class=\"sub\" style=\"margin-top:0\">全服玩家自助注册（网页/API）每日限额；"
+            "后台「创建账号」不受此限制。今日已用 <strong>%u</strong> / %u。"
+            "设为 0 表示禁止新注册。</p>"
+            "<form method=\"post\" action=\"/action\" "
+            "style=\"display:flex;flex-wrap:wrap;gap:10px;align-items:end;max-width:420px\">"
+            "<input type=\"hidden\" name=\"action\" value=\"save-registration-config\">"
+            "<label style=\"display:grid;gap:4px;flex:1;min-width:140px\">"
+            "<span style=\"font-size:12px;color:#667085\">每日名额</span>"
+            "<input type=\"number\" name=\"daily_limit\" min=\"0\" max=\"9999\" "
+            "value=\"%u\" required>"
+            "</label>"
+            "<button type=\"submit\">保存</button></form></section>",
+            regUsed, regLimit, regLimit);
+    }
     vm_mock_admin_text_appendf(
         &page,
         "<div class=\"grid\">"
@@ -8025,7 +8070,9 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
 #include "web_admin_ladder.inc.c"
 #include "web_admin_fruit.inc.c"
 #include "web_admin_guess.inc.c"
+#include "web_admin_auction.inc.c"
 #include "web_admin_activities.inc.c"
+#include "web_admin_gateways.inc.c"
 
 static bool vm_mock_admin_utf8_to_gbk_task_text(const char *utf8,
                                                 char *gbk,
@@ -9587,6 +9634,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         u32 rowCount = 0;
         bool found = false;
         bool enabled = true;
+        bool overridden = false;
 
         if (!vm_mock_admin_form_u32(body, "x", 0xffffu, &x) || x == 0 ||
             !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0)
@@ -9611,6 +9659,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
             {
                 seed = rows[i].seed;
                 enabled = rows[i].enabled;
+                overridden = rows[i].overridden || !rows[i].builtin;
                 found = true;
                 break;
             }
@@ -9624,8 +9673,26 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         }
         seed.x = (u16)x;
         seed.y = (u16)y;
-        if (!vm_net_mock_dynamic_npc_admin_save(runtimeScene, &seed, enabled,
-                                                 &error))
+        /*
+         * Already-persisted NPCs: pos-only UPDATE.  Avoids DELETE/reinsert of
+         * server_dynamic_npc_tasks (binding wipe / FK noise on map drag).
+         * First move of a pure SCE builtin still needs a full save to create
+         * the server_dynamic_npcs row.
+         */
+        if (overridden)
+        {
+            if (!vm_net_mock_dynamic_npc_admin_save_position(
+                    runtimeScene, actorId, (u16)x, (u16)y, &error))
+            {
+                free(rows);
+                vm_mock_admin_redirect_content(
+                    client, sceneUtf8, "error",
+                    error ? error : "NPC 坐标保存失败");
+                return;
+            }
+        }
+        else if (!vm_net_mock_dynamic_npc_admin_save(runtimeScene, &seed, enabled,
+                                                      &error))
         {
             free(rows);
             vm_mock_admin_redirect_content(
@@ -10555,8 +10622,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         return;
     }
     if (strcmp(action, "enhance-milestone-upsert") == 0 ||
+        strcmp(action, "enhance-milestone-save-all") == 0 ||
         strcmp(action, "enhance-pool-upsert") == 0 ||
-        strcmp(action, "enhance-pool-save-all") == 0)
+        strcmp(action, "enhance-pool-save-all") == 0 ||
+        strcmp(action, "enhance-wash-settings-save") == 0 ||
+        strcmp(action, "enhance-wash-quality-scale-save") == 0)
     {
         vm_mock_admin_handle_enhance_action(client, action, body);
         return;
@@ -10605,6 +10675,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_guess_action(client, action, body);
         return;
     }
+    if (strcmp(action, "save-auction-config") == 0)
+    {
+        vm_mock_admin_handle_auction_action(client, action, body);
+        return;
+    }
     if (strcmp(action, "save-festival-config") == 0 ||
         strcmp(action, "save-festival-exchange") == 0 ||
         strcmp(action, "save-yanmen-config") == 0 ||
@@ -10619,6 +10694,48 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "delete-login-server") == 0)
     {
         vm_mock_admin_handle_login_server_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-gateway-zone") == 0 ||
+        strcmp(action, "create-gateway-zone") == 0 ||
+        strcmp(action, "delete-gateway-zone") == 0)
+    {
+        vm_mock_admin_handle_gateway_zone_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-registration-config") == 0)
+    {
+        u32 dailyLimit = 0;
+        char keepAccount[64];
+
+        memset(keepAccount, 0, sizeof(keepAccount));
+        (void)vm_mock_admin_form_value(body, "account", keepAccount,
+                                       sizeof(keepAccount));
+        if (!vm_mock_admin_form_u32(body, "daily_limit", 9999u, &dailyLimit))
+        {
+            vm_mock_admin_redirect(client, keepAccount, "error",
+                                   "每日注册上限无效（0-9999）");
+            return;
+        }
+        if (!vm_mock_service_register_daily_limit_admin_save(dailyLimit))
+        {
+            const char *mysqlErr = vm_mysql_last_error();
+            char errMsg[384];
+
+            memset(errMsg, 0, sizeof(errMsg));
+            if (mysqlErr != NULL && mysqlErr[0] != 0 &&
+                strcmp(mysqlErr, "no MySQL error detail") != 0)
+                snprintf(errMsg, sizeof(errMsg), "保存失败：%s", mysqlErr);
+            else
+                snprintf(errMsg, sizeof(errMsg), "%s", "保存失败");
+            vm_mock_admin_redirect(client, keepAccount, "error", errMsg);
+            return;
+        }
+        {
+            char okMsg[96];
+            snprintf(okMsg, sizeof(okMsg), "每日注册上限已设为 %u", dailyLimit);
+            vm_mock_admin_redirect(client, keepAccount, "ok", okMsg);
+        }
         return;
     }
     if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))
@@ -11074,6 +11191,96 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                     "application/json; charset=utf-8", NULL,
                                     "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
         return 1;
+    }
+    /* Public gateway zone catalog for Pixi pre-login zone picker. */
+    if (strcmp(method, "GET") == 0 && strcmp(target, "/api/zones") == 0)
+    {
+        vm_net_mock_gateway_zone rows[VM_NET_MOCK_GATEWAY_ZONE_MAX];
+        char *json = NULL;
+        size_t jsonCap = 0;
+        size_t jsonLen = 0;
+        u32 rowCount = 0;
+        u32 defaultZoneId = 0;
+        u32 written = 0;
+        int ok = 1;
+        const char *cors = "Access-Control-Allow-Origin: *\r\n";
+
+        memset(rows, 0, sizeof(rows));
+        rowCount = vm_net_mock_gateway_zone_public_list(
+            rows, VM_NET_MOCK_GATEWAY_ZONE_MAX, &defaultZoneId);
+        jsonCap = 128u + (size_t)rowCount * 384u;
+        if (jsonCap < 256u)
+            jsonCap = 256u;
+        json = (char *)malloc(jsonCap);
+        if (json == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        "application/json; charset=utf-8", cors,
+                                        "{\"ok\":false,\"error\":\"oom\"}\n");
+            return 0;
+        }
+        jsonLen = (size_t)snprintf(json, jsonCap,
+                                   "{\"ok\":true,\"defaultZoneId\":%u,\"zones\":[",
+                                   defaultZoneId);
+        if (jsonLen >= jsonCap)
+            ok = 0;
+        for (u32 i = 0; ok && i < rowCount; ++i)
+        {
+            char nameEsc[256];
+            char labelEsc[256];
+            char wsEsc[512];
+            char webEsc[512];
+            char piece[1400];
+            int pieceLen;
+
+            memset(nameEsc, 0, sizeof(nameEsc));
+            memset(labelEsc, 0, sizeof(labelEsc));
+            memset(wsEsc, 0, sizeof(wsEsc));
+            memset(webEsc, 0, sizeof(webEsc));
+            if (!vm_mock_admin_json_escape(rows[i].displayName, nameEsc,
+                                           sizeof(nameEsc)) ||
+                !vm_mock_admin_json_escape(rows[i].label, labelEsc,
+                                           sizeof(labelEsc)) ||
+                !vm_mock_admin_json_escape(rows[i].wsUrl, wsEsc,
+                                           sizeof(wsEsc)) ||
+                !vm_mock_admin_json_escape(rows[i].accountWebUrl, webEsc,
+                                           sizeof(webEsc)))
+            {
+                ok = 0;
+                break;
+            }
+            pieceLen = snprintf(
+                piece, sizeof(piece),
+                "%s{\"zoneId\":%u,\"name\":\"%s\",\"label\":\"%s\","
+                "\"wsUrl\":\"%s\",\"accountWebUrl\":\"%s\"}",
+                written ? "," : "", rows[i].zoneId, nameEsc, labelEsc, wsEsc,
+                webEsc);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 4u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++written;
+        }
+        if (ok && jsonLen + 4u < jsonCap)
+        {
+            memcpy(json + jsonLen, "]}\n", 3);
+            jsonLen += 3;
+            json[jsonLen] = 0;
+            vm_mock_admin_send_response(client, "200 OK",
+                                        "application/json; charset=utf-8",
+                                        cors, json);
+            free(json);
+            return 1;
+        }
+        free(json);
+        vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                    "application/json; charset=utf-8", cors,
+                                    "{\"ok\":false,\"error\":\"encode\"}\n");
+        return 0;
     }
     /* Public catalog for Pixi map nameplates / battle visuals (gateway proxy):
      * overrides=levels, actors, names (UTF-8), reals=wire→real spawn bindings.
@@ -11997,6 +12204,7 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
     {
         char account[64];
         char password[64];
+        char limitMessage[128];
         const char *message = NULL;
         bool registering = strcmp(target, "/user/register") == 0;
         bool ok = false;
@@ -12010,6 +12218,7 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         }
         memset(account, 0, sizeof(account));
         memset(password, 0, sizeof(password));
+        memset(limitMessage, 0, sizeof(limitMessage));
         if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)) ||
             !vm_mock_admin_form_value(body, "password", password, sizeof(password)))
         {
@@ -12030,7 +12239,12 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                     else if (createMessage &&
                              strcmp(createMessage,
                                     "daily registration limit reached") == 0)
-                        message = "今日全服注册名额已满（每天最多 3 个），请明天再试";
+                    {
+                        snprintf(limitMessage, sizeof(limitMessage),
+                                 "今日全服注册名额已满（每天最多 %u 个），请明天再试",
+                                 vm_mock_service_register_daily_limit());
+                        message = limitMessage;
+                    }
                     else
                         message = "账号注册失败，请稍后重试";
                 }
@@ -12083,28 +12297,57 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
     if (strcmp(target, "/user/password") == 0)
     {
         vm_mock_user_session *session = NULL;
+        char account[64];
         char currentPassword[64];
         char newPassword[64];
         char confirmPassword[64];
+        char accountEscaped[128];
+        char errorEscaped[256];
+        char json[512];
         const char *error = NULL;
+        const char *accountId = NULL;
         bool ok = false;
+        bool apiMode = false;
+        const char *cors =
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type\r\n"
+            "Access-Control-Max-Age: 86400\r\n";
 
+        if (strcmp(method, "OPTIONS") == 0)
+        {
+            vm_mock_admin_send_response(client, "204 No Content",
+                                        "text/plain; charset=utf-8", cors, "");
+            return 1;
+        }
         if (strcmp(method, "POST") != 0)
         {
             vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
-                                        "Allow: POST\r\n",
+                                        "Allow: POST, OPTIONS\r\n",
                                         "修改密码只允许 POST。\n");
             return 0;
         }
+        memset(account, 0, sizeof(account));
+        memset(currentPassword, 0, sizeof(currentPassword));
+        memset(newPassword, 0, sizeof(newPassword));
+        memset(confirmPassword, 0, sizeof(confirmPassword));
+        memset(accountEscaped, 0, sizeof(accountEscaped));
+        memset(errorEscaped, 0, sizeof(errorEscaped));
+        memset(json, 0, sizeof(json));
+        /* Pixi / gateway: form includes account → JSON (no web session). */
+        apiMode = vm_mock_admin_form_value(body, "account", account,
+                                           sizeof(account)) &&
+                  account[0] != 0;
         session = vm_mock_user_request_session(request, headerLen);
-        if (session == NULL)
+        if (apiMode)
+            accountId = account;
+        else if (session != NULL)
+            accountId = session->accountId;
+        else
         {
             vm_mock_admin_send_location(client, "/", NULL);
             return 0;
         }
-        memset(currentPassword, 0, sizeof(currentPassword));
-        memset(newPassword, 0, sizeof(newPassword));
-        memset(confirmPassword, 0, sizeof(confirmPassword));
         if (!vm_mock_admin_form_value(body, "current_password",
                                       currentPassword,
                                       sizeof(currentPassword)) ||
@@ -12116,8 +12359,8 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         {
             error = "密码参数不完整";
         }
-        else if (!vm_mock_service_account_verify_credentials(
-                     session->accountId, currentPassword))
+        else if (!vm_mock_service_account_verify_credentials(accountId,
+                                                            currentPassword))
         {
             error = "当前密码不正确";
         }
@@ -12131,26 +12374,59 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         }
         else
         {
-            ok = vm_mock_service_account_set_password(
-                session->accountId, newPassword, &error);
+            ok = vm_mock_service_account_set_password(accountId, newPassword,
+                                                     &error);
         }
         memset(currentPassword, 0, sizeof(currentPassword));
         memset(newPassword, 0, sizeof(newPassword));
         memset(confirmPassword, 0, sizeof(confirmPassword));
         if (ok)
         {
-            vm_mock_user_invalidate_other_sessions(session->accountId,
-                                                   session);
-            printf("[info][user-web] password_change account=%s result=success other_sessions=invalidated\n",
-                   session->accountId);
-            vm_mock_user_redirect_message(client, "ok", "密码修改成功");
+            vm_mock_user_invalidate_other_sessions(accountId, session);
+            printf("[info][user-web] password_change account=%s result=success "
+                   "other_sessions=invalidated api=%d\n",
+                   accountId, apiMode ? 1 : 0);
+            if (apiMode)
+            {
+                if (!vm_mock_admin_json_escape(accountId, accountEscaped,
+                                               sizeof(accountEscaped)))
+                {
+                    vm_mock_admin_send_response(
+                        client, "500 Internal Server Error",
+                        "application/json; charset=utf-8", cors,
+                        "{\"ok\":false,\"error\":\"修改密码响应无效\"}\n");
+                    return 0;
+                }
+                snprintf(json, sizeof(json),
+                         "{\"ok\":true,\"account\":\"%s\"}\n", accountEscaped);
+                vm_mock_admin_send_response(client, "200 OK",
+                                            "application/json; charset=utf-8",
+                                            cors, json);
+            }
+            else
+                vm_mock_user_redirect_message(client, "ok", "密码修改成功");
         }
         else
         {
-            printf("[warn][user-web] password_change account=%s result=rejected\n",
-                   session->accountId);
-            vm_mock_user_redirect_message(client, "error",
-                                          error ? error : "密码修改失败");
+            printf("[warn][user-web] password_change account=%s result=rejected "
+                   "api=%d\n",
+                   accountId ? accountId : "-", apiMode ? 1 : 0);
+            if (apiMode)
+            {
+                const char *err = error ? error : "密码修改失败";
+                if (!vm_mock_admin_json_escape(err, errorEscaped,
+                                               sizeof(errorEscaped)))
+                    snprintf(errorEscaped, sizeof(errorEscaped),
+                             "密码修改失败");
+                snprintf(json, sizeof(json),
+                         "{\"ok\":false,\"error\":\"%s\"}\n", errorEscaped);
+                vm_mock_admin_send_response(client, "400 Bad Request",
+                                            "application/json; charset=utf-8",
+                                            cors, json);
+            }
+            else
+                vm_mock_user_redirect_message(client, "error",
+                                              error ? error : "密码修改失败");
         }
         return 1;
     }
@@ -12522,7 +12798,8 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
     if (strcmp(method, "GET") == 0 &&
         (strcmp(target, "/api/monster-levels") == 0 ||
          strcmp(target, "/api/world-boss-active") == 0 ||
-         strcmp(target, "/api/npc-scenes") == 0))
+         strcmp(target, "/api/npc-scenes") == 0 ||
+         strcmp(target, "/api/zones") == 0))
     {
         g_vm_mock_admin_protocol_lock_depth = 0;
         g_vm_mock_admin_protocol_holder_label[0] = 0;

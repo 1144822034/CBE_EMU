@@ -61,6 +61,30 @@ export class LoginIme {
     if (document.activeElement !== this.pass2Input) this.pass2Input.value = pass2;
   }
 
+  /**
+   * login/register: first field = account (text).
+   * password: first field = current password (password).
+   */
+  setAuthKind(kind: "login" | "register" | "password"): void {
+    const changePw = kind === "password";
+    this.userInput.type = changePw ? "password" : "text";
+    this.userInput.setAttribute(
+      "autocomplete",
+      changePw ? "current-password" : "username",
+    );
+    this.userInput.setAttribute("aria-label", changePw ? "旧密码" : "账号");
+    this.passInput.setAttribute(
+      "autocomplete",
+      changePw ? "new-password" : "current-password",
+    );
+    this.passInput.setAttribute("aria-label", changePw ? "新密码" : "密码");
+    this.pass2Input.setAttribute("autocomplete", "new-password");
+    this.pass2Input.setAttribute(
+      "aria-label",
+      changePw ? "确认新密码" : "确认密码",
+    );
+  }
+
   /** Hard sync after programmatic edits (paste / non-IME keyboard). */
   forceValues(user: string, password: string, pass2 = ""): void {
     const active = document.activeElement;

@@ -129,6 +129,9 @@ bool vm_mock_world_boss_try_claim_encounter(const char *scene, u32 wireId,
                                             u32 posx, u32 posy,
                                             u32 *enemyIdOut);
 void vm_mock_world_boss_on_battle_end(bool victory);
+u32 vm_mock_world_boss_configured_monster_id(void);
+u32 vm_mock_world_boss_remap_battle_enemy(const char *scene, u32 wireId,
+                                          u32 posx, u32 posy);
 static u32 vm_net_mock_build_ladder_protocol_response(const u8 *request,
                                                       u32 requestLen, u8 *out,
                                                       u32 outCap);
@@ -224,5 +227,6 @@ static u32 vm_net_mock_build_enmity_protocol_response(const u8 *request,
 #include "mock_server_marriage.c"
 #include "mock_server_battle.c"
 #include "mock_server_interaction_login.c"
+#include "mock_server_gateway_zones.inc.c"
 #include "mock_server_dispatch.c"
 #include "mock_server_transport.c"

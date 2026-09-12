@@ -287,6 +287,30 @@ static bool vm_mock_auction_load_config(bool force)
     return true;
 }
 
+const vm_mock_auction_config *vm_net_mock_auction_config_get(void)
+{
+    (void)vm_mock_auction_load_config(false);
+    return &g_vm_mock_auction_config;
+}
+
+bool vm_mock_auction_admin_save_config(u8 enabled)
+{
+    char query[320];
+
+    if (!vm_mock_auction_ensure_tables())
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_auction_config ("
+             "id,enabled,fee_percent_base,fee_percent_per_tier,min_bid_step,"
+             "currency_mask,max_active_listings) VALUES (1,%u,2,2,1,3,2) "
+             "ON DUPLICATE KEY UPDATE enabled=VALUES(enabled)",
+             enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+        return false;
+    g_vm_mock_auction_config_loaded = false;
+    return vm_mock_auction_load_config(true);
+}
+
 static u32 vm_mock_auction_duration_sec(u8 tier)
 {
     if (tier > 3)
@@ -1497,15 +1521,18 @@ static u32 vm_net_mock_build_auction_buyout_challenge_response(
         return 0;
     (void)vm_mock_auction_tick();
     (void)vm_mock_auction_load_config(false);
+    if (!g_vm_mock_auction_config.enabled)
+        return vm_net_mock_build_auction_op_result(
+            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 2, 0, "disabled");
     if (role == NULL || session == NULL)
         return vm_net_mock_build_auction_op_result(
-            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 2, 0, "no-role");
+            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 3, 0, "no-role");
     (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
                                               "listingId", &listingId);
     if (listingId == 0 || !vm_mock_auction_load_listing(listingId, &row) ||
         row.status != VM_MOCK_AUCTION_ST_OPEN)
         return vm_net_mock_build_auction_op_result(
-            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 3, listingId,
+            out, outCap, VM_MOCK_AUCTION_WT_BUYOUT_CHALLENGE, 4, listingId,
             "not-open");
     if (row.buyoutPrice == 0)
         return vm_net_mock_build_auction_op_result(
@@ -1799,14 +1826,17 @@ static u32 vm_net_mock_build_auction_buyout_response(const u8 *request, u32 requ
         return 0;
     (void)vm_mock_auction_tick();
     (void)vm_mock_auction_load_config(false);
+    if (!g_vm_mock_auction_config.enabled)
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BUYOUT,
+                                                   2, 0, "disabled");
     if (role == NULL || session == NULL)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BUYOUT,
-                                                   2, 0, "no-role");
+                                                   3, 0, "no-role");
     (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
                                               "listingId", &listingId);
     if (listingId == 0)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BUYOUT,
-                                                   3, 0, "not-open");
+                                                   4, 0, "not-open");
     captchaIn[0] = 0;
     (void)vm_net_mock_get_object_string_field(object.payload, object.payloadLen,
                                               "captcha", captchaIn, sizeof(captchaIn));
@@ -1851,8 +1881,11 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
         return 0;
     (void)vm_mock_auction_tick();
     (void)vm_mock_auction_load_config(false);
-    if (role == NULL || session == NULL)
+    if (!g_vm_mock_auction_config.enabled)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 2,
+                                                   0, "disabled");
+    if (role == NULL || session == NULL)
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 3,
                                                    0, "no-role");
     (void)vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
                                               "listingId", &listingId);
@@ -1861,10 +1894,10 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
     if (listingId == 0 || amount == 0 ||
         !vm_mock_auction_load_listing(listingId, &row) ||
         row.status != VM_MOCK_AUCTION_ST_OPEN)
-        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 3,
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 4,
                                                    listingId, "not-open");
     if (row.sellerRoleId == role->roleId)
-        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 4,
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 5,
                                                    listingId, "self");
     sellerAccount[0] = 0;
     snprintf(query, sizeof(query),

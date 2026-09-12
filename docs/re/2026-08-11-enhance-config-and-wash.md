@@ -10,17 +10,19 @@
 
 ### `server_enhance_milestones`
 
-默认档词条：`(equip_slot, unlock_level)` → `attr_type` / `flag` / `enabled`。
-空表启动时 seed 原硬编码 8 部位 × 4 档。
+默认档词条：`(equip_slot, unlock_level)` → `attr_type` / `flag` / `enabled` / `value_q0..value_q4`（品质档次数值）。
+空表启动时 seed 原硬编码 8 部位 × 4 档（含品质公式展开的 Q0..Q4）。
+详见 `2026-09-11-enhance-milestone-default-values-admin.md`。
 
 ### `server_enhance_attr_pool`
 
 洗练池：`(attr_type, flag)` → `value_min` / `value_max` / `weight` / `enabled`。
-玩家洗练 / 首次获得 seed 时按权重随机属性；**实际上限**按装备 `品质`（0..4）缩放：
+玩家洗练 / 首次获得 seed 时按权重随机属性；**实际上限**默认可按装备 `品质`（0..4）缩放：
 `scaled_max = value_max * (quality+1) / 5`（0档 1/5 … 4档满值；>4 按 4）。
+后台「洗练质量分档」关闭后一律用完整 `value_max`（见 `2026-09-11-enhance-wash-quality-scale-admin.md`）。
 `value_min` 不变；若 min > scaled_max 则塌缩为单点。29/7 下发的 pool 区间同此缩放。
 
-管理入口：`/?tab=enhance`（默认档 / 洗练属性池）。
+管理入口：`/?tab=enhance`（质量分档开关 / 默认档 / 洗练属性池）。
 洗练属性池支持「一键保存全部」（`enhance-pool-save-all`）：AJAX 提交后不整页刷新，仅右下角 toast。
 
 按角色调整实例覆盖：账号管理 → 角色明细「装备洗练」→ `set-equip-wash`
@@ -35,9 +37,11 @@ w,t,f,v,c;w,t,f,v,c;w,t,f,v,c;w,t,f,v,c
 ```
 
 对应 +4/+8/+12/+16：`washed,type,flag,value,wash_count`。
-**首次获得**装备（`add_backpack` 且无继承 wash）：**20%** 从洗练池随机四档写入
-（`washed=1`、`wash_count=0`）；**80%** 保持空 wash，走配置默认 + 品质公式
-（见 `2026-09-10-equip-first-obtain-wash-seed.md`）。
+**首次获得**装备（`add_backpack` 且无继承 wash）：按后台 `first_seed_percent`
+（默认 **20%**）从洗练池随机四档写入
+（`washed=1`、`wash_count=0`）；未命中则保持空 wash，走配置默认 + 品质公式
+（见 `2026-09-10-equip-first-obtain-wash-seed.md`、
+`2026-09-11-enhance-wash-quality-scale-admin.md`）。
 历史空 wash / 管理后台清零仍显示配置默认 + 品质公式；玩家洗练或首获命中随机后用覆盖值。
 装备详情：默认档黄字，实例覆盖红字（wire `flag` bit7=washed，PixiJS 解析）。
 穿脱、仓存、拍卖、强化转移（29/6）、交易跟随装备实例，不重随。

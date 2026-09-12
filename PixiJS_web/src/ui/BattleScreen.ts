@@ -375,6 +375,8 @@ export class BattleScreen extends Container {
   onHangupCancel: (() => void) | null = null;
   /** Hangup settle「补充时间」— main uses bag 828 / tips mall. */
   onHangupAddTime: (() => void | Promise<void>) | null = null;
+  /** Fetch 修/7/31 remain before hangup settle paints 有效时间. */
+  onHangupInsightRefresh: (() => Promise<number>) | null = null;
   /** Fired when a round finishes playback and [自动] is still armed. */
   onAutoReady: (() => void) | null = null;
   /**
@@ -454,7 +456,8 @@ export class BattleScreen extends Container {
   setHangupActive(on: boolean): void {
     this.ensureAutoBanner();
     if (on && !this.hangupActive) {
-      this.resetHangupTally();
+      /* Keep session totals across hide()/next fight; only reset on fresh arm. */
+      if (!this.hangupTallyArmed) this.resetHangupTally();
       preloadHangupPanelTextures();
     }
     if (!on) {
@@ -936,7 +939,7 @@ export class BattleScreen extends Container {
     this.state = null;
     this.arenaDuel = false;
     this.hangupActive = false;
-    this.hangupTallyArmed = false;
+    /* Keep hangupTallyArmed so the next fight continues session 战斗场次. */
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
     this.playbackBusy = false;
@@ -3496,11 +3499,16 @@ export class BattleScreen extends Container {
     this.hangupTallyArmed = true;
   }
 
-  /** Prefer wire combatinfo; otherwise accumulate per-fight gains client-side. */
+  /**
+   * Session totals for hangup settle — always accumulate client-side.
+   * Wire combatinfo often resets completed per fight (1/64…); ignore it for
+   * the running 战斗场次 / exp / gold / recover counters.
+   */
   private hangupSnapshot(s: BattleSettlement): HangupCombatinfo {
-    if (s.hangupCombatinfo) return s.hangupCombatinfo;
     if (!this.hangupTallyArmed) this.resetHangupTally();
     const t = this.hangupTally;
+    const wire = s.hangupCombatinfo;
+    if (wire && wire.maximum >= 200) t.maximum = wire.maximum >>> 0;
     t.completed = Math.min(0xffff, t.completed + 1);
     t.totalExp = (t.totalExp + Math.max(0, s.expGain | 0)) >>> 0;
     t.totalGold = (t.totalGold + Math.max(0, s.goldGain | 0)) >>> 0;
@@ -3560,6 +3568,17 @@ export class BattleScreen extends Container {
     const tally = this.hangupSnapshot(s);
     const bagUsed = this.hangupBagUsed;
     const bagCap = this.hangupBagCap > 0 ? this.hangupBagCap : 64;
+
+    /* Auto-refresh 战斗心得 remain — do not require map「修」tap first. */
+    if (this.onHangupInsightRefresh) {
+      try {
+        const sec = await this.onHangupInsightRefresh();
+        if (gen !== this.settlePaintGen) return;
+        this.insightRemainSec = Math.max(0, sec | 0);
+      } catch {
+        /* keep prior insightRemainSec */
+      }
+    }
 
     const ok = await paintHangupPanel(this.settleHost, {
       tally,
@@ -3668,7 +3687,7 @@ export class BattleScreen extends Container {
       this.settleHost.addChild(lab);
       y += 14;
     };
-    row(`战斗场次 ${tally.completed}/${tally.maximum}  背包 ${bagUsed}/${bagCap}`);
+    row(`战斗场次 ${tally.completed}  背包 ${bagUsed}/${bagCap}`);
     row(`获得经验 ${tally.totalExp}  金钱 ${tally.totalGold}`);
     row(`自动回血 ${tally.totalHpRecovered}  回魔 ${tally.totalMpRecovered}`);
     this.armSettleAutoClose(gen);

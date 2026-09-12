@@ -254,6 +254,7 @@ static bool vm_net_mock_shop_admin_db_load(void);
 static void vm_net_mock_ensure_hunt_order_catalog_item(void);
 static void vm_net_mock_ensure_force_pk_proof_catalog_item(void);
 static void vm_net_mock_ensure_star_sky_stone_catalog_item(void);
+static void vm_net_mock_ensure_rename_card_catalog_item(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
@@ -1666,6 +1667,7 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_net_mock_ensure_hunt_order_catalog_item();
     vm_net_mock_ensure_force_pk_proof_catalog_item();
     vm_net_mock_ensure_star_sky_stone_catalog_item();
+    vm_net_mock_ensure_rename_card_catalog_item();
 
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
@@ -2032,6 +2034,74 @@ static void vm_net_mock_ensure_star_sky_stone_catalog_item(void)
             &err))
     {
         printf("[warn][network] mock_star_sky_stone_shop_seed_failed error=%s\n",
+               err ? err : "?");
+    }
+}
+
+/* Pixi 自定义 852 角色改名卡：注入商城目录并默认上架（酷宝）. */
+static void vm_net_mock_ensure_rename_card_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xbd\xc7\xc9\xab\xb8\xc4\xc3\xfb\xbf\xa8"; /* 角色改名卡 */
+    static const u8 descGbk[] =
+        "\xca\xb9\xd3\xc3\xba\xf3\xbf\xc9\xd0\xde\xb8\xc4\xd2\xbb\xb4\xce"
+        "\xbd\xc7\xc9\xab\xc3\xfb\xa1\xa3"; /* 使用后可修改一次角色名。 */
+    const char *err = NULL;
+    vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
+    u32 i = 0;
+
+    memset(&one, 0, sizeof(one));
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId ==
+            VM_NET_MOCK_RENAME_CARD_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_RENAME_CARD_ITEM_ID, nameGbk, sizeof(nameGbk) - 1,
+                descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_RENAME_CARD_SHOP_PRICE,
+                99, 1, 1, false, 14))
+        {
+            printf("[warn][network] mock_rename_card_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_RENAME_CARD_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+    }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             VM_NET_MOCK_RENAME_CARD_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
+    {
+        printf("[info][network] mock_rename_card_catalog_bound item=%u price=%u "
+               "enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    if (!vm_net_mock_shop_admin_save(
+            VM_NET_MOCK_RENAME_CARD_ITEM_ID,
+            item->price ? item->price : VM_NET_MOCK_RENAME_CARD_SHOP_PRICE, true,
+            &err))
+    {
+        printf("[warn][network] mock_rename_card_shop_seed_failed error=%s\n",
                err ? err : "?");
     }
 }
@@ -2526,6 +2596,7 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 847: /* 江湖追杀令：走 43/2 对仇人使用，禁止通用 7/1 扣耐久 */
     case 848: /* 强制PK证明：由 4/14 force=1 扣，禁止通用 7/1 */
     case 849: /* 星空石：走 29/13 重置洗练次数，禁止通用 7/1 */
+    case 852: /* 角色改名卡：走 29/15 改名，禁止通用 7/1 */
     case 813: /* chest keys must not fall into generic 7/1 category-10 consume */
     case 814:
     case 815:
@@ -8324,6 +8395,14 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
                 "\xc7\xeb\xd1\xa1\xd4\xf1\xb3\xf0\xc8\xcb\xca\xb9\xd3\xc3"; /* 请选择仇人使用 */
             return vm_net_mock_build_item_use_reject_with_hint_response(
                 out, outCap, itemId, parsed.type ? parsed.type : 1, huntPickTipGbk);
+        }
+        if (itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID)
+        {
+            /* Pixi opens name input; generic 7/1 must clear wait without consume. */
+            static const char renameTipGbk[] =
+                "\xc7\xeb\xca\xe4\xc8\xeb\xd0\xc2\xc3\xfb\xb3\xc6\xca\xb9\xd3\xc3"; /* 请输入新名称使用 */
+            return vm_net_mock_build_item_use_reject_with_hint_response(
+                out, outCap, itemId, parsed.type ? parsed.type : 1, renameTipGbk);
         }
         return 0;
     }

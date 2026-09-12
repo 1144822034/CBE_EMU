@@ -94,7 +94,7 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         "<title>江湖OL 强化配置</title><style>"
         "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;"
         "font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
-        ".wrap{max-width:1120px;margin:0 auto;padding:28px 18px}"
+        ".wrap{max-width:1280px;margin:0 auto;padding:28px 18px}"
         "h1{font-size:24px;margin:0}.sub{color:#667085;margin:4px 0 20px}"
         ".tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}"
         ".tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;"
@@ -108,7 +108,7 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         "padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:middle}"
         "th{color:#667085;font-weight:600}"
         "input,select{border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;"
-        "background:#fff;max-width:110px}button{border:0;border-radius:6px;"
+        "background:#fff;max-width:96px}button{border:0;border-radius:6px;"
         "padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer}"
         "button:disabled{opacity:.6;cursor:not-allowed}"
         ".toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;"
@@ -116,6 +116,10 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         ".muted{color:#98a2b3}.chip{display:inline-block;background:#eef4ff;"
         "color:#175cd3;border-radius:999px;padding:2px 8px;font-size:12px;"
         "margin-right:6px}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));"
+        "gap:12px;align-items:end}"
+        "label.field{display:block;font-size:12px;color:#667085}"
+        "label.field select{display:block;width:100%%;max-width:none;margin-top:4px}"
         "</style>"
         "<script src=\"/admin.js?v=7\" defer></script>"
         "</head><body><main class=\"wrap\"><header><div>"
@@ -134,6 +138,40 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         vm_mock_admin_text_appendf(&page, "</div>");
     }
 
+    {
+        u8 qualityScaleOn =
+            vm_net_mock_enhance_wash_quality_scale_enabled();
+        u8 firstSeedPercent = vm_net_mock_enhance_wash_first_seed_percent();
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\">"
+            "<form method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" "
+            "value=\"enhance-wash-settings-save\">"
+            "<div class=\"toolbar\"><h2 style=\"margin:0\">洗练规则</h2>"
+            "<button type=\"submit\">保存</button></div>"
+            "<div class=\"grid\">"
+            "<label class=\"field\"><span>按装备品质缩放洗练上限</span>"
+            "<select name=\"quality_scale_enabled\">"
+            "<option value=\"1\"%s>开（Q0=1/5 … Q4=满值）</option>"
+            "<option value=\"0\"%s>关（一律用属性池 value_max）</option>"
+            "</select></label>"
+            "<label class=\"field\"><span>首次获得随机洗练概率 %%（0–100）</span>"
+            "<input name=\"first_seed_percent\" type=\"number\" min=\"0\" "
+            "max=\"100\" value=\"%u\" style=\"max-width:none;width:100%%;"
+            "margin-top:4px\"></label>"
+            "</div>"
+            "<p class=\"muted\" style=\"margin:12px 0 0\">"
+            "质量分档开启时：首获 seed / 玩家洗练 / 29/7 pool 上限为 "
+            "<code>value_max × (品质+1) / 5</code>。"
+            "首获概率仅作用于新掉落/商店等首次入包（不重随交易穿脱）。"
+            "0=永不随机，100=必定随机四档（wash_count 仍为 0）。表："
+            "<code>server_enhance_wash_settings</code>。"
+            "</p></form></section>",
+            qualityScaleOn ? " selected" : "",
+            qualityScaleOn ? "" : " selected", (u32)firstSeedPercent);
+    }
+
     vm_mock_admin_text_appendf(
         &page,
         "<section class=\"card\"><div class=\"tabs\">"
@@ -148,9 +186,16 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
     {
         vm_mock_admin_text_appendf(
             &page,
-            "<section class=\"card\"><h2>默认档词条（未洗练）</h2>"
+            "<section class=\"card\">"
+            "<form method=\"post\" action=\"/action\" id=\"enhance-milestone-form\">"
+            "<input type=\"hidden\" name=\"action\" value=\"enhance-milestone-save-all\">"
+            "<input type=\"hidden\" name=\"row_count\" value=\"%u\">"
+            "<div class=\"toolbar\"><h2 style=\"margin:0\">默认档词条（未洗练）</h2>"
+            "<button type=\"submit\">一键保存全部</button></div>"
             "<table><thead><tr><th>部位</th><th>档次</th><th>属性</th>"
-            "<th>%%</th><th>启用</th><th></th></tr></thead><tbody>");
+            "<th>%%</th><th>Q0</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th>"
+            "<th>启用</th></tr></thead><tbody>",
+            milestoneCount);
         for (i = 0; i < milestoneCount; ++i)
         {
             const vm_net_mock_enhance_milestone_cfg *row =
@@ -159,15 +204,14 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
                 continue;
             vm_mock_admin_text_appendf(
                 &page,
-                "<tr><form method=\"post\" action=\"/action\">"
-                "<td>%s<input type=\"hidden\" name=\"action\" "
-                "value=\"enhance-milestone-upsert\">"
-                "<input type=\"hidden\" name=\"slot\" value=\"%u\">"
-                "<input type=\"hidden\" name=\"unlock\" value=\"%u\"></td>"
+                "<tr>"
+                "<td>%s"
+                "<input type=\"hidden\" name=\"slot_%u\" value=\"%u\">"
+                "<input type=\"hidden\" name=\"unlock_%u\" value=\"%u\"></td>"
                 "<td>+%u</td>"
-                "<td><select name=\"attr_type\">",
-                vm_mock_admin_enhance_slot_name(row->equipSlot), row->equipSlot,
-                row->unlockLevel, row->unlockLevel);
+                "<td><select name=\"attr_type_%u\">",
+                vm_mock_admin_enhance_slot_name(row->equipSlot), i,
+                row->equipSlot, i, row->unlockLevel, row->unlockLevel, i);
             {
                 u8 t;
                 for (t = 1; t <= 10; ++t)
@@ -181,25 +225,42 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
             vm_mock_admin_text_appendf(
                 &page,
                 "</select></td>"
-                "<td><select name=\"flag\">"
+                "<td><select name=\"flag_%u\">"
                 "<option value=\"0\"%s>值</option>"
                 "<option value=\"1\"%s>%%</option></select></td>"
-                "<td><select name=\"enabled\">"
+                "<td><input name=\"value_q0_%u\" type=\"number\" min=\"0\" "
+                "max=\"65535\" value=\"%u\"></td>"
+                "<td><input name=\"value_q1_%u\" type=\"number\" min=\"0\" "
+                "max=\"65535\" value=\"%u\"></td>"
+                "<td><input name=\"value_q2_%u\" type=\"number\" min=\"0\" "
+                "max=\"65535\" value=\"%u\"></td>"
+                "<td><input name=\"value_q3_%u\" type=\"number\" min=\"0\" "
+                "max=\"65535\" value=\"%u\"></td>"
+                "<td><input name=\"value_q4_%u\" type=\"number\" min=\"0\" "
+                "max=\"65535\" value=\"%u\"></td>"
+                "<td><select name=\"enabled_%u\">"
                 "<option value=\"1\"%s>是</option>"
                 "<option value=\"0\"%s>否</option></select></td>"
-                "<td><button type=\"submit\">保存</button></td>"
-                "</form></tr>",
-                row->flag == 0 ? " selected" : "",
-                row->flag != 0 ? " selected" : "",
-                row->enabled ? " selected" : "",
+                "</tr>",
+                i, row->flag == 0 ? " selected" : "",
+                row->flag != 0 ? " selected" : "", i, row->valueQ[0], i,
+                row->valueQ[1], i, row->valueQ[2], i, row->valueQ[3], i,
+                row->valueQ[4], i, row->enabled ? " selected" : "",
                 !row->enabled ? " selected" : "");
         }
         vm_mock_admin_text_appendf(
             &page,
             "</tbody></table>"
-            "<p class=\"muted\">表：MySQL <code>server_enhance_milestones</code>。"
-            "未洗练数值仍按装备品质公式计算；仅 type/flag 可配。</p></section>");
+            "<div class=\"toolbar\" style=\"margin-top:14px\">"
+            "<p class=\"muted\" style=\"margin:0\">表：MySQL "
+            "<code>server_enhance_milestones</code>。"
+            "Q0..Q4 为装备品质 0..4 的默认档数值（未洗练）；"
+            "武器 +12 气血 / +16 三围等特例直接改对应行。"
+            "改完点「一键保存全部」立即生效。</p>"
+            "<button type=\"submit\">一键保存全部</button></div>"
+            "</form></section>");
     }
+
     else
     {
         vm_mock_admin_text_appendf(
@@ -248,6 +309,7 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
             "<div class=\"toolbar\" style=\"margin-top:14px\">"
             "<p class=\"muted\" style=\"margin:0\">表：MySQL "
             "<code>server_enhance_attr_pool</code>。"
+            "实际上限是否按品质分档见上方「洗练质量分档」开关。"
             "改完点「一键保存全部」，页面不刷新，仅提示结果。</p>"
             "<button type=\"submit\">一键保存全部</button></div>"
             "</form></section>");
@@ -284,8 +346,144 @@ static void vm_mock_admin_handle_enhance_action(vm_mock_service_socket client,
     memset(weightText, 0, sizeof(weightText));
     memset(countText, 0, sizeof(countText));
 
-    if (strcmp(action, "enhance-milestone-upsert") == 0)
+    if (strcmp(action, "enhance-wash-settings-save") == 0 ||
+        strcmp(action, "enhance-wash-quality-scale-save") == 0)
     {
+        u32 qualityScale = 1;
+        u32 firstSeedPercent = 20;
+        char okMsg[128];
+
+        if (!vm_mock_admin_form_u32(body, "quality_scale_enabled", 1u,
+                                    &qualityScale))
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "质量分档开关无效");
+            return;
+        }
+        if (!vm_mock_admin_form_u32(body, "first_seed_percent", 100u,
+                                    &firstSeedPercent))
+        {
+            /* Older form without the field: keep current runtime value. */
+            firstSeedPercent = vm_net_mock_enhance_wash_first_seed_percent();
+        }
+        if (!vm_net_mock_enhance_wash_settings_admin_save(
+                (u8)qualityScale, (u8)firstSeedPercent))
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "保存洗练规则失败");
+            return;
+        }
+        snprintf(okMsg, sizeof(okMsg),
+                 "洗练规则已保存（质量分档%s，首获随机 %u%%）",
+                 qualityScale ? "开" : "关", firstSeedPercent);
+        vm_mock_admin_redirect_enhance(client, "milestones", "ok", okMsg);
+        return;
+    }
+
+    if (strcmp(action, "enhance-milestone-upsert") == 0 ||
+        strcmp(action, "enhance-milestone-save-all") == 0)
+    {
+        char qText[5][16];
+        u32 qv[5] = {0, 0, 0, 0, 0};
+        u16 valueQ[5];
+        u8 qi;
+
+        if (strcmp(action, "enhance-milestone-save-all") == 0)
+        {
+            vm_net_mock_enhance_milestone_cfg rows[VM_NET_MOCK_ENHANCE_MILESTONE_CFG_MAX];
+            u32 saved = 0;
+
+            memset(rows, 0, sizeof(rows));
+            (void)vm_mock_admin_form_value(body, "row_count", countText,
+                                           sizeof(countText));
+            if (!vm_net_mock_parse_u32_strict(countText, &rowCount) ||
+                rowCount == 0 ||
+                rowCount > VM_NET_MOCK_ENHANCE_MILESTONE_CFG_MAX)
+            {
+                vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                               "默认档行数无效");
+                return;
+            }
+            for (i = 0; i < rowCount; ++i)
+            {
+                snprintf(key, sizeof(key), "slot_%u", i);
+                memset(slotText, 0, sizeof(slotText));
+                if (!vm_mock_admin_form_value(body, key, slotText,
+                                               sizeof(slotText)))
+                {
+                    vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                                   "缺少部位字段");
+                    return;
+                }
+                snprintf(key, sizeof(key), "unlock_%u", i);
+                memset(unlockText, 0, sizeof(unlockText));
+                (void)vm_mock_admin_form_value(body, key, unlockText,
+                                               sizeof(unlockText));
+                snprintf(key, sizeof(key), "attr_type_%u", i);
+                memset(typeText, 0, sizeof(typeText));
+                (void)vm_mock_admin_form_value(body, key, typeText,
+                                               sizeof(typeText));
+                snprintf(key, sizeof(key), "flag_%u", i);
+                memset(flagText, 0, sizeof(flagText));
+                (void)vm_mock_admin_form_value(body, key, flagText,
+                                               sizeof(flagText));
+                snprintf(key, sizeof(key), "enabled_%u", i);
+                memset(enabledText, 0, sizeof(enabledText));
+                (void)vm_mock_admin_form_value(body, key, enabledText,
+                                               sizeof(enabledText));
+                for (qi = 0; qi < 5; ++qi)
+                {
+                    snprintf(key, sizeof(key), "value_q%u_%u", qi, i);
+                    memset(qText[qi], 0, sizeof(qText[qi]));
+                    (void)vm_mock_admin_form_value(body, key, qText[qi],
+                                                   sizeof(qText[qi]));
+                }
+                if (!vm_net_mock_parse_u32_strict(slotText, &slot) ||
+                    !vm_net_mock_parse_u32_strict(unlockText, &unlock) ||
+                    !vm_net_mock_parse_u32_strict(typeText, &type) ||
+                    !vm_net_mock_parse_u32_strict(flagText, &flag) ||
+                    !vm_net_mock_parse_u32_strict(enabledText, &enabled) ||
+                    type < 1 || type > 10 || flag > 1)
+                {
+                    vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                                   "默认档字段无效");
+                    return;
+                }
+                for (qi = 0; qi < 5; ++qi)
+                {
+                    if (!vm_net_mock_parse_u32_strict(qText[qi], &qv[qi]) ||
+                        qv[qi] > 65535u)
+                    {
+                        vm_mock_admin_redirect_enhance(
+                            client, "milestones", "error", "默认档数值无效");
+                        return;
+                    }
+                    valueQ[qi] = (u16)qv[qi];
+                }
+                rows[saved].equipSlot = (u8)slot;
+                rows[saved].unlockLevel = (u8)unlock;
+                rows[saved].attrType = (u8)type;
+                rows[saved].flag = (u8)flag;
+                rows[saved].enabled = enabled != 0 ? 1 : 0;
+                for (qi = 0; qi < 5; ++qi)
+                    rows[saved].valueQ[qi] = valueQ[qi];
+                ++saved;
+            }
+            if (!vm_net_mock_enhance_milestone_admin_save_all(rows, saved))
+            {
+                vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                               "一键保存默认档失败");
+                return;
+            }
+            {
+                char okMsg[96];
+                snprintf(okMsg, sizeof(okMsg), "已保存全部 %u 条默认档", saved);
+                vm_mock_admin_redirect_enhance(client, "milestones", "ok",
+                                               okMsg);
+            }
+            return;
+        }
+
         (void)vm_mock_admin_form_value(body, "slot", slotText, sizeof(slotText));
         (void)vm_mock_admin_form_value(body, "unlock", unlockText,
                                        sizeof(unlockText));
@@ -294,13 +492,36 @@ static void vm_mock_admin_handle_enhance_action(vm_mock_service_socket client,
         (void)vm_mock_admin_form_value(body, "flag", flagText, sizeof(flagText));
         (void)vm_mock_admin_form_value(body, "enabled", enabledText,
                                        sizeof(enabledText));
+        for (qi = 0; qi < 5; ++qi)
+        {
+            snprintf(key, sizeof(key), "value_q%u", qi);
+            memset(qText[qi], 0, sizeof(qText[qi]));
+            (void)vm_mock_admin_form_value(body, key, qText[qi],
+                                           sizeof(qText[qi]));
+        }
         if (!vm_net_mock_parse_u32_strict(slotText, &slot) ||
             !vm_net_mock_parse_u32_strict(unlockText, &unlock) ||
             !vm_net_mock_parse_u32_strict(typeText, &type) ||
             !vm_net_mock_parse_u32_strict(flagText, &flag) ||
-            !vm_net_mock_parse_u32_strict(enabledText, &enabled) ||
-            !vm_net_mock_enhance_milestone_admin_upsert(
-                (u8)slot, (u8)unlock, (u8)type, (u8)flag, (u8)enabled))
+            !vm_net_mock_parse_u32_strict(enabledText, &enabled))
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "保存默认档词条失败");
+            return;
+        }
+        for (qi = 0; qi < 5; ++qi)
+        {
+            if (!vm_net_mock_parse_u32_strict(qText[qi], &qv[qi]) ||
+                qv[qi] > 65535u)
+            {
+                vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                               "默认档数值无效");
+                return;
+            }
+            valueQ[qi] = (u16)qv[qi];
+        }
+        if (!vm_net_mock_enhance_milestone_admin_upsert(
+                (u8)slot, (u8)unlock, (u8)type, (u8)flag, (u8)enabled, valueQ))
         {
             vm_mock_admin_redirect_enhance(client, "milestones", "error",
                                            "保存默认档词条失败");

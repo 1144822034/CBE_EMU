@@ -10622,38 +10622,61 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         static const char submitSuccessText[] =
             "\xc8\xce\xce\xf1\xcc\xe1\xbd\xbb\xb3\xc9\xb9\xa6\xa3\xa1"; /* 任务提交成功！ */
         bool committed = false;
+        const char *commitMiss = NULL;
+        bool haveTaskId = vm_net_mock_get_object_number_field(
+            object.payload, object.payloadLen, "taskid", &taskId);
 
-        if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
-                                                 "taskid", &taskId))
-        {
-            return 0;
-        }
-        taskDefinition = vm_net_mock_task_catalog_find_by_id(taskId);
-        if (taskId != VM_NET_MOCK_TEST_TASK_ID && taskDefinition == NULL)
-            return 0;
+        /*
+         * Recognized 6/4 (or 25/5+6/4) must always emit case-4 result.
+         * Returning 0 after matching this shape falls through to
+         * unimplemented tip「功能暂未实现(1/25/5)」while commit_reward may
+         * already have stored state=3 — client keeps yellow "?" until the
+         * next dialog arms 6/1+6/14, and 26/1 has no「提交」.  Never leave
+         * that split.
+         */
         activeRole = vm_net_mock_active_role();
-        if (activeRole == NULL)
-            return 0;
-        if (vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
-            taskState.found && (taskState.state == 1 || taskState.state == 2))
+        if (!haveTaskId)
         {
-            if (taskDefinition != NULL)
+            commitMiss = "parse-taskid";
+            taskId = 0;
+        }
+        else
+        {
+            taskDefinition = vm_net_mock_task_catalog_find_by_id(taskId);
+            if (taskId != VM_NET_MOCK_TEST_TASK_ID && taskDefinition == NULL)
+                commitMiss = "unknown-or-disabled-task";
+            else if (activeRole == NULL)
+                commitMiss = "no-role";
+            else if (vm_net_mock_task_state_load(activeRole->roleId, taskId,
+                                                  &taskState) &&
+                     taskState.found &&
+                     (taskState.state == 1 || taskState.state == 2))
             {
-                (void)vm_net_mock_task_sync_item_progress(
-                    activeRole, taskDefinition, &taskState.progress1,
-                    &taskState.progress2, &taskState.state);
+                if (taskDefinition != NULL)
+                {
+                    (void)vm_net_mock_task_sync_item_progress(
+                        activeRole, taskDefinition, &taskState.progress1,
+                        &taskState.progress2, &taskState.state);
+                }
+                if (taskState.state == 2 &&
+                    ((taskDefinition != NULL &&
+                      vm_net_mock_task_commit_reward(
+                          activeRole, taskDefinition, &committedRewardSeq,
+                          consumeSync, VM_NET_MOCK_CONSUME_SYNC_MAX,
+                          &consumeSyncCount)) ||
+                     (taskDefinition == NULL &&
+                      vm_net_mock_task_state_store(activeRole->roleId, taskId,
+                                                   3))))
+                {
+                    committed = true;
+                }
+                else if (taskState.state != 2)
+                    commitMiss = "not-completed-state";
+                else
+                    commitMiss = "commit-reward-failed";
             }
-            if (taskState.state == 2 &&
-                ((taskDefinition != NULL &&
-                  vm_net_mock_task_commit_reward(
-                      activeRole, taskDefinition, &committedRewardSeq,
-                      consumeSync, VM_NET_MOCK_CONSUME_SYNC_MAX,
-                      &consumeSyncCount)) ||
-                 (taskDefinition == NULL &&
-                  vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))))
-            {
-                committed = true;
-            }
+            else
+                commitMiss = "no-active-task-row";
         }
         /* net_handle_task_response_dispatch(0x0104726C) case 4 is the normal
          * submit result and uses result=1 for success.  Subtype 16 belongs to
@@ -10661,6 +10684,13 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
          * hard-coded “重置成功!”, so it must never be used for submission. */
         result = committed ? 1 : 0;
         responseSubtype = 4;
+        if (!committed && commitMiss != NULL)
+        {
+            printf("[warn][network] mock_task_commit_miss task=%u role=%u "
+                   "reason=%s info_prefix=%u evidence=keep-6/4-ack\n",
+                   taskId, activeRole ? activeRole->roleId : 0, commitMiss,
+                   hasInfoBannerPrefix ? 1u : 0u);
+        }
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6,
                                          responseSubtype,
                                          &objectStart) ||
@@ -10673,22 +10703,59 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             u32 totalExp = activeRole->exp;
             u32 wireEnergy = 100;
             u32 wireEnergyMax = 100;
-            vm_mock_activities_vitality_wire(activeRole, &wireEnergy, &wireEnergyMax);
-            if (!vm_net_mock_build_task_awardinfo(
-                    awardInfo, sizeof(awardInfo), &awardInfoLen, activeRole,
-                    taskDefinition, committedRewardSeq) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", wireEnergy) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", wireEnergyMax) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "exp", totalExp) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "level", activeRole->level) ||
+            bool awardOk = false;
+
+            vm_mock_activities_vitality_wire(activeRole, &wireEnergy,
+                                             &wireEnergyMax);
+            awardOk = vm_net_mock_build_task_awardinfo(
+                awardInfo, sizeof(awardInfo), &awardInfoLen, activeRole,
+                taskDefinition, committedRewardSeq);
+            if (!awardOk)
+            {
+                /* Commit already mutated bag/state; still deliver case-4
+                 * success with exp/money-only awardinfo so the client clears
+                 * the wait and removes the active row. */
+                awardInfoLen = 0;
+                if (vm_net_mock_seq_put_u32(awardInfo, sizeof(awardInfo),
+                                            &awardInfoLen,
+                                            taskDefinition ? taskDefinition->rewardExp
+                                                           : 0) &&
+                    vm_net_mock_seq_put_u32(awardInfo, sizeof(awardInfo),
+                                            &awardInfoLen,
+                                            taskDefinition
+                                                ? taskDefinition->rewardMoney
+                                                : 0) &&
+                    vm_net_mock_seq_put_u8(awardInfo, sizeof(awardInfo),
+                                           &awardInfoLen, 0))
+                {
+                    awardOk = true;
+                    printf("[warn][network] mock_task_awardinfo_fallback "
+                           "task=%u role=%u reward_seq=%u "
+                           "action=exp-money-only evidence=post-commit-ack\n",
+                           taskId, activeRole->roleId, committedRewardSeq);
+                }
+            }
+            if (!awardOk ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energy",
+                                            wireEnergy) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax",
+                                            wireEnergyMax) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "exp",
+                                            totalExp) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "level",
+                                            activeRole->level) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "lastexp",
-                                            vm_net_mock_role_last_level_exp(totalExp)) ||
+                                            vm_net_mock_role_last_level_exp(
+                                                totalExp)) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "curexp",
-                                            vm_net_mock_role_next_level_start_exp(totalExp)) ||
+                                            vm_net_mock_role_next_level_start_exp(
+                                                totalExp)) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "persentexp",
-                                            vm_net_mock_role_exp_percent(totalExp)) ||
+                                            vm_net_mock_role_exp_percent(
+                                                totalExp)) ||
                 !vm_net_mock_put_object_u8(out, outCap, &pos, "seqnum", 0) ||
-                !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", NULL, 0) ||
+                !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", NULL,
+                                            0) ||
                 !vm_net_mock_put_object_raw(out, outCap, &pos, "awardinfo",
                                             awardInfo, (u16)awardInfoLen) ||
                 /* case 4 reads taskdes through the WT string accessor
@@ -10700,13 +10767,29 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                 !vm_net_mock_put_object_string(out, outCap, &pos, "taskdes",
                                                submitSuccessText))
             {
-                return 0;
+                /* Last resort: result=0 object already started — truncate to
+                 * result-only so the wait flag still clears without tip. */
+                pos = objectStart;
+                if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6, 4,
+                                                 &objectStart) ||
+                    !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
+                {
+                    return 0;
+                }
+                result = 0;
+                printf("[error][network] mock_task_commit_encode_fail "
+                       "task=%u role=%u action=result0-ack "
+                       "evidence=avoid-unimplemented-1/25/5\n",
+                       taskId, activeRole->roleId);
             }
-            /* Push authoritative 6/1+6/14 after commit so remaining active
-             * rows carry the catalog/delivery receiver, not a giver-side
-             * （未完成） override left over from the previous list/accept. */
-            vm_mock_service_session_arm_task_prompt_refresh(
-                vm_net_mock_current_scene_name());
+            else
+            {
+                /* Push authoritative 6/1+6/14 after commit so remaining active
+                 * rows carry the catalog/delivery receiver, not a giver-side
+                 * （未完成） override left over from the previous list/accept. */
+                vm_mock_service_session_arm_task_prompt_refresh(
+                    vm_net_mock_current_scene_name());
+            }
         }
         action = "commit";
         evidence = "JianghuOL.CBE:0x01047CFC+0x0104726C(case4)+0x01046EDA";

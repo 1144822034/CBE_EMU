@@ -220,6 +220,8 @@ export class QuestTrackerOverlay extends Container {
   private worldActive = false;
   /** Extra map-local Y under party mate slots (0 when solo). */
   private partyOffsetY = 0;
+  /** Extra map-local Y under 比武计时条 (0 when ArenaHud hidden). */
+  private arenaOffsetY = 0;
 
   constructor() {
     super();
@@ -266,7 +268,22 @@ export class QuestTrackerOverlay extends Container {
     const next = Math.max(0, px | 0);
     if (next === this.partyOffsetY) return;
     this.partyOffsetY = next;
-    this.position.y = TRACKER_Y0 + this.partyOffsetY;
+    this.relayoutY();
+  }
+
+  /**
+   * Sit below ArenaHud 比武计时 when the strip is visible.
+   * Pass ArenaHud.overlayOffsetY().
+   */
+  setArenaOffsetY(px: number): void {
+    const next = Math.max(0, px | 0);
+    if (next === this.arenaOffsetY) return;
+    this.arenaOffsetY = next;
+    this.relayoutY();
+  }
+
+  private relayoutY(): void {
+    this.position.y = TRACKER_Y0 + this.partyOffsetY + this.arenaOffsetY;
   }
 
   setTasks(rows: QuestTrackerRow[]): void {

@@ -1147,6 +1147,20 @@ export class SceneView {
     }
   }
 
+  /**
+   * 「拍」tile: hide when admin closes auction (42/1 enabled=0), unless
+   * pending claims / blink still need an entry for claim/cancel.
+   */
+  setPaiVisible(on: boolean): void {
+    this.paiBadge.visible = !!on;
+    if (!on) {
+      this.paiBlink = false;
+      this.paiBadge.alpha = 1;
+      this.paiBlinkPhase = 0;
+    }
+    this.layoutStatusBadges();
+  }
+
   /** Flash「擂」when wager notices need attention (应战/拒绝/结算等). */
   setLeiBlink(on: boolean): void {
     this.leiBlink = on;
@@ -1169,7 +1183,7 @@ export class SceneView {
   }
 
   /**
-   * Compact strip: [收/展] fixed left; when expanded, 修/拍/擂 + optional 斗/练
+   * Compact strip: [收/展] fixed left; when expanded, 修/[拍]/擂 + optional 斗/练
    * then 娱 → 翅 → 骑 → 称. Collapsed: only the toggle remains on the left.
    */
   private layoutStatusBadges(): void {
@@ -1184,7 +1198,9 @@ export class SceneView {
 
     let next = 0;
     this.mountStatusBadgeSlot(this.xiuBadge, next++);
-    this.mountStatusBadgeSlot(this.paiBadge, next++);
+    if (this.paiBadge.visible) {
+      this.mountStatusBadgeSlot(this.paiBadge, next++);
+    }
     this.mountStatusBadgeSlot(this.leiBadge, next++);
     if (this.douBadge.visible) {
       this.mountStatusBadgeSlot(this.douBadge, next++);

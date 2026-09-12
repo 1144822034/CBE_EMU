@@ -222,7 +222,7 @@ const MALL_TABS: MallTab[] = [
 ];
 
 /** Visible action buttons on equip detail footer. */
-const EQUIP_ACTION_VISIBLE = 2;
+const EQUIP_ACTION_VISIBLE = 4;
 /** Selection bar on bag list (sampled from CBE shot). */
 const BAG_SELECT = 0x20676e;
 const BAG_TAB_BG = 0x375946;
@@ -598,7 +598,8 @@ export class SystemPanel extends Container {
     ) {
       const lines = buildEquipDetailLines(this.selected);
       // 与 drawBagEquipDetail 同一套可容纳行数：装得下则不分页
-      const fitRows = 16; // ≈ (bodyBottom-bodyTop)/16；装得下时 pages=1
+      // 底栏 4 操作时约 15 行（LCD 400 / rowH 16）
+      const fitRows = 15;
       const rowsPerPage = lines.length <= fitRows ? lines.length || 1 : fitRows;
       const pages = Math.max(1, Math.ceil(lines.length / rowsPerPage));
       if (pages <= 1) return;
@@ -2060,7 +2061,14 @@ export class SystemPanel extends Container {
     this.addLabelCentered(it.name, LCD_WIDTH / 2, titleY + titleH / 2, qColor);
 
     const softY = y + h - PANEL_BOTTOM_PAD;
-    const actionH = 52;
+    const btnH = 18;
+    const btnGap = 2;
+    const actionPad = 4;
+    // 一页 4 个操作；超出仍用右侧 ▲▼ 翻页
+    const actionH =
+      actionPad * 2 +
+      EQUIP_ACTION_VISIBLE * btnH +
+      (EQUIP_ACTION_VISIBLE - 1) * btnGap;
     const actionTop = softY - actionH - 4;
     const bodyTop = titleY + titleH + 8;
     const bodyBottom = actionTop - 4;
@@ -2121,12 +2129,11 @@ export class SystemPanel extends Container {
       Math.min(this.actionCursor, Math.max(0, acts.length - EQUIP_ACTION_VISIBLE)),
     );
     const btnW = 72;
-    const btnH = 20;
     for (let i = 0; i < EQUIP_ACTION_VISIBLE; i++) {
       const label = acts[actStart + i];
       if (!label) break;
       const hi = actStart + i === this.actionCursor;
-      const by = actionTop + 6 + i * (btnH + 4);
+      const by = actionTop + actionPad + i * (btnH + btnGap);
       const bx = Math.floor((LCD_WIDTH - btnW) / 2);
       this.box
         .roundRect(bx, by, btnW, btnH, 3)
@@ -2157,11 +2164,30 @@ export class SystemPanel extends Container {
       );
     }
 
-    // Footer ▲▼ (scroll actions when more than 2)
+    // Footer ▲▼ (scroll actions when more than one page)
     if (acts.length > EQUIP_ACTION_VISIBLE) {
       const ax = x + w - 18;
-      this.drawScrollArrow(ax, actionTop + 14, true, this.actionCursor > 0);
-      this.drawScrollArrow(ax, actionTop + 36, false, this.actionCursor < acts.length - 1);
+      const canUp = this.actionCursor > 0;
+      const canDown = this.actionCursor < acts.length - 1;
+      const upY = actionTop + actionPad + btnH / 2;
+      const downY = actionTop + actionH - actionPad - btnH / 2;
+      this.drawScrollArrow(ax, upY, true, canUp);
+      this.drawScrollArrow(ax, downY, false, canDown);
+      // Graphics alone are not interactive — same tap path as ↑↓ / move().
+      const hitW = 22;
+      const hitH = 18;
+      this.rowHits.push(
+        attachRowPointerHit(this, ax - hitW / 2, upY - hitH / 2, hitW, hitH, () => {
+          if (!canUp) return;
+          this.move(-1);
+        }),
+      );
+      this.rowHits.push(
+        attachRowPointerHit(this, ax - hitW / 2, downY - hitH / 2, hitW, hitH, () => {
+          if (!canDown) return;
+          this.move(1);
+        }),
+      );
     }
   }
 

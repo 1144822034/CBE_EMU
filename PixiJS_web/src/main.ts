@@ -17,6 +17,13 @@ import {
 import { loadSMapAliases } from "./resources/smap";
 import { defaultLiveGatewayUrl } from "./net/Transport";
 import {
+  applyGatewayZone,
+  loadGatewayZoneCatalog,
+  readStoredZoneId,
+  resolveGatewayZoneSelection,
+  type GatewayZoneRow,
+} from "./net/zones";
+import {
   clearGlSessionResume,
   readStoredLoginCredentials,
   takeGlSessionResume,
@@ -28,6 +35,7 @@ import {
   type RechargePayType,
 } from "./net/recharge";
 import { registerAccount } from "./net/register";
+import { changeAccountPassword } from "./net/password";
 import {
   isClientUpdateRequiredError,
   promptDownloadLatestApk,
@@ -151,6 +159,7 @@ import {
   isCrystalFragment,
   isDreamBadge,
   isStarSkyStone,
+  isRenameCard,
   NpcServiceOpcode,
   npcServiceOpcode,
 } from "./net/protocolExtras";
@@ -200,6 +209,8 @@ type Phase =
   | "splash"
   | "login"
   | "register"
+  | "password"
+  | "zones"
   | "servers"
   | "role"
   | "create-role"
@@ -746,6 +757,21 @@ async function main(): Promise<void> {
   preloadCbeFlowerCorners();
 
   // server_monsters overrides via gateway → admin; builtin fallback on failure.
+  // Resolve physical gateway zone before monster/NPC HTTP (uses selected pix_gateway).
+  const zoneCatalogBoot = await loadGatewayZoneCatalog();
+  resolveGatewayZoneSelection(zoneCatalogBoot);
+  let zoneCatalog = zoneCatalogBoot;
+  let gatewayZones: GatewayZoneRow[] = zoneCatalog.zones;
+  let pendingLoginAfterZone = false;
+  let zonesRefreshInFlight = false;
+  if (!gatewayZones.length) {
+    console.warn("[zones] boot catalog empty", zoneCatalogBoot);
+  } else {
+    console.info(
+      `[zones] boot zones=${gatewayZones.length} from ${zoneCatalogBoot.sourceUrl || "?"}`,
+    );
+  }
+
   await loadMonsterLevelOverrides(
     defaultMonsterLevelsUrl(defaultLiveGatewayUrl()),
   );
@@ -753,6 +779,9 @@ async function main(): Promise<void> {
   await loadNpcSceneIndex(defaultNpcScenesUrl(defaultLiveGatewayUrl()));
 
   const title = new TitleScreen();
+  if (gatewayZones.length) {
+    title.setZones(gatewayZones, readStoredZoneId() || zoneCatalog.defaultZoneId);
+  }
   const roles = new RoleScreen();
   const createRole = new CreateRoleScreen();
   const hud = new WorldHud();
@@ -1034,6 +1063,15 @@ async function main(): Promise<void> {
     }
   };
 
+  /** Map-corner「拍」: follow admin enabled; keep visible for pending claim/blink. */
+  const syncAuctionPaiBadge = (status: AuctionStatus | null | undefined) => {
+    if (!status) return;
+    const show =
+      !!status.enabled || status.pendingClaims > 0 || !!status.blink;
+    view.setPaiVisible(show);
+    view.setPaiBlink(!!status.blink);
+  };
+
   const openAuctionPanel = async (opts?: {
     preferTab?: "browse" | "mine" | "list" | "claim";
     preselect?: import("./net/protocolExtras").BagItem;
@@ -1065,7 +1103,7 @@ async function main(): Promise<void> {
       claimPage,
     });
     auctionCache = board;
-    view.setPaiBlink(!!board.status?.blink);
+    syncAuctionPaiBadge(board.status);
     auctionPanel.open(
       board.rows,
       board.mine,
@@ -1216,7 +1254,16 @@ async function main(): Promise<void> {
     }
     if (action === "claim") {
       void session.auctionClaim().then((r) => {
-        view.setPaiBlink(!!r?.blink);
+        if (auctionCache.status && r) {
+          auctionCache.status = {
+            ...auctionCache.status,
+            blink: !!r.blink,
+            pendingClaims: r.pendingClaims,
+          };
+          syncAuctionPaiBadge(auctionCache.status);
+        } else {
+          view.setPaiBlink(!!r?.blink);
+        }
         const tip = formatAuctionClaimTip(r, auctionMsgTip);
         showGameTip(tip);
         void session.openBag().then(() => refresh(tip));
@@ -1838,14 +1885,23 @@ async function main(): Promise<void> {
 
   const showPhase = (p: Phase) => {
     phase = p;
-    title.visible = p === "splash" || p === "login" || p === "register" || p === "servers";
+    title.visible =
+      p === "splash" ||
+      p === "login" ||
+      p === "register" ||
+      p === "password" ||
+      p === "zones" ||
+      p === "servers";
     if (p === "splash") title.setMode("splash");
     else if (p === "login") title.setMode("login");
     else if (p === "register") title.setMode("register");
+    else if (p === "password") title.setMode("password");
+    else if (p === "zones") title.setMode("zones");
     else if (p === "servers") title.setMode("servers");
     else {
       // doLogin → role/world used to only set title.visible=false while mode
       // stayed "login" and the caret kept remounting LoginIme over the game.
+      if (title.getMode() === "password") title.exitPasswordMode();
       title.releaseIme();
     }
     if (p !== "create-role") createRole.releaseIme();
@@ -1867,6 +1923,7 @@ async function main(): Promise<void> {
     if (
       p !== "login" &&
       p !== "register" &&
+      p !== "password" &&
       p !== "chat" &&
       p !== "create-role" &&
       p !== "trade"
@@ -1947,6 +2004,7 @@ async function main(): Promise<void> {
         (p === "splash" ||
           p === "login" ||
           p === "register" ||
+          p === "password" ||
           p === "servers" ||
           p === "role" ||
           p === "create-role")
@@ -1969,6 +2027,8 @@ async function main(): Promise<void> {
     if (p === "splash") shell.setSoftkeys({ left: "确定", right: "" });
     else if (p === "login") shell.setSoftkeys({ left: "登录", right: "返回" });
     else if (p === "register") shell.setSoftkeys({ left: "注册", right: "返回" });
+    else if (p === "password") shell.setSoftkeys({ left: "修改", right: "返回" });
+    else if (p === "zones") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "servers") shell.setSoftkeys({ left: "继续", right: "返回" });
     else if (p === "role") {
       roles.cancelDeleteConfirm();
@@ -2460,7 +2520,7 @@ async function main(): Promise<void> {
     onRoles: (list) => {
       pendingRoles = list;
       roles.setRoles(list);
-      if (phase === "servers" || phase === "splash" || phase === "login" || phase === "register") {
+      if (phase === "servers" || phase === "splash" || phase === "login" || phase === "register" || phase === "password") {
         showPhase("role");
       }
     },
@@ -2572,7 +2632,7 @@ async function main(): Promise<void> {
       );
       void session.fetchAuctionBoard().then((board) => {
         auctionCache = board;
-        view.setPaiBlink(!!board.status?.blink);
+        syncAuctionPaiBadge(board.status);
       });
       void session.fetchWagerBoard().then((board) => {
         if (board.mine?.needConfirm) view.setLeiBlink(true);
@@ -3355,7 +3415,19 @@ async function main(): Promise<void> {
       else view.setLeiBlink(true);
     },
     onAuctionEvent: (ev) => {
-      view.setPaiBlink(!!ev.blink);
+      if (auctionCache.status) {
+        auctionCache.status = {
+          ...auctionCache.status,
+          blink: !!ev.blink,
+        };
+        syncAuctionPaiBadge(auctionCache.status);
+      } else if (ev.blink) {
+        // Status not cached yet — still surface「拍」for claim entry.
+        view.setPaiVisible(true);
+        view.setPaiBlink(true);
+      } else {
+        view.setPaiBlink(false);
+      }
       const kind =
         ev.eventKind === 1
           ? "可领取"
@@ -3378,6 +3450,7 @@ async function main(): Promise<void> {
     },
     onArenaHud: (hud) => {
       arenaHud.apply(hud);
+      questTracker.setArenaOffsetY(arenaHud.overlayOffsetY());
     },
     onNpcDialog: (d) => {
       if (session.equipSellBatchSilent) return;
@@ -3934,10 +4007,32 @@ async function main(): Promise<void> {
         .then((ok) => rollbackSceneMonsterIfNoBattle(ok, actorId));
       return;
     }
-    // SCE teleport stones (0x60000000+) → 16/1 destination list.
+    // SCE teleport stones (0x60000000+) → current-region free map (n_telestone).
     if (actorId >= 0x60000000 && actorId < 0x70000000) {
-      hud.pushChat("[系]传送石: 打开目的地列表…");
-      void session.requestTeleportStoneList();
+      if (session.isTeamMemberNotLeader()) {
+        hud.pushChat("[系]队员不能传送");
+        showGameTip("队员不能传送");
+        return;
+      }
+      void (async () => {
+        mapUiMode = "world";
+        showPhase("map");
+        view.inputEnabled = false;
+        const ok = await worldMap.openRegionFree(session.scene || "");
+        if (!ok) {
+          mapUiMode = "off";
+          worldMap.hide();
+          showPhase("world");
+          view.inputEnabled = true;
+          hud.pushChat("[系]传送石: 当前区域地图不可用");
+          showGameTip("当前区域地图不可用");
+          return;
+        }
+        // Keep CBE list contract warm (server returns same-region exitinfo).
+        void session.requestTeleportStoneList();
+        setChromeStatus("传送石·区域地图");
+        hud.pushChat("[系]传送石: 免费传送当前区域");
+      })();
       return;
     }
     // Face-to-face peer tap → same options as 周围玩家 menu.
@@ -4435,16 +4530,47 @@ async function main(): Promise<void> {
     }
   };
 
-  // 游客不走空凭据直连；标题「开始游戏/登陆游戏」进登录；登录页可进注册。
+  // 开始/登陆：每次先选区服网关，再进登录。
+  const openZonesThenLogin = () => {
+    if (zonesRefreshInFlight) return;
+    zonesRefreshInFlight = true;
+    pendingLoginAfterZone = true;
+    title.setStatus("正在获取区服目录…");
+    setChromeStatus("拉取区服目录…");
+    void loadGatewayZoneCatalog()
+      .then((catalog) => {
+        zoneCatalog = catalog;
+        gatewayZones = catalog.zones;
+        if (!gatewayZones.length) {
+          const detail = catalog.error ? `（${catalog.error}）` : "";
+          title.setStatus(`区服目录不可用${detail}，使用默认网关登录`);
+          setChromeStatus(`区服目录不可用${detail}`, true);
+          console.warn("[zones] catalog empty", catalog);
+          showPhase("login");
+          return;
+        }
+        title.setZones(
+          gatewayZones,
+          readStoredZoneId() || catalog.defaultZoneId,
+        );
+        title.setStatus("请选择区服后登录");
+        showPhase("zones");
+      })
+      .finally(() => {
+        zonesRefreshInFlight = false;
+      });
+  };
+
   title.onStartGame = () => {
-    title.setStatus("请先登录或注册账号");
-    showPhase("login");
+    title.setStatus("请选择区服");
+    openZonesThenLogin();
   };
   title.onOpenLogin = () => {
-    title.setStatus("输入账号密码登录");
-    showPhase("login");
+    title.setStatus("请选择区服");
+    openZonesThenLogin();
   };
   title.onOpenRegister = () => {
+    // 登录页内进注册：区服已在此前选定。
     title.setStatus("输入账号密码注册");
     showPhase("register");
   };
@@ -4480,8 +4606,69 @@ async function main(): Promise<void> {
         registerInFlight = false;
       });
   };
+  let passwordInFlight = false;
+  title.onSubmitPassword = (currentPassword, newPassword) => {
+    if (passwordInFlight) return;
+    const account = title.getPasswordAccount();
+    if (!account) {
+      title.setStatus("未找到账号，请重新登录后再改密");
+      return;
+    }
+    passwordInFlight = true;
+    title.setStatus("正在修改密码…");
+    setChromeStatus("修改密码中…");
+    void changeAccountPassword({
+      account,
+      currentPassword,
+      newPassword,
+      confirmPassword: newPassword,
+    })
+      .then((result) => {
+        if (!result.ok) {
+          title.setStatus(result.error);
+          setChromeStatus(result.error, true);
+          showPhase("password");
+          return;
+        }
+        title.setCredentials(result.account, newPassword);
+        session.setCredentials(result.account, newPassword);
+        title.setStatus("密码修改成功");
+        setChromeStatus("密码已更新");
+        showGameTip("密码修改成功");
+        showPhase("world");
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        title.setStatus(msg);
+        setChromeStatus(msg, true);
+        showPhase("password");
+      })
+      .finally(() => {
+        passwordInFlight = false;
+      });
+  };
+  title.onCancelPassword = () => {
+    title.setStatus("");
+    showPhase("world");
+  };
   title.onCancelLogin = () => showPhase("splash");
   title.onConfirmServer = () => void confirmServer();
+  title.onConfirmZone = () => {
+    const sel = title.selectedZone ?? gatewayZones[0];
+    if (!sel) {
+      title.setStatus("无可用区服");
+      return;
+    }
+    applyGatewayZone(sel);
+    title.setStatus(`已选 ${sel.name}，请登录`);
+    setChromeStatus(`区服 ${sel.name}`);
+    void loadMonsterLevelOverrides(
+      defaultMonsterLevelsUrl(defaultLiveGatewayUrl()),
+    );
+    void loadNpcSceneIndex(defaultNpcScenesUrl(defaultLiveGatewayUrl()));
+    pendingLoginAfterZone = false;
+    showPhase("login");
+  };
   roles.onConfirm = () => {
     const role = roles.selected;
     if (!role) {
@@ -4588,6 +4775,19 @@ async function main(): Promise<void> {
       title.setStatus("已退出登录，请重新登录");
       setChromeStatus("已退出登录");
       showPhase("login");
+      return;
+    }
+    if (leaf === "change_password") {
+      const creds = session.getCredentials();
+      if (!creds.user) {
+        setChromeStatus("未登录账号，无法修改密码", true);
+        showGameTip("未登录账号，无法修改密码");
+        return;
+      }
+      title.setCredentials(creds.user, creds.password);
+      title.setStatus("输入旧密码与新密码");
+      setChromeStatus("修改密码");
+      showPhase("password");
       return;
     }
     if (leaf === "status") {
@@ -5143,6 +5343,46 @@ async function main(): Promise<void> {
           /* 星空石：选装备→选档位→29/13，不直接 7/1. */
           if (isStarSkyStone(bag.itemId)) {
             openStarSkyStoneEquipDialog(bag);
+            return;
+          }
+          /* 角色改名卡：输入新名→29/15，不直接 7/1. */
+          if (isRenameCard(bag.itemId)) {
+            const draft = window.prompt(
+              "请输入新角色名",
+              session.roleName || "",
+            );
+            if (draft == null) return;
+            const name = draft.trim();
+            if (!name) {
+              showGameTip("请输入角色名");
+              return;
+            }
+            showGameTip("改名中…");
+            const fb = await session.renameCharacter(bag.seq, name);
+            if (fb.ok) {
+              await session.openBag();
+              system.setBag(session.bagItems);
+              const cap =
+                session.characterStats?.backpackCapacity ||
+                Math.max(20, session.bagItems.length);
+              system.setBagMeta(
+                session.characterStats?.money ?? session.gold,
+                cap,
+              );
+              const role =
+                session.roles.find((r) => r.roleId === session.selectedRoleId) ??
+                null;
+              const newName =
+                fb.name || session.roleName || role?.name || "侠客";
+              hud.setIdentity(newName, session.scene, "");
+              void view.setPlayerNameplate(
+                newName,
+                session.roleTitle || "",
+                session.roleTitleGif || "",
+                isRedNamePk(session.pkPoints),
+              );
+            }
+            showGameTip(fb.message || (fb.ok ? "改名成功" : "改名失败"));
             return;
           }
           showGameTip(`使用 ${bag.name}…`);
@@ -6455,21 +6695,33 @@ dialog.hide();
     }
     worldMap.showTip(`传送中…${args.alias}`);
     view.inputEnabled = false;
-    void session
-      .requestMapTeleport(
-        args.curTeleportId,
-        args.objTeleportId,
-        args.exitId,
-        args.scene,
-      )
+    const run = args.free
+      ? session.requestRegionFreeTeleport(
+          args.curTeleportId,
+          args.objTeleportId,
+          args.exitId,
+          args.scene,
+        )
+      : session.requestMapTeleport(
+          args.curTeleportId,
+          args.objTeleportId,
+          args.exitId,
+          args.scene,
+        );
+    void run
       .then((r) => {
         if (r.ok) {
           mapUiMode = "off";
           miniMap.hide();
           worldMap.hide();
           showPhase("world");
-          hud.pushChat(`[系]消耗${r.cost}个传送石 → ${args.alias}`);
-          showGameTip(`消耗${r.cost}个传送石 → ${args.alias}`);
+          if (args.free) {
+            hud.pushChat(`[系]免费传送 → ${args.alias}`);
+            showGameTip(`免费传送 → ${args.alias}`);
+          } else {
+            hud.pushChat(`[系]消耗${r.cost}个传送石 → ${args.alias}`);
+            showGameTip(`消耗${r.cost}个传送石 → ${args.alias}`);
+          }
         } else {
           hud.pushChat(`[系]传送失败: ${r.detail}`);
           // Longer toast so「传送石不够」is readable on the confirm panel.
@@ -6638,6 +6890,9 @@ dialog.hide();
     void session.stopHangup();
     syncWorldStatusBadges();
   };
+  battle.onHangupInsightRefresh = async () => {
+    return session.ensureBattleInsightRemainSec();
+  };
   battle.onHangupAddTime = async () => {
     const fb = await session.useBattleInsightFromBag();
     if (fb.ok) {
@@ -6735,9 +6990,17 @@ dialog.hide();
       if (which === "left") title.confirm();
       return;
     }
-    if (phase === "login" || phase === "register") {
+    if (phase === "login" || phase === "register" || phase === "password") {
       if (which === "left") title.confirm();
       if (which === "right") title.cancelLogin();
+      return;
+    }
+    if (phase === "zones") {
+      if (which === "left") title.confirm();
+      if (which === "right") {
+        pendingLoginAfterZone = false;
+        showPhase("splash");
+      }
       return;
     }
     if (phase === "servers") {
@@ -6752,7 +7015,8 @@ dialog.hide();
         return;
       }
       if (which === "left") roles.confirm();
-      if (which === "right") showPhase("servers");
+      // 返回主菜单（跳过服务器列表），与选区/选服返回一致。
+      if (which === "right") showPhase("splash");
       return;
     }
     if (phase === "create-role") {
@@ -7112,7 +7376,7 @@ dialog.hide();
       }
       return;
     }
-    if (phase === "splash" || phase === "login" || phase === "register") {
+    if (phase === "splash" || phase === "zones" || phase === "login" || phase === "register" || phase === "password") {
       title.confirm();
       return;
     }
@@ -7331,12 +7595,12 @@ dialog.hide();
         return;
       }
       // horizontal only used in world; lists use vertical
-      if (phase === "splash" || phase === "servers" || phase === "login" || phase === "register") {
+      if (phase === "splash" || phase === "zones" || phase === "servers" || phase === "login" || phase === "register" || phase === "password") {
         title.move(delta);
       }
       return;
     }
-    if (phase === "splash" || phase === "servers" || phase === "login" || phase === "register") title.move(delta);
+    if (phase === "splash" || phase === "zones" || phase === "servers" || phase === "login" || phase === "register" || phase === "password") title.move(delta);
     else if (phase === "role") roles.move(delta);
     else if (phase === "create-role") createRole.move(delta);
     else if (phase === "menu") menu.move(delta);
@@ -7354,7 +7618,7 @@ dialog.hide();
 
   window.addEventListener("keydown", (e) => {
     const k = e.key.toLowerCase();
-    if (phase === "login" || phase === "register") {
+    if (phase === "login" || phase === "register" || phase === "password") {
       if (k === "arrowup" || k === "arrowdown") {
         title.move(k === "arrowup" ? -1 : 1);
         e.preventDefault();
@@ -7375,9 +7639,9 @@ dialog.hide();
         return;
       }
     }
-    if (phase === "splash" || phase === "servers" || phase === "login" || phase === "register") {
-      if (phase !== "login" && phase !== "register" && (k === "arrowup" || k === "w")) title.move(-1);
-      if (phase !== "login" && phase !== "register" && (k === "arrowdown" || k === "s")) title.move(1);
+    if (phase === "splash" || phase === "zones" || phase === "servers" || phase === "login" || phase === "register" || phase === "password") {
+      if (phase !== "login" && phase !== "register" && phase !== "password" && (k === "arrowup" || k === "w")) title.move(-1);
+      if (phase !== "login" && phase !== "register" && phase !== "password" && (k === "arrowdown" || k === "s")) title.move(1);
     }
     if (phase === "role") {
       if (k === "arrowup" || k === "w") roles.move(-1);
@@ -7686,9 +7950,9 @@ dialog.hide();
         handleSoftkey("left");
       } else if (phase === "world" && approach.open) approach.confirm();
       else if (phase === "world") showPhase("menu");
-      else if (phase === "splash" || phase === "login" || phase === "register") title.confirm();
+      else if (phase === "splash" || phase === "zones" || phase === "login" || phase === "register" || phase === "password") title.confirm();
       else shell.softkeys.onSoftkey?.("left");
-    } else if (k === "f" && phase !== "login" && phase !== "register") {
+    } else if (k === "f" && phase !== "login" && phase !== "register" && phase !== "password") {
       // F = D-pad OK（与左软 Q 分开）
       handleOk();
       e.preventDefault();
@@ -7719,7 +7983,7 @@ dialog.hide();
         showPhase("menu");
       } else if (phase === "map") {
         worldMap.cancel();
-      } else if (phase === "login" || phase === "register") {
+      } else if (phase === "login" || phase === "register" || phase === "password") {
         title.cancelLogin();
       } else if (phase === "battle") {
         if (battle.isAwaitingRound()) return;
@@ -7755,7 +8019,7 @@ dialog.hide();
     const resumed = await tryResumeAfterGlSoftReload();
     if (resumed) return;
     showPhase("splash");
-    title.setStatus("开始游戏/登陆游戏=创建或登录");
+    title.setStatus("开始游戏/登陆游戏=选区后登录");
     setChromeStatus("就绪");
   })();
 
@@ -8306,6 +8570,8 @@ dialog.hide();
         phase === "splash" ||
         phase === "login" ||
         phase === "register" ||
+        phase === "password" ||
+        phase === "zones" ||
         phase === "servers" ||
         phase === "role" ||
         phase === "create-role"
@@ -8332,6 +8598,8 @@ dialog.hide();
       if (phase === "splash") shell.setSoftkeys({ left: "确定", right: "" });
       else if (phase === "login") shell.setSoftkeys({ left: "登录", right: "返回" });
       else if (phase === "register") shell.setSoftkeys({ left: "注册", right: "返回" });
+      else if (phase === "password") shell.setSoftkeys({ left: "修改", right: "返回" });
+      else if (phase === "zones") shell.setSoftkeys({ left: "确定", right: "返回" });
       else if (phase === "servers") shell.setSoftkeys({ left: "继续", right: "返回" });
       else if (phase === "role") shell.setSoftkeys({ left: "继续", right: "返回" });
       else if (phase === "create-role") shell.setSoftkeys({ left: "确定", right: "返回" });

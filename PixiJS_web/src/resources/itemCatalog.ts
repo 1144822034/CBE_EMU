@@ -287,6 +287,25 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
       durabilityMax: 1,
     });
   }
+  if (!itemCache.has(852)) {
+    itemCache.set(852, {
+      id: 852,
+      name: "角色改名卡",
+      desc: "使用后可修改一次角色名。",
+      category: 14,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 100,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
   return itemCache;
 }
 

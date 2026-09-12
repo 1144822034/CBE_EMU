@@ -51,7 +51,8 @@ const CURSOR = 18; // map_kuang2.gif
  * - Map UI (this panel): any selected world/region node is a valid teleport
  *   target (costs item 800). Cursor prefers DSH neighbor links, then falls
  *   back to nearest node in that direction so the full graph stays reachable.
- * - Scene `n_telestone` NPC (16/1 exitinfo): restricted destination list only.
+ * - Scene `n_telestone` NPC: same regional-map UI for the current wMap only,
+ *   free (no item 800). Server 16/1.exitinfo mirrors that same-region list.
  */
 export class WorldMapPanel extends Container {
   private box = new Graphics();
@@ -72,16 +73,19 @@ export class WorldMapPanel extends Container {
   private toast: PanelTipState = createPanelTipState();
   /** Sticky confirm copy restored after transient tips (e.g. 传送石不够). */
   private confirmTip = "";
+  /** n_telestone path: current-region only, free teleport. */
+  private freeRegion = false;
 
   onClose: (() => void) | null = null;
   onSoftkeys: ((labels: { left: string; right: string }) => void) | null = null;
-  /** Confirm spend stone → teleport to sMap row. */
+  /** Confirm → teleport to sMap row (paid map UI or free telestone). */
   onTeleport: ((args: {
     curTeleportId: number;
     objTeleportId: number;
     exitId: number;
     scene: string;
     alias: string;
+    free: boolean;
   }) => void) | null = null;
 
   constructor() {
@@ -101,6 +105,7 @@ export class WorldMapPanel extends Container {
   async open(scene: string): Promise<void> {
     await this.mountArt();
     this.currentScene = scene;
+    this.freeRegion = false;
     if (!this.catalog) {
       try {
         this.catalog = await loadWorldMapCatalog();
@@ -121,8 +126,39 @@ export class WorldMapPanel extends Container {
     this.redraw();
   }
 
+  /**
+   * Scene teleport-stone NPC: open the current region's map only (no world
+   * hop), confirm is free. Reuses the same sMap graph as paid map UI.
+   */
+  async openRegionFree(scene: string): Promise<boolean> {
+    await this.open(scene);
+    if (!this.catalog || !this.hereWorldId) {
+      this.hide();
+      return false;
+    }
+    const w = this.catalog.byWorldId.get(this.hereWorldId);
+    if (!w) {
+      this.hide();
+      return false;
+    }
+    const list = scenesForWorld(this.catalog, w.id);
+    if (!list.length) {
+      this.hide();
+      return false;
+    }
+    this.freeRegion = true;
+    this.regionWorld = w;
+    const prefer = list.findIndex((s) => s.id === this.hereSceneId);
+    this.regionCursor = prefer >= 0 ? prefer : 0;
+    this.mode = "region";
+    this.clearConfirmTip();
+    this.redraw();
+    return true;
+  }
+
   hide(): void {
     this.confirmTip = "";
+    this.freeRegion = false;
     clearPanelTip(this.toast);
     this.visible = false;
   }
@@ -145,7 +181,9 @@ export class WorldMapPanel extends Container {
   }
 
   private setConfirmTip(alias: string): void {
-    this.confirmTip = `您需要花费1个传送石\n瞬移到${alias}`;
+    this.confirmTip = this.freeRegion
+      ? `免费瞬移到${alias}`
+      : `您需要花费1个传送石\n瞬移到${alias}`;
     setPanelTipSticky(this.toast, this.confirmTip, () => {
       if (this.visible) this.redraw();
     });
@@ -229,6 +267,7 @@ export class WorldMapPanel extends Container {
         exitId: scene.id,
         scene: scene.scene,
         alias: scene.alias || scene.scene,
+        free: this.freeRegion,
       });
     }
   }
@@ -242,6 +281,11 @@ export class WorldMapPanel extends Container {
       return;
     }
     if (this.mode === "region") {
+      if (this.freeRegion) {
+        this.hide();
+        this.onClose?.();
+        return;
+      }
       this.mode = "world";
       this.regionWorld = null;
       this.redraw();

@@ -88,6 +88,7 @@ static void vm_mock_world_boss_queue_scene_resync_for(const char *scene);
 static void vm_mock_world_boss_broadcast_despawn(const char *sceneGbk, u16 x,
                                                  u16 y);
 static void vm_mock_world_boss_load_config(bool force);
+static void vm_mock_world_boss_despawn_active(const char *reason);
 
 static bool vm_mock_world_boss_scene_in_update_catalog(const char *scene)
 {
@@ -507,20 +508,55 @@ static void vm_mock_world_boss_save_runtime(void)
 }
 
 /*
- * Battle remap: ACTIVE/CLAIMED world boss on this scene + home/near feet /
- * wire hit resolves to configured monsterId (no SCE binding required).
+ * True when wire/id is the world-boss identity (configured monster, runtime
+ * overlay wire, or keep-id #250). Unrelated catalog wires must never remap
+ * via proximity alone — that turned nearby mucus #41 into Boss #213.
+ */
+static bool vm_mock_world_boss_wire_is_boss_identity(u32 wireId)
+{
+    if (wireId == 0)
+        return false;
+    if (wireId == g_vm_mock_world_boss_config.monsterId)
+        return true;
+    if (wireId == (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB)
+        return true;
+    if (g_vm_mock_world_boss_rt.wireId != 0 &&
+        wireId == g_vm_mock_world_boss_rt.wireId)
+        return true;
+    return false;
+}
+
+static bool vm_mock_world_boss_pos_near_home(u32 posx, u32 posy)
+{
+    u32 dx = 0;
+    u32 dy = 0;
+
+    if (posx == g_vm_mock_world_boss_rt.x && posy == g_vm_mock_world_boss_rt.y)
+        return true;
+    if (posx == 0 || posy == 0)
+        return false;
+    dx = posx > g_vm_mock_world_boss_rt.x ? posx - g_vm_mock_world_boss_rt.x
+                                          : g_vm_mock_world_boss_rt.x - posx;
+    dy = posy > g_vm_mock_world_boss_rt.y ? posy - g_vm_mock_world_boss_rt.y
+                                          : g_vm_mock_world_boss_rt.y - posy;
+    return dx <= 96u && dy <= 96u;
+}
+
+/*
+ * Battle remap: enabled + ACTIVE/CLAIMED + boss-identity wire on boss scene
+ * (home/near feet optional when wire is boss id). Never hijack other catalog
+ * wires just because feet are within 96px of a stale home.
  */
 u32 vm_mock_world_boss_remap_battle_enemy(const char *scene, u32 wireId,
                                           u32 posx, u32 posy)
 {
-    u32 dx = 0;
-    u32 dy = 0;
     bool posHit = false;
     bool idHit = false;
 
     vm_mock_world_boss_load_config(false);
     vm_mock_world_boss_load_runtime(false);
-    if (g_vm_mock_world_boss_config.monsterId == 0)
+    if (!g_vm_mock_world_boss_config.enabled ||
+        g_vm_mock_world_boss_config.monsterId == 0)
         return 0;
     if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_ACTIVE &&
         g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_CLAIMED)
@@ -529,24 +565,20 @@ u32 vm_mock_world_boss_remap_battle_enemy(const char *scene, u32 wireId,
         !vm_net_mock_scene_names_equal_loose(scene,
                                              g_vm_mock_world_boss_rt.scene))
         return 0;
-    posHit = (posx == g_vm_mock_world_boss_rt.x &&
-              posy == g_vm_mock_world_boss_rt.y);
+    idHit = vm_mock_world_boss_wire_is_boss_identity(wireId);
+    posHit = vm_mock_world_boss_pos_near_home(posx, posy);
+    /* Require boss wire/id — proximity alone must not steal outdoor trash mobs. */
+    if (!idHit)
+        return 0;
     if (!posHit && posx != 0 && posy != 0)
-    {
-        dx = posx > g_vm_mock_world_boss_rt.x
-                 ? posx - g_vm_mock_world_boss_rt.x
-                 : g_vm_mock_world_boss_rt.x - posx;
-        dy = posy > g_vm_mock_world_boss_rt.y
-                 ? posy - g_vm_mock_world_boss_rt.y
-                 : g_vm_mock_world_boss_rt.y - posy;
-        if (dx <= 96u && dy <= 96u)
-            posHit = true;
-    }
-    idHit = (wireId != 0 &&
-             (wireId == g_vm_mock_world_boss_rt.wireId ||
-              wireId == g_vm_mock_world_boss_config.monsterId ||
-              wireId == (u32)VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB));
-    if (!posHit && !idHit)
+        return 0;
+    return g_vm_mock_world_boss_config.monsterId;
+}
+
+u32 vm_mock_world_boss_configured_monster_id(void)
+{
+    vm_mock_world_boss_load_config(false);
+    if (!g_vm_mock_world_boss_config.enabled)
         return 0;
     return g_vm_mock_world_boss_config.monsterId;
 }
@@ -556,6 +588,8 @@ bool vm_mock_world_boss_active_anchor(char *sceneOut, size_t sceneCap, u16 *xOut
 {
     vm_mock_world_boss_load_config(false);
     vm_mock_world_boss_load_runtime(false);
+    if (!g_vm_mock_world_boss_config.enabled)
+        return false;
     if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_ACTIVE)
         return false;
     if (g_vm_mock_world_boss_rt.scene[0] == 0 ||
@@ -618,6 +652,15 @@ static void vm_mock_world_boss_load_config(bool force)
         vm_mock_world_boss_config_row, &g_vm_mock_world_boss_config);
     g_vm_mock_world_boss_config_loaded = true;
     vm_mock_world_boss_load_runtime(force);
+    if (!g_vm_mock_world_boss_config.enabled &&
+        g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+    {
+        printf("[info][mock-service] world_boss_disabled_clear status=%u "
+               "scene=%s evidence=config-enabled-0\n",
+               (u32)g_vm_mock_world_boss_rt.status,
+               g_vm_mock_world_boss_rt.scene);
+        vm_mock_world_boss_despawn_active("config-disabled-load");
+    }
 }
 
 const vm_mock_world_boss_config *vm_net_mock_world_boss_config_get(void)
@@ -1200,9 +1243,14 @@ static void vm_mock_world_boss_tick(void)
     char sceneGbk[128];
 
     vm_mock_world_boss_load_config(false);
-    if (!g_vm_mock_world_boss_config.enabled)
-        return;
     vm_mock_world_boss_load_runtime(false);
+    if (!g_vm_mock_world_boss_config.enabled)
+    {
+        /* Disable must clear leftover ACTIVE/CLAIMED/PREVIEW (stale DB rows). */
+        if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+            vm_mock_world_boss_despawn_active("config-disabled");
+        return;
+    }
     vm_mock_world_boss_legacy_sce_cleanup_once();
     if ((u32)now == g_vm_mock_world_boss_last_tick_sec)
         return;
@@ -1253,37 +1301,26 @@ bool vm_mock_world_boss_try_claim_encounter(
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     bool posHit = false;
     bool idHit = false;
-    u32 dx = 0;
-    u32 dy = 0;
 
     if (enemyIdOut)
         *enemyIdOut = 0;
+    vm_mock_world_boss_load_config(false);
+    vm_mock_world_boss_load_runtime(false);
+    if (!g_vm_mock_world_boss_config.enabled ||
+        g_vm_mock_world_boss_config.monsterId == 0)
+        return false;
     if (g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_ACTIVE)
         return false;
     if (scene == NULL || !vm_net_mock_scene_names_equal_loose(
                              scene, g_vm_mock_world_boss_rt.scene))
         return false;
     /*
-     * Pixi hangup/collide may upload patrol feet instead of SCE home tiles.
-     * Accept exact home, nearby feet, or wire/monster id on the boss scene.
+     * Manual claim: boss-identity wire + home/near feet. Do not claim when the
+     * client collided a different outdoor trash mob near the boss tile.
      */
-    posHit = (posx == g_vm_mock_world_boss_rt.x &&
-              posy == g_vm_mock_world_boss_rt.y);
-    if (!posHit && posx != 0 && posy != 0)
-    {
-        dx = posx > g_vm_mock_world_boss_rt.x
-                 ? posx - g_vm_mock_world_boss_rt.x
-                 : g_vm_mock_world_boss_rt.x - posx;
-        dy = posy > g_vm_mock_world_boss_rt.y
-                 ? posy - g_vm_mock_world_boss_rt.y
-                 : g_vm_mock_world_boss_rt.y - posy;
-        if (dx <= 96u && dy <= 96u)
-            posHit = true;
-    }
-    idHit = (wireId != 0 &&
-             (wireId == g_vm_mock_world_boss_rt.wireId ||
-              wireId == g_vm_mock_world_boss_config.monsterId));
-    if (!posHit && !idHit)
+    idHit = vm_mock_world_boss_wire_is_boss_identity(wireId);
+    posHit = vm_mock_world_boss_pos_near_home(posx, posy);
+    if (!idHit || !posHit)
         return false;
     g_vm_mock_world_boss_rt.status = VM_MOCK_WORLD_BOSS_STATUS_CLAIMED;
     g_vm_mock_world_boss_rt.claimRoleId = role ? role->roleId : 0;
@@ -1508,6 +1545,10 @@ bool vm_mock_world_boss_admin_save(
         return false;
     g_vm_mock_world_boss_config_loaded = false;
     vm_mock_world_boss_load_config(true);
+    /* Saving enabled=0 must immediately drop map overlay + battle remap. */
+    if (!g_vm_mock_world_boss_config.enabled &&
+        g_vm_mock_world_boss_rt.status != VM_MOCK_WORLD_BOSS_STATUS_IDLE)
+        vm_mock_world_boss_despawn_active("admin-disable");
     return true;
 }
 

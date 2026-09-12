@@ -103,6 +103,27 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_login
 显示名称、状态标签、24 位颜色、排序和启用状态。该配置驱动标题登录响应中的
 服务器列表，不配置 CBMS 主机或端口，也不会让已建立的游戏连接切换到其他地址。
 
+已有数据库增加区服网关（Pixi 物理分区）时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_gateway_zones.sql
+```
+
+脚本新增 `server_gateway_zones`，空库写入“江湖归来”指向
+`ws://192.1.1.1:19092` 的初始行；已有行不会被覆盖。后台
+`/admin-418yz6/?tab=gateways` 编辑区服名、WS 网关 URL、账号页 URL、
+排序、启用与默认项。公开 `GET /api/zones`（经 gateway 代理）供 Pixi
+进游戏前选区；与标题 `server_login_servers` 无关。
+
+已有数据库增加每日注册上限配置时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_registration_config.sql
+```
+
+脚本新增 `server_registration_config`（默认每日 3 个名额）。服务启动时也会
+自动建表。后台「账号管理」页可调整；后台手动创建账号不受此限额。
+
 已有数据库升级到商品管理功能时执行：
 
 ```powershell
@@ -177,6 +198,9 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `CBE_MYSQL_USER`
 - `CBE_MYSQL_PASSWORD`
 - `CBE_MYSQL_DATABASE`
+
+也可写入 `bin/mock-server.conf` 的 `mysql_*` 字段（见 `server/README.md`）；
+已设置的环境变量仍优先于配置文件。
 
 ## 表说明
 
