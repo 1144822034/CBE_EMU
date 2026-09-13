@@ -379,7 +379,7 @@ export async function warmItemCatalogs(): Promise<void> {
 /**
  * Equip/item list name color by 品质 (CBE MMORPG_Item.c @0x010325B0, flag=1).
  * DrawString takes RGB565; expanded here to 24-bit for UC3 paint.
- * Q4 shares Q3 magenta in the CBE jump table (no separate orange stub).
+ * Q4 单独用粉红（与 Q3 品红区分）。
  */
 export function qualityColor(quality: number): number {
   switch (quality | 0) {
@@ -390,8 +390,9 @@ export function qualityColor(quality: number): number {
     case 2:
       return 0x29faff; // RGB565 0x2FDF 青（非蓝）
     case 3:
-    case 4:
       return 0xee10f6; // RGB565 0xE89E 品红
+    case 4:
+      return 0xff69b4; // 粉红
     default:
       return 0xee10f6;
   }

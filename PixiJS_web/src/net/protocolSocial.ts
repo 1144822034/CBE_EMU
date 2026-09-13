@@ -307,12 +307,27 @@ export type SocialNotice =
   | { kind: "guild_invite_result"; result: number; name: string }
   | { kind: "guild_create"; stage: "need_name" | "confirm" | "done" | "fail"; tip: string; name?: string };
 
+/** Milestone attrs from ParseEquipAttributes (21/6 / 21/8 common-extra). */
+export type TradeOfferEnhanceAttr = {
+  unlock: number;
+  type: number;
+  flag: number;
+  value: number;
+  washed?: boolean;
+};
+
 export type TradeOfferItem = {
   seq: number;
   itemId: number;
   count: number;
   name: string;
   enhance: number;
+  quality?: number;
+  kind?: "equip" | "item";
+  desc?: string;
+  equipSlot?: number;
+  /** Present when wire common-extra carried milestone slots (first-obtain / wash). */
+  enhanceAttrs?: TradeOfferEnhanceAttr[];
 };
 
 export type TradeOfferView = {
@@ -794,23 +809,60 @@ export type TradePacketUpdate = {
   session?: TradeSessionUpdate;
 };
 
-function skipTradeCommonExtra(r: SeqReader): { enhance: number } {
+function skipTradeCommonExtra(r: SeqReader): {
+  enhance: number;
+  attrs: TradeOfferEnhanceAttr[];
+} {
   let enhance = 0;
+  const attrs: TradeOfferEnhanceAttr[] = [];
   try {
     const first = r.i16();
     r.i16();
     const attrCount = r.u8();
     enhance = first & 0xff;
     for (let a = 0; a < attrCount && a < 8; a++) {
-      r.u8();
-      r.u8();
-      r.u8();
-      r.i16();
+      const unlock = r.u8();
+      const type = r.u8();
+      const rawFlag = r.u8();
+      const value = r.i16();
+      const washed = (rawFlag & 0x80) !== 0;
+      const flag = rawFlag & 0x01;
+      attrs.push({
+        unlock,
+        type,
+        flag,
+        value,
+        ...(washed ? { washed: true } : {}),
+      });
     }
   } catch {
     /* truncated */
   }
-  return { enhance };
+  return { enhance, attrs };
+}
+
+function tradeOfferItemFromWire(
+  seq: number,
+  itemId: number,
+  count: number,
+  extra: { enhance: number; attrs: TradeOfferEnhanceAttr[] },
+): TradeOfferItem {
+  const cat = lookupItemSync(itemId);
+  const kind: "equip" | "item" =
+    cat?.kind ?? (itemId >= 1000 ? "equip" : "item");
+  const isEquip = kind === "equip";
+  return {
+    seq,
+    itemId,
+    count: Math.max(1, count),
+    name: cat?.name ?? `#${itemId}`,
+    enhance: isEquip ? extra.enhance : 0,
+    quality: cat?.quality ?? 0,
+    kind,
+    desc: cat?.desc ?? "",
+    equipSlot: cat?.equipSlot ?? -1,
+    ...(isEquip && extra.attrs.length ? { enhanceAttrs: extra.attrs } : {}),
+  };
 }
 
 /** Parse 21/6 peer offer rows: i16 seq, u32 itemId, i16 count, [string if item], extra. */
@@ -832,15 +884,7 @@ export function parseTradeOfferIteminfo(
           /* optional empty name */
         }
       }
-      const extra = skipTradeCommonExtra(r);
-      const cat = lookupItemSync(itemId);
-      items.push({
-        seq,
-        itemId,
-        count: Math.max(1, count),
-        name: cat?.name ?? `#${itemId}`,
-        enhance: cat?.kind === "equip" || itemId >= 1000 ? extra.enhance : 0,
-      });
+      items.push(tradeOfferItemFromWire(seq, itemId, count, skipTradeCommonExtra(r)));
     } catch {
       break;
     }
@@ -860,15 +904,7 @@ function parseTradeReceiptIteminfo(
       const seq = r.i16();
       const itemId = r.u32();
       const count = r.u32();
-      const extra = skipTradeCommonExtra(r);
-      const cat = lookupItemSync(itemId);
-      items.push({
-        seq,
-        itemId,
-        count: Math.max(1, count),
-        name: cat?.name ?? `#${itemId}`,
-        enhance: cat?.kind === "equip" || itemId >= 1000 ? extra.enhance : 0,
-      });
+      items.push(tradeOfferItemFromWire(seq, itemId, count, skipTradeCommonExtra(r)));
     } catch {
       break;
     }

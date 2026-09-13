@@ -476,6 +476,12 @@ function isWashedMilestone(cat: ItemCatalogRow, a: BagEnhanceAttr): boolean {
   return a.type !== defType || (a.flag & 1) !== defFlag || a.value !== defValue;
 }
 
+/** True when wire marks any milestone washed (flag bit7) — bag list `[洗]`. */
+export function equipHasWashedAttr(it: BagItem): boolean {
+  if (it.kind !== "equip" || !it.enhanceAttrs?.length) return false;
+  return it.enhanceAttrs.some((a) => !!a.washed);
+}
+
 /** M(L) = base * (1 + (10L + 35*⌊L/4⌋)/100) */
 function bonusScale(base: number, enhanceLevel: number): number {
   if (base <= 0 || enhanceLevel <= 0) return base;

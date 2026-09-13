@@ -191,6 +191,8 @@ import {
   parseMapTeleportConfirm,
   npcServiceOpcode,
   EquipSellService,
+  equipSellQualityLabel,
+  matchEquipSellQuality,
   parseBagItems,
   parseBagItemUpdates,
   mergeBagItemUpdateDeltas,
@@ -3757,12 +3759,14 @@ export class GameSession {
 
   /**
    * Client-side batch sell via existing equip-sell 26/1 SELL_BASE.
-   * Sells every backpack equip with enhance==0; skips worn / enhanced.
+   * Sells backpack equips with enhance==0; optional quality filter.
    * Suppresses onNpcDialog while looping so the UI does not flicker.
    */
   equipSellBatchSilent = false;
 
-  async sellAllUnenhancedBagEquips(): Promise<{
+  async sellUnenhancedBagEquips(opts?: {
+    quality?: number;
+  }): Promise<{
     sold: number;
     skipped: number;
     message: string;
@@ -3770,12 +3774,32 @@ export class GameSession {
     if (!this.transport) {
       return { sold: 0, skipped: 0, message: "未连接服务器" };
     }
+    const qualityFilter =
+      opts?.quality !== undefined ? opts.quality | 0 : undefined;
+    const qLabel =
+      qualityFilter !== undefined
+        ? equipSellQualityLabel(qualityFilter)
+        : "装备";
     await this.openBag();
     const targets = this.bagItems.filter(
-      (it) => it.kind === "equip" && (it.enhance | 0) === 0 && it.seq > 0,
+      (it) =>
+        it.kind === "equip" &&
+        (it.enhance | 0) === 0 &&
+        it.seq > 0 &&
+        (qualityFilter === undefined ||
+          matchEquipSellQuality(it.quality, qualityFilter)),
     );
     if (!targets.length) {
-      return { sold: 0, skipped: 0, message: "背包没有可出售的未强化装备" };
+      // Keep sell voucher UI open; do not drop to world.
+      await this.pickNpcOption(1, EquipSellService.OPEN, "出售装备");
+      return {
+        sold: 0,
+        skipped: 0,
+        message:
+          qualityFilter !== undefined
+            ? `背包没有可出售的未强化${qLabel}`
+            : "背包没有可出售的未强化装备",
+      };
     }
     this.equipSellBatchSilent = true;
     let sold = 0;
@@ -3806,9 +3830,17 @@ export class GameSession {
     await this.pickNpcOption(1, EquipSellService.OPEN, "出售装备");
     const message =
       skipped > 0
-        ? `已出售 ${sold} 件未强化装备（跳过 ${skipped}）`
-        : `已出售 ${sold} 件未强化装备`;
+        ? `已出售 ${sold} 件未强化${qLabel}（跳过 ${skipped}）`
+        : `已出售 ${sold} 件未强化${qLabel}`;
     return { sold, skipped, message };
+  }
+
+  async sellAllUnenhancedBagEquips(): Promise<{
+    sold: number;
+    skipped: number;
+    message: string;
+  }> {
+    return this.sellUnenhancedBagEquips();
   }
 
   async openTaskDetail(

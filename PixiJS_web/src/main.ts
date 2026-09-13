@@ -149,8 +149,10 @@ import type { RoleRow } from "./net/protocol";
 import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
 import {
   augmentEquipSellDialog,
+  EQUIP_SELL_QUALITY_OPTIONS,
   EquipSellBatchAction,
   EquipSellService,
+  equipSellQualityLabel,
   DREAM_BADGE_EQUIP_IDS,
   bagVisibleStackCount,
   decodeNpcBuyItemId,
@@ -6558,8 +6560,8 @@ async function main(): Promise<void> {
       })();
       return;
     }
-    // Equip-sell voucher: client-only batch sell of unenhanced bag equips.
-    // Actions 293..295 — must not reuse dream-badge combine 290/291.
+    // Equip-sell voucher: client-only batch / quality sell of unenhanced bag equips.
+    // 293..295 all-sell; 296..298 quality-sell (avoid dream-badge / star-sky ids).
     if (action === EquipSellBatchAction.OPEN_CONFIRM) {
       dialog.show({
         title: "确认出售",
@@ -6580,7 +6582,53 @@ async function main(): Promise<void> {
         const r = await session.sellAllUnenhancedBagEquips();
         showGameTip(r.message);
         hud.pushChat(`[系]${r.message}`);
-        if (!dialog.visible) showPhase("world");
+      })();
+      return;
+    }
+    if (action === EquipSellBatchAction.OPEN_QUALITY_MENU) {
+      dialog.show({
+        title: "按品质出售",
+        body: "选择要出售的装备品质（仅未强化）：",
+        options: [
+          ...EQUIP_SELL_QUALITY_OPTIONS.map((o) => ({
+            label: `出售全部${o.label}`,
+            action: EquipSellBatchAction.OPEN_QUALITY_CONFIRM,
+            value: o.quality,
+          })),
+          { label: "返回", action: EquipSellBatchAction.CANCEL, value: 0 },
+        ],
+      });
+      showPhase("dialog");
+      setChromeStatus("按品质出售");
+      return;
+    }
+    if (action === EquipSellBatchAction.OPEN_QUALITY_CONFIRM) {
+      const q = value | 0;
+      const qLabel = equipSellQualityLabel(q);
+      dialog.show({
+        title: "确认出售",
+        body: `出售背包中全部未强化${qLabel}？售出后不可找回。`,
+        options: [
+          {
+            label: "确认出售",
+            action: EquipSellBatchAction.CONFIRM_QUALITY,
+            value: q,
+          },
+          { label: "取消", action: EquipSellBatchAction.CANCEL, value: 0 },
+        ],
+      });
+      showPhase("dialog");
+      setChromeStatus(`确认出售${qLabel}`);
+      return;
+    }
+    if (action === EquipSellBatchAction.CONFIRM_QUALITY) {
+      const q = value | 0;
+      dialog.hide();
+      void (async () => {
+        showGameTip("批量出售中…");
+        const r = await session.sellUnenhancedBagEquips({ quality: q });
+        showGameTip(r.message);
+        hud.pushChat(`[系]${r.message}`);
       })();
       return;
     }

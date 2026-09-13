@@ -450,38 +450,77 @@ export function isEquipSellDialog(dialog: NpcDialog): boolean {
 }
 
 /**
- * Client-only dialog actions for equip-sell batch (must not collide with
- * dream-badge combine 290/291 in main.ts).
+ * Client-only dialog actions for equip-sell batch.
+ * 293..295: all-sell (guarded vs star-sky 293..295 in main.ts).
+ * 296..298: quality sell (avoid star-sky / dream-badge ids).
  */
 export const EquipSellBatchAction = {
   OPEN_CONFIRM: 293,
   CONFIRM: 294,
   CANCEL: 295,
+  OPEN_QUALITY_MENU: 296,
+  OPEN_QUALITY_CONFIRM: 297,
+  CONFIRM_QUALITY: 298,
 } as const;
 
-/** Inject client-only「出售背包全部装备」into equip-sell dialogs. */
+/** 品质选项：0白/1绿/2青/3紫/4红。 */
+export const EQUIP_SELL_QUALITY_OPTIONS = [
+  { quality: 0, label: "白装" },
+  { quality: 1, label: "绿装" },
+  { quality: 2, label: "蓝装" },
+  { quality: 3, label: "紫装" },
+  { quality: 4, label: "粉装" },
+] as const;
+
+export function equipSellQualityLabel(quality: number): string {
+  const q = quality | 0;
+  return (
+    EQUIP_SELL_QUALITY_OPTIONS.find((o) => o.quality === q)?.label ??
+    `品质${q}`
+  );
+}
+
+export function matchEquipSellQuality(
+  itemQuality: number,
+  selected: number,
+): boolean {
+  return (itemQuality | 0) === (selected | 0);
+}
+
+/** Inject client-only batch/quality sell options into equip-sell dialogs. */
 export function augmentEquipSellDialog(dialog: NpcDialog): NpcDialog {
   if (!isEquipSellDialog(dialog)) return dialog;
+  const options = [...dialog.options];
+  let changed = false;
   if (
-    dialog.options.some(
+    !options.some(
       (o) =>
         o.action === EquipSellBatchAction.OPEN_CONFIRM ||
         o.label === "出售背包全部装备",
     )
   ) {
-    return dialog;
+    options.push({
+      label: "出售背包全部装备",
+      action: EquipSellBatchAction.OPEN_CONFIRM,
+      value: 0,
+    });
+    changed = true;
   }
-  return {
-    ...dialog,
-    options: [
-      ...dialog.options,
-      {
-        label: "出售背包全部装备",
-        action: EquipSellBatchAction.OPEN_CONFIRM,
-        value: 0,
-      },
-    ],
-  };
+  if (
+    !options.some(
+      (o) =>
+        o.action === EquipSellBatchAction.OPEN_QUALITY_MENU ||
+        o.label === "按品质出售",
+    )
+  ) {
+    options.push({
+      label: "按品质出售",
+      action: EquipSellBatchAction.OPEN_QUALITY_MENU,
+      value: 0,
+    });
+    changed = true;
+  }
+  return changed ? { ...dialog, options } : dialog;
 }
 
 /** World chat: 1/3/1 { type=0, data }. */

@@ -2,6 +2,7 @@
  * Player trade stall — two-step flow:
  * ① configure (bag + gold); left softkey 锁定 = submit offer (21/5)
  * ② 确认交易 unlocks only after both sides locked/submitted.
+ * After both lock, peer offer rows show 查看 after equip names.
  */
 import { Container, Graphics } from "pixi.js";
 import { replaceGraphics } from "../render/gpuResume";
@@ -13,13 +14,17 @@ import {
   paintCbePanel,
   drawCbeTitlePill,
 } from "./constants";
-import { BitmapLabel } from "./BitmapLabel";
+import { BitmapLabel, wrapChars, measureUiTextWidth } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
 import type { BagItem } from "../net/protocolExtras";
 import type { TradeOfferItem, TradeOfferView } from "../net/protocolSocial";
 import { isTradeableItem, qualityColor } from "../resources/itemCatalog";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
+import {
+  buildEquipDetailLines,
+  type EquipPaintLine,
+} from "./equipDetail";
 
 export type TradeAction =
   | "pick_item"
@@ -32,11 +37,9 @@ export type TradeAction =
 
 /** 1 = configure offer · 2 = wait / confirm. */
 type FlowStep = 1 | 2;
-type Mode = "list" | "money";
+type Mode = "list" | "money" | "peer_detail";
 
 const BAG_PAGE_SIZE = 6;
-
-const STEP2_ACTIONS = ["确认交易"] as const;
 
 type ConfigRow = { kind: "money" } | { kind: "bag"; index: number };
 
@@ -60,6 +63,9 @@ export class TradePanel extends Container {
   private waitingPeer = false;
   private offerSubmitted = false;
   private peerSubmitted = false;
+  /** Peer equip selected for attribute detail (after both locked). */
+  private peerDetailItem: TradeOfferItem | null = null;
+  private peerDetailPage = 0;
   private ime = new ChatIme({
     maxLength: 10,
     inputMode: "numeric",
@@ -110,8 +116,11 @@ export class TradePanel extends Container {
   }
 
   softkeys(): { left: string; right: string } {
-    // Right softkey 返回 = cancel trade (except leaving money IME).
+    // Right softkey 返回 = cancel trade (except leaving money IME / peer detail).
     if (this.mode === "money") return { left: "确定", right: "返回" };
+    if (this.mode === "peer_detail") {
+      return { left: "", right: "返回" };
+    }
     if (this.flowStep === 1) {
       // Before gold/items: left softkey disabled; after: 锁定 = submit.
       if (this.hasOffer()) return { left: "锁定", right: "返回" };
@@ -126,6 +135,7 @@ export class TradePanel extends Container {
   /** Left softkey — 锁定 submits offer; step2 确认 confirms trade. */
   softLeft(): void {
     if (!this.visible) return;
+    if (this.mode === "peer_detail") return;
     if (this.mode === "money") {
       this.commitMoney();
       return;
@@ -150,6 +160,8 @@ export class TradePanel extends Container {
     this.waitingPeer = false;
     this.offerSubmitted = false;
     this.peerSubmitted = false;
+    this.peerDetailItem = null;
+    this.peerDetailPage = 0;
     this.flowStep = 1;
     this.mode = "list";
     this.listCursor = 0;
@@ -174,8 +186,18 @@ export class TradePanel extends Container {
     // Peer 21/6 clears confirmations server-side; keep local offerSubmitted.
     this.waitingPeer = false;
     if (this.offerSubmitted) this.flowStep = 2;
-    this.mode = "list";
-    this.listCursor = 0;
+    if (this.mode === "peer_detail" && this.peerDetailItem) {
+      const keep = offer.items.find(
+        (it) =>
+          it.seq === this.peerDetailItem!.seq &&
+          it.itemId === this.peerDetailItem!.itemId,
+      );
+      this.peerDetailItem = keep ?? null;
+      if (!keep) this.mode = "list";
+    } else {
+      this.mode = "list";
+      this.listCursor = 0;
+    }
     this.notifySoftkeys();
     if (this.visible) this.redraw();
   }
@@ -264,6 +286,13 @@ export class TradePanel extends Container {
         count: qty,
         name: item.name,
         enhance: item.enhance,
+        quality: item.quality,
+        kind: item.kind,
+        desc: item.desc,
+        equipSlot: item.equipSlot,
+        ...(item.enhanceAttrs?.length
+          ? { enhanceAttrs: item.enhanceAttrs }
+          : {}),
       });
     }
     this.invalidateOffer();
@@ -282,6 +311,9 @@ export class TradePanel extends Container {
 
   hide(): void {
     this.releaseMoneyIme();
+    this.peerDetailItem = null;
+    this.peerDetailPage = 0;
+    this.mode = "list";
     this.visible = false;
   }
 
@@ -301,17 +333,20 @@ export class TradePanel extends Container {
 
   move(delta: number): void {
     if (!this.visible || this.mode === "money") return;
+    if (this.mode === "peer_detail") return;
     if (this.flowStep === 1) {
       const n = Math.max(1, this.configRowCount());
       this.listCursor = (this.listCursor + delta + n) % n;
       this.ensureBagVisible();
       this.resetPickQtyForCursor();
     } else {
-      const n = STEP2_ACTIONS.length;
+      const actions = this.step2Actions();
+      const n = actions.length;
+      if (!n) return;
       let next = this.listCursor;
       for (let i = 0; i < n; i++) {
         next = (next + delta + n) % n;
-        if (this.actionEnabled(STEP2_ACTIONS[next]!)) break;
+        if (this.actionEnabled(actions[next]!)) break;
       }
       this.listCursor = next;
     }
@@ -324,23 +359,31 @@ export class TradePanel extends Container {
       this.commitMoney();
       return;
     }
+    if (this.mode === "peer_detail") {
+      this.closePeerInspect();
+      return;
+    }
     if (this.flowStep === 1) {
       this.confirmConfigRow();
       return;
     }
     this.ensureStep2Cursor();
-    const label = STEP2_ACTIONS[this.listCursor];
+    const label = this.step2Actions()[this.listCursor];
     if (!label || !this.actionEnabled(label)) return;
     if (label === "确认交易") {
       this.onAction?.("confirm");
     }
   }
 
-  /** Right softkey 返回 — leave money IME, else cancel trade. */
+  /** Right softkey 返回 — leave money/detail, else cancel trade. */
   cancel(): void {
     if (!this.visible) return;
     if (this.mode === "money") {
       this.cancelMoney();
+      return;
+    }
+    if (this.mode === "peer_detail") {
+      this.closePeerInspect();
       return;
     }
     this.onAction?.("cancel");
@@ -350,6 +393,11 @@ export class TradePanel extends Container {
     if (!this.visible) return;
     if (this.mode === "money") {
       this.focusMoneyInput();
+      return;
+    }
+    if (this.mode === "peer_detail") {
+      this.peerDetailPage = Math.max(0, this.peerDetailPage + delta);
+      this.redraw();
       return;
     }
     if (this.flowStep === 1 && this.mode === "list") {
@@ -438,6 +486,27 @@ export class TradePanel extends Container {
     return true;
   }
 
+  private step2Actions(): string[] {
+    return ["确认交易"];
+  }
+
+  private openPeerDetail(it: TradeOfferItem): void {
+    this.peerDetailItem = it;
+    this.peerDetailPage = 0;
+    this.mode = "peer_detail";
+    this.notifySoftkeys();
+    this.redraw();
+  }
+
+  private closePeerInspect(): void {
+    this.peerDetailItem = null;
+    this.peerDetailPage = 0;
+    this.mode = "list";
+    this.listCursor = 0;
+    this.notifySoftkeys();
+    this.redraw();
+  }
+
   /** Absolute rows: money · each bag item. */
   private configRowCount(): number {
     return 1 + this.bag.length;
@@ -466,10 +535,11 @@ export class TradePanel extends Container {
   }
 
   private ensureStep2Cursor(): void {
-    const cur = STEP2_ACTIONS[this.listCursor];
+    const actions = this.step2Actions();
+    const cur = actions[this.listCursor];
     if (cur && this.actionEnabled(cur)) return;
-    for (let i = 0; i < STEP2_ACTIONS.length; i++) {
-      if (this.actionEnabled(STEP2_ACTIONS[i]!)) {
+    for (let i = 0; i < actions.length; i++) {
+      if (this.actionEnabled(actions[i]!)) {
         this.listCursor = i;
         return;
       }
@@ -591,7 +661,26 @@ export class TradePanel extends Container {
       CBE.inkMint,
     );
     this.peerOffer.items.slice(0, 4).forEach((it, i) => {
-      this.addLabel(formatOfferLine(it), rightX, y + 56 + i * 14, CBE.inkBody);
+      const line = formatOfferLine(it);
+      const rowY = y + 56 + i * 14;
+      this.addLabel(line, rightX, rowY, CBE.inkBody);
+      const canView =
+        this.bothSubmitted() &&
+        isTradeOfferEquip(it) &&
+        (this.mode === "list" || this.mode === "peer_detail");
+      if (canView && this.mode === "list") {
+        const viewX = Math.min(
+          rightX + measureUiTextWidth(line) + 4,
+          x + w - 28,
+        );
+        this.addLabel("查看", viewX, rowY, CBE.inkMint);
+        const item = it;
+        this.rowHits.push(
+          attachRowPointerHit(this, viewX - 2, rowY - 2, 28, 14, () => {
+            this.openPeerDetail(item);
+          }),
+        );
+      }
     });
     if (!this.peerOffer.items.length) {
       this.addLabel("(空)", rightX, y + 56, CBE.inkLabel);
@@ -599,6 +688,12 @@ export class TradePanel extends Container {
 
     const midY = y + 118;
     this.box.rect(x + 4, midY - 2, w - 8, 1).fill({ color: CBE.inkLabel });
+
+    if (this.mode === "peer_detail" && this.peerDetailItem) {
+      this.drawPeerEquipDetail(x, midY, w, h - (midY - y));
+      return;
+    }
+
     this.drawStepBar(leftX, midY);
 
     if (this.mode === "money") {
@@ -743,7 +838,8 @@ export class TradePanel extends Container {
     this.ensureStep2Cursor();
     // Both locked — prompt to confirm.
     this.addLabel("对方已锁定请确认交易", leftX, midY + 20, CBE.inkMint);
-    STEP2_ACTIONS.forEach((lab, i) => {
+    const actions = this.step2Actions();
+    actions.forEach((lab, i) => {
       const en = this.actionEnabled(lab);
       const hi = i === this.listCursor;
       const ry = midY + 38 + i * 16;
@@ -766,6 +862,75 @@ export class TradePanel extends Container {
         }),
       );
     });
+  }
+
+  private drawPeerEquipDetail(
+    x: number,
+    bodyTop: number,
+    w: number,
+    bodyH: number,
+  ): void {
+    const it = this.peerDetailItem;
+    if (!it) return;
+    const bag = tradeOfferAsBagItem(it);
+    const qColor = qualityColor(bag.quality);
+    const titleH = 20;
+    this.box.rect(x + 6, bodyTop, w - 12, titleH).fill({ color: CBE.bgPanelDark });
+    const en = it.enhance > 0 ? `+${it.enhance}` : "";
+    this.addLabel(
+      `${it.name}${en}`.slice(0, 16),
+      x + 10,
+      bodyTop + 4,
+      qColor,
+    );
+    this.addLabel("对方提交", x + w - 70, bodyTop + 4, CBE.inkLabel);
+
+    const tipY = bodyTop + bodyH - 16;
+    const bodyY = bodyTop + titleH + 6;
+    const rowH = 14;
+    const fitRows = Math.max(1, Math.floor((tipY - bodyY - 2) / rowH));
+    const lines = buildEquipDetailLines(bag);
+    const pageCount = Math.max(1, Math.ceil(lines.length / fitRows));
+    const page = Math.min(Math.max(0, this.peerDetailPage), pageCount - 1);
+    this.peerDetailPage = page;
+    const start = page * fitRows;
+    const pageLines = lines.slice(start, start + fitRows);
+    let ly = bodyY;
+    for (const line of pageLines) {
+      const rows = this.paintEquipLine(line, x + 10, ly);
+      ly += rowH * Math.max(1, rows);
+    }
+    // Same as right softkey 返回 — close detail, stay in trade.
+    this.addLabel("返回", x + 10, tipY, CBE.inkMint);
+    this.rowHits.push(
+      attachRowPointerHit(this, x + 8, tipY - 2, 36, 16, () => {
+        this.closePeerInspect();
+      }),
+    );
+    if (pageCount > 1) {
+      this.addLabel(
+        `←→ ${page + 1}/${pageCount}`,
+        x + w - 56,
+        tipY,
+        CBE.inkLabel,
+      );
+    }
+  }
+
+  private paintEquipLine(line: EquipPaintLine, x: number, y: number): number {
+    if (line.kind === "text" || line.kind === "milestone") {
+      this.addLabel(line.text, x, y, line.color);
+      return Math.max(1, wrapChars(line.text).length);
+    }
+    if (line.keyColor === line.valueColor) {
+      const merged = `${line.key}${line.value}`;
+      this.addLabel(merged, x, y, line.keyColor);
+      return Math.max(1, wrapChars(merged).length);
+    }
+    this.addLabel(line.key, x, y, line.keyColor);
+    const keyW = measureUiTextWidth(line.key);
+    this.addLabel(line.value, x + keyW, y, line.valueColor);
+    return 1;
   }
 
   /** Status while waiting on peer lock / confirm. */
@@ -818,6 +983,30 @@ function filterTradeBag(bag: BagItem[]): BagItem[] {
       b.seq > 0 &&
       isTradeableItem(b.itemId, { enhance: b.enhance, kind: b.kind }),
   );
+}
+
+function isTradeOfferEquip(it: TradeOfferItem): boolean {
+  if (it.kind === "equip") return true;
+  if (it.kind === "item") return false;
+  return it.itemId >= 1000;
+}
+
+function tradeOfferAsBagItem(it: TradeOfferItem): BagItem {
+  const kind = isTradeOfferEquip(it) ? "equip" : "item";
+  return {
+    itemId: it.itemId,
+    seq: it.seq,
+    count: it.count,
+    name: it.name,
+    quality: it.quality ?? 0,
+    enhance: it.enhance,
+    kind,
+    category: 0,
+    desc: it.desc ?? "",
+    usable: false,
+    equipSlot: it.equipSlot ?? -1,
+    ...(it.enhanceAttrs?.length ? { enhanceAttrs: it.enhanceAttrs } : {}),
+  };
 }
 
 function formatOfferLine(it: TradeOfferItem): string {

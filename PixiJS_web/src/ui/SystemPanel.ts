@@ -49,6 +49,7 @@ import {
   buildEquipCompareMarks,
   buildEquipDetailLines,
   EQUIP_DETAIL_YELLOW,
+  equipHasWashedAttr,
   equipKvAttrName,
   type EquipPaintLine,
 } from "./equipDetail";
@@ -2668,13 +2669,15 @@ export class SystemPanel extends Container {
 }
 
 function formatBagLine(it: BagItem): string {
+  const wash = equipHasWashedAttr(it) ? "[洗]" : "";
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
-  return `${it.name}${plus} ×${it.count}`;
+  return `${it.name}${wash}${plus} ×${it.count}`;
 }
 
 function formatBagName(it: BagItem): string {
+  const wash = equipHasWashedAttr(it) ? "[洗]" : "";
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
-  return `${it.name}${plus}`;
+  return `${it.name}${wash}${plus}`;
 }
 
 /** Wrap description wells at {@link UI_WRAP_CHARS} per line. */

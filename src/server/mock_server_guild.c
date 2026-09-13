@@ -3515,6 +3515,18 @@ static u32 vm_net_mock_build_trade_offer_response(const u8 *request,
            parsed.itemCount, parsed.money,
            trade ? ((trade->offerPendingMask >> (1 - index)) & 1u) : 0u,
            pos);
+    if (result == 1 && parsed.itemCount > 0)
+    {
+        for (u32 i = 0; i < parsed.itemCount; ++i)
+        {
+            printf("[info][network] mock_trade_offer_item client=%08x side=%d idx=%u "
+                   "seq=%u item=%u count=%u enhance=%u instance=%u\n",
+                   session ? session->clientId : 0, index, i,
+                   parsed.items[i].sourceSeq, parsed.items[i].itemId,
+                   parsed.items[i].count, parsed.items[i].enhanceLevel,
+                   parsed.items[i].enhanceInstanceId);
+        }
+    }
     return pos;
 }
 
@@ -3653,6 +3665,40 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
     for (u32 side = 0; side < 2; ++side)
         *liveRoles[side] = roles[side];
     /*
+     * Seal both account_state.roleDb mirrors from the committed live bags
+     * BEFORE trade-commit-immediate capture/restore.  Sticky capture skip
+     * otherwise leaves the confirmer's heap roleDb on the pre-trade snapshot;
+     * restoring that account after saving the peer clobbers globals and
+     * role_db_save then overwrites trade_persist_pair (duplicate if active was
+     * giver, destroy if active was receiver).
+     */
+    for (u32 side = 0; side < 2; ++side)
+    {
+        const vm_net_mock_role_db_file *db = NULL;
+        bool dbValid = false;
+
+        if (accounts[side] == NULL || sessions[side] == NULL)
+            continue;
+        if (accounts[side] == g_vm_mock_service_active_account)
+        {
+            db = &g_vm_net_mock_role_db;
+            dbValid = g_vm_net_mock_role_db_valid;
+        }
+        else
+        {
+            db = &accounts[side]->roleDb;
+            dbValid = accounts[side]->roleDbValid;
+        }
+        vm_mock_service_account_note_durable_role_write(
+            sessions[side]->accountId,
+            db,
+            dbValid,
+            NULL,
+            true,
+            false,
+            "trade-commit-seal");
+    }
+    /*
      * trade_persist_pair already wrote backpack rows (incl. enhance_wash).
      * Immediately role_db_save each side as well so sticky/login reload cannot
      * race a deferred flush and drop traded first-obtain / washed attrs.
@@ -3688,17 +3734,15 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
         g_vm_mock_service_active_client_id = savedClientId;
     }
     /*
-     * trade_persist_pair writes backpack/money outside role_db_save.  Any
-     * deferred flush queued with a pre-trade snapshot must be superseded, and
-     * account_state.roleDb must mirror the committed bags before sticky
-     * capture can skip a memcpy.
+     * Refresh mirrors again after immediate saves so deferred flush / sticky
+     * skip cannot revive a mid-loop capture of the peer account.
      */
     for (u32 side = 0; side < 2; ++side)
     {
         const vm_net_mock_role_db_file *db = NULL;
         bool dbValid = false;
 
-        if (accounts[side] == NULL)
+        if (accounts[side] == NULL || sessions[side] == NULL)
             continue;
         if (accounts[side] == g_vm_mock_service_active_account)
         {
@@ -3724,6 +3768,17 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
            trade->receipts[0].itemCount,
            sessions[1]->clientId, roles[1].roleId, roles[1].money,
            trade->receipts[1].itemCount);
+    for (u32 side = 0; side < 2; ++side)
+    {
+        for (u32 i = 0; i < trade->receipts[side].itemCount; ++i)
+        {
+            const vm_mock_service_trade_item *row = &trade->receipts[side].items[i];
+            printf("[info][mock-service] trade_commit_receipt side=%u role=%u idx=%u "
+                   "src_seq=%u dst_seq=%u item=%u count=%u enhance=%u instance=%u\n",
+                   side, roles[side].roleId, i, row->sourceSeq, row->destinationSeq,
+                   row->itemId, row->count, row->enhanceLevel, row->enhanceInstanceId);
+        }
+    }
     return VM_MOCK_TRADE_COMMIT_OK;
 }
 
