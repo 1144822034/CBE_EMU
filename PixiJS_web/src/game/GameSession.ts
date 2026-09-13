@@ -125,10 +125,13 @@ import {
   buildMapHealSkillRequest,
   CHEST_KEY_BY_BOX,
   expCardSuccessMessage,
+  goldScrollSuccessMessage,
+  renameGoldScrollDisplayText,
   isBattleInsightItem,
   isChestBoxItem,
   isChestKeyItem,
   isExpCardItem,
+  isGoldScrollItem,
   isOfficialExpCardItem,
   buildMallBalanceRequest,
   buildMallPageRequest,
@@ -4102,7 +4105,7 @@ export class GameSession {
    * - Official exp cards 809/810/811 → 1/7/30
    * - 战斗心得 828 → 1/25/6 (+ follow-up 1/25/7)
    * - 大力丸/神力丸 829/830 → 1/22/3
-   * - Other consumables (incl. custom 845) → 1/7/1
+   * - Other consumables (incl. custom 845 / 打金心得 853) → 1/7/1
    * Always returns UI feedback (success text / reject tip).
    * On failure (`result!=1` / tip reject): do not apply inventory bodies —
    * CBE only client-deducts on result=1 (docs/re/2026-08-08-item-use-fail-no-deduct.md).
@@ -4170,6 +4173,11 @@ export class GameSession {
       // Custom 845 (and any 7/1 exp-card path): upgrade generic success copy.
       if (isExpCardItem(itemId) && fb.message === "使用成功") {
         fb = { ...fb, message: expCardSuccessMessage(itemId) };
+      }
+      if (isGoldScrollItem(itemId)) {
+        let msg = renameGoldScrollDisplayText(fb.message || "");
+        if (!msg || msg === "使用成功") msg = goldScrollSuccessMessage();
+        fb = { ...fb, message: msg };
       }
     } else if (!fb.message) {
       fb = { ...fb, message: "使用失败" };

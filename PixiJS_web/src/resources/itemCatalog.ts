@@ -306,6 +306,25 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
       durabilityMax: 1,
     });
   }
+  if (!itemCache.has(853)) {
+    itemCache.set(853, {
+      id: 853,
+      name: "打金心得",
+      desc: "使用后获得1小时打金心得状态，获得钱币增加20%，获得经验降为0（战斗只获得钱币）。耐久1。",
+      category: 10,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 50,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
   return itemCache;
 }
 

@@ -4901,6 +4901,12 @@ enum
 #define VM_NET_MOCK_RENAME_CARD_ITEM_ID           852u
 #define VM_NET_MOCK_RENAME_CARD_DURABILITY        1u
 #define VM_NET_MOCK_RENAME_CARD_SHOP_PRICE        100u
+/* Pixi 自定义：打金心得 — 1 小时内钱币 +20%、战斗经验为 0；耐久1。 */
+#define VM_NET_MOCK_GOLD_SCROLL_ITEM_ID           853u
+#define VM_NET_MOCK_GOLD_SCROLL_DURABILITY        1u
+#define VM_NET_MOCK_GOLD_SCROLL_SHOP_PRICE        50u
+#define VM_NET_MOCK_GOLD_SCROLL_DURATION_MIN      60u
+#define VM_NET_MOCK_GOLD_SCROLL_MONEY_BONUS_PCT   20u
 /* Initiator cooldown after a successful nearby force-PK start (or doll block). */
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC    (VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS / 1000u)
@@ -5269,7 +5275,9 @@ enum
 {
     VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD = 1,
     VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL = 2,
-    VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT = 3
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT = 3,
+    /* 打金心得 853：multiplier = 钱币加成百分比；激活时战斗经验强制为 0。 */
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL = 4
 };
 
 /* item.dsh 827: +1h per pill, daily train <=8h, bank <=100h. */
@@ -5690,9 +5698,19 @@ static bool vm_net_mock_role_battle_insight_pause_on_logout(const char *accountI
                                                             u32 roleId);
 static bool vm_net_mock_role_battle_insight_resume_on_login(
     vm_net_mock_role_state *role);
+static bool vm_net_mock_role_gold_scroll_pause_on_logout(const char *accountId,
+                                                          u32 roleId);
+static bool vm_net_mock_role_gold_scroll_resume_on_login(
+    vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_insight_remaining_seconds(
+    const vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_active_gold_scroll_money_bonus_percent(
+    const vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_active_gold_scroll_remaining_seconds(
+    const vm_net_mock_role_state *role);
+static bool vm_net_mock_role_active_gold_scroll_suppresses_exp(
     const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_combat_pill_remaining_seconds(
     const vm_net_mock_role_state *role);

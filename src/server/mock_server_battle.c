@@ -7665,12 +7665,31 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         if (g_vm_net_mock_battle_reward_rate_suppressed_serial !=
             g_mockBattleOperateSessionSerial)
         {
-            displayGoldGain = vm_net_mock_mul_capped_u32(
+            u32 baseRewardGold = vm_net_mock_mul_capped_u32(
                 vm_net_mock_env_u32_if_set(
                     "CBE_BATTLE_REWARD_GOLD",
                     vm_net_mock_battle_reward_gold_for_enemy(
                         g_vm_net_mock_battle_enemy_id_current)),
                 vm_net_mock_battle_enemy_count_current());
+            u32 goldScrollBonusPct = 0;
+
+            displayGoldGain = baseRewardGold;
+            {
+                u32 marriageMult = vm_net_mock_marriage_world_buff_multiplier();
+                if (marriageMult > 1u)
+                    displayGoldGain =
+                        vm_net_mock_mul_capped_u32(displayGoldGain, marriageMult);
+            }
+            goldScrollBonusPct =
+                vm_net_mock_role_active_gold_scroll_money_bonus_percent(role);
+            if (goldScrollBonusPct != 0)
+            {
+                uint64_t bonus =
+                    ((uint64_t)baseRewardGold * goldScrollBonusPct) / 100u;
+                displayGoldGain = vm_net_mock_add_capped_u32(
+                    displayGoldGain,
+                    bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
+            }
         }
         if (g_vm_net_mock_battle_rewarded_auto_sell_gold != 0)
         {

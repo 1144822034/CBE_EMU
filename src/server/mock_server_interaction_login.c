@@ -3809,6 +3809,8 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
      * can leave roleDbLoaded=true with an empty heap snapshot while
      * account_role_state still has rows (observed: lxh001 role_count=3 →
      * actorinfo count=0 until reload).
+     * role_db_load flushes valid dirty heap first so kill+relogin cannot
+     * drop first-obtain enhance_wash still only in memory.
      */
     g_vm_net_mock_role_db_loaded = false;
     vm_net_mock_role_db_load();
@@ -4886,8 +4888,14 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
                 g_vm_mock_service_globals_account = NULL;
             account->roleDbLoaded = false;
             account->roleDbValid = false;
+            account->roleInventoryDirty = false;
+            account->rolePositionDirty = false;
         }
+        /* Distrust polluted heap: do not flush it over MySQL on reload. */
         g_vm_net_mock_role_db_loaded = false;
+        g_vm_net_mock_role_db_valid = false;
+        g_vm_net_mock_role_inventory_dirty = false;
+        g_vm_net_mock_role_position_dirty = false;
         vm_net_mock_role_db_load();
         if (account != NULL && g_vm_net_mock_role_db_valid)
         {
@@ -4931,6 +4939,7 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          * wall-clock end before any bonus reads for this role. */
         (void)vm_net_mock_role_exp_card_resume_on_login(role);
         (void)vm_net_mock_role_battle_insight_resume_on_login(role);
+        (void)vm_net_mock_role_gold_scroll_resume_on_login(role);
         /* 比武未结束且本场已进场：选角后立刻写回擂台场景，避免重登落原图仍被匹配。 */
         vm_mock_arena_restore_venue_scene_if_needed(role);
         /*

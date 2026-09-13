@@ -3328,6 +3328,9 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
             return false;
         offer->items[i].itemId = item->itemId;
         offer->items[i].enhanceLevel = item->enhanceLevel;
+        offer->items[i].enhanceInstanceId = item->enhanceInstanceId;
+        /* First-obtain seed lives on backpack.enhance_wash; players who have
+         * not 洗练 yet often have no wash_record row — do not coalesce. */
         vm_net_mock_enhance_wash_copy(&offer->items[i].enhanceWash,
                                       &item->enhanceWash);
     }
@@ -3603,13 +3606,23 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
                     row->sourceSeq = incomingItem->sourceSeq;
                     row->count = 1;
                     row->enhanceLevel = incomingItem->enhanceLevel;
+                    row->enhanceInstanceId = incomingItem->enhanceInstanceId;
                     vm_net_mock_enhance_wash_copy(&row->enhanceWash,
                                                   &incomingItem->enhanceWash);
                     if (!vm_mock_service_trade_role_add_item(
                             &roles[side], row->itemId, 1, row->enhanceLevel,
-                            &row->enhanceWash, &row->destinationSeq))
+                            &row->enhanceWash, row->enhanceInstanceId,
+                            &row->destinationSeq))
                     {
                         return VM_MOCK_TRADE_COMMIT_BAG_FULL;
+                    }
+                    {
+                        /* Destination seq/instance may be allocated in add. */
+                        vm_net_mock_backpack_item_state *added =
+                            vm_net_mock_role_find_backpack_item(
+                                &roles[side], row->itemId, row->destinationSeq);
+                        if (added != NULL)
+                            row->enhanceInstanceId = added->enhanceInstanceId;
                     }
                     receipt->itemCount =
                         (u8)(receipt->itemCount + 1);
@@ -3622,6 +3635,7 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
             if (!vm_mock_service_trade_role_add_item(
                     &roles[side], incomingItem->itemId, incomingItem->count,
                     incomingItem->enhanceLevel, &incomingItem->enhanceWash,
+                    incomingItem->enhanceInstanceId,
                     &receipt->items[receipt->itemCount].destinationSeq))
             {
                 return VM_MOCK_TRADE_COMMIT_BAG_FULL;
@@ -3629,6 +3643,7 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
             receipt->itemCount = (u8)(receipt->itemCount + 1);
         }
         vm_net_mock_role_normalize_backpack(&roles[side]);
+        vm_net_mock_role_refresh_enhance_instance_counter(&roles[side]);
         trade->finalMoney[side] = roles[side].money;
     }
     if (!vm_mock_service_trade_persist_pair(persistSessions, roles))
@@ -3637,6 +3652,41 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
     }
     for (u32 side = 0; side < 2; ++side)
         *liveRoles[side] = roles[side];
+    /*
+     * trade_persist_pair already wrote backpack rows (incl. enhance_wash).
+     * Immediately role_db_save each side as well so sticky/login reload cannot
+     * race a deferred flush and drop traded first-obtain / washed attrs.
+     */
+    for (u32 side = 0; side < 2; ++side)
+    {
+        vm_mock_service_account_state *savedActive = g_vm_mock_service_active_account;
+        const char *savedActiveId = g_vm_mock_service_active_account_id;
+        u32 savedClientId = g_vm_mock_service_active_client_id;
+
+        if (accounts[side] == NULL || sessions[side] == NULL)
+            continue;
+        if (savedActive != NULL)
+            vm_mock_service_account_capture(savedActive);
+        vm_mock_service_account_restore(accounts[side]);
+        g_vm_mock_service_active_client_id = sessions[side]->clientId;
+        if (g_vm_net_mock_role_db_valid)
+        {
+            if (!vm_net_mock_role_db_save("trade-commit-immediate"))
+            {
+                vm_net_mock_role_mark_inventory_dirty("trade-commit-immediate");
+                printf("[warn][mock-service] trade_commit_immediate_save_failed "
+                       "account=%s role=%u side=%u\n",
+                       sessions[side]->accountId, roles[side].roleId, side);
+            }
+        }
+        vm_mock_service_account_capture(accounts[side]);
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+    }
     /*
      * trade_persist_pair writes backpack/money outside role_db_save.  Any
      * deferred flush queued with a pre-trade snapshot must be superseded, and

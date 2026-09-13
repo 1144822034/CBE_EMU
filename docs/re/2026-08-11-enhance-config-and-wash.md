@@ -44,7 +44,9 @@ w,t,f,v,c;w,t,f,v,c;w,t,f,v,c;w,t,f,v,c
 `2026-09-11-enhance-wash-quality-scale-admin.md`）。
 历史空 wash / 管理后台清零仍显示配置默认 + 品质公式；玩家洗练或首获命中随机后用覆盖值。
 装备详情：默认档黄字，实例覆盖红字（wire `flag` bit7=washed，PixiJS 解析）。
-穿脱、仓存、拍卖、强化转移（29/6）、交易跟随装备实例，不重随。
+穿脱、仓存、拍卖、强化转移（29/6）、交易跟随装备实例，不重随
+（交易落库须写 `enhance_wash`/`item_instance_id`，见
+`2026-09-13-trade-lose-first-obtain-enhance-attrs.md`）。
 
 ## 洗练协议（PixiJS，family 29）
 

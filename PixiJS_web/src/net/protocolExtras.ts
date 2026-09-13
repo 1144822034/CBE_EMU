@@ -636,6 +636,22 @@ export function expCardSuccessMessage(itemId: number): string {
   return `获得${m}倍经验值，持续时间1小时。`;
 }
 
+/** 打金心得 853 — Pixi 自定义；走通用 1/7/1 时效，非 25/6. */
+export const GOLD_SCROLL_ITEM_ID = 853;
+
+export function isGoldScrollItem(itemId: number): boolean {
+  return itemId === GOLD_SCROLL_ITEM_ID;
+}
+
+export function goldScrollSuccessMessage(): string {
+  return "打金心得效果已生效，钱币增加20%，经验为0。";
+}
+
+/** Rename leftover「打金卷轴」copy from older server builds. */
+export function renameGoldScrollDisplayText(text: string): string {
+  return text.replaceAll("打金卷轴", "打金心得");
+}
+
 /**
  * Exp card: WT 1/7/30 { itemseq:u16, num:u8=1 }.
  * Evidence: docs/re/2026-07-23-special-item-use-contract.md
@@ -694,7 +710,7 @@ export function parseExpCardStatusInfoFromPacket(packet: WtPacket): string {
     if (obj.kind !== 7 || obj.subtype !== 31) continue;
     const raw = findField(obj, "expinfo");
     if (!raw) continue;
-    const text = decodeFieldString(raw).trim();
+    const text = renameGoldScrollDisplayText(decodeFieldString(raw).trim());
     if (text) return text;
   }
   return "";
@@ -808,7 +824,9 @@ export function parseHintNotices(packet: WtPacket): string[] {
     if (obj.kind !== 16 || obj.subtype !== 2) continue;
     const hintRaw = findField(obj, "hint");
     if (!hintRaw) continue;
-    const text = decodeFieldString(hintRaw).replace(/\0+$/g, "").trim();
+    const text = renameGoldScrollDisplayText(
+      decodeFieldString(hintRaw).replace(/\0+$/g, "").trim(),
+    );
     if (text) out.push(text);
   }
   return out;

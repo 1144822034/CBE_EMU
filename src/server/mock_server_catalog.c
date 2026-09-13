@@ -255,6 +255,8 @@ static void vm_net_mock_ensure_hunt_order_catalog_item(void);
 static void vm_net_mock_ensure_force_pk_proof_catalog_item(void);
 static void vm_net_mock_ensure_star_sky_stone_catalog_item(void);
 static void vm_net_mock_ensure_rename_card_catalog_item(void);
+static void vm_net_mock_ensure_gold_scroll_catalog_item(void);
+static void vm_net_mock_ensure_gold_scroll_item_effect(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
@@ -1668,6 +1670,7 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_net_mock_ensure_force_pk_proof_catalog_item();
     vm_net_mock_ensure_star_sky_stone_catalog_item();
     vm_net_mock_ensure_rename_card_catalog_item();
+    vm_net_mock_ensure_gold_scroll_catalog_item();
 
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
@@ -2106,6 +2109,91 @@ static void vm_net_mock_ensure_rename_card_catalog_item(void)
     }
 }
 
+/* Pixi 自定义 853 打金心得：注入商城目录并默认上架（酷宝）. */
+static void vm_net_mock_ensure_gold_scroll_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xb4\xf2\xbd\xf0\xd0\xc4\xb5\xc3"; /* 打金心得 */
+    static const u8 descGbk[] =
+        "\xca\xb9\xd3\xc3\xba\xf3\xbb\xf1\xb5\xc3\x31\xd0\xa1\xca\xb1\xb4\xf2"
+        "\xbd\xf0\xd0\xc4\xb5\xc3\xd7\xb4\xcc\xac\xa3\xac\xbb\xf1\xb5\xc3\xc7"
+        "\xae\xb1\xd2\xd4\xf6\xbc\xd3\x32\x30\x25\xa3\xac\xbb\xf1\xb5\xc3\xbe"
+        "\xad\xd1\xe9\xbd\xb5\xce\xaa\x30\xa3\xa8\xd5\xbd\xb6\xb7\xd6\xbb\xbb"
+        "\xf1\xb5\xc3\xc7\xae\xb1\xd2\xa3\xa9\xa1\xa3\xc4\xcd\xbe\xc3\x31\xa1"
+        "\xa3";
+        /* 使用后获得1小时打金心得状态，获得钱币增加20%，获得经验降为0（战斗只获得钱币）。耐久1。 */
+    const char *err = NULL;
+    vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
+    u32 i = 0;
+
+    memset(&one, 0, sizeof(one));
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId ==
+            VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_GOLD_SCROLL_ITEM_ID, nameGbk, sizeof(nameGbk) - 1,
+                descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_GOLD_SCROLL_SHOP_PRICE,
+                99, 1, 1, false, 10))
+        {
+            printf("[warn][network] mock_gold_scroll_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+    }
+    if (item == NULL)
+        return;
+    /* Always refresh display name/desc so renames (卷轴→心得) take effect without
+     * deleting the catalog row. */
+    {
+        u32 copyLen = vm_net_mock_shop_safe_name_len(
+            nameGbk, sizeof(nameGbk) - 1, VM_NET_MOCK_SHOP_NAME_BYTES);
+        memcpy(item->name, nameGbk, copyLen);
+        item->name[copyLen] = 0;
+        copyLen = vm_net_mock_shop_safe_name_len(
+            descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_SHOP_DESC_BYTES);
+        memcpy(item->description, descGbk, copyLen);
+        item->description[copyLen] = 0;
+    }
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             VM_NET_MOCK_GOLD_SCROLL_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
+    {
+        printf("[info][network] mock_gold_scroll_catalog_bound item=%u price=%u "
+               "enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    if (!vm_net_mock_shop_admin_save(
+            VM_NET_MOCK_GOLD_SCROLL_ITEM_ID,
+            item->price ? item->price : VM_NET_MOCK_GOLD_SCROLL_SHOP_PRICE, true,
+            &err))
+    {
+        printf("[warn][network] mock_gold_scroll_shop_seed_failed error=%s\n",
+               err ? err : "?");
+    }
+}
+
 static u8 vm_net_mock_equipment_slot_for_category(u32 category)
 {
     switch (category)
@@ -2524,7 +2612,34 @@ static u32 vm_net_mock_load_item_effect_catalog(void)
         printf("[info][network] mock_item_effect_catalog total=%u source=item.dsh\n",
                g_vm_net_mock_item_effect_catalog_count);
     }
+    vm_net_mock_ensure_gold_scroll_item_effect();
     return g_vm_net_mock_item_effect_catalog_count;
+}
+
+/* 853 打金心得：不在 item.dsh，注入时效目录（类别10、持续60分钟）. */
+static void vm_net_mock_ensure_gold_scroll_item_effect(void)
+{
+    u32 i;
+
+    for (i = 0; i < g_vm_net_mock_item_effect_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_item_effect_catalog[i].itemId ==
+            VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
+        {
+            return;
+        }
+    }
+    if (!vm_net_mock_add_item_effect_catalog_item(
+            VM_NET_MOCK_GOLD_SCROLL_ITEM_ID, 10, 1, 99, 0,
+            VM_NET_MOCK_GOLD_SCROLL_DURATION_MIN, 0, 0, 0, 0, 0))
+    {
+        printf("[warn][network] mock_gold_scroll_item_effect_add_failed\n");
+        return;
+    }
+    printf("[info][network] mock_gold_scroll_item_effect_added item=%u "
+           "duration_min=%u evidence=custom:gold-scroll\n",
+           VM_NET_MOCK_GOLD_SCROLL_ITEM_ID,
+           (u32)VM_NET_MOCK_GOLD_SCROLL_DURATION_MIN);
 }
 
 static const vm_net_mock_item_effect_catalog_item *vm_net_mock_find_item_effect_catalog_item(u32 itemId)
@@ -2597,6 +2712,7 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 848: /* 强制PK证明：由 4/14 force=1 扣，禁止通用 7/1 */
     case 849: /* 星空石：走 29/13 重置洗练次数，禁止通用 7/1 */
     case 852: /* 角色改名卡：走 29/15 改名，禁止通用 7/1 */
+    case 853: /* 打金心得：走自定义 7/1 时效，禁止当普通药 */
     case 813: /* chest keys must not fall into generic 7/1 category-10 consume */
     case 814:
     case 815:
@@ -5516,6 +5632,48 @@ static const char *vm_net_mock_battle_insight_active_info(u32 remainingSeconds)
     return info;
 }
 
+/* 「打金心得生效中」 + remaining suffix. */
+static const char *vm_net_mock_gold_scroll_active_info(u32 remainingSeconds)
+{
+    static char info[96];
+    const char *prefix =
+        "\xb4\xf2\xbd\xf0\xd0\xc4\xb5\xc3\xc9\xfa\xd0\xa7\xd6\xd0";
+
+    if (remainingSeconds == 0)
+        return prefix;
+    snprintf(info, sizeof(info), "%s", prefix);
+    (void)vm_net_mock_append_remaining_time_suffix(info, sizeof(info),
+                                                   (u32)strlen(info),
+                                                   remainingSeconds);
+    return info;
+}
+
+/* 7/1 tip: 「打金心得效果已生效，钱币增加20%，经验为0(剩余…)。」 */
+static const char *vm_net_mock_gold_scroll_use_success_info(u32 remainingSeconds)
+{
+    static char info[160];
+    const char *base =
+        "\xb4\xf2\xbd\xf0\xd0\xc4\xb5\xc3\xd0\xa7\xb9\xfb\xd2\xd1\xc9\xfa"
+        "\xd0\xa7\xa3\xac\xc7\xae\xb1\xd2\xd4\xf6\xbc\xd3\x32\x30\x25\xa3"
+        "\xac\xbe\xad\xd1\xe9\xce\xaa\x30";
+    const char *period = "\xA1\xA3";
+
+    snprintf(info, sizeof(info), "%s", base);
+    (void)vm_net_mock_append_remaining_time_suffix(info, sizeof(info),
+                                                   (u32)strlen(info),
+                                                   remainingSeconds);
+    {
+        size_t used = strlen(info);
+        if (used + 2 < sizeof(info))
+        {
+            info[used] = period[0];
+            info[used + 1] = period[1];
+            info[used + 2] = '\0';
+        }
+    }
+    return info;
+}
+
 /* 「大力丸生效中」/「神力丸生效中」 + remaining suffix. */
 static const char *vm_net_mock_combat_pill_active_info(u32 itemId,
                                                       u32 remainingSeconds)
@@ -5572,6 +5730,20 @@ static const char *vm_net_mock_active_buff_status_list_info(void)
         remaining =
             vm_net_mock_role_active_battle_insight_remaining_seconds(role);
         line = vm_net_mock_battle_insight_active_info(remaining);
+        if (line != NULL && line[0] != '\0')
+        {
+            if (used > 0 && used + 1u < sizeof(info))
+                info[used++] = '\n';
+            used += (u32)snprintf(info + used, sizeof(info) - used, "%s", line);
+            if (used >= sizeof(info))
+                used = (u32)sizeof(info) - 1u;
+        }
+    }
+    if (vm_net_mock_role_active_gold_scroll_money_bonus_percent(role) != 0)
+    {
+        remaining =
+            vm_net_mock_role_active_gold_scroll_remaining_seconds(role);
+        line = vm_net_mock_gold_scroll_active_info(remaining);
         if (line != NULL && line[0] != '\0')
         {
             if (used > 0 && used + 1u < sizeof(info))
@@ -5654,6 +5826,12 @@ static bool vm_net_mock_append_exp_card_info_object(u8 *out, u32 outCap, u32 *po
         remainingSeconds =
             vm_net_mock_role_active_battle_insight_remaining_seconds(role);
         info = vm_net_mock_battle_insight_active_info(remainingSeconds);
+    }
+    else if (vm_net_mock_role_active_gold_scroll_money_bonus_percent(role) != 0)
+    {
+        remainingSeconds =
+            vm_net_mock_role_active_gold_scroll_remaining_seconds(role);
+        info = vm_net_mock_gold_scroll_active_info(remainingSeconds);
     }
     else
     {
@@ -8310,6 +8488,145 @@ static u32 vm_net_mock_build_exp_card_use_via_generic_7_1(
     return pos;
 }
 
+/*
+ * Custom 853 打金心得: Pixi sends generic 1/7/1 (no CBE 25/6 route).
+ * Apply GOLD_SCROLL timed effect, mutate bag like other 7/1 consumables,
+ * then arm the shared status icon (7/32+7/31).
+ */
+static u32 vm_net_mock_build_gold_scroll_use_via_generic_7_1(
+    vm_net_mock_role_state *role, u32 itemId, u16 seq, u16 enhanceLevel,
+    u8 itemUseType, u8 *out, u32 outCap)
+{
+    const vm_net_mock_item_effect_catalog_item *catalogItem = NULL;
+    vm_net_mock_role_item_effect effect;
+    u32 durationSeconds = 0;
+    u32 now = (u32)time(NULL);
+    u32 remaining = 0;
+    bool success = false;
+    const char *tip = NULL;
+    u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_SCRATCH];
+    u32 itemInfoLen = 0;
+    u8 countInfo[32];
+    u32 countInfoLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+
+    if (role == NULL || out == NULL || outCap < pos ||
+        itemId != VM_NET_MOCK_GOLD_SCROLL_ITEM_ID || seq == 0)
+    {
+        return 0;
+    }
+
+    memset(&effect, 0, sizeof(effect));
+    catalogItem = vm_net_mock_find_item_effect_catalog_item(itemId);
+    effect.kind = VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL;
+    effect.itemId = itemId;
+    effect.multiplier = VM_NET_MOCK_GOLD_SCROLL_MONEY_BONUS_PCT;
+    if (catalogItem != NULL &&
+        catalogItem->durationMinutes == VM_NET_MOCK_GOLD_SCROLL_DURATION_MIN &&
+        catalogItem->category == 10)
+    {
+        durationSeconds = (u32)catalogItem->durationMinutes * 60u;
+    }
+    if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds)
+    {
+        const char *failInfo = NULL;
+        effect.expiresUnix = now + durationSeconds;
+        success = vm_net_mock_role_consume_backpack_item_with_timed_effect(
+            role, itemId, seq, &effect, &remaining, "gold-scroll-use-7-1",
+            &failInfo);
+        if (!success)
+        {
+            printf("[warn][network] mock_gold_scroll_generic_7_1_failed item=%u "
+                   "seq=%u duration_s=%u evidence=runtime:wt7/1-gold-scroll\n",
+                   itemId, seq, durationSeconds);
+            return vm_net_mock_build_item_use_hint_response(
+                out, outCap,
+                failInfo ? failInfo
+                         : "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3");
+        }
+        tip = vm_net_mock_gold_scroll_use_success_info(
+            vm_net_mock_role_active_gold_scroll_remaining_seconds(role));
+    }
+    if (!success)
+    {
+        printf("[warn][network] mock_gold_scroll_generic_7_1_failed item=%u "
+               "seq=%u duration_s=%u evidence=runtime:wt7/1-gold-scroll\n",
+               itemId, seq, durationSeconds);
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap,
+            "\xB8\xC3\xB5\xC0\xBE\xDF\xB5\xC4\xC8\xA8\xCD\xFE\xB9\xA5\xB7\xC0\xCA\xFD\xD6\xB5\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3");
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type",
+                                   itemUseType ? itemUseType : 1) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "id", (u16)itemId))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    objectCount = 1;
+
+    if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo), seq,
+                                                  itemId, remaining, enhanceLevel,
+                                                  &itemInfoLen) ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
+
+    if (!vm_net_mock_build_item_use_count_info_blob(countInfo, sizeof(countInfo), seq,
+                                                    remaining, &countInfoLen) ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11, &objectStart) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "info", countInfo,
+                                    (u16)countInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 32, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "expcard", 1))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
+
+    if (!vm_net_mock_append_exp_card_info_object(out, outCap, &pos))
+        return 0;
+    if (vm_net_mock_role_active_status_icon_flag() != 0)
+        ++objectCount;
+
+    /* Optional UTF-8-safe tip via 16/2 for Pixi when iteminfo blob is opaque. */
+    if (tip != NULL && tip[0] != '\0')
+    {
+        if (!vm_net_mock_append_item_use_hint_object(out, outCap, &pos,
+                                                     &objectCount, tip))
+            return 0;
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_gold_scroll_generic_7_1 item=%u seq=%u "
+           "remaining_bag=%u remain_s=%u response=%u evidence=custom:gold-scroll\n",
+           itemId, seq, remaining,
+           vm_net_mock_role_active_gold_scroll_remaining_seconds(role), pos);
+    vm_autotest_note("mock_gold_scroll_generic_7_1 item=%u seq=%u remaining=%u "
+                     "response=7/1+7/7+7/11+7/32+7/31 evidence=custom:gold-scroll\n",
+                     itemId, seq, remaining);
+    return pos;
+}
+
 static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen,
                                                u8 *out, u32 outCap)
 {
@@ -8385,6 +8702,12 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         if (vm_net_mock_exp_card_multiplier_for_item(itemId) != 0)
         {
             return vm_net_mock_build_exp_card_use_via_generic_7_1(
+                role, itemId, seq, enhanceLevel,
+                parsed.type ? parsed.type : 1, out, outCap);
+        }
+        if (itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
+        {
+            return vm_net_mock_build_gold_scroll_use_via_generic_7_1(
                 role, itemId, seq, enhanceLevel,
                 parsed.type ? parsed.type : 1, out, outCap);
         }

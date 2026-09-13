@@ -1899,7 +1899,9 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
                         }
                         reason = "wash-failed";
                     }
-                    vm_net_mock_role_mark_inventory_dirty("equipment-enhance-wash");
+                    /* wash_count / gold spend must land even if replace is pending. */
+                    if (!vm_net_mock_role_db_save("equipment-enhance-wash"))
+                        vm_net_mock_role_mark_inventory_dirty("equipment-enhance-wash");
                 }
             }
         }
@@ -2202,7 +2204,9 @@ static u32 vm_net_mock_build_equipment_enhance_wash_apply_response(
                     &equipment->enhanceWash, unlockLevel);
             }
             vm_net_mock_enhance_wash_pending_clear(&role->enhanceWashPending);
-            vm_net_mock_role_mark_inventory_dirty("equipment-enhance-wash-apply");
+            /* Sync save: wash attrs must survive kill+relogin before deferred flush. */
+            if (!vm_net_mock_role_db_save("equipment-enhance-wash-apply"))
+                vm_net_mock_role_mark_inventory_dirty("equipment-enhance-wash-apply");
             reason = "applied";
         }
         else
@@ -3534,6 +3538,15 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
             if (marriageMult > 1u)
                 rewardExp = vm_net_mock_mul_capped_u32(rewardExp, marriageMult);
         }
+        /* 打金心得：战斗经验强制为 0（在卡/心得/姻缘加成之后清零）. */
+        if (vm_net_mock_role_active_gold_scroll_suppresses_exp(role))
+        {
+            printf("[info][network] mock_battle_exp_suppressed enemy=%u role=%u "
+                   "pre_exp=%u reason=gold-scroll evidence=item:853\n",
+                   g_vm_net_mock_battle_enemy_id_current, role->roleId,
+                   rewardExp);
+            rewardExp = 0;
+        }
     }
     if (rewardExp != baseRewardExp)
     {
@@ -3897,8 +3910,28 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
                 vm_net_mock_battle_enemy_count_current());
             {
                 u32 marriageMult = vm_net_mock_marriage_world_buff_multiplier();
+                u32 goldScrollBonusPct = 0;
+                u32 baseRewardGold = rewardGold;
+
                 if (marriageMult > 1u)
                     rewardGold = vm_net_mock_mul_capped_u32(rewardGold, marriageMult);
+                /* 打金心得：相对基础战斗钱币 +20%（可审计，叠在姻缘倍数之后）. */
+                goldScrollBonusPct =
+                    vm_net_mock_role_active_gold_scroll_money_bonus_percent(role);
+                if (goldScrollBonusPct != 0)
+                {
+                    uint64_t bonus =
+                        ((uint64_t)baseRewardGold * goldScrollBonusPct) / 100u;
+                    rewardGold = vm_net_mock_add_capped_u32(
+                        rewardGold,
+                        bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
+                    printf("[info][network] mock_battle_gold_modifier enemy=%u "
+                           "role=%u base_gold=%u scroll_bonus_percent=%u "
+                           "marriage_mult=%u reward_gold=%u evidence=item:853\n",
+                           g_vm_net_mock_battle_enemy_id_current, role->roleId,
+                           baseRewardGold, goldScrollBonusPct, marriageMult,
+                           rewardGold);
+                }
             }
         }
         if (g_vm_net_mock_battle_rewarded_auto_sell_gold != 0)
@@ -4838,6 +4871,7 @@ typedef struct
     u16 destinationSeq;
     u32 count;
     u16 enhanceLevel;
+    u32 enhanceInstanceId;
     vm_net_mock_enhance_wash_state enhanceWash;
 } vm_mock_service_trade_item;
 
@@ -8150,6 +8184,7 @@ static bool vm_mock_service_trade_role_add_item(
     u32 count,
     u16 enhanceLevel,
     const vm_net_mock_enhance_wash_state *wash,
+    u32 enhanceInstanceId,
     u16 *destinationSeqOut)
 {
     u32 itemCount = 0;
@@ -8195,6 +8230,10 @@ static bool vm_mock_service_trade_role_add_item(
             item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
             item->count = 1;
             item->enhanceLevel = enhanceLevel;
+            /* Keep traded instance identity (and first-obtain wash) — do not
+             * re-seed.  Counter refresh after commit avoids later collisions. */
+            item->enhanceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+                role, enhanceInstanceId, itemId);
             vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
             if (firstSeq == 0)
                 firstSeq = item->seq;
@@ -8266,6 +8305,10 @@ static bool vm_mock_service_trade_persist_pair(
     {
         return false;
     }
+    /* Same columns as role_db_save backpack insert — omitting enhance_wash
+     * wiped first-obtain / washed milestone attrs after trade_commit. */
+    if (!vm_net_mock_role_equipment_ensure_enhance_column())
+        return false;
     bulkQuery = (char *)malloc(bulkCapacity);
     stage = "start";
     if (bulkQuery == NULL || !vm_mysql_exec("START TRANSACTION"))
@@ -8291,22 +8334,26 @@ static bool vm_mock_service_trade_persist_pair(
     }
     bulkLen = (size_t)snprintf(
         bulkQuery, bulkCapacity,
-        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level) VALUES");
+        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,"
+        "item_seq,item_count,enhance_level,item_instance_id,enhance_wash) VALUES");
     for (u32 side = 0; side < 2; ++side)
     {
         u32 count = vm_net_mock_role_backpack_count(&roles[side]);
         for (u32 slot = 0; slot < count; ++slot)
         {
             const vm_net_mock_backpack_item_state *item = &roles[side].backpackItems[slot];
+            char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
             int written = 0;
             if (item->itemId == 0 || item->seq == 0 || item->count == 0)
                 continue;
+            (void)vm_net_mock_enhance_wash_sql_text(&item->enhanceWash, washText,
+                                                    sizeof(washText));
             written = snprintf(
                 bulkQuery + bulkLen, bulkCapacity - bulkLen,
-                "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u)",
+                "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,'%s')",
                 bulkRows ? "," : "", accountHex[side], roles[side].roleId,
                 slot, item->itemId, item->seq, item->count,
-                item->enhanceLevel);
+                item->enhanceLevel, item->enhanceInstanceId, washText);
             if (written < 0 || (size_t)written >= bulkCapacity - bulkLen)
                 goto done;
             bulkLen += (size_t)written;
@@ -11164,6 +11211,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
             (void)vm_net_mock_role_exp_card_pause_on_logout(
                 session->accountId, session->onlineRoleId);
             (void)vm_net_mock_role_battle_insight_pause_on_logout(
+                session->accountId, session->onlineRoleId);
+            (void)vm_net_mock_role_gold_scroll_pause_on_logout(
                 session->accountId, session->onlineRoleId);
         }
         printf("[info][mock-service] session_offline client=%08x account=%s role=%u name=%s scene=%s pos=(%u,%u) reason=%s\n",

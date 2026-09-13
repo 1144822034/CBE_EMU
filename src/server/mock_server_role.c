@@ -7054,6 +7054,11 @@ static bool vm_net_mock_role_item_effect_is_valid(
     {
         return effect->itemId == 828 && effect->multiplier == 20;
     }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL)
+    {
+        return effect->itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID &&
+               effect->multiplier == VM_NET_MOCK_GOLD_SCROLL_MONEY_BONUS_PCT;
+    }
     return false;
 }
 
@@ -7193,7 +7198,8 @@ static bool vm_net_mock_role_get_active_timed_item_effect_for(
     u32 now = (u32)time(NULL);
     size_t account_len;
     bool pausable = effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ||
-                    effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT;
+                    effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT ||
+                    effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL;
 
     if (effectOut)
         memset(effectOut, 0, sizeof(*effectOut));
@@ -9372,6 +9378,15 @@ static void vm_net_mock_role_mark_inventory_dirty(const char *reason)
            role ? role->roleId : 0);
 }
 
+/* Sync save for consume/move paths that must not race kill+relogin (sell /
+ * warehouse).  Discard stays deferred — sync DELETE+INSERT froze 7/4. */
+static void vm_net_mock_role_persist_inventory_now(const char *reason)
+{
+    if (vm_net_mock_role_db_save(reason ? reason : "inventory-now"))
+        return;
+    vm_net_mock_role_mark_inventory_dirty(reason ? reason : "inventory-now");
+}
+
 static u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role)
 {
@@ -9414,13 +9429,16 @@ static const char *vm_net_mock_role_pausable_timed_effect_name(u8 effectKind)
         return "exp-card";
     if (effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT)
         return "battle-insight";
+    if (effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL)
+        return "gold-scroll";
     return "timed-effect";
 }
 
 static bool vm_net_mock_role_timed_effect_is_pausable(u8 effectKind)
 {
     return effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ||
-           effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT;
+           effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT ||
+           effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL;
 }
 
 /*
@@ -9572,6 +9590,20 @@ static bool vm_net_mock_role_battle_insight_resume_on_login(
         role, VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT);
 }
 
+static bool vm_net_mock_role_gold_scroll_pause_on_logout(const char *accountId,
+                                                          u32 roleId)
+{
+    return vm_net_mock_role_pausable_timed_effect_pause_on_logout(
+        accountId, roleId, VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL);
+}
+
+static bool vm_net_mock_role_gold_scroll_resume_on_login(
+    vm_net_mock_role_state *role)
+{
+    return vm_net_mock_role_pausable_timed_effect_resume_on_login(
+        role, VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL);
+}
+
 /* item.dsh describes ???? as a one-hour, +20% experience status. Its
  * multiplier column therefore denotes an additive percentage for this kind,
  * unlike the factor stored for experience cards. */
@@ -9610,6 +9642,46 @@ static u32 vm_net_mock_role_active_battle_insight_remaining_seconds(
     return effect.expiresUnix - now;
 }
 
+/* 打金心得：multiplier = 钱币加成百分比。 */
+static u32 vm_net_mock_role_active_gold_scroll_money_bonus_percent(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL, &effect))
+    {
+        printf("[error][mock-service] gold_scroll_state_read_failed account=%s role=%u error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role ? role->roleId : 0, vm_mysql_last_error());
+        return 0;
+    }
+    return effect.expiresUnix != 0 ? effect.multiplier : 0;
+}
+
+static u32 vm_net_mock_role_active_gold_scroll_remaining_seconds(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+    u32 now = (u32)time(NULL);
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL, &effect) ||
+        effect.expiresUnix == 0 || effect.expiresUnix <= now)
+    {
+        return 0;
+    }
+    return effect.expiresUnix - now;
+}
+
+static bool vm_net_mock_role_active_gold_scroll_suppresses_exp(
+    const vm_net_mock_role_state *role)
+{
+    return vm_net_mock_role_active_gold_scroll_money_bonus_percent(role) != 0;
+}
+
 static u8 vm_net_mock_role_active_exp_card_flag(void)
 {
     return vm_net_mock_role_active_exp_card_multiplier(vm_net_mock_active_role()) > 1
@@ -9628,6 +9700,8 @@ static u8 vm_net_mock_role_active_status_icon_flag(void)
     if (vm_net_mock_role_active_exp_card_multiplier(role) > 1)
         return 1;
     if (vm_net_mock_role_active_battle_exp_bonus_percent(role) != 0)
+        return 1;
+    if (vm_net_mock_role_active_gold_scroll_money_bonus_percent(role) != 0)
         return 1;
     return 0;
 }
@@ -9735,7 +9809,8 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     }
     stacked = *effect;
     stackable = effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ||
-                effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT;
+                effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT ||
+                effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL;
     memset(&active, 0, sizeof(active));
     if (!vm_net_mock_role_get_active_timed_item_effect(role, effect->kind, &active))
         return false;
@@ -9794,8 +9869,11 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
         if (!vm_net_mock_role_item_effect_is_valid(&stacked))
             return false;
         printf("[info][network] mock_%s_stacked account=%s role=%u active_item=%u active_until=%u add_s=%u new_item=%u new_mult=%u new_until=%u\n",
-               effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ?
-                   "exp_card" : "battle_insight",
+               effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD
+                   ? "exp_card"
+                   : (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL
+                          ? "gold_scroll"
+                          : "battle_insight"),
                g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
                role->roleId, active.itemId, active.expiresUnix, addSeconds,
                stacked.itemId, stacked.multiplier, stacked.expiresUnix);
@@ -10255,6 +10333,36 @@ static void vm_net_mock_role_db_load(void)
 
     if (g_vm_net_mock_role_db_loaded)
         return;
+    /*
+     * Login / title 1/1/4 force-reload used to wipe heap before deferred flush
+     * finished — first-obtain enhance_wash (and other dirty bag rows) vanished
+     * on kill+relogin.  If this process still holds a valid dirty snapshot,
+     * commit it first.  Callers that distrust heap must clear role_db_valid
+     * (and dirty bits) before invoking load.
+     */
+    if (g_vm_net_mock_role_db_valid &&
+        g_vm_net_mock_role_db.roleCount > 0 &&
+        (g_vm_net_mock_role_inventory_dirty || g_vm_net_mock_role_position_dirty))
+    {
+        const char *flushReason =
+            (g_vm_net_mock_role_inventory_dirty &&
+             g_vm_net_mock_role_position_dirty)
+                ? "flush-before-role-db-load-position+inventory"
+                : (g_vm_net_mock_role_inventory_dirty
+                       ? "flush-before-role-db-load-inventory"
+                       : "flush-before-role-db-load-position");
+        printf("[info][mock-service] role_db_flush_before_reload account=%s "
+               "roles=%u inv_dirty=%u pos_dirty=%u reason=%s "
+               "evidence=login-kill-relogin-preserve-dirty\n",
+               g_vm_mock_service_active_account_id
+                   ? g_vm_mock_service_active_account_id
+                   : "-",
+               g_vm_net_mock_role_db.roleCount,
+               g_vm_net_mock_role_inventory_dirty ? 1u : 0u,
+               g_vm_net_mock_role_position_dirty ? 1u : 0u,
+               flushReason);
+        (void)vm_net_mock_role_db_save(flushReason);
+    }
     g_vm_net_mock_role_db_loaded = true;
     memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
     memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
@@ -11595,7 +11703,7 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
     }
     role->money = vm_net_mock_add_capped_u32(role->money, price);
     (void)beforeRole;
-    vm_net_mock_role_mark_inventory_dirty("equip-sell");
+    vm_net_mock_role_persist_inventory_now("equip-sell");
     if (soldPriceOut)
         *soldPriceOut = price;
     if (soldItemIdOut)
@@ -11746,7 +11854,7 @@ static bool vm_net_mock_warehouse_deposit_backpack_seq(vm_net_mock_role_state *r
             vm_net_mock_role_normalize_backpack(role);
             (void)beforeRole;
             (void)beforeWarehouse;
-            vm_net_mock_role_mark_inventory_dirty("warehouse-deposit-flask-merge");
+            vm_net_mock_role_persist_inventory_now("warehouse-deposit-flask-merge");
             printf("[info][network] mock_warehouse_deposit role=%u bag_seq=%u "
                    "item=%u enhance=%u warehouse_slots=%u bag_rows=%u "
                    "flask_merge_remaining=%u\n",
@@ -11763,10 +11871,10 @@ static bool vm_net_mock_warehouse_deposit_backpack_seq(vm_net_mock_role_state *r
     warehouse->items[warehouse->itemCount++] = moved;
     bagItem->count = 0;
     vm_net_mock_role_normalize_backpack(role);
-    /* Memory is authoritative for the session; MySQL flushes after CBMR. */
     (void)beforeRole;
     (void)beforeWarehouse;
-    vm_net_mock_role_mark_inventory_dirty("warehouse-deposit");
+    /* Bag remove + warehouse add must land together before kill/relogin. */
+    vm_net_mock_role_persist_inventory_now("warehouse-deposit");
     printf("[info][network] mock_warehouse_deposit role=%u bag_seq=%u item=%u "
            "enhance=%u warehouse_slots=%u bag_rows=%u\n",
            role->roleId, backpackSeq, moved.itemId, moved.enhanceLevel,
@@ -11860,10 +11968,11 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
             return false;
         }
     }
-    /* add_backpack already marked dirty; re-mark after reservoir/enhance fix. */
+    /* add_backpack may already have saved wash rows; force one more save so
+     * warehouse slot removal and bag grant share one durable snapshot. */
     (void)beforeRole;
     (void)beforeWarehouse;
-    vm_net_mock_role_mark_inventory_dirty("warehouse-retrieve");
+    vm_net_mock_role_persist_inventory_now("warehouse-retrieve");
     if (backpackSeqOut)
         *backpackSeqOut = addedSeq;
     return true;
@@ -12163,7 +12272,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
         itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
         itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
-        itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID)
+        itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
+        itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
     {
         u32 freeSlots = role->backpackCapacity > itemCount
                             ? (u32)role->backpackCapacity - itemCount
@@ -12176,8 +12286,9 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                            itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
                            itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
                            itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
-                           itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID
-                       ? VM_NET_MOCK_RENAME_CARD_DURABILITY
+                           itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
+                           itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID
+                       ? VM_NET_MOCK_GOLD_SCROLL_DURABILITY
                        : VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY);
         const char *saveReason =
             itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID
@@ -12192,14 +12303,17 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                             ? "backpack-add-star-sky-stone"
                                             : (itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID
                                                    ? "backpack-add-rename-card"
-                                                   : "backpack-add-warehouse-pass")))));
+                                                   : (itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID
+                                                          ? "backpack-add-gold-scroll"
+                                                          : "backpack-add-warehouse-pass"))))));
 
-        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡：耐久1，叠加入已有堆或新行。 */
+        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得：耐久1，叠加入已有堆或新行。 */
         if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
             itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
             itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
             itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
-            itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID)
+            itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
+            itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
         {
             vm_net_mock_backpack_item_state *existing =
                 vm_net_mock_role_find_backpack_item(role, itemId, 0);
@@ -12297,6 +12411,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                             ? (u32)role->backpackCapacity - itemCount
                             : 0;
         u16 firstSeq = 0;
+        bool washDurable = false;
 
         if (count > freeSlots || count > VM_NET_MOCK_BACKPACK_MAX_ITEMS - itemCount)
             return false;
@@ -12315,6 +12430,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                 /* Inherited instance (trade / equip swap / warehouse /
                  * auction): keep attrs and wash_count unchanged. */
                 vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
+                if (!vm_net_mock_enhance_wash_is_empty(&item->enhanceWash))
+                    washDurable = true;
             }
             else if (vm_net_mock_enhance_wash_seed_initial(
                          &item->enhanceWash, itemId, item->enhanceInstanceId,
@@ -12324,6 +12441,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                 (void)vm_net_mock_enhance_wash_record_upsert(
                     role->roleId, item->enhanceInstanceId, item->seq, itemId,
                     clampedEnhance, &item->enhanceWash, 0);
+                washDurable = true;
                 printf("[info][mock-service] enhance_wash_seed_initial role=%u "
                        "item=%u instance=%u seq=%u reason=%s "
                        "evidence=first-obtain-pool-roll\n",
@@ -12341,8 +12459,16 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             *seqOut = firstSeq;
         vm_net_mock_role_normalize_backpack(role);
         (void)before;
-        vm_net_mock_role_mark_inventory_dirty(
-            reason ? reason : "backpack-add-equipment");
+        if (washDurable && role == vm_net_mock_active_role() &&
+            vm_net_mock_role_db_save(reason ? reason : "backpack-add-equip-wash"))
+        {
+            /* Immediate save landed first-obtain / inherited wash. */
+        }
+        else
+        {
+            vm_net_mock_role_mark_inventory_dirty(
+                reason ? reason : "backpack-add-equipment");
+        }
         return true;
     }
 
