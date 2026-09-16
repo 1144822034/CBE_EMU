@@ -4,7 +4,10 @@ import {
   loadUc3Font,
   renderUc3ToRgba,
 } from "../resources/uc3Font";
-import { SYSTEM_FONT_FALLBACK, uiFontFamily } from "../resources/systemFont";
+import {
+  SYSTEM_FONT_FALLBACK,
+  uiFontFamily,
+} from "../resources/systemFont";
 import { rgbaToTexture } from "../render/rgbaTexture";
 
 /**
@@ -167,25 +170,53 @@ function rememberCrispCache(key: string, tex: Texture): void {
   }
 }
 
-/** Drop baked UC3 textures after a font pack switch. */
+/**
+ * Drop idle UC3 bakes. Never destroy textures still bound to live labels —
+ * that leaves Sprite.texture with a dead source → Pixi alphaMode crash / 黑屏.
+ */
 export function clearUc3TexCache(): void {
-  for (const tex of uc3TexCache.values()) {
+  const live = new Set<string>();
+  for (const lab of liveLabels) {
+    if (lab.uc3CacheKey) live.add(lab.uc3CacheKey);
+  }
+  for (const [k, tex] of [...uc3TexCache]) {
+    if (live.has(k)) continue;
     try {
       tex.destroy(true);
     } catch {
       /* ignore */
     }
+    uc3TexCache.delete(k);
   }
-  uc3TexCache.clear();
 }
 
-/** Re-bake every live UC3 label after `applyUc3FontId`. */
+/** Drop idle system-font crisp bakes (same live-protect contract as UC3). */
+export function clearCrispTexCache(): void {
+  const live = new Set<string>();
+  for (const lab of liveLabels) {
+    if (lab.crispCacheKey) live.add(lab.crispCacheKey);
+  }
+  for (const [k, tex] of [...crispTexCache]) {
+    if (live.has(k)) continue;
+    try {
+      tex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+    crispTexCache.delete(k);
+  }
+}
+
+/** Re-bake every live UC3 label after font pack switch. */
 export async function refreshAllUc3Labels(): Promise<void> {
   const jobs: Promise<void>[] = [];
   for (const label of [...liveLabels]) {
     if (!label.destroyed) jobs.push(label.rebake());
   }
   await Promise.all(jobs);
+  // Orphans from the previous pack are no longer live-keyed.
+  clearUc3TexCache();
+  clearCrispTexCache();
 }
 
 function crispCacheKey(
@@ -292,11 +323,9 @@ function bakeCrispSystem(
   for (let i = 3; i < d.length; i += 4) {
     d[i] = d[i]! < 140 ? 0 : 255;
   }
-  ctx.putImageData(img, 0, 0);
-
-  const tex = Texture.from(canvas);
-  tex.source.scaleMode = "nearest";
-  return tex;
+  // Buffer upload (same path as UC3) — Texture.from(canvas) can leave a dead
+  // CanvasSource.alphaMode under WebGL pressure and black the LCD.
+  return rgbaToTexture(canvas.width, canvas.height, d, "nearest");
 }
 
 /**
@@ -398,7 +427,7 @@ export class BitmapLabel extends Container {
       if (opts.fontSize != null) this._fontSize = opts.fontSize;
       if (opts.crisp != null) this._crisp = opts.crisp;
     }
-    // Always UC3 for LCD UI (TTF retired).
+    // Always UC3 for LCD UI unless caller passes uc3:false.
     this._uc3 = opts?.uc3 !== false;
     await this.rerender();
   }

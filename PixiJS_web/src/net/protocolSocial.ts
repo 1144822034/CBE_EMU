@@ -328,6 +328,9 @@ export type TradeOfferItem = {
   equipSlot?: number;
   /** Present when wire common-extra carried milestone slots (first-obtain / wash). */
   enhanceAttrs?: TradeOfferEnhanceAttr[];
+  /** 921 修炼天书：短名/列表展示用. */
+  bookLevel?: number;
+  bookFull?: boolean;
 };
 
 export type TradeOfferView = {
@@ -846,22 +849,33 @@ function tradeOfferItemFromWire(
   itemId: number,
   count: number,
   extra: { enhance: number; attrs: TradeOfferEnhanceAttr[] },
+  wireName?: string,
 ): TradeOfferItem {
   const cat = lookupItemSync(itemId);
   const kind: "equip" | "item" =
     cat?.kind ?? (itemId >= 1000 ? "equip" : "item");
   const isEquip = kind === "equip";
+  const trimmed = (wireName || "").trim();
+  let name = trimmed || cat?.name || `#${itemId}`;
+  let bookLevel: number | undefined;
+  let bookFull: boolean | undefined;
+  const bookMatch = /Lv(\d+)·(满|未满)/.exec(name);
+  if (bookMatch && itemId === 921) {
+    bookLevel = Number(bookMatch[1]);
+    bookFull = bookMatch[2] === "满";
+  }
   return {
     seq,
     itemId,
     count: Math.max(1, count),
-    name: cat?.name ?? `#${itemId}`,
+    name,
     enhance: isEquip ? extra.enhance : 0,
     quality: cat?.quality ?? 0,
     kind,
     desc: cat?.desc ?? "",
     equipSlot: cat?.equipSlot ?? -1,
     ...(isEquip && extra.attrs.length ? { enhanceAttrs: extra.attrs } : {}),
+    ...(bookLevel && bookLevel > 0 ? { bookLevel, bookFull } : {}),
   };
 }
 
@@ -877,14 +891,23 @@ export function parseTradeOfferIteminfo(
       const seq = r.i16();
       const itemId = r.u32();
       const count = r.i16();
+      let wireName = "";
       if (itemId < 1000) {
         try {
-          r.string();
+          wireName = r.string().replace(/\0+$/g, "");
         } catch {
           /* optional empty name */
         }
       }
-      items.push(tradeOfferItemFromWire(seq, itemId, count, skipTradeCommonExtra(r)));
+      items.push(
+        tradeOfferItemFromWire(
+          seq,
+          itemId,
+          count,
+          skipTradeCommonExtra(r),
+          wireName,
+        ),
+      );
     } catch {
       break;
     }

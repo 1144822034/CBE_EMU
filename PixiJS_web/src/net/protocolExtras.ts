@@ -668,6 +668,82 @@ export function isOfficialExpCardItem(itemId: number): boolean {
   return itemId === 809 || itemId === 810 || itemId === 811;
 }
 
+/** 920 空白修炼天书 / 921 记录实例 — 专用 7/35·7/38·7/40. */
+export const CULTIVATION_BOOK_BLANK_ITEM_ID = 920;
+export const CULTIVATION_BOOK_ITEM_ID = 921;
+
+export function isCultivationBookBlankItem(itemId: number): boolean {
+  return itemId === CULTIVATION_BOOK_BLANK_ITEM_ID;
+}
+
+export function isCultivationBookItem(itemId: number): boolean {
+  return itemId === CULTIVATION_BOOK_ITEM_ID;
+}
+
+/** 920: WT 1/7/35 { seq:u16 }. result=0 成功并客户端删空白. */
+export function buildCultivationBookBindRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 35).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+/** 921 read: WT 1/7/38 { seq:u16 }. */
+export function buildCultivationBookReadRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 38).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+/** 921 use: WT 1/7/40 { seq:u16 }. result=0 成功并客户端删除. */
+export function buildCultivationBookUseRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 40).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+export function parseCultivationBookBindResult(
+  packet: WtPacket,
+): ItemUseFeedback | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 35);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const raw = findField(obj, "bookdes");
+  const text = raw
+    ? decodeFieldString(raw).replace(/\0+$/g, "").trim()
+    : "";
+  /* CBE: result=0 deletes blank 920. */
+  if (result === 0) {
+    return { ok: true, message: text || "修炼天书已记录" };
+  }
+  return { ok: false, message: text || "记录失败" };
+}
+
+export function parseCultivationBookReadResult(packet: WtPacket): string {
+  for (const obj of packet.objects) {
+    if (obj.kind !== 7 || obj.subtype !== 38) continue;
+    const raw = findField(obj, "bookdes");
+    if (!raw) continue;
+    return decodeFieldString(raw).replace(/\0+$/g, "").trim();
+  }
+  return "";
+}
+
+export function parseCultivationBookUseResult(
+  packet: WtPacket,
+): ItemUseFeedback | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 40);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const raw = findField(obj, "bookinfo");
+  const text = raw
+    ? decodeFieldString(raw).replace(/\0+$/g, "").trim()
+    : "";
+  if (result === 0) {
+    return { ok: true, message: text || "修炼天书使用成功" };
+  }
+  return { ok: false, message: text || "使用失败" };
+}
+
 /** Mock success copy (GBK on wire; UTF-8 here for Pixi tip). */
 export function expCardSuccessMessage(itemId: number): string {
   const m = EXP_CARD_MULT[itemId];
@@ -1028,11 +1104,13 @@ export function parseSpecialTimedItemUseResult(
   return null;
 }
 
-/** Prefer chest batch → chest → special timed → item-use → lone 16/2 hint. */
+/** Prefer chest batch → chest → cultivation book → special timed → item-use → lone 16/2 hint. */
 export function parseItemUseFeedback(packet: WtPacket): ItemUseFeedback | null {
   return (
     parseChestOpenBatchResult(packet) ||
     parseChestOpenResult(packet) ||
+    parseCultivationBookBindResult(packet) ||
+    parseCultivationBookUseResult(packet) ||
     parseSpecialTimedItemUseResult(packet) ||
     parseItemUseResult(packet) ||
     (() => {
@@ -3223,7 +3301,35 @@ export type BagItem = {
   durability?: number;
   /** Common-extra milestone / enhance attrs (server-authoritative, may include wash). */
   enhanceAttrs?: BagEnhanceAttr[];
+  /** 921 修炼天书：记录等级（详情/列表名展示）. */
+  bookLevel?: number;
+  /** 921 修炼天书：是否已注满. */
+  bookFull?: boolean;
 };
+
+/** 920 空白 / 921 实例共用展示名基名. */
+export function formatCultivationBookName(
+  baseName: string,
+  bookLevel?: number,
+  bookFull?: boolean,
+): string {
+  const base = (baseName || "修炼天书").trim() || "修炼天书";
+  if (!bookLevel || bookLevel <= 0) return base;
+  return `${base} Lv${bookLevel}·${bookFull ? "满" : "未满"}`;
+}
+
+/** Parse 7/38 bookdes produced by mock_cultivation_book_format_des. */
+export function parseCultivationBookMetaFromDes(
+  des: string,
+): { level: number; full: boolean } | null {
+  const text = (des || "").trim();
+  if (!text) return null;
+  const lm = /天书等级[：:]\s*(\d+)\s*级/.exec(text);
+  if (!lm) return null;
+  const level = Number(lm[1]);
+  if (!Number.isFinite(level) || level <= 0) return null;
+  return { level, full: /已注满/.test(text) };
+}
 
 /**
  * 神仙壶/逍遥壶：背包 u32 count 是 HP/MP 储量，可见堆叠恒为 1
@@ -3492,17 +3598,37 @@ export function preserveFlaskReservoirAcrossBagRefresh(
   next: BagItem,
   prev: BagItem | undefined,
 ): BagItem {
-  if (!isReservoirFlaskItemId(next.itemId)) return next;
-  if (next.count > 1) return next;
-  if (
-    prev &&
-    isReservoirFlaskItemId(prev.itemId) &&
-    prev.seq === next.seq &&
-    prev.count > 1
-  ) {
-    return { ...next, count: prev.count };
+  let row = next;
+  if (isReservoirFlaskItemId(next.itemId)) {
+    if (next.count <= 1 &&
+      prev &&
+      isReservoirFlaskItemId(prev.itemId) &&
+      prev.seq === next.seq &&
+      prev.count > 1
+    ) {
+      row = { ...next, count: prev.count };
+    }
   }
-  return next;
+  /* 921：刷新背包时暂留上次读到的等级/满未满，随后异步 7/38 再校正. */
+  if (
+    isCultivationBookItem(row.itemId) &&
+    prev &&
+    prev.itemId === row.itemId &&
+    prev.seq === row.seq &&
+    (prev.bookLevel ?? 0) > 0
+  ) {
+    row = {
+      ...row,
+      bookLevel: prev.bookLevel,
+      bookFull: prev.bookFull,
+      name: formatCultivationBookName(
+        lookupItemSync(row.itemId)?.name ?? row.name,
+        prev.bookLevel,
+        prev.bookFull,
+      ),
+    };
+  }
+  return row;
 }
 
 /**

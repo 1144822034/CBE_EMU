@@ -7872,7 +7872,84 @@ typedef struct
 {
     vm_net_mock_role_db_file *database;
     bool invalid;
+} vm_mock_mysql_chest_pity_miss_load_context;
+
+typedef struct
+{
+    vm_net_mock_role_db_file *database;
+    bool invalid;
 } vm_mock_mysql_spouse_load_context;
+
+static void vm_net_mock_role_chest_crystal_miss_clear(vm_net_mock_role_state *role)
+{
+    if (role == NULL)
+        return;
+    memset(role->chestCrystalMiss, 0, sizeof(role->chestCrystalMiss));
+}
+
+static void vm_net_mock_role_chest_crystal_miss_decode(vm_net_mock_role_state *role,
+                                                       const char *text,
+                                                       size_t textLen)
+{
+    unsigned v0 = 0, v1 = 0, v2 = 0, v3 = 0, v4 = 0;
+    char buf[80];
+    size_t copy;
+
+    vm_net_mock_role_chest_crystal_miss_clear(role);
+    if (role == NULL || text == NULL || textLen == 0)
+        return;
+    copy = textLen < sizeof(buf) - 1u ? textLen : sizeof(buf) - 1u;
+    memcpy(buf, text, copy);
+    buf[copy] = 0;
+    if (sscanf(buf, "%u,%u,%u,%u,%u", &v0, &v1, &v2, &v3, &v4) != 5)
+        return;
+    if (v0 > 65535u || v1 > 65535u || v2 > 65535u || v3 > 65535u || v4 > 65535u)
+        return;
+    role->chestCrystalMiss[0] = (u16)v0;
+    role->chestCrystalMiss[1] = (u16)v1;
+    role->chestCrystalMiss[2] = (u16)v2;
+    role->chestCrystalMiss[3] = (u16)v3;
+    role->chestCrystalMiss[4] = (u16)v4;
+}
+
+static bool vm_net_mock_role_chest_crystal_miss_encode(
+    const vm_net_mock_role_state *role, char *out, size_t outCap)
+{
+    if (role == NULL || out == NULL || outCap < 16)
+        return false;
+    snprintf(out, outCap, "%u,%u,%u,%u,%u", role->chestCrystalMiss[0],
+             role->chestCrystalMiss[1], role->chestCrystalMiss[2],
+             role->chestCrystalMiss[3], role->chestCrystalMiss[4]);
+    return true;
+}
+
+static bool vm_mock_mysql_role_chest_pity_miss_row(void *context_value,
+                                                   unsigned int column_count,
+                                                   const char *const *values,
+                                                   const size_t *lengths)
+{
+    vm_mock_mysql_chest_pity_miss_load_context *context =
+        (vm_mock_mysql_chest_pity_miss_load_context *)context_value;
+    u32 roleId = 0;
+    vm_net_mock_role_state *role;
+
+    if (context == NULL || context->database == NULL || column_count != 2 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &roleId) || roleId == 0)
+    {
+        if (context)
+            context->invalid = true;
+        return true;
+    }
+    role = vm_mock_mysql_find_loaded_role(context->database, roleId);
+    if (role == NULL)
+    {
+        context->invalid = true;
+        return true;
+    }
+    vm_net_mock_role_chest_crystal_miss_decode(
+        role, values[1], values[1] != NULL ? lengths[1] : 0);
+    return true;
+}
 
 static bool vm_mock_mysql_role_spouse_row(void *context_value,
                                           unsigned int column_count,
@@ -8491,7 +8568,13 @@ static bool vm_net_mock_role_ensure_pixi_cosmetics_columns(void)
             "ALTER TABLE account_roles "
             "ADD COLUMN equipped_mount_id INT UNSIGNED NOT NULL DEFAULT 0 "
             "AFTER equipped_wing_id",
-            "role_equipped_mount_id_column"))
+            "role_equipped_mount_id_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "chest_crystal_miss",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN chest_crystal_miss VARCHAR(64) NOT NULL DEFAULT "
+            "'0,0,0,0,0' AFTER pk_pve_streak",
+            "role_chest_crystal_miss_column"))
     {
         ok = false;
         return false;
@@ -8702,6 +8785,22 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
                  account_hex);
         if (!vm_mysql_query(query, vm_mock_mysql_role_cosmetics_row, &cosCtx) ||
             cosCtx.invalid)
+            return false;
+    }
+    {
+        vm_mock_mysql_chest_pity_miss_load_context pityCtx;
+        memset(&pityCtx, 0, sizeof(pityCtx));
+        pityCtx.database = &g_vm_net_mock_role_db;
+        for (u32 ri = 0; ri < g_vm_net_mock_role_db.roleCount; ++ri)
+            vm_net_mock_role_chest_crystal_miss_clear(
+                &g_vm_net_mock_role_db.roles[ri]);
+        snprintf(query, sizeof(query),
+                 "SELECT role_id,IFNULL(chest_crystal_miss,'0,0,0,0,0') "
+                 "FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR)",
+                 account_hex);
+        if (!vm_mysql_query(query, vm_mock_mysql_role_chest_pity_miss_row,
+                            &pityCtx) ||
+            pityCtx.invalid)
             return false;
     }
     if (!vm_net_mock_role_ensure_intimacy_marriage_columns())
@@ -9061,6 +9160,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
             continue;
         char name_hex[sizeof(role->name) * 2 + 1];
         char scene_hex[sizeof(role->scene) * 2 + 1];
+        char chest_miss_text[64];
         size_t name_len = vm_mock_mysql_bounded_strlen(role->name, sizeof(role->name));
         size_t scene_len = vm_mock_mysql_bounded_strlen(role->scene, sizeof(role->scene));
         if (name_len >= sizeof(role->name) || scene_len >= sizeof(role->scene) ||
@@ -9074,14 +9174,20 @@ static bool vm_net_mock_role_db_save_relational_ex(
             name_hex[0] = 0;
         if (!scene_len)
             scene_hex[0] = 0;
+        if (!vm_net_mock_role_chest_crystal_miss_encode(role, chest_miss_text,
+                                                        sizeof(chest_miss_text)))
+        {
+            snprintf(chest_miss_text, sizeof(chest_miss_text), "0,0,0,0,0");
+        }
         snprintf(query, sizeof(query),
-                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,unlocked_chenghao_ids,unlocked_wing_ids,unlocked_mount_ids,equipped_chenghao_id,equipped_wing_id,equipped_mount_id) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,'%s','%s','%s',%u,%u,%u) "
+                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,chest_crystal_miss,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,unlocked_chenghao_ids,unlocked_wing_ids,unlocked_mount_ids,equipped_chenghao_id,equipped_wing_id,equipped_mount_id) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,'%s',X'%s',%u,%u,%u,%u,%u,%u,%u,'%s','%s','%s',%u,%u,%u) "
                  "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
                  "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
                  "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
                  "mp=VALUES(mp),mp_max=VALUES(mp_max),money=VALUES(money),wcoin=VALUES(wcoin),"
                  "pk_points=VALUES(pk_points),pk_pve_streak=VALUES(pk_pve_streak),"
+                 "chest_crystal_miss=VALUES(chest_crystal_miss),"
                  "scene=VALUES(scene),pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
                  "backpack_item_count=VALUES(backpack_item_count),designation_id=VALUES(designation_id),"
                  "arena_designation_mask=VALUES(arena_designation_mask),"
@@ -9096,7 +9202,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
                  account_hex, role->roleId, i, name_hex, role->job, role->sex,
                  role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
                  role->mp, role->mpMax, role->money, role->wcoin, role->pkPoints,
-                 (u32)role->pkPveDecayStreak, scene_hex,
+                 (u32)role->pkPveDecayStreak, chest_miss_text, scene_hex,
                  role->x, role->y, role->backpackItemCount, role->designationId,
                  role->arenaDesignationMask, role->specialDesignationMask,
                  role->nextBackpackSeq,
@@ -10312,6 +10418,502 @@ static void vm_net_mock_role_offline_practise_clear_login_notice(void)
 {
     g_vm_net_mock_offline_practise_login_flag = 0;
     g_vm_net_mock_offline_practise_login_info[0] = 0;
+}
+
+static bool g_vm_net_mock_cultivation_book_schema_prepared = false;
+
+static bool vm_net_mock_cultivation_book_prepare_schema(void)
+{
+    if (g_vm_net_mock_cultivation_book_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_cultivation_books ("
+            "book_id INT UNSIGNED NOT NULL AUTO_INCREMENT,"
+            "book_level INT UNSIGNED NOT NULL DEFAULT 0,"
+            "capacity_exp INT UNSIGNED NOT NULL DEFAULT 0,"
+            "filled_exp INT UNSIGNED NOT NULL DEFAULT 0,"
+            "creator_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin "
+            "NOT NULL DEFAULT '',"
+            "creator_role_id INT UNSIGNED NOT NULL DEFAULT 0,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(book_id),"
+            "KEY idx_cultivation_books_creator(creator_account_id,creator_role_id)"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] cultivation_book_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_cultivation_book_schema_prepared = true;
+    return true;
+}
+
+typedef struct
+{
+    vm_net_mock_cultivation_book_state book;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_cultivation_book_context;
+
+static bool vm_mock_mysql_cultivation_book_row(void *context_value,
+                                               unsigned int column_count,
+                                               const char *const *values,
+                                               const size_t *lengths)
+{
+    vm_mock_mysql_cultivation_book_context *context =
+        (vm_mock_mysql_cultivation_book_context *)context_value;
+    u32 number[4];
+
+    if (context == NULL || context->found || column_count < 4)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    memset(number, 0, sizeof(number));
+    for (u32 i = 0; i < 4; ++i)
+    {
+        if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
+        {
+            context->invalid = true;
+            return true;
+        }
+    }
+    context->book.bookId = number[0];
+    context->book.bookLevel = number[1];
+    context->book.capacityExp = number[2];
+    context->book.filledExp = number[3];
+    if (context->book.filledExp > context->book.capacityExp &&
+        context->book.capacityExp != 0)
+    {
+        context->book.filledExp = context->book.capacityExp;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_cultivation_book_load(
+    u32 bookId, vm_net_mock_cultivation_book_state *out)
+{
+    char query[192];
+    vm_mock_mysql_cultivation_book_context context;
+
+    if (out == NULL || bookId == 0)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!vm_net_mock_cultivation_book_prepare_schema())
+        return false;
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT book_id,book_level,capacity_exp,filled_exp "
+             "FROM account_cultivation_books WHERE book_id=%u LIMIT 1",
+             bookId);
+    if (!vm_mysql_query(query, vm_mock_mysql_cultivation_book_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    *out = context.book;
+    return true;
+}
+
+static bool vm_net_mock_cultivation_book_save(
+    const vm_net_mock_cultivation_book_state *book)
+{
+    char query[256];
+
+    if (book == NULL || book->bookId == 0)
+        return false;
+    if (!vm_net_mock_cultivation_book_prepare_schema())
+        return false;
+    snprintf(query, sizeof(query),
+             "UPDATE account_cultivation_books SET book_level=%u,"
+             "capacity_exp=%u,filled_exp=%u WHERE book_id=%u",
+             book->bookLevel, book->capacityExp, book->filledExp, book->bookId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] cultivation_book_save book=%u error=%s\n",
+               book->bookId, vm_mysql_last_error());
+        return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_cultivation_book_delete(u32 bookId)
+{
+    char query[128];
+
+    if (bookId == 0)
+        return false;
+    if (!vm_net_mock_cultivation_book_prepare_schema())
+        return false;
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_cultivation_books WHERE book_id=%u", bookId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] cultivation_book_delete book=%u error=%s\n",
+               bookId, vm_mysql_last_error());
+        return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_cultivation_book_create(vm_net_mock_role_state *role,
+                                                u32 bookLevel, u32 capacityExp,
+                                                u32 *bookIdOut)
+{
+    char account_hex[129];
+    char query[384];
+    vm_mock_mysql_u32_context idContext;
+    const char *accountId = g_vm_mock_service_active_account_id;
+
+    if (bookIdOut)
+        *bookIdOut = 0;
+    if (role == NULL || role->roleId == 0 || bookLevel == 0 || capacityExp == 0 ||
+        accountId == NULL || accountId[0] == '\0')
+    {
+        return false;
+    }
+    if (!vm_net_mock_cultivation_book_prepare_schema())
+        return false;
+    if (!vm_net_mock_mysql_account_hex(account_hex))
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_cultivation_books("
+             "book_level,capacity_exp,filled_exp,creator_account_id,creator_role_id) "
+             "VALUES(%u,%u,0,CAST(X'%s' AS CHAR),%u)",
+             bookLevel, capacityExp, account_hex, role->roleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] cultivation_book_create role=%u error=%s\n",
+               role->roleId, vm_mysql_last_error());
+        return false;
+    }
+    memset(&idContext, 0, sizeof(idContext));
+    if (!vm_mysql_query("SELECT LAST_INSERT_ID()", vm_mock_mysql_single_u32_row,
+                        &idContext) ||
+        idContext.invalid || !idContext.found || idContext.value == 0)
+    {
+        printf("[error][mock-service] cultivation_book_create_id role=%u error=%s\n",
+               role->roleId, vm_mysql_last_error());
+        return false;
+    }
+    if (bookIdOut)
+        *bookIdOut = idContext.value;
+    printf("[info][mock-service] cultivation_book_create role=%u book=%u "
+           "level=%u capacity=%u\n",
+           role->roleId, idContext.value, bookLevel, capacityExp);
+    return true;
+}
+
+typedef struct
+{
+    vm_net_mock_cultivation_book_state books[16];
+    u32 count;
+    bool invalid;
+} vm_mock_mysql_cultivation_book_list_context;
+
+static bool vm_mock_mysql_cultivation_book_list_row(void *context_value,
+                                                    unsigned int column_count,
+                                                    const char *const *values,
+                                                    const size_t *lengths)
+{
+    vm_mock_mysql_cultivation_book_list_context *context =
+        (vm_mock_mysql_cultivation_book_list_context *)context_value;
+    u32 number[4];
+    vm_net_mock_cultivation_book_state *book = NULL;
+
+    if (context == NULL)
+        return true;
+    if (context->count >=
+            (u32)(sizeof(context->books) / sizeof(context->books[0])) ||
+        column_count < 4)
+    {
+        if (column_count < 4)
+            context->invalid = true;
+        return true;
+    }
+    memset(number, 0, sizeof(number));
+    for (u32 i = 0; i < 4; ++i)
+    {
+        if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
+        {
+            context->invalid = true;
+            return true;
+        }
+    }
+    book = &context->books[context->count++];
+    memset(book, 0, sizeof(*book));
+    book->bookId = number[0];
+    book->bookLevel = number[1];
+    book->capacityExp = number[2];
+    book->filledExp = number[3];
+    if (book->filledExp > book->capacityExp && book->capacityExp != 0)
+        book->filledExp = book->capacityExp;
+    return true;
+}
+
+static bool vm_net_mock_cultivation_book_id_in_backpack(
+    const vm_net_mock_role_state *role, u32 bookId)
+{
+    u32 itemCount = 0;
+
+    if (role == NULL || bookId == 0)
+        return false;
+    itemCount = vm_net_mock_role_backpack_count((vm_net_mock_role_state *)role);
+    for (u32 i = 0; i < itemCount && i < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++i)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID &&
+            item->count != 0 && item->enhanceInstanceId == bookId)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Resolve book state for a 921 bag row.  If enhanceInstanceId was wiped
+ * (legacy finalize zeroed non-equip ids), reattach an orphan creator book.
+ */
+static bool vm_net_mock_cultivation_book_resolve_for_item(
+    vm_net_mock_role_state *role, vm_net_mock_backpack_item_state *item,
+    vm_net_mock_cultivation_book_state *bookOut)
+{
+    char account_hex[129];
+    char query[320];
+    vm_mock_mysql_cultivation_book_list_context list;
+    const char *accountId = g_vm_mock_service_active_account_id;
+
+    if (bookOut)
+        memset(bookOut, 0, sizeof(*bookOut));
+    if (role == NULL || item == NULL ||
+        item->itemId != VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID || item->count == 0)
+    {
+        return false;
+    }
+    if (item->enhanceInstanceId != 0 &&
+        vm_net_mock_cultivation_book_load(item->enhanceInstanceId, bookOut))
+    {
+        return true;
+    }
+
+    if (accountId == NULL || accountId[0] == '\0' ||
+        !vm_net_mock_cultivation_book_prepare_schema() ||
+        !vm_net_mock_mysql_account_hex(account_hex))
+    {
+        return false;
+    }
+    memset(&list, 0, sizeof(list));
+    snprintf(query, sizeof(query),
+             "SELECT book_id,book_level,capacity_exp,filled_exp "
+             "FROM account_cultivation_books WHERE creator_role_id=%u "
+             "AND creator_account_id=CAST(X'%s' AS CHAR) "
+             "ORDER BY book_id DESC LIMIT 16",
+             role->roleId, account_hex);
+    if (!vm_mysql_query(query, vm_mock_mysql_cultivation_book_list_row, &list) ||
+        list.invalid || list.count == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < list.count; ++i)
+    {
+        const vm_net_mock_cultivation_book_state *cand = &list.books[i];
+        if (cand->bookId == 0)
+            continue;
+        if (vm_net_mock_cultivation_book_id_in_backpack(role, cand->bookId))
+            continue;
+        item->enhanceInstanceId = cand->bookId;
+        if (bookOut)
+            *bookOut = *cand;
+        vm_net_mock_role_mark_inventory_dirty("cultivation-book-relink");
+        printf("[warn][mock-service] cultivation_book_relink role=%u seq=%u "
+               "book=%u filled=%u/%u evidence=wiped-non-equip-instance-id\n",
+               role->roleId, item->seq, cand->bookId, cand->filledExp,
+               cand->capacityExp);
+        return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_cultivation_book_is_full(
+    const vm_net_mock_cultivation_book_state *book)
+{
+    if (book == NULL || book->bookId == 0 || book->capacityExp == 0)
+        return false;
+    return book->filledExp >= book->capacityExp;
+}
+
+static bool vm_net_mock_cultivation_book_is_tradeable_instance(
+    const vm_net_mock_backpack_item_state *item)
+{
+    vm_net_mock_cultivation_book_state book;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (item == NULL || item->itemId != VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID)
+        return false;
+    memset(&book, 0, sizeof(book));
+    if (role != NULL &&
+        vm_net_mock_cultivation_book_resolve_for_item(
+            role, (vm_net_mock_backpack_item_state *)item, &book))
+    {
+        return vm_net_mock_cultivation_book_is_full(&book);
+    }
+    if (item->enhanceInstanceId == 0 ||
+        !vm_net_mock_cultivation_book_load(item->enhanceInstanceId, &book))
+    {
+        return false;
+    }
+    return vm_net_mock_cultivation_book_is_full(&book);
+}
+
+static void vm_net_mock_cultivation_book_format_des(
+    const vm_net_mock_cultivation_book_state *book, char *gbkOut, u32 gbkCap)
+{
+    char utf8[320];
+    u32 percent = 0;
+    int n = 0;
+
+    if (gbkOut == NULL || gbkCap == 0)
+        return;
+    gbkOut[0] = 0;
+    if (book == NULL || book->bookId == 0)
+    {
+        /* 天书资料缺失 */
+        static const char missing[] =
+            "\xCC\xEC\xCA\xE9\xD7\xCA\xC1\xCF\xC8\xB1\xCA\xA7";
+        snprintf(gbkOut, gbkCap, "%s", missing);
+        return;
+    }
+    if (book->capacityExp != 0)
+        percent = (u32)(((unsigned long long)book->filledExp * 100ull) /
+                        (unsigned long long)book->capacityExp);
+    if (percent > 100u)
+        percent = 100u;
+    if (vm_net_mock_cultivation_book_is_full(book))
+    {
+        u32 minUse =
+            book->bookLevel > (u32)VM_NET_MOCK_CULTIVATION_BOOK_USE_LEVEL_GAP
+                ? book->bookLevel - (u32)VM_NET_MOCK_CULTIVATION_BOOK_USE_LEVEL_GAP
+                : 1u;
+        u32 maxUse = book->bookLevel > 1u ? book->bookLevel - 1u : 1u;
+        n = snprintf(
+            utf8, sizeof(utf8),
+            "修炼天书实例\n"
+            "天书等级：%u级\n"
+            "经验：%u/%u（%u%%）\n"
+            "状态：已注满，可交易\n"
+            "使用：%u-%u级玩家可用，获得书内全部经验（不再享受经验卡等加成）",
+            book->bookLevel, book->filledExp, book->capacityExp, percent,
+            minUse, maxUse);
+    }
+    else
+    {
+        n = snprintf(
+            utf8, sizeof(utf8),
+            "修炼天书实例\n"
+            "天书等级：%u级\n"
+            "经验：%u/%u（%u%%）\n"
+            "状态：记录中（同时只能记录一本）\n"
+            "说明：打怪获得的经验（含经验卡等加成）会注入本书；注满后方可交易",
+            book->bookLevel, book->filledExp, book->capacityExp, percent);
+    }
+    if (n < 0)
+        utf8[0] = 0;
+    utf8_to_gbk((u8 *)utf8, (u8 *)gbkOut, gbkCap);
+}
+
+static void vm_net_mock_cultivation_book_format_list_name(
+    const vm_net_mock_cultivation_book_state *book, char *gbkOut, u32 gbkCap)
+{
+    char utf8[64];
+
+    if (gbkOut == NULL || gbkCap == 0)
+        return;
+    gbkOut[0] = 0;
+    if (book == NULL || book->bookId == 0 || book->bookLevel == 0)
+        return;
+    snprintf(utf8, sizeof(utf8), "修炼天书 Lv%u·%s", book->bookLevel,
+             vm_net_mock_cultivation_book_is_full(book) ? "满" : "未满");
+    utf8_to_gbk((u8 *)utf8, (u8 *)gbkOut, gbkCap);
+}
+
+static vm_net_mock_backpack_item_state *
+vm_net_mock_role_find_incomplete_cultivation_book(
+    vm_net_mock_role_state *role, vm_net_mock_cultivation_book_state *bookOut)
+{
+    u32 itemCount = 0;
+
+    if (bookOut)
+        memset(bookOut, 0, sizeof(*bookOut));
+    if (role == NULL)
+        return NULL;
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount && i < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++i)
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        vm_net_mock_cultivation_book_state book;
+
+        if (item->itemId != VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID ||
+            item->count == 0)
+        {
+            continue;
+        }
+        memset(&book, 0, sizeof(book));
+        if (!vm_net_mock_cultivation_book_resolve_for_item(role, item, &book))
+            continue;
+        if (vm_net_mock_cultivation_book_is_full(&book))
+            continue;
+        if (bookOut)
+            *bookOut = book;
+        return item;
+    }
+    return NULL;
+}
+
+static bool vm_net_mock_role_has_incomplete_cultivation_book(
+    vm_net_mock_role_state *role)
+{
+    return vm_net_mock_role_find_incomplete_cultivation_book(role, NULL) != NULL;
+}
+
+static u8 vm_net_mock_role_cultivation_book_status_flag(
+    vm_net_mock_role_state *role)
+{
+    return vm_net_mock_role_has_incomplete_cultivation_book(role) ? 1u : 0u;
+}
+
+/* Copy combat EXP into the single incomplete recording book. Returns injected.
+ * Caller must pass post-modifier battle reward (exp card / insight / marriage
+ * already applied). Book use grants filled_exp via bare role_add_exp only. */
+static u32 vm_net_mock_role_inject_cultivation_book_exp(vm_net_mock_role_state *role,
+                                                        u32 gainExp)
+{
+    vm_net_mock_backpack_item_state *item = NULL;
+    vm_net_mock_cultivation_book_state book;
+    u32 room = 0;
+    u32 injected = 0;
+
+    if (role == NULL || gainExp == 0)
+        return 0;
+    item = vm_net_mock_role_find_incomplete_cultivation_book(role, &book);
+    if (item == NULL || book.bookId == 0 || book.capacityExp == 0)
+        return 0;
+    if (book.filledExp >= book.capacityExp)
+        return 0;
+    room = book.capacityExp - book.filledExp;
+    injected = gainExp < room ? gainExp : room;
+    book.filledExp += injected;
+    if (!vm_net_mock_cultivation_book_save(&book))
+        return 0;
+    printf("[info][mock-service] cultivation_book_inject role=%u book=%u "
+           "gain=%u injected=%u filled=%u/%u full=%u\n",
+           role->roleId, book.bookId, gainExp, injected, book.filledExp,
+           book.capacityExp, vm_net_mock_cultivation_book_is_full(&book) ? 1u : 0u);
+    return injected;
 }
 
 static void vm_net_mock_role_db_load(void)
@@ -12216,6 +12818,10 @@ static void vm_net_mock_role_finalize_loaded_enhance_instances(
         vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
         if (item->itemId == 0 || item->count == 0)
             continue;
+        /* 921 的 enhanceInstanceId = cultivation book_id，不是装备实例。
+         * ensure_equipment_instance_id 对非装备会返回 0，会冲掉书本关联。 */
+        if (item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID)
+            continue;
         item->enhanceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
             role, item->enhanceInstanceId, item->itemId);
     }
@@ -12475,6 +13081,9 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     for (u32 i = 0; i < itemCount; ++i)
     {
         vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        /* 921 修炼天书实例不可堆叠：每本绑定独立 book_id。 */
+        if (itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID)
+            break;
         if (item->itemId == itemId)
         {
             if (0xffffffffu - item->count < count)
@@ -12501,6 +13110,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     if (item->seq == 0)
         item->seq = 1;
     item->count = count;
+    if (itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID && enhanceInstanceId != 0)
+        item->enhanceInstanceId = enhanceInstanceId;
     role->backpackItemCount = (u16)(itemCount + 1);
     role->nextBackpackSeq = (u16)(item->seq + 1);
     if (role->nextBackpackSeq == 0)

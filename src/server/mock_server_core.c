@@ -5229,6 +5229,12 @@ typedef struct
     u32 pkPoints;
     /* Wins toward next −1 pk_points while pkPoints>0 (mod 3). */
     u8 pkPveDecayStreak;
+    /*
+     * Per-chest consecutive opens without 玄晶(901..916).
+     * Index order matches catalog chest kinds: 522,523,524,532,534.
+     * Used by gold-chest (etc.) pity; persisted as account_roles.chest_crystal_miss.
+     */
+    u16 chestCrystalMiss[5];
     char scene[64];
     u16 x;
     u16 y;
@@ -5288,6 +5294,29 @@ enum
     VM_NET_MOCK_PRACTISE_BANK_MAX_MINUTES = 100u * 60u,
     VM_NET_MOCK_PRACTISE_DAILY_MAX_MINUTES = 8u * 60u
 };
+
+/*
+ * item.dsh 920/921 修炼天书:
+ * 920 blank → 7/35 binds into 921 instance (capacity = current level-up cost).
+ * One incomplete recording book per role.  Full 921 tradable; usable by
+ * players in [bookLevel-10, bookLevel-1] (e.g. Lv50 book → Lv40-49).
+ */
+enum
+{
+    VM_NET_MOCK_CULTIVATION_BOOK_BLANK_ITEM_ID = 920,
+    VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID = 921,
+    VM_NET_MOCK_CULTIVATION_BOOK_BIND_MIN_LEVEL = 50, /* level > 49 */
+    /* 可用区间：bookLevel-GAP .. bookLevel-1（含两端）。 */
+    VM_NET_MOCK_CULTIVATION_BOOK_USE_LEVEL_GAP = 10
+};
+
+typedef struct
+{
+    u32 bookId;
+    u32 bookLevel;
+    u32 capacityExp;
+    u32 filledExp;
+} vm_net_mock_cultivation_book_state;
 
 typedef struct
 {
@@ -5617,6 +5646,8 @@ static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
+static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
+static u32 vm_net_mock_role_level_up_cost(u32 level);
 static bool vm_net_mock_role_db_save(const char *reason);
 /* Persist one role by role_id (not only activeRoleId).  Admin money/wcoin
  * paths must use this when the selected role may differ from active. */
@@ -5745,6 +5776,38 @@ static u32 vm_net_mock_build_practise_pill_use_response(const u8 *request,
                                                         u8 *out, u32 outCap);
 static u32 vm_net_mock_build_practise_pill_followup_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+static bool vm_net_mock_cultivation_book_prepare_schema(void);
+static bool vm_net_mock_cultivation_book_load(u32 bookId,
+                                              vm_net_mock_cultivation_book_state *out);
+static bool vm_net_mock_cultivation_book_save(
+    const vm_net_mock_cultivation_book_state *book);
+static bool vm_net_mock_cultivation_book_delete(u32 bookId);
+static bool vm_net_mock_cultivation_book_create(
+    vm_net_mock_role_state *role, u32 bookLevel, u32 capacityExp, u32 *bookIdOut);
+static bool vm_net_mock_cultivation_book_resolve_for_item(
+    vm_net_mock_role_state *role, vm_net_mock_backpack_item_state *item,
+    vm_net_mock_cultivation_book_state *bookOut);
+static vm_net_mock_backpack_item_state *
+vm_net_mock_role_find_incomplete_cultivation_book(vm_net_mock_role_state *role,
+                                                   vm_net_mock_cultivation_book_state *bookOut);
+static bool vm_net_mock_role_has_incomplete_cultivation_book(
+    vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_inject_cultivation_book_exp(vm_net_mock_role_state *role,
+                                                        u32 gainExp);
+static bool vm_net_mock_cultivation_book_is_full(
+    const vm_net_mock_cultivation_book_state *book);
+static bool vm_net_mock_cultivation_book_is_tradeable_instance(
+    const vm_net_mock_backpack_item_state *item);
+static u8 vm_net_mock_role_cultivation_book_status_flag(
+    vm_net_mock_role_state *role);
+static void vm_net_mock_cultivation_book_format_des(
+    const vm_net_mock_cultivation_book_state *book, char *gbkOut, u32 gbkCap);
+/* Short bag/trade label: 「修炼天书 LvN·满/未满」. */
+static void vm_net_mock_cultivation_book_format_list_name(
+    const vm_net_mock_cultivation_book_state *book, char *gbkOut, u32 gbkCap);
+static u32 vm_net_mock_build_cultivation_book_response(const u8 *request,
+                                                       u32 requestLen,
+                                                       u8 *out, u32 outCap);
 static u32 vm_net_mock_build_timed_special_item_use_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_battle_insight_followup_response(

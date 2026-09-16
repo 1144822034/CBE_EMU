@@ -118,6 +118,16 @@ import {
   parseBattleInsightRemainSecFromStatus,
   parseBattleInsightIteminfoFromPacket,
   isCombatPillItem,
+  buildCultivationBookBindRequest,
+  buildCultivationBookReadRequest,
+  buildCultivationBookUseRequest,
+  parseCultivationBookBindResult,
+  parseCultivationBookReadResult,
+  parseCultivationBookUseResult,
+  parseCultivationBookMetaFromDes,
+  formatCultivationBookName,
+  isCultivationBookBlankItem,
+  isCultivationBookItem,
   buildEquipSwapRequest,
   buildItemDiscardRequest,
   buildItemEquipRequest,
@@ -776,6 +786,8 @@ export class GameSession {
   /** Last bag / worn / mall / actorinfo from server packets. */
   bagItems: BagItem[] = [];
   wornItems: BagItem[] = [];
+  /** Bumps to cancel in-flight 7/38 list-name enrichment. */
+  private cultivationBookEnrichGen = 0;
   /**
    * Unequip/swap: CBE moves the item object and keeps item+0x110. Pixi bag
    * open rebuilds from 30/21 (count=stack only), so stash current durability
@@ -2279,7 +2291,7 @@ export class GameSession {
     // Claim the slot before await so FGS keepalive cannot start a twin 4/1.
     this.clearHangupEncounterTimer();
     this.hangupActive = true;
-    // Live SCE may still be in the 10s post-battle suppress window — hangup
+    // Live SCE may still be in the 8s post-battle suppress window — hangup
     // must keep using seed catalog (same species/home), not an empty live pool.
     if (!this.sceneMonsters.length && this.sceneMonsterCatalog.length) {
       this.sceneMonsters = this.sceneMonsterCatalog.map((m) => ({ ...m }));
@@ -4190,6 +4202,14 @@ export class GameSession {
       return this.useCombatPill(itemId, seq);
     }
 
+    if (isCultivationBookBlankItem(itemId)) {
+      return this.useCultivationBookBlank(seq);
+    }
+
+    if (isCultivationBookItem(itemId)) {
+      return this.useCultivationBook(seq);
+    }
+
     const bodies = await this.transport.exchange(
       0,
       buildItemUseRequest(itemId, seq),
@@ -4400,6 +4420,167 @@ export class GameSession {
       this.bagItems = this.bagItems.filter((_, i) => i !== idx);
     }
     this.cb.onBag?.(this.bagItems);
+  }
+
+  /**
+   * 920 空白修炼天书 → 1/7/35。result=0 本地扣空白；同包 7/7 加入 921。
+   * Evidence: docs/re/2026-07-23-special-item-use-contract.md
+   */
+  async useCultivationBookBlank(seq: number): Promise<ItemUseFeedback> {
+    if (!this.transport) {
+      return { ok: false, message: "未连接服务器" };
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildCultivationBookBindRequest(seq),
+    );
+    let fb: ItemUseFeedback | null = null;
+    for (const body of bodies) {
+      try {
+        const packet = decodeWtPacket(body);
+        fb = parseCultivationBookBindResult(packet) ?? fb;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!fb) fb = { ok: false, message: "天书无响应" };
+    if (fb.ok) {
+      this.consumeBagSeqLocally(seq);
+      this.handleBodies(bodies);
+    }
+    this.emitItemUseFeedback(fb);
+    return fb;
+  }
+
+  /**
+   * 921 读描述：1/7/38 → bookdes（背包详情明细）。
+   */
+  async readCultivationBookDes(seq: number): Promise<string> {
+    if (!this.transport) return "";
+    const bodies = await this.transport.exchange(
+      0,
+      buildCultivationBookReadRequest(seq),
+    );
+    let des = "";
+    for (const body of bodies) {
+      try {
+        des = parseCultivationBookReadResult(decodeWtPacket(body)) || des;
+      } catch {
+        /* ignore */
+      }
+    }
+    this.handleBodies(bodies);
+    return des.trim();
+  }
+
+  /**
+   * Apply 7/38 bookdes → bag row name「修炼天书 LvN·满/未满」.
+   * Returns true when bag state changed.
+   * Pass `notify: true` to push bag UI immediately (batch enrich leaves notify to caller).
+   */
+  applyCultivationBookMetaFromDes(
+    seq: number,
+    des: string,
+    opts?: { notify?: boolean },
+  ): boolean {
+    const meta = parseCultivationBookMetaFromDes(des);
+    if (!meta) return false;
+    const idx = this.bagItems.findIndex((it) => it.seq === seq && seq > 0);
+    if (idx < 0) return false;
+    const cur = this.bagItems[idx]!;
+    if (!isCultivationBookItem(cur.itemId)) return false;
+    const base = lookupItemSync(cur.itemId)?.name ?? "修炼天书";
+    const name = formatCultivationBookName(base, meta.level, meta.full);
+    if (
+      cur.bookLevel === meta.level &&
+      cur.bookFull === meta.full &&
+      cur.name === name &&
+      (!des || cur.desc === des)
+    ) {
+      return false;
+    }
+    this.bagItems = this.bagItems.map((it, i) =>
+      i === idx
+        ? {
+            ...it,
+            bookLevel: meta.level,
+            bookFull: meta.full,
+            name,
+            ...(des ? { desc: des } : {}),
+          }
+        : it,
+    );
+    if (opts?.notify) this.cb.onBag?.(this.bagItems);
+    return true;
+  }
+
+  /** After bag refresh: async 7/38 for each 921 so list names show Lv/满未满. */
+  private scheduleEnrichCultivationBookNames(opts?: {
+    /** When true, re-query even if bookLevel already cached (full bag sync). */
+    force?: boolean;
+  }): void {
+    if (!this.transport) return;
+    const force = !!opts?.force;
+    const targets = this.bagItems.filter(
+      (it) =>
+        isCultivationBookItem(it.itemId) &&
+        it.seq > 0 &&
+        (force || !(it.bookLevel && it.bookLevel > 0)),
+    );
+    if (!targets.length) return;
+    const gen = ++this.cultivationBookEnrichGen;
+    void (async () => {
+      let changed = false;
+      for (const it of targets) {
+        if (gen !== this.cultivationBookEnrichGen) return;
+        const des = await this.readCultivationBookDes(it.seq);
+        if (gen !== this.cultivationBookEnrichGen) return;
+        if (this.applyCultivationBookMetaFromDes(it.seq, des)) changed = true;
+      }
+      if (changed && gen === this.cultivationBookEnrichGen) {
+        this.cb.onBag?.(this.bagItems);
+      }
+    })();
+  }
+
+  /**
+   * 921：先 7/38 读描述，再 7/40 使用。result=0 本地删除并应用经验结算包。
+   */
+  async useCultivationBook(seq: number): Promise<ItemUseFeedback> {
+    if (!this.transport) {
+      return { ok: false, message: "未连接服务器" };
+    }
+    const des = await this.readCultivationBookDes(seq);
+
+    const bodies = await this.transport.exchange(
+      0,
+      buildCultivationBookUseRequest(seq),
+    );
+    let fb: ItemUseFeedback | null = null;
+    for (const body of bodies) {
+      try {
+        const packet = decodeWtPacket(body);
+        fb = parseCultivationBookUseResult(packet) ?? fb;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!fb) {
+      fb = {
+        ok: false,
+        message: des ? `${des}（使用无响应）` : "天书使用无响应",
+      };
+    } else if (fb.ok) {
+      this.consumeBagSeqLocally(seq);
+      this.handleBodies(bodies);
+      if (des && (!fb.message || fb.message === "修炼天书使用成功")) {
+        fb = { ...fb, message: des };
+      }
+    } else if (des && !fb.message) {
+      fb = { ...fb, message: des };
+    }
+    this.emitItemUseFeedback(fb);
+    return fb;
   }
 
   /** 828: 25/6 apply + 25/7 wait-clear (docs/re/2026-07-23-special-item-use-contract.md). */
@@ -4993,6 +5174,17 @@ export class GameSession {
     parsed: EnhanceTransferConfirmResult,
   ): void {
     let changed = false;
+    const src = this.bagItems.find(
+      (it) => it.seq === parsed.sourceSeq && it.seq > 0,
+    );
+    const movedAttrs =
+      src?.kind === "equip" && src.enhanceAttrs?.length
+        ? src.enhanceAttrs.map((a) => ({ ...a }))
+        : undefined;
+    // Drop unequip-race pending for both seats — stale pending would resurrect
+    // pre-transfer wash onto source (+0) or overwrite dest after move.
+    if (parsed.sourceSeq > 0) this.pendingBagEquipEnhance.delete(parsed.sourceSeq);
+    if (parsed.destSeq > 0) this.pendingBagEquipEnhance.delete(parsed.destSeq);
     this.bagItems = this.bagItems.map((it) => {
       if (it.seq === parsed.sourceSeq && it.seq > 0) {
         changed = true;
@@ -5001,7 +5193,17 @@ export class GameSession {
       }
       if (it.seq === parsed.destSeq && it.seq > 0) {
         changed = true;
-        return { ...it, enhance: parsed.destLevel >>> 0 };
+        // Server copies enhance_wash source→dest; mirror locally so dest does
+        // not keep pre-transfer wash until the next 7/7/openBag.
+        if (movedAttrs?.length) {
+          return {
+            ...it,
+            enhance: parsed.destLevel >>> 0,
+            enhanceAttrs: movedAttrs,
+          };
+        }
+        const { enhanceAttrs: _dropDest, ...rest } = it;
+        return { ...rest, enhance: parsed.destLevel >>> 0 };
       }
       return it;
     });
@@ -7031,6 +7233,7 @@ export class GameSession {
           return this.applyBagEquipDurability(withFlask, prev);
         });
         this.cb.onBag?.(this.bagItems);
+        this.scheduleEnrichCultivationBookNames({ force: true });
       } else {
         const updates = parseBagItemUpdates(packet);
         if (updates.length) {
@@ -7047,6 +7250,7 @@ export class GameSession {
             return this.applyBagEquipDurability(withFlask, prev);
           });
           this.cb.onBag?.(this.bagItems);
+          this.scheduleEnrichCultivationBookNames();
         }
       }
       const flaskRes = parseFlaskReservoirUpdates(packet);

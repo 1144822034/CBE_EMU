@@ -1,6 +1,6 @@
 /**
  * Persisted UC3 bitmap font preference for LCD UI.
- * TTF paths are retired — only `.uc3` packs.
+ * Only `.uc3` packs — no OTF/TTF LCD path.
  */
 
 export type Uc3FontId = "sky" | "gb16" | "gb";
@@ -47,6 +47,14 @@ export function getUc3FontId(): Uc3FontId {
   try {
     const v = localStorage.getItem(LS_KEY);
     if (v === "sky" || v === "gb16" || v === "gb") return v;
+    // Stale `cn` (removed OTF experiment) → reset to default.
+    if (v === "cn") {
+      try {
+        localStorage.setItem(LS_KEY, "sky");
+      } catch {
+        /* ignore */
+      }
+    }
   } catch {
     /* ignore */
   }

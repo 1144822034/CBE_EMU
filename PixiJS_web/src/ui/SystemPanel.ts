@@ -23,8 +23,10 @@ import {
   canCombineCrystalFragment,
   canCombineDreamBadge,
   canCombineEnhanceCrystal,
+  formatCultivationBookName,
   isChestBoxItem,
   isCrystalFragment,
+  isCultivationBookItem,
   isDreamBadge,
   isEnhanceCrystal,
   type BagItem,
@@ -316,6 +318,11 @@ export class SystemPanel extends Container {
       ) => void)
     | null = null;
   onClose: (() => void) | null = null;
+  /**
+   * Optional enrich for bag item detail text (e.g. 921 修炼天书 → 7/38 bookdes).
+   * Return non-empty string to replace `it.desc` before drawing.
+   */
+  onEnrichBagDetail: ((it: BagItem) => Promise<string | null>) | null = null;
 
   constructor() {
     super();
@@ -991,6 +998,7 @@ export class SystemPanel extends Container {
       this.detailPage = 0;
       // CBE：物品/装备详情与操作同屏
       this.openActions();
+      void this.enrichSelectedBagDetail(it);
       return;
     }
     if (this.kind === "equip") {
@@ -1015,6 +1023,31 @@ export class SystemPanel extends Container {
       // 与背包道具详情同屏：说明 + 购买（←→ 调数量）
       this.openActions();
     }
+  }
+
+  /** Fetch dynamic desc (921 bookdes) and redraw if still on same item. */
+  private async enrichSelectedBagDetail(it: BagItem): Promise<void> {
+    if (!this.onEnrichBagDetail) return;
+    const seq = it.seq;
+    const itemId = it.itemId;
+    let text: string | null = null;
+    try {
+      text = await this.onEnrichBagDetail(it);
+    } catch {
+      return;
+    }
+    if (!text || !text.trim()) return;
+    if (!this.visible) return;
+    if (!this.selected || !isBag(this.selected)) return;
+    if (this.selected.seq !== seq || this.selected.itemId !== itemId) return;
+    this.selected = { ...this.selected, desc: text.trim() };
+    // Keep bag row in sync so reopening detail stays filled.
+    this.bagItems = this.bagItems.map((row) =>
+      row.seq === seq && row.itemId === itemId
+        ? { ...row, desc: text!.trim() }
+        : row,
+    );
+    if (this.mode === "actions" || this.mode === "detail") this.redraw();
   }
 
   private openActions(): void {
@@ -2668,16 +2701,24 @@ export class SystemPanel extends Container {
   }
 }
 
+function cultivationBookDisplayName(it: BagItem): string {
+  if (!isCultivationBookItem(it.itemId) || !(it.bookLevel && it.bookLevel > 0)) {
+    return it.name;
+  }
+  const base = lookupItemSync(it.itemId)?.name ?? "修炼天书";
+  return formatCultivationBookName(base, it.bookLevel, it.bookFull);
+}
+
 function formatBagLine(it: BagItem): string {
   const wash = equipHasWashedAttr(it) ? "[洗]" : "";
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
-  return `${it.name}${wash}${plus} ×${it.count}`;
+  return `${cultivationBookDisplayName(it)}${wash}${plus} ×${it.count}`;
 }
 
 function formatBagName(it: BagItem): string {
   const wash = equipHasWashedAttr(it) ? "[洗]" : "";
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
-  return `${it.name}${wash}${plus}`;
+  return `${cultivationBookDisplayName(it)}${wash}${plus}`;
 }
 
 /** Wrap description wells at {@link UI_WRAP_CHARS} per line. */

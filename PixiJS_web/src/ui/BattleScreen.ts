@@ -1156,6 +1156,15 @@ export class BattleScreen extends Container {
     return op;
   }
 
+  /** Manual skill path: tip + stay in menu when HUD MP < cost. */
+  private ensureSkillMp(operate: number): boolean {
+    const op = operate | 0;
+    if (op === 0) return true;
+    if (this.resolveAutoOperateMp(op) === op) return true;
+    void this.log.setText("法力不足", CBE.inkTip);
+    return false;
+  }
+
   submitAutoOperate(operate: number, tip: string): boolean {
     if (!this.state || !this.canSubmitOperate()) return false;
     const op = this.resolveAutoOperateMp(operate);
@@ -1200,6 +1209,17 @@ export class BattleScreen extends Container {
     this.noteOperateSubmitted(tip || `施展${name}…`);
     this.onSkill?.(op);
     return true;
+  }
+
+  /**
+   * System-panel / external manual cast: disarm [自动], then same wire pick
+   * as hangup auto (no target UI). Returns false if seat locked / no target.
+   */
+  submitManualSkill(operate: number, name: string): boolean {
+    if (!this.canSubmitOperate()) return false;
+    this.clearAutoForManualOp();
+    if (!this.ensureSkillMp(operate)) return false;
+    return this.submitAutoOperate(operate, `施展${name}…`);
   }
 
   allyVitals(): { hp: number; maxHp: number; mp: number; maxMp: number } | null {
@@ -1292,6 +1312,8 @@ export class BattleScreen extends Container {
       const sk = this.skills[this.skillCursor]!;
       const kind = sk.targetKind ?? 3;
       const operate = sk.id + 2;
+      if (!this.ensureSkillMp(operate)) return;
+      this.clearAutoForManualOp();
       if (skillNeedsTargetPick(kind)) {
         const wires =
           kind === 1 ? this.livingAllyWires() : this.livingEnemyWires();
@@ -1338,8 +1360,10 @@ export class BattleScreen extends Container {
   }
 
   /**
-   * Turn countdown expiry: always send normal attack (operate=0).
-   * Never open the multi-enemy target UI — that would stall with timer=0.
+   * Turn countdown expiry.
+   * If the player already opened 仙术/物品 (or is mid target-pick after
+   * choosing one), commit that choice — do not wipe to 普攻.
+   * Root-menu / idle timeout still defaults to normal attack.
    */
   private submitTimeoutAttack(): void {
     if (
@@ -1352,6 +1376,48 @@ export class BattleScreen extends Container {
       return;
     }
     this.clearAutoForManualOp();
+
+    // Target pick after 仙术/物品 confirm — submit the chosen action.
+    if (
+      this.menuMode === "target" &&
+      (this.pendingOperate != null || this.pendingItem)
+    ) {
+      const pendingOp = this.pendingOperate;
+      if (
+        pendingOp != null &&
+        this.resolveAutoOperateMp(pendingOp) !== (pendingOp | 0)
+      ) {
+        // Timer already 0 — cannot stay on pick; fall through to 普攻.
+        void this.log.setText("超时·法力不足·普攻", CBE.inkTip);
+        this.pendingOperate = null;
+        this.pendingSkillName = "";
+        this.pendingItem = null;
+        this.targetWires = [];
+        this.targetCursor = 0;
+        this.clearTargetMark();
+      } else {
+        const tip = this.pendingItem
+          ? `超时·${this.pendingItem.name}`
+          : `超时·${this.pendingSkillName || "仙术"}`;
+        void this.log.setText(tip, CBE.inkTip);
+        this.commitTargetPick();
+        return;
+      }
+    }
+
+    // Browsing skill list — cast highlighted skill (MP gate → else 普攻).
+    if (this.menuMode === "skill" && this.skills.length) {
+      const sk = this.skills[this.skillCursor]!;
+      if (this.submitAutoOperate(sk.id + 2, `超时·${sk.name}`)) return;
+    }
+
+    // Browsing item list — use highlighted medicine/flask.
+    if (this.menuMode === "item" && this.items.length) {
+      void this.log.setText("超时·使用物品", CBE.inkTip);
+      this.commitItemPick();
+      return;
+    }
+
     let wire: number | null = null;
     if (
       this.menuMode === "target" &&
@@ -1575,10 +1641,12 @@ export class BattleScreen extends Container {
   private commitTargetPick(): void {
     const wire = this.targetWires[this.targetCursor];
     if (wire == null) return;
-    this.selectedTargetWire = wire;
     const operate = this.pendingOperate;
     const name = this.pendingSkillName;
     const item = this.pendingItem;
+    if (!item && operate != null && !this.ensureSkillMp(operate)) return;
+    this.clearAutoForManualOp();
+    this.selectedTargetWire = wire;
     this.pendingOperate = null;
     this.pendingSkillName = "";
     this.pendingItem = null;
@@ -1608,6 +1676,7 @@ export class BattleScreen extends Container {
       this.redrawMenu();
       return;
     }
+    this.clearAutoForManualOp();
     const row = this.items[this.itemCursor]!;
     const wires = this.livingAllyWires();
     if (!wires.length) {
@@ -1638,6 +1707,8 @@ export class BattleScreen extends Container {
     kind: SkillTargetKind,
   ): void {
     if (!this.state) return;
+    this.clearAutoForManualOp();
+    if (!this.ensureSkillMp(operate)) return;
     if (kind === 0) {
       this.selectedTargetWire = this.selfWire();
     } else if (kind === 2) {

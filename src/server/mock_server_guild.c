@@ -3326,6 +3326,12 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
             return false;
         if (!vm_net_mock_item_is_tradeable(item->itemId, item->enhanceLevel))
             return false;
+        /* 921 未注满不可交易；注满后才可给低级号使用。 */
+        if (item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID &&
+            !vm_net_mock_cultivation_book_is_tradeable_instance(item))
+        {
+            return false;
+        }
         offer->items[i].itemId = item->itemId;
         offer->items[i].enhanceLevel = item->enhanceLevel;
         offer->items[i].enhanceInstanceId = item->enhanceInstanceId;
@@ -3356,6 +3362,19 @@ static bool vm_net_mock_append_trade_offer_object(
     for (u32 i = 0; i < offer->itemCount; ++i)
     {
         const vm_mock_service_trade_item *item = &offer->items[i];
+        char itemNameGbk[48];
+
+        itemNameGbk[0] = 0;
+        /* 921：可选 string 带短名，对端锁定栏显示等级/满未满. */
+        if (item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID &&
+            item->enhanceInstanceId != 0)
+        {
+            vm_net_mock_cultivation_book_state book;
+            memset(&book, 0, sizeof(book));
+            if (vm_net_mock_cultivation_book_load(item->enhanceInstanceId, &book))
+                vm_net_mock_cultivation_book_format_list_name(
+                    &book, itemNameGbk, sizeof(itemNameGbk));
+        }
         if (!vm_net_mock_seq_put_i16(itemInfo, sizeof(itemInfo), &itemInfoLen,
                                      item->sourceSeq) ||
             !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
@@ -3364,7 +3383,7 @@ static bool vm_net_mock_append_trade_offer_object(
                                      (u16)SDL_min(item->count, 0xffffu)) ||
             (item->itemId < 1000 &&
              !vm_net_mock_seq_put_string(itemInfo, sizeof(itemInfo),
-                                         &itemInfoLen, "")) ||
+                                         &itemInfoLen, itemNameGbk)) ||
             !vm_net_mock_seq_put_item_common_extra(
                 itemInfo, sizeof(itemInfo), &itemInfoLen,
                 vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL

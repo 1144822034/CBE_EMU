@@ -5,7 +5,7 @@
 export const SYSTEM_FONT_FALLBACK =
   'SimSun, "Songti SC", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
 
-/** Always false — YaHei TTF path retired. */
+/** Always false — LCD path is UC3 only. */
 export function preferSystemFont(): boolean {
   return false;
 }

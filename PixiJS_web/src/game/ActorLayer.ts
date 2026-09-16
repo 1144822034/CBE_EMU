@@ -385,7 +385,7 @@ export class ActorLayer {
    * After battle ends: arm refresh delay for every engaged SCE spawn.
    * Skips entries marked permanent (world-boss claim — never map-respawn).
    */
-  armSuppressedRespawns(delayMs = 10_000): void {
+  armSuppressedRespawns(delayMs = 8_000): void {
     const at = performance.now() + Math.max(0, delayMs);
     for (const info of this.suppressedScene.values()) {
       if (info.permanent) continue;

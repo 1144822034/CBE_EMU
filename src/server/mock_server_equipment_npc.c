@@ -1531,16 +1531,49 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
         }
         else
         {
+            u32 sourceInstanceId = 0;
+            u32 destInstanceId = 0;
+
             moneyCost = feeCopper;
             destLevelAfter = sourceLevel; /* no level loss */
             sourceLevelAfter = 0;
+            /*
+             * Wash must move with enhance. Coalesce source first so an empty
+             * in-memory seat still transfers the last wash-record snapshot;
+             * then rewrite records so equip coalesce cannot resurrect the
+             * source snapshot (duplicate wash on both seats).
+             */
+            sourceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+                role, source->enhanceInstanceId, source->itemId);
+            destInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
+                role, dest->enhanceInstanceId, dest->itemId);
+            source->enhanceInstanceId = sourceInstanceId;
+            dest->enhanceInstanceId = destInstanceId;
+            vm_net_mock_enhance_wash_coalesce_from_record(
+                role->roleId, sourceInstanceId, source->itemId, sourceLevel,
+                source->seq, &source->enhanceWash);
             source->enhanceLevel = sourceLevelAfter;
             dest->enhanceLevel = destLevelAfter;
             vm_net_mock_enhance_wash_copy(&dest->enhanceWash, &source->enhanceWash);
             vm_net_mock_enhance_wash_clear(&source->enhanceWash);
+            (void)vm_net_mock_enhance_wash_record_delete(
+                role->roleId, sourceInstanceId, source->seq);
+            if (!vm_net_mock_enhance_wash_is_empty(&dest->enhanceWash))
+            {
+                (void)vm_net_mock_enhance_wash_record_upsert(
+                    role->roleId, destInstanceId, dest->seq, dest->itemId,
+                    destLevelAfter, &dest->enhanceWash, 0);
+            }
+            else
+            {
+                (void)vm_net_mock_enhance_wash_record_delete(
+                    role->roleId, destInstanceId, dest->seq);
+            }
             role->money -= moneyCost;
             transferred = true;
-            vm_net_mock_role_mark_inventory_dirty("equipment-enhance-transfer");
+            /* Sync save: wash columns + records must survive before deferred flush. */
+            if (!vm_net_mock_role_db_save("equipment-enhance-transfer"))
+                vm_net_mock_role_mark_inventory_dirty("equipment-enhance-transfer");
             reason = "transferred";
         }
     }
@@ -3546,6 +3579,22 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                    g_vm_net_mock_battle_enemy_id_current, role->roleId,
                    rewardExp);
             rewardExp = 0;
+        }
+        /* 修炼天书：注入「加成后」的本场战斗经验（经验卡/战斗心得/姻缘等已计入
+         * rewardExp）。角色仍照常获得同一份经验；使用天书时只加书内 filled，
+         * 不再套任何经验加成。 */
+        if (rewardExp != 0)
+        {
+            u32 injected =
+                vm_net_mock_role_inject_cultivation_book_exp(role, rewardExp);
+            if (injected != 0)
+            {
+                printf("[info][network] mock_battle_cultivation_book_inject "
+                       "enemy=%u role=%u reward_exp=%u injected=%u "
+                       "evidence=post-card-insight-marriage\n",
+                       g_vm_net_mock_battle_enemy_id_current, role->roleId,
+                       rewardExp, injected);
+            }
         }
     }
     if (rewardExp != baseRewardExp)
@@ -8197,7 +8246,7 @@ static bool vm_mock_service_trade_role_add_item(
     vm_net_mock_role_normalize_backpack(role);
     itemCount = vm_net_mock_role_backpack_count(role);
     isEquipment = vm_net_mock_find_equipment_catalog_item(itemId) != NULL;
-    if (!isEquipment)
+    if (!isEquipment && itemId != VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID)
     {
         for (u32 i = 0; i < itemCount; ++i)
         {
@@ -8258,6 +8307,8 @@ static bool vm_mock_service_trade_role_add_item(
         item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
         item->count = count;
         item->enhanceLevel = enhanceLevel;
+        if (itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID)
+            item->enhanceInstanceId = enhanceInstanceId;
         vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
         role->backpackItemCount = (u16)(itemCount + 1);
         role->nextBackpackSeq = (u16)(item->seq + 1);

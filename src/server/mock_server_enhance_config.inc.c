@@ -1274,3 +1274,45 @@ static void vm_net_mock_enhance_wash_coalesce_from_record(
     (void)vm_net_mock_enhance_wash_record_restore(roleId, itemInstanceId, itemId,
                                                   enhanceLevel, bagSeq, wash);
 }
+
+/*
+ * Drop wash-record rows so coalesce cannot resurrect attrs after intentional
+ * clear (e.g. 29/6 enhance transfer source seat). Delete by instance id and by
+ * bag_seq — restore falls back to bag_seq when instance lookup misses.
+ */
+static bool vm_net_mock_enhance_wash_record_delete(u32 roleId, u32 itemInstanceId,
+                                                   u16 bagSeq)
+{
+    char query[320];
+    bool ok = true;
+
+    if (roleId == 0)
+        return false;
+    if (!vm_net_mock_enhance_wash_record_ensure_table())
+        return false;
+    if (itemInstanceId != 0)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_enhance_wash_record "
+                 "WHERE role_id=%u AND item_instance_id=%u",
+                 roleId, itemInstanceId);
+        if (!vm_mysql_exec(query))
+            ok = false;
+    }
+    if (bagSeq != 0)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_enhance_wash_record "
+                 "WHERE role_id=%u AND bag_seq=%u",
+                 roleId, (u32)bagSeq);
+        if (!vm_mysql_exec(query))
+            ok = false;
+    }
+    if (ok)
+    {
+        printf("[info][mock-service] enhance_wash_record_delete role=%u "
+               "instance=%u seq=%u evidence=clear-after-transfer\n",
+               roleId, itemInstanceId, (u32)bagSeq);
+    }
+    return ok;
+}

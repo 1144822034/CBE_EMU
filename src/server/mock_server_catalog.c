@@ -6269,32 +6269,71 @@ static u32 vm_net_mock_build_battle_insight_followup_response(
 
 /* These requests have parser-proven response contracts, but their durable
  * gameplay state is not yet represented by an authoritative server record:
- * 833 needs vitality, and 920/921 need the book instance's level and
- * experience payload.  827 修炼丹 is handled by
- * vm_net_mock_build_practise_pill_use_response.  Return a parser-valid
- * non-success response instead of silently dropping the request or consuming
- * an item with no corresponding gameplay effect. */
+ * 833 needs vitality.  827 修炼丹 / 920/921 修炼天书 have dedicated builders.
+ * Return a parser-valid non-success response instead of silently dropping the
+ * request or consuming an item with no corresponding gameplay effect. */
 static u32 vm_net_mock_build_unresolved_special_item_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u16 requestedSeq = 0;
-    u8 subtype = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     const char *itemInfo =
         "\xB8\xC3\xB5\xC0\xBE\xDF\xB5\xC4\xC8\xA8\xCD\xFE\xD7\xB4\xCC\xAC\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
-    const char *bookInfo =
-        "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xD7\xCA\xC1\xCF\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
 
     if (out == NULL || outCap < pos)
         return 0;
-    if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 33,
-                                                        "itemseq", false, &requestedSeq))
+    if (!vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 33,
+                                                    "itemseq", false, &requestedSeq))
     {
-        subtype = 33;
+        return 0;
     }
-    else if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 35,
-                                                        "seq", false, &requestedSeq))
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 33, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 2) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "maxnum", 0) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "iteminfo", itemInfo))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[warn][network] mock_special_item_unresolved request=7/33 seq=%u "
+           "action=not-consumed response=%u evidence=JianghuOL.CBE:0x01025AE6\n",
+           requestedSeq, pos);
+    return pos;
+}
+
+/*
+ * 修炼天书 920/921 — docs/re/2026-07-23-special-item-use-contract.md
+ * 920 → 1/7/35 {seq} → result=0 客户端删空白；服务端落 921 + book 状态。
+ * 921 → 1/7/38 读描述；1/7/40 使用，result=0 附 bookinfo+等级经验结算字段。
+ * 业务：level>49 记录；同一角色同时只能有一本未注满的记录本；注满可交易；
+ * 使用者等级须在 [bookLevel-10, bookLevel-1]（如 50 级书→40-49 级）。
+ */
+static u32 vm_net_mock_build_cultivation_book_response(const u8 *request,
+                                                       u32 requestLen,
+                                                       u8 *out, u32 outCap)
+{
+    u16 requestedSeq = 0;
+    u8 subtype = 0;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *item = NULL;
+    vm_net_mock_cultivation_book_state book;
+    char bookDes[384];
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+    u8 result = 1;
+    u16 newSeq = 0;
+    u32 bookId = 0;
+    u32 capacity = 0;
+    bool leveledUp = false;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 35,
+                                                    "seq", false, &requestedSeq))
     {
         subtype = 35;
     }
@@ -6313,44 +6352,259 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
         return 0;
     }
 
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, subtype, &objectStart))
-        return 0;
-    if (subtype == 33)
+    memset(&book, 0, sizeof(book));
+    bookDes[0] = 0;
+    role = vm_net_mock_active_role();
+    if (role != NULL)
+        item = vm_net_mock_role_find_backpack_item(role, 0, requestedSeq);
+
+    if (subtype == 38)
     {
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 2) ||
-            !vm_net_mock_put_object_u32(out, outCap, &pos, "maxnum", 0) ||
-            !vm_net_mock_put_object_string(out, outCap, &pos, "iteminfo", itemInfo))
+        if (item != NULL &&
+            item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID &&
+            vm_net_mock_cultivation_book_resolve_for_item(role, item, &book))
+        {
+            vm_net_mock_cultivation_book_format_des(&book, bookDes, sizeof(bookDes));
+        }
+        else
+        {
+            vm_net_mock_cultivation_book_format_des(NULL, bookDes, sizeof(bookDes));
+        }
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 38, &objectStart) ||
+            !vm_net_mock_put_object_string(out, outCap, &pos, "bookdes", bookDes))
         {
             return 0;
         }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        printf("[info][network] mock_cultivation_book_read seq=%u book=%u "
+               "filled=%u/%u response=%u evidence=JianghuOL.CBE:7/38\n",
+               requestedSeq, book.bookId, book.filledExp, book.capacityExp, pos);
+        return pos;
     }
-    else if (subtype == 35)
+
+    if (subtype == 35)
     {
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
-            !vm_net_mock_put_object_string(out, outCap, &pos, "bookdes", bookInfo))
+        /* Bind blank 920 → 921. result=0 success (client deletes blank). */
+        const char *failUtf8 = NULL;
+        char failGbk[160];
+
+        failGbk[0] = 0;
+        if (role == NULL || item == NULL ||
+            item->itemId != VM_NET_MOCK_CULTIVATION_BOOK_BLANK_ITEM_ID)
+        {
+            failUtf8 = "未找到空白修炼天书。";
+        }
+        else if (role->level < VM_NET_MOCK_CULTIVATION_BOOK_BIND_MIN_LEVEL)
+        {
+            failUtf8 = "需要50级以上才能记录修炼天书。";
+        }
+        else if (vm_net_mock_role_has_incomplete_cultivation_book(role))
+        {
+            failUtf8 = "同时只能记录一本修炼天书。";
+        }
+        else
+        {
+            capacity = vm_net_mock_role_level_up_cost(role->level);
+            if (capacity == 0 || capacity == 0xffffffffu)
+            {
+                failUtf8 = "当前等级无法记录天书。";
+            }
+            else if (!vm_net_mock_cultivation_book_create(role, role->level, capacity,
+                                                          &bookId))
+            {
+                failUtf8 = "天书记录失败，请稍后重试。";
+            }
+            else
+            {
+                vm_net_mock_role_state before = *role;
+                u32 remaining = 0;
+
+                if (!vm_net_mock_role_consume_backpack_item(
+                        role, VM_NET_MOCK_CULTIVATION_BOOK_BLANK_ITEM_ID,
+                        requestedSeq, 1, &remaining))
+                {
+                    (void)vm_net_mock_cultivation_book_delete(bookId);
+                    failUtf8 = "扣除空白天书失败。";
+                }
+                else if (!vm_net_mock_role_add_backpack_item_to_role(
+                             role, VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID, 1, 0,
+                             &newSeq, "cultivation-book-bind", NULL, bookId))
+                {
+                    *role = before;
+                    (void)vm_net_mock_role_db_save("cultivation-book-bind-rollback");
+                    (void)vm_net_mock_cultivation_book_delete(bookId);
+                    failUtf8 = "背包已满，无法生成天书。";
+                }
+                else if (!vm_net_mock_role_db_save("cultivation-book-bind"))
+                {
+                    *role = before;
+                    (void)vm_net_mock_role_db_save("cultivation-book-bind-rollback");
+                    (void)vm_net_mock_cultivation_book_delete(bookId);
+                    failUtf8 = "天书保存失败。";
+                }
+                else
+                {
+                    result = 0;
+                    book.bookId = bookId;
+                    book.bookLevel = role->level;
+                    book.capacityExp = capacity;
+                    book.filledExp = 0;
+                    vm_net_mock_cultivation_book_format_des(&book, bookDes,
+                                                            sizeof(bookDes));
+                }
+            }
+        }
+        if (result != 0)
+        {
+            if (failUtf8 != NULL)
+                utf8_to_gbk((u8 *)failUtf8, (u8 *)failGbk, sizeof(failGbk));
+            snprintf(bookDes, sizeof(bookDes), "%s",
+                     failGbk[0] ? failGbk
+                                : "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xBC\xC7"
+                                  "\xC2\xBC\xCA\xA7\xB0\xDC\xA1\xA3");
+        }
+
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 35, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+            !vm_net_mock_put_object_string(out, outCap, &pos, "bookdes", bookDes))
         {
             return 0;
         }
-    }
-    else if (subtype == 38)
-    {
-        if (!vm_net_mock_put_object_string(out, outCap, &pos, "bookdes", bookInfo))
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount = 1;
+        if (result == 0 && newSeq != 0 &&
+            !vm_net_mock_append_backpack_item_add7_object(
+                out, outCap, &pos, newSeq, VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID, 1,
+                0))
+        {
             return 0;
+        }
+        if (result == 0 && newSeq != 0)
+            objectCount = 2;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][network] mock_cultivation_book_bind seq=%u result=%u "
+               "book=%u new_seq=%u capacity=%u response=%u "
+               "evidence=JianghuOL.CBE:7/35\n",
+               requestedSeq, result, bookId, newSeq, capacity, pos);
+        return pos;
     }
-    else
+
+    /* subtype == 40: use filled 921. result=0 success + settle fields. */
     {
-        /* result=1 displays bookinfo without removing the selected 921 row. */
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        const char *failUtf8 = NULL;
+        char failGbk[160];
+        char bookInfo[192];
+        u32 grantExp = 0;
+        u32 lastExp = 0;
+        u32 curExp = 0;
+        u32 percentExp = 0;
+        u32 levelAfter = 0;
+
+        failGbk[0] = 0;
+        bookInfo[0] = 0;
+        if (role == NULL || item == NULL ||
+            item->itemId != VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID)
+        {
+            failUtf8 = "未找到修炼天书。";
+        }
+        else if (!vm_net_mock_cultivation_book_resolve_for_item(role, item, &book))
+        {
+            failUtf8 = "天书资料缺失。";
+        }
+        else if (!vm_net_mock_cultivation_book_is_full(&book))
+        {
+            failUtf8 = "天书尚未注满，不能使用。";
+        }
+        else
+        {
+            u32 minUseLevel =
+                book.bookLevel > (u32)VM_NET_MOCK_CULTIVATION_BOOK_USE_LEVEL_GAP
+                    ? book.bookLevel - (u32)VM_NET_MOCK_CULTIVATION_BOOK_USE_LEVEL_GAP
+                    : 1u;
+            /* 50级书→40-49；51级书→41-50：minUseLevel <= level < bookLevel */
+            if (role->level < minUseLevel || role->level >= book.bookLevel)
+            {
+                failUtf8 = "只能给比天书低1到10级的玩家使用。";
+            }
+            else
+            {
+            vm_net_mock_role_state before = *role;
+            u32 remaining = 0;
+            u32 consumeBookId = item->enhanceInstanceId;
+
+            grantExp = book.filledExp;
+            if (!vm_net_mock_role_consume_backpack_item(
+                    role, VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID, requestedSeq, 1,
+                    &remaining))
+            {
+                failUtf8 = "扣除天书失败。";
+            }
+            else
+            {
+                /* 书内经验已是记录时加成后的净值；使用时只做裸加经验，
+                 * 不套经验卡 / 战斗心得 / 姻缘等倍率。 */
+                leveledUp = vm_net_mock_role_add_exp(role, grantExp);
+                (void)leveledUp;
+                if (!vm_net_mock_role_db_save("cultivation-book-use"))
+                {
+                    *role = before;
+                    (void)vm_net_mock_role_db_save("cultivation-book-use-rollback");
+                    failUtf8 = "天书使用保存失败。";
+                }
+                else
+                {
+                    (void)vm_net_mock_cultivation_book_delete(consumeBookId);
+                    result = 0;
+                    lastExp = vm_net_mock_role_last_level_exp(role->exp);
+                    curExp = vm_net_mock_role_next_level_start_exp(role->exp);
+                    percentExp = vm_net_mock_role_exp_percent(role->exp);
+                    levelAfter = role->level;
+                    {
+                        char utf8[160];
+                        snprintf(utf8, sizeof(utf8),
+                                 "修炼天书注入经验 %u，当前等级 %u。", grantExp,
+                                 levelAfter);
+                        utf8_to_gbk((u8 *)utf8, (u8 *)bookInfo, sizeof(bookInfo));
+                    }
+                }
+            }
+            }
+        }
+        if (result != 0)
+        {
+            if (failUtf8 != NULL)
+                utf8_to_gbk((u8 *)failUtf8, (u8 *)failGbk, sizeof(failGbk));
+            snprintf(bookInfo, sizeof(bookInfo), "%s",
+                     failGbk[0] ? failGbk
+                                : "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xCA\xB9"
+                                  "\xD3\xC3\xCA\xA7\xB0\xDC\xA1\xA3");
+        }
+
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 40, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
             !vm_net_mock_put_object_string(out, outCap, &pos, "bookinfo", bookInfo))
         {
             return 0;
         }
+        if (result == 0)
+        {
+            if (!vm_net_mock_put_object_u32(out, outCap, &pos, "level", levelAfter) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "lastexp", lastExp) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "curexp", curExp) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "persentexp",
+                                            percentExp))
+            {
+                return 0;
+            }
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        printf("[info][network] mock_cultivation_book_use seq=%u result=%u "
+               "book=%u grant=%u level=%u response=%u evidence=JianghuOL.CBE:7/40\n",
+               requestedSeq, result, book.bookId, grantExp, levelAfter, pos);
+        return pos;
     }
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
-    printf("[warn][network] mock_special_item_unresolved request=7/%u seq=%u action=not-consumed response=%u evidence=JianghuOL.CBE:0x01025AE6\n",
-           subtype, requestedSeq, pos);
-    return pos;
 }
 
 /*
@@ -6522,6 +6776,23 @@ static bool g_vm_net_mock_chest_reward_truncated[VM_NET_MOCK_CHEST_KIND_COUNT];
 static bool g_vm_net_mock_chest_reward_reload_attempted[VM_NET_MOCK_CHEST_KIND_COUNT];
 static bool g_vm_net_mock_chest_reward_db_loaded = false;
 static bool g_vm_net_mock_chest_reward_db_valid = false;
+
+/*
+ * Per-chest 玄晶 pity (admin: server_chest_pity_config).
+ * pity_threshold=N means the Nth consecutive open without any 玄晶(901..916)
+ * is forced to pity_item_id (default gold: 99 → 十二级玄晶 912).
+ */
+typedef struct
+{
+    u32 chestItemId;
+    u8 enabled;
+    u32 pityThreshold;
+    u32 pityItemId;
+} vm_net_mock_chest_pity_config;
+
+static vm_net_mock_chest_pity_config
+    g_vm_net_mock_chest_pity[VM_NET_MOCK_CHEST_KIND_COUNT];
+static bool g_vm_net_mock_chest_pity_loaded = false;
 
 static u32 vm_net_mock_chest_reward_kind_for_item(u32 chestItemId)
 {
@@ -7221,6 +7492,222 @@ static u64 vm_net_mock_chest_reward_enabled_weight_total(u32 chestItemId)
     return total;
 }
 
+static void vm_net_mock_chest_pity_set_defaults(void)
+{
+    for (u32 i = 0; i < VM_NET_MOCK_CHEST_KIND_COUNT; ++i)
+    {
+        g_vm_net_mock_chest_pity[i].chestItemId =
+            g_vm_net_mock_chest_reward_chest_ids[i];
+        g_vm_net_mock_chest_pity[i].enabled = 0;
+        g_vm_net_mock_chest_pity[i].pityThreshold = 0;
+        g_vm_net_mock_chest_pity[i].pityItemId = 0;
+    }
+    /* Gold chest default: 第99抽保底十二级玄晶(912). */
+    {
+        u32 goldKind =
+            vm_net_mock_chest_reward_kind_for_item(VM_NET_MOCK_GOLD_CHEST_ITEM_ID);
+        if (goldKind < VM_NET_MOCK_CHEST_KIND_COUNT)
+        {
+            g_vm_net_mock_chest_pity[goldKind].enabled = 1;
+            g_vm_net_mock_chest_pity[goldKind].pityThreshold = 99;
+            g_vm_net_mock_chest_pity[goldKind].pityItemId =
+                (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST + 11u; /* 912 */
+        }
+    }
+}
+
+static bool vm_net_mock_chest_pity_db_row(void *contextValue,
+                                          unsigned int columnCount,
+                                          const char *const *values,
+                                          const size_t *lengths)
+{
+    u32 chestItemId = 0;
+    u32 enabled = 0;
+    u32 threshold = 0;
+    u32 pityItemId = 0;
+    u32 kind = 0;
+    (void)contextValue;
+    if (columnCount < 4 || values == NULL || lengths == NULL)
+        return true;
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &chestItemId) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &enabled) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &threshold) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &pityItemId))
+        return true;
+    kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+        return true;
+    g_vm_net_mock_chest_pity[kind].chestItemId = chestItemId;
+    g_vm_net_mock_chest_pity[kind].enabled = enabled != 0 ? 1u : 0u;
+    g_vm_net_mock_chest_pity[kind].pityThreshold = threshold;
+    g_vm_net_mock_chest_pity[kind].pityItemId = pityItemId;
+    return true;
+}
+
+static bool vm_net_mock_chest_pity_ensure_table(void)
+{
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_chest_pity_config ("
+            "chest_item_id INT UNSIGNED NOT NULL,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "pity_threshold INT UNSIGNED NOT NULL DEFAULT 0,"
+            "pity_item_id INT UNSIGNED NOT NULL DEFAULT 0,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(chest_item_id)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
+        return false;
+    if (!vm_mysql_exec(
+            "INSERT IGNORE INTO server_chest_pity_config "
+            "(chest_item_id,enabled,pity_threshold,pity_item_id) "
+            "VALUES (524,1,99,912)"))
+        return false;
+    return true;
+}
+
+static void vm_net_mock_chest_pity_db_load(bool force)
+{
+    if (g_vm_net_mock_chest_pity_loaded && !force)
+        return;
+    vm_net_mock_chest_pity_set_defaults();
+    if (!vm_net_mock_chest_pity_ensure_table())
+    {
+        g_vm_net_mock_chest_pity_loaded = true;
+        printf("[warn][mock-admin] chest_pity_db_load ensure failed error=%s "
+               "using-defaults\n",
+               vm_mysql_last_error());
+        return;
+    }
+    if (!vm_mysql_query(
+            "SELECT chest_item_id,enabled,pity_threshold,pity_item_id "
+            "FROM server_chest_pity_config",
+            vm_net_mock_chest_pity_db_row, NULL))
+    {
+        printf("[warn][mock-admin] chest_pity_db_load query failed error=%s "
+               "using-defaults\n",
+               vm_mysql_last_error());
+    }
+    g_vm_net_mock_chest_pity_loaded = true;
+}
+
+static const vm_net_mock_chest_pity_config *vm_net_mock_chest_pity_for(
+    u32 chestItemId)
+{
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+    vm_net_mock_chest_pity_db_load(false);
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+        return NULL;
+    return &g_vm_net_mock_chest_pity[kind];
+}
+
+static bool vm_net_mock_chest_pity_admin_get(u32 chestItemId, u8 *enabledOut,
+                                             u32 *thresholdOut, u32 *itemIdOut)
+{
+    const vm_net_mock_chest_pity_config *cfg =
+        vm_net_mock_chest_pity_for(chestItemId);
+    if (enabledOut)
+        *enabledOut = 0;
+    if (thresholdOut)
+        *thresholdOut = 0;
+    if (itemIdOut)
+        *itemIdOut = 0;
+    if (cfg == NULL)
+        return false;
+    if (enabledOut)
+        *enabledOut = cfg->enabled;
+    if (thresholdOut)
+        *thresholdOut = cfg->pityThreshold;
+    if (itemIdOut)
+        *itemIdOut = cfg->pityItemId;
+    return true;
+}
+
+static bool vm_net_mock_chest_pity_admin_save(u32 chestItemId, u8 enabled,
+                                              u32 pityThreshold, u32 pityItemId,
+                                              const char **errorOut)
+{
+    char query[384];
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+
+    if (errorOut)
+        *errorOut = NULL;
+    if (kind >= VM_NET_MOCK_CHEST_KIND_COUNT)
+    {
+        if (errorOut)
+            *errorOut = "不支持的宝箱";
+        return false;
+    }
+    if (pityThreshold > 100000u)
+    {
+        if (errorOut)
+            *errorOut = "保底次数过大";
+        return false;
+    }
+    if (enabled != 0 && (pityThreshold == 0 || pityItemId == 0))
+    {
+        if (errorOut)
+            *errorOut = "启用保底时需填写保底次数与保底物品";
+        return false;
+    }
+    if (!vm_net_mock_chest_pity_ensure_table())
+    {
+        if (errorOut)
+            *errorOut = "创建保底配置表失败";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_chest_pity_config "
+             "(chest_item_id,enabled,pity_threshold,pity_item_id) "
+             "VALUES (%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "enabled=VALUES(enabled),pity_threshold=VALUES(pity_threshold),"
+             "pity_item_id=VALUES(pity_item_id)",
+             chestItemId, enabled ? 1u : 0u, pityThreshold, pityItemId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = "保存保底配置失败";
+        return false;
+    }
+    g_vm_net_mock_chest_pity_loaded = false;
+    vm_net_mock_chest_pity_db_load(true);
+    return true;
+}
+
+static bool vm_net_mock_item_is_enhance_crystal(u32 itemId)
+{
+    return itemId >= (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST &&
+           itemId <= (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST;
+}
+
+static u16 *vm_net_mock_role_chest_crystal_miss_slot(vm_net_mock_role_state *role,
+                                                     u32 chestItemId)
+{
+    u32 kind = vm_net_mock_chest_reward_kind_for_item(chestItemId);
+    if (role == NULL || kind >= VM_NET_MOCK_CHEST_KIND_COUNT ||
+        kind >= (u32)(sizeof(role->chestCrystalMiss) /
+                      sizeof(role->chestCrystalMiss[0])))
+        return NULL;
+    return &role->chestCrystalMiss[kind];
+}
+
+static void vm_net_mock_chest_pity_note_open_result(vm_net_mock_role_state *role,
+                                                    u32 chestItemId,
+                                                    u32 rewardItemId)
+{
+    u16 *miss = vm_net_mock_role_chest_crystal_miss_slot(role, chestItemId);
+    const vm_net_mock_chest_pity_config *cfg =
+        vm_net_mock_chest_pity_for(chestItemId);
+
+    if (miss == NULL)
+        return;
+    if (cfg == NULL || cfg->enabled == 0 || cfg->pityThreshold == 0)
+        return;
+    if (vm_net_mock_item_is_enhance_crystal(rewardItemId))
+        *miss = 0;
+    else if (*miss < 0xffffu)
+        *miss = (u16)(*miss + 1u);
+}
+
 static bool vm_net_mock_chest_roll_reward_from_db(u32 chestItemId,
                                                   u32 *itemIdOut)
 {
@@ -7274,6 +7761,44 @@ static bool vm_net_mock_chest_roll_reward_item(u32 chestItemId, u32 *itemIdOut)
         return false;
     /* Strict isolation: only server_chest_rewards.chest_item_id == chestItemId. */
     return vm_net_mock_chest_roll_reward_from_db(chestItemId, itemIdOut);
+}
+
+/*
+ * Weighted roll, then optional 玄晶 pity override.
+ * Call pity_note_open_result only after a successful grant so role rollback
+ * restores the prior miss counter.
+ */
+static bool vm_net_mock_chest_roll_reward_item_with_pity(
+    vm_net_mock_role_state *role, u32 chestItemId, u32 *itemIdOut,
+    bool *pityForcedOut)
+{
+    const vm_net_mock_chest_pity_config *cfg = NULL;
+    u16 *miss = NULL;
+    u32 rewardItemId = 0;
+    bool forced = false;
+
+    if (pityForcedOut)
+        *pityForcedOut = false;
+    if (itemIdOut)
+        *itemIdOut = 0;
+    if (!vm_net_mock_chest_roll_reward_item(chestItemId, &rewardItemId) ||
+        rewardItemId == 0)
+        return false;
+
+    cfg = vm_net_mock_chest_pity_for(chestItemId);
+    miss = vm_net_mock_role_chest_crystal_miss_slot(role, chestItemId);
+    if (cfg != NULL && cfg->enabled != 0 && cfg->pityThreshold > 0 &&
+        cfg->pityItemId != 0 && miss != NULL &&
+        (u32)(*miss) + 1u >= cfg->pityThreshold)
+    {
+        rewardItemId = cfg->pityItemId;
+        forced = true;
+    }
+    if (itemIdOut)
+        *itemIdOut = rewardItemId;
+    if (pityForcedOut)
+        *pityForcedOut = forced;
+    return true;
 }
 
 static u32 vm_net_mock_build_chest_open_result_response(u8 *out, u32 outCap,
@@ -7463,6 +7988,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     u32 rewardCount = 0;
     u32 chestItemId = 0;
     u32 keyItemId = 0;
+    bool pityForced = false;
     u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_SCRATCH];
     u32 itemInfoLen = 0;
     u32 pos = 5;
@@ -7513,7 +8039,9 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
                boxSeq, keySeq, chestItemId, keyItemId, result, pos);
         return pos;
     }
-    if (!vm_net_mock_chest_roll_reward_item(chestItemId, &rewardItemId))
+    if (!vm_net_mock_chest_roll_reward_item_with_pity(role, chestItemId,
+                                                       &rewardItemId,
+                                                       &pityForced))
     {
         u32 enabledPool =
             vm_net_mock_chest_reward_admin_enabled_count(chestItemId);
@@ -7553,6 +8081,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
                boxSeq, keySeq, chestItemId, result, rewardItemId, pos);
         return pos;
     }
+    vm_net_mock_chest_pity_note_open_result(role, chestItemId, rewardItemId);
 
     /*
      * JianghuOL.CBE:0x01019228 accumulates wire count into the tip out-param
@@ -7606,13 +8135,17 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         vm_net_mock_backpack_item_state *rewardItem =
             vm_net_mock_role_find_backpack_item(role, rewardItemId, rewardSeq);
         u32 bagAfter = rewardItem != NULL ? rewardItem->count : rewardCount;
+        u16 *missSlot =
+            vm_net_mock_role_chest_crystal_miss_slot(role, chestItemId);
 
         printf("[info][network] mock_chest_open box=%u/%u key=%u/%u reward=%u "
-               "seq=%u granted=%u bag_after=%u result=1 "
+               "seq=%u granted=%u bag_after=%u pity=%u miss=%u result=1 "
                "pool=server_chest_rewards chest_item_id=%u resp=%u "
                "evidence=JianghuOL.CBE:0x01023706+0x010261EC+0x01019228+0x01026376\n",
                chestItemId, boxSeq, keyItemId, keySeq,
-               rewardItemId, rewardSeq, rewardCount, bagAfter, chestItemId, pos);
+               rewardItemId, rewardSeq, rewardCount, bagAfter,
+               pityForced ? 1u : 0u, missSlot != NULL ? (u32)*missSlot : 0u,
+               chestItemId, pos);
         vm_autotest_note("mock_chest_open box=%u key=%u reward=%u seq=%u granted=%u "
                          "result=1 pool=server_chest_rewards chest_item_id=%u "
                          "response=7/15 evidence=JianghuOL.CBE:0x01023706+0x010261EC+0x01019228\n",
@@ -7885,6 +8418,7 @@ static u32 vm_net_mock_build_chest_open_batch_response(const u8 *request,
         u16 rewardSeq = 0;
         u8 g = 0;
         bool stackedGrant = false;
+        bool pityForced = false;
 
         boxItem = vm_net_mock_role_find_backpack_item(role, 0, boxSeq);
         if (boxItem == NULL || boxItem->count == 0 ||
@@ -7911,7 +8445,8 @@ static u32 vm_net_mock_build_chest_open_batch_response(const u8 *request,
         boxSeq = boxItem->seq;
         keySeq = keyItem->seq;
 
-        if (!vm_net_mock_chest_roll_reward_item(chestItemId, &rewardItemId) ||
+        if (!vm_net_mock_chest_roll_reward_item_with_pity(
+                role, chestItemId, &rewardItemId, &pityForced) ||
             rewardItemId == 0)
         {
             result = 6;
@@ -7934,6 +8469,11 @@ static u32 vm_net_mock_build_chest_open_batch_response(const u8 *request,
                    i, times, rewardItemId);
             break;
         }
+        vm_net_mock_chest_pity_note_open_result(role, chestItemId, rewardItemId);
+        if (pityForced)
+            printf("[info][network] mock_chest_open_batch pity i=%u/%u box=%u "
+                   "reward=%u\n",
+                   i, times, chestItemId, rewardItemId);
 
         stackedGrant = false;
         for (g = 0; g < grantRows; ++g)

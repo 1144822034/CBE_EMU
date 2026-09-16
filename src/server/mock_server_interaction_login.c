@@ -4365,7 +4365,10 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
         if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard",
                                        vm_net_mock_role_active_status_icon_flag()))
             return false;
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expbook", 0))
+        if (!vm_net_mock_put_object_u8(
+                out, outCap, pos, "expbook",
+                vm_net_mock_role_cultivation_book_status_flag(
+                    vm_net_mock_active_role())))
             return false;
         if (!vm_net_mock_put_object_string(out, outCap, pos, "practiseinfo", ""))
             return false;

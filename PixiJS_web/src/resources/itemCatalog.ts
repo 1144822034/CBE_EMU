@@ -358,6 +358,7 @@ export function isTradeableItem(
   if (itemId >= 901 && itemId <= 916) return false;
   // 梦境徽章（BOSS 掉落 / 任务相关，不可交易）
   if (itemId === 840) return false;
+  // 未注满的修炼天书实例由服务端按 book 状态拒绝；客户端放行 921 交给校验
   // 已强化装备不可交易
   if ((opts?.enhance ?? 0) > 0) return false;
 

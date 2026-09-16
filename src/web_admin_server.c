@@ -10615,6 +10615,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "chest-clear") == 0 ||
         strcmp(action, "chest-import-legacy") == 0 ||
         strcmp(action, "chest-import-crystal") == 0 ||
+        strcmp(action, "chest-pity-save") == 0 ||
         strcmp(action, "chest-batch-category") == 0 ||
         strcmp(action, "chest-batch-quality") == 0)
     {

@@ -1,5 +1,5 @@
 import { actorResourceForJobSex, uiActorResourceForJobSex } from "./resources/actor";
-import { clearUc3TexCache, refreshAllUc3Labels } from "./ui/BitmapLabel";
+import { clearCrispTexCache, clearUc3TexCache, refreshAllUc3Labels } from "./ui/BitmapLabel";
 import { invalidateUiGpuTextures } from "./ui/UiAssets";
 import { applyUc3FontId, currentUc3FontId, loadUc3Font } from "./resources/uc3Font";
 import { UC3_FONT_OPTIONS, type Uc3FontId } from "./resources/uiFontPreference";
@@ -162,6 +162,7 @@ import {
   isDreamBadge,
   isStarSkyStone,
   isRenameCard,
+  isCultivationBookItem,
   NpcServiceOpcode,
   npcServiceOpcode,
 } from "./net/protocolExtras";
@@ -3094,7 +3095,7 @@ async function main(): Promise<void> {
     },
     onBattle: (state) => {
       // Hangup / challenge 4/1 may skip onMonsterCollide — hide map SCE spawn now.
-      // Temporary suppress only (wild ~10s respawn). World-boss permanent drop is
+      // Temporary suppress only (wild ~8s respawn). World-boss permanent drop is
       // solely via [WBOSS:claim] → dropWorldBossFromMap; do not permanent-remove
       // here or post-battle SCE refresh re-paints the wild spawn immediately.
       // Prefer ActorLayer seeds (session.sceneMonsters is often a filtered live
@@ -4380,14 +4381,14 @@ async function main(): Promise<void> {
     touch.releaseAll();
     view.clearHeldKeys();
     view.inputEnabled = true;
-    // Arm 10s respawn immediately so a slow SCE reload cannot leave respawnAt
+    // Arm 8s respawn immediately so a slow SCE reload cannot leave respawnAt
     // null while setSceneMonsters rematches — fought spawn stays hidden on map.
     // World-boss permanent suppress must not be re-armed (arm skips permanent).
-    view.actors.armSuppressedRespawns(10_000);
+    view.actors.armSuppressedRespawns(8_000);
     session.sceneMonsters = view.actors.liveSceneMonsters();
     void refreshSceneCombatSpawns("post-battle").then(() => {
       // Rematch may recreate suppress entries with respawnAt=null — re-arm.
-      view.actors.armSuppressedRespawns(10_000);
+      view.actors.armSuppressedRespawns(8_000);
       session.sceneMonsters = view.actors.liveSceneMonsters();
     });
     view.armCollideCooldown(2000);
@@ -5326,6 +5327,12 @@ async function main(): Promise<void> {
     }
     showPhase("world");
   };
+  system.onEnrichBagDetail = async (it) => {
+    if (!isCultivationBookItem(it.itemId) || it.seq <= 0) return null;
+    const des = await session.readCultivationBookDes(it.seq);
+    if (des) session.applyCultivationBookMetaFromDes(it.seq, des, { notify: true });
+    return des || null;
+  };
   system.onAction = (kind, action, item) => {
     if (action === "refresh") return;
     if (kind === "bag" || kind === "enhance") {
@@ -5613,12 +5620,14 @@ async function main(): Promise<void> {
         })();
         return;
       }
-      battle.noteOperateSubmitted(`施展${sk.name}…`);
+      showPhase("battle");
+      if (!battle.submitManualSkill(sk.id + 2, sk.name)) {
+        showGameTip("无法施放（法力不足或未到出手）");
+        return;
+      }
       if (battle.isAwaitingRound()) {
         shell.setSoftkeys({ left: "", right: "" });
       }
-      void session.battleOperate(battle.targetIndex(), sk.id + 2);
-      showPhase("battle");
     }
     if (kind === "skill" && action === "skill_forget") {
       const sk =
@@ -6547,7 +6556,7 @@ async function main(): Promise<void> {
       }
       void (async () => {
         try {
-          clearUc3TexCache();
+          // Rebake first; refreshAllUc3Labels prunes orphan caches with live-protect.
           await applyUc3FontId(opt.id as Uc3FontId);
           await refreshAllUc3Labels();
           showGameTip(`字体: ${opt.label}`);
@@ -8791,6 +8800,7 @@ dialog.hide();
         alphaModeStormCount > 0
       ) {
         clearUc3TexCache();
+        clearCrispTexCache();
         try {
           invalidateUiGpuTextures();
         } catch (e) {

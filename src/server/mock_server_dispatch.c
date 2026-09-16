@@ -1249,6 +1249,24 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_practise_pill_followup_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-pill-followup", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_cultivation_book_response(request, requestLen,
+                                                            out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-cultivation-book", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_unresolved_special_item_response(
         request, requestLen, out, outCap);
     if (hookedLen)

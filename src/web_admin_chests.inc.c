@@ -107,6 +107,7 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         "<p class=\"sub\">配置青铜/白银/黄金/玄晶/幻彩宝箱开出物品；保存后立即生效，无需重启。"
         "权重越大越容易抽中。各宝箱按 chest_item_id 隔离抽取，互不混用；"
         "对应箱/钥：522↔813、523↔814、524↔815、532↔533、534↔535。"
+        "可配置玄晶保底（连续未出玄晶则强制发放保底物）。"
         "任一宝箱无启用行时开箱失败。</p></div></header>");
     vm_mock_admin_append_tabs(&page, "chests");
 
@@ -169,6 +170,51 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         "<button class=\"danger\" type=\"submit\">清空当前宝箱配置</button></form>"
         "</section>",
         chestItemId);
+
+    {
+        u8 pityEnabled = 0;
+        u32 pityThreshold = 0;
+        u32 pityItemId = 0;
+        char pityName[128];
+
+        memset(pityName, 0, sizeof(pityName));
+        (void)vm_net_mock_chest_pity_admin_get(chestItemId, &pityEnabled,
+                                               &pityThreshold, &pityItemId);
+        if (pityItemId != 0)
+        {
+            const vm_net_mock_shop_catalog_item *pityShop =
+                vm_net_mock_find_shop_catalog_item(pityItemId);
+            if (pityShop != NULL && pityShop->name[0] != 0)
+                vm_net_mock_gbk_label_to_utf8(pityShop->name, pityName,
+                                              sizeof(pityName));
+        }
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>玄晶保底</h2>"
+            "<p class=\"muted\">连续开启本箱未开出玄晶（901–916）达到保底次数时，"
+            "强制发放保底物品。默认黄金宝箱：第 99 次保底十二级玄晶（912）。"
+            "任出玄晶（含保底）会重置计数。保存后立即生效。</p>"
+            "<form class=\"inline\" method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" value=\"chest-pity-save\">"
+            "<input type=\"hidden\" name=\"chest\" value=\"%u\">"
+            "<label><span class=\"muted\">启用</span><br>"
+            "<select name=\"enabled\">"
+            "<option value=\"1\"%s>启用</option>"
+            "<option value=\"0\"%s>关闭</option></select></label>"
+            "<label><span class=\"muted\">保底次数（第 N 次）</span><br>"
+            "<input type=\"number\" name=\"pity_threshold\" min=\"0\" max=\"100000\" "
+            "value=\"%u\" required></label>"
+            "<label><span class=\"muted\">保底物品 ID</span><br>"
+            "<input type=\"number\" name=\"pity_item\" min=\"1\" max=\"999999\" "
+            "value=\"%u\" required></label>"
+            "<button type=\"submit\">保存保底</button></form>"
+            "<p class=\"muted\">当前：%s · 次数 %u · 物品 #%u%s%s</p></section>",
+            chestItemId, pityEnabled ? " selected" : "",
+            pityEnabled ? "" : " selected", pityThreshold,
+            pityItemId ? pityItemId : 912u,
+            pityEnabled ? "已启用" : "已关闭", pityThreshold, pityItemId,
+            pityName[0] != 0 ? " · " : "", pityName);
+    }
 
     {
         bool itemCats[256];
@@ -397,9 +443,11 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
                 chestItemId, pageNumber + 1);
         vm_mock_admin_text_appendf(
             &page,
-            "</p><p class=\"muted\">表：MySQL <code>server_chest_rewards</code>。"
+            "</p><p class=\"muted\">表：MySQL <code>server_chest_rewards</code> / "
+            "<code>server_chest_pity_config</code>。"
             "开箱协议仍是 1/7/15；箱/钥配对 522↔813、523↔814、524↔815、"
-            "532↔533、534↔535。概率 = 启用行权重 / 启用权重总和。</p>"
+            "532↔533、534↔535。概率 = 启用行权重 / 启用权重总和。"
+            "玄晶保底按角色累计未出玄晶次数，独立于权重池。</p>"
             "</section></main><script src=\"/admin.js?v=4\" defer></script></body></html>");
     }
 
@@ -436,6 +484,43 @@ static void vm_mock_admin_handle_chest_action(vm_mock_service_socket client,
         }
         vm_mock_admin_redirect_chests(client, chestItemId, "ok",
                                       "已导入旧默认池并热加载");
+        return;
+    }
+    if (strcmp(action, "chest-pity-save") == 0)
+    {
+        u32 pityThreshold = 0;
+        u32 pityItemId = 0;
+        u8 pityEnabled = 1;
+
+        if (vm_mock_admin_form_value(body, "enabled", enabledText,
+                                     sizeof(enabledText)) &&
+            strcmp(enabledText, "0") == 0)
+            pityEnabled = 0;
+        if (!vm_mock_admin_form_u32(body, "pity_threshold", 100000u,
+                                    &pityThreshold))
+        {
+            vm_mock_admin_redirect_chests(client, chestItemId, "error",
+                                          "保底次数无效");
+            return;
+        }
+        if (!vm_mock_admin_form_u32(body, "pity_item", 0xffffffffu,
+                                    &pityItemId) ||
+            pityItemId == 0)
+        {
+            vm_mock_admin_redirect_chests(client, chestItemId, "error",
+                                          "请填写保底物品 ID");
+            return;
+        }
+        if (!vm_net_mock_chest_pity_admin_save(chestItemId, pityEnabled,
+                                               pityThreshold, pityItemId,
+                                               &error))
+        {
+            vm_mock_admin_redirect_chests(client, chestItemId, "error",
+                                          error ? error : "保底保存失败");
+            return;
+        }
+        vm_mock_admin_redirect_chests(client, chestItemId, "ok",
+                                      "玄晶保底已保存并热加载");
         return;
     }
     if (strcmp(action, "chest-import-crystal") == 0)
