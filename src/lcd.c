@@ -23,6 +23,10 @@ int finalLayerBuffer[LCD_WIDTH * LCD_HEIGHT];
 static vm_lcd_rotation g_lcdRotation = VM_LCD_ROTATE_0;
 /* Game-frame upscale into the host window (2x by request). */
 static int g_lcdScale = 2;
+/* Active design resolution (may be smaller than framebuffer capacity).
+ * 封神演义V2 paints a classic 176x220 frame inside the 240x400 buffer. */
+static int g_lcdNativeW = LCD_WIDTH;
+static int g_lcdNativeH = LCD_HEIGHT;
 static int g_lcdDstX = 0;
 static int g_lcdDstY = 0;
 static int g_lcdDstW = 0;
@@ -81,18 +85,45 @@ const char *LcdRotationName(vm_lcd_rotation rotation)
     }
 }
 
+int LcdGetNativeWidth(void)
+{
+    return g_lcdNativeW;
+}
+
+int LcdGetNativeHeight(void)
+{
+    return g_lcdNativeH;
+}
+
+void LcdSetNativeSize(int width, int height)
+{
+    if (width < 1)
+        width = 1;
+    if (height < 1)
+        height = 1;
+    if (width > LCD_WIDTH)
+        width = LCD_WIDTH;
+    if (height > LCD_HEIGHT)
+        height = LCD_HEIGHT;
+    if (g_lcdNativeW == width && g_lcdNativeH == height)
+        return;
+    g_lcdNativeW = width;
+    g_lcdNativeH = height;
+    LcdApplyWindowSize();
+}
+
 int LcdGetViewWidth(void)
 {
     return (g_lcdRotation == VM_LCD_ROTATE_90_CW || g_lcdRotation == VM_LCD_ROTATE_90_CCW)
-               ? LCD_HEIGHT
-               : LCD_WIDTH;
+               ? g_lcdNativeH
+               : g_lcdNativeW;
 }
 
 int LcdGetViewHeight(void)
 {
     return (g_lcdRotation == VM_LCD_ROTATE_90_CW || g_lcdRotation == VM_LCD_ROTATE_90_CCW)
-               ? LCD_WIDTH
-               : LCD_HEIGHT;
+               ? g_lcdNativeW
+               : g_lcdNativeH;
 }
 
 int LcdGetScale(void)
@@ -162,6 +193,8 @@ void LcdWindowPointToVm(int windowX, int windowY, int *vmX, int *vmY)
 {
     int viewW = LcdGetViewWidth();
     int viewH = LcdGetViewHeight();
+    int nativeW = g_lcdNativeW;
+    int nativeH = g_lcdNativeH;
     int logicalX;
     int viewY;
     int x;
@@ -185,14 +218,14 @@ void LcdWindowPointToVm(int windowX, int windowY, int *vmX, int *vmY)
     {
     case VM_LCD_ROTATE_90_CW:
         x = viewY;
-        y = LCD_HEIGHT - 1 - logicalX;
+        y = nativeH - 1 - logicalX;
         break;
     case VM_LCD_ROTATE_180:
-        x = LCD_WIDTH - 1 - logicalX;
-        y = LCD_HEIGHT - 1 - viewY;
+        x = nativeW - 1 - logicalX;
+        y = nativeH - 1 - viewY;
         break;
     case VM_LCD_ROTATE_90_CCW:
-        x = LCD_WIDTH - 1 - viewY;
+        x = nativeW - 1 - viewY;
         y = logicalX;
         break;
     default:
@@ -233,6 +266,8 @@ void LcdVmRectToWindowRect(int x, int y, int w, int h, SDL_Rect *rect)
     int y0 = y;
     int x1 = x + w;
     int y1 = y + h;
+    int nativeW = g_lcdNativeW;
+    int nativeH = g_lcdNativeH;
     int scale = g_lcdScale > 0 ? g_lcdScale : 1;
 
     if (!rect)
@@ -241,10 +276,10 @@ void LcdVmRectToWindowRect(int x, int y, int w, int h, SDL_Rect *rect)
         x0 = 0;
     if (y0 < 0)
         y0 = 0;
-    if (x1 > LCD_WIDTH)
-        x1 = LCD_WIDTH;
-    if (y1 > LCD_HEIGHT)
-        y1 = LCD_HEIGHT;
+    if (x1 > nativeW)
+        x1 = nativeW;
+    if (y1 > nativeH)
+        y1 = nativeH;
     if (x1 < x0)
         x1 = x0;
     if (y1 < y0)
@@ -253,20 +288,20 @@ void LcdVmRectToWindowRect(int x, int y, int w, int h, SDL_Rect *rect)
     switch (g_lcdRotation)
     {
     case VM_LCD_ROTATE_90_CW:
-        rect->x = LCD_HEIGHT - y1;
+        rect->x = nativeH - y1;
         rect->y = x0;
         rect->w = y1 - y0;
         rect->h = x1 - x0;
         break;
     case VM_LCD_ROTATE_180:
-        rect->x = LCD_WIDTH - x1;
-        rect->y = LCD_HEIGHT - y1;
+        rect->x = nativeW - x1;
+        rect->y = nativeH - y1;
         rect->w = x1 - x0;
         rect->h = y1 - y0;
         break;
     case VM_LCD_ROTATE_90_CCW:
         rect->x = y0;
-        rect->y = LCD_WIDTH - x1;
+        rect->y = nativeW - x1;
         rect->w = y1 - y0;
         rect->h = x1 - x0;
         break;
@@ -467,7 +502,11 @@ void UpdateLcd()
     int offY;
     int availH;
     SDL_Surface *sfc;
-    static int s_loggedPresent = 0;
+    static int s_loggedNativeW = -1;
+    static int s_loggedNativeH = -1;
+    static int s_loggedDrawScale = -1;
+    static int s_loggedSurfaceW = -1;
+    static int s_loggedSurfaceH = -1;
 
     if (!window || !Lcd_Cache_Buffer)
         return;
@@ -527,9 +566,9 @@ void UpdateLcd()
     SDL_FillRect(sfc, NULL, SDL_MapRGB(sfc->format, 0, 0, 0));
     LcdDrawToolbar(sfc);
 
-    for (int i = 0; i < LCD_HEIGHT; i++)
+    for (int i = 0; i < g_lcdNativeH; i++)
     {
-        for (int j = 0; j < LCD_WIDTH; j++)
+        for (int j = 0; j < g_lcdNativeW; j++)
         {
             int srcX = j;
             int srcY = i;
@@ -542,16 +581,16 @@ void UpdateLcd()
             switch (g_lcdRotation)
             {
             case VM_LCD_ROTATE_90_CW:
-                srcX = LCD_HEIGHT - 1 - i;
+                srcX = g_lcdNativeH - 1 - i;
                 srcY = j;
                 break;
             case VM_LCD_ROTATE_180:
-                srcX = LCD_WIDTH - 1 - j;
-                srcY = LCD_HEIGHT - 1 - i;
+                srcX = g_lcdNativeW - 1 - j;
+                srcY = g_lcdNativeH - 1 - i;
                 break;
             case VM_LCD_ROTATE_90_CCW:
                 srcX = i;
-                srcY = LCD_WIDTH - 1 - j;
+                srcY = g_lcdNativeW - 1 - j;
                 break;
             default:
                 break;
@@ -582,13 +621,19 @@ void UpdateLcd()
     if (SDL_MUSTLOCK(sfc))
         SDL_UnlockSurface(sfc);
 
-    if (!s_loggedPresent)
+    if (s_loggedNativeW != g_lcdNativeW || s_loggedNativeH != g_lcdNativeH ||
+        s_loggedDrawScale != drawScale || s_loggedSurfaceW != sfc->w ||
+        s_loggedSurfaceH != sfc->h)
     {
-        printf("[info][lcd] game_frame_blit prefer=%d draw=%d view=%dx%d "
+        printf("[info][lcd] game_frame_blit prefer=%d draw=%d native=%dx%d view=%dx%d "
                "surface=%dx%d dst=(%d,%d %dx%d)\n",
-               preferScale, drawScale, viewW, viewH, sfc->w, sfc->h, offX, offY,
-               g_lcdDstW, g_lcdDstH);
-        s_loggedPresent = 1;
+               preferScale, drawScale, g_lcdNativeW, g_lcdNativeH, viewW, viewH,
+               sfc->w, sfc->h, offX, offY, g_lcdDstW, g_lcdDstH);
+        s_loggedNativeW = g_lcdNativeW;
+        s_loggedNativeH = g_lcdNativeH;
+        s_loggedDrawScale = drawScale;
+        s_loggedSurfaceW = sfc->w;
+        s_loggedSurfaceH = sfc->h;
     }
 
 #ifdef _WIN32

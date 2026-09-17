@@ -29,6 +29,11 @@ void LcdCycleRotation(void);
 const char *LcdRotationName(vm_lcd_rotation rotation);
 int LcdGetViewWidth(void);
 int LcdGetViewHeight(void);
+int LcdGetNativeWidth(void);
+int LcdGetNativeHeight(void);
+/* Design resolution used for window sizing / present / mouse map.
+ * Must stay <= LCD_WIDTH x LCD_HEIGHT (framebuffer capacity). */
+void LcdSetNativeSize(int width, int height);
 int LcdGetScale(void);
 void LcdSetScale(int scale);
 int LcdGetWindowWidth(void);

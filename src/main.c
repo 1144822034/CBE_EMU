@@ -308,6 +308,7 @@ static int vm_client_server_list_apply(const char *selectedName,
                                       int allowPrompt,
                                       int *appliedOut);
 static bool vm_cbe_load_and_start(const char *cbe_path_utf8);
+static void vm_lcd_apply_native_size_for_cbe_path(const char *cbePath);
 
 static void vm_game_launcher_update(void)
 {
@@ -5571,10 +5572,16 @@ static void vm_debug_log_login_input_state(const char *phase, u32 callback, u32 
 
 static void vm_lcd_init_screen_image_struct(void)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    if (screenW < 1)
+        screenW = LCD_WIDTH;
+    if (screenH < 1)
+        screenH = LCD_HEIGHT;
     uc_mem_write(MTK, VM_screenImageStruct_ADDRESS, emptyBuff, 24);
     vm_set_var(VM_screenImageStruct_ADDRESS, VM_screenImage_ADDRESS);
-    vm_set_var_short(VM_screenImageStruct_ADDRESS + 4, LCD_WIDTH);
-    vm_set_var_short(VM_screenImageStruct_ADDRESS + 6, LCD_HEIGHT);
+    vm_set_var_short(VM_screenImageStruct_ADDRESS + 4, (u16)screenW);
+    vm_set_var_short(VM_screenImageStruct_ADDRESS + 6, (u16)screenH);
 }
 
 static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen)
@@ -10219,6 +10226,9 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
         return false;
     snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", cbe_path_utf8);
 
+    /* Switch host present size before VM screen struct / first frames. */
+    vm_lcd_apply_native_size_for_cbe_path(g_cbeLoadPathUtf8);
+
 #ifdef CBE_HOST_UTF8_PATHS
     snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", cbe_path_utf8);
 #else
@@ -10669,6 +10679,39 @@ static int vm_bytes_contains(const char *haystack, const unsigned char *needle, 
     return 0;
 }
 
+static void vm_lcd_apply_native_size_for_cbe_path(const char *cbePath)
+{
+    /* Screenshot forensics: 封神演义V2 only paints columns 0..175 and rows
+     * 0..219 of the 240x400 buffer (classic MTK 176x220). Host 2x of 240x400
+     * left a 352x440 island in a larger black window. */
+    static const unsigned char fengshenUtf8[] = {
+        0xe5, 0xb0, 0x81, 0xe7, 0xa5, 0x9e /* 封神 */
+    };
+    static const unsigned char fengshenGbk[] = {0xb7, 0xe2, 0xc9, 0xf1};
+    int width = LCD_WIDTH;
+    int height = LCD_HEIGHT;
+    const char *source = "default";
+    int isFengshen = 0;
+
+    if (cbePath &&
+        (vm_bytes_contains(cbePath, fengshenUtf8, sizeof(fengshenUtf8)) ||
+         vm_bytes_contains(cbePath, fengshenGbk, sizeof(fengshenGbk)) ||
+         strstr(cbePath, "FengShen") != NULL ||
+         strstr(cbePath, "fengshen") != NULL))
+    {
+        width = 176;
+        height = 220;
+        source = "fengshen-176x220";
+        isFengshen = 1;
+    }
+
+    LcdSetNativeSize(width, height);
+    if (isFengshen)
+        LcdSetScale(3);
+    printf("[info][lcd] native_size=%dx%d source=%s scale=%d cbe=%s\n", width,
+           height, source, LcdGetScale(), cbePath ? cbePath : "(null)");
+}
+
 static vm_lcd_rotation vm_lcd_auto_rotation_for_current_cbe(void)
 {
     static const unsigned char angryUtf8[] = {
@@ -10752,8 +10795,15 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
     const char *source = "auto";
     const char *envRotate = getenv("CBE_LCD_ROTATE");
     const char *envScale = getenv("CBE_LCD_SCALE");
+    const char *envSize = getenv("CBE_LCD_SIZE");
     int isAuto = 0;
-    int scale = LcdGetScale();
+    int scale;
+    int sizeW = -1;
+    int sizeH = -1;
+
+    vm_lcd_apply_native_size_for_cbe_path(g_cbeLoadPathUtf8);
+    /* Pick up CBE defaults (e.g. 封神 -> scale 3) before env/arg overrides. */
+    scale = LcdGetScale();
 
     if (envRotate != NULL)
     {
@@ -10769,6 +10819,18 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
             scale = parsed;
         else
             printf("[warn][lcd] invalid CBE_LCD_SCALE=%s (use 1..8)\n", envScale);
+    }
+    if (envSize != NULL)
+    {
+        int w = 0;
+        int h = 0;
+        if (sscanf(envSize, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+        {
+            sizeW = w;
+            sizeH = h;
+        }
+        else
+            printf("[warn][lcd] invalid CBE_LCD_SIZE=%s (use WxH)\n", envSize);
     }
 
     for (int i = 1; i < argc; ++i)
@@ -10791,6 +10853,20 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
                        scaleValue);
             continue;
         }
+        else if (strncmp(args[i], "--lcd-size=", 11) == 0)
+        {
+            int w = 0;
+            int h = 0;
+            if (sscanf(args[i] + 11, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+            {
+                sizeW = w;
+                sizeH = h;
+            }
+            else
+                printf("[warn][lcd] invalid --lcd-size=%s (use WxH)\n",
+                       args[i] + 11);
+            continue;
+        }
 
         if (value != NULL)
         {
@@ -10801,12 +10877,16 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
         }
     }
 
+    if (sizeW > 0 && sizeH > 0)
+        LcdSetNativeSize(sizeW, sizeH);
+
     LcdSetScale(scale);
     LcdSetRotation(rotation);
-    printf("[info][lcd] rotate=%s source=%s scale=%d view=%dx%d window=%dx%d\n",
+    printf("[info][lcd] rotate=%s source=%s scale=%d native=%dx%d view=%dx%d "
+           "window=%dx%d\n",
            LcdRotationName(LcdGetRotation()), source, LcdGetScale(),
-           LcdGetViewWidth(), LcdGetViewHeight(),
-           LcdGetWindowWidth(), LcdGetWindowHeight());
+           LcdGetNativeWidth(), LcdGetNativeHeight(), LcdGetViewWidth(),
+           LcdGetViewHeight(), LcdGetWindowWidth(), LcdGetWindowHeight());
 }
 
 static void vm_persist_ensure_dir(void)
