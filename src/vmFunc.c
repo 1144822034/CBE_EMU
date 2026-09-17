@@ -392,6 +392,67 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
     return sawWideChar;
 }
 
+/* Big-endian UCS-2 paths (封神演义V2 等 isBiggianProgram CBE)：字节序为 00 2e 00 2f ... */
+static int vm_path_looks_like_ucs2_be(const u8 *raw, size_t rawSize, u32 *ucs2LenOut)
+{
+    if (ucs2LenOut)
+        *ucs2LenOut = 0;
+    if (raw == NULL || rawSize < 4)
+        return 0;
+    if (vm_path_looks_like_ascii_c_string(raw, rawSize))
+        return 0;
+
+    u32 pos = 0;
+    u32 units = 0;
+    int sawWideChar = 0;
+    while (pos + 1 < rawSize)
+    {
+        u16 ch = (u16)((raw[pos] << 8) | raw[pos + 1]);
+        if (ch == 0)
+        {
+            if (units == 0)
+                return 0;
+            if (ucs2LenOut)
+                *ucs2LenOut = pos;
+            return 1;
+        }
+
+        if (ch >= 0xD800 && ch <= 0xDFFF)
+            return 0;
+
+        if (ch <= 0x7F)
+        {
+            if (!(ch == '/' || ch == '\\' || ch == '.' || ch == '_' || ch == '-' ||
+                  ch == '+' || ch == ' ' ||
+                  (ch >= '0' && ch <= '9') ||
+                  (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= 'a' && ch <= 'z')))
+                return 0;
+        }
+        else
+        {
+            if (!((ch >= 0x2E80 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)))
+                return 0;
+            sawWideChar = 1;
+        }
+
+        pos += 2;
+        ++units;
+    }
+
+    return sawWideChar;
+}
+
+static void vm_ucs2_be_to_le_inplace(u8 *raw, u32 byteLen)
+{
+    for (u32 i = 0; i + 1 < byteLen; i += 2)
+    {
+        u8 tmp = raw[i];
+        raw[i] = raw[i + 1];
+        raw[i + 1] = tmp;
+    }
+}
+
 static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 {
     u8 rawName[256];
@@ -404,9 +465,56 @@ static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 #endif
     if (outSize == 0)
         return;
+
+    /* Prefer guest-endian halfword walk: BE CBE titles (封神演义) and LE
+     * titles both store path characters via vm_set_var_short / strh. */
+    {
+        u16 hostLe[128];
+        u32 n = 0;
+        memset(hostLe, 0, sizeof(hostLe));
+        while (n + 1u < (u32)(sizeof(hostLe) / sizeof(hostLe[0])))
+        {
+            u16 ch = vm_get_var_short(namePtr + n * 2u);
+            if (ch == 0)
+                break;
+            hostLe[n++] = ch;
+        }
+        hostLe[n] = 0;
+        if (n > 0)
+        {
+            u32 byteLen = (n + 1u) * 2u;
+#ifdef CBE_PLATFORM_ANDROID
+            ucs2_to_gbk((u8 *)hostLe, byteLen, (u8 *)gbkPath, sizeof(gbkPath));
+            gbk_to_utf8((u8 *)gbkPath, (u8 *)out, outSize);
+#else
+            ucs2_to_gbk((u8 *)hostLe, byteLen, out, (u32)outSize);
+#endif
+            out[outSize - 1] = 0;
+            if (out[0] != 0)
+                return;
+        }
+    }
+
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     u32 ucs2Len = 0;
-    if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
+    int asUcs2 = 0;
+    if (g_cbeInfo.isBiggianProgram &&
+        vm_path_looks_like_ucs2_be(rawName, sizeof(rawName), &ucs2Len))
+    {
+        vm_ucs2_be_to_le_inplace(rawName, ucs2Len);
+        asUcs2 = 1;
+    }
+    else if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
+    {
+        asUcs2 = 1;
+    }
+    else if (vm_path_looks_like_ucs2_be(rawName, sizeof(rawName), &ucs2Len))
+    {
+        vm_ucs2_be_to_le_inplace(rawName, ucs2Len);
+        asUcs2 = 1;
+    }
+
+    if (asUcs2)
     {
 #ifdef CBE_PLATFORM_ANDROID
         ucs2_to_gbk(rawName, ucs2Len, (u8 *)gbkPath, sizeof(gbkPath));
@@ -1221,7 +1329,9 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
     u32 pc = 0, lr = 0;
     uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL || size <= 0)
+    if (size <= 0)
+        return vm_set_call_result(0);
+    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
     {
         return vm_set_call_result(-1);
     }
@@ -1621,30 +1731,35 @@ int vm_DF_DataPackage_InitTxt(int a1, int a2)
 }
 u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
 {
-    u32 offset;
-    u16 ret = 0;
-    uc_mem_read(MTK, offsetPtr, &offset, 4);
+    /* DF record payload is little-endian; the cursor at offsetPtr is guest-endian. */
+    u32 offset = vm_get_var(offsetPtr);
+    u8 raw[2] = {0};
+    u16 ret;
 
-    uc_mem_read(MTK, bufPtr + offset, &ret, 2);
+    uc_mem_read(MTK, bufPtr + offset, raw, 2);
+    ret = (u16)(raw[0] | (raw[1] << 8));
     if ((lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0) ||
         (lastAddress >= 0x0100db80 && lastAddress <= 0x0100de90))
     {
-        u8 raw[8] = {0};
-        uc_mem_read(MTK, bufPtr + offset, raw, sizeof(raw));
+        u8 probe[8] = {0};
+        uc_mem_read(MTK, bufPtr + offset, probe, sizeof(probe));
     }
     offset += 2;
-    uc_mem_write(MTK, offsetPtr, &offset, 4);
+    vm_set_var(offsetPtr, offset);
     return vm_set_call_result(ret);
 }
 
 u32 vm_DF_WriteShort(u32 bufPtr, u32 offsetPtr, u32 value)
 {
-    u32 offset, ret;
-    uc_mem_read(MTK, offsetPtr, &offset, 4);
+    /* DF record payload is little-endian; the cursor at offsetPtr is guest-endian. */
+    u32 offset = vm_get_var(offsetPtr);
+    u8 raw[2];
 
-    uc_mem_write(MTK, bufPtr + offset, &value, 2);
+    raw[0] = (u8)(value & 0xff);
+    raw[1] = (u8)((value >> 8) & 0xff);
+    uc_mem_write(MTK, bufPtr + offset, raw, 2);
     offset += 2;
-    uc_mem_write(MTK, offsetPtr, &offset, 4);
+    vm_set_var(offsetPtr, offset);
     return vm_set_call_result(offset);
 }
 // ok
@@ -3707,12 +3822,18 @@ static void vm_readStringUCS2ByRegLimited(uc_arm_reg reg, u16 *dst, size_t dstBy
     uc_reg_read(MTK, reg, &ptr);
     while (pos + 1 < maxChars)
     {
-        u16 tmp = 0;
-        if (uc_mem_read(MTK, ptr + (u32)(pos * sizeof(u16)), &tmp, sizeof(tmp)) != UC_ERR_OK || tmp == 0)
+        u16 tmp = vm_get_var_short(ptr + (u32)(pos * sizeof(u16)));
+        if (tmp == 0)
             break;
         dst[pos++] = tmp;
     }
     dst[pos] = 0;
+}
+
+static void vm_write_ucs2_host_le_to_guest(u32 dst, const u16 *hostLe, u32 charsIncludingNull)
+{
+    for (u32 i = 0; i < charsIncludingNull; ++i)
+        vm_set_var_short(dst + i * 2u, hostLe[i]);
 }
 
 void vm_initManagerTable()

@@ -6,6 +6,29 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
+#include <windows.h>
+
+/* Must run before SDL creates any HWND. Windows 10/11 may treat unmanifested
+ * processes as system-DPI-aware; SDL 2.0.10 then BitBlts a small surface into
+ * the top-left of a larger client, leaving black margins. */
+static void vm_win32_force_dpi_unaware(void)
+{
+    HMODULE shcore = LoadLibraryA("Shcore.dll");
+    if (shcore)
+    {
+        typedef HRESULT(WINAPI *SetProcessDpiAwarenessFn)(int);
+        SetProcessDpiAwarenessFn setAware =
+            (SetProcessDpiAwarenessFn)GetProcAddress(shcore, "SetProcessDpiAwareness");
+        if (setAware)
+            setAware(0); /* PROCESS_DPI_UNAWARE */
+        FreeLibrary(shcore);
+    }
+}
+
+static void __attribute__((constructor(101))) vm_win32_dpi_constructor(void)
+{
+    vm_win32_force_dpi_unaware();
+}
 #else
 #include <unistd.h>
 #endif
@@ -19,6 +42,7 @@
 #if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
     !defined(CBE_PLATFORM_NO_WINDOW)
 #include "gameLauncher.h"
+#include "../Lib/sdl2-2.0.10/include/SDL2/SDL_syswm.h"
 #endif
 static bool vm_file_try_download_named_resource(const char *normalizedPath);
 #include "vmFunc.c"
@@ -3417,6 +3441,21 @@ static u32 vm_net_queue_http_get_mock_response(u32 urlPtr, u32 callback, u32 con
         g_wpayMockFlowActive = 1;
         body = wpayPaySuccessBody;
         bodyLen = (u32)sizeof(wpayPaySuccessBody);
+    }
+    else if (strstr(url, "wmix.kvbar.com") != NULL ||
+             strstr(url, "/wmix/") != NULL)
+    {
+        /*
+         * CoolBar wmix bootstrap (vmdlEnterNet): response is a 2-byte header
+         * plus optional payload.  Parser returns (len-2) and then copies that
+         * many bytes from buf+2; defaultBody={1} yields -1 and asserts at
+         * vmdlEnterNet.c:154 (封神演义V2 single-player enter path).
+         * Empty payload with status bytes is enough to pass the length
+         * contract for offline/embedded-DF titles; live wmix is long dead.
+         */
+        static const u8 wmixEmptyOkBody[] = {1, 0};
+        body = wmixEmptyOkBody;
+        bodyLen = (u32)sizeof(wmixEmptyOkBody);
     }
 
     responsePtr = vm_net_mock_sync_buffer_to_vm(body, bodyLen);
@@ -9871,6 +9910,7 @@ static void vm_game_launcher_start_selected(const char *path)
     if (!vm_cbe_load_and_start(path))
     {
         printf("[error][launcher] failed to load %s\n", path);
+        LcdReleasePresentBackend();
         g_gameLauncherActive = true;
         g_gameLauncherState.loading = false;
         g_gameLauncherState.selected_server_name[0] = 0;
@@ -10711,7 +10751,9 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
     vm_lcd_rotation rotation = vm_lcd_auto_rotation_for_current_cbe();
     const char *source = "auto";
     const char *envRotate = getenv("CBE_LCD_ROTATE");
+    const char *envScale = getenv("CBE_LCD_SCALE");
     int isAuto = 0;
+    int scale = LcdGetScale();
 
     if (envRotate != NULL)
     {
@@ -10719,6 +10761,14 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
             source = isAuto ? "env:auto" : "env";
         else
             printf("[warn][lcd] invalid CBE_LCD_ROTATE=%s\n", envRotate);
+    }
+    if (envScale != NULL)
+    {
+        int parsed = atoi(envScale);
+        if (parsed >= 1 && parsed <= 8)
+            scale = parsed;
+        else
+            printf("[warn][lcd] invalid CBE_LCD_SCALE=%s (use 1..8)\n", envScale);
     }
 
     for (int i = 1; i < argc; ++i)
@@ -10728,6 +10778,19 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
             value = args[i] + 9;
         else if (strncmp(args[i], "--lcd-rotate=", 13) == 0)
             value = args[i] + 13;
+        else if (strncmp(args[i], "--scale=", 8) == 0 ||
+                 strncmp(args[i], "--lcd-scale=", 12) == 0)
+        {
+            const char *scaleValue =
+                (args[i][2] == 's') ? (args[i] + 8) : (args[i] + 12);
+            int parsed = atoi(scaleValue);
+            if (parsed >= 1 && parsed <= 8)
+                scale = parsed;
+            else
+                printf("[warn][lcd] invalid scale option=%s (use 1..8)\n",
+                       scaleValue);
+            continue;
+        }
 
         if (value != NULL)
         {
@@ -10738,9 +10801,10 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
         }
     }
 
+    LcdSetScale(scale);
     LcdSetRotation(rotation);
-    printf("[info][lcd] rotate=%s source=%s view=%dx%d window=%dx%d\n",
-           LcdRotationName(LcdGetRotation()), source,
+    printf("[info][lcd] rotate=%s source=%s scale=%d view=%dx%d window=%dx%d\n",
+           LcdRotationName(LcdGetRotation()), source, LcdGetScale(),
            LcdGetViewWidth(), LcdGetViewHeight(),
            LcdGetWindowWidth(), LcdGetWindowHeight());
 }
@@ -12156,6 +12220,7 @@ int main(int argc, char *args[])
 
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+    vm_win32_force_dpi_unaware();
 #endif
     // while(1);
 
@@ -12180,12 +12245,9 @@ int main(int argc, char *args[])
             return -1;
         }
         LcdApplyWindowSize();
-        SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
-        if (startupSurface)
-        {
-            SDL_FillRect(startupSurface, NULL, SDL_MapRGB(startupSurface->format, 0, 0, 0));
-            SDL_UpdateWindowSurface(window);
-        }
+        printf("[info][lcd] present=surface_blit scale=%d view=%dx%d window=%dx%d\n",
+               LcdGetScale(), LcdGetViewWidth(), LcdGetViewHeight(),
+               LcdGetWindowWidth(), LcdGetWindowHeight());
     }
 #endif
 
@@ -13312,6 +13374,52 @@ return 4;
             printf("assert_stack[%02x]=%08x\n", off, word);
             if ((word >= Program_ROM_Address && word < Program_ROM_Address + Program_ROM_Mapped_Size))
             {
+            }
+        }
+        /* 封神演义 wmix 引导：vmdlEnterNet.c:154 时 r5/r7 指向 mix 状态，转储解析对象与缓冲。 */
+        if (strstr((char *)cbeTextString, "vmdlEnterNet") != NULL)
+        {
+            u32 r5 = 0, r9 = 0, obj = 0, fn0 = 0, fn14 = 0;
+            u32 st = 0, buf = 0, got = 0;
+            u8 head[16];
+            memset(head, 0, sizeof(head));
+            uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+            uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+            if (r5)
+                obj = vm_get_var(r5);
+            if (obj)
+            {
+                fn0 = vm_get_var(obj);
+                fn14 = vm_get_var(obj + 0x14);
+            }
+            st = r9 + 0x5ecc;
+            buf = vm_get_var(st + 8);
+            got = vm_get_var(st + 0xc);
+            if (buf)
+                uc_mem_read(MTK, buf, head, sizeof(head));
+            {
+                u32 r4 = 0, r6 = 0;
+                char pathBuf[128];
+                memset(pathBuf, 0, sizeof(pathBuf));
+                uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+                uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+                if (r4)
+                {
+                    u8 raw[64];
+                    memset(raw, 0, sizeof(raw));
+                    uc_mem_read(MTK, r4, raw, sizeof(raw));
+                    vm_read_path_string(r4, pathBuf, sizeof(pathBuf));
+                    printf("[forensic][wmix] path_raw=");
+                    for (u32 i = 0; i < 32; ++i)
+                        printf("%02x", raw[i]);
+                    printf("\n");
+                }
+                printf("[forensic][wmix] r5=%08x obj=%08x fn0=%08x fn14=%08x "
+                       "st=%08x buf=%08x got=%u head=%02x%02x%02x%02x "
+                       "r4=%08x r6=%08x path='%s'\n",
+                       r5, obj, fn0, fn14, st, buf, got,
+                       head[0], head[1], head[2], head[3],
+                       r4, r6, pathBuf[0] ? pathBuf : "(empty)");
             }
         }
         dumpCpuInfo();
@@ -14704,8 +14812,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
         gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-        tmp3 = strlen_utf16((u16 *)sprintfBuff);
-        uc_mem_write(MTK, tmp2, sprintfBuff, (tmp3 + 1) * 2);
+        tmp3 = (u32)strlen_utf16((u16 *)sprintfBuff);
+        vm_write_ucs2_host_le_to_guest(tmp2, (const u16 *)sprintfBuff, tmp3 + 1u);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
     }
     else if (idx == 40)
@@ -16564,7 +16672,8 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // dst
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // src
         vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
-        uc_mem_write(MTK, tmp1, cbeTextString, (strlen_utf16(cbeTextString) + 1) * 2);
+        tmp3 = (u32)strlen_utf16((u16 *)cbeTextString);
+        vm_write_ucs2_host_le_to_guest(tmp1, (const u16 *)cbeTextString, tmp3 + 1u);
         vm_set_call_result(tmp1);
     }
     else if (idx == 3)
@@ -16572,19 +16681,18 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // dst
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // src
         u32 dstChars = 0;
-        u16 ch = 0;
         if (tmp1 && tmp2)
         {
             while (dstChars < 512)
             {
-                uc_mem_read(MTK, tmp1 + dstChars * 2, &ch, 2);
+                u16 ch = vm_get_var_short(tmp1 + dstChars * 2);
                 if (ch == 0)
                     break;
                 dstChars++;
             }
             vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
-            u32 srcChars = strlen_utf16((u16 *)cbeTextString);
-            uc_mem_write(MTK, tmp1 + dstChars * 2, cbeTextString, (srcChars + 1) * 2);
+            u32 srcChars = (u32)strlen_utf16((u16 *)cbeTextString);
+            vm_write_ucs2_host_le_to_guest(tmp1 + dstChars * 2, (const u16 *)cbeTextString, srcChars + 1u);
         }
         vm_set_call_result(tmp1);
     }
@@ -16594,8 +16702,8 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_readStringByPtr(tmp2, cbeTextString);
         gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-        tmp3 = strlen_utf16((u16 *)sprintfBuff);
-        uc_mem_write(MTK, tmp1, sprintfBuff, (tmp3 + 1) * 2);
+        tmp3 = (u32)strlen_utf16((u16 *)sprintfBuff);
+        vm_write_ucs2_host_le_to_guest(tmp1, (const u16 *)sprintfBuff, tmp3 + 1u);
         vm_set_call_result(tmp1);
     }
     else if (idx == 5)
