@@ -10681,17 +10681,24 @@ static int vm_bytes_contains(const char *haystack, const unsigned char *needle, 
 
 static void vm_lcd_apply_native_size_for_cbe_path(const char *cbePath)
 {
-    /* Screenshot forensics: 封神演义V2 only paints columns 0..175 and rows
-     * 0..219 of the 240x400 buffer (classic MTK 176x220). Host 2x of 240x400
-     * left a 352x440 island in a larger black window. */
+    /* Several BE MTK titles (封神演义V2 / 原罪天使) only paint a classic
+     * 176x220 frame inside the 240x400 host buffer. Presenting the full
+     * buffer leaves a content island + garbage/black margins ("花屏"/黑边). */
     static const unsigned char fengshenUtf8[] = {
         0xe5, 0xb0, 0x81, 0xe7, 0xa5, 0x9e /* 封神 */
     };
     static const unsigned char fengshenGbk[] = {0xb7, 0xe2, 0xc9, 0xf1};
+    static const unsigned char yuanzuiUtf8[] = {
+        0xe5, 0x8e, 0x9f, 0xe7, 0xbd, 0xaa /* 原罪 */
+    };
+    static const unsigned char yuanzuiGbk[] = {0xd4, 0xad, 0xd7, 0xef};
+    static const unsigned char angelUtf8[] = {
+        0xe5, 0xa4, 0xa9, 0xe4, 0xbd, 0xbf /* 天使 */
+    };
     int width = LCD_WIDTH;
     int height = LCD_HEIGHT;
     const char *source = "default";
-    int isFengshen = 0;
+    int useClassic176 = 0;
 
     if (cbePath &&
         (vm_bytes_contains(cbePath, fengshenUtf8, sizeof(fengshenUtf8)) ||
@@ -10699,14 +10706,29 @@ static void vm_lcd_apply_native_size_for_cbe_path(const char *cbePath)
          strstr(cbePath, "FengShen") != NULL ||
          strstr(cbePath, "fengshen") != NULL))
     {
+        useClassic176 = 1;
+        source = "fengshen-176x220";
+    }
+    else if (cbePath &&
+             (((vm_bytes_contains(cbePath, yuanzuiUtf8, sizeof(yuanzuiUtf8)) ||
+                vm_bytes_contains(cbePath, yuanzuiGbk, sizeof(yuanzuiGbk))) &&
+               (vm_bytes_contains(cbePath, angelUtf8, sizeof(angelUtf8)) ||
+                strstr(cbePath, "Angel") != NULL ||
+                strstr(cbePath, "angel") != NULL)) ||
+              strstr(cbePath, "SinAngel") != NULL))
+    {
+        useClassic176 = 1;
+        source = "yuanzui-angel-176x220";
+    }
+
+    if (useClassic176)
+    {
         width = 176;
         height = 220;
-        source = "fengshen-176x220";
-        isFengshen = 1;
     }
 
     LcdSetNativeSize(width, height);
-    if (isFengshen)
+    if (useClassic176)
         LcdSetScale(3);
     printf("[info][lcd] native_size=%dx%d source=%s scale=%d cbe=%s\n", width,
            height, source, LcdGetScale(), cbePath ? cbePath : "(null)");
