@@ -34,6 +34,8 @@ int LcdGetNativeHeight(void);
 /* Design resolution used for window sizing / present / mouse map.
  * Must stay <= LCD_WIDTH x LCD_HEIGHT (framebuffer capacity). */
 void LcdSetNativeSize(int width, int height);
+/* Active screen row stride in pixels (4-pixel aligned native width). */
+int LcdGetScreenPitchPixels(void);
 int LcdGetScale(void);
 void LcdSetScale(int scale);
 int LcdGetWindowWidth(void);

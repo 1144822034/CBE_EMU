@@ -256,6 +256,7 @@ static void vm_net_mock_ensure_force_pk_proof_catalog_item(void);
 static void vm_net_mock_ensure_star_sky_stone_catalog_item(void);
 static void vm_net_mock_ensure_rename_card_catalog_item(void);
 static void vm_net_mock_ensure_gold_scroll_catalog_item(void);
+static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void);
 static void vm_net_mock_ensure_gold_scroll_item_effect(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 
@@ -1671,6 +1672,7 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_net_mock_ensure_star_sky_stone_catalog_item();
     vm_net_mock_ensure_rename_card_catalog_item();
     vm_net_mock_ensure_gold_scroll_catalog_item();
+    vm_net_mock_ensure_crystal_extract_stone_catalog_item();
 
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
@@ -2616,6 +2618,79 @@ static u32 vm_net_mock_load_item_effect_catalog(void)
     return g_vm_net_mock_item_effect_catalog_count;
 }
 
+/* Pixi 自定义 854 玄晶提炼石：注入商城目录并默认上架（酷宝）. */
+static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xd0\xfe\xbe\xa7\xcc\xe1\xc1\xb6\xca\xaf"; /* 玄晶提炼石 */
+    static const u8 descGbk[] =
+        "\xcf\xfb\xba\xc4\x31\xb8\xf6\xa3\xac\xbf\xc9\xbd\xab\xd2\xd1\xc7\xbf"
+        "\xbb\xaf\xd7\xb0\xb1\xb8\xcd\xb6\xc8\xeb\xb5\xc4\xd0\xfe\xbe\xa7\xcc"
+        "\xe1\xc1\xb6\xbb\xd8\xb1\xb3\xb0\xfc\xa3\xac\xd7\xb0\xb1\xb8\xcf\xfa"
+        "\xbb\xd9\xa1\xa3";
+        /* 消耗1个，可将已强化装备投入的玄晶提炼回背包，装备销毁。 */
+    const char *err = NULL;
+    vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
+    u32 i = 0;
+
+    memset(&one, 0, sizeof(one));
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId ==
+            VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID, nameGbk,
+                sizeof(nameGbk) - 1, descGbk, sizeof(descGbk) - 1,
+                VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_SHOP_PRICE, 99, 1, 1, false,
+                14))
+        {
+            printf("[warn][network] mock_crystal_extract_stone_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+    }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
+    {
+        printf("[info][network] mock_crystal_extract_stone_catalog_bound item=%u "
+               "price=%u enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    if (!vm_net_mock_shop_admin_save(
+            VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID,
+            item->price ? item->price
+                        : VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_SHOP_PRICE,
+            true, &err))
+    {
+        printf("[warn][network] mock_crystal_extract_stone_shop_seed_failed error=%s\n",
+               err ? err : "?");
+    }
+}
+
 /* 853 打金心得：不在 item.dsh，注入时效目录（类别10、持续60分钟）. */
 static void vm_net_mock_ensure_gold_scroll_item_effect(void)
 {
@@ -2713,6 +2788,7 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 849: /* 星空石：走 29/13 重置洗练次数，禁止通用 7/1 */
     case 852: /* 角色改名卡：走 29/15 改名，禁止通用 7/1 */
     case 853: /* 打金心得：走自定义 7/1 时效，禁止当普通药 */
+    case 854: /* 玄晶提炼石：走 29/16 装备提炼，禁止通用 7/1 */
     case 813: /* chest keys must not fall into generic 7/1 category-10 consume */
     case 814:
     case 815:
@@ -4930,7 +5006,7 @@ typedef struct
     u16 enhanceLevel;
 } vm_net_mock_battle_drop_result;
 
-#define VM_NET_MOCK_BATTLE_DROP_RESULT_MAX 8u
+#define VM_NET_MOCK_BATTLE_DROP_RESULT_MAX 32u
 
 /* The client-side 7/7 type=1 stream starts with a row count and can safely
  * consume several normal additive item rows.  Keep this builder shared so

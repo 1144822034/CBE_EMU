@@ -24,17 +24,37 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
     vm_mock_admin_text page;
     char status[16];
     char message[256];
+    char editText[32];
     const vm_mock_ladder_config *cfg;
+    const vm_mock_ladder_reward *editReward = NULL;
     u32 rewardCount;
+    u32 editMilestone = 0;
     u32 i;
 
     vm_mock_admin_text_init(&page, response, responseCap);
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
+    memset(editText, 0, sizeof(editText));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    (void)vm_mock_admin_form_value(query, "edit_ms", editText, sizeof(editText));
+    if (editText[0] != 0)
+        (void)vm_net_mock_parse_u32_strict(editText, &editMilestone);
     cfg = vm_net_mock_ladder_config_get();
     rewardCount = vm_net_mock_ladder_reward_admin_count();
+    if (editMilestone != 0)
+    {
+        for (i = 0; i < rewardCount; ++i)
+        {
+            const vm_mock_ladder_reward *rw =
+                vm_net_mock_ladder_reward_admin_row(i);
+            if (rw != NULL && (u32)rw->floorMilestone == editMilestone)
+            {
+                editReward = rw;
+                break;
+            }
+        }
+    }
 
     vm_mock_admin_text_appendf(
         &page,
@@ -49,7 +69,10 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "label{font-size:12px;color:#666;display:block;margin-bottom:4px}"
         ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}"
         "table{border-collapse:collapse;width:100%%}th,td{padding:8px;border-bottom:1px solid #eee}"
-        "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px}"
+        "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;border-radius:6px;cursor:pointer}"
+        "a.btn-edit{display:inline-block;padding:6px 10px;border-radius:6px;background:#175cd3;color:#fff;"
+        "text-decoration:none;font-size:12px}a.btn-edit:hover{background:#0f4a9c}"
+        "a.btn-cancel{margin-left:10px;color:#667085;font-size:13px}"
         "</style></head><body><h1>天梯挑战</h1>"
         "<p>每日挑战（次数与层数进度均按自然日重置）；对手为天机/幻剑/鬼道三人。"
         "层数越高属性与伤害越高；每N层发里程碑奖励（并系统提示）。"
@@ -102,7 +125,8 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
     vm_mock_admin_text_appendf(
         &page,
         "<section class=\"card\"><h2>里程碑奖励（每N层，N=里程碑值）</h2>"
-        "<table><tr><th>层数</th><th>经验</th><th>金钱</th><th>物品</th><th>数量</th></tr>");
+        "<table><tr><th>层数</th><th>经验</th><th>金钱</th><th>物品</th><th>数量</th>"
+        "<th></th></tr>");
     for (i = 0; i < rewardCount; ++i)
     {
         const vm_mock_ladder_reward *rw = vm_net_mock_ladder_reward_admin_row(i);
@@ -110,23 +134,45 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
             continue;
         vm_mock_admin_text_appendf(
             &page,
-            "<tr><td>%u</td><td>%u</td><td>%u</td><td>%u</td><td>%u</td></tr>",
+            "<tr><td>%u</td><td>%u</td><td>%u</td><td>%u</td><td>%u</td>"
+            "<td><a class=\"btn-edit\" href=\"/?tab=ladder&amp;edit_ms=%u\">编辑</a></td></tr>",
             (u32)rw->floorMilestone, rw->rewardExp, rw->rewardMoney,
-            rw->rewardItemId, rw->rewardItemCount);
+            rw->rewardItemId, rw->rewardItemCount, (u32)rw->floorMilestone);
     }
     vm_mock_admin_text_appendf(
         &page,
         "</table>"
-        "<form method=\"post\" action=\"/action\" style=\"margin-top:12px\">"
+        "<form method=\"post\" action=\"/action\" style=\"margin-top:12px\" id=\"ladder-reward-form\">"
         "<input type=\"hidden\" name=\"action\" value=\"save-ladder-reward\">"
         "<div class=\"grid\">"
-        "<div><label>里程碑层数(如10)</label><input name=\"floor_milestone\"></div>"
-        "<div><label>经验</label><input name=\"reward_exp\"></div>"
-        "<div><label>金钱</label><input name=\"reward_money\"></div>"
-        "<div><label>物品ID</label><input name=\"reward_item_id\"></div>"
-        "<div><label>数量</label><input name=\"reward_item_count\"></div>"
-        "</div><button type=\"submit\">添加/更新奖励</button></form></section>"
-        "</body></html>");
+        "<div><label>里程碑层数(如10)</label>");
+    if (editReward != NULL)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<input name=\"floor_milestone\" value=\"%u\" readonly></div>"
+            "<div><label>经验</label><input name=\"reward_exp\" value=\"%u\"></div>"
+            "<div><label>金钱</label><input name=\"reward_money\" value=\"%u\"></div>"
+            "<div><label>物品ID</label><input name=\"reward_item_id\" value=\"%u\"></div>"
+            "<div><label>数量</label><input name=\"reward_item_count\" value=\"%u\"></div>"
+            "</div><button type=\"submit\">保存奖励</button>"
+            "<a class=\"btn-cancel\" href=\"/?tab=ladder\">取消编辑</a>",
+            (u32)editReward->floorMilestone, editReward->rewardExp,
+            editReward->rewardMoney, editReward->rewardItemId,
+            editReward->rewardItemCount);
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<input name=\"floor_milestone\"></div>"
+            "<div><label>经验</label><input name=\"reward_exp\"></div>"
+            "<div><label>金钱</label><input name=\"reward_money\"></div>"
+            "<div><label>物品ID</label><input name=\"reward_item_id\"></div>"
+            "<div><label>数量</label><input name=\"reward_item_count\"></div>"
+            "</div><button type=\"submit\">添加/更新奖励</button>");
+    }
+    vm_mock_admin_text_appendf(&page, "</form></section></body></html>");
 }
 
 static void vm_mock_admin_handle_ladder_action(vm_mock_service_socket client,
@@ -144,7 +190,7 @@ static void vm_mock_admin_handle_ladder_action(vm_mock_service_socket client,
         char errMsg[384];
 
         if (!vm_mock_admin_form_u32(body, "enabled", 1u, &enabled) ||
-            !vm_mock_admin_form_u32(body, "daily_limit", 100u, &daily) ||
+            !vm_mock_admin_form_u32(body, "daily_limit", 1000u, &daily) ||
             !vm_mock_admin_form_u32(body, "enemy_tianji", 0xffffffffu, &tj) ||
             !vm_mock_admin_form_u32(body, "enemy_huanjian", 0xffffffffu, &hj) ||
             !vm_mock_admin_form_u32(body, "enemy_guidao", 0xffffffffu, &gd) ||

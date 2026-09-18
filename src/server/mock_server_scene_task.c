@@ -3433,34 +3433,30 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     normalized = *seed;
     vm_net_mock_npc_normalize_service_fields(&normalized);
     /*
-     * Admin save-npc only fills legacy primary taskId / repeatable / daily.
-     * Persist path writes server_dynamic_npc_tasks from boundTasks[] after a
-     * full DELETE — leaving boundTaskCount=0 silently wiped「可接取任务」.
-     * Mirror primary → boundTasks before MySQL (or clear when unbound).
-     *
-     * Do NOT clear boundTasks when taskId==0 but bindings are already present:
-     * save-npc-position reuses the live seed and a stale primary=0 used to wipe
-     * every binding on each map drag (then FK re-insert looked like a save error /
-     * in-game task submit tip after the NPC lost its delivery binding).
+     * Persist writes server_dynamic_npc_tasks from boundTasks[] after DELETE.
+     * Prefer an already-filled boundTasks[] (multi-row save-npc). Otherwise
+     * mirror legacy primary taskId into boundTasks. Keep existing bindings when
+     * primary is stale 0 but boundTaskCount>0 (save-npc-position / toggle).
      */
-    if (normalized.taskId == 0)
+    if (normalized.boundTaskCount != 0)
     {
-        if (normalized.boundTaskCount != 0)
-            vm_net_mock_seed_sync_primary_bound_task(&normalized);
-        else
+        vm_net_mock_seed_sync_primary_bound_task(&normalized);
+    }
+    else if (normalized.taskId != 0)
+    {
+        if (!vm_net_mock_seed_add_bound_task(
+                &normalized, normalized.taskId, normalized.taskRepeatable,
+                normalized.taskDailyAcceptLimit))
         {
-            memset(normalized.boundTasks, 0, sizeof(normalized.boundTasks));
-            vm_net_mock_seed_sync_primary_bound_task(&normalized);
+            if (errorOut)
+                *errorOut = "NPC 可接取任务绑定失败";
+            return false;
         }
     }
-    if (normalized.taskId != 0 &&
-        !vm_net_mock_seed_add_bound_task(
-            &normalized, normalized.taskId, normalized.taskRepeatable,
-            normalized.taskDailyAcceptLimit))
+    else
     {
-        if (errorOut)
-            *errorOut = "NPC 可接取任务绑定失败";
-        return false;
+        memset(normalized.boundTasks, 0, sizeof(normalized.boundTasks));
+        vm_net_mock_seed_sync_primary_bound_task(&normalized);
     }
     seed = &normalized;
     if (!vm_net_mock_scene_name_is_safe(scene) ||

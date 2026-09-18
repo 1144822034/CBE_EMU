@@ -11,6 +11,7 @@
 import {
   getUc3FontId,
   getUc3FontUrl,
+  isUc3PackId,
   setUc3FontId,
   type Uc3FontId,
   uc3FontOption,
@@ -100,7 +101,12 @@ function parseUc3(buf: Uint8Array, url: string): Uc3Font {
 }
 
 export async function loadUc3Font(url?: string): Promise<Uc3Font> {
-  const target = url ?? getUc3FontUrl();
+  // Never fetch web fonts (fusion-pixel / SimSun) into the UC3 parser.
+  const target =
+    url ??
+    (isUc3PackId(getUc3FontId())
+      ? getUc3FontUrl()
+      : "./font_16_sky.uc3");
   if (cached && cachedUrl === target) return cached;
   if (loadPromise) {
     try {
@@ -138,6 +144,9 @@ export async function loadUc3Font(url?: string): Promise<Uc3Font> {
 
 /** Persist preference, clear cache, and load the chosen pack. */
 export async function applyUc3FontId(id: Uc3FontId): Promise<Uc3Font> {
+  if (!isUc3PackId(id)) {
+    throw new Error(`applyUc3FontId expects a UC3 pack, got ${id}`);
+  }
   setUc3FontId(id);
   clearUc3FontCache();
   return loadUc3Font(uc3FontOption(id).url);

@@ -3,6 +3,7 @@ import {
   CBE,
   LCD_HEIGHT,
   LCD_WIDTH,
+  MAP_STATUS_STRIP_H,
   WORLD_BOTTOM_H,
   WORLD_TOP_H,
   makePixelText,
@@ -97,10 +98,10 @@ const CHAT_VISIBLE_ROWS = 2;
 const CHAT_LINE_H = UC3_CELL;
 /**
  * Party mates under the HUD chrome, left of the map.
- * Must clear SceneView map-corner status strip (修/拍/擂/[斗]/[练]/娱/翅/骑 @ y=4, 17px).
+ * Must clear SceneView map-corner status strip (修/拍/… flush under exp).
  * Evidence: partyHost previously at WORLD_TOP_H+1 covered those badges (HUD above map).
  */
-const MAP_STATUS_STRIP_BOTTOM = 4 + 17;
+const MAP_STATUS_STRIP_BOTTOM = MAP_STATUS_STRIP_H;
 const PARTY_Y0 = WORLD_TOP_H + MAP_STATUS_STRIP_BOTTOM + 2;
 const PARTY_SLOT_H = 30;
 const PARTY_FACE = PORTRAIT_INNER;
@@ -209,7 +210,7 @@ export class WorldHud extends Container {
     super();
     this.eventMode = "static";
     this.sortableChildren = true;
-    this.toast.host.zIndex = 100;
+    this.toast.host.zIndex = 2_000_000;
     this.addChild(this.top, this.bottom, this.toast.host);
     this.bottom.y = LCD_HEIGHT - WORLD_BOTTOM_H;
     this.bottom.eventMode = "static";
@@ -413,7 +414,6 @@ export class WorldHud extends Container {
     void this.hangLabel.show("挂机", 0xffffff, {
       fontSize: 12,
       outline: false,
-      uc3: true,
       smooth: false,
       crisp: true,
     });
@@ -960,7 +960,11 @@ export class WorldHud extends Container {
         if (!run.text) continue;
         const lab = new BitmapLabel();
         lab.position.set(x, y);
-        void lab.setText(run.text, run.color, { outline: false, wordWrap: false });
+        void lab.setText(run.text, run.color, {
+          outline: false,
+          wordWrap: false,
+          fontSize: UC3_CELL,
+        });
         this.chatStripHost.addChild(lab);
         this.chatLines.push(lab);
         x += measureUiTextWidth(run.text, UC3_CELL);

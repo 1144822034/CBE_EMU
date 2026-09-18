@@ -13,7 +13,14 @@ import {
 } from "./constants";
 import { attachRowPointerHit } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
-import { UI_WRAP_CHARS, UC3_CELL, measureUiTextBytes, uiCharByteWidth, wrapChars } from "./BitmapLabel";
+import {
+  UI_WRAP_CHARS,
+  UC3_CELL,
+  measureUiTextBytes,
+  measureUiTextWidth,
+  uiCharByteWidth,
+  wrapChars,
+} from "./BitmapLabel";
 
 export const LIST_SHELL_DEFAULT_PAGE_SIZE = 8;
 /** Dual-line list row height (name + desc, UC3 14px cell). */
@@ -102,7 +109,17 @@ export function paintListShellChrome(
   const pillW = Math.min(120, Math.max(56, title.length * 12 + 24));
   const pillH = 20;
   drawCbeTitlePill(ctx.box, LCD_WIDTH / 2, y + 6, pillW, pillH);
-  ctx.addLabel(title, LCD_WIDTH / 2 - pillW / 2 + 8, y + 9, CBE.ink);
+  if (ctx.addLabelCentered) {
+    ctx.addLabelCentered(title, LCD_WIDTH / 2, y + 6 + pillH / 2, CBE.ink);
+  } else {
+    const tw = measureUiTextWidth(title);
+    ctx.addLabel(
+      title,
+      Math.round(LCD_WIDTH / 2 - tw / 2),
+      y + 6 + Math.floor((pillH - UC3_CELL) / 2),
+      CBE.ink,
+    );
+  }
   return bounds;
 }
 

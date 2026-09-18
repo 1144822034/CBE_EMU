@@ -107,7 +107,7 @@ const ROOT_DISPLAY_IDX = [5, 4, 3, 2, 1, 0];
 
 const SCROLL_WHITE_W = MENU2_WHITE_TARGET_W;
 /** Fixed Y — menu never repositions when paging or entering L2. */
-const SCROLL_Y = 80;
+const SCROLL_Y = 100;
 const ROW_H = 18;
 /** Visible rows inside the white parchment column. */
 const PAGE_ROWS = 6;
@@ -242,10 +242,6 @@ export class MenuScreen extends Container {
     return Math.floor(this.menuCursor / PAGE_ROWS) * PAGE_ROWS;
   }
 
-  private listTop(y: number): number {
-    return y + MENU2_CAP_H + 3;
-  }
-
   private async addCenteredLabel(
     text: string,
     cx: number,
@@ -261,6 +257,7 @@ export class MenuScreen extends Container {
     await lab.setText(text, color, {
       outline: false,
       maxWidth: maxWidth - 2,
+      bold: true,
     });
     if (gen !== this.redrawGen) {
       lab.destroy();
@@ -333,7 +330,9 @@ export class MenuScreen extends Container {
 
     const bodyTop = y + MENU2_CAP_H;
     const bodyH = SCROLL_H - MENU2_CAP_H * 2;
-    const top = this.listTop(y);
+    // Center the visible row block in the parchment body (not top-aligned).
+    const usedH = visible.length * ROW_H;
+    const top = bodyTop + Math.max(0, Math.floor((bodyH - usedH) / 2));
     this.box.rect(content.x, bodyTop, content.w, bodyH).fill({ color: MENU2_WHITE_FILL });
     visible.forEach((label, vi) => {
       const abs = start + vi;

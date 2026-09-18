@@ -1,9 +1,10 @@
 /**
  * Left-side accepted-quest tracker under the map status strip.
- * Collapse toggle above the task plate — independent from 修/拍/… strip.
+ * Thin vertical collapse strip left of the task plate (same top Y / panel height).
+ * Independent from 修/拍/… strip. Login defaults collapsed; tap strip to expand.
  */
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_WIDTH, makePixelText } from "./constants";
+import { CBE, LCD_WIDTH, MAP_STATUS_STRIP_H, makePixelText } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth } from "./BitmapLabel";
 import { sceneDisplayName } from "./WorldHud";
 import type { TaskListRow } from "../net/protocolExtras";
@@ -13,6 +14,7 @@ import { lookupNpcSceneFromDb } from "../resources/npcScenes";
 import { replaceGraphics } from "../render/gpuResume";
 import {
   isQuestTrackerCollapsed,
+  setQuestTrackerCollapsed,
   toggleQuestTrackerCollapsed,
 } from "../resources/questTrackerPref";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -29,21 +31,25 @@ const RING_TYPE_WORLD_TRUTH = 8;
 
 /**
  * Map-local coords (parent = SceneView.root, already at WORLD_TOP_H).
- * Clear status strip (修/拍/… @ y=4, 17px) — same band as WorldHud PARTY_Y0.
+ * Clear status strip flush under exp — same band as WorldHud PARTY_Y0.
  * When party strip is visible, shift down by mateCount * PARTY_SLOT_H (not right).
- * Toggle sits above the task plate.
+ * Toggle and task plate share the same top Y (thin vertical rail on the left).
  */
-const STRIP_BOTTOM = 4 + 17;
+const STRIP_BOTTOM = MAP_STATUS_STRIP_H;
 const TRACKER_Y0 = STRIP_BOTTOM + 2;
-const TRACKER_X0 = 4;
-const TRACKER_MAX_W = 118;
+const TRACKER_X0 = 1;
+/** Panel body width — a bit wider so it sits closer to the status strip. */
+const TRACKER_MAX_W = 130;
 const MAX_TASKS = 4;
-const TOGGLE_SIZE = 17;
-const TOGGLE_GAP = 3;
-/** Panel fill / stroke — keep readable but less occlusive on the map. */
-const PANEL_FILL_ALPHA = 0.3;
-const PANEL_STROKE_ALPHA = 0.45;
-const PANEL_INNER_ALPHA = 0.32;
+/** Thin vertical rail — full panel height, left of the task plate. */
+const TOGGLE_W = 8;
+const TOGGLE_GAP = 2;
+/** Collapsed rail height when content size is not yet known. */
+const TOGGLE_MIN_H = 28;
+/** Semi-transparent plate — 50% fill so the map still shows through. */
+const PANEL_FILL_ALPHA = 0.5;
+const PANEL_STROKE_ALPHA = 0.55;
+const PANEL_INNER_ALPHA = 0.4;
 
 /** Smaller than map HUD UC3 (14→10). */
 const TEXT_SCALE = 10 / UC3_CELL;
@@ -222,22 +228,21 @@ export class QuestTrackerOverlay extends Container {
   private partyOffsetY = 0;
   /** Extra map-local Y under 比武计时条 (0 when ArenaHud hidden). */
   private arenaOffsetY = 0;
+  /** Last drawn panel height — drives the vertical toggle strip. */
+  private panelH = TOGGLE_MIN_H;
 
   constructor() {
     super();
     this.visible = false;
     this.eventMode = "static";
-    // Same band as status strip badges (SceneView.root).
-    this.zIndex = 20;
+    // Same band as map-corner status strip (SceneView STATUS_STRIP_Z) — above nameplates.
+    this.zIndex = 100_001;
     this.sortableChildren = true;
 
     this.toggle.zIndex = 2;
     this.toggle.eventMode = "static";
     this.toggle.cursor = "pointer";
-    this.toggle.hitArea = {
-      contains: (px: number, py: number) =>
-        px >= 0 && py >= 0 && px <= TOGGLE_SIZE && py <= TOGGLE_SIZE,
-    };
+    this.syncToggleHitArea();
     this.toggle.on("pointertap", (e) => {
       e.stopPropagation();
       this.collapsed = toggleQuestTrackerCollapsed();
@@ -252,6 +257,16 @@ export class QuestTrackerOverlay extends Container {
     this.addChild(this.content, this.toggle);
     this.position.set(TRACKER_X0, TRACKER_Y0);
     this.mountToggleArt();
+  }
+
+  /**
+   * Force collapsed (e.g. after account login). Player must tap the strip to expand.
+   */
+  collapseForLogin(): void {
+    setQuestTrackerCollapsed(true);
+    this.collapsed = true;
+    this.mountToggleArt();
+    this.applyVisibility();
   }
 
   /** Only show on the interactive world map band. */
@@ -300,38 +315,48 @@ export class QuestTrackerOverlay extends Container {
     this.content.visible = show && !this.collapsed;
   }
 
+  private syncToggleHitArea(): void {
+    const h = Math.max(TOGGLE_MIN_H, this.panelH);
+    this.toggle.hitArea = {
+      contains: (px: number, py: number) =>
+        px >= 0 && py >= 0 && px <= TOGGLE_W && py <= h,
+    };
+  }
+
   private mountToggleArt(): void {
     this.toggle.removeChildren().forEach((c) => {
       c.destroy({ children: true });
     });
+    const h = Math.max(TOGGLE_MIN_H, this.panelH);
+    this.syncToggleHitArea();
     // pointRight = expand affordance when collapsed
     const pointRight = this.collapsed;
-    const fill = pointRight ? 0x182818 : 0x281818;
-    const border = pointRight ? 0xb8e8b0 : 0xe8c8b0;
+    const fill = pointRight ? 0x142414 : 0x241414;
+    const border = pointRight ? 0xb0e0a8 : 0xe0c0a8;
     const ink = pointRight ? 0xc8f0c0 : 0xf0d8c0;
     const plate = new Graphics()
-      .rect(0, 0, TOGGLE_SIZE, TOGGLE_SIZE)
-      .fill({ color: fill })
-      .stroke({ width: 1, color: border });
+      .roundRect(0, 0, TOGGLE_W, h, 2)
+      .fill({ color: fill, alpha: 1 })
+      .stroke({ width: 1, color: border, alpha: 0.95 });
     this.toggle.addChild(plate);
 
     const g = new Graphics();
-    const cx = TOGGLE_SIZE / 2;
-    const cy = TOGGLE_SIZE / 2;
+    const cx = TOGGLE_W / 2;
+    const cy = h / 2;
     const drawChevron = (ox: number) => {
       if (pointRight) {
-        g.moveTo(cx + ox - 2.5, cy - 4.5)
-          .lineTo(cx + ox + 1.5, cy)
-          .lineTo(cx + ox - 2.5, cy + 4.5);
+        g.moveTo(cx + ox - 1.2, cy - 3.5)
+          .lineTo(cx + ox + 1.4, cy)
+          .lineTo(cx + ox - 1.2, cy + 3.5);
       } else {
-        g.moveTo(cx + ox + 2.5, cy - 4.5)
-          .lineTo(cx + ox - 1.5, cy)
-          .lineTo(cx + ox + 2.5, cy + 4.5);
+        g.moveTo(cx + ox + 1.2, cy - 3.5)
+          .lineTo(cx + ox - 1.4, cy)
+          .lineTo(cx + ox + 1.2, cy + 3.5);
       }
     };
-    drawChevron(pointRight ? -1.5 : 1.5);
-    drawChevron(pointRight ? 1.5 : -1.5);
-    g.stroke({ width: 1.5, color: ink, join: "miter", cap: "square" });
+    // Single chevron fits the thin rail better than a double mark.
+    drawChevron(0);
+    g.stroke({ width: 1.25, color: ink, join: "miter", cap: "square" });
     this.toggle.addChild(g);
   }
 
@@ -367,16 +392,20 @@ export class QuestTrackerOverlay extends Container {
     clearPointerHits(this.rowHits);
     this.box.clear();
     this.position.x = TRACKER_X0;
-    this.position.y = TRACKER_Y0 + this.partyOffsetY;
+    this.position.y = TRACKER_Y0 + this.partyOffsetY + this.arenaOffsetY;
     this.toggle.position.set(0, 0);
-    /* Task plate below the hide/show toggle. */
-    this.content.position.set(0, TOGGLE_SIZE + TOGGLE_GAP);
+    /* Task plate shares top Y with the hide/show rail (rail on the left). */
+    this.content.position.set(TOGGLE_W + TOGGLE_GAP, 0);
 
-    if (!this.rows.length) return;
+    if (!this.rows.length) {
+      this.panelH = TOGGLE_MIN_H;
+      this.mountToggleArt();
+      return;
+    }
 
     const maxW = Math.min(
       TRACKER_MAX_W,
-      LCD_WIDTH - TRACKER_X0 - 48,
+      LCD_WIDTH - TRACKER_X0 - (TOGGLE_W + TOGGLE_GAP) - 48,
     );
     const textX = PAD_X + ACCENT_W + GAP_AFTER_ACCENT;
     const textW = maxW - textX - PAD_X;
@@ -385,6 +414,9 @@ export class QuestTrackerOverlay extends Container {
       PAD_Y * 2 +
       this.rows.length * blockH +
       Math.max(0, this.rows.length - 1) * (TASK_GAP + DIVIDER_H);
+
+    this.panelH = contentH;
+    this.mountToggleArt();
 
     this.box
       .roundRect(0, 0, maxW, contentH, 3)
@@ -405,13 +437,12 @@ export class QuestTrackerOverlay extends Container {
         .rect(PAD_X, y + 1, ACCENT_W, blockH - 2)
         .fill({ color: accentColor, alpha: 0.9 });
 
-      const progColor =
-        row.progressLabel === "可提交" ? CBE.inkTipGreen : CBE.inkLabel;
+      const progColor = 0xffffff;
       const progW =
         measureUiTextWidth(row.progressLabel, UC3_CELL) * TEXT_SCALE;
       const nameBudget = Math.max(12, textW - progW - 4);
       const nameText = truncateToWidth(row.name, nameBudget);
-      this.addLine(nameText, textX, y, CBE.cream);
+      this.addLine(nameText, textX, y, 0xffffff);
       this.addLine(
         row.progressLabel,
         textX + textW - progW,
@@ -429,7 +460,7 @@ export class QuestTrackerOverlay extends Container {
         ? truncateToWidth(row.sceneLabel, Math.max(10, sceneBudget))
         : "";
       const sub = sceneBit ? `${npcBit} ${sceneBit}` : npcBit;
-      this.addLine(truncateToWidth(sub, textW), textX, y + LINE_H, CBE.inkMint);
+      this.addLine(truncateToWidth(sub, textW), textX, y + LINE_H, 0xffffff);
 
       y += blockH;
       if (i < this.rows.length - 1) {

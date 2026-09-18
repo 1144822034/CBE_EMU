@@ -96,6 +96,20 @@ export class MountPanel extends Container {
     this.labels.push(t);
   }
 
+  private addLabelCentered(
+    text: string,
+    cx: number,
+    cy: number,
+    color: number,
+  ): void {
+    const t = new BitmapLabel();
+    t.anchor.set(0.5, 0.5);
+    t.position.set(Math.round(cx), Math.round(cy));
+    t.show(text, color, { outline: false, smooth: false });
+    this.box.addChild(t);
+    this.labels.push(t);
+  }
+
 
   /** webglcontextrestored: remount paintCbePanel Graphics then redraw. */
   nudgeAfterGpuResume(): void {
@@ -116,6 +130,8 @@ export class MountPanel extends Container {
       box: this.box,
       hits: this.rowHits,
       addLabel: (text, x, y, color) => this.addLabel(text, x, y, color),
+      addLabelCentered: (text, cx, cy, color) =>
+        this.addLabelCentered(text, cx, cy, color),
     };
     paintListShellChrome(ctx, "坐骑", CBE.bgDeep, bounds);
     const listTop = bounds.y + 32;

@@ -11,6 +11,7 @@ import {
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { tryLoadUiTexture } from "./UiAssets";
+import { preferSystemFont } from "../resources/systemFont";
 import type { ServerRow } from "../net/protocol";
 import type { GatewayZoneRow } from "../net/zones";
 import {
@@ -92,6 +93,8 @@ export class TitleScreen extends Container {
   onStartGame: (() => void) | null = null;
   onOpenLogin: (() => void) | null = null;
   onOpenRegister: (() => void) | null = null;
+  /** Register / softkey 返回 → login form (not zone picker). */
+  onBackToLogin: (() => void) | null = null;
   onSubmitLogin: ((user: string, password: string) => void) | null = null;
   onSubmitRegister: ((user: string, password: string) => void) | null = null;
   onSubmitPassword:
@@ -206,6 +209,8 @@ export class TitleScreen extends Container {
       mode === "login" || mode === "register" || mode === "password";
     this.serverLayer.visible = mode === "servers";
     this.zoneLayer.visible = mode === "zones";
+    if (mode === "zones") this.redrawZones();
+    if (mode === "servers") this.redrawServers();
     if (mode === "login" || mode === "register" || mode === "password") {
       if (mode === "login" && this.loginField === "pass2") this.loginField = "user";
       if (mode === "register") this.pass2Value = "";
@@ -277,7 +282,7 @@ export class TitleScreen extends Container {
   setServers(servers: ServerRow[]): void {
     this.servers = servers;
     this.serverCursor = 0;
-    this.redrawServers();
+    if (this.mode === "servers") this.redrawServers();
   }
 
   setZones(zones: GatewayZoneRow[], preferredZoneId = 0): void {
@@ -287,7 +292,7 @@ export class TitleScreen extends Container {
         ? zones.findIndex((z) => z.zoneId === preferredZoneId)
         : -1;
     this.zoneCursor = pref >= 0 ? pref : 0;
-    this.redrawZones();
+    if (this.mode === "zones") this.redrawZones();
   }
 
   setStatus(text: string): void {
@@ -434,7 +439,7 @@ export class TitleScreen extends Container {
 
   cancelLogin(): void {
     if (this.mode === "register") {
-      this.onOpenLogin?.();
+      this.onBackToLogin?.();
       return;
     }
     if (this.mode === "password") {
@@ -640,7 +645,9 @@ export class TitleScreen extends Container {
     const startY = 224;
     const rowH = 26;
 
+    // UC3 / 点阵：用 title2.gif 烘焙格。系统宋体：DOM 叠字仿描边高亮。
     const useSheet =
+      !preferSystemFont() &&
       !!this.menuSheet &&
       this.menuItems.length === 4 &&
       this.menuSheet.width === MENU_CELL_W * 2 &&
@@ -673,7 +680,17 @@ export class TitleScreen extends Container {
         this.menuLayer.addChild(spr);
         this.menuSprites.push(spr);
       } else {
-        const t = makePixelText(label, 14, hi ? CBE.menuHi : CBE.ink);
+        // Songti DOM: gold highlight (not orange menuHi) + bold to match GIF weight.
+        const fill = hi ? 0xffd700 : CBE.ink;
+        const stroke = hi ? 0x6a4010 : 0x000000;
+        const t = new BitmapLabel();
+        void t.setText(label, fill, {
+          fontSize: 16,
+          outline: true,
+          outlineColor: stroke,
+          outlineThin: true,
+          bold: true,
+        });
         t.anchor.set(0.5, 0);
         t.position.set(LCD_WIDTH / 2, y);
         t.eventMode = "static";
@@ -688,6 +705,13 @@ export class TitleScreen extends Container {
         this.menuLabels.push(t);
       }
     });
+  }
+
+  /** Font switch: rebuild splash menu (GIF vs Songti DOM). */
+  refreshAfterFontChange(): void {
+    if (this.mode === "splash" || this.menuLayer.visible) {
+      this.redrawMenu();
+    }
   }
 
   private buildLoginChrome(): void {
@@ -824,27 +848,34 @@ export class TitleScreen extends Container {
     if (changingPw) {
       const backBtn = makePixelText("返回游戏", 12, CBE.inkTip);
       backBtn.position.set(boxX + 12, linkY);
-      backBtn.eventMode = "static";
-      backBtn.cursor = "pointer";
-      backBtn.on("pointertap", () => this.onCancelPassword?.());
       this.loginLayer.addChild(backBtn);
       this.loginLabels.push(backBtn);
+      // Songti DOM labels have no canvas glyph hit — use an explicit target.
+      this.loginHits.push(
+        attachRowPointerHit(this.loginLayer, boxX + 8, linkY - 2, boxW - 16, 18, () => {
+          this.onCancelPassword?.();
+        }),
+      );
     } else if (!registering) {
       const regBtn = makePixelText("没有账号？点此注册", 12, CBE.inkTip);
       regBtn.position.set(boxX + 12, linkY);
-      regBtn.eventMode = "static";
-      regBtn.cursor = "pointer";
-      regBtn.on("pointertap", () => this.onOpenRegister?.());
       this.loginLayer.addChild(regBtn);
       this.loginLabels.push(regBtn);
+      this.loginHits.push(
+        attachRowPointerHit(this.loginLayer, boxX + 8, linkY - 2, boxW - 16, 18, () => {
+          this.onOpenRegister?.();
+        }),
+      );
     } else {
       const backLogin = makePixelText("已有账号？返回登录", 12, CBE.inkTip);
       backLogin.position.set(boxX + 12, linkY);
-      backLogin.eventMode = "static";
-      backLogin.cursor = "pointer";
-      backLogin.on("pointertap", () => this.onOpenLogin?.());
       this.loginLayer.addChild(backLogin);
       this.loginLabels.push(backLogin);
+      this.loginHits.push(
+        attachRowPointerHit(this.loginLayer, boxX + 8, linkY - 2, boxW - 16, 18, () => {
+          this.onBackToLogin?.();
+        }),
+      );
     }
     this.syncImeValues(false);
     // HTML overlays sit on the boxes so phone taps open the soft keyboard.
@@ -909,6 +940,9 @@ export class TitleScreen extends Container {
   }
 
   private buildServerChrome(): void {
+    for (const c of [...this.serverLayer.children]) {
+      c.destroy({ children: true });
+    }
     this.serverLayer.removeChildren();
     this.serverLayer.addChild(
       new Graphics().rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgDeep }),
@@ -972,6 +1006,9 @@ export class TitleScreen extends Container {
   }
 
   private buildZoneChrome(): void {
+    for (const c of [...this.zoneLayer.children]) {
+      c.destroy({ children: true });
+    }
     this.zoneLayer.removeChildren();
     this.zoneLayer.addChild(
       new Graphics().rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgDeep }),

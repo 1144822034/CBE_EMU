@@ -784,8 +784,8 @@ static void vm_lcd_draw_line(int x0, int y0, int x1, int y1, u16 color)
 
     while (1)
     {
-        if (x0 >= 0 && x0 < LCD_WIDTH && y0 >= 0 && y0 < LCD_HEIGHT)
-            ((u16 *)Lcd_Cache_Buffer)[y0 * LCD_PITCH + x0] = color;
+        if (x0 >= 0 && x0 < LcdGetNativeWidth() && y0 >= 0 && y0 < LcdGetNativeHeight())
+            ((u16 *)Lcd_Cache_Buffer)[y0 * LcdGetScreenPitchPixels() + x0] = color;
         if (x0 == x1 && y0 == y1)
             break;
         int e2 = err * 2;
@@ -924,15 +924,15 @@ static int vm_lcd_draw_image_to_screen(u32 imageInfo, int dstX, int dstY)
         w = srcW - srcX;
     if (srcY + h > srcH)
         h = srcH - srcY;
-    if (dstX + w > LCD_WIDTH)
-        w = LCD_WIDTH - dstX;
-    if (dstY + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - dstY;
+    if (dstX + w > LcdGetNativeWidth())
+        w = LcdGetNativeWidth() - dstX;
+    if (dstY + h > LcdGetNativeHeight())
+        h = LcdGetNativeHeight() - dstY;
     if (w <= 0 || h <= 0)
         return 1;
 
     int srcPitch = vm_lcd_image_pitch_bytes(srcW);
-    int dstPitch = LCD_PITCH * PIXEL_PER_BYTE;
+    int dstPitch = LcdGetScreenPitchPixels() * PIXEL_PER_BYTE;
     int copyBytes = w * PIXEL_PER_BYTE;
     if (copyBytes > (int)sizeof(rowBuf))
         return 0;
@@ -1481,6 +1481,94 @@ static void vm_config_program_mapping(void)
         Program_ROM_Mapped_Size = size_16mb;
     else
         Program_ROM_Mapped_Size = vm_round_up_page(imageEnd - Program_ROM_Address);
+}
+
+/*
+ * BE RWPI softfloat resolves FP status via:
+ *   ip=*[r9]; ip=*[ip]; return ip + literal
+ * (pattern e599c000 e59cc000 ..., literal at +0x14). BSS leaves *[r9]==0;
+ * overwriting slot0 with a self-pointer breaks sb+0 module object users
+ * (DF_PictureLibrary assert). Instead, when slot0 is still 0, return
+ * Program_Data_Address + literal so heaven_03.sce FP paths do not deref NULL.
+ */
+static u32 g_rwpi_fp_status_helper = 0;
+static u32 g_rwpi_fp_status_literal = 0;
+static uc_hook g_rwpi_fp_status_hook = 0;
+
+static void vm_cbe_scan_rwpi_fp_status_helper(void)
+{
+    static const u8 kPat[] = {
+        0xe5, 0x99, 0xc0, 0x00, 0xe5, 0x9c, 0xc0, 0x00, 0xe5, 0x9f, 0x00, 0x04,
+        0xe0, 0x80, 0x00, 0x0c, 0xe1, 0x2f, 0xff, 0x1e};
+    const u8 *code;
+    u32 codeLen;
+    u32 i;
+
+    g_rwpi_fp_status_helper = 0;
+    g_rwpi_fp_status_literal = 0;
+    if (!g_cbeInfo.isBiggianProgram || g_cbeFileBuffer == NULL)
+        return;
+    code = g_cbeFileBuffer + g_cbeInfo.codeOffset;
+    codeLen = g_cbeInfo.codeLen;
+    if (codeLen < sizeof(kPat) + 4)
+        return;
+    for (i = 0; i + sizeof(kPat) + 4 <= codeLen; i += 2)
+    {
+        if (memcmp(code + i, kPat, sizeof(kPat)) != 0)
+            continue;
+        g_rwpi_fp_status_helper = Program_ROM_Address + i;
+        g_rwpi_fp_status_literal =
+            ((u32)code[i + 20] << 24) | ((u32)code[i + 21] << 16) |
+            ((u32)code[i + 22] << 8) | (u32)code[i + 23];
+        printf("[info][cbe] rwpi fp-status helper=%08x literal=%08x\n",
+               g_rwpi_fp_status_helper, g_rwpi_fp_status_literal);
+        return;
+    }
+}
+
+static void hook_rwpi_fp_status_helper(uc_engine *uc, uint64_t address,
+                                       uint32_t size, void *user_data)
+{
+    u32 r9 = 0;
+    u32 slot0;
+    u32 r0;
+    u32 lr = 0;
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (g_rwpi_fp_status_helper == 0 || Program_Data_Address == 0)
+        return;
+    uc_reg_read(uc, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        return;
+    slot0 = vm_get_var(r9);
+    if (slot0 != 0)
+        return; /* relocated: let guest softfloat run */
+    r0 = Program_Data_Address + g_rwpi_fp_status_literal;
+    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    uc_reg_write(uc, UC_ARM_REG_R0, &r0);
+    uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+}
+
+static void vm_cbe_install_rwpi_fp_status_helper_hook(uc_engine *uc)
+{
+    uc_err err;
+    if (uc == NULL || g_rwpi_fp_status_helper == 0)
+        return;
+    if (g_rwpi_fp_status_hook != 0)
+    {
+        uc_hook_del(uc, g_rwpi_fp_status_hook);
+        g_rwpi_fp_status_hook = 0;
+    }
+    err = uc_hook_add(uc, &g_rwpi_fp_status_hook, UC_HOOK_CODE,
+                      hook_rwpi_fp_status_helper, NULL, g_rwpi_fp_status_helper,
+                      g_rwpi_fp_status_helper);
+    if (err != UC_ERR_OK)
+    {
+        printf("[warn][cbe] rwpi fp-status hook failed: %u (%s)\n", err,
+               uc_strerror(err));
+        g_rwpi_fp_status_hook = 0;
+    }
 }
 
 /* initMtkSimalator 里 IDA XRAM 后备缓冲首址，供 Find* 在映像溢出段扫 magic */
@@ -3443,6 +3531,29 @@ static u32 vm_net_queue_http_get_mock_response(u32 urlPtr, u32 callback, u32 con
         body = wpayPaySuccessBody;
         bodyLen = (u32)sizeof(wpayPaySuccessBody);
     }
+    else if (strstr(url, "SinAngelCongfig") != NULL)
+    {
+        /*
+         * 原罪天使 title FSM (R9+0x2008+2): after HTTP get, state=7 waits for
+         * Congfig validation (0x10014d8 → 0x100691c).  691c requires size>4 and
+         * a matching header checksum.  defaultBody={1} matches the shipped
+         * offline stub but FAILS that check, so state stays 7 forever while the
+         * input dispatcher (0x1002714) spins — client_out "卡加载" / wpay_trace
+         * game_pay_* spam (Castlevania PC labels, not real pay).
+         *
+         * Offline contract: local open of an invalid stub makes 6baa return 2
+         * and 0fa8 sets state=0 (skip download).  Live CDN is dead; mock HTTP
+         * *failure* (callback event 2 → flag=2 → state 8 → timer drain) rather
+         * than a fake success body.  Prefer resolving/seeding the stub so HTTP
+         * is never requested (see vm_file_try_resolve_sinangel_resource_path).
+         */
+        scheduler_queue_net_event(2, 0, 0, 0, callback, context);
+        printf("[info][network] http_get_mock url=%s events=2 cb=%08x ctx=%08x\n",
+               url[0] ? url : "-", callback, context);
+        vm_autotest_note("http_get_mock url=%s events=2 cb=%08x ctx=%08x\n",
+                         url[0] ? url : "-", callback, context);
+        return 1;
+    }
     else if (strstr(url, "wmix.kvbar.com") != NULL ||
              strstr(url, "/wmix/") != NULL)
     {
@@ -3817,6 +3928,9 @@ static void vm_input_enqueue_utf8_text(const char *text)
 
 static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
     if (x < 0)
     {
         w += x;
@@ -3827,16 +3941,16 @@ static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
         h += y;
         y = 0;
     }
-    if (x + w > LCD_WIDTH)
-        w = LCD_WIDTH - x;
-    if (y + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - y;
+    if (x + w > screenW)
+        w = screenW - x;
+    if (y + h > screenH)
+        h = screenH - y;
     if (w <= 0 || h <= 0)
         return;
 
     for (int row = 0; row < h; ++row)
     {
-        u32 off = (y + row) * LCD_WIDTH + x;
+        u32 off = (y + row) * pitch + x;
         for (int col = 0; col < w; ++col)
             ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
     }
@@ -3844,6 +3958,9 @@ static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
 
 static void vm_lcd_sync_cache_rect_to_vm(int x, int y, int w, int h)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
     if (x < 0)
     {
         w += x;
@@ -3854,22 +3971,25 @@ static void vm_lcd_sync_cache_rect_to_vm(int x, int y, int w, int h)
         h += y;
         y = 0;
     }
-    if (x + w > LCD_WIDTH)
-        w = LCD_WIDTH - x;
-    if (y + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - y;
+    if (x + w > screenW)
+        w = screenW - x;
+    if (y + h > screenH)
+        h = screenH - y;
     if (w <= 0 || h <= 0)
         return;
 
     for (int row = 0; row < h; ++row)
     {
-        u32 off = (y + row) * LCD_WIDTH + x;
+        u32 off = (y + row) * pitch + x;
         uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
     }
 }
 
 static void vm_lcd_sync_vm_rect_to_cache(int x, int y, int w, int h)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
     if (x < 0)
     {
         w += x;
@@ -3880,16 +4000,16 @@ static void vm_lcd_sync_vm_rect_to_cache(int x, int y, int w, int h)
         h += y;
         y = 0;
     }
-    if (x + w > LCD_WIDTH)
-        w = LCD_WIDTH - x;
-    if (y + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - y;
+    if (x + w > screenW)
+        w = screenW - x;
+    if (y + h > screenH)
+        h = screenH - y;
     if (w <= 0 || h <= 0)
         return;
 
     for (int row = 0; row < h; ++row)
     {
-        u32 off = (y + row) * LCD_WIDTH + x;
+        u32 off = (y + row) * pitch + x;
         uc_mem_read(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
     }
 }
@@ -5463,7 +5583,12 @@ static void vm_frame_delay(u32 ms) { SDL_Delay(ms); }
 
 static void vm_lcd_update_with_input_overlay(void)
 {
-    uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
+    int pitch = LcdGetScreenPitchPixels();
+    int screenH = LcdGetNativeHeight();
+    u32 bytes = (u32)pitch * (u32)screenH * (u32)PIXEL_PER_BYTE;
+    if (bytes > (u32)LCD_WIDTH * (u32)LCD_HEIGHT * (u32)PIXEL_PER_BYTE)
+        bytes = (u32)LCD_WIDTH * (u32)LCD_HEIGHT * (u32)PIXEL_PER_BYTE;
+    uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, bytes);
 #ifndef CBE_PLATFORM_NO_WINDOW
     vm_input_draw_overlay();
 #endif
@@ -6779,14 +6904,20 @@ void keyEvent(int type, int key)
 // 1按下3弹起
 void mouseEvent(int type, int x, int y)
 {
+    int maxX = LcdGetNativeWidth() - 1;
+    int maxY = LcdGetNativeHeight() - 1;
+    if (maxX < 0)
+        maxX = 0;
+    if (maxY < 0)
+        maxY = 0;
     if (x < 0)
         x = 0;
-    else if (x > 239)
-        x = 239;
+    else if (x > maxX)
+        x = maxX;
     if (y < 0)
         y = 0;
-    else if (y > 399)
-        y = 399;
+    else if (y > maxY)
+        y = maxY;
 
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
@@ -10312,6 +10443,8 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
                g_cbeInfo.codeOffset, Program_ROM_Address);
         uc_mem_write(MTK, Program_Data_Address,
                      fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        vm_cbe_scan_rwpi_fp_status_helper();
+        vm_cbe_install_rwpi_fp_status_helper_hook(MTK);
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
         vm_set_var(VM_Manager_Table_ADDRESS + 8, changeTmp3);
@@ -10384,6 +10517,8 @@ static void vm_reset_runtime_state_for_restart(void)
     {
         uc_mem_write(MTK, Program_ROM_Address, g_cbeFileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
         uc_mem_write(MTK, Program_Data_Address, g_cbeFileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        vm_cbe_scan_rwpi_fp_status_helper();
+        vm_cbe_install_rwpi_fp_status_helper_hook(MTK);
     }
 
     vm_close_open_files_for_restart();
@@ -12481,6 +12616,8 @@ int main(int argc, char *args[])
         // 数据段起始位置放这里
         // codeSize = headerInt2 + headerInt4
         uc_mem_write(MTK, Program_Data_Address, fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        vm_cbe_scan_rwpi_fp_status_helper();
+        vm_cbe_install_rwpi_fp_status_helper_hook(MTK);
         printf("Data In Rom Address:0x%x - 0x%x\n", Program_Data_Address, Program_Data_Address + g_cbeInfo.headerInt4);
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
@@ -14527,32 +14664,35 @@ static bool hook_vm_manager_lcd_func(u32 address)
             h = vm_lcd_coord_from_reg(rectH);
         }
         u16 color = (u16)rectColor;
-        if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
-            u16 *rowBuf = (u16 *)cbeTextString;
-            for (int col = 0; col < w; col++)
-                rowBuf[col] = color;
-            u32 top = y * LCD_WIDTH + x;
-            uc_mem_write(MTK, VM_screenImage_ADDRESS + top * 2, rowBuf, w * 2);
-            for (int col = 0; col < w; col++)
-                ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
-            if (h > 1)
+            int screenPitch = LcdGetScreenPitchPixels();
+            if (vm_lcd_clip_rect(&x, &y, &w, &h, LcdGetNativeWidth(), LcdGetNativeHeight()))
             {
-                u32 bottom = (y + h - 1) * LCD_WIDTH + x;
-                uc_mem_write(MTK, VM_screenImage_ADDRESS + bottom * 2, rowBuf, w * 2);
+                u16 *rowBuf = (u16 *)cbeTextString;
                 for (int col = 0; col < w; col++)
-                    ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
-            }
-            for (int row = 1; row < h - 1; row++)
-            {
-                u32 left = (y + row) * LCD_WIDTH + x;
-                ((u16 *)Lcd_Cache_Buffer)[left] = color;
-                uc_mem_write(MTK, VM_screenImage_ADDRESS + left * 2, &color, 2);
-                if (w > 1)
+                    rowBuf[col] = color;
+                u32 top = y * screenPitch + x;
+                uc_mem_write(MTK, VM_screenImage_ADDRESS + top * 2, rowBuf, w * 2);
+                for (int col = 0; col < w; col++)
+                    ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
+                if (h > 1)
                 {
-                    u32 right = left + w - 1;
-                    ((u16 *)Lcd_Cache_Buffer)[right] = color;
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + right * 2, &color, 2);
+                    u32 bottom = (y + h - 1) * screenPitch + x;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + bottom * 2, rowBuf, w * 2);
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
+                }
+                for (int row = 1; row < h - 1; row++)
+                {
+                    u32 left = (y + row) * screenPitch + x;
+                    ((u16 *)Lcd_Cache_Buffer)[left] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + left * 2, &color, 2);
+                    if (w > 1)
+                    {
+                        u32 right = left + w - 1;
+                        ((u16 *)Lcd_Cache_Buffer)[right] = color;
+                        uc_mem_write(MTK, VM_screenImage_ADDRESS + right * 2, &color, 2);
+                    }
                 }
             }
         }
@@ -14575,8 +14715,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
             dstPixels = VM_screenImage_ADDRESS;
-            dstW = LCD_WIDTH;
-            dstH = LCD_HEIGHT;
+            dstW = (u16)LcdGetNativeWidth();
+            dstH = (u16)LcdGetNativeHeight();
         }
         int x = vm_lcd_coord_from_reg(tmp1);
         int y = vm_lcd_coord_from_reg(tmp2);
@@ -14590,14 +14730,14 @@ static bool hook_vm_manager_lcd_func(u32 address)
                 rowBuf[col] = color;
             u32 top = y * dstW + x;
             uc_mem_write(MTK, dstPixels + top * 2, rowBuf, w * 2);
-            if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+            if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                 for (int col = 0; col < w; col++)
                     ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
             if (h > 1)
             {
                 u32 bottom = (y + h - 1) * dstW + x;
                 uc_mem_write(MTK, dstPixels + bottom * 2, rowBuf, w * 2);
-                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                     for (int col = 0; col < w; col++)
                         ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
             }
@@ -14605,13 +14745,13 @@ static bool hook_vm_manager_lcd_func(u32 address)
             {
                 u32 left = (y + row) * dstW + x;
                 uc_mem_write(MTK, dstPixels + left * 2, &color, 2);
-                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                     ((u16 *)Lcd_Cache_Buffer)[left] = color;
                 if (w > 1)
                 {
                     u32 right = left + w - 1;
                     uc_mem_write(MTK, dstPixels + right * 2, &color, 2);
-                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                         ((u16 *)Lcd_Cache_Buffer)[right] = color;
                 }
             }
@@ -14640,15 +14780,18 @@ static bool hook_vm_manager_lcd_func(u32 address)
             w = vm_lcd_coord_from_reg(tmp3);
             h = vm_lcd_coord_from_reg(fillH);
         }
-        if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
-            u16 color = (u16)fillColor;
-            for (int row = 0; row < h; row++)
+            int screenPitch = LcdGetScreenPitchPixels();
+            if (vm_lcd_clip_rect(&x, &y, &w, &h, LcdGetNativeWidth(), LcdGetNativeHeight()))
             {
-                u32 off = (y + row) * LCD_WIDTH + x;
-                for (int col = 0; col < w; col++)
-                    ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
-                uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                u16 color = (u16)fillColor;
+                for (int row = 0; row < h; row++)
+                {
+                    u32 off = (y + row) * screenPitch + x;
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                }
             }
         }
         vm_set_call_result(1);
@@ -14671,15 +14814,18 @@ static bool hook_vm_manager_lcd_func(u32 address)
             int y = vm_lcd_coord_from_reg(tmp1);
             int w = vm_lcd_coord_from_reg(tmp2);
             int h = vm_lcd_coord_from_reg(tmp3);
-            if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
             {
-                u16 color = (u16)fillH;
-                for (int row = 0; row < h; row++)
+                int screenPitch = LcdGetScreenPitchPixels();
+                if (vm_lcd_clip_rect(&x, &y, &w, &h, LcdGetNativeWidth(), LcdGetNativeHeight()))
                 {
-                    u32 off = (y + row) * LCD_WIDTH + x;
-                    for (int col = 0; col < w; col++)
-                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                    u16 color = (u16)fillH;
+                    for (int row = 0; row < h; row++)
+                    {
+                        u32 off = (y + row) * screenPitch + x;
+                        for (int col = 0; col < w; col++)
+                            ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                        uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                    }
                 }
             }
             vm_set_call_result(1);
@@ -14694,8 +14840,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
             dstPixels = VM_screenImage_ADDRESS;
-            dstW = LCD_WIDTH;
-            dstH = LCD_HEIGHT;
+            dstW = (u16)LcdGetNativeWidth();
+            dstH = (u16)LcdGetNativeHeight();
         }
         int x = vm_lcd_coord_from_reg(tmp1);
         int y = vm_lcd_coord_from_reg(tmp2);
@@ -14710,7 +14856,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
                 u32 off = (y + row) * dstW + x;
                 for (int col = 0; col < w; col++)
                     rowBuf[col] = color;
-                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                 {
                     for (int col = 0; col < w; col++)
                         ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
@@ -15902,15 +16048,17 @@ static u32 vm_ctrl_draw_softkey_bar(u32 imageInfo, u32 leftPtr, u32 centerPtr, u
     u8 left[128];
     u8 center[128];
     u8 right[128];
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
     int barH = vm_ctrl_image_height(imageInfo, 27);
     int y;
 
     if (imageInfo)
-        vm_lcd_draw_image_to_screen(imageInfo, 0, LCD_HEIGHT - barH);
+        vm_lcd_draw_image_to_screen(imageInfo, 0, screenH - barH);
 
-    y = LCD_HEIGHT - barH + (barH - getFontHeight()) / 2;
+    y = screenH - barH + (barH - getFontHeight()) / 2;
     if (y < 0)
-        y = LCD_HEIGHT - getFontHeight();
+        y = screenH - getFontHeight();
 
     vm_ctrl_read_text(leftPtr, ucs2, left, sizeof(left));
     vm_ctrl_read_text(centerPtr, ucs2, center, sizeof(center));
@@ -15924,12 +16072,12 @@ static u32 vm_ctrl_draw_softkey_bar(u32 imageInfo, u32 leftPtr, u32 centerPtr, u
     if (center[0])
     {
         int w = vm_lcd_measure_current_string_render_width(center);
-        vm_ctrl_draw_text(center, (LCD_WIDTH - w) / 2, y, color);
+        vm_ctrl_draw_text(center, (screenW - w) / 2, y, color);
     }
     if (right[0])
     {
         int w = vm_lcd_measure_current_string_render_width(right);
-        vm_ctrl_draw_text(right, LCD_WIDTH - 11 - w, y, color);
+        vm_ctrl_draw_text(right, screenW - 11 - w, y, color);
     }
     return 1;
 }
@@ -15939,11 +16087,13 @@ static u32 vm_ctrl_tp_press_softkey_bar(u32 imageInfo, u32 textPtr, u32 xReg, u3
     u8 text[128];
     int x = vm_lcd_coord_from_reg(xReg);
     int y = vm_lcd_coord_from_reg(yReg);
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
     int barH = vm_ctrl_image_height(imageInfo, 27);
-    int top = LCD_HEIGHT - barH;
-    int bottom = LCD_HEIGHT - 1;
+    int top = screenH - barH;
+    int bottom = screenH - 1;
     int left = 0;
-    int right = LCD_WIDTH - 1;
+    int right = screenW - 1;
     int textW;
 
     if (textPtr == 0)
@@ -15960,13 +16110,13 @@ static u32 vm_ctrl_tp_press_softkey_bar(u32 imageInfo, u32 textPtr, u32 xReg, u3
     }
     else if (pos == 1)
     {
-        left = (230 - textW) / 2;
+        left = (screenW - 10 - textW) / 2;
         right = left + textW + 10;
     }
     else if (pos == 2)
     {
-        left = LCD_WIDTH - 11 - textW;
-        right = LCD_WIDTH - 1;
+        left = screenW - 11 - textW;
+        right = screenW - 1;
     }
 
     return (x >= left && x <= right && y >= top && y <= bottom) ? 1 : 0;

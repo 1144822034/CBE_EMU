@@ -4323,7 +4323,7 @@ typedef enum
 } vm_net_mock_monster_family;
 
 #define VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX 0x7fffffffu
-#define VM_NET_MOCK_MONSTER_DROP_MAX 8u
+#define VM_NET_MOCK_MONSTER_DROP_MAX 32u
 #define VM_NET_MOCK_MONSTER_CATALOG_MAX 192u
 #define VM_NET_MOCK_MONSTER_CUSTOM_MAX 64u
 
@@ -12879,7 +12879,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
         itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
         itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
-        itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
+        itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
+        itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID)
     {
         u32 freeSlots = role->backpackCapacity > itemCount
                             ? (u32)role->backpackCapacity - itemCount
@@ -12893,7 +12894,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                            itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
                            itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
                            itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
-                           itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID
+                           itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
+                           itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID
                        ? VM_NET_MOCK_GOLD_SCROLL_DURABILITY
                        : VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY);
         const char *saveReason =
@@ -12911,15 +12913,18 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                    ? "backpack-add-rename-card"
                                                    : (itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID
                                                           ? "backpack-add-gold-scroll"
-                                                          : "backpack-add-warehouse-pass"))))));
+                                                          : (itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID
+                                                                 ? "backpack-add-crystal-extract-stone"
+                                                                 : "backpack-add-warehouse-pass")))))));
 
-        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得：耐久1，叠加入已有堆或新行。 */
+        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得 / 玄晶提炼石：耐久1，叠加入已有堆或新行。 */
         if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
             itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
             itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
             itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
             itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
-            itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID)
+            itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
+            itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID)
         {
             vm_net_mock_backpack_item_state *existing =
                 vm_net_mock_role_find_backpack_item(role, itemId, 0);

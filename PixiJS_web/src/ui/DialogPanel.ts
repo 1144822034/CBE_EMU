@@ -1,6 +1,6 @@
 import { Container, Graphics } from "pixi.js";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, makePixelText, paintCbePanel } from "./constants";
-import { BitmapLabel, wrapChars } from "./BitmapLabel";
+import { BitmapLabel, UI_FONT_SIZE, wrapChars } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
@@ -186,10 +186,7 @@ export class DialogPanel extends Container {
 
     const titleText =
       pages > 1 ? `${this.dialog.title} ${page + 1}/${pages}` : this.dialog.title;
-    const title = makePixelText(titleText, 13, CBE.ink);
-    title.position.set(x + 10, y + 8);
-    this.addChild(title);
-    this.labels.push(title);
+    this.addDialogTitle(titleText, y + 8);
 
     const bodyLines = wrapChars(this.dialog.body).slice(0, 8);
     bodyLines.forEach((line, i) => {
@@ -260,10 +257,7 @@ export class DialogPanel extends Container {
     const h = 220;
     paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
-    const title = makePixelText("购买药品", 13, CBE.ink);
-    title.position.set(x + 10, y + 8);
-    this.addChild(title);
-    this.labels.push(title);
+    this.addDialogTitle("购买药品", y + 8);
 
     const total = s.unitPrice * s.qty;
     const lines = [
@@ -293,5 +287,15 @@ export class DialogPanel extends Container {
     this.rowHits.push(
       attachRowPointerHit(this, x + 24, btnY, w - 48, 24, () => this.confirm()),
     );
+  }
+
+  /** Match SystemPanel / bag popup titles: centered, default UI size (Songti→14). */
+  private addDialogTitle(text: string, y: number): void {
+    const title = makePixelText(text, UI_FONT_SIZE, CBE.ink);
+    title.eventMode = "none";
+    title.anchor.set(0.5, 0);
+    title.position.set(LCD_WIDTH / 2, y);
+    this.addChild(title);
+    this.labels.push(title);
   }
 }

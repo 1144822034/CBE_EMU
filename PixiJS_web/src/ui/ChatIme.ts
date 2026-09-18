@@ -88,6 +88,8 @@ export class ChatIme {
     this.input.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter") {
         ev.preventDefault();
+        // Stop bubble to window keydown (main handleOk → confirm again).
+        ev.stopPropagation();
         this.onSubmit?.();
       }
     });

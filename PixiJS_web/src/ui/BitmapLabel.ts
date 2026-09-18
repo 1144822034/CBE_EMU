@@ -1,14 +1,27 @@
-import { Container, Sprite, Text, Texture } from "pixi.js";
+import { Container, Sprite, Text, Texture, Rectangle } from "pixi.js";
 import {
   activeUc3FontUrl,
   loadUc3Font,
   renderUc3ToRgba,
 } from "../resources/uc3Font";
 import {
+  preferSystemFont,
   SYSTEM_FONT_FALLBACK,
   uiFontFamily,
+  activeWebFontFamily,
 } from "../resources/systemFont";
+import { getUc3FontId } from "../resources/uiFontPreference";
 import { rgbaToTexture } from "../render/rgbaTexture";
+import {
+  cssHexColor,
+  ensureLcdDomTextLayer,
+  lcdDomCssScale,
+  lcdDomCssZIndex,
+  lcdDomOccludedByPopup,
+  lcdDomTierFor,
+  registerLcdDomSync,
+  unregisterLcdDomSync,
+} from "./lcdDomText";
 
 /**
  * OS fallback stack for rare non-UC3 paths / HTML softkeys.
@@ -81,6 +94,10 @@ export type LabelTextOpts = {
    * System font hard-bake when `uc3: false`. Default true.
    */
   crisp?: boolean;
+  /**
+   * System / Songti DOM only (UC3 bitmap has no weight). Default false.
+   */
+  bold?: boolean;
 };
 
 /** @deprecated Use LabelTextOpts. */
@@ -207,7 +224,11 @@ export function clearCrispTexCache(): void {
   }
 }
 
-/** Re-bake every live UC3 label after font pack switch. */
+/**
+ * Re-bake every live label after font switch (UC3 pack or CN Medium).
+ * Rebake first, then prune — never destroy textures still on Sprites
+ * (that caused Pixi alphaMode storms / 黑屏).
+ */
 export async function refreshAllUc3Labels(): Promise<void> {
   const jobs: Promise<void>[] = [];
   for (const label of [...liveLabels]) {
@@ -229,12 +250,18 @@ function crispCacheKey(
   maxWidth: number | undefined,
   wordWrap: boolean,
   ss: number,
+  softAa: boolean,
 ): string {
-  return `${text}\0${color.toString(16)}\0${outline ? 1 : 0}\0${outlineColor.toString(16)}\0${outlineThin ? 1 : 0}\0${fontSize}\0${maxWidth ?? ""}\0${wordWrap ? 1 : 0}\0${ss}`;
+  return `${uiFontFamily()}\0${text}\0${color.toString(16)}\0${outline ? 1 : 0}\0${outlineColor.toString(16)}\0${outlineThin ? 1 : 0}\0${fontSize}\0${maxWidth ?? ""}\0${wordWrap ? 1 : 0}\0${ss}\0${softAa ? 1 : 0}`;
 }
 
 function crispSupersample(): number {
   return Math.max(1, Math.min(3, Math.round(lcdDisplayScale)));
+}
+
+/** Integer ss so hard fold lands on LCD pixels (UC3 contract). */
+function cnHardSupersample(): number {
+  return Math.max(2, Math.min(4, Math.round(lcdDisplayScale) || 2));
 }
 
 function cssColor(rgb: number): string {
@@ -242,13 +269,53 @@ function cssColor(rgb: number): string {
 }
 
 /**
- * Hard-edge bake at supersample × lcdDisplayScale, then displayed at 1/ss.
- * Optional neighbor outline for nameplates. Binary alpha + nearest avoids the
- * bold/ghost look of AA Text under CSS `image-rendering: pixelated`.
- *
- * Alphabetic baseline + actualBoundingBox* so CJK tops are not clipped.
+ * Binary coverage fold → opaque LCD pixels (fusion / pixel faces).
  */
-function bakeCrispSystem(
+function foldHardNearest(
+  src: Uint8ClampedArray,
+  sw: number,
+  sh: number,
+  ss: number,
+  cr: number,
+  cg: number,
+  cb: number,
+  coverageFrac = 0.5,
+  inkAlpha = 128,
+): { w: number; h: number; rgba: Uint8ClampedArray } {
+  const dw = Math.max(1, Math.floor(sw / ss));
+  const dh = Math.max(1, Math.floor(sh / ss));
+  const rgba = new Uint8ClampedArray(dw * dh * 4);
+  const cell = ss * ss;
+  const need = Math.max(1, Math.round(cell * coverageFrac));
+  for (let y = 0; y < dh; y++) {
+    for (let x = 0; x < dw; x++) {
+      let on = 0;
+      for (let oy = 0; oy < ss; oy++) {
+        const sy = y * ss + oy;
+        if (sy >= sh) break;
+        const row = sy * sw;
+        for (let ox = 0; ox < ss; ox++) {
+          const sx = x * ss + ox;
+          if (sx >= sw) break;
+          if (src[(row + sx) * 4 + 3]! >= inkAlpha) on++;
+        }
+      }
+      const di = (y * dw + x) * 4;
+      if (on >= need) {
+        rgba[di] = cr;
+        rgba[di + 1] = cg;
+        rgba[di + 2] = cb;
+        rgba[di + 3] = 255;
+      }
+    }
+  }
+  return { w: dw, h: dh, rgba };
+}
+
+/**
+ * Web pixel face (JHPixel) → 1-bit LCD texels. Songti uses soft-AA instead.
+ */
+function bakeWebFontHard(
   text: string,
   fontSize: number,
   color: number,
@@ -259,6 +326,8 @@ function bakeCrispSystem(
   wordWrap: boolean,
   ss: number,
 ): Texture {
+  const family = activeWebFontFamily();
+  const weight = "400";
   const lines =
     wordWrap && maxWidth
       ? wrapUiText(text, maxWidth, fontSize)
@@ -270,11 +339,10 @@ function bakeCrispSystem(
       ? OUTLINE_4
       : OUTLINE_8
     : [];
-  // Outline offsets stay in baked px; scale with supersample.
   const outlineStep = ss;
 
   const measure = document.createElement("canvas").getContext("2d")!;
-  measure.font = `400 ${fs}px ${uiFontFamily()}`;
+  measure.font = `${weight} ${fs}px ${family}`;
   measure.textBaseline = "alphabetic";
 
   let textW = 1;
@@ -296,40 +364,187 @@ function bakeCrispSystem(
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, w);
   canvas.height = Math.max(1, h);
-  const ctx = canvas.getContext("2d")!;
-  ctx.font = `400 ${fs}px ${uiFontFamily()}`;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.font = `${weight} ${fs}px ${family}`;
   ctx.textBaseline = "alphabetic";
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = true;
 
-  const ox = pad + (offsets.length ? ss : 0);
+  const ox = Math.round(pad + (offsets.length ? ss : 0));
   if (offsets.length) {
     ctx.fillStyle = cssColor(outlineColor);
     for (const [dx, dy] of offsets) {
       for (let i = 0; i < lines.length; i++) {
-        const baseY = pad + ascent + i * lineH;
-        ctx.fillText(lines[i]!, ox + dx * outlineStep, baseY + dy * outlineStep);
+        const baseY = Math.round(pad + ascent + i * lineH);
+        ctx.fillText(
+          lines[i]!,
+          ox + dx * outlineStep,
+          baseY + dy * outlineStep,
+        );
       }
     }
   }
   ctx.fillStyle = cssColor(color);
   for (let i = 0; i < lines.length; i++) {
-    const baseY = pad + ascent + i * lineH;
+    const baseY = Math.round(pad + ascent + i * lineH);
     ctx.fillText(lines[i]!, ox, baseY);
   }
 
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = img.data;
-  // Mid threshold: low values fatten AA fringes into "bold/ghost" strokes.
-  for (let i = 3; i < d.length; i += 4) {
-    d[i] = d[i]! < 140 ? 0 : 255;
+  const cr = (color >>> 16) & 0xff;
+  const cg = (color >>> 8) & 0xff;
+  const cb = color & 0xff;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3]! < 168) {
+      d[i] = 0;
+      d[i + 1] = 0;
+      d[i + 2] = 0;
+      d[i + 3] = 0;
+    } else {
+      d[i] = cr;
+      d[i + 1] = cg;
+      d[i + 2] = cb;
+      d[i + 3] = 255;
+    }
   }
-  // Buffer upload (same path as UC3) — Texture.from(canvas) can leave a dead
-  // CanvasSource.alphaMode under WebGL pressure and black the LCD.
+  const folded = foldHardNearest(
+    d,
+    canvas.width,
+    canvas.height,
+    ss,
+    cr,
+    cg,
+    cb,
+    0.5,
+    128,
+  );
+  return rgbaToTexture(folded.w, folded.h, folded.rgba, "nearest");
+}
+
+/**
+ * System-font bake via canvas → rgbaToTexture (not Texture.from).
+ * Hard edge for rare non-CN crisp experiments.
+ *
+ * Alphabetic baseline + actualBoundingBox* so CJK tops are not clipped.
+ */
+function bakeCrispSystem(
+  text: string,
+  fontSize: number,
+  color: number,
+  outline: boolean,
+  outlineColor: number,
+  outlineThin: boolean,
+  maxWidth: number | undefined,
+  wordWrap: boolean,
+  ss: number,
+  softAa: boolean,
+): Texture {
+  const lines =
+    wordWrap && maxWidth
+      ? wrapUiText(text, maxWidth, fontSize)
+      : text.split("\n");
+  const fs = Math.max(1, Math.round(fontSize * ss));
+  const pad = (outline ? 3 : 2) * ss;
+  const offsets = outline
+    ? outlineThin
+      ? OUTLINE_4
+      : OUTLINE_8
+    : [];
+  const outlineStep = ss;
+  const family = softAa ? activeWebFontFamily() : uiFontFamily();
+  const weight = softAa ? "400" : "500";
+
+  const measure = document.createElement("canvas").getContext("2d")!;
+  measure.font = `${weight} ${fs}px ${family}`;
+  measure.textBaseline = "alphabetic";
+
+  let textW = 1;
+  let ascent = Math.ceil(fs * 0.9);
+  let descent = Math.ceil(fs * 0.25);
+  for (const line of lines) {
+    const m = measure.measureText(line);
+    textW = Math.max(textW, Math.ceil(m.width));
+    const a = Math.ceil(m.actualBoundingBoxAscent || 0);
+    const d = Math.ceil(m.actualBoundingBoxDescent || 0);
+    if (a > ascent) ascent = a;
+    if (d > descent) descent = d;
+  }
+  const lineGap = 2 * ss;
+  const lineH = ascent + descent + lineGap;
+  const w = textW + pad * 2 + (offsets.length ? 2 * ss : 0);
+  const h = Math.max(1, lines.length) * lineH - lineGap + pad * 2;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, w);
+  canvas.height = Math.max(1, h);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.font = `${weight} ${fs}px ${family}`;
+  ctx.textBaseline = "alphabetic";
+  ctx.imageSmoothingEnabled = softAa;
+
+  const ox = Math.round(pad + (offsets.length ? ss : 0));
+  if (offsets.length) {
+    ctx.fillStyle = cssColor(outlineColor);
+    for (const [dx, dy] of offsets) {
+      for (let i = 0; i < lines.length; i++) {
+        const baseY = Math.round(pad + ascent + i * lineH);
+        ctx.fillText(
+          lines[i]!,
+          ox + dx * outlineStep,
+          baseY + dy * outlineStep,
+        );
+      }
+    }
+  }
+  ctx.fillStyle = cssColor(color);
+  for (let i = 0; i < lines.length; i++) {
+    const baseY = Math.round(pad + ascent + i * lineH);
+    ctx.fillText(lines[i]!, ox, baseY);
+  }
+
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = img.data;
+  const cr = (color >>> 16) & 0xff;
+  const cg = (color >>> 8) & 0xff;
+  const cb = color & 0xff;
+  if (!softAa) {
+    const cut = 160;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3]! < cut) {
+        d[i] = 0;
+        d[i + 1] = 0;
+        d[i + 2] = 0;
+        d[i + 3] = 0;
+      } else {
+        d[i] = cr;
+        d[i + 1] = cg;
+        d[i + 2] = cb;
+        d[i + 3] = 255;
+      }
+    }
+  } else {
+    // Keep coverage AA; re-tint RGB so outline+fill share the label color.
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3]!;
+      if (a < 16) {
+        d[i] = 0;
+        d[i + 1] = 0;
+        d[i + 2] = 0;
+        d[i + 3] = 0;
+      } else {
+        d[i] = cr;
+        d[i + 1] = cg;
+        d[i + 2] = cb;
+      }
+    }
+  }
+  // Soft AA keeps coverage alpha; nearest matches prior Songti LCD path.
   return rgbaToTexture(canvas.width, canvas.height, d, "nearest");
 }
 
 /**
- * Dual-mode label: UC3 bitmap (default). System TTF path kept but unused.
+ * Dual-mode label: UC3 bitmap, or web face when `preferSystemFont()`.
+ * Songti (cn) = DOM overlay SimSun (reference); fusion = 1-bit hard bake.
  */
 export class BitmapLabel extends Container {
   private pixiText: Text | null = null;
@@ -344,6 +559,8 @@ export class BitmapLabel extends Container {
   /** undefined = wrap when maxWidth set; false = single line. */
   private _wordWrap: boolean | undefined;
   private _fontSize = UI_FONT_SIZE;
+  /** System / Songti weight; ignored by UC3. */
+  private _bold = false;
   /** Default UC3 bitmap glyphs. */
   private _uc3 = true;
   /** Hard-edge bake when uc3:false. */
@@ -351,6 +568,13 @@ export class BitmapLabel extends Container {
   private _bakeSs = 1;
   private _ax = 0;
   private _ay = 0;
+  /** Soft-AA (cn) owns its bake — never put in shared crispTexCache. */
+  private _ownedCrispTex: Texture | null = null;
+  /** Reference Songti: HTML span over pixelated canvas. */
+  private _domEl: HTMLSpanElement | null = null;
+  private readonly _domSync = (): void => {
+    this.syncDomLabel();
+  };
   /** Last UC3 cache key (for eviction — keep live label textures). */
   uc3CacheKey?: string;
   /** Last crisp-bake cache key (same live-protect contract as UC3). */
@@ -362,6 +586,12 @@ export class BitmapLabel extends Container {
       this._ay = y;
       this.pixiText?.anchor.set(x, y);
       this.applySpriteAnchor();
+      if (this._domEl) {
+        const w = this.boundsArea?.width ?? 0;
+        const h = this.boundsArea?.height ?? 0;
+        this.pivot.set(w * this._ax, h * this._ay);
+        this.syncDomLabel();
+      }
     },
   };
 
@@ -371,15 +601,48 @@ export class BitmapLabel extends Container {
     liveLabels.add(this);
   }
 
-  /** Force UC3 re-bake with current text/style (font pack switch). */
+  /** Re-bake with current text/style after font pack / CN Medium switch. */
   async rebake(): Promise<void> {
-    if (this.destroyed || !this._uc3 || !this._text) return;
+    if (this.destroyed || !this._text) return;
+    // Follow global preference (explicit per-label overrides are rare).
+    this._uc3 = !preferSystemFont();
     await this.rerender();
   }
 
   destroy(options?: Parameters<Container["destroy"]>[0]): void {
     liveLabels.delete(this);
-    super.destroy(options);
+    // Drop live-protect keys first so cache eviction can reclaim unused bakes.
+    this.uc3CacheKey = undefined;
+    this.crispCacheKey = undefined;
+    this.dropOwnedCrisp();
+    this.hideDomLabel();
+    // Unbind shared bake textures before destroying the Sprite. Pixi v8
+    // `destroy()` defaults to children:false — orphaned Sprites kept dead
+    // Texture refs in the batcher → alphaMode storm when opening equip detail
+    // (many labels rebuilt each redraw).
+    if (this.spr && !this.spr.destroyed) {
+      try {
+        this.spr.texture = Texture.EMPTY;
+      } catch {
+        /* ignore */
+      }
+    }
+    this.spr = null;
+    if (this.pixiText && !this.pixiText.destroyed) {
+      try {
+        if (this.pixiText.parent) this.removeChild(this.pixiText);
+        this.pixiText.destroy(true);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.pixiText = null;
+    super.destroy({
+      ...(typeof options === "object" && options ? options : {}),
+      children: true,
+      texture: false,
+      textureSource: false,
+    });
   }
 
   get style(): { fill: number } {
@@ -426,9 +689,14 @@ export class BitmapLabel extends Container {
       if (opts.wordWrap != null) this._wordWrap = opts.wordWrap;
       if (opts.fontSize != null) this._fontSize = opts.fontSize;
       if (opts.crisp != null) this._crisp = opts.crisp;
+      if (opts.bold != null) this._bold = opts.bold;
     }
-    // Always UC3 for LCD UI unless caller passes uc3:false.
-    this._uc3 = opts?.uc3 !== false;
+    // Explicit uc3 wins; otherwise follow menu preference (cn → OTF).
+    if (opts && opts.uc3 !== undefined) {
+      this._uc3 = opts.uc3;
+    } else {
+      this._uc3 = !preferSystemFont();
+    }
     await this.rerender();
   }
 
@@ -439,7 +707,7 @@ export class BitmapLabel extends Container {
   private applySpriteAnchor(): void {
     if (this.destroyed) return;
     if (!this.spr) {
-      if (!this.pixiText) this.pivot.set(0, 0);
+      if (!this.pixiText && !this._domEl) this.pivot.set(0, 0);
       return;
     }
     // width/height already include sprite.scale (supersample bake → 1/ss).
@@ -453,6 +721,55 @@ export class BitmapLabel extends Container {
     }
   }
 
+  private clearBoundsArea(): void {
+    // Pixi typings mark boundsArea as Rectangle, but runtime treats any
+    // truthy value as authoritative — must delete, not assign empty rect.
+    (this as { boundsArea?: Rectangle }).boundsArea = undefined;
+  }
+
+  private hideDomLabel(): void {
+    unregisterLcdDomSync(this._domSync);
+    if (this._domEl) {
+      try {
+        this._domEl.remove();
+      } catch {
+        /* ignore */
+      }
+      this._domEl = null;
+    }
+    // Must clear — Pixi treats any truthy boundsArea as authoritative and
+    // skips child bounds. An empty rect made .width/.height stick at 0, so
+    // status badges / nameplates that center via those metrics sat at the
+    // bottom-right (floor((slot-0)/2) / -floor(0/2)).
+    this.clearBoundsArea();
+  }
+
+  private syncDomLabel(): void {
+    if (this.destroyed || !this._domEl) return;
+    const el = this._domEl;
+    // Detached labels (removeChildren without destroy) must not float on screen.
+    let show = !!this._text && this.visible && !!this.parent;
+    for (let p = this.parent; p && show; p = p.parent) {
+      if (!p.visible) show = false;
+    }
+    // Popup panels paint on the canvas under #lcd-dom-text — hide world/HUD
+    // DOM glyphs so they cannot float above SystemPanel / dialog / etc.
+    if (show && lcdDomOccludedByPopup(this)) show = false;
+    el.style.display = show ? "block" : "none";
+    if (!show) return;
+    el.style.zIndex = String(lcdDomCssZIndex(this));
+    const gp = this.getGlobalPosition();
+    const s = lcdDomCssScale();
+    const worldScale =
+      Math.hypot(this.worldTransform.a, this.worldTransform.b) || 1;
+    const fontSize = this.webDisplayFontSize();
+    el.style.fontSize = `${fontSize * s * worldScale}px`;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    el.style.left = `${gp.x * s - w * this._ax}px`;
+    el.style.top = `${gp.y * s - h * this._ay}px`;
+  }
+
   private hideSprite(): void {
     if (this.destroyed) return;
     if (this.spr) this.spr.visible = false;
@@ -462,6 +779,13 @@ export class BitmapLabel extends Container {
   private showSprite(tex: Texture, ss = 1): void {
     if (this.destroyed) return;
     this._bakeSs = Math.max(1, ss);
+    try {
+      tex.source.scaleMode = "nearest";
+    } catch {
+      /* ignore */
+    }
+    // Sprite path owns metrics — drop any Songti DOM boundsArea leftover.
+    this.clearBoundsArea();
     if (!this.spr) {
       this.spr = new Sprite(tex);
       this.addChild(this.spr);
@@ -479,19 +803,141 @@ export class BitmapLabel extends Container {
     if (!this._text) {
       this.hideSystemText();
       this.hideSprite();
+      this.hideDomLabel();
       return;
     }
     if (this._uc3) {
+      this.crispCacheKey = undefined;
+      this.dropOwnedCrisp();
+      this.hideDomLabel();
       this.hideSystemText();
       await this.rerenderUc3();
+    } else if (preferSystemFont()) {
+      this.uc3CacheKey = undefined;
+      this.crispCacheKey = undefined;
+      // Reference: DOM SimSun over pixelated canvas (not bake, not auto).
+      if (getUc3FontId() === "cn") {
+        this.dropOwnedCrisp();
+        this.hideSprite();
+        this.hideSystemText();
+        this.rerenderSongtiDom();
+      } else {
+        this.hideDomLabel();
+        this.hideSystemText();
+        this.rerenderWebHard();
+      }
     } else if (this._crisp || this._outline) {
-      // Default UI + nameplates: hard bake (pixelated canvas safe).
+      this.hideDomLabel();
+      this.uc3CacheKey = undefined;
+      this.dropOwnedCrisp();
       this.hideSystemText();
       this.rerenderSystemCrisp();
     } else {
+      this.hideDomLabel();
+      this.uc3CacheKey = undefined;
+      this.crispCacheKey = undefined;
+      this.dropOwnedCrisp();
       this.hideSprite();
       this.rerenderSystem();
     }
+  }
+
+  private dropOwnedCrisp(): void {
+    if (!this._ownedCrispTex) return;
+    try {
+      this._ownedCrispTex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+    this._ownedCrispTex = null;
+  }
+
+  /**
+   * Web-font display size. Fusion + SimSun + UC3 all use {@link UC3_CELL}=14.
+   */
+  private webDisplayFontSize(): number {
+    if (this._fontSize === UI_FONT_SIZE || this._fontSize === UC3_CELL) {
+      return UC3_CELL;
+    }
+    return this._fontSize;
+  }
+
+  /**
+   * System Songti — HTML overlay (reference DOM SimSun).
+   * Canvas stays `pixelated` so the map does not fog.
+   */
+  private rerenderSongtiDom(): void {
+    const wrap =
+      this._wordWrap ?? (this._maxWidth != null && this._maxWidth > 0);
+    const shown = wrap ? this.displayText() : this._text;
+    const fontSize = this.webDisplayFontSize();
+    const tier = lcdDomTierFor(this);
+    const layer = ensureLcdDomTextLayer(tier);
+    if (!this._domEl) {
+      this._domEl = document.createElement("span");
+      this._domEl.className = "lcd-dom-label";
+      layer.appendChild(this._domEl);
+      registerLcdDomSync(this._domSync);
+    } else if (this._domEl.parentElement !== layer) {
+      layer.appendChild(this._domEl);
+    }
+    const el = this._domEl;
+    // JS already inserted `\n` via wrapUiText — never CSS-rewrap (double wrap
+    // shifted breaks by ~3 CJK glyphs and stacked lines on top of each other).
+    el.classList.remove("wrap");
+    el.style.whiteSpace = "pre";
+    el.style.maxWidth = "";
+    el.textContent = shown;
+    el.style.fontFamily = activeWebFontFamily();
+    el.style.fontWeight = this._bold ? "700" : "400";
+    el.style.color = cssHexColor(this._color);
+    const s = lcdDomCssScale();
+    el.style.fontSize = `${fontSize * s}px`;
+    if (this._outline) {
+      const oc = cssHexColor(this._outlineColor);
+      const r = this._outlineThin ? 1 : 1.25;
+      el.style.textShadow = [
+        `${-r}px 0 ${oc}`,
+        `${r}px 0 ${oc}`,
+        `0 ${-r}px ${oc}`,
+        `0 ${r}px ${oc}`,
+      ].join(", ");
+    } else {
+      el.style.textShadow = "none";
+    }
+
+    // Layout bounds in LCD px (no WebGL glyph; nameplates use .width).
+    const lines = shown.split("\n");
+    let lcdW = 1;
+    for (const line of lines) {
+      lcdW = Math.max(lcdW, measureUiTextWidth(line, fontSize));
+    }
+    const lcdH = Math.max(1, Math.round(fontSize * Math.max(1, lines.length)));
+    this.boundsArea = new Rectangle(0, 0, lcdW, lcdH);
+    this.pivot.set(lcdW * this._ax, lcdH * this._ay);
+    this.syncDomLabel();
+  }
+
+  /** JHPixel → opaque 1-bit LCD bake (pixel face). */
+  private rerenderWebHard(): void {
+    const wrap =
+      this._wordWrap ?? (this._maxWidth != null && this._maxWidth > 0);
+    const shown = wrap ? this.displayText() : this._text;
+    const ss = cnHardSupersample();
+    this.dropOwnedCrisp();
+    const tex = bakeWebFontHard(
+      shown,
+      this.webDisplayFontSize(),
+      this._color,
+      this._outline,
+      this._outlineColor,
+      this._outlineThin,
+      this._maxWidth,
+      wrap,
+      ss,
+    );
+    this._ownedCrispTex = tex;
+    this.showSprite(tex, 1);
   }
 
   private rerenderSystemCrisp(): void {
@@ -499,22 +945,24 @@ export class BitmapLabel extends Container {
       this._wordWrap ?? (this._maxWidth != null && this._maxWidth > 0);
     const shown = wrap ? this.displayText() : this._text;
     const ss = crispSupersample();
+    const fontSize = this._fontSize;
     const key = crispCacheKey(
       shown,
       this._color,
       this._outline,
       this._outlineColor,
       this._outlineThin,
-      this._fontSize,
+      fontSize,
       this._maxWidth,
       wrap,
       ss,
+      false,
     );
     let tex = crispTexCache.get(key);
     if (!tex) {
       tex = bakeCrispSystem(
         shown,
-        this._fontSize,
+        fontSize,
         this._color,
         this._outline,
         this._outlineColor,
@@ -522,6 +970,7 @@ export class BitmapLabel extends Container {
         this._maxWidth,
         wrap,
         ss,
+        false,
       );
       rememberCrispCache(key, tex);
     } else {
@@ -535,20 +984,27 @@ export class BitmapLabel extends Container {
     const wrap =
       this._wordWrap ?? (this._maxWidth != null && this._maxWidth > 0);
     const shown = wrap ? this.displayText() : this._text;
+    const fontSize = this._fontSize;
     const style: Record<string, unknown> = {
       fontFamily: uiFontFamily(),
-      fontSize: this._fontSize,
+      fontSize,
+      fontWeight: this._bold ? "700" : "400",
       fill: this._color,
       align: "left" as const,
       wordWrap: wrap,
       breakWords: wrap,
-      lineHeight: Math.round(this._fontSize * 1.25),
+      lineHeight: Math.round(fontSize * 1.25),
     };
     if (wrap) style.wordWrapWidth = this._maxWidth;
-    // Rasterize near CSS/device pixels so upscale isn't nearest-neighbor mush.
+    if (this._outline) {
+      style.stroke = {
+        color: this._outlineColor,
+        width: this._outlineThin ? 1 : 2,
+      };
+    }
     const textRes = Math.max(
       UI_TEXT_RESOLUTION,
-      Math.min(4, Math.ceil(lcdDisplayScale + 0.001)),
+      Math.min(4, Math.ceil(lcdDisplayScale)),
     );
 
     if (!this.pixiText) {
@@ -573,6 +1029,13 @@ export class BitmapLabel extends Container {
 
   private displayText(): string {
     if (this._wordWrap === false || !this._text) return this._text;
+    if (this._maxWidth != null && this._maxWidth > 0) {
+      return wrapUiText(
+        this._text,
+        this._maxWidth,
+        this.webDisplayFontSize(),
+      ).join("\n");
+    }
     return formatUiMultiline(this._text);
   }
 
@@ -708,8 +1171,21 @@ export function measureUiTextBytes(text: string): number {
   return n;
 }
 
-/** Advance width for default UC3 layout (CJK=16, ASCII=8). */
+/** Advance width for layout. UC3 cell grid, or canvas measure when CN Medium. */
 export function measureUiTextWidth(text: string, cell = UC3_CELL): number {
+  if (preferSystemFont() && typeof document !== "undefined") {
+    const fs = cell === UI_FONT_SIZE ? UC3_CELL : cell;
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (ctx) {
+      ctx.font = `400 ${fs}px ${activeWebFontFamily()}`;
+      let w = 0;
+      for (const ch of text) {
+        if ((ch.codePointAt(0) ?? 0) > 0xff) w += fs;
+        else w += Math.max(1, Math.ceil(ctx.measureText(ch).width));
+      }
+      return Math.ceil(w);
+    }
+  }
   const ascii = cell * 0.5;
   let w = 0;
   for (const ch of text) {
@@ -756,16 +1232,36 @@ export function formatUiMultiline(
 }
 
 /**
- * Wrap by glyph advances. Default matches font_gb.uc3 (CJK=16, ASCII=8).
- * Pass a smaller fontSize only for system-font layouts.
+ * Wrap by glyph advances. UC3 uses a fixed CJK/ASCII grid; Songti/web faces
+ * measure real advances so chat/panels stay aligned.
  */
 export function wrapUiText(
   text: string,
   maxWidth: number,
   fontSize = UC3_CELL,
 ): string[] {
+  const useMeasure =
+    preferSystemFont() && typeof document !== "undefined";
+  let measure: CanvasRenderingContext2D | null = null;
+  if (useMeasure) {
+    measure = document.createElement("canvas").getContext("2d");
+    if (measure) {
+      measure.font = `400 ${fontSize}px ${activeWebFontFamily()}`;
+    }
+  }
+  // Songti canvas metrics run slightly narrow vs DOM SimSun — keep 1px slack
+  // so the last glyph does not spill / look like a 2–3 char overlap.
+  const budget = Math.max(fontSize, maxWidth - (useMeasure ? 1 : 0));
   const cjk = fontSize;
   const ascii = fontSize * 0.5;
+  const charW = (ch: string): number => {
+    if (measure) {
+      // Prefer full-cell for CJK — measureText(SimSun) often under-reports.
+      if ((ch.codePointAt(0) ?? 0) > 0xff) return cjk;
+      return Math.max(1, Math.ceil(measure.measureText(ch).width));
+    }
+    return (ch.codePointAt(0) ?? 0) > 0xff ? cjk : ascii;
+  };
   const lines: string[] = [];
   let cur = "";
   let w = 0;
@@ -776,8 +1272,8 @@ export function wrapUiText(
       w = 0;
       continue;
     }
-    const cw = (ch.codePointAt(0) ?? 0) > 0xff ? cjk : ascii;
-    if (w + cw > maxWidth && cur) {
+    const cw = charW(ch);
+    if (w + cw > budget && cur) {
       lines.push(cur);
       cur = ch;
       w = cw;

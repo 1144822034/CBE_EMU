@@ -9,6 +9,7 @@ import {
   preloadCbeFlowerCorners,
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
+import { preferSystemFont } from "../resources/systemFont";
 import type { BattleState, BattleSide } from "../net/protocol";
 import {
   battleDisplayToWire,
@@ -108,6 +109,8 @@ const BATTLE_DT_CLAMP_MS = 50;
 
 const MONSTER_RED = 0xff8080;
 const SETTLE_GOLD = 0xffd080;
+/** Match hangup/battle settle Songti row size (pickupimage1 ~11px). */
+const SETTLE_FS = 11;
 const HEAL_GREEN = 0x50e080;
 const TOP_H = 36;
 /** Compact party vitals strip — flush to LCD bottom (HTML softkeys are outside). */
@@ -2286,7 +2289,6 @@ export class BattleScreen extends Container {
   private paintActingTitle(name: string): void {
     const label = (name || "").trim() || "侠客";
     void this.topTitle.setText(`${label}行动`, CBE.ink, {
-      uc3: true,
       smooth: false,
       outline: false,
     });
@@ -3748,15 +3750,15 @@ export class BattleScreen extends Container {
     const titleLab = new BitmapLabel();
     titleLab.anchor.set(0.5, 0);
     titleLab.position.set(LCD_WIDTH / 2, panelY + 8);
-    titleLab.show("挂机中", SETTLE_GOLD, { outline: false });
+    titleLab.show("挂机中", SETTLE_GOLD, { outline: false, fontSize: SETTLE_FS });
     this.settleHost.addChild(titleLab);
     let y = panelY + 30;
     const row = (text: string) => {
       const lab = new BitmapLabel();
       lab.position.set(panelX + 10, y);
-      lab.show(text, CBE.inkMint, { outline: false });
+      lab.show(text, CBE.inkMint, { outline: false, fontSize: SETTLE_FS });
       this.settleHost.addChild(lab);
-      y += 14;
+      y += SETTLE_FS + 3;
     };
     row(`战斗场次 ${tally.completed}  背包 ${bagUsed}/${bagCap}`);
     row(`获得经验 ${tally.totalExp}  金钱 ${tally.totalGold}`);
@@ -3902,6 +3904,7 @@ export class BattleScreen extends Container {
     titleLab.position.set(LCD_WIDTH / 2, panelY + 8);
     void titleLab.setText(title, SETTLE_GOLD, {
       outline: false,
+      fontSize: SETTLE_FS,
       maxWidth: panelW - 24,
     });
     this.settleHost.addChild(titleLab);
@@ -3910,7 +3913,8 @@ export class BattleScreen extends Container {
     const valueX = panelX + 118;
     let y = panelY + 8 + titleH;
 
-    const labels = arenaFdata ? null : await loadSettleLabelTextures();
+    const textLabels = preferSystemFont();
+    const labels = arenaFdata || textLabels ? null : await loadSettleLabelTextures();
     if (gen !== this.settlePaintGen) return;
 
     for (const row of rows) {
@@ -3919,6 +3923,7 @@ export class BattleScreen extends Container {
         lab.position.set(labelX, y);
         void lab.setText(row.text, row.color, {
           outline: false,
+          fontSize: SETTLE_FS,
           maxWidth: panelW - 24,
         });
         this.settleHost.addChild(lab);
@@ -3956,6 +3961,7 @@ export class BattleScreen extends Container {
               lab.position.set(labelX, y);
               void lab.setText(fallback[row.label], CBE.inkTip, {
                 outline: false,
+                fontSize: SETTLE_FS,
               });
               this.settleHost.addChild(lab);
             }
@@ -3963,13 +3969,17 @@ export class BattleScreen extends Container {
         } else {
           const lab = new BitmapLabel();
           lab.position.set(labelX, y);
-          void lab.setText(fallback[row.label], CBE.inkTip, { outline: false });
+          void lab.setText(fallback[row.label], CBE.inkTip, {
+            outline: false,
+            fontSize: SETTLE_FS,
+          });
           this.settleHost.addChild(lab);
         }
         const val = new BitmapLabel();
         val.position.set(valueX, y);
         void val.setText(row.value, settleValueColor(row.value), {
           outline: false,
+          fontSize: SETTLE_FS,
           maxWidth: panelW - (valueX - panelX) - 12,
         });
         this.settleHost.addChild(val);
@@ -3988,7 +3998,7 @@ export class BattleScreen extends Container {
     btnLabel.eventMode = "none";
     btnLabel.anchor.set(0.5, 0.5);
     btnLabel.position.set(btnW / 2, btnH / 2);
-    btnLabel.show("关闭", CBE.inkWarn, { outline: false });
+    btnLabel.show("关闭", CBE.inkWarn, { outline: false, fontSize: SETTLE_FS });
     btn.addChild(btnBg, btnLabel);
     btn.position.set(
       panelX + Math.floor((panelW - btnW) / 2),

@@ -5,6 +5,7 @@
 import { Container, Graphics, Texture } from "pixi.js";
 import { CBE, LCD_WIDTH, paintCbePanel } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
+import { preferSystemFont } from "../resources/systemFont";
 import { loadHangupPanelTextures, valuePill } from "./hangupSettleUi";
 import { uiSprite } from "./UiAssets";
 
@@ -13,6 +14,8 @@ const DROP_INK = 0xe8f0e8;
 const STOP_BTN_BG = 0x2a5058;
 const STOP_BTN_BORDER = 0x70a0b0;
 const BAG_BAR = 0x0a1210;
+/** Match hangup settle / pickupimage1 row height. */
+const SETTLE_FS = 11;
 
 export type BattleSettlePaintOpts = {
   expGain: number;
@@ -79,23 +82,28 @@ export async function paintBattleSettlePanel(
     value: string,
     valueColor = VAL_GREEN,
   ) => {
-    if (label) {
+    const textLabels = preferSystemFont();
+    if (label && !textLabels) {
       const spr = uiSprite(label);
       spr.position.set(xLabel, yy + 1);
       host.addChild(spr);
     } else {
       const lab = new BitmapLabel();
       lab.position.set(xLabel, yy);
-      lab.show(fallback, CBE.inkTip, { outline: false });
+      lab.show(fallback, CBE.inkTip, { outline: false, fontSize: SETTLE_FS });
       host.addChild(lab);
     }
+    const pillW = labelW === leftLabelW ? leftPillW : rightPillW;
     const pillX = xLabel + labelW;
-    const pill = valuePill(labelW === leftLabelW ? leftPillW : rightPillW, pillH);
+    const pill = valuePill(pillW, pillH);
     pill.position.set(pillX, yy);
     host.addChild(pill);
     const val = new BitmapLabel();
-    val.position.set(pillX + 3, yy + 1);
-    val.show(value, valueColor, { outline: false });
+    val.position.set(
+      pillX + 3,
+      yy + Math.max(0, Math.floor((pillH - SETTLE_FS) / 2)),
+    );
+    val.show(value, valueColor, { outline: false, fontSize: SETTLE_FS });
     host.addChild(val);
   };
 
@@ -140,14 +148,14 @@ export async function paintBattleSettlePanel(
     .fill({ color: BAG_BAR });
   host.addChild(bar);
   const bagLabelX = panelX + panelW - 6 - rightLabelW - rightPillW - 8;
-  if (tex.bag) {
+  if (tex.bag && !preferSystemFont()) {
     const bagSpr = uiSprite(tex.bag);
     bagSpr.position.set(bagLabelX, y + 1);
     host.addChild(bagSpr);
   } else {
     const bagLab = new BitmapLabel();
     bagLab.position.set(bagLabelX, y + 1);
-    bagLab.show("背包", CBE.inkTip, { outline: false });
+    bagLab.show("背包", CBE.inkTip, { outline: false, fontSize: SETTLE_FS });
     host.addChild(bagLab);
   }
   const bagPillX = bagLabelX + rightLabelW;
@@ -155,13 +163,16 @@ export async function paintBattleSettlePanel(
   bagPill.position.set(bagPillX, y);
   host.addChild(bagPill);
   const bagVal = new BitmapLabel();
-  bagVal.position.set(bagPillX + 3, y + 1);
+  bagVal.position.set(
+    bagPillX + 3,
+    y + Math.max(0, Math.floor((pillH - SETTLE_FS) / 2)),
+  );
   const bagUsed = Math.max(0, opts.bagUsed | 0);
   const bagCap = Math.max(1, opts.bagCap | 0);
   bagVal.show(
     `${bagUsed}/${bagCap}`,
     bagUsed >= bagCap ? CBE.inkWarn : VAL_GREEN,
-    { outline: false },
+    { outline: false, fontSize: SETTLE_FS },
   );
   host.addChild(bagVal);
   y += bagBarH + 4;
@@ -172,7 +183,11 @@ export async function paintBattleSettlePanel(
   for (const line of drops) {
     const lab = new BitmapLabel();
     lab.position.set(dropX, y);
-    lab.show(line, DROP_INK, { outline: false, maxWidth: dropW });
+    lab.show(line, DROP_INK, {
+      outline: false,
+      fontSize: SETTLE_FS,
+      maxWidth: dropW,
+    });
     host.addChild(lab);
     y += dropLineH;
   }
@@ -189,7 +204,7 @@ export async function paintBattleSettlePanel(
   btnLabel.eventMode = "none";
   btnLabel.anchor.set(0.5, 0.5);
   btnLabel.position.set(btnW / 2, closeH / 2);
-  btnLabel.show("关闭", 0xf0f8ff, { outline: false });
+  btnLabel.show("关闭", 0xf0f8ff, { outline: false, fontSize: SETTLE_FS });
   btn.addChild(btnLabel);
   btn.position.set(panelX + Math.floor((panelW - btnW) / 2), y + 2);
   btn.eventMode = "static";

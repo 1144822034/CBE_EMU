@@ -8,8 +8,9 @@ import {
   paintCbePanel,
   drawCbeTitlePill,
 } from "./constants";
-import { BitmapLabel, measureUiTextWidth, wrapChars } from "./BitmapLabel";
+import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapChars, wrapUiText } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
+import { rgbaToTexture } from "../render/rgbaTexture";
 import {
   EQUIP_ICON_SIZE,
   SLOT_FRAME_SIZE,
@@ -29,6 +30,7 @@ import {
   isCultivationBookItem,
   isDreamBadge,
   isEnhanceCrystal,
+  isCrystalExtractStone,
   type BagItem,
   type CharacterStats,
   type MallState,
@@ -92,6 +94,8 @@ export type SystemAction =
   | "swap"
   | "enhance"
   | "recast"
+  | "wash"
+  | "extract"
   | "discard"
   | "auction"
   | "buy"
@@ -359,7 +363,27 @@ export class SystemPanel extends Container {
   /** webglcontextrestored: remount panel Graphics; redraw only if open. */
   nudgeAfterGpuResume(): void {
     this.remountChrome();
-    if (this.visible) this.redraw();
+    // invalidateUiGpuTextures already destroyed these GPU sources.
+    this.moneyTex = null;
+    this.moneyTexLoading = false;
+    this.equipArtReady = false;
+    this.equipArtLoading = false;
+    if (this.equipActorTex) {
+      try {
+        this.equipActorTex.destroy(true);
+      } catch {
+        /* ignore */
+      }
+      this.equipActorTex = null;
+      this.equipActorKey = "";
+    }
+    if (!this.visible) return;
+    if (this.kind === "bag") this.ensureMoneyIcons();
+    if (this.kind === "equip") {
+      this.ensureEquipArt();
+      // Actor stand is rebuilt on next setEquipActor from main; redraw chrome now.
+    }
+    this.redraw();
   }
 
   open(kind: SystemKind, _hint = ""): void {
@@ -430,16 +454,14 @@ export class SystemPanel extends Container {
         // CBE dir: 1=up 2=right 3=down(front) 4=left — equip panel wants front stand.
         const frame = composeMapActor(loaded, 3, false, 0);
         if (!frame || frame.width < 4) return;
-        const canvas = document.createElement("canvas");
-        canvas.width = frame.width;
-        canvas.height = frame.height;
-        canvas.getContext("2d")!.putImageData(
-          new ImageData(new Uint8ClampedArray(frame.rgba), frame.width, frame.height),
-          0,
-          0,
+        // rgbaToTexture — Texture.from(canvas) has caused CanvasSource.alphaMode
+        // storms when the worn panel remounts under WebGL pressure.
+        const tex = rgbaToTexture(
+          frame.width,
+          frame.height,
+          frame.rgba,
+          "nearest",
         );
-        const tex = Texture.from(canvas);
-        tex.source.scaleMode = "nearest";
         this.equipActorTex = tex;
         if (this.visible && this.kind === "equip") this.redraw();
       })
@@ -556,11 +578,11 @@ export class SystemPanel extends Container {
     this.brokenGlowGfx.clear();
     this.brokenSlotRects = [];
     // Unpin panel UC3 / UI sprites while hidden (VRAM); open() redraws fresh.
-    for (const t of this.labels) t.destroy();
+    for (const t of this.labels) t.destroy({ children: true });
     this.labels = [];
     for (const s of this.uiSprites) s.destroy({ children: true });
     this.uiSprites = [];
-    for (const h of this.hitSprites) h.destroy();
+    for (const h of this.hitSprites) h.destroy({ children: true });
     this.hitSprites = [];
     clearPointerHits(this.rowHits);
     this.box.clear();
@@ -1067,6 +1089,7 @@ export class SystemPanel extends Container {
         acts.push("强化");
         if (it.enhance >= 4) acts.push("洗练");
         if (it.enhance > 0) acts.push("重铸");
+        if (it.enhance > 0) acts.push("提炼");
       } else if (isEnhanceCrystal(it.itemId)) {
         // 玄晶：≥3 且非十六级 →「合成」代替「使用」
         if (canCombineEnhanceCrystal(it.itemId, it.count)) acts.push("合成");
@@ -1076,6 +1099,8 @@ export class SystemPanel extends Container {
       } else if (isDreamBadge(it.itemId)) {
         // 梦境徽章：≥300 →「合成」随机梦境装备
         if (canCombineDreamBadge(it.itemId, it.count)) acts.push("合成");
+      } else if (isCrystalExtractStone(it.itemId)) {
+        // 玄晶提炼石：从已强化装备详情点「提炼」，不走通用使用
       } else {
         // 非装备一律提供使用（道具/任务/材料/杂物/秘宝）
         acts.push("使用");
@@ -1093,6 +1118,7 @@ export class SystemPanel extends Container {
       const acts = ["强化"];
       if (this.selected.enhance >= 4) acts.push("洗练");
       if (this.selected.enhance > 0) acts.push("重铸");
+      if (this.selected.enhance > 0) acts.push("提炼");
       acts.push("返回");
       return acts;
     }
@@ -1176,11 +1202,11 @@ export class SystemPanel extends Container {
   }
 
   private redraw(): void {
-    for (const t of this.labels) t.destroy();
+    for (const t of this.labels) t.destroy({ children: true });
     this.labels = [];
     for (const s of this.uiSprites) s.destroy({ children: true });
     this.uiSprites = [];
-    for (const h of this.hitSprites) h.destroy();
+    for (const h of this.hitSprites) h.destroy({ children: true });
     this.hitSprites = [];
     clearPointerHits(this.rowHits);
     this.box.clear();
@@ -1227,12 +1253,29 @@ export class SystemPanel extends Container {
 
       const rechargeOverlay =
         this.mode === "recharge_amount" || this.mode === "recharge_pay";
-      if (!rechargeOverlay) {
-        this.addLabel(titleOf(this.kind), x + 10, y + 8, CBE.ink);
+      const pillH = 22;
+      const pillY = y + 8;
+      {
+        const title = rechargeOverlay
+          ? this.mode === "recharge_amount"
+            ? "赞助金额(元)"
+            : "赞助支付"
+          : titleOf(this.kind);
+        const pillW = Math.min(
+          w - 20,
+          Math.max(72, measureUiTextWidth(title) + 24),
+        );
+        drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
+        this.addLabelCentered(
+          title,
+          LCD_WIDTH / 2,
+          pillY + pillH / 2,
+          CBE.ink,
+        );
       }
       const showCatTabs = this.mode === "list" && this.usesCategoryTabs();
       const tabH = 20;
-      const tabY = y + 26;
+      const tabY = pillY + pillH + 6;
       if (showCatTabs) {
         this.drawCategoryTabStrip(
           x + 6,
@@ -1243,18 +1286,17 @@ export class SystemPanel extends Container {
         );
         this.addLabel(this.listHint(), x + 10, tabY + tabH + 4, CBE.inkLabel);
       } else if (!rechargeOverlay) {
-        this.addLabel(this.listHint(), x + 10, y + 26, CBE.inkLabel);
+        this.addLabel(this.listHint(), x + 10, tabY, CBE.inkLabel);
       }
 
       if (this.mode === "recharge_amount") {
         this.drawRechargeAmountPanel(x, y, w);
       } else if (this.mode === "recharge_pay") {
-        this.addLabel("赞助支付", x + 10, y + 8, CBE.ink);
-        this.addLabel(`金额 ${this.rechargeYuan} 元`, x + 10, y + 26, CBE.inkTipGreen);
-        this.addLabel("选择支付方式", x + 10, y + 44, CBE.inkLabel);
+        this.addLabel(`金额 ${this.rechargeYuan} 元`, x + 10, y + 36, CBE.inkTipGreen);
+        this.addLabel("选择支付方式", x + 10, y + 54, CBE.inkLabel);
         this.actionLabels.forEach((label, i) => {
           const hi = i === this.actionCursor;
-          const rowY = y + 66 + i * 20;
+          const rowY = y + 76 + i * 20;
           if (hi) this.box.rect(x + 4, rowY, w - 8, 19).fill({ color: CBE.select });
           this.addLabel(label, x + 12, rowY + 2, hi ? CBE.ink : CBE.inkMint);
           const idx = i;
@@ -1271,7 +1313,7 @@ export class SystemPanel extends Container {
       } else if (this.mode === "detail") {
         this.drawDetail(x, y, w);
       } else {
-        const listTop = showCatTabs ? tabY + tabH + 20 : y + 44;
+        const listTop = showCatTabs ? tabY + tabH + 20 : tabY + 18;
         this.drawList(x, y, w, listTop);
       }
     }
@@ -1395,12 +1437,12 @@ export class SystemPanel extends Container {
       const qColor = qualityColor(focusWorn.quality);
       this.addAttrText(formatBagName(focusWorn), x + 14, detailTop + 2, qColor);
       const lines = buildEquipDetailLines(focusWorn, { omitTypeJob: true });
-      const rowH = 14;
+      const rowH = UC3_CELL;
       const maxRows = Math.max(1, Math.floor((detailBottom - detailTop - 18) / rowH));
       let ly = detailTop + 16;
       for (let i = 0; i < Math.min(maxRows, lines.length); i++) {
-        this.paintEquipLine(lines[i]!, x + 14, ly);
-        ly += rowH;
+        const rows = this.paintEquipLine(lines[i]!, x + 14, ly);
+        ly += rowH * Math.max(1, rows);
       }
     }
 
@@ -1541,12 +1583,12 @@ export class SystemPanel extends Container {
     const sel = rows[this.cursorIndex] ?? null;
     if (sel) {
       const lines = buildEquipDetailLines(sel);
-      const rowH = 15;
+      const rowH = UC3_CELL;
       const maxRows = Math.max(1, Math.floor((softY - 8 - splitY - 6) / rowH));
       let ly = splitY + 8;
       for (let i = 0; i < Math.min(maxRows, lines.length); i++) {
-        this.paintEquipLine(lines[i]!, x + 14, ly);
-        ly += rowH;
+        const rows = this.paintEquipLine(lines[i]!, x + 14, ly);
+        ly += rowH * Math.max(1, rows);
       }
     } else {
       this.addAttrText("选择背包装备后替换", x + 14, splitY + 10, CBE.inkLabel);
@@ -1944,10 +1986,10 @@ export class SystemPanel extends Container {
    * Mall 赞助金额 — UC3 keypad on LCD (←→ ±1, tap digits, 确定/软左继续).
    */
   private drawRechargeAmountPanel(x: number, y: number, w: number): void {
-    this.addLabel("赞助金额(元)", x + 10, y + 8, CBE.ink);
-    this.addLabel("←→微调 · 点按数字", x + 10, y + 26, CBE.inkLabel);
+    // Title pill drawn by redraw() chrome; body starts below it.
+    this.addLabel("←→微调 · 点按数字", x + 10, y + 36, CBE.inkLabel);
 
-    const boxY = y + 46;
+    const boxY = y + 54;
     const boxH = 28;
     this.box
       .roundRect(x + 10, boxY, w - 20, boxH, 3)
@@ -2106,7 +2148,7 @@ export class SystemPanel extends Container {
     const actionTop = softY - actionH - 4;
     const bodyTop = titleY + titleH + 8;
     const bodyBottom = actionTop - 4;
-    const rowH = 16;
+    const rowH = UC3_CELL;
     const lines = buildEquipDetailLines(it);
     const slot = it.equipSlot >= 0 ? it.equipSlot : lookupItemSync(it.itemId)?.equipSlot ?? -1;
     const worn = slot >= 0 ? this.wornBySlot(slot) : null;
@@ -2232,30 +2274,45 @@ export class SystemPanel extends Container {
     rightReserve = 0,
   ): number {
     const maxW = Math.max(40, LCD_WIDTH - x - 16 - rightReserve);
+    const rowH = UC3_CELL;
     if (line.kind === "text" || line.kind === "milestone") {
-      this.addAttrText(line.text, x, y, line.color, maxW);
-      return wrapChars(line.text).length;
+      const rows = wrapUiText(line.text, maxW);
+      rows.forEach((row, i) => {
+        this.addAttrText(row, x, y + i * rowH, line.color, maxW);
+      });
+      return rows.length;
     }
     // Same-color key+value → one Label (merge); two-tone keeps two Labels.
     if (line.keyColor === line.valueColor) {
       const merged = `${line.key}${line.value}`;
-      this.addAttrText(merged, x, y, line.keyColor, maxW);
-      return wrapChars(merged).length;
+      const rows = wrapUiText(merged, maxW);
+      rows.forEach((row, i) => {
+        this.addAttrText(row, x, y + i * rowH, line.keyColor, maxW);
+      });
+      return rows.length;
     }
-    this.addAttrText(line.key, x, y, line.keyColor, maxW);
+    const keyRows = wrapUiText(line.key, maxW);
+    keyRows.forEach((row, i) => {
+      this.addAttrText(row, x, y + i * rowH, line.keyColor, maxW);
+    });
     // UC3 16×16 — old 12/7 system-font estimate put yellow values on top of keys.
     const keyW = measureUiTextWidth(line.key);
-    this.addAttrText(line.value, x + keyW, y, line.valueColor, Math.max(24, maxW - keyW));
-    return Math.max(wrapChars(line.key).length, wrapChars(line.value).length);
+    const valMax = Math.max(24, maxW - keyW);
+    const valRows = wrapUiText(line.value, valMax);
+    valRows.forEach((row, i) => {
+      this.addAttrText(row, x + keyW, y + i * rowH, line.valueColor, valMax);
+    });
+    return Math.max(keyRows.length, valRows.length);
   }
 
   private drawBagInnerDetail(x: number, _y: number, w: number, top: number, bottom: number): void {
-    const flat = this.detailText().flatMap((line) => wrapChars(line));
-    const maxLines = Math.floor((bottom - top) / 16);
+    const maxW = Math.max(40, w - 28);
+    const flat = this.detailText().flatMap((line) => wrapUiText(line, maxW));
+    const maxLines = Math.floor((bottom - top) / UC3_CELL);
     let ly = top;
     for (const line of flat.slice(0, maxLines)) {
-      this.addAttrText(line, x + 14, ly, CBE.inkMint);
-      ly += 16;
+      this.addAttrText(line, x + 14, ly, CBE.inkMint, maxW);
+      ly += UC3_CELL;
     }
     this.addAttrText("左软=操作  右软=返回", x + 14, ly + 8, CBE.inkLabel);
   }
@@ -2306,7 +2363,6 @@ export class SystemPanel extends Container {
     nameLab.anchor.set(0.5, 0.5);
     nameLab.position.set(Math.round(LCD_WIDTH / 2), Math.round(pillY + pillH + 16));
     void nameLab.setText(name, CBE.inkChat, {
-      uc3: true,
       smooth: false,
       outline: false,
     });
@@ -2581,11 +2637,12 @@ export class SystemPanel extends Container {
   }
 
   private drawDetail(x: number, y: number, w: number): void {
-    const lines = this.detailText().flatMap((line) => wrapChars(line));
+    const maxW = Math.max(40, w - 16);
+    const lines = this.detailText().flatMap((line) => wrapUiText(line, maxW));
     let ly = y + 46;
     for (const line of lines.slice(0, 24)) {
       this.addLabel(line, x + 8, ly, CBE.inkMint);
-      ly += 15;
+      ly += UC3_CELL;
     }
     this.addLabel(
       "左软=操作  右软=返回",
@@ -2652,7 +2709,11 @@ export class SystemPanel extends Container {
     const t = new BitmapLabel();
     t.eventMode = "none";
     t.position.set(x, y);
-    void t.setText(text, color, { outline: false, maxWidth: LCD_WIDTH - 36 });
+    void t.setText(text, color, {
+      outline: false,
+      maxWidth: LCD_WIDTH - 36,
+      wordWrap: false,
+    });
     this.addChild(t);
     this.labels.push(t);
   }
@@ -2668,7 +2729,12 @@ export class SystemPanel extends Container {
     const t = new BitmapLabel();
     t.eventMode = "none";
     t.position.set(x, y);
-    void t.setText(text, color, { outline: false, maxWidth });
+    void t.setText(text, color, {
+      outline: false,
+      maxWidth,
+      // Caller owns wrapping (wrapUiText); avoid JS+CSS double-wrap overlap.
+      wordWrap: false,
+    });
     this.addChild(t);
     this.labels.push(t);
   }
@@ -2684,7 +2750,11 @@ export class SystemPanel extends Container {
     t.eventMode = "none";
     t.anchor.set(1, 0);
     t.position.set(rightX, y);
-    void t.setText(text, color, { outline: false, maxWidth });
+    void t.setText(text, color, {
+      outline: false,
+      maxWidth,
+      wordWrap: false,
+    });
     this.addChild(t);
     this.labels.push(t);
   }
@@ -2694,8 +2764,11 @@ export class SystemPanel extends Container {
     t.eventMode = "none";
     t.anchor.set(0.5, 0.5);
     t.position.set(Math.round(cx), Math.round(cy));
-    // font_gb.uc3 hard pixels — sharp on CSS-pixelated LCD (HTML softkeys stay DOM).
-    void t.setText(text, color, { uc3: true, smooth: false, outline: false });
+    // Follow menu font preference (UC3 packs or CN Medium).
+    void t.setText(text, color, {
+      smooth: false,
+      outline: false,
+    });
     this.addChild(t);
     this.labels.push(t);
   }
@@ -2771,6 +2844,8 @@ function actionKey(label: string): SystemAction | string {
       return "wash";
     case "重铸":
       return "recast";
+    case "提炼":
+      return "extract";
     case "丢弃":
       return "discard";
     case "拍卖":

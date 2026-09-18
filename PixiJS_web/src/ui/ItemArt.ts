@@ -96,6 +96,16 @@ export function slotFrameTextureSync(): Texture | null {
   return frameTex ?? null;
 }
 
+/**
+ * Drop equip-art Texture handles after {@link invalidateUiGpuTextures}.
+ * `iconCache` / `frameTex` otherwise keep destroyed sources for worn/bag UI.
+ */
+export function invalidateEquipArtGpu(): void {
+  iconCache.clear();
+  frameTex = undefined;
+  artWarm = null;
+}
+
 /** Small leading icon for replace-list rows (16×16, no frame). */
 export function mountEquipIconOnly(
   host: Container,

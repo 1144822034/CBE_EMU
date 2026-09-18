@@ -2692,6 +2692,78 @@ static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
         page, "task_id", currentTaskId, "不绑定任务");
 }
 
+/**
+ * 渲染动态 NPC 可接任务多绑定表单（最多 VM_NET_MOCK_NPC_BOUND_TASK_MAX 行）。
+ * @param page 页面缓冲
+ * @param seed 当前 NPC；NULL 表示新增空表单
+ */
+static void vm_mock_admin_render_npc_bound_tasks(
+    vm_mock_admin_text *page,
+    const vm_net_mock_scene_npcinfo_seed *seed)
+{
+    u32 boundCount = seed != NULL ? seed->boundTaskCount : 0;
+
+    if (page == NULL)
+        return;
+    if (boundCount > VM_NET_MOCK_NPC_BOUND_TASK_MAX)
+        boundCount = VM_NET_MOCK_NPC_BOUND_TASK_MAX;
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"bound-tasks\">"
+        "<div class=\"bound-tasks-title\">可接取任务（最多 %u 个，可留空）</div>",
+        (u32)VM_NET_MOCK_NPC_BOUND_TASK_MAX);
+    for (u32 i = 0; i < VM_NET_MOCK_NPC_BOUND_TASK_MAX; ++i)
+    {
+        char fieldTask[40];
+        char fieldRepeatable[48];
+        char fieldDaily[56];
+        u32 taskId = 0;
+        bool repeatable = false;
+        u32 dailyLimit = 0;
+
+        if (i < boundCount)
+        {
+            taskId = seed->boundTasks[i].taskId;
+            repeatable = seed->boundTasks[i].repeatable;
+            dailyLimit = seed->boundTasks[i].dailyAcceptLimit;
+        }
+        snprintf(fieldTask, sizeof(fieldTask), "bound_task_id_%u", i);
+        snprintf(fieldRepeatable, sizeof(fieldRepeatable),
+                 "bound_task_repeatable_%u", i);
+        snprintf(fieldDaily, sizeof(fieldDaily),
+                 "bound_task_daily_accept_limit_%u", i);
+        vm_mock_admin_text_appendf(
+            page,
+            "<div class=\"bound-task-row\">"
+            "<label class=\"field\"><span>任务 %u</span>",
+            i + 1u);
+        vm_mock_admin_render_npc_task_select_named(
+            page, fieldTask, taskId, "不绑定");
+        vm_mock_admin_text_appendf(
+            page,
+            "</label>"
+            "<label class=\"field\"><span>重复接取</span>"
+            "<select name=\"%s\">"
+            "<option value=\"0\"%s>完成后不可再接</option>"
+            "<option value=\"1\"%s>完成后允许再接</option>"
+            "</select></label>"
+            "<label class=\"field\"><span>每天次数</span>"
+            "<input type=\"number\" name=\"%s\" min=\"0\" max=\"9999\" value=\"%u\">"
+            "</label></div>",
+            fieldRepeatable,
+            repeatable ? "" : " selected",
+            repeatable ? " selected" : "",
+            fieldDaily,
+            dailyLimit);
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "<p class=\"bound-tasks-help\">"
+        "同一 NPC 可绑多个不同任务；空行忽略。每天次数 0=不限制。"
+        "对话选项与服务入口合计最多 7 个。"
+        "</p></div>");
+}
+
 static bool vm_mock_admin_utf8_to_gbk_text(const char *utf8,
                                            char *gbk, size_t gbkCap,
                                            bool allowEmpty)
@@ -4700,10 +4772,10 @@ static void vm_mock_admin_render_content_page(char *response,
         ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene-search-row{display:flex;gap:8px;margin:0 0 8px;align-items:stretch}.scene-search{flex:1;margin:0;width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}.scene-search-row button{flex:none}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene.is-filtered,.scene[hidden]{display:none!important}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.scene .scene-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
         ".create-scene{flex:none;margin:0 0 12px;padding:10px;border:1px solid #e4e7ec;border-radius:8px;background:#f9fafb}.create-scene .fields{grid-template-columns:1fr;gap:8px;margin-top:8px}.create-scene .actions{margin-top:8px}.monster-slots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0}.monster-slots a{color:#175cd3;text-decoration:none;font-size:12px}"
         ".portal-edit,.combat-edit{display:grid;gap:12px;margin-top:10px}.portal-card,.combat-card{border:1px solid #e4e7ec;border-radius:8px;padding:12px;background:#fff}.portal-card h3,.combat-card h3{margin:0 0 8px;font-size:14px}.portal-fields,.combat-fields{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:8px}.portal-fields .wide,.combat-fields .wide{grid-column:span 2}.combat-fields .check{display:flex;align-items:flex-end;padding-bottom:8px}"
-        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:flex-start;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.preview-head .size{margin-left:auto}.map-edit-link{padding:4px 10px;border-radius:6px;background:#175cd3;color:#fff;text-decoration:none;font-size:12px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.npc-pin.draggable,.npc-pin.copyable{pointer-events:auto;touch-action:none;-webkit-user-select:none;user-select:none}.npc-pin.draggable{cursor:grab}.npc-pin.copyable:not(.draggable){cursor:context-menu}.npc-pin.draggable:active,.npc-pin.dragging{cursor:grabbing;z-index:8}.npc-pin.dragging{opacity:.92}.scene-pin-modal{position:fixed;inset:0;z-index:1200;place-items:center;padding:20px;background:#10182899}.scene-pin-modal:not([hidden]){display:grid}.scene-pin-modal[hidden]{display:none!important}.scene-pin-dialog{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.scene-pin-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid #eaecf0}.scene-pin-head strong{font-size:16px}.scene-pin-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.scene-pin-body{overflow:auto;padding:14px 16px 18px;overscroll-behavior:contain}.scene-pin-body .npc,.scene-pin-body .combat-card{border:0;padding:0;background:transparent}.scene-pin-body .fields{grid-template-columns:repeat(2,minmax(0,1fr))}.scene-pin-body .combat-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.scene-pin-body .instance-fields{grid-template-columns:1fr 1fr}.preview-edit-tools{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}.preview-edit-tools button{font-size:13px}.scene-edit-store{display:none!important}.modal-open{overflow:hidden}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.npc-pin.combat .pin-name{background:#b42318}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-icon.combat{background:#b42318}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.npc-chip.combat{background:#fef3f2;color:#b42318}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
-        ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.badge.override{background:#fffaeb;color:#b54708}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.service-kinds{display:flex;flex-wrap:wrap;gap:8px 14px;padding:8px 10px;border:1px solid #e4e7ec;border-radius:7px;background:#f9fafb}.service-kind{display:flex;align-items:center;gap:6px;font-size:13px;color:#344054;white-space:nowrap}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-teleport-task,.instance-help{grid-column:1/-1}.instance-help{margin:0;color:#7a2e0e;font-size:12px}"
+        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:flex-start;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.preview-head .size{margin-left:auto}.map-edit-link{padding:4px 10px;border-radius:6px;background:#175cd3;color:#fff;text-decoration:none;font-size:12px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.npc-pin.draggable,.npc-pin.copyable{pointer-events:auto;touch-action:none;-webkit-user-select:none;user-select:none}.npc-pin.draggable{cursor:grab}.npc-pin.copyable:not(.draggable){cursor:context-menu}.npc-pin.draggable:active,.npc-pin.dragging{cursor:grabbing;z-index:8}.npc-pin.dragging{opacity:.92}.scene-pin-modal{position:fixed;inset:0;z-index:1200;place-items:center;padding:20px;background:#10182899}.scene-pin-modal:not([hidden]){display:grid}.scene-pin-modal[hidden]{display:none!important}.scene-pin-dialog{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.scene-pin-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid #eaecf0}.scene-pin-head strong{font-size:16px}.scene-pin-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.scene-pin-body{overflow:auto;padding:14px 16px 18px;overscroll-behavior:contain}.scene-pin-body .npc,.scene-pin-body .combat-card{border:0;padding:0;background:transparent}.scene-pin-body .fields{grid-template-columns:repeat(2,minmax(0,1fr))}.scene-pin-body .combat-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.scene-pin-body .instance-fields{grid-template-columns:1fr 1fr}.scene-pin-body .bound-task-row{grid-template-columns:1fr 1fr}.preview-edit-tools{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 0}.preview-edit-tools button{font-size:13px}.scene-edit-store{display:none!important}.modal-open{overflow:hidden}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.npc-pin.combat .pin-name{background:#b42318}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-icon.combat{background:#b42318}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.npc-chip.combat{background:#fef3f2;color:#b42318}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
+        ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.badge.override{background:#fffaeb;color:#b54708}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.service-kinds{display:flex;flex-wrap:wrap;gap:8px 14px;padding:8px 10px;border:1px solid #e4e7ec;border-radius:7px;background:#f9fafb}.service-kind{display:flex;align-items:center;gap:6px;font-size:13px;color:#344054;white-space:nowrap}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-teleport-task,.instance-help{grid-column:1/-1}.instance-help{margin:0;color:#7a2e0e;font-size:12px}.bound-tasks{display:grid;gap:8px;margin-top:10px;padding:10px;border:1px solid #e4e7ec;border-radius:7px;background:#f9fafb}.bound-tasks-title{font-size:12px;color:#667085}.bound-task-row{display:grid;grid-template-columns:minmax(140px,1.4fr) minmax(150px,1fr) minmax(100px,.7fr);gap:8px;align-items:end}.bound-tasks-help{margin:0;font-size:12px;color:#667085}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-block;text-align:center}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}"
-        "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields,.monster-slots{grid-template-columns:1fr 1fr}.instance-scene,.instance-help{grid-column:1/-1}}"
+        "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields,.monster-slots,.bound-task-row{grid-template-columns:1fr 1fr}.instance-scene,.instance-help{grid-column:1/-1}}"
         "</style><script src=\"/admin.js?v=17\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
@@ -5567,15 +5639,8 @@ static void vm_mock_admin_render_content_page(char *response,
             row->seed.orientation);
         vm_mock_admin_render_xse_select(&page, xseFiles, xseCount,
                                         row->seed.scriptName);
-        vm_mock_admin_text_appendf(&page,
-            "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
-        vm_mock_admin_render_npc_task_select(&page, row->seed.taskId);
-        vm_mock_admin_text_appendf(&page,
-            "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\"%s>完成后不可再次接取</option><option value=\"1\"%s>完成后允许再次接取</option></select></label>"
-            "<label class=\"field\" style=\"margin-top:8px\"><span>每天可接取次数</span><input type=\"number\" name=\"task_daily_accept_limit\" min=\"0\" max=\"9999\" value=\"%u\"><span class=\"muted\" style=\"font-size:12px\">0=不限制；大于 0 时按服务器本地自然日计数，达上限后当天不再显示接取（也允许完成后在剩余次数内再接）</span></label>",
-            row->seed.taskRepeatable ? "" : " selected",
-            row->seed.taskRepeatable ? " selected" : "",
-            (u32)row->seed.taskDailyAcceptLimit);
+        vm_mock_admin_text_appendf(&page, "</label>");
+        vm_mock_admin_render_npc_bound_tasks(&page, &row->seed);
         vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount,
                                              &row->seed);
         vm_mock_admin_text_appendf(&page,
@@ -5626,16 +5691,12 @@ static void vm_mock_admin_render_content_page(char *response,
         "</label><label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"0\"></label></div>"
         "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
     vm_mock_admin_render_xse_select(&page, xseFiles, xseCount, NULL);
-    vm_mock_admin_text_appendf(&page,
-        "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
-    vm_mock_admin_render_npc_task_select(&page, 0);
-    vm_mock_admin_text_appendf(&page,
-        "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\" selected>完成后不可再次接取</option><option value=\"1\">完成后允许再次接取</option></select></label>"
-        "<label class=\"field\" style=\"margin-top:8px\"><span>每天可接取次数</span><input type=\"number\" name=\"task_daily_accept_limit\" min=\"0\" max=\"9999\" value=\"0\"><span class=\"muted\" style=\"font-size:12px\">0=不限制；大于 0 时按服务器本地自然日计数，达上限后当天不再显示接取（也允许完成后在剩余次数内再接）</span></label>");
+    vm_mock_admin_text_appendf(&page, "</label>");
+    vm_mock_admin_render_npc_bound_tasks(&page, NULL);
     vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
-        "<p class=\"foot\">服务选项可多选：对话中每个勾选的服务各增加一个入口。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人只出售 item.dsh 类别 10 中 HP/MP 恢复类药品（不含经验卡、喇叭等消耗品）。副本向导在对话中拆成「传送」与「挑战」两项：配置目标场景才显示传送（可设前置任务，ID=0 直接显示）；配置挑战怪物 ID 才显示挑战；并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。可接取任务可设「任务重复接取」与「每天可接取次数」（0=不限；大于 0 按本地自然日计数，且允许在剩余次数内完成后重接）。任务与服务合计最多 7 个对话选项。SCE 内置 NPC 可编辑：保存写入 MySQL 覆盖，不改写 .sce；「恢复内置默认」可撤销覆盖。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
+        "<p class=\"foot\">服务选项可多选：对话中每个勾选的服务各增加一个入口。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人只出售 item.dsh 类别 10 中 HP/MP 恢复类药品（不含经验卡、喇叭等消耗品）。副本向导在对话中拆成「传送」与「挑战」两项：配置目标场景才显示传送（可设前置任务，ID=0 直接显示）；配置挑战怪物 ID 才显示挑战；并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。可接取任务最多 8 个绑定，每行可单独设重复接取与每天次数（0=不限）。任务与服务合计最多 7 个对话选项。SCE 内置 NPC 可编辑：保存写入 MySQL 覆盖，不改写 .sce；「恢复内置默认」可撤销覆盖。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div></div></section></div></main></body></html>");
 
     if (page.truncated)
@@ -6219,7 +6280,7 @@ static void vm_mock_admin_render_item_grant_form(
                                            "物品", 0, true);
     vm_mock_admin_text_appendf(
         page,
-        "<label><span>数量</span><input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required></label>"
+        "<label><span>数量</span><input type=\"number\" name=\"amount\" min=\"1\" max=\"1000\" value=\"1\" required></label>"
         "<button type=\"submit\">给予物品</button></form>"
         "<p class=\"muted grant-note\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p></div>");
     vm_mock_admin_render_item_picker_modal(page);
@@ -8061,6 +8122,32 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
     return true;
 }
 
+/**
+ * 解析可选 u32 表单字段；缺省或空串时使用 defaultValue。
+ * @return 解析成功或采用默认值时为 true；字段存在但非法时为 false
+ */
+static bool vm_mock_admin_form_u32_or_default(const char *body, const char *field,
+                                              u32 maximum, u32 defaultValue,
+                                              u32 *valueOut)
+{
+    char textValue[32];
+    u32 parsed = 0;
+
+    memset(textValue, 0, sizeof(textValue));
+    if (!vm_mock_admin_form_value(body, field, textValue, sizeof(textValue)) ||
+        textValue[0] == 0)
+    {
+        if (valueOut)
+            *valueOut = defaultValue;
+        return true;
+    }
+    if (!vm_net_mock_parse_u32_strict(textValue, &parsed) || parsed > maximum)
+        return false;
+    if (valueOut)
+        *valueOut = parsed;
+    return true;
+}
+
 #include "web_admin_chests.inc.c"
 #include "web_admin_enhance.inc.c"
 #include "web_admin_combat.inc.c"
@@ -9771,10 +9858,6 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     if (strcmp(action, "save-npc") != 0 ||
         !vm_mock_admin_form_u32(body, "x", 0xffffu, &x) || x == 0 ||
         !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0 ||
-        !vm_mock_admin_form_u32(body, "task_id", 0xffffffffu, &taskId) ||
-        !vm_mock_admin_form_u32(body, "task_repeatable", 1, &taskRepeatable) ||
-        !vm_mock_admin_form_u32(body, "task_daily_accept_limit", 9999u,
-                                &taskDailyAcceptLimit) ||
         !vm_mock_admin_form_u32(body, "orientation", 0xffffu, &orientation) ||
         !vm_mock_admin_form_value(body, "display_name", displayUtf8,
                                   sizeof(displayUtf8)) ||
@@ -9802,23 +9885,88 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     }
     serviceMask &= VM_NET_MOCK_NPC_SERVICE_MASK_ALL;
     kind = vm_net_mock_npc_primary_kind_from_mask(serviceMask);
-    if (taskId != 0 && vm_net_mock_task_catalog_find_by_id(taskId) == NULL)
+    seed.boundTaskCount = 0;
+    memset(seed.boundTasks, 0, sizeof(seed.boundTasks));
+    seed.taskId = 0;
+    seed.taskRepeatable = false;
+    seed.taskDailyAcceptLimit = 0;
+    for (u32 bindIndex = 0; bindIndex < VM_NET_MOCK_NPC_BOUND_TASK_MAX; ++bindIndex)
     {
-        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
-                                       "绑定任务不存在或已停用");
-        return;
+        char fieldTask[40];
+        char fieldRepeatable[48];
+        char fieldDaily[56];
+        u32 bindTaskId = 0;
+        u32 bindRepeatable = 0;
+        u32 bindDaily = 0;
+
+        snprintf(fieldTask, sizeof(fieldTask), "bound_task_id_%u", bindIndex);
+        snprintf(fieldRepeatable, sizeof(fieldRepeatable),
+                 "bound_task_repeatable_%u", bindIndex);
+        snprintf(fieldDaily, sizeof(fieldDaily),
+                 "bound_task_daily_accept_limit_%u", bindIndex);
+        if (!vm_mock_admin_form_u32_or_default(body, fieldTask, 0xffffffffu, 0,
+                                                &bindTaskId) ||
+            !vm_mock_admin_form_u32_or_default(body, fieldRepeatable, 1u, 0,
+                                                &bindRepeatable) ||
+            !vm_mock_admin_form_u32_or_default(body, fieldDaily, 9999u, 0,
+                                                &bindDaily))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "可接取任务绑定字段无效");
+            return;
+        }
+        if (bindTaskId == 0)
+            continue;
+        if (vm_net_mock_task_catalog_find_by_id(bindTaskId) == NULL)
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "绑定任务不存在或已停用");
+            return;
+        }
+        if (vm_net_mock_seed_find_bound_task(&seed, bindTaskId) != NULL)
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "同一 NPC 不能重复绑定相同任务");
+            return;
+        }
+        if (!vm_net_mock_seed_add_bound_task(&seed, bindTaskId,
+                                              bindRepeatable != 0,
+                                              (u16)bindDaily))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "可接取任务绑定数量超过上限");
+            return;
+        }
     }
-    if (taskId == 0 && taskRepeatable != 0)
+    /* Legacy single-field fallback when multi-row form is absent. */
+    if (seed.boundTaskCount == 0 &&
+        vm_mock_admin_form_u32_or_default(body, "task_id", 0xffffffffu, 0,
+                                           &taskId) &&
+        taskId != 0)
     {
-        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
-                                       "只有绑定任务的 NPC 才能设置重复接取");
-        return;
-    }
-    if (taskId == 0 && taskDailyAcceptLimit != 0)
-    {
-        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
-                                       "只有绑定任务的 NPC 才能设置每天可接取次数");
-        return;
+        if (!vm_mock_admin_form_u32_or_default(body, "task_repeatable", 1u, 0,
+                                                &taskRepeatable) ||
+            !vm_mock_admin_form_u32_or_default(body, "task_daily_accept_limit",
+                                                9999u, 0,
+                                                &taskDailyAcceptLimit))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "可接取任务绑定字段无效");
+            return;
+        }
+        if (vm_net_mock_task_catalog_find_by_id(taskId) == NULL)
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "绑定任务不存在或已停用");
+            return;
+        }
+        if (!vm_net_mock_seed_add_bound_task(&seed, taskId, taskRepeatable != 0,
+                                              (u16)taskDailyAcceptLimit))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "可接取任务绑定失败");
+            return;
+        }
     }
     if ((serviceMask & (1u << VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)) != 0)
     {
@@ -9949,9 +10097,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.y = (u16)y;
     seed.kind = (u16)kind;
     seed.serviceMask = serviceMask;
-    seed.taskId = taskId;
-    seed.taskRepeatable = taskRepeatable != 0;
-    seed.taskDailyAcceptLimit = (u16)taskDailyAcceptLimit;
+    vm_net_mock_seed_sync_primary_bound_task(&seed);
     seed.orientation = (u16)orientation;
     seed.instanceX = (u16)instanceX;
     seed.instanceY = (u16)instanceY;
@@ -10865,7 +11011,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
                                       sizeof(amountText)) ||
             !vm_net_mock_parse_u32_strict(itemText, &itemId) || itemId == 0 ||
             !vm_net_mock_parse_u32_strict(amountText, &amount) || amount == 0 ||
-            amount > 255)
+            amount > 1000)
         {
             vm_mock_admin_redirect(client, account, "error",
                                    "物品和数量参数无效");

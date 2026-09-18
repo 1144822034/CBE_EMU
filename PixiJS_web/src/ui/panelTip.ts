@@ -1,6 +1,7 @@
 /**
  * Shared center toast for LCD panels (auction / wager / arena / social / HUD…).
- * Opaque tip layer sits above panel labels so content cannot show through.
+ * Tip host stays above panel labels; tip Songti uses a top DOM z band.
+ * Overlapping Songti is covered by a solid DOM plate (not whole-line hidden).
  */
 import { Container, Graphics } from "pixi.js";
 import {
@@ -12,6 +13,14 @@ import {
   paintCbePanel,
 } from "./constants";
 import { UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
+import {
+  clearLcdDomTipOccludeRect,
+  registerLcdDomPanelTip,
+  setLcdDomTipOccludeRect,
+} from "./lcdDomText";
+
+/** Above panel labels / HUD chrome / popup Songti. */
+const TIP_HOST_Z = 2_000_000;
 
 export type PanelTipState = {
   tipText: string;
@@ -28,6 +37,8 @@ export function createPanelTipState(): PanelTipState {
   const host = new Container();
   host.eventMode = "none";
   host.visible = false;
+  host.zIndex = TIP_HOST_Z;
+  registerLcdDomPanelTip(host);
   const gfx = new Graphics();
   host.addChild(gfx);
   return {
@@ -118,6 +129,7 @@ function clearTipLayer(state: PanelTipState): void {
   state.gfx.clear();
   state.host.visible = false;
   state.host.eventMode = "none";
+  clearLcdDomTipOccludeRect();
 }
 
 /**
@@ -130,9 +142,9 @@ export function drawPanelTipOverlay(
 ): void {
   // Re-parent to end → above box + BitmapLabels from this redraw.
   parent.addChild(state.host);
-  // Keep above siblings that also bump z during redraw (HUD bands, etc.).
-  state.host.zIndex = 1000;
+  state.host.zIndex = TIP_HOST_Z;
   parent.sortableChildren = true;
+  registerLcdDomPanelTip(state.host);
 
   for (const c of [...state.host.children]) {
     if (c !== state.gfx) c.destroy();
@@ -154,21 +166,20 @@ export function drawPanelTipOverlay(
 
   const padFrame = 6;
   const padX = 10;
-  // Asymmetric: UC3 glyphs sit low in the cell — extra bottom so bottoms are
-  // not covered by drawCbePanel double-frame / corners.
-  const padYTop = 8;
-  const padYBottom = 14;
+  const padY = 10;
   const lineH = UC3_CELL + 4;
   const closeW = 18;
   const maxInner = LCD_WIDTH - 28 - padFrame * 2;
-  const textMax = Math.max(40, maxInner - padX * 2 - closeW);
+  const textMax = Math.max(40, maxInner - padX * 2);
   const lines = wrapUiText(state.tipText, textMax);
   const contentW = Math.max(
     96,
     ...lines.map((l) => measureUiTextWidth(l)),
   );
+  // Keep room for × without biasing body text left.
   const boxW = Math.min(maxInner, contentW + padX * 2 + closeW);
-  const boxH = padYTop + padYBottom + lines.length * lineH;
+  const textBlockH = lines.length * lineH;
+  const boxH = Math.max(textBlockH + padY * 2, 36);
 
   // Nudge above mid-LCD so softkey chrome does not clip the toast.
   const bx = Math.floor((LCD_WIDTH - boxW) / 2) - padFrame;
@@ -176,14 +187,19 @@ export function drawPanelTipOverlay(
     Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2) - padFrame - 24;
   const fw = boxW + padFrame * 2;
   const fh = boxH + padFrame * 2;
+  // Solid canvas fill under chrome so map pixels cannot peek through.
+  state.gfx.roundRect(bx, by, fw, fh, 2).fill({ color: CBE.bgPanelDark, alpha: 1 });
   paintCbePanel(state.host, state.gfx, bx, by, fw, fh, CBE.bgPanelDark);
+  // DOM plate under tip Songti — covers behind text in place (no display:none).
+  setLcdDomTipOccludeRect(state.host, bx, by, fw, fh, CBE.bgPanelDark);
 
-  const textLeft = bx + padFrame + padX;
-  const textTop = by + padFrame + padYTop;
+  const textCx = Math.round(bx + padFrame + boxW / 2);
+  const textTop =
+    by + padFrame + Math.max(0, Math.floor((boxH - textBlockH) / 2));
   lines.forEach((line, i) => {
     const lab = makePixelText(line, 12, CBE.inkTipGreen);
-    lab.anchor.set(0, 0);
-    lab.x = textLeft;
+    lab.anchor.set(0.5, 0);
+    lab.x = textCx;
     lab.y = Math.floor(textTop + i * lineH);
     state.host.addChild(lab);
   });

@@ -70,6 +70,14 @@ u8 getFontBitMap(u16 gbCode, char *bitmapData)
 }
 void drawFontChar(u16 gbCode, int x, int y, u16 color)
 {
+    /*
+     * Must use native pitch (not LCD_WIDTH capacity).  176×220 titles present
+     * Lcd_Cache with pitch=176; writing py*240+px parks glyphs off the
+     * visible dialogue band (empty text box while softkey bitmaps still show).
+     */
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
     char *bitMapData = SDL_malloc(bitmapDataSize);
     if (bitMapData == NULL)
         return;
@@ -78,18 +86,18 @@ void drawFontChar(u16 gbCode, int x, int y, u16 color)
         for (int j = 0; j < fontHeight; j++)
         {
             int py = y + j;
-            if (py < 0 || py >= LCD_HEIGHT)
+            if (py < 0 || py >= screenH)
                 continue;
             for (int i = 0; i < fontWidth; i++)
             {
                 int px = x + i;
-                if (px < 0 || px >= LCD_WIDTH)
+                if (px < 0 || px >= screenW)
                     continue;
                 int byteIndex = j * linePitch + i / 8;
                 int bitIndex = 7 - (i % 8);
                 if ((bitMapData[byteIndex] >> bitIndex) & 1)
                 {
-                    int offset = py * LCD_WIDTH + px;
+                    int offset = py * pitch + px;
                     ((u16 *)Lcd_Cache_Buffer)[offset] = color;
                 }
             }
@@ -114,6 +122,9 @@ void drawFontCharWithWidth(u16 gbCode, int x, int y, u16 color, int drawWidth)
      * all 16 columns into eight pixels.
      */
     int bitmapDrawWidth = drawWidth < fontWidth ? drawWidth : fontWidth;
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
 
     char *bitMapData = SDL_malloc(bitmapDataSize);
     if (bitMapData == NULL)
@@ -123,19 +134,19 @@ void drawFontCharWithWidth(u16 gbCode, int x, int y, u16 color, int drawWidth)
         for (int j = 0; j < fontHeight; j++)
         {
             int py = y + j;
-            if (py < 0 || py >= LCD_HEIGHT)
+            if (py < 0 || py >= screenH)
                 continue;
             for (int i = 0; i < bitmapDrawWidth; i++)
             {
                 int px = x + i;
-                if (px < 0 || px >= LCD_WIDTH)
+                if (px < 0 || px >= screenW)
                     continue;
 
                 int byteIndex = j * linePitch + i / 8;
                 int bitIndex = 7 - (i % 8);
                 if ((bitMapData[byteIndex] >> bitIndex) & 1)
                 {
-                    int offset = py * LCD_WIDTH + px;
+                    int offset = py * pitch + px;
                     ((u16 *)Lcd_Cache_Buffer)[offset] = color;
                 }
             }

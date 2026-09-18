@@ -325,6 +325,25 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
       durabilityMax: 1,
     });
   }
+  if (!itemCache.has(854)) {
+    itemCache.set(854, {
+      id: 854,
+      name: "玄晶提炼石",
+      desc: "消耗1个，可将已强化装备投入的玄晶提炼回背包，装备销毁。",
+      category: 14,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 100,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
   return itemCache;
 }
 

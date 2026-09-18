@@ -29,9 +29,50 @@
         --muted: #8a8070;
         --accent: #c4a35a;
         --danger: #c45c5c;
-        --ui-font: SimSun, "Songti SC", "Microsoft YaHei", monospace;
+        --ui-font: SimSun, "宋体", "Songti SC", "Noto Serif CJK SC", sans-serif;
         font-family: var(--ui-font);
         -webkit-tap-highlight-color: transparent;
+      }
+      /* Reference http://162.14.112.35:18880/ 字体切换:
+       * panels = DOM SimSun; game canvas stays pixelated.
+       * Our Songti LCD labels use #lcd-dom-text overlay (not canvas bake / auto). */
+      html.jh-system-font {
+        /* cn = OS Songti stack (no bundled simsun.ttf). */
+        --ui-font: SimSun, "宋体", "Songti SC", "Noto Serif CJK SC", serif;
+      }
+      /* Songti: world nameplates (map band only) under UI/panel DOM text.
+       * clip-path = WORLD_TOP_H/LCD_H … WORLD_BOTTOM_H so canvas HUD chrome wins. */
+      #lcd-dom-world {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        overflow: hidden;
+        pointer-events: none;
+        font-family: var(--ui-font);
+        clip-path: inset(18% 0 14.5% 0);
+      }
+      #lcd-dom-text {
+        position: absolute;
+        inset: 0;
+        z-index: 4;
+        overflow: hidden;
+        pointer-events: none;
+        font-family: var(--ui-font);
+      }
+      #lcd-dom-world .lcd-dom-label,
+      #lcd-dom-text .lcd-dom-label {
+        position: absolute;
+        left: 0;
+        top: 0;
+        margin: 0;
+        padding: 0;
+        /* Match UC3_CELL row pitch — 1.25 caused ~3-glyph vertical overlap in panels. */
+        line-height: 1;
+        font-weight: 400;
+        white-space: pre;
+        transform-origin: 0 0;
+        pointer-events: none;
+        -webkit-font-smoothing: antialiased;
       }
       * { box-sizing: border-box; }
       html, body {

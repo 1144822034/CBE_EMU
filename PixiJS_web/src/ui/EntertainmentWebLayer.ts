@@ -5,6 +5,7 @@
  */
 import { Capacitor, registerPlugin } from "@capacitor/core";
 import { LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
+import { uiFontFamily } from "../resources/systemFont";
 
 interface EntertainmentHttpPlugin {
   resolve(opts: {
@@ -87,7 +88,7 @@ export class EntertainmentWebLayer {
       margin: "0",
       padding: "0",
       boxSizing: "border-box",
-      fontFamily: 'SimSun, "Songti SC", "Microsoft YaHei", monospace',
+      fontFamily: uiFontFamily(),
       color: "#e8dcc8",
       touchAction: "manipulation",
       pointerEvents: "none",

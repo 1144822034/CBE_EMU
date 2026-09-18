@@ -2158,6 +2158,168 @@ export function parseRenameCardResult(
   };
 }
 
+/** Pixi 自定义 854 玄晶提炼石 — 装备详情提炼退回强化玄晶并销毁装备。29/16. */
+export const CRYSTAL_EXTRACT_STONE_ITEM_ID = 854;
+
+export function isCrystalExtractStone(itemId: number): boolean {
+  return (itemId | 0) === CRYSTAL_EXTRACT_STONE_ITEM_ID;
+}
+
+export type CrystalExtractResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  equipSeq: number;
+  stoneSeq: number;
+  remaining: number;
+  needSlots: number;
+  freeSlots: number;
+  /** Parsed spent ledger rows when ok or bag-full. */
+  spent: { itemId: number; count: number }[];
+};
+
+export function buildCrystalExtractRequest(equipSeq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 16).u16("equipseq", equipSeq & 0xffff);
+  return b.finish();
+}
+
+/**
+ * Estimate free slots needed to take back crystals for +enhance gear.
+ * Mirrors server fallback (1 crystal of each tier 1..N) and stacking:
+ * only missing crystal types need a new bag row. Destroyed equip (+ stone
+ * if last copy) frees slots first.
+ */
+export function estimateCrystalExtractBagSpace(opts: {
+  enhance: number;
+  bagItems: { itemId: number; count: number }[];
+  stoneCount: number;
+}): { needSlots: number; freeAfter: number; ok: boolean } {
+  const enhance = Math.min(16, Math.max(0, opts.enhance | 0));
+  const bag = opts.bagItems;
+  let need = 0;
+  for (let tier = 1; tier <= enhance; tier++) {
+    const id = ENHANCE_CRYSTAL_FIRST + tier - 1;
+    if (!bag.some((it) => it.itemId === id && (it.count | 0) > 0)) need += 1;
+  }
+  let freed = 1; /* destroy equip */
+  if ((opts.stoneCount | 0) <= 1) freed += 1;
+  return {
+    needSlots: need,
+    freeAfter: freed,
+    ok: need <= freed, /* caller adds empty slots */
+  };
+}
+
+/** True when current bag can hold extract refund (fallback estimate). */
+export function canFitCrystalExtractInBag(opts: {
+  enhance: number;
+  bagItems: { itemId: number; count: number }[];
+  bagCapacity: number;
+  stoneCount: number;
+}): boolean {
+  const occupied = opts.bagItems.filter((it) => (it.count | 0) > 0).length;
+  const empty = Math.max(0, (opts.bagCapacity | 0) - occupied);
+  const est = estimateCrystalExtractBagSpace(opts);
+  return est.needSlots <= empty + est.freeAfter;
+}
+
+function crystalExtractFailMessage(
+  result: number,
+  needSlots = 0,
+  freeSlots = 0,
+): string {
+  switch (result) {
+    case 2:
+      return "玄晶提炼石不足";
+    case 3:
+      return "装备不存在";
+    case 4:
+      return "未强化装备无法提炼";
+    case 5:
+      if (needSlots > 0) {
+        const short = Math.max(0, needSlots - freeSlots);
+        return short > 0
+          ? `背包空间不足，需空出${short}格存放玄晶`
+          : "背包空间不足，无法存放提炼玄晶";
+      }
+      return "背包空间不足，无法存放提炼玄晶";
+    case 6:
+      return "扣除失败";
+    case 7:
+      return "发放玄晶失败";
+    default:
+      return "提炼失败";
+  }
+}
+
+function parseCrystalExtractSpent(text: string): { itemId: number; count: number }[] {
+  const out: { itemId: number; count: number }[] = [];
+  if (!text) return out;
+  for (const piece of text.split(",")) {
+    const m = /^(\d+):(\d+)$/.exec(piece.trim());
+    if (!m) continue;
+    const itemId = Number(m[1]) >>> 0;
+    const count = Number(m[2]) >>> 0;
+    if (!itemId || !count) continue;
+    out.push({ itemId, count });
+  }
+  return out;
+}
+
+function crystalExtractSuccessMessage(
+  spent: { itemId: number; count: number }[],
+): string {
+  if (!spent.length) return "提炼成功，装备已销毁";
+  const parts = spent.map((row) => {
+    const name =
+      lookupItemSync(row.itemId)?.name || enhanceCrystalName(row.itemId);
+    return `${name}×${row.count}`;
+  });
+  return `提炼成功：${parts.join("、")}`;
+}
+
+export function parseCrystalExtractResult(
+  packet: WtPacket,
+): CrystalExtractResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 16);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const equipSeq = fieldU32(obj, "equipseq");
+  const stoneSeq = fieldU32(obj, "stoneseq");
+  const remaining = fieldU32(obj, "remaining");
+  const needSlots = fieldU32(obj, "needslots");
+  const freeSlots = fieldU32(obj, "freeslots");
+  const spentRaw = findField(obj, "spent");
+  const spentText = spentRaw
+    ? decodeFieldString(spentRaw).replace(/\0+$/g, "")
+    : "";
+  const spent = parseCrystalExtractSpent(spentText);
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: crystalExtractSuccessMessage(spent),
+      equipSeq,
+      stoneSeq,
+      remaining,
+      needSlots,
+      freeSlots,
+      spent,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: crystalExtractFailMessage(result, needSlots, freeSlots),
+    equipSeq,
+    stoneSeq,
+    remaining,
+    needSlots,
+    freeSlots,
+    spent,
+  };
+}
 
 export const ENHANCE_TRANSFER_FEE_TEXT = "48金65银";
 

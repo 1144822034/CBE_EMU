@@ -753,7 +753,7 @@ export class TradePanel extends Container {
     const title = `交易·${this.peerName}`;
     const pillW = Math.min(w - 16, title.length * 12 + 20);
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 18);
-    this.addLabel(title, LCD_WIDTH / 2 - pillW / 2 + 6, y + 8, CBE.ink);
+    this.addTitleCentered(title, y + 6 + 9, CBE.ink);
 
     const leftX = x + 8;
     const rightX = x + w / 2 + 2;
@@ -1209,6 +1209,17 @@ export class TradePanel extends Container {
     const t = new BitmapLabel();
     void t.setText(text, color);
     t.position.set(lx, ly);
+    this.addChild(t);
+    this.labels.push(t);
+  }
+
+  /** Capsule title — same size/center as SystemPanel popup titles. */
+  private addTitleCentered(text: string, cy: number, color: number): void {
+    const t = new BitmapLabel();
+    t.eventMode = "none";
+    t.anchor.set(0.5, 0.5);
+    t.position.set(LCD_WIDTH / 2, Math.round(cy));
+    void t.setText(text, color, { outline: false });
     this.addChild(t);
     this.labels.push(t);
   }

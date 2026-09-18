@@ -73,6 +73,8 @@ export function invalidateUiGpuTextures(): void {
     }
   }
   cropCache.clear();
+  // Callers must also run invalidateCbeFlowerCornerGpu + invalidateEquipArtGpu
+  // (and panel moneyTex drops) — those Maps hold the same Texture objects.
 }
 
 async function loadGifCached(name: string): Promise<GifRgba> {

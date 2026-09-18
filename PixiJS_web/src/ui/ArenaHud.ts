@@ -1,6 +1,6 @@
 import { Container, Graphics } from "pixi.js";
 import { replaceGraphics } from "../render/gpuResume";
-import { CBE, LCD_WIDTH, WORLD_TOP_H, makePixelText } from "./constants";
+import { CBE, LCD_WIDTH, MAP_STATUS_STRIP_H, WORLD_TOP_H, makePixelText } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import type { ArenaHud as ArenaHudState } from "../net/protocolArena";
 
@@ -12,10 +12,10 @@ function fmtSec(sec: number): string {
 }
 
 /**
- * Map-corner status strip (修/拍/擂/… @ SceneView y=4, 17px).
+ * Map-corner status strip (修/拍/擂/… flush under exp).
  * Same clearance as WorldHud PARTY_Y0 / QuestTracker TRACKER_Y0.
  */
-const STATUS_STRIP_BOTTOM = 4 + 17;
+const STATUS_STRIP_BOTTOM = MAP_STATUS_STRIP_H;
 /** Band height (bg rect + text padding). */
 export const ARENA_HUD_BAND_H = 16;
 /** Absolute LCD Y: under WorldHud chrome and clear of 修/拍 badges. */
@@ -35,7 +35,7 @@ export class ArenaHud extends Container {
     this.y = ARENA_HUD_Y;
     this.zIndex = 40;
     this.addChild(this.bg);
-    this.line = makePixelText("", 12, CBE.inkTip);
+    this.line = makePixelText("", 10, CBE.inkTip);
     this.line.x = 4;
     this.line.y = 2;
     this.addChild(this.line);

@@ -2,7 +2,7 @@ import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
 import type { LoadedScene } from "../resources/loader";
 import { formatCombatSpawnNameplate } from "../resources/monsterLevels";
 import { ActorLayer } from "../game/ActorLayer";
-import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale, CBE } from "../ui/constants";
+import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale, CBE, MAP_STATUS_STRIP_H } from "../ui/constants";
 import { BitmapLabel } from "../ui/BitmapLabel";
 import { sceneAssetCandidates } from "../net/protocol";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
@@ -71,11 +71,24 @@ const WALK_PX_PER_MS = 1 / (1000 / 60);
 const MOUNT_WALK_SPEED_MULT = 2;
 /** Cap one tick so a long hitch cannot teleport past collision samples. */
 const WALK_DT_CLAMP_MS = 50;
-/** Map-corner status strip (修/拍/擂/斗/练/娱). */
+/** Map-corner status strip (修/拍/擂/斗/练/娱) — flush under exp (local y=0). */
 const STATUS_BADGE_SIZE = 17;
-const STATUS_BADGE_PITCH = 20;
-const STATUS_BADGE_X0 = 4;
-const STATUS_BADGE_Y = 4;
+/** Slot step — slightly tighter than size+3 so badges sit closer. */
+const STATUS_BADGE_PITCH = 18;
+const STATUS_BADGE_X0 = 3;
+/** Thin vertical collapse rail — same idiom as QuestTrackerOverlay. */
+const STATUS_TOGGLE_W = 8;
+const STATUS_TOGGLE_GAP = 2;
+/** Strip bar padding; badge Y = pad so bar top sits at y=0 (no seam under exp). */
+const STATUS_STRIP_PAD_X = 3;
+const STATUS_STRIP_PAD_Y = Math.max(
+  0,
+  Math.floor((MAP_STATUS_STRIP_H - STATUS_BADGE_SIZE) / 2),
+);
+const STATUS_BADGE_Y = STATUS_STRIP_PAD_Y;
+const STATUS_STRIP_H = STATUS_BADGE_SIZE + STATUS_STRIP_PAD_Y * 2;
+/** Above world nameplates (z=100_000) by one band. */
+const STATUS_STRIP_Z = 100_001;
 
 /**
  * World map camera inside the CBE LCD map band (below HUD, above softkeys).
@@ -83,6 +96,8 @@ const STATUS_BADGE_Y = 4;
 export class SceneView {
   readonly root = new Container();
   readonly world = new Container();
+  /** Above map/actors inside world (shares camera); Songti DOM still map-band clipped. */
+  readonly nameplates = new Container();
   readonly actors: ActorLayer;
   private mapSprite: Sprite | null = null;
   /**
@@ -99,6 +114,7 @@ export class SceneView {
   private decorTexByActor = new Map<string, Texture>();
   private decorPaintGen = 0;
   private player: Container;
+  private playerPlate: Container;
   private playerSprite: Sprite | null = null;
   private playerFallback: Graphics;
   private playerActor: LoadedActor | null = null;
@@ -213,7 +229,9 @@ export class SceneView {
   private chenBadge = new Container();
   /** Collapsible host for 修…称 (toggle sits outside). */
   private statusStripHost = new Container();
-  /** Left「收/展」control for the map-corner status strip. */
+  /** Shared bar behind [收/展] + expanded badges. */
+  private statusStripBg = new Graphics();
+  /** Left thin collapse rail for the map-corner status strip. */
   private statusToggleBadge = new Container();
   private statusStripCollapsed = isStatusStripCollapsed();
   private paiBlink = false;
@@ -234,6 +252,7 @@ export class SceneView {
   constructor(private readonly app: Application) {
     this.root.y = WORLD_TOP_H;
     this.clip = new Container();
+    this.clip.sortableChildren = true;
     this.clipMask = createSolidMaskSprite(this.viewW, this.viewH);
     this.clip.mask = this.clipMask;
     this.clip.addChild(this.clipMask);
@@ -247,14 +266,26 @@ export class SceneView {
     this.clip.addChild(this.mapPointer);
     this.clip.addChild(this.world);
     this.world.sortableChildren = true;
+    this.world.zIndex = 0;
+
+    // Same transform as map/actors (camera on world). High zIndex = draw above
+    // decor bodies but still under shell HUD (view.root < hud).
+    this.nameplates.sortableChildren = true;
+    this.nameplates.eventMode = "none";
+    this.nameplates.zIndex = 100_000;
+    this.world.addChild(this.nameplates);
 
     // Markers share world with player / decor for feet-Y depth sort.
-    this.actors = new ActorLayer(this.world);
+    this.actors = new ActorLayer(this.world, this.nameplates);
 
     this.player = new Container();
     this.player.zIndex = 0;
     this.player.sortableChildren = true;
     this.player.eventMode = "none";
+    this.playerPlate = new Container();
+    this.playerPlate.eventMode = "none";
+    this.playerPlate.sortableChildren = true;
+    this.nameplates.addChild(this.playerPlate);
     this.playerFallback = new Graphics()
       .circle(0, -4, 5)
       .fill({ color: 0xffe08a })
@@ -264,7 +295,7 @@ export class SceneView {
     this.guildLabel.visible = false;
     this.nameLabel.zIndex = 4;
     this.nameLabel.pivot.set(0, 0);
-    /* Depth: sparkles 0 → mount 0.5 → wing-behind 1 → body 2 → wing-back 3 → name 4 → title 5 → guild 6 */
+    /* Depth: sparkles 0 → mount 0.5 → wing-behind 1 → body 2 → wing-back 3 */
     this.plus16Sparkles.root.zIndex = 0;
     this.mountOverlay.root.zIndex = 0.5;
     this.wingOverlay.root.zIndex = 1;
@@ -274,19 +305,25 @@ export class SceneView {
       this.mountOverlay.root,
       this.wingOverlay.root,
       this.playerFallback,
-      this.titleBadge,
-      this.nameLabel,
-      this.guildLabel,
     );
+    this.playerPlate.addChild(this.titleBadge, this.nameLabel, this.guildLabel);
     // Portals join world feet-Y sort with player/decor (not a flat z=10000 layer).
     this.world.addChild(this.player);
     this.root.addChild(this.clip);
+    this.clip.zIndex = 0;
 
     // Status strip on map top-left: [收/展] → 修 → 拍 → 擂 → (斗) → (练) → 娱 → 翅 → 骑 → 称.
+    // Above nameplates (world z=100_000); bar top flush with WORLD_TOP_H / exp bottom.
+    this.statusStripBg.eventMode = "none";
+    this.statusStripBg.zIndex = STATUS_STRIP_Z;
     this.statusStripHost.eventMode = "passive";
+    this.statusStripHost.zIndex = STATUS_STRIP_Z + 1;
+    this.statusToggleBadge.zIndex = STATUS_STRIP_Z + 2;
+    this.root.sortableChildren = true;
+    this.root.addChild(this.statusStripBg);
     this.root.addChild(this.statusStripHost);
 
-    this.mountStatusBadgeSlot(this.statusToggleBadge, 0);
+    this.mountStatusToggleSlot();
     this.statusToggleBadge.on("pointertap", (e) => {
       e.stopPropagation();
       this.statusStripCollapsed = toggleStatusStripCollapsed();
@@ -566,6 +603,7 @@ export class SceneView {
     this.ensurePlayerWalkable("showScene");
     this.player.position.set(this.playerX, this.playerY);
     this.player.zIndex = this.playerY | 0;
+    this.syncPlayerPlate();
     this.applyCamera();
     if (!sameMap) {
       this.paintDecorations();
@@ -793,6 +831,7 @@ export class SceneView {
       this.ensurePlayerWalkable("unequip-wing");
       this.player.position.set(this.playerX, this.playerY);
       this.player.zIndex = this.playerY | 0;
+      this.syncPlayerPlate();
       this.applyCamera();
     }
   }
@@ -871,6 +910,7 @@ export class SceneView {
     this.ensurePlayerWalkable("setPlayerPos", x, y);
     this.player.position.set(this.playerX, this.playerY);
     this.player.zIndex = this.playerY | 0;
+    this.syncPlayerPlate();
     this.applyCamera();
   }
 
@@ -903,7 +943,6 @@ export class SceneView {
     this.lastTitleText = textTitle;
 
     await this.nameLabel.setText(this.lastName, redName ? NAME_RED : NAME_YELLOW, {
-      uc3: true,
       smooth: false,
       outline: true,
       outlineThin: true,
@@ -931,7 +970,6 @@ export class SceneView {
       this.chenghaoOverlay.clear();
       const lab = new BitmapLabel();
       await lab.setText(chenghaoLabel(chenghaoId).slice(0, 8), CBE.inkChat, {
-        uc3: true,
         smooth: false,
         outline: true,
         outlineThin: true,
@@ -960,7 +998,6 @@ export class SceneView {
     } else if (textTitle) {
       const lab = new BitmapLabel();
       await lab.setText(textTitle.slice(0, 8), arenaTextTitleColor(textTitle), {
-        uc3: true,
         smooth: false,
         outline: true,
         outlineThin: true,
@@ -976,7 +1013,14 @@ export class SceneView {
     }
   }
 
+  private syncPlayerPlate(): void {
+    this.playerPlate.position.set(this.player.x, this.player.y);
+    this.playerPlate.zIndex = this.player.zIndex;
+    this.playerPlate.visible = this.player.visible;
+  }
+
   private layoutNameplate(): void {
+    this.syncPlayerPlate();
     const nameH = this.nameLabel.height || 16;
     const bodyH = this.playerSprite ? this.playerSprite.height + 2 : 20;
     const mountExtra = this.mountOverlay.currentMountId
@@ -1025,7 +1069,6 @@ export class SceneView {
     }
     this.lastGuildLine = line;
     await this.guildLabel.setText(line, 0x88eeff, {
-      uc3: true,
       smooth: false,
       outline: true,
       outlineThin: true,
@@ -1106,6 +1149,7 @@ export class SceneView {
     this.nameLabel.zIndex = 4;
     this.titleBadge.zIndex = 5;
     this.player.sortChildren();
+    this.playerPlate.sortChildren();
   }
 
   private async mountXiuArt(): Promise<void> {
@@ -1136,6 +1180,23 @@ export class SceneView {
 
   private async mountChenArt(): Promise<void> {
     await this.mountTextStatusBadge(this.chenBadge, "称", 0x102028, 0xa8c8e8);
+  }
+
+  /**
+   * After font switch: remount text badges (anchor centering) and re-layout
+   * nameplates now that BitmapLabel.width reflects the UC3 sprite again.
+   */
+  remountAfterFontChange(): void {
+    void this.mountXiuArt();
+    void this.mountPaiArt();
+    void this.mountLeiArt();
+    void this.mountYuArt();
+    void this.mountChiArt();
+    void this.mountQiArt();
+    void this.mountChenArt();
+    this.layoutStatusBadges();
+    this.layoutNameplate();
+    this.actors.relayoutAllNameplates();
   }
 
   /** Flash「拍」when auction claims / refunds are pending. */
@@ -1183,18 +1244,21 @@ export class SceneView {
   }
 
   /**
-   * Compact strip: [收/展] fixed left; when expanded, 修/[拍]/擂 + optional 斗/练
-   * then 娱 → 翅 → 骑 → 称. Collapsed: only the toggle remains on the left.
+   * Compact strip: thin [收/展] rail fixed left; when expanded, 修/[拍]/擂 + optional 斗/练
+   * then 娱 → 翅 → 骑 → 称. Collapsed: only the rail remains on the left.
    */
   private layoutStatusBadges(): void {
-    this.mountStatusBadgeSlot(this.statusToggleBadge, 0);
+    this.mountStatusToggleSlot();
     this.mountStatusToggleArt();
 
     this.statusStripHost.visible = !this.statusStripCollapsed;
-    if (this.statusStripCollapsed) return;
+    if (this.statusStripCollapsed) {
+      this.paintStatusStripBg(0);
+      return;
+    }
 
-    // Strip starts one slot to the right of the toggle.
-    this.statusStripHost.position.set(STATUS_BADGE_PITCH, 0);
+    // Badges start just right of the thin collapse rail.
+    this.statusStripHost.position.set(STATUS_TOGGLE_W + STATUS_TOGGLE_GAP, 0);
 
     let next = 0;
     this.mountStatusBadgeSlot(this.xiuBadge, next++);
@@ -1211,50 +1275,75 @@ export class SceneView {
     this.mountStatusBadgeSlot(this.yuBadge, next++);
     this.mountStatusBadgeSlot(this.chiBadge, next++);
     this.mountStatusBadgeSlot(this.qiBadge, next++);
-    this.mountStatusBadgeSlot(this.chenBadge, next);
+    this.mountStatusBadgeSlot(this.chenBadge, next++);
+    this.paintStatusStripBg(next);
+  }
+
+  /** Dark teal bar under the collapse rail (+ expanded badges). */
+  private paintStatusStripBg(badgeSlots: number): void {
+    const n = Math.max(0, badgeSlots | 0);
+    const x = STATUS_BADGE_X0 - STATUS_STRIP_PAD_X;
+    const y = STATUS_BADGE_Y - STATUS_STRIP_PAD_Y;
+    const badgesW =
+      n <= 0
+        ? 0
+        : STATUS_BADGE_SIZE + (n - 1) * STATUS_BADGE_PITCH;
+    const innerW =
+      n <= 0
+        ? STATUS_TOGGLE_W
+        : STATUS_TOGGLE_W + STATUS_TOGGLE_GAP + badgesW;
+    const w = innerW + STATUS_STRIP_PAD_X * 2;
+    const h = STATUS_STRIP_H;
+    this.statusStripBg
+      .clear()
+      .roundRect(x, y, w, h, 2)
+      .fill({ color: CBE.bgDeep, alpha: 0.82 })
+      .stroke({ width: 1, color: CBE.borderDim, alpha: 0.95 });
+  }
+
+  private mountStatusToggleSlot(): void {
+    // Full strip height, flush with bar top (local y=0 under exp).
+    this.statusToggleBadge.position.set(
+      STATUS_BADGE_X0,
+      STATUS_BADGE_Y - STATUS_STRIP_PAD_Y,
+    );
+    this.statusToggleBadge.zIndex = STATUS_STRIP_Z + 2;
+    this.statusToggleBadge.eventMode = "static";
+    this.statusToggleBadge.cursor = "pointer";
+    this.statusToggleBadge.hitArea = {
+      contains: (px: number, py: number) =>
+        px >= 0 && py >= 0 && px <= STATUS_TOGGLE_W && py <= STATUS_STRIP_H,
+    };
   }
 
   private mountStatusToggleArt(): void {
-    this.mountChevronStatusBadge(
-      this.statusToggleBadge,
-      /* pointRight = expand affordance when collapsed */
-      this.statusStripCollapsed,
-    );
-  }
-
-  /** Pixel chevron on the same 17×17 plate as 修/拍/… */
-  private mountChevronStatusBadge(host: Container, pointRight: boolean): void {
-    host.removeChildren().forEach((c) => {
+    this.statusToggleBadge.removeChildren().forEach((c) => {
       c.destroy({ children: true });
     });
-    const fill = pointRight ? 0x182818 : 0x281818;
-    const border = pointRight ? 0xb8e8b0 : 0xe8c8b0;
+    const pointRight = this.statusStripCollapsed;
+    const fill = pointRight ? 0x142414 : 0x241414;
+    const border = pointRight ? 0xb0e0a8 : 0xe0c0a8;
     const ink = pointRight ? 0xc8f0c0 : 0xf0d8c0;
     const plate = new Graphics()
-      .rect(0, 0, STATUS_BADGE_SIZE, STATUS_BADGE_SIZE)
-      .fill({ color: fill })
-      .stroke({ width: 1, color: border });
-    host.addChild(plate);
+      .roundRect(0, 0, STATUS_TOGGLE_W, STATUS_STRIP_H, 2)
+      .fill({ color: fill, alpha: 1 })
+      .stroke({ width: 1, color: border, alpha: 0.95 });
+    this.statusToggleBadge.addChild(plate);
 
     const g = new Graphics();
-    const cx = STATUS_BADGE_SIZE / 2;
-    const cy = STATUS_BADGE_SIZE / 2;
-    // Two-bar chevron « or » (1px strokes) — readable at 17×17.
-    const drawChevron = (ox: number) => {
-      if (pointRight) {
-        g.moveTo(cx + ox - 2.5, cy - 4.5)
-          .lineTo(cx + ox + 1.5, cy)
-          .lineTo(cx + ox - 2.5, cy + 4.5);
-      } else {
-        g.moveTo(cx + ox + 2.5, cy - 4.5)
-          .lineTo(cx + ox - 1.5, cy)
-          .lineTo(cx + ox + 2.5, cy + 4.5);
-      }
-    };
-    drawChevron(pointRight ? -1.5 : 1.5);
-    drawChevron(pointRight ? 1.5 : -1.5);
-    g.stroke({ width: 1.5, color: ink, join: "miter", cap: "square" });
-    host.addChild(g);
+    const cx = STATUS_TOGGLE_W / 2;
+    const cy = STATUS_STRIP_H / 2;
+    if (pointRight) {
+      g.moveTo(cx - 1.2, cy - 3.5)
+        .lineTo(cx + 1.4, cy)
+        .lineTo(cx - 1.2, cy + 3.5);
+    } else {
+      g.moveTo(cx + 1.2, cy - 3.5)
+        .lineTo(cx - 1.4, cy)
+        .lineTo(cx + 1.2, cy + 3.5);
+    }
+    g.stroke({ width: 1.25, color: ink, join: "miter", cap: "square" });
+    this.statusToggleBadge.addChild(g);
   }
 
   private mountStatusBadgeSlot(host: Container, index: number): void {
@@ -1282,9 +1371,12 @@ export class SceneView {
     host.addChild(plate);
     const label = new BitmapLabel();
     await label.setText(text, 0xffe080, { outline: false });
+    // Anchor at slot center so rebake / font switch keeps centering even if
+    // Container.width briefly lags (sprite pivot tracks texture size).
+    label.anchor.set(0.5, 0.5);
     label.position.set(
-      Math.floor((STATUS_BADGE_SIZE - label.width) / 2),
-      Math.floor((STATUS_BADGE_SIZE - label.height) / 2),
+      Math.floor(STATUS_BADGE_SIZE / 2),
+      Math.floor(STATUS_BADGE_SIZE / 2),
     );
     host.addChild(label);
   }
@@ -1428,6 +1520,7 @@ export class SceneView {
       this.clampPlayer();
       this.player.position.set(this.playerX, this.playerY);
       this.player.zIndex = this.playerY | 0;
+      this.syncPlayerPlate();
       this.applyCamera();
 
       // Click-path stuck on collision: stop instead of spinning in place.
@@ -1661,6 +1754,7 @@ export class SceneView {
     // Status badge plates are Graphics — UC3 glyphs return via refreshAllUc3Labels
     // but plates stay blank, leaving bare「修 拍 擂…」over the black band.
     try {
+      this.statusStripBg = replaceGraphics(this.statusStripBg);
       this.mountStatusToggleArt();
       void this.mountXiuArt();
       void this.mountPaiArt();

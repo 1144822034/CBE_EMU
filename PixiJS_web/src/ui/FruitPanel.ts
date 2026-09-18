@@ -10,6 +10,7 @@ import {
 import { replaceGraphics } from "../render/gpuResume";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
+import { uiFontFamily } from "../resources/systemFont";
 import {
   FRUIT_BET_OPTIONS,
   FRUIT_CREDITS_PER_GOLD,
@@ -114,7 +115,7 @@ export class FruitPanel extends Container {
     text: "加载水果机…",
     style: new TextStyle({
       fill: 0xffffff,
-      fontFamily: "sans-serif",
+      fontFamily: uiFontFamily(),
       fontSize: 12,
     }),
   });

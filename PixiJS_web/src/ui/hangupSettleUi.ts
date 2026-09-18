@@ -5,11 +5,14 @@
  */
 import { Container, Graphics, Texture } from "pixi.js";
 import { CBE, LCD_WIDTH, paintCbePanel } from "./constants";
-import { BitmapLabel } from "./BitmapLabel";
+import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
+import { preferSystemFont } from "../resources/systemFont";
 import { formatBattleInsightRemainMmSs } from "../net/protocolExtras";
 import { loadUiCrop, tryLoadUiTexture, uiSprite } from "./UiAssets";
 
 const PICKUP_CELL = 12;
+/** Match pickupimage1 glyph height (~11px) for Songti value/label rows. */
+const SETTLE_FS = 11;
 const VAL_GREEN = 0x40e860;
 const TITLE_GOLD = 0xf0d060;
 const STOP_BTN_BG = 0x2a5058;
@@ -125,15 +128,16 @@ export async function paintHangupPanel(
   paintCbePanel(host, box, panelX, panelY, panelW, panelH, CBE.bgPanelDark);
   host.addChild(box);
 
-  /* Title: concernp + concernf1「挂机中」 */
+  /* Title: concernp + concernf1「挂机中」 (Songti → text so font switch applies). */
   const titleY = panelY + 5;
   const titleCx = LCD_WIDTH / 2;
-  if (tex.concernp) {
+  const textTitle = preferSystemFont();
+  if (tex.concernp && !textTitle) {
     const icon = uiSprite(tex.concernp);
     icon.position.set(titleCx - 36, titleY);
     host.addChild(icon);
   }
-  if (tex.concernTitle) {
+  if (tex.concernTitle && !textTitle) {
     const t = uiSprite(tex.concernTitle);
     t.position.set(titleCx - 12, titleY + 2);
     host.addChild(t);
@@ -141,7 +145,7 @@ export async function paintHangupPanel(
     const lab = new BitmapLabel();
     lab.anchor.set(0.5, 0);
     lab.position.set(titleCx, titleY + 2);
-    lab.show("挂机中", TITLE_GOLD, { outline: false });
+    lab.show("挂机中", TITLE_GOLD, { outline: false, fontSize: SETTLE_FS });
     host.addChild(lab);
   }
 
@@ -164,23 +168,26 @@ export async function paintHangupPanel(
     value: string,
     valueColor = VAL_GREEN,
   ) => {
-    if (label) {
+    // Songti: text labels (GIF stays on UC3/fusion so chrome matches pixel packs).
+    const textLabels = preferSystemFont();
+    if (label && !textLabels) {
       const spr = uiSprite(label);
       spr.position.set(xLabel, yy + 1);
       host.addChild(spr);
     } else {
       const lab = new BitmapLabel();
       lab.position.set(xLabel, yy);
-      lab.show(fallback, CBE.inkTip, { outline: false });
+      lab.show(fallback, CBE.inkTip, { outline: false, fontSize: SETTLE_FS });
       host.addChild(lab);
     }
+    const pillW = labelW === leftLabelW ? leftPillW : rightPillW;
     const pillX = xLabel + labelW;
-    const pill = valuePill(labelW === leftLabelW ? leftPillW : rightPillW, pillH);
+    const pill = valuePill(pillW, pillH);
     pill.position.set(pillX, yy);
     host.addChild(pill);
     const val = new BitmapLabel();
-    val.position.set(pillX + 3, yy + 1);
-    val.show(value, valueColor, { outline: false });
+    val.position.set(pillX + 3, yy + Math.max(0, Math.floor((pillH - SETTLE_FS) / 2)));
+    val.show(value, valueColor, { outline: false, fontSize: SETTLE_FS });
     host.addChild(val);
   };
 
@@ -237,14 +244,14 @@ export async function paintHangupPanel(
       }
     : { time: "00:00", exp: "+0%", battles: "0" };
 
-  if (tex.effect) {
+  if (tex.effect && !preferSystemFont()) {
     const eff = uiSprite(tex.effect);
     eff.position.set(insX, y);
     host.addChild(eff);
   } else {
     const lab = new BitmapLabel();
     lab.position.set(insX, y);
-    lab.show("战斗心得效果", TITLE_GOLD, { outline: false });
+    lab.show("战斗心得效果", TITLE_GOLD, { outline: false, fontSize: SETTLE_FS });
     host.addChild(lab);
   }
   if (tex.help) {
@@ -261,12 +268,15 @@ export async function paintHangupPanel(
   const insightLineH = 15;
   const timeLab = new BitmapLabel();
   timeLab.position.set(insX, y);
-  timeLab.show("有效时间", insightInk, { outline: false });
+  timeLab.show("有效时间", insightInk, { outline: false, fontSize: SETTLE_FS });
   host.addChild(timeLab);
   const timeVal = new BitmapLabel();
-  /* ~4 glyphs「有效时间」≈ 48px; leave clear gap before clock. */
-  timeVal.position.set(insX + 64, y);
-  timeVal.show(insightBonus.time, insightInk, { outline: false });
+  const timeGap = measureUiTextWidth("有效时间", SETTLE_FS) + 8;
+  timeVal.position.set(insX + timeGap, y);
+  timeVal.show(insightBonus.time, insightInk, {
+    outline: false,
+    fontSize: SETTLE_FS,
+  });
   host.addChild(timeVal);
   if (tex.addtime) {
     const add = uiSprite(tex.addtime);
@@ -291,6 +301,7 @@ export async function paintHangupPanel(
     lab.position.set(insX, y);
     lab.show(line, insightInk, {
       outline: false,
+      fontSize: SETTLE_FS,
       maxWidth: insW,
     });
     host.addChild(lab);
@@ -310,7 +321,7 @@ export async function paintHangupPanel(
   btnLabel.eventMode = "none";
   btnLabel.anchor.set(0.5, 0.5);
   btnLabel.position.set(btnW / 2, stopH / 2);
-  btnLabel.show("中止挂机", 0xf0f8ff, { outline: false });
+  btnLabel.show("中止挂机", 0xf0f8ff, { outline: false, fontSize: SETTLE_FS });
   btn.addChild(btnLabel);
   btn.position.set(panelX + Math.floor((panelW - btnW) / 2), y);
   btn.eventMode = "static";

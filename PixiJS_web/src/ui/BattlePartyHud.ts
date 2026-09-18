@@ -144,7 +144,6 @@ export class BattlePartyHud extends Container {
         `队友${i + 1}`
       ).slice(0, 5);
       void slot.name.setText(name, NAME_PINK, {
-        uc3: true,
         smooth: false,
         outline: false,
       });

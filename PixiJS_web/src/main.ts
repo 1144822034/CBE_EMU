@@ -1,8 +1,11 @@
 import { actorResourceForJobSex, uiActorResourceForJobSex } from "./resources/actor";
 import { clearCrispTexCache, clearUc3TexCache, refreshAllUc3Labels } from "./ui/BitmapLabel";
 import { invalidateUiGpuTextures } from "./ui/UiAssets";
-import { applyUc3FontId, currentUc3FontId, loadUc3Font } from "./resources/uc3Font";
+import { invalidateCbeFlowerCornerGpu } from "./ui/cbePanelCorners";
+import { invalidateEquipArtGpu } from "./ui/ItemArt";
+import { currentUc3FontId } from "./resources/uc3Font";
 import { UC3_FONT_OPTIONS, type Uc3FontId } from "./resources/uiFontPreference";
+import { applyUiFontId, bootUiFont } from "./resources/systemFont";
 import { Application, Graphics, Rectangle } from "pixi.js";
 import { loadSceneIndex, loadSceneMap } from "./resources/loader";
 import {
@@ -131,6 +134,13 @@ import { TouchControls, type TouchDir } from "./ui/TouchControls";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, preloadCbeFlowerCorners } from "./ui/constants";
 import { setLcdDisplayScale } from "./ui/BitmapLabel";
 import {
+  setLcdDomChromeBranches,
+  setLcdDomCoverBranches,
+  setLcdDomSoftCoverBranches,
+  setLcdDomStackRoot,
+  setLcdDomWorldTextRoot,
+} from "./ui/lcdDomText";
+import {
   imeShellAdoptLock,
   imeShellCaptureLockFromWrap,
   imeShellClearLockSize,
@@ -162,6 +172,9 @@ import {
   isDreamBadge,
   isStarSkyStone,
   isRenameCard,
+  isCrystalExtractStone,
+  canFitCrystalExtractInBag,
+  estimateCrystalExtractBagSpace,
   isCultivationBookItem,
   NpcServiceOpcode,
   npcServiceOpcode,
@@ -751,11 +764,11 @@ async function main(): Promise<void> {
     new Graphics().rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgDeep }),
   );
 
-  // UC3 pack from settings (default font_16_sky.uc3).
+  // UI font from settings (default sky UC3; cn = OS Songti stack).
   try {
-    await loadUc3Font();
+    await bootUiFont();
   } catch (e) {
-    console.warn("[boot] uc3 font", e);
+    console.warn("[boot] ui font", e);
   }
   preloadCbeFlowerCorners();
 
@@ -782,9 +795,8 @@ async function main(): Promise<void> {
   await loadNpcSceneIndex(defaultNpcScenesUrl(defaultLiveGatewayUrl()));
 
   const title = new TitleScreen();
-  if (gatewayZones.length) {
-    title.setZones(gatewayZones, readStoredZoneId() || zoneCatalog.defaultZoneId);
-  }
+  // Do not paint zone rows during splash — DOM Songti would leak if detached.
+  // Zones load in openZonesThenLogin → showPhase("zones").
   const roles = new RoleScreen();
   const createRole = new CreateRoleScreen();
   const hud = new WorldHud();
@@ -957,6 +969,9 @@ async function main(): Promise<void> {
     worldMap,
   );
   shell.content.sortableChildren = true;
+  view.root.zIndex = 10;
+  hud.zIndex = 30;
+  miniMap.zIndex = 35;
   arenaHud.zIndex = 40;
   dialog.zIndex = 45;
   approach.zIndex = 46;
@@ -973,6 +988,58 @@ async function main(): Promise<void> {
   entertainPanel.zIndex = 56;
   wingPanel.zIndex = 56;
   mountPanel.zIndex = 56;
+  // Songti DOM overlay: only allowlisted popups cover world nameplates.
+  setLcdDomStackRoot(shell.content);
+  setLcdDomWorldTextRoot(view.nameplates);
+  setLcdDomCoverBranches([
+    title,
+    roles,
+    createRole,
+    menu,
+    battle,
+    dialog,
+    approach,
+    system,
+    enhanceUi,
+    washUi,
+    social,
+    arenaPanel,
+    wagerPanel,
+    ladderPanel,
+    guessPanel,
+    fruitPanel,
+    festivalPanel,
+    yanmenPanel,
+    ringQuestPanel,
+    auctionPanel,
+    entertainPanel,
+    wingPanel,
+    mountPanel,
+    taskUi,
+    chatPanel,
+    tradeUi,
+    guildUi,
+    worldMap,
+  ]);
+  // Approach tip + world menu: keep status/HUD Songti; full NPC dialog stays hard cover.
+  setLcdDomSoftCoverBranches([approach, menu]);
+  // 修拍擂… + 比武计时：同一 DOM chrome 层（低于对话框）。
+  setLcdDomChromeBranches([view.root, arenaHud]);
+  // Explicit stack above map so menu/bag/battle cover world DOM text.
+  menu.zIndex = 50;
+  system.zIndex = 52;
+  enhanceUi.zIndex = 53;
+  washUi.zIndex = 53;
+  social.zIndex = 53;
+  taskUi.zIndex = 54;
+  chatPanel.zIndex = 54;
+  tradeUi.zIndex = 54;
+  guildUi.zIndex = 54;
+  worldMap.zIndex = 54;
+  battle.zIndex = 60;
+  title.zIndex = 70;
+  roles.zIndex = 70;
+  createRole.zIndex = 70;
   await title.mountArt();
   await roles.mountArt();
   await hud.mountArt();
@@ -3381,8 +3448,11 @@ async function main(): Promise<void> {
       // Escape leaves immediately. Victory 4/8 waits for BattleScreen playback
       // (onExitReady); 4/7 settle panel uses onSettleConfirm — never tear down
       // mid-playback or deferred HP/MP never reaches the world HUD.
+      // Late settlement_exit 4/8 (server panel window ≈ settle auto-close) must
+      // not call endBattleToWorld after we already left — showPhase("world")
+      // would hide an open NPC dialog / menu.
       if (up.escaped && up.escapeOk) {
-        endBattleToWorld(up.log);
+        if (session.inBattle || phase === "battle") endBattleToWorld(up.log);
       } else if (
         up.finished &&
         !up.settlement &&
@@ -3391,7 +3461,7 @@ async function main(): Promise<void> {
         if (phase === "battle") {
           /* Lone 4/8: applyUpdate queues exit; onExitReady after any prior 4/6.
            * Immediate endBattleToWorld here aborted multi-monster counters. */
-        } else {
+        } else if (session.inBattle) {
           endBattleToWorld(up.log);
         }
       }
@@ -4134,6 +4204,9 @@ async function main(): Promise<void> {
   /** Bag discard confirm: cancel/close returns to bag. */
   let discardConfirmOpen = false;
   let pendingDiscard: import("./net/protocolExtras").BagItem | null = null;
+  /** Enhanced equip extract confirm: consume 玄晶提炼石, destroy equip. */
+  let extractConfirmOpen = false;
+  let pendingExtract: import("./net/protocolExtras").BagItem | null = null;
   /** Dream badge combine: pick target equip then 29/12. */
   let dreamBadgeCombineOpen = false;
   let pendingDreamBadge: import("./net/protocolExtras").BagItem | null = null;
@@ -4165,6 +4238,18 @@ async function main(): Promise<void> {
   const returnFromDiscardConfirm = (): void => {
     discardConfirmOpen = false;
     pendingDiscard = null;
+    showPhase("system");
+    system.open("bag");
+    system.setBag(session.bagItems);
+    const cap =
+      session.characterStats?.backpackCapacity ||
+      Math.max(20, session.bagItems.length);
+    system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+  };
+
+  const returnFromExtractConfirm = (): void => {
+    extractConfirmOpen = false;
+    pendingExtract = null;
     showPhase("system");
     system.open("bag");
     system.setBag(session.bagItems);
@@ -4422,6 +4507,8 @@ async function main(): Promise<void> {
         return;
       }
       await session.confirmServer(sid);
+      // Quest tracker: start collapsed each login; player taps the rail to expand.
+      questTracker.collapseForLogin();
       showPhase("role");
       setChromeStatus("请选择角色");
       title.setStatus("请选择角色");
@@ -4571,6 +4658,10 @@ async function main(): Promise<void> {
   title.onOpenLogin = () => {
     title.setStatus("请选择区服");
     openZonesThenLogin();
+  };
+  title.onBackToLogin = () => {
+    title.setStatus("请输入账号和密码");
+    showPhase("login");
   };
   title.onOpenRegister = () => {
     // 登录页内进注册：区服已在此前选定。
@@ -4941,7 +5032,7 @@ async function main(): Promise<void> {
       const cur = currentUc3FontId();
       dialog.show({
         title: "字体切换",
-        body: "选择 LCD 点阵字库",
+        body: "选择 LCD 字体（点阵或思源中黑）",
         options: [
           ...UC3_FONT_OPTIONS.map((o, i) => ({
             label: `${o.id === cur ? "● " : "  "}${o.label} (${o.file})`,
@@ -5465,6 +5556,60 @@ async function main(): Promise<void> {
       }
       if (action === "recast") {
         void openRecastFlow(bag);
+        return;
+      }
+      if (action === "extract") {
+        if ((bag.enhance | 0) <= 0) {
+          showGameTip("未强化装备无法提炼");
+          return;
+        }
+        const stone = session.bagItems.find(
+          (it) => isCrystalExtractStone(it.itemId) && (it.count | 0) >= 1,
+        );
+        if (!stone) {
+          showGameTip("玄晶提炼石不足");
+          return;
+        }
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(20, session.bagItems.length);
+        if (
+          !canFitCrystalExtractInBag({
+            enhance: bag.enhance,
+            bagItems: session.bagItems,
+            bagCapacity: cap,
+            stoneCount: stone.count,
+          })
+        ) {
+          const est = estimateCrystalExtractBagSpace({
+            enhance: bag.enhance,
+            bagItems: session.bagItems,
+            stoneCount: stone.count,
+          });
+          const occupied = session.bagItems.filter(
+            (it) => (it.count | 0) > 0,
+          ).length;
+          const empty = Math.max(0, (cap | 0) - occupied);
+          const short = Math.max(0, est.needSlots - empty - est.freeAfter);
+          showGameTip(
+            short > 0
+              ? `背包空间不足，需空出${short}格存放玄晶`
+              : "背包空间不足，无法存放提炼玄晶",
+          );
+          return;
+        }
+        pendingExtract = bag;
+        extractConfirmOpen = true;
+        dialog.show({
+          title: "确认提炼",
+          body: `消耗1个玄晶提炼石，提炼「${bag.name}」+${bag.enhance} 投入的玄晶并销毁装备？\n提炼后装备无法找回。`,
+          options: [
+            { label: "确认提炼", action: 296, value: 0 },
+            { label: "取消", action: 297, value: 0 },
+          ],
+        });
+        showPhase("dialog");
+        setChromeStatus("确认提炼装备");
         return;
       }
       if (action === "discard") {
@@ -6094,6 +6239,10 @@ async function main(): Promise<void> {
       returnFromDiscardConfirm();
       return;
     }
+    if (extractConfirmOpen) {
+      returnFromExtractConfirm();
+      return;
+    }
     if (dreamBadgeCombineOpen) {
       returnFromDreamBadgeCombine();
       return;
@@ -6547,6 +6696,38 @@ async function main(): Promise<void> {
       returnFromDiscardConfirm();
       return;
     }
+    if (action === 296) {
+      dialog.hide();
+      extractConfirmOpen = false;
+      const bag = pendingExtract;
+      pendingExtract = null;
+      if (!bag) {
+        returnFromExtractConfirm();
+        return;
+      }
+      void (async () => {
+        showGameTip(`提炼 ${bag.name}…`);
+        const fb = await session.extractEnhanceCrystals(bag.seq);
+        await session.openBag();
+        system.setBag(session.bagItems);
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(20, session.bagItems.length);
+        system.setBagMeta(
+          session.characterStats?.money ?? session.gold,
+          cap,
+        );
+        showGameTip(fb.message || (fb.ok ? "提炼成功" : "提炼失败"));
+        showPhase("system");
+        system.open("bag");
+      })();
+      return;
+    }
+    if (action === 297) {
+      dialog.hide();
+      returnFromExtractConfirm();
+      return;
+    }
     if (action === 270) {
       dialog.hide();
       const opt = UC3_FONT_OPTIONS[value | 0];
@@ -6556,9 +6737,12 @@ async function main(): Promise<void> {
       }
       void (async () => {
         try {
-          // Rebake first; refreshAllUc3Labels prunes orphan caches with live-protect.
-          await applyUc3FontId(opt.id as Uc3FontId);
+          // Load face/pack first; refreshAllUc3Labels rebakes then prunes
+          // with live-protect (never destroy textures still on Sprites).
+          await applyUiFontId(opt.id as Uc3FontId);
           await refreshAllUc3Labels();
+          view.remountAfterFontChange();
+          title.refreshAfterFontChange();
           showGameTip(`字体: ${opt.label}`);
           hud.pushChat(`[系]字体已切换为 ${opt.label} (${opt.file})`);
         } catch (e) {
@@ -8014,6 +8198,11 @@ dialog.hide();
       handleOk();
       e.preventDefault();
     } else if (k === "enter") {
+      // ChatIme already submits on Enter; a second handleOk would send twice.
+      if (phase === "chat" && chatPanel.isImeFocused()) {
+        e.preventDefault();
+        return;
+      }
       handleOk();
       e.preventDefault();
     } else if (k === "e" || k === "escape") {
@@ -8473,6 +8662,8 @@ dialog.hide();
         });
         try {
           invalidateUiGpuTextures();
+          invalidateCbeFlowerCornerGpu();
+          invalidateEquipArtGpu();
         } catch (e) {
           console.warn("[gl] ui texture invalidate", e);
         }
@@ -8803,6 +8994,8 @@ dialog.hide();
         clearCrispTexCache();
         try {
           invalidateUiGpuTextures();
+          invalidateCbeFlowerCornerGpu();
+          invalidateEquipArtGpu();
         } catch (e) {
           console.warn("[gl] ui texture invalidate", e);
         }

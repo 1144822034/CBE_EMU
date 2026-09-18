@@ -64,17 +64,14 @@ export class SoftkeyBar extends Container {
   setLabels(labels: SoftkeyLabels): void {
     this.labels = labels;
     void this.leftLabel.setText(labels.left ?? "", CBE.inkMint, {
-      uc3: true,
       smooth: false,
       outline: false,
     });
     void this.rightLabel.setText(labels.right ?? "", CBE.inkMint, {
-      uc3: true,
       smooth: false,
       outline: false,
     });
     void this.centerLabel.setText(labels.center ?? "", CBE.inkMint, {
-      uc3: true,
       smooth: false,
       outline: false,
     });
@@ -97,7 +94,7 @@ function makeBtn(w: number): Container {
 
 function makeLabel(text: string): BitmapLabel {
   const t = new BitmapLabel();
-  t.show(text, CBE.inkMint, { uc3: true, smooth: false, outline: false });
+  t.show(text, CBE.inkMint, { smooth: false, outline: false });
   t.eventMode = "none";
   return t;
 }

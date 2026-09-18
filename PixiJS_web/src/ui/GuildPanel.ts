@@ -418,12 +418,7 @@ export class GuildPanel extends Container {
     paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
     const pillW = Math.min(w - 20, Math.max(80, this.title.length * 12 + 20));
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 20);
-    this.addLabel(
-      this.title.slice(0, 14),
-      LCD_WIDTH / 2 - pillW / 2 + 8,
-      y + 9,
-      CBE.ink,
-    );
+    this.addTitleCentered(this.title.slice(0, 14), y + 6 + 10, CBE.ink);
 
     try {
       if (this.mode === "text") {
@@ -624,6 +619,17 @@ export class GuildPanel extends Container {
     const t = new BitmapLabel();
     void t.setText(text, color);
     t.position.set(lx, ly);
+    this.addChild(t);
+    this.labels.push(t);
+  }
+
+  /** Capsule title — same size/center as SystemPanel popup titles. */
+  private addTitleCentered(text: string, cy: number, color: number): void {
+    const t = new BitmapLabel();
+    t.eventMode = "none";
+    t.anchor.set(0.5, 0.5);
+    t.position.set(LCD_WIDTH / 2, Math.round(cy));
+    void t.setText(text, color, { outline: false });
     this.addChild(t);
     this.labels.push(t);
   }

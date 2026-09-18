@@ -62,6 +62,7 @@ import {
   buildDreamBadgeCombineRequest,
   buildStarSkyStoneWashResetRequest,
   buildRenameCardRequest,
+  buildCrystalExtractRequest,
   parseEnhanceOpenResult,
   parseEnhancePreviewResult,
   parseEnhanceConfirmResult,
@@ -76,6 +77,7 @@ import {
   parseDreamBadgeCombineResult,
   parseStarSkyStoneWashResetResult,
   parseRenameCardResult,
+  parseCrystalExtractResult,
   buildSkillForgetRequest,
   parseSkillForgetResult,
   SKILL_FORGET_COST_COPPER,
@@ -90,8 +92,11 @@ import {
   isDreamBadgeEquipId,
   STAR_SKY_STONE_ITEM_ID,
   RENAME_CARD_ITEM_ID,
+  CRYSTAL_EXTRACT_STONE_ITEM_ID,
   isRenameCard,
   isEnhanceCrystal,
+  canFitCrystalExtractInBag,
+  estimateCrystalExtractBagSpace,
   type EnhanceOpenResult,
   type EnhancePreviewResult,
   type EnhanceConfirmResult,
@@ -104,6 +109,7 @@ import {
   type CrystalCombineResult,
   type StarSkyStoneWashResetResult,
   type RenameCardResult,
+  type CrystalExtractResult,
   type SkillForgetResult,
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
@@ -5857,6 +5863,77 @@ export class GameSession {
       }
     }
     return fail("改名无响应");
+  }
+
+  /**
+   * PixiJS-only: 消耗1×玄晶提炼石(854)提炼已强化装备投入的玄晶，并销毁装备。
+   * Server 29/16 is authoritative.
+   */
+  async extractEnhanceCrystals(equipSeq: number): Promise<CrystalExtractResult> {
+    const fail = (message: string, result = 0): CrystalExtractResult => ({
+      result,
+      ok: false,
+      message,
+      equipSeq,
+      stoneSeq: 0,
+      remaining: 0,
+      needSlots: 0,
+      freeSlots: 0,
+      spent: [],
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(equipSeq > 0)) return fail("参数无效");
+    const equip = this.bagItems.find(
+      (it) => it.seq === equipSeq && it.kind === "equip",
+    );
+    if (!equip) return fail("装备不存在", 3);
+    if ((equip.enhance | 0) <= 0) return fail("未强化装备无法提炼", 4);
+    const stone = this.bagItems.find(
+      (it) => it.itemId === CRYSTAL_EXTRACT_STONE_ITEM_ID && (it.count | 0) >= 1,
+    );
+    if (!stone) return fail("玄晶提炼石不足", 2);
+    const cap =
+      this.characterStats?.backpackCapacity ||
+      Math.max(20, this.bagItems.length);
+    if (
+      !canFitCrystalExtractInBag({
+        enhance: equip.enhance,
+        bagItems: this.bagItems,
+        bagCapacity: cap,
+        stoneCount: stone.count,
+      })
+    ) {
+      const est = estimateCrystalExtractBagSpace({
+        enhance: equip.enhance,
+        bagItems: this.bagItems,
+        stoneCount: stone.count,
+      });
+      const occupied = this.bagItems.filter((it) => (it.count | 0) > 0).length;
+      const empty = Math.max(0, (cap | 0) - occupied);
+      const short = Math.max(0, est.needSlots - empty - est.freeAfter);
+      return fail(
+        short > 0
+          ? `背包空间不足，需空出${short}格存放玄晶`
+          : "背包空间不足，无法存放提炼玄晶",
+        5,
+      );
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildCrystalExtractRequest(equipSeq),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseCrystalExtractResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("提炼无响应");
   }
 
   async teamInvite(actorId: number): Promise<void> {

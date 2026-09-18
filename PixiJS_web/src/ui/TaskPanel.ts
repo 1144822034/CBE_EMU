@@ -239,6 +239,7 @@ export class TaskPanel extends Container {
       box: this.box,
       hits: this.rowHits,
       addLabel: (t, x, y, c) => this.addLabel(t, x, y, c),
+      addLabelCentered: (t, cx, cy, c) => this.addLabelCentered(t, cx, cy, c),
     };
   }
 
@@ -246,6 +247,20 @@ export class TaskPanel extends Container {
     const lab = new BitmapLabel();
     void lab.setText(text, color, { outline: false });
     lab.position.set(px, py);
+    this.addChild(lab);
+    this.labels.push(lab);
+  }
+
+  private addLabelCentered(
+    text: string,
+    cx: number,
+    cy: number,
+    color: number,
+  ): void {
+    const lab = new BitmapLabel();
+    lab.anchor.set(0.5, 0.5);
+    lab.position.set(Math.round(cx), Math.round(cy));
+    void lab.setText(text, color, { outline: false });
     this.addChild(lab);
     this.labels.push(lab);
   }

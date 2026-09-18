@@ -112,6 +112,12 @@ void LcdSetNativeSize(int width, int height)
     LcdApplyWindowSize();
 }
 
+int LcdGetScreenPitchPixels(void)
+{
+    /* Match host DrawImage / DF image pitch: pad width up to 4 pixels. */
+    return ((4 - g_lcdNativeW) & 3) + g_lcdNativeW;
+}
+
 int LcdGetViewWidth(void)
 {
     return (g_lcdRotation == VM_LCD_ROTATE_90_CW || g_lcdRotation == VM_LCD_ROTATE_90_CCW)
@@ -474,16 +480,19 @@ void UpdateLcd()
 #ifdef CBE_PLATFORM_ANDROID
     if (Lcd_Cache_Buffer == NULL)
         return;
-    for (int i = 0; i < LCD_HEIGHT; ++i)
     {
-        for (int j = 0; j < LCD_WIDTH; ++j)
+        int pitch = LcdGetScreenPitchPixels();
+        for (int i = 0; i < g_lcdNativeH; ++i)
         {
-            u32 offset = (u32)j + (u32)i * LCD_WIDTH;
-            u16 color = ((u16 *)Lcd_Cache_Buffer)[offset];
-            finalLayerBuffer[offset] = (int)(0xff000000u |
-                                             ((u32)PIXEL565R(color) << 16) |
-                                             ((u32)PIXEL565G(color) << 8) |
-                                             (u32)PIXEL565B(color));
+            for (int j = 0; j < g_lcdNativeW; ++j)
+            {
+                u32 offset = (u32)j + (u32)i * (u32)pitch;
+                u16 color = ((u16 *)Lcd_Cache_Buffer)[offset];
+                finalLayerBuffer[j + i * LCD_WIDTH] = (int)(0xff000000u |
+                                                             ((u32)PIXEL565R(color) << 16) |
+                                                             ((u32)PIXEL565G(color) << 8) |
+                                                             (u32)PIXEL565B(color));
+            }
         }
     }
 #elif defined(CBE_PLATFORM_HEADLESS)
@@ -566,53 +575,56 @@ void UpdateLcd()
     SDL_FillRect(sfc, NULL, SDL_MapRGB(sfc->format, 0, 0, 0));
     LcdDrawToolbar(sfc);
 
-    for (int i = 0; i < g_lcdNativeH; i++)
     {
-        for (int j = 0; j < g_lcdNativeW; j++)
+        int pitch = LcdGetScreenPitchPixels();
+        for (int i = 0; i < g_lcdNativeH; i++)
         {
-            int srcX = j;
-            int srcY = i;
-            u16 color = ((u16 *)Lcd_Cache_Buffer)[j + i * LCD_WIDTH];
-            u32 mapped = SDL_MapRGB(sfc->format, PIXEL565R(color), PIXEL565G(color),
-                                    PIXEL565B(color));
-            int baseX;
-            int baseY;
-
-            switch (g_lcdRotation)
+            for (int j = 0; j < g_lcdNativeW; j++)
             {
-            case VM_LCD_ROTATE_90_CW:
-                srcX = g_lcdNativeH - 1 - i;
-                srcY = j;
-                break;
-            case VM_LCD_ROTATE_180:
-                srcX = g_lcdNativeW - 1 - j;
-                srcY = g_lcdNativeH - 1 - i;
-                break;
-            case VM_LCD_ROTATE_90_CCW:
-                srcX = i;
-                srcY = g_lcdNativeW - 1 - j;
-                break;
-            default:
-                break;
-            }
+                int srcX = j;
+                int srcY = i;
+                u16 color = ((u16 *)Lcd_Cache_Buffer)[j + i * pitch];
+                u32 mapped = SDL_MapRGB(sfc->format, PIXEL565R(color), PIXEL565G(color),
+                                        PIXEL565B(color));
+                int baseX;
+                int baseY;
 
-            if (srcX < 0 || srcY < 0 || srcX >= viewW || srcY >= viewH)
-                continue;
-
-            baseX = offX + srcX * drawScale;
-            baseY = offY + srcY * drawScale;
-            for (int sy = 0; sy < drawScale; ++sy)
-            {
-                int py = baseY + sy;
-                u32 *dstRow;
-                if (py < 0 || py >= sfc->h)
-                    continue;
-                dstRow = (u32 *)((u8 *)sfc->pixels + py * sfc->pitch);
-                for (int sx = 0; sx < drawScale; ++sx)
+                switch (g_lcdRotation)
                 {
-                    int px = baseX + sx;
-                    if (px >= 0 && px < sfc->w)
-                        dstRow[px] = mapped;
+                case VM_LCD_ROTATE_90_CW:
+                    srcX = g_lcdNativeH - 1 - i;
+                    srcY = j;
+                    break;
+                case VM_LCD_ROTATE_180:
+                    srcX = g_lcdNativeW - 1 - j;
+                    srcY = g_lcdNativeH - 1 - i;
+                    break;
+                case VM_LCD_ROTATE_90_CCW:
+                    srcX = i;
+                    srcY = g_lcdNativeW - 1 - j;
+                    break;
+                default:
+                    break;
+                }
+
+                if (srcX < 0 || srcY < 0 || srcX >= viewW || srcY >= viewH)
+                    continue;
+
+                baseX = offX + srcX * drawScale;
+                baseY = offY + srcY * drawScale;
+                for (int sy = 0; sy < drawScale; ++sy)
+                {
+                    int py = baseY + sy;
+                    u32 *dstRow;
+                    if (py < 0 || py >= sfc->h)
+                        continue;
+                    dstRow = (u32 *)((u8 *)sfc->pixels + py * sfc->pitch);
+                    for (int sx = 0; sx < drawScale; ++sx)
+                    {
+                        int px = baseX + sx;
+                        if (px >= 0 && px < sfc->w)
+                            dstRow[px] = mapped;
+                    }
                 }
             }
         }

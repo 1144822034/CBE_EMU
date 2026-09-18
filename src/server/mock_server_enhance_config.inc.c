@@ -1316,3 +1316,385 @@ static bool vm_net_mock_enhance_wash_record_delete(u32 roleId, u32 itemInstanceI
     }
     return ok;
 }
+
+/* -------------------------------------------------------------------------
+ * account_role_enhance_crystal_spent — crystals actually fed into one
+ * equipment instance (success and failed rolls). Keyed by item_instance_id
+ * so unequip / warehouse / transfer can follow the piece.
+ * Text: "901:2,905:1" (itemId:count). Digits, colon, comma only.
+ * ------------------------------------------------------------------------- */
+
+#define VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS 16
+#define VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_TEXT 320
+
+typedef struct
+{
+    u32 itemId;
+    u32 count;
+} vm_net_mock_enhance_crystal_spent_row;
+
+typedef struct
+{
+    char text[VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_TEXT];
+    bool found;
+} vm_net_mock_enhance_crystal_spent_lookup_ctx;
+
+static bool vm_net_mock_enhance_crystal_spent_row_cb(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_enhance_crystal_spent_lookup_ctx *ctx =
+        (vm_net_mock_enhance_crystal_spent_lookup_ctx *)contextValue;
+
+    (void)columnCount;
+    if (ctx == NULL || values == NULL || lengths == NULL || values[0] == NULL)
+        return false;
+    if (lengths[0] >= sizeof(ctx->text))
+        return false;
+    memcpy(ctx->text, values[0], lengths[0]);
+    ctx->text[lengths[0]] = 0;
+    ctx->found = true;
+    return true;
+}
+
+static bool vm_net_mock_enhance_crystal_spent_ensure_table(void)
+{
+    static bool ready = false;
+
+    if (ready)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_enhance_crystal_spent ("
+            "role_id INT UNSIGNED NOT NULL,"
+            "item_instance_id INT UNSIGNED NOT NULL,"
+            "spent VARCHAR(320) NOT NULL DEFAULT '',"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(role_id,item_instance_id)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
+        return false;
+    ready = true;
+    return true;
+}
+
+static bool vm_net_mock_enhance_crystal_spent_text_ok(const char *text)
+{
+    size_t i;
+
+    if (text == NULL)
+        return false;
+    for (i = 0; text[i] != 0; ++i)
+    {
+        char c = text[i];
+        if (!((c >= '0' && c <= '9') || c == ':' || c == ','))
+            return false;
+    }
+    return true;
+}
+
+static u32 vm_net_mock_enhance_crystal_spent_parse(
+    const char *text,
+    vm_net_mock_enhance_crystal_spent_row *rows,
+    u32 cap)
+{
+    u32 n = 0;
+    const char *p = text;
+
+    if (text == NULL || rows == NULL || cap == 0)
+        return 0;
+    while (*p != 0 && n < cap)
+    {
+        u32 itemId = 0;
+        u32 count = 0;
+        bool sawDigit = false;
+
+        while (*p >= '0' && *p <= '9')
+        {
+            sawDigit = true;
+            itemId = itemId * 10u + (u32)(*p - '0');
+            ++p;
+        }
+        if (!sawDigit || *p != ':')
+            break;
+        ++p;
+        sawDigit = false;
+        while (*p >= '0' && *p <= '9')
+        {
+            sawDigit = true;
+            if (count > 0xffffffffu / 10u)
+                count = 0xffffffffu;
+            else
+                count = count * 10u + (u32)(*p - '0');
+            ++p;
+        }
+        if (!sawDigit || count == 0 ||
+            itemId < (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST ||
+            itemId > (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST)
+        {
+            if (*p == ',')
+            {
+                ++p;
+                continue;
+            }
+            break;
+        }
+        rows[n].itemId = itemId;
+        rows[n].count = count;
+        n += 1;
+        if (*p == ',')
+            ++p;
+        else
+            break;
+    }
+    return n;
+}
+
+static bool vm_net_mock_enhance_crystal_spent_format(
+    const vm_net_mock_enhance_crystal_spent_row *rows,
+    u32 rowCount,
+    char *out,
+    size_t outCap)
+{
+    size_t used = 0;
+    u32 i;
+
+    if (out == NULL || outCap < 2)
+        return false;
+    out[0] = 0;
+    if (rows == NULL || rowCount == 0)
+        return true;
+    for (i = 0; i < rowCount; ++i)
+    {
+        char piece[32];
+        int n;
+
+        if (rows[i].itemId == 0 || rows[i].count == 0)
+            continue;
+        n = snprintf(piece, sizeof(piece), "%s%u:%u",
+                     used == 0 ? "" : ",", rows[i].itemId, rows[i].count);
+        if (n <= 0 || (size_t)n >= sizeof(piece) || used + (size_t)n >= outCap)
+            return false;
+        memcpy(out + used, piece, (size_t)n);
+        used += (size_t)n;
+        out[used] = 0;
+    }
+    return vm_net_mock_enhance_crystal_spent_text_ok(out);
+}
+
+static void vm_net_mock_enhance_crystal_spent_merge(
+    vm_net_mock_enhance_crystal_spent_row *rows,
+    u32 *rowCount,
+    u32 cap,
+    u32 itemId,
+    u32 add)
+{
+    u32 i;
+    u32 n;
+
+    if (rows == NULL || rowCount == NULL || add == 0 ||
+        itemId < (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST ||
+        itemId > (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST)
+        return;
+    n = *rowCount;
+    for (i = 0; i < n; ++i)
+    {
+        if (rows[i].itemId == itemId)
+        {
+            if (0xffffffffu - rows[i].count < add)
+                rows[i].count = 0xffffffffu;
+            else
+                rows[i].count += add;
+            return;
+        }
+    }
+    if (n >= cap)
+        return;
+    rows[n].itemId = itemId;
+    rows[n].count = add;
+    *rowCount = n + 1;
+}
+
+/* One crystal of the target tier per already-reached level (901 for +1 …). */
+static void vm_net_mock_enhance_crystal_spent_seed_fallback(
+    u8 enhanceLevel,
+    vm_net_mock_enhance_crystal_spent_row *rows,
+    u32 *rowCount,
+    u32 cap)
+{
+    u8 level;
+
+    if (rows == NULL || rowCount == NULL || enhanceLevel == 0)
+        return;
+    if (enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
+        enhanceLevel = (u8)VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
+    for (level = 1; level <= enhanceLevel; ++level)
+    {
+        vm_net_mock_enhance_crystal_spent_merge(
+            rows, rowCount, cap,
+            (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST + (u32)level - 1u, 1u);
+    }
+}
+
+static bool vm_net_mock_enhance_crystal_spent_load(
+    u32 roleId, u32 itemInstanceId,
+    vm_net_mock_enhance_crystal_spent_row *rows, u32 cap, u32 *rowCountOut)
+{
+    vm_net_mock_enhance_crystal_spent_lookup_ctx ctx;
+    char query[192];
+
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (roleId == 0 || itemInstanceId == 0 || rows == NULL || cap == 0)
+        return false;
+    if (!vm_net_mock_enhance_crystal_spent_ensure_table())
+        return false;
+    memset(&ctx, 0, sizeof(ctx));
+    snprintf(query, sizeof(query),
+             "SELECT spent FROM account_role_enhance_crystal_spent "
+             "WHERE role_id=%u AND item_instance_id=%u",
+             roleId, itemInstanceId);
+    if (!vm_mysql_query(query, vm_net_mock_enhance_crystal_spent_row_cb, &ctx) ||
+        !ctx.found || !vm_net_mock_enhance_crystal_spent_text_ok(ctx.text))
+        return false;
+    if (rowCountOut)
+        *rowCountOut = vm_net_mock_enhance_crystal_spent_parse(ctx.text, rows, cap);
+    return true;
+}
+
+static bool vm_net_mock_enhance_crystal_spent_save(
+    u32 roleId, u32 itemInstanceId,
+    const vm_net_mock_enhance_crystal_spent_row *rows, u32 rowCount)
+{
+    char text[VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_TEXT];
+    char query[512];
+
+    if (roleId == 0 || itemInstanceId == 0)
+        return false;
+    if (!vm_net_mock_enhance_crystal_spent_ensure_table())
+        return false;
+    if (!vm_net_mock_enhance_crystal_spent_format(rows, rowCount, text, sizeof(text)))
+        return false;
+    if (text[0] == 0)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_enhance_crystal_spent "
+                 "WHERE role_id=%u AND item_instance_id=%u",
+                 roleId, itemInstanceId);
+        return vm_mysql_exec(query);
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_enhance_crystal_spent "
+             "(role_id,item_instance_id,spent) VALUES (%u,%u,'%s') "
+             "ON DUPLICATE KEY UPDATE spent=VALUES(spent)",
+             roleId, itemInstanceId, text);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_net_mock_enhance_crystal_spent_delete(u32 roleId, u32 itemInstanceId)
+{
+    char query[192];
+
+    if (roleId == 0 || itemInstanceId == 0)
+        return false;
+    if (!vm_net_mock_enhance_crystal_spent_ensure_table())
+        return false;
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_role_enhance_crystal_spent "
+             "WHERE role_id=%u AND item_instance_id=%u",
+             roleId, itemInstanceId);
+    return vm_mysql_exec(query);
+}
+
+/*
+ * Append crystals consumed by one enhance attempt (29/3), success or fail.
+ * First touch of a pre-ledger +N piece seeds one matching-tier crystal per
+ * level already reached, then adds this attempt.
+ */
+static bool vm_net_mock_enhance_crystal_spent_record(
+    u32 roleId, u32 itemInstanceId, u8 alreadyLevel,
+    const u32 itemIds[5], const u8 counts[5], u32 materialRows)
+{
+    vm_net_mock_enhance_crystal_spent_row rows[VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS];
+    u32 rowCount = 0;
+    bool found = false;
+    u32 i;
+
+    if (roleId == 0 || itemInstanceId == 0 || itemIds == NULL || counts == NULL)
+        return false;
+    memset(rows, 0, sizeof(rows));
+    found = vm_net_mock_enhance_crystal_spent_load(
+        roleId, itemInstanceId, rows,
+        VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS, &rowCount);
+    if ((!found || rowCount == 0) && alreadyLevel > 0)
+    {
+        rowCount = 0;
+        vm_net_mock_enhance_crystal_spent_seed_fallback(
+            alreadyLevel, rows, &rowCount, VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS);
+    }
+    if (materialRows > 5)
+        materialRows = 5;
+    for (i = 0; i < materialRows; ++i)
+    {
+        vm_net_mock_enhance_crystal_spent_merge(
+            rows, &rowCount, VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS,
+            itemIds[i], counts[i]);
+    }
+    if (!vm_net_mock_enhance_crystal_spent_save(roleId, itemInstanceId, rows, rowCount))
+        return false;
+    printf("[info][mock-service] enhance_crystal_spent_record role=%u instance=%u "
+           "already=%u rows=%u seeded=%u\n",
+           roleId, itemInstanceId, (u32)alreadyLevel, rowCount,
+           (!found && alreadyLevel > 0) ? 1u : 0u);
+    return true;
+}
+
+/* Transfer: dest's old ledger is overwritten with the source ledger. */
+static bool vm_net_mock_enhance_crystal_spent_move(u32 roleId, u32 fromInstanceId,
+                                                   u32 toInstanceId)
+{
+    vm_net_mock_enhance_crystal_spent_row rows[VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS];
+    u32 rowCount = 0;
+    bool found = false;
+
+    if (roleId == 0 || fromInstanceId == 0 || toInstanceId == 0)
+        return false;
+    if (fromInstanceId == toInstanceId)
+        return true;
+    memset(rows, 0, sizeof(rows));
+    found = vm_net_mock_enhance_crystal_spent_load(
+        roleId, fromInstanceId, rows, VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS,
+        &rowCount);
+    (void)vm_net_mock_enhance_crystal_spent_delete(roleId, toInstanceId);
+    (void)vm_net_mock_enhance_crystal_spent_delete(roleId, fromInstanceId);
+    if (!found || rowCount == 0)
+        return true;
+    return vm_net_mock_enhance_crystal_spent_save(roleId, toInstanceId, rows, rowCount);
+}
+
+/*
+ * Crystals to return on extract. Ledger wins; empty ledger uses the
+ * one-crystal-per-level fallback so pre-feature +N gear is still extractable.
+ */
+static void vm_net_mock_enhance_crystal_spent_resolve(
+    u32 roleId, u32 itemInstanceId, u8 enhanceLevel,
+    vm_net_mock_enhance_crystal_spent_row *rows, u32 cap, u32 *rowCountOut)
+{
+    u32 rowCount = 0;
+    bool found = false;
+
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (rows == NULL || cap == 0)
+        return;
+    memset(rows, 0, sizeof(*rows) * cap);
+    found = vm_net_mock_enhance_crystal_spent_load(
+        roleId, itemInstanceId, rows, cap, &rowCount);
+    if (!found || rowCount == 0)
+    {
+        rowCount = 0;
+        vm_net_mock_enhance_crystal_spent_seed_fallback(
+            enhanceLevel, rows, &rowCount, cap);
+    }
+    if (rowCountOut)
+        *rowCountOut = rowCount;
+}

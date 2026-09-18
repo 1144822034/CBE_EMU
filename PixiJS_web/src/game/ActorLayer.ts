@@ -2,7 +2,7 @@ import { Container, Graphics, Sprite, type Texture } from "pixi.js";
 import type { NpcActor, PeerActor } from "../net/protocol";
 import { isRedNamePk } from "../net/protocol";
 import { BitmapLabel } from "../ui/BitmapLabel";
-import { ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE, actorSpriteScale } from "../ui/constants";
+import { ACTOR_DISPLAY_SCALE, CBE, NAMEPLATE_SCALE, actorSpriteScale } from "../ui/constants";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
 import { tryLoadUiTexture } from "../ui/UiAssets";
 import {
@@ -69,7 +69,8 @@ const PEER_HEAVY_CAP = (() => {
  */
 const PEER_POSE_LOD_PAD = 64;
 
-const NPC_CYAN = 0x80e8ff;
+/** Same cyan as boot tip「江湖支招」(CBE.inkTip). */
+const NPC_CYAN = CBE.inkTip;
 const PEER_GREEN = 0xa8e6a1;
 /** Map peer nameplate when pk_points >= 60. */
 const PEER_RED = 0xff4040;
@@ -132,6 +133,8 @@ const MAP_IDLE_FRAME_MS = 360;
 type Marker = {
   id: number;
   root: Container;
+  /** Name / title / guild / quest mark — above map scene, under HUD. */
+  plate: Container;
   sprite: Sprite | null;
   label: BitmapLabel;
   /** Peer designation GIF badge above name (riches_name* / level_name*). */
@@ -231,6 +234,8 @@ function dirDelta(dir: number): { dx: number; dy: number } {
 export class ActorLayer {
   /** Shared with SceneView.world so markers Y-sort with player / decor. */
   readonly root: Container;
+  /** SceneView nameplate layer (above world, under HUD chrome). */
+  private readonly nameplates: Container;
   onNpcTap: ((actorId: number) => void) | null = null;
   private markers = new Map<number, Marker>();
   private animAcc = 0;
@@ -267,8 +272,9 @@ export class ActorLayer {
   private viewerY = 0;
   private heavyBudgetAcc = 0;
 
-  constructor(parent: Container) {
+  constructor(parent: Container, nameplates: Container) {
     this.root = parent;
+    this.nameplates = nameplates;
   }
 
   setViewer(x: number, y: number): void {
@@ -291,6 +297,8 @@ export class ActorLayer {
     m.wing?.clear();
     m.mount?.clear();
     m.chenghao?.clear();
+    if (m.plate.parent) m.plate.parent.removeChild(m.plate);
+    m.plate.destroy({ children: true });
     m.root.destroy({ children: true });
   }
 
@@ -990,6 +998,7 @@ export class ActorLayer {
       } else if (m.kind === "peer" && m.peerMoveQueue.length) {
         this.tickPeerMove(m, dt);
       }
+      this.syncPlate(m);
       m.plus16Sparkles?.tick(dt);
       m.chenghao?.tick(dt);
       m.wing?.tick(dt);
@@ -1272,6 +1281,9 @@ export class ActorLayer {
     if (!m) {
       const root = new Container();
       root.sortableChildren = true;
+      const plate = new Container();
+      plate.eventMode = "none";
+      plate.sortableChildren = true;
       const body = new Graphics()
         .roundRect(-7, -14, 14, 14, 2)
         .fill({ color })
@@ -1284,17 +1296,21 @@ export class ActorLayer {
       titleBadge.visible = false;
       const plus16Sparkles = kind === "peer" ? new Plus16Sparkles() : null;
       if (plus16Sparkles) root.addChild(plus16Sparkles.root);
-      root.addChild(body, titleBadge, text);
+      root.addChild(body);
+      plate.addChild(titleBadge, text);
       root.zIndex = y | 0;
+      plate.zIndex = y | 0;
       if (kind === "npc" || kind === "monster" || kind === "peer") {
         root.eventMode = "static";
         root.cursor = "pointer";
         root.on("pointertap", () => this.onNpcTap?.(id));
       }
       this.root.addChild(root);
+      this.nameplates.addChild(plate);
       m = {
         id,
         root,
+        plate,
         sprite: null,
         label: text,
         titleBadge,
@@ -1370,7 +1386,6 @@ export class ActorLayer {
     // Monsters allow 8 glyphs so prefixes like "12级野猪" fit; peers/NPCs stay 6.
     const nameCap = kind === "monster" ? 8 : 6;
     await m.label.setText(label.slice(0, nameCap), color, {
-      uc3: true,
       smooth: false,
       outline: nameOutline,
       outlineThin: true,
@@ -1436,7 +1451,7 @@ export class ActorLayer {
 
   private clearQuestMarkSprite(m: Marker): void {
     if (!m.questMark) return;
-    if (m.questMark.parent) m.root.removeChild(m.questMark);
+    if (m.questMark.parent) m.questMark.parent.removeChild(m.questMark);
     // Texture is shared via fuhaoTexCache — do not destroy it with the sprite.
     m.questMark.destroy({ texture: false });
     m.questMark = null;
@@ -1448,16 +1463,12 @@ export class ActorLayer {
    * the real mark is re-laid above the taller sprite.
    */
   private purgeOrphanQuestMarks(m: Marker): void {
-    for (const child of [...m.root.children]) {
-      if (child === m.sprite || child === m.label || child === m.titleBadge) {
-        continue;
-      }
+    for (const child of [...m.plate.children]) {
+      if (child === m.label || child === m.titleBadge) continue;
+      if (child === m.guildLabel) continue;
       if (child === m.questMark) continue;
-      if (m.wing && child === m.wing.root) continue;
-      if (m.mount && child === m.mount.root) continue;
-      if (m.plus16Sparkles && child === m.plus16Sparkles.root) continue;
       if (!(child instanceof Sprite)) continue;
-      m.root.removeChild(child);
+      m.plate.removeChild(child);
       child.destroy({ texture: false });
     }
   }
@@ -1491,7 +1502,7 @@ export class ActorLayer {
     const spr = new Sprite(tex);
     spr.anchor.set(0.5, 1);
     spr.eventMode = "none";
-    m.root.addChild(spr);
+    m.plate.addChild(spr);
     m.questMark = spr;
     this.layoutNameplate(m);
   }
@@ -1627,7 +1638,6 @@ export class ActorLayer {
       m.chenghao.clear();
       const lab = new BitmapLabel();
       await lab.setText(chenghaoLabel(chenghaoId).slice(0, 8), 0xf8dc00, {
-        uc3: true,
         smooth: false,
         outline: true,
         outlineThin: true,
@@ -1667,7 +1677,6 @@ export class ActorLayer {
     }
     const lab = new BitmapLabel();
     await lab.setText(textTitle.slice(0, 8), arenaTextTitleColor(textTitle), {
-      uc3: true,
       smooth: false,
       outline: true,
       outlineThin: true,
@@ -1689,8 +1698,18 @@ export class ActorLayer {
     this.layoutNameplate(m);
   }
 
+  private syncPlate(m: Marker): void {
+    if (m.plate.destroyed || m.root.destroyed) return;
+    m.plate.position.set(m.root.x, m.root.y);
+    m.plate.zIndex = m.root.zIndex;
+    m.plate.visible = m.root.visible;
+  }
+
   private layoutNameplate(m: Marker): void {
-    if (m.root.destroyed || m.label.destroyed) return;
+    if (m.root.destroyed || m.label.destroyed || m.plate.destroyed) return;
+    m.plate.position.set(m.root.x, m.root.y);
+    m.plate.zIndex = m.root.zIndex;
+    m.plate.visible = m.root.visible;
     const bodyH = m.sprite
       ? Math.round(m.sprite.height)
       : 16;
@@ -1723,6 +1742,13 @@ export class ActorLayer {
     }
   }
 
+  /** Re-center every map nameplate (e.g. after UC3/Songti font switch). */
+  relayoutAllNameplates(): void {
+    for (const m of this.markers.values()) {
+      this.layoutNameplate(m);
+    }
+  }
+
   private async refreshPeerGuild(m: Marker): Promise<void> {
     if (m.kind !== "peer") return;
     const raw = (m.guildName || "").replace(/\0+$/g, "").trim();
@@ -1739,10 +1765,9 @@ export class ActorLayer {
     if (!m.guildLabel) {
       m.guildLabel = new BitmapLabel();
       m.guildLabel.zIndex = 4;
-      m.root.addChild(m.guildLabel);
+      m.plate.addChild(m.guildLabel);
     }
     await m.guildLabel.setText(line, 0x88eeff, {
-      uc3: true,
       smooth: false,
       outline: true,
       outlineThin: true,

@@ -67,6 +67,11 @@ export const SOFTKEY_H = 32;
 export const WORLD_TOP_H = 72;
 export const WORLD_BOTTOM_H = 58;
 export const MAP_VIEW_H = LCD_HEIGHT - WORLD_TOP_H - WORLD_BOTTOM_H;
+/**
+ * Map-corner status strip (修/拍/…) height, flush under the exp bar
+ * (SceneView.root local y=0 → absolute WORLD_TOP_H).
+ */
+export const MAP_STATUS_STRIP_H = 19;
 
 /** Dark teal panel with light border + corner flourishes. */
 export function drawCbePanel(
@@ -214,7 +219,8 @@ export function makePixelText(
     outline: opts?.outline === true,
     outlineColor: opts?.stroke,
     outlineThin: opts?.strokeWidth != null ? opts.strokeWidth <= 1 : undefined,
-    uc3: opts?.uc3 !== false,
+    // Omit uc3 → BitmapLabel follows preferSystemFont() (cn = OTF).
+    ...(opts?.uc3 !== undefined ? { uc3: opts.uc3 } : {}),
     smooth: opts?.smooth === true,
     crisp: opts?.crisp !== false,
   });

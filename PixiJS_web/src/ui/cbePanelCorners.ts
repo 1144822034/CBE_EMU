@@ -64,6 +64,19 @@ export function clearCbeFlowerCorners(host: Container): void {
 }
 
 /**
+ * Drop flower corner Texture handles after {@link invalidateUiGpuTextures}.
+ * The crop textures are already destroyed; keeping `flowerReady` would remount
+ * dead sources onto open SystemPanel → alphaMode storm.
+ */
+export function invalidateCbeFlowerCornerGpu(): void {
+  cornerTex.clear();
+  flowerReady = false;
+  flowerLoad = null;
+  // Re-warm so the next paintCbePanel can use GIF corners again.
+  preloadCbeFlowerCorners();
+}
+
+/**
  * Place four flowerStyle corner sprites on a CBE panel.
  * Sprites are parented under `host` (not `box`).
  */

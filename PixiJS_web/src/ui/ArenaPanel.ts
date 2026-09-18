@@ -346,8 +346,10 @@ export class ArenaPanel extends Container {
     this.clearLabels();
     this.box.clear();
     paintCbePanel(this, this.box, 0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
-    drawCbeTitlePill(this.box, 8, 6, LCD_WIDTH - 16, 22);
-    this.addLabel("比武排行榜", 16, 8, CBE.cream);
+    const pillW = Math.min(LCD_WIDTH - 32, 120);
+    const pillH = 22;
+    drawCbeTitlePill(this.box, LCD_WIDTH / 2, 6, pillW, pillH);
+    this.addLabelCentered("比武排行榜", LCD_WIDTH / 2, 6 + pillH / 2, CBE.cream);
 
     const jobY = 32;
     const tabH = 18;

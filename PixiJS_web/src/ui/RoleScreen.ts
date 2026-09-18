@@ -10,8 +10,15 @@ import {
   drawLocBanner,
   makePixelText,
 } from "./constants";
+import { clearCbeFlowerCorners } from "./cbePanelCorners";
 import { BitmapLabel } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
+import {
+  clearLcdDomTipOccludeRect,
+  registerLcdDomPanelTip,
+  setLcdDomTipOccludeRect,
+  unregisterLcdDomPanelTip,
+} from "./lcdDomText";
 import type { RoleRow } from "../net/protocol";
 import { TITLE_ROLE_MAX } from "../net/protocol";
 import {
@@ -19,6 +26,9 @@ import {
   composeMapActor,
   loadActor,
 } from "../resources/actor";
+
+/** Above role-list labels so confirm Songti / occlude host stack correctly. */
+const CONFIRM_HOST_Z = 2_000_000;
 
 const JOBS = ["天机", "幻剑", "鬼道"];
 /** Full-body front stand (CBE dir=3), keyed by actor resource. */
@@ -79,11 +89,17 @@ export class RoleScreen extends Container {
       if (this.visible) this.paintFrame();
     });
     this.addChild(this.frame);
+    this.sortableChildren = true;
+    this.rowsHost.zIndex = 1;
+    this.confirmHost.zIndex = CONFIRM_HOST_Z;
+    // Tip-band Songti: confirm labels stay above list text; cover plate occludes overlap.
+    registerLcdDomPanelTip(this.confirmHost);
     this.addChild(this.rowsHost, this.confirmHost);
 
     this.tipLabel = makePixelText("OK键删除 · 需输入角色名", 11, CBE.inkTip);
     this.tipLabel.anchor.set(0.5, 0);
     this.tipLabel.position.set(LCD_WIDTH / 2, FOOTER_TIP_Y);
+    this.tipLabel.zIndex = 2;
     this.addChild(this.tipLabel);
 
     this.ime.onChange = (v) => {
@@ -208,7 +224,10 @@ export class RoleScreen extends Container {
     this.confirmValue = "";
     this.ime.hide();
     this.confirmHost.visible = false;
+    clearCbeFlowerCorners(this.confirmHost);
     this.confirmHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    clearLcdDomTipOccludeRect();
+    this.rowsHost.visible = true;
     this.setTip("OK键删除 · 需输入角色名");
     this.onDeleteConfirmChange?.(false);
   }
@@ -234,6 +253,8 @@ export class RoleScreen extends Container {
   }
 
   destroy(options?: Parameters<Container["destroy"]>[0]): void {
+    clearLcdDomTipOccludeRect();
+    unregisterLcdDomPanelTip(this.confirmHost);
     this.ime.destroy();
     super.destroy(options);
   }
@@ -241,6 +262,7 @@ export class RoleScreen extends Container {
   private openDeleteConfirm(role: RoleRow): void {
     this.deleting = role;
     this.confirmValue = "";
+    this.rowsHost.visible = false;
     this.confirmHost.visible = true;
     this.paintConfirm();
     this.ime.show(this.confirmBox);
@@ -267,17 +289,31 @@ export class RoleScreen extends Container {
   }
 
   private paintConfirm(): void {
+    clearCbeFlowerCorners(this.confirmHost);
     this.confirmHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     if (!this.deleting) return;
 
-    const panel = new Graphics();
     const px = 16;
     const py = 120;
     const pw = LCD_WIDTH - 32;
     const ph = 150;
-    panel.roundRect(px, py, pw, ph, 6).fill({ color: CBE.bgPanel });
-    panel.roundRect(px, py, pw, ph, 6).stroke({ width: 2, color: CBE.borderBright });
+
+    // Dim list behind so canvas bodies cannot peek through the modal.
+    const dim = new Graphics();
+    dim
+      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+      .fill({ color: 0x000000, alpha: 0.45 });
+    dim.eventMode = "static";
+    dim.on("pointertap", (e) => e.stopPropagation());
+    this.confirmHost.addChild(dim);
+
+    const panel = new Graphics();
     this.confirmHost.addChild(panel);
+    // Opaque fill under 边花 — same contract as panelTip toast.
+    panel.roundRect(px, py, pw, ph, 2).fill({ color: CBE.bgPanelDark, alpha: 1 });
+    paintCbePanel(this.confirmHost, panel, px, py, pw, ph, CBE.bgPanelDark);
+    // DOM plate under confirm Songti — covers list text in place (no display:none).
+    setLcdDomTipOccludeRect(this.confirmHost, px, py, pw, ph, CBE.bgPanelDark);
 
     const title = makePixelText("删除确认", 14, CBE.inkTip);
     title.anchor.set(0.5, 0);

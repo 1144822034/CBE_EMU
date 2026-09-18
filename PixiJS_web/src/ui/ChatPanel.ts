@@ -174,6 +174,8 @@ export class ChatPanel extends Container {
   private toast: PanelTipState = createPanelTipState();
   /** Bumped on open/hide so deferred focus cannot remount IME after close. */
   private openGen = 0;
+  /** Ignore re-entry while onSend is in flight (Enter IME + window handleOk). */
+  private sendBusy = false;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
   private pmTarget: ChatPmTarget | null = null;
   /** Skip starting PM to self when tapping own lines. */
@@ -249,6 +251,7 @@ export class ChatPanel extends Container {
     opts?: { pm?: ChatPmTarget | null; keepChannel?: boolean },
   ): void {
     this.openGen += 1;
+    this.sendBusy = false;
     this.clearFocusTimer();
     this.entries = entries.slice();
     if (!opts?.keepChannel) this.channelIdx = 0;
@@ -308,6 +311,7 @@ export class ChatPanel extends Container {
 
   hide(): void {
     this.openGen += 1;
+    this.sendBusy = false;
     this.clearFocusTimer();
     clearPanelTip(this.toast);
     this.visible = false;
@@ -366,8 +370,13 @@ export class ChatPanel extends Container {
     }, ms);
   }
 
+  /** True while the HTML IME owns focus (Enter already submits via ChatIme). */
+  isImeFocused(): boolean {
+    return this.visible && this.ime.isFocused();
+  }
+
   confirm(): void {
-    if (!this.visible) return;
+    if (!this.visible || this.sendBusy) return;
     const ch = CHANNELS[this.channelIdx]!;
     if (ch.sendType < 0) {
       this.focusInput();
@@ -384,23 +393,28 @@ export class ChatPanel extends Container {
         : null;
     const sendType = whisper ? 7 : ch.sendType;
     const gen = this.openGen;
+    this.sendBusy = true;
     void Promise.resolve(
       this.onSend?.(
         text,
         sendType,
         whisper ? { sendTo: whisper.id } : undefined,
       ),
-    ).then((ok) => {
-      if (!this.visible || this.openGen !== gen) return;
-      if (ok === false) {
+    )
+      .then((ok) => {
+        if (!this.visible || this.openGen !== gen) return;
+        if (ok === false) {
+          this.focusInput();
+          return;
+        }
+        this.draft = "";
+        this.ime.clear();
+        this.redraw();
         this.focusInput();
-        return;
-      }
-      this.draft = "";
-      this.ime.clear();
-      this.redraw();
-      this.focusInput();
-    });
+      })
+      .finally(() => {
+        this.sendBusy = false;
+      });
   }
 
   cancel(): void {
@@ -512,7 +526,7 @@ export class ChatPanel extends Container {
     const start = Math.max(0, end - MSG_PAGE);
     const shown = displayLines.slice(start, end);
     shown.forEach((row, i) => {
-      const ly = msgTop + i * 16;
+      const ly = msgTop + i * UC3_CELL;
       let lx = x + 10;
       const runs = chatLineColorRuns(row.text, row.color, row.entry);
       for (const run of runs) {
@@ -523,7 +537,7 @@ export class ChatPanel extends Container {
       if (this.canWhisperEntry(row.entry)) {
         const entry = row.entry;
         this.rowHits.push(
-          attachRowPointerHit(this, x + 8, ly, w - 16, 16, () => {
+          attachRowPointerHit(this, x + 8, ly, w - 16, UC3_CELL, () => {
             const sid = (entry.senderRoleId ?? 0) >>> 0;
             const sname =
               (entry.senderName || "").trim() ||
@@ -619,9 +633,9 @@ export class ChatPanel extends Container {
     const lab = new BitmapLabel();
     lab.position.set(x, y);
     void lab.setText(text, color, {
-      uc3: true,
       smooth: false,
       outline: false,
+      fontSize: UC3_CELL,
       maxWidth: opts?.maxWidth,
       // Compose bar may clip; list rows are pre-wrapped — never stack in-label.
       wordWrap: false,

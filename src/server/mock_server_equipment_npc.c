@@ -1208,8 +1208,30 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                 result = enhancementSucceeded ? 1 : 2;
                 equipment = vm_net_mock_role_find_backpack_item(
                     role, 0, parsed.equipSeq);
-                if (enhancementSucceeded && equipment != NULL)
-                    equipment->enhanceLevel = (u16)(currentLevel + 1);
+                if (equipment != NULL)
+                {
+                    u32 instanceId = vm_net_mock_role_ensure_equipment_instance_id(
+                        role, equipment->enhanceInstanceId, equipment->itemId);
+
+                    equipment->enhanceInstanceId = instanceId;
+                    if (enhancementSucceeded)
+                        equipment->enhanceLevel = (u16)(currentLevel + 1);
+                    /*
+                     * Ledger follows the piece. Failed rolls are spent too.
+                     * First touch of a pre-ledger +N seeds one matching-tier
+                     * crystal per level already reached.
+                     */
+                    if (instanceId != 0 &&
+                        !vm_net_mock_enhance_crystal_spent_record(
+                            role->roleId, instanceId, currentLevel, itemIds,
+                            counts, parsed.materialRows))
+                    {
+                        printf("[warn][network] mock_equipment_enhance "
+                               "crystal-spent-record-failed seq=%u instance=%u "
+                               "level=%u\n",
+                               parsed.equipSeq, instanceId, currentLevel);
+                    }
+                }
                 vm_net_mock_role_mark_inventory_dirty(enhancementSucceeded
                                              ? "equipment-enhance-success"
                                              : "equipment-enhance-failed");
@@ -1571,6 +1593,8 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
             }
             role->money -= moneyCost;
             transferred = true;
+            (void)vm_net_mock_enhance_crystal_spent_move(
+                role->roleId, sourceInstanceId, destInstanceId);
             /* Sync save: wash columns + records must survive before deferred flush. */
             if (!vm_net_mock_role_db_save("equipment-enhance-transfer"))
                 vm_net_mock_role_mark_inventory_dirty("equipment-enhance-transfer");
@@ -6937,6 +6961,252 @@ static u32 vm_net_mock_build_rename_card_response(const u8 *request,
     vm_autotest_note(
         "mock_rename_card card=%u result=%u reason=%s evidence=pixijs-only-29/15\n",
         cardSeq, result, reason);
+    return pos;
+}
+
+/*
+ * PixiJS-only 玄晶提炼: 1/29/16 { equipseq }.
+ * Consume 1× item 854, return crystals spent on this equipment instance
+ * (ledger; else one matching-tier crystal per current +N), destroy the piece.
+ * result: 1=ok, 2=stone missing, 3=equip missing, 4=not enhanced,
+ *         5=bag full, 6=consume failed, 7=grant failed.
+ */
+static bool vm_net_mock_crystal_extract_bag_has_room(
+    vm_net_mock_role_state *role,
+    const vm_net_mock_backpack_item_state *equipment,
+    const vm_net_mock_backpack_item_state *stone,
+    const vm_net_mock_enhance_crystal_spent_row *crystals,
+    u32 crystalRows,
+    u32 *needSlotsOut,
+    u32 *freeSlotsOut)
+{
+    u32 itemCount = 0;
+    u32 freed = 0;
+    u32 need = 0;
+    u32 freeSlots = 0;
+    u32 i;
+
+    if (needSlotsOut)
+        *needSlotsOut = 0;
+    if (freeSlotsOut)
+        *freeSlotsOut = 0;
+    if (role == NULL || crystals == NULL)
+        return false;
+    itemCount = vm_net_mock_role_backpack_count(role);
+    if (equipment != NULL && equipment->count <= 1u)
+        freed += 1u;
+    if (stone != NULL && stone->count <= 1u &&
+        (equipment == NULL || stone->seq != equipment->seq))
+        freed += 1u;
+    for (i = 0; i < crystalRows; ++i)
+    {
+        if (crystals[i].itemId == 0 || crystals[i].count == 0)
+            continue;
+        if (vm_net_mock_role_find_backpack_item(role, crystals[i].itemId, 0) == NULL)
+            need += 1u;
+    }
+    freeSlots = role->backpackCapacity > itemCount
+                    ? role->backpackCapacity - itemCount
+                    : 0;
+    freeSlots += freed;
+    if (needSlotsOut)
+        *needSlotsOut = need;
+    if (freeSlotsOut)
+        *freeSlotsOut = freeSlots;
+    if (need > freeSlots)
+        return false;
+    if (itemCount + need > freed + VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        return false;
+    return true;
+}
+
+static u32 vm_net_mock_build_crystal_extract_response(const u8 *request,
+                                                     u32 requestLen, u8 *out,
+                                                     u32 outCap)
+{
+    u32 offset = 4;
+    u32 equipSeqValue = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u16 equipSeq = 0;
+    u16 stoneSeq = 0;
+    u32 stoneRemaining = 0;
+    u32 instanceId = 0;
+    u8 enhanceLevel = 0;
+    u32 crystalRows = 0;
+    u32 granted = 0;
+    u32 needSlots = 0;
+    u32 freeSlots = 0;
+    const char *reason = "ok";
+    char spentText[VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_TEXT];
+    vm_net_mock_enhance_crystal_spent_row crystals[VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS];
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *stone = NULL;
+    vm_net_mock_backpack_item_state *equipment = NULL;
+    const vm_net_mock_equipment_catalog_item *catalog = NULL;
+
+    memset(crystals, 0, sizeof(crystals));
+    spentText[0] = 0;
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 16 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "equipseq", &equipSeqValue) ||
+        equipSeqValue == 0 || equipSeqValue > 0xffffu)
+    {
+        return 0;
+    }
+    equipSeq = (u16)equipSeqValue;
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+    {
+        result = 3;
+        reason = "no-role";
+    }
+    else
+    {
+        vm_net_mock_role_normalize_backpack(role);
+        stone = vm_net_mock_role_find_backpack_item(
+            role, VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID, 0);
+        equipment = vm_net_mock_role_find_backpack_item(role, 0, equipSeq);
+        if (equipment != NULL)
+            catalog = vm_net_mock_find_equipment_catalog_item(equipment->itemId);
+        if (stone == NULL || stone->count == 0)
+        {
+            result = 2;
+            reason = "stone-not-found";
+        }
+        else if (equipment == NULL || catalog == NULL || equipment->count == 0)
+        {
+            result = 3;
+            reason = "equip-not-found";
+        }
+        else if (equipment->enhanceLevel == 0)
+        {
+            result = 4;
+            reason = "not-enhanced";
+        }
+        else
+        {
+            stoneSeq = stone->seq;
+            enhanceLevel = (u8)SDL_min(equipment->enhanceLevel,
+                                       VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+            instanceId = equipment->enhanceInstanceId;
+            {
+                u32 equipItemId = equipment->itemId;
+                u32 equipCount = equipment->count;
+
+                vm_net_mock_enhance_crystal_spent_resolve(
+                    role->roleId, instanceId, enhanceLevel, crystals,
+                    VM_NET_MOCK_ENHANCE_CRYSTAL_SPENT_ROWS, &crystalRows);
+                if (crystalRows == 0)
+                {
+                    result = 4;
+                    reason = "no-crystals";
+                }
+                else if (!vm_net_mock_crystal_extract_bag_has_room(
+                             role, equipment, stone, crystals, crystalRows,
+                             &needSlots, &freeSlots))
+                {
+                    result = 5;
+                    reason = "bag-full";
+                    if (!vm_net_mock_enhance_crystal_spent_format(
+                             crystals, crystalRows, spentText, sizeof(spentText)))
+                        spentText[0] = 0;
+                }
+                else if (!vm_net_mock_role_consume_backpack_item(
+                             role, VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID,
+                             stoneSeq, 1u, &stoneRemaining))
+                {
+                    result = 6;
+                    reason = "stone-consume-failed";
+                }
+                else if (!vm_net_mock_role_consume_backpack_item(
+                             role, equipItemId, equipSeq, equipCount, NULL))
+                {
+                    (void)vm_net_mock_role_add_backpack_item_to_role(
+                        role, VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID, 1, 0,
+                        NULL, "crystal-extract-rollback-stone", NULL, 0);
+                    result = 6;
+                    reason = "equip-consume-failed";
+                }
+                else
+                {
+                    u32 i;
+                    bool grantOk = true;
+
+                    (void)vm_net_mock_enhance_wash_record_delete(
+                        role->roleId, instanceId, equipSeq);
+                    (void)vm_net_mock_enhance_crystal_spent_delete(
+                        role->roleId, instanceId);
+                    for (i = 0; i < crystalRows; ++i)
+                    {
+                        if (crystals[i].itemId == 0 || crystals[i].count == 0)
+                            continue;
+                        if (!vm_net_mock_role_add_backpack_item_to_role(
+                                role, crystals[i].itemId, crystals[i].count, 0,
+                                NULL, "crystal-extract-grant", NULL, 0))
+                        {
+                            grantOk = false;
+                            break;
+                        }
+                        granted += 1u;
+                    }
+                    if (!grantOk)
+                    {
+                        result = 7;
+                        reason = "grant-failed";
+                    }
+                    else if (!vm_net_mock_enhance_crystal_spent_format(
+                                 crystals, crystalRows, spentText,
+                                 sizeof(spentText)))
+                    {
+                        spentText[0] = 0;
+                        reason = "format-failed";
+                    }
+                    else
+                        reason = "extracted";
+                    if (!vm_net_mock_role_db_save("crystal-extract"))
+                        vm_net_mock_role_mark_inventory_dirty("crystal-extract");
+                }
+            }
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 16, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "equipseq", equipSeq) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "stoneseq", stoneSeq) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining", stoneRemaining) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "needslots", needSlots) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "freeslots", freeSlots) ||
+        !vm_net_mock_put_object_string(
+            out, outCap, &pos, "spent",
+            (result == 1 || result == 5) ? spentText : ""))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_crystal_extract equip_seq=%u stone_seq=%u "
+           "instance=%u level=%u crystals=%u granted=%u stone_remain=%u "
+           "need_slots=%u free_slots=%u result=%u reason=%s spent=%s "
+           "resp=29/16\n",
+           equipSeq, stoneSeq, instanceId, enhanceLevel, crystalRows, granted,
+           stoneRemaining, needSlots, freeSlots, result, reason,
+           (result == 1 || result == 5) ? spentText : "-");
+    vm_autotest_note(
+        "mock_crystal_extract equip=%u result=%u need=%u free=%u reason=%s "
+        "evidence=pixijs-only-29/16\n",
+        equipSeq, result, needSlots, freeSlots, reason);
     return pos;
 }
 
@@ -13770,7 +14040,7 @@ static bool vm_mock_service_account_grant_role_item(const char *accountId,
         *seqOut = 0;
     if (messageOut)
         *messageOut = "物品给予失败";
-    if (itemId == 0 || count == 0 || count > 255)
+    if (itemId == 0 || count == 0 || count > 1000)
     {
         if (messageOut)
             *messageOut = "物品或数量无效";

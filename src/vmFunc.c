@@ -1,4 +1,5 @@
 #include "main.h"
+#include "lcd.h"
 #include "gifDecode.h"
 #define STBI_ONLY_PNG
 #define STBI_NO_STDIO
@@ -1074,6 +1075,81 @@ static void vm_file_ensure_parent_dirs(const char *path)
     }
 }
 
+/*
+ * 原罪天使 offline Congfig: title boot opens SinAngel_Resource/SinAngelCongfig.
+ * A present-but-invalid stub (size<=4) makes guest 6baa return 2 and skip the
+ * dead CoolBar download (state=0).  Missing file triggers HTTP; mock success
+ * with {1} then leaves the FSM in state 7 forever.  Resolve common cwd/bin
+ * layouts and seed the 1-byte stub when absent so cold launch matches the
+ * intentional offline skip path.
+ */
+static int vm_file_is_sinangel_congfig_path(const char *normalizedName)
+{
+    const char *base;
+    if (normalizedName == NULL || normalizedName[0] == 0)
+        return 0;
+    if (strstr(normalizedName, "SinAngel_Resource") == NULL)
+        return 0;
+    base = vm_path_basename(normalizedName);
+    return base != NULL && _stricmp(base, "SinAngelCongfig") == 0;
+}
+
+static int vm_file_try_resolve_sinangel_resource_path(const char *normalizedName, const char *mode,
+                                                     char *resolvedName, size_t resolvedSize)
+{
+    static const char *pathFormats[] = {
+        "%s",
+        "bin/%s",
+        "../bin/%s",
+    };
+    FILE *fp;
+    size_t i;
+    const u8 stub = 1;
+
+    if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
+        return 0;
+    if (!vm_file_is_read_only_mode(mode) || !vm_file_is_sinangel_congfig_path(normalizedName))
+        return 0;
+
+    for (i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
+    {
+        if (snprintf(resolvedName, resolvedSize, pathFormats[i], normalizedName) >=
+            (int)resolvedSize)
+        {
+            continue;
+        }
+        fp = fopen(resolvedName, "rb");
+        if (fp != NULL)
+        {
+            fclose(fp);
+            return 1;
+        }
+    }
+
+    /* Seed under cwd-relative SinAngel_Resource/ so the next open hits 6baa. */
+    if (snprintf(resolvedName, resolvedSize, "%s", normalizedName) >= (int)resolvedSize)
+        return 0;
+    vm_file_ensure_parent_dirs(resolvedName);
+    fp = fopen(resolvedName, "wb");
+    if (fp == NULL)
+    {
+        if (snprintf(resolvedName, resolvedSize, "bin/%s", normalizedName) >= (int)resolvedSize)
+            return 0;
+        vm_file_ensure_parent_dirs(resolvedName);
+        fp = fopen(resolvedName, "wb");
+    }
+    if (fp == NULL)
+        return 0;
+    if (fwrite(&stub, 1, 1, fp) != 1)
+    {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    printf("[info][resource] seeded offline SinAngelCongfig path=%s\n", resolvedName);
+    return 1;
+}
+
 static void vm_file_select_mode(int openMode, const char *modeHint, char *mode, size_t modeSize)
 {
     snprintf(mode, modeSize, "rb");
@@ -1159,6 +1235,12 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
             }
             FILE *f = fopen(normalizedName, openMode);
             if (f == NULL && vm_file_try_resolve_cbe_module_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
+            {
+                f = fopen(resolvedName, openMode);
+                if (f != NULL)
+                    snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
+            }
+            if (f == NULL && vm_file_try_resolve_sinangel_resource_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
             {
                 f = fopen(resolvedName, openMode);
                 if (f != NULL)
@@ -3298,8 +3380,8 @@ void vM_DrawImageWithClipEx()
     if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
     {
         dstPtr = VM_screenImage_ADDRESS;
-        dst_w = LCD_WIDTH;
-        dst_h = LCD_HEIGHT;
+        dst_w = (u16)LcdGetNativeWidth();
+        dst_h = (u16)LcdGetNativeHeight();
     }
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
     u8 tmpBuffer[480];
@@ -3364,7 +3446,7 @@ void vM_DrawImageWithClipEx()
             assert(0);
         }
         uc_mem_write(MTK, dstPtr + dstScreenOffset, tmpBuffer, copyBytes);
-        if (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH)
+        if (dstPtr == VM_screenImage_ADDRESS && dst_w == (u16)LcdGetNativeWidth())
             memcpy(Lcd_Cache_Buffer + dstScreenOffset, tmpBuffer, copyBytes);
     }
 }
@@ -3408,8 +3490,8 @@ void vm_vMDrawImageClipAndAlphaEx()
     if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
     {
         dstPtr = VM_screenImage_ADDRESS;
-        dst_w = LCD_WIDTH;
-        dst_h = LCD_HEIGHT;
+        dst_w = (u16)LcdGetNativeWidth();
+        dst_h = (u16)LcdGetNativeHeight();
     }
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
     u8 tmpBuffer[480];
@@ -3479,7 +3561,7 @@ void vm_vMDrawImageClipAndAlphaEx()
             printf("读取内存错误");
             assert(0);
         }
-        int dstIsScreen = (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH);
+        int dstIsScreen = (dstPtr == VM_screenImage_ADDRESS && dst_w == (u16)LcdGetNativeWidth());
         u16 *dstBasePtr = dstIsScreen ? ((u16 *)(Lcd_Cache_Buffer + dstScreenOffset)) : (u16 *)dstBuffer;
         if (!dstIsScreen)
             uc_mem_read(MTK, dstPtr + dstScreenOffset, dstBasePtr, copyBytes);
