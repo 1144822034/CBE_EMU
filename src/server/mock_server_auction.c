@@ -91,6 +91,9 @@ typedef struct
     u16 enhanceLevel;
     u32 itemInstanceId;
     vm_net_mock_enhance_wash_state enhanceWash;
+    u8 gemReflectLevel;
+    u8 gemComboLevel;
+    u8 gemReviveLevel;
     u32 startPrice;
     u32 currentPrice;
     u32 buyoutPrice;
@@ -113,6 +116,9 @@ typedef struct
     u16 enhanceLevel;
     u32 itemInstanceId;
     vm_net_mock_enhance_wash_state enhanceWash;
+    u8 gemReflectLevel;
+    u8 gemComboLevel;
+    u8 gemReviveLevel;
     u32 moneyAmount;
     u32 wcoinAmount;
 } vm_mock_auction_claim_row;
@@ -206,6 +212,25 @@ static bool vm_mock_auction_ensure_tables(void)
     (void)vm_mysql_exec(
         "ALTER TABLE server_auction_claims ADD COLUMN item_instance_id "
         "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level");
+    /* Socketed gear must round-trip; empty sockets stay 0. */
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_auction_listings ADD COLUMN gem_reflect "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_wash");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_auction_listings ADD COLUMN gem_combo "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER gem_reflect");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_auction_listings ADD COLUMN gem_revive "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER gem_combo");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_auction_claims ADD COLUMN gem_reflect "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_wash");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_auction_claims ADD COLUMN gem_combo "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER gem_reflect");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_auction_claims ADD COLUMN gem_revive "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER gem_combo");
     (void)vm_net_mock_enhance_wash_record_ensure_table();
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_auction_bids ("
@@ -557,10 +582,25 @@ static u32 vm_mock_auction_bag_item_total(const vm_net_mock_role_state *role,
  * 834/839: item_count is remaining durability on one pass row. add_backpack
  * treats count as NEW full-pass quantity → durability 50 becomes 50×50.
  */
+static void vm_mock_auction_stamp_bag_gems(vm_net_mock_role_state *role, u16 seq,
+                                              u8 gemReflect, u8 gemCombo, u8 gemRevive)
+{
+    vm_net_mock_backpack_item_state *bagRow;
+
+    if (role == NULL || seq == 0 || (gemReflect == 0 && gemCombo == 0 && gemRevive == 0))
+        return;
+    bagRow = vm_net_mock_role_find_backpack_item(role, 0, seq);
+    if (bagRow == NULL)
+        return;
+    bagRow->gemReflectLevel = gemReflect;
+    bagRow->gemComboLevel = gemCombo;
+    bagRow->gemReviveLevel = gemRevive;
+}
+
 static bool vm_mock_auction_return_item_to_bag(
     vm_net_mock_role_state *role, u32 itemId, u32 itemCount, u16 enhanceLevel,
     u32 itemInstanceId, const vm_net_mock_enhance_wash_state *wash, u16 *seqOut,
-    const char *reason)
+    const char *reason, u8 gemReflect, u8 gemCombo, u8 gemRevive)
 {
     u16 seq = 0;
     bool ok = false;
@@ -611,6 +651,8 @@ static bool vm_mock_auction_return_item_to_bag(
                reason ? reason : "-", role->roleId, itemId, itemCount, bagBefore,
                bagAfter);
     }
+    if (seq != 0)
+        vm_mock_auction_stamp_bag_gems(role, seq, gemReflect, gemCombo, gemRevive);
     if (seqOut)
         *seqOut = seq;
     return true;
@@ -648,12 +690,13 @@ static bool vm_mock_auction_insert_claim_ex(u32 roleId, const char *accountId, u
                                             u32 listingId, u32 itemId, u32 itemCount,
                                             u16 enhanceLevel, u32 itemInstanceId,
                                             const vm_net_mock_enhance_wash_state *wash,
+                                            u8 gemReflect, u8 gemCombo, u8 gemRevive,
                                             u32 moneyAmount, u32 wcoinAmount,
                                             bool notify)
 {
     char accountEsc[160];
     char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
-    char query[896];
+    char query[1024];
 
     if (roleId == 0 || accountId == NULL || accountId[0] == 0)
         return false;
@@ -664,10 +707,12 @@ static bool vm_mock_auction_insert_claim_ex(u32 roleId, const char *accountId, u
     snprintf(query, sizeof(query),
              "INSERT INTO server_auction_claims ("
              "role_id,account_id,kind,listing_id,item_id,item_count,enhance_level,"
-             "item_instance_id,enhance_wash,money_amount,wcoin_amount,claimed) VALUES ("
-             "%u,CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s',%u,%u,0)",
+             "item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive,"
+             "money_amount,wcoin_amount,claimed) VALUES ("
+             "%u,CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s',%u,%u,%u,%u,%u,0)",
              roleId, accountEsc, (u32)kind, listingId, itemId, itemCount,
-             (u32)enhanceLevel, itemInstanceId, washText, moneyAmount, wcoinAmount);
+             (u32)enhanceLevel, itemInstanceId, washText, (u32)gemReflect,
+             (u32)gemCombo, (u32)gemRevive, moneyAmount, wcoinAmount);
     if (!vm_mysql_exec(query))
         return false;
     if (notify)
@@ -679,11 +724,13 @@ static bool vm_mock_auction_insert_claim(u32 roleId, const char *accountId, u8 k
                                          u32 listingId, u32 itemId, u32 itemCount,
                                          u16 enhanceLevel, u32 itemInstanceId,
                                          const vm_net_mock_enhance_wash_state *wash,
+                                         u8 gemReflect, u8 gemCombo, u8 gemRevive,
                                          u32 moneyAmount, u32 wcoinAmount)
 {
     return vm_mock_auction_insert_claim_ex(roleId, accountId, kind, listingId, itemId,
                                             itemCount, enhanceLevel, itemInstanceId, wash,
-                                            moneyAmount, wcoinAmount, true);
+                                            gemReflect, gemCombo, gemRevive, moneyAmount,
+                                            wcoinAmount, true);
 }
 
 static u32 vm_mock_auction_pending_claim_count(u32 roleId)
@@ -741,7 +788,42 @@ static bool vm_mock_auction_listing_row_cb(void *contextValue, unsigned int colu
     if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
         row->enhanceLevel = (u16)tmp;
     vm_net_mock_enhance_wash_clear(&row->enhanceWash);
-    if (columnCount >= 17)
+    if (columnCount >= 20)
+    {
+        if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
+            row->itemInstanceId = tmp;
+        if (values[7] != NULL)
+            (void)vm_net_mock_enhance_wash_decode(values[7], lengths[7],
+                                                  &row->enhanceWash);
+        if (values[8] && vm_mock_mysql_parse_u32(values[8], lengths[8], &tmp) &&
+            tmp <= 255u)
+            row->gemReflectLevel = (u8)tmp;
+        if (values[9] && vm_mock_mysql_parse_u32(values[9], lengths[9], &tmp) &&
+            tmp <= 255u)
+            row->gemComboLevel = (u8)tmp;
+        if (values[10] && vm_mock_mysql_parse_u32(values[10], lengths[10], &tmp) &&
+            tmp <= 255u)
+            row->gemReviveLevel = (u8)tmp;
+        if (values[11] && vm_mock_mysql_parse_u32(values[11], lengths[11], &tmp))
+            row->startPrice = tmp;
+        if (values[12] && vm_mock_mysql_parse_u32(values[12], lengths[12], &tmp))
+            row->currentPrice = tmp;
+        if (values[13] && vm_mock_mysql_parse_u32(values[13], lengths[13], &tmp))
+            row->buyoutPrice = tmp;
+        if (values[14] && vm_mock_mysql_parse_u32(values[14], lengths[14], &tmp))
+            row->currency = (u8)tmp;
+        if (values[15] && vm_mock_mysql_parse_u32(values[15], lengths[15], &tmp))
+            row->feePercent = (u8)tmp;
+        if (values[16] && vm_mock_mysql_parse_u32(values[16], lengths[16], &tmp))
+            row->durationTier = (u8)tmp;
+        if (values[17] && vm_mock_mysql_parse_u32(values[17], lengths[17], &tmp))
+            row->status = (u8)tmp;
+        if (values[18] && vm_mock_mysql_parse_u32(values[18], lengths[18], &tmp))
+            row->highBidderRoleId = tmp;
+        if (values[19] && vm_mock_mysql_parse_u32(values[19], lengths[19], &tmp))
+            row->expireUnix = tmp;
+    }
+    else if (columnCount >= 17)
     {
         if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
             row->itemInstanceId = tmp;
@@ -822,7 +904,7 @@ static bool vm_mock_auction_listing_row_cb(void *contextValue, unsigned int colu
 
 static bool vm_mock_auction_load_listing(u32 listingId, vm_mock_auction_listing_row *out)
 {
-    char query[384];
+    char query[640];
     vm_mock_auction_list_ctx ctx;
     u32 now = (u32)time(NULL);
 
@@ -834,7 +916,7 @@ static bool vm_mock_auction_load_listing(u32 listingId, vm_mock_auction_listing_
     ctx.now = now;
     snprintf(query, sizeof(query),
              "SELECT listing_id,seller_role_id,seller_name,item_id,item_count,"
-             "enhance_level,item_instance_id,enhance_wash,start_price,current_price,buyout_price,currency,fee_percent,"
+             "enhance_level,item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive,start_price,current_price,buyout_price,currency,fee_percent,"
              "duration_tier,status,high_bidder_role_id,expire_unix "
              "FROM server_auction_listings WHERE listing_id=%u LIMIT 1",
              listingId);
@@ -918,7 +1000,7 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
             if (!vm_mock_auction_insert_claim_ex(
                     row.sellerRoleId, sellerAccount,
                     VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT, listingId, 0, 0, 0, 0, NULL, 0,
-                    row.currentPrice, false))
+                    0, 0, 0, row.currentPrice, false))
             {
                 vm_mock_auction_tx_rollback();
                 return false;
@@ -927,7 +1009,7 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
         else if (!vm_mock_auction_insert_claim_ex(
                      row.sellerRoleId, sellerAccount,
                      VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT, listingId, 0, 0, 0, 0, NULL,
-                     row.currentPrice, 0, false))
+                     0, 0, 0, row.currentPrice, 0, false))
         {
             vm_mock_auction_tx_rollback();
             return false;
@@ -937,7 +1019,8 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
                 row.highBidderRoleId, highAccount,
                 VM_MOCK_AUCTION_CLAIM_WINNER_ITEM, listingId, row.itemId,
                 row.itemCount, row.enhanceLevel, row.itemInstanceId, &row.enhanceWash,
-                0, 0, false))
+                row.gemReflectLevel, row.gemComboLevel, row.gemReviveLevel, 0, 0,
+                false))
         {
             vm_mock_auction_tx_rollback();
             return false;
@@ -976,7 +1059,8 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
         if (!vm_mock_auction_insert_claim_ex(
                 row.sellerRoleId, sellerAccount, VM_MOCK_AUCTION_CLAIM_ITEM_RETURN,
                 listingId, row.itemId, row.itemCount, row.enhanceLevel,
-                row.itemInstanceId, &row.enhanceWash, 0, 0, false))
+                row.itemInstanceId, &row.enhanceWash, row.gemReflectLevel,
+                row.gemComboLevel, row.gemReviveLevel, 0, 0, false))
         {
             vm_mock_auction_tx_rollback();
             return false;
@@ -1134,7 +1218,7 @@ static u32 vm_net_mock_build_auction_browse_response(const u8 *request, u32 requ
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_mock_auction_listing_row rows[VM_MOCK_AUCTION_PAGE_SIZE];
     vm_mock_auction_list_ctx ctx;
-    char query[512];
+    char query[768];
     u32 now = (u32)time(NULL);
     char itemName[48];
 
@@ -1158,7 +1242,7 @@ static u32 vm_net_mock_build_auction_browse_response(const u8 *request, u32 requ
         /* 我的：在售上架 + 当前最高出价（仍 OPEN 的参与中拍品）. */
         snprintf(query, sizeof(query),
                  "SELECT listing_id,seller_role_id,seller_name,item_id,item_count,"
-                 "enhance_level,item_instance_id,enhance_wash,start_price,current_price,buyout_price,currency,fee_percent,"
+                 "enhance_level,item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive,start_price,current_price,buyout_price,currency,fee_percent,"
                  "duration_tier,status,high_bidder_role_id,expire_unix "
                  "FROM server_auction_listings WHERE status=%u AND "
                  "(seller_role_id=%u OR high_bidder_role_id=%u) "
@@ -1170,7 +1254,7 @@ static u32 vm_net_mock_build_auction_browse_response(const u8 *request, u32 requ
     {
         snprintf(query, sizeof(query),
                  "SELECT listing_id,seller_role_id,seller_name,item_id,item_count,"
-                 "enhance_level,item_instance_id,enhance_wash,start_price,current_price,buyout_price,currency,fee_percent,"
+                 "enhance_level,item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive,start_price,current_price,buyout_price,currency,fee_percent,"
                  "duration_tier,status,high_bidder_role_id,expire_unix "
                  "FROM server_auction_listings WHERE status=%u "
                  "ORDER BY expire_unix ASC LIMIT %u OFFSET %u",
@@ -1188,12 +1272,13 @@ static u32 vm_net_mock_build_auction_browse_response(const u8 *request, u32 requ
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].itemId) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].itemCount) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].enhanceLevel) ||
-            !vm_net_mock_seq_put_item_common_extra_plain(
+            !vm_net_mock_seq_put_item_common_extra(
                 blob, sizeof(blob), &blobLen,
                 (u8)SDL_min(rows[i].itemCount, 255u),
                 (u8)SDL_min(rows[i].enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                rows[i].itemId, &rows[i].enhanceWash) ||
+                rows[i].itemId, &rows[i].enhanceWash, rows[i].gemReflectLevel,
+                rows[i].gemComboLevel, rows[i].gemReviveLevel) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].startPrice) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].currentPrice) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].buyoutPrice) ||
@@ -1247,6 +1332,9 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
     char query[1024];
     u32 remaining = 0;
     u16 enhance = 0;
+    u8 listGemR = 0;
+    u8 listGemC = 0;
+    u8 listGemV = 0;
     vm_net_mock_enhance_wash_state listWash;
     char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
     u32 itemId = 0;
@@ -1301,11 +1389,20 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
                                                    6, 0, "no-item");
     itemId = bag->itemId;
     enhance = bag->enhanceLevel;
-    if (!(g_vm_mock_auction_config.categoryGate
-              ? vm_net_mock_item_is_tradeable(itemId, enhance)
-              : vm_net_mock_item_is_auctionable(itemId, enhance)) ||
-        vm_net_mock_gem_sockets_occupied(bag->gemReflectLevel, bag->gemComboLevel,
-                                         bag->gemReviveLevel))
+    listGemR = bag->gemReflectLevel;
+    listGemC = bag->gemComboLevel;
+    listGemV = bag->gemReviveLevel;
+    /* Socketed gear must remove gems first — no auction round-trip for holes. */
+    if (vm_net_mock_gem_sockets_occupied(listGemR, listGemC, listGemV))
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
+                                                   4, 0, "socketed");
+    /*
+     * category_gate=1: same item rules as player trade (incl. loose gems).
+     * category_gate=0: auction does not reject by category, bind, quest,
+     * enhance, or loose gems/fragments. Player trade stays on is_tradeable.
+     */
+    if (g_vm_mock_auction_config.categoryGate &&
+        !vm_net_mock_item_is_tradeable(itemId, enhance))
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
                                                    4, 0, "not-tradeable");
     listInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
@@ -1388,13 +1485,15 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
     snprintf(query, sizeof(query),
              "INSERT INTO server_auction_listings ("
              "seller_role_id,seller_account_id,seller_name,item_id,item_count,"
-             "enhance_level,item_instance_id,enhance_wash,start_price,current_price,buyout_price,currency,fee_paid,"
+             "enhance_level,item_instance_id,enhance_wash,gem_reflect,gem_combo,"
+             "gem_revive,start_price,current_price,buyout_price,currency,fee_paid,"
              "fee_percent,duration_tier,status,high_bidder_role_id,"
              "high_bidder_account_id,expire_unix) VALUES ("
-             "%u,CAST(X'%s' AS CHAR),UNHEX('%s'),%u,%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,0,'',"
+             "%u,CAST(X'%s' AS CHAR),UNHEX('%s'),%u,%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,0,'',"
              "%u)",
              role->roleId, accountEsc, nameHex, itemId, count, (u32)enhance,
-             listInstanceId, washText, startPrice, startPrice, buyoutPrice, currency, fee,
+             listInstanceId, washText, (u32)listGemR, (u32)listGemC, (u32)listGemV,
+             startPrice, startPrice, buyoutPrice, currency, fee,
              (u32)feePct, durationTier, VM_MOCK_AUCTION_ST_OPEN, expireUnix);
     if (!vm_mysql_exec(query))
     {
@@ -1706,7 +1805,7 @@ static u32 vm_net_mock_build_auction_buyout_core(
         {
             if (!vm_mock_auction_insert_claim_ex(
                     prevRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND, listingId,
-                    0, 0, 0, 0, NULL, 0, prevPrice, false))
+                    0, 0, 0, 0, NULL, 0, 0, 0, 0, prevPrice, false))
             {
                 vm_mock_auction_tx_rollback();
                 *role = before;
@@ -1718,7 +1817,7 @@ static u32 vm_net_mock_build_auction_buyout_core(
         }
         else if (!vm_mock_auction_insert_claim_ex(
                      prevRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND,
-                     listingId, 0, 0, 0, 0, NULL, prevPrice, 0, false))
+                     listingId, 0, 0, 0, 0, NULL, 0, 0, 0, prevPrice, 0, false))
         {
             vm_mock_auction_tx_rollback();
             *role = before;
@@ -1765,7 +1864,7 @@ static u32 vm_net_mock_build_auction_buyout_core(
     {
         if (!vm_mock_auction_insert_claim_ex(
                 row.sellerRoleId, sellerAccount, VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT,
-                listingId, 0, 0, 0, 0, NULL, 0, row.buyoutPrice, false))
+                listingId, 0, 0, 0, 0, NULL, 0, 0, 0, 0, row.buyoutPrice, false))
         {
             vm_mock_auction_tx_rollback();
             *role = before;
@@ -1776,7 +1875,7 @@ static u32 vm_net_mock_build_auction_buyout_core(
     }
     else if (!vm_mock_auction_insert_claim_ex(
                  row.sellerRoleId, sellerAccount, VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT,
-                 listingId, 0, 0, 0, 0, NULL, row.buyoutPrice, 0, false))
+                 listingId, 0, 0, 0, 0, NULL, 0, 0, 0, row.buyoutPrice, 0, false))
     {
         vm_mock_auction_tx_rollback();
         *role = before;
@@ -1788,7 +1887,8 @@ static u32 vm_net_mock_build_auction_buyout_core(
     if (!vm_mock_auction_insert_claim_ex(
             role->roleId, session->accountId, VM_MOCK_AUCTION_CLAIM_WINNER_ITEM,
             listingId, row.itemId, row.itemCount, row.enhanceLevel, row.itemInstanceId,
-            &row.enhanceWash, 0, 0, false))
+            &row.enhanceWash, row.gemReflectLevel, row.gemComboLevel,
+            row.gemReviveLevel, 0, 0, false))
     {
         vm_mock_auction_tx_rollback();
         *role = before;
@@ -2013,7 +2113,7 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
         {
             if (!vm_mock_auction_insert_claim_ex(
                     row.highBidderRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND,
-                    listingId, 0, 0, 0, 0, NULL, 0, row.currentPrice, false))
+                    listingId, 0, 0, 0, 0, NULL, 0, 0, 0, 0, row.currentPrice, false))
             {
                 vm_mock_auction_tx_rollback();
                 *role = before;
@@ -2024,7 +2124,7 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
         }
         else if (!vm_mock_auction_insert_claim_ex(
                      row.highBidderRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND,
-                     listingId, 0, 0, 0, 0, NULL, row.currentPrice, 0, false))
+                     listingId, 0, 0, 0, 0, NULL, 0, 0, 0, row.currentPrice, 0, false))
         {
             vm_mock_auction_tx_rollback();
             *role = before;
@@ -2114,14 +2214,15 @@ static u32 vm_net_mock_build_auction_cancel_response(const u8 *request, u32 requ
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
                                                    5, listingId, "has-bid");
 
-    /* Return item first; only then mark cancelled so bag-full cannot destroy items. */
+    /* Return item first; only then mark cancelled so bag-full cannot destroy items.
+     * Listing enhance_wash is authority — do not coalesce_from_record (instance
+     * ids are per-role counters; stale wash_record can resurrect foreign attrs). */
     before = *role;
-    vm_net_mock_enhance_wash_coalesce_from_record(
-        role->roleId, row.itemInstanceId, row.itemId, row.enhanceLevel, 0,
-        &row.enhanceWash);
     if (!vm_mock_auction_return_item_to_bag(role, row.itemId, row.itemCount,
                                             row.enhanceLevel, row.itemInstanceId,
-                                            &row.enhanceWash, &seq, "auction-cancel"))
+                                            &row.enhanceWash, &seq, "auction-cancel",
+                                            row.gemReflectLevel, row.gemComboLevel,
+                                            row.gemReviveLevel))
     {
         const char *fail =
             g_vm_net_mock_backpack_add_fail_kind ==
@@ -2131,9 +2232,20 @@ static u32 vm_net_mock_build_auction_cancel_response(const u8 *request, u32 requ
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
                                                    7, listingId, fail);
     }
-    (void)vm_net_mock_enhance_wash_record_relocate_seq(
-        role->roleId, row.itemInstanceId, 0, seq, row.itemId, row.enhanceLevel,
-        &row.enhanceWash);
+    if (seq != 0)
+    {
+        if (!vm_net_mock_enhance_wash_is_empty(&row.enhanceWash))
+        {
+            (void)vm_net_mock_enhance_wash_record_relocate_seq(
+                role->roleId, row.itemInstanceId, 0, seq, row.itemId,
+                row.enhanceLevel, &row.enhanceWash);
+        }
+        else
+        {
+            (void)vm_net_mock_enhance_wash_record_delete(
+                role->roleId, row.itemInstanceId, seq);
+        }
+    }
 
     snprintf(query, sizeof(query),
              "UPDATE server_auction_listings SET status=%u WHERE listing_id=%u "
@@ -2221,7 +2333,28 @@ static bool vm_mock_auction_claim_row_cb(void *contextValue, unsigned int column
     if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
         row->enhanceLevel = (u16)tmp;
     vm_net_mock_enhance_wash_clear(&row->enhanceWash);
-    if (columnCount >= 10)
+    if (columnCount >= 13)
+    {
+        if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
+            row->itemInstanceId = tmp;
+        if (values[7] != NULL)
+            (void)vm_net_mock_enhance_wash_decode(values[7], lengths[7],
+                                                  &row->enhanceWash);
+        if (values[8] && vm_mock_mysql_parse_u32(values[8], lengths[8], &tmp) &&
+            tmp <= 255u)
+            row->gemReflectLevel = (u8)tmp;
+        if (values[9] && vm_mock_mysql_parse_u32(values[9], lengths[9], &tmp) &&
+            tmp <= 255u)
+            row->gemComboLevel = (u8)tmp;
+        if (values[10] && vm_mock_mysql_parse_u32(values[10], lengths[10], &tmp) &&
+            tmp <= 255u)
+            row->gemReviveLevel = (u8)tmp;
+        if (values[11] && vm_mock_mysql_parse_u32(values[11], lengths[11], &tmp))
+            row->moneyAmount = tmp;
+        if (values[12] && vm_mock_mysql_parse_u32(values[12], lengths[12], &tmp))
+            row->wcoinAmount = tmp;
+    }
+    else if (columnCount >= 10)
     {
         if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
             row->itemInstanceId = tmp;
@@ -2265,7 +2398,7 @@ static u32 vm_net_mock_build_auction_claims_list_response(const u8 *request,
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_mock_auction_claim_row rows[VM_MOCK_AUCTION_PAGE_SIZE];
     vm_mock_auction_claim_ctx ctx;
-    char query[384];
+    char query[512];
     u32 pageIndex = 0;
     u8 blob[2048];
     u32 blobLen = 0;
@@ -2290,7 +2423,7 @@ static u32 vm_net_mock_build_auction_claims_list_response(const u8 *request,
     ctx.cap = VM_MOCK_AUCTION_PAGE_SIZE;
     snprintf(query, sizeof(query),
              "SELECT claim_id,kind,listing_id,item_id,item_count,enhance_level,"
-             "item_instance_id,enhance_wash,money_amount,wcoin_amount FROM server_auction_claims "
+             "item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive,money_amount,wcoin_amount FROM server_auction_claims "
              "WHERE role_id=%u AND claimed=0 ORDER BY claim_id ASC "
              "LIMIT %u OFFSET %u",
              role->roleId, VM_MOCK_AUCTION_PAGE_SIZE,
@@ -2342,7 +2475,7 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
         vm_mock_service_get_active_client_session();
     vm_mock_auction_claim_row rows[16];
     vm_mock_auction_claim_ctx ctx;
-    char query[384];
+    char query[512];
     u32 claimed = 0;
     u32 failed = 0;
     u32 i;
@@ -2368,7 +2501,7 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
     ctx.cap = 16;
     snprintf(query, sizeof(query),
              "SELECT claim_id,kind,listing_id,item_id,item_count,enhance_level,"
-             "item_instance_id,enhance_wash,money_amount,wcoin_amount FROM server_auction_claims "
+             "item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive,money_amount,wcoin_amount FROM server_auction_claims "
              "WHERE role_id=%u AND claimed=0 ORDER BY claim_id ASC LIMIT 16",
              role->roleId);
     (void)vm_mysql_query(query, vm_mock_auction_claim_row_cb, &ctx);
@@ -2397,14 +2530,19 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
         if (rows[i].kind == VM_MOCK_AUCTION_CLAIM_ITEM_RETURN ||
             rows[i].kind == VM_MOCK_AUCTION_CLAIM_WINNER_ITEM)
         {
-            vm_net_mock_enhance_wash_coalesce_from_record(
-                role->roleId, rows[i].itemInstanceId, rows[i].itemId,
-                rows[i].enhanceLevel, 0, &rows[i].enhanceWash);
+            /*
+             * Claim/listing enhance_wash is the transfer authority (may be empty
+             * when first_seed_percent=0 or seller never washed). Do not
+             * coalesce_from_record under the *claimer* roleId: seller instance
+             * ids collide with the buyer's own wash_record keys and would paint
+             * red wash onto items the auction UI correctly showed as unwashed.
+             */
             if (rows[i].itemId == 0 || rows[i].itemCount == 0 ||
                 !vm_mock_auction_return_item_to_bag(
                     role, rows[i].itemId, rows[i].itemCount, rows[i].enhanceLevel,
                     rows[i].itemInstanceId, &rows[i].enhanceWash, &seq,
-                    "auction-claim-item"))
+                    "auction-claim-item", rows[i].gemReflectLevel,
+                    rows[i].gemComboLevel, rows[i].gemReviveLevel))
             {
                 ok = false;
                 if (failCode == NULL)
@@ -2416,9 +2554,18 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
             }
             else if (seq != 0)
             {
-                (void)vm_net_mock_enhance_wash_record_relocate_seq(
-                    role->roleId, rows[i].itemInstanceId, 0, seq, rows[i].itemId,
-                    rows[i].enhanceLevel, &rows[i].enhanceWash);
+                if (!vm_net_mock_enhance_wash_is_empty(&rows[i].enhanceWash))
+                {
+                    (void)vm_net_mock_enhance_wash_record_relocate_seq(
+                        role->roleId, rows[i].itemInstanceId, 0, seq,
+                        rows[i].itemId, rows[i].enhanceLevel,
+                        &rows[i].enhanceWash);
+                }
+                else
+                {
+                    (void)vm_net_mock_enhance_wash_record_delete(
+                        role->roleId, rows[i].itemInstanceId, seq);
+                }
             }
         }
         else if (rows[i].kind == VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT ||
