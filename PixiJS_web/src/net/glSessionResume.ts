@@ -17,6 +17,8 @@ export type GlSessionResumeSnapshot = {
   serverId: number;
   roleId: number;
   hangupDesired: boolean;
+  /** Hangup skill Operate (skillId+2); independent of [自动] LastOperate. */
+  hangupSkillOperate: number;
   autoBattle: boolean;
   why: string;
   ts: number;
@@ -52,6 +54,7 @@ export function writeGlSessionResume(
       serverId: (Number(snap.serverId) >>> 0) || 1,
       roleId: Number(snap.roleId) >>> 0,
       hangupDesired: !!snap.hangupDesired,
+      hangupSkillOperate: Number(snap.hangupSkillOperate) | 0,
       autoBattle: !!snap.autoBattle,
       why: String(snap.why || ""),
       ts: snap.ts ?? Date.now(),
@@ -82,6 +85,7 @@ export function peekGlSessionResume(): GlSessionResumeSnapshot | null {
       serverId: (Number(o.serverId) >>> 0) || 1,
       roleId,
       hangupDesired: !!o.hangupDesired,
+      hangupSkillOperate: Number(o.hangupSkillOperate) | 0,
       autoBattle: !!o.autoBattle,
       why: String(o.why || ""),
       ts,

@@ -13,6 +13,8 @@ interface EntertainmentHttpPlugin {
     preferJson?: boolean;
     timeoutMs?: number;
   }): Promise<{ url: string; body?: string }>;
+  download(opts: { url: string; filename?: string }): Promise<{ ok: boolean }>;
+  currentMedia(): Promise<{ url?: string }>;
 }
 
 const EntertainmentHttp = registerPlugin<EntertainmentHttpPlugin>("EntertainmentHttp");
@@ -65,6 +67,10 @@ export class EntertainmentWebLayer {
   private videoLoadGen = 0;
   /** Last playable mp4 — skip immediate repeats from sticky redirect APIs. */
   private lastPlayableUrl = "";
+  /** Last audio URL reported by the music iframe / native sniffer. */
+  private lastMusicUrl = "";
+  private lastMusicTitle = "";
+  private musicDlBtn!: HTMLButtonElement;
   private panelLayout: EntertainmentPanelLayout = "mall";
   private autoNext = true;
   private noteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -148,6 +154,13 @@ export class EntertainmentWebLayer {
       paddingLeft: "2px",
     } as CSSStyleDeclaration);
 
+    this.musicDlBtn = makeBarBtn("下载");
+    this.musicDlBtn.style.display = "none";
+    this.musicDlBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void this.downloadCurrentMusic();
+    });
     const openBtn = makeBarBtn("外开");
     openBtn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -166,7 +179,7 @@ export class EntertainmentWebLayer {
       e.stopPropagation();
       this.close();
     });
-    bar.append(this.titleEl, openBtn, minBtn, closeBtn);
+    bar.append(this.titleEl, this.musicDlBtn, openBtn, minBtn, closeBtn);
 
     this.noteEl = document.createElement("div");
     Object.assign(this.noteEl.style, {
@@ -273,7 +286,14 @@ export class EntertainmentWebLayer {
       this.syncMuteBtn();
       if (!this.video.muted) void this.video.play().catch(() => undefined);
     });
-    this.videoBar.append(this.contBtn, nextBtn, this.muteBtn);
+    const dlBtn = makeBarBtn("下载");
+    dlBtn.style.flex = "1";
+    dlBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void this.downloadCurrentVideo();
+    });
+    this.videoBar.append(this.contBtn, nextBtn, this.muteBtn, dlBtn);
 
     this.panel.append(bar, this.noteEl, this.frame, this.video, this.videoBar);
     this.root.append(dim, this.panel);
@@ -306,6 +326,20 @@ export class EntertainmentWebLayer {
       e.stopPropagation();
       this.restore();
     });
+
+    window.addEventListener("message", (ev) => {
+      const data = ev.data as { type?: string; url?: string; title?: string } | null;
+      if (!data || data.type !== "jh-ent-audio") return;
+      if (!acceptMusicMessage(ev.origin, data.url || "")) return;
+      const url = (data.url || "").trim();
+      const title = (data.title || "").replace(/\s+/g, " ").trim();
+      if (url !== this.lastMusicUrl) {
+        this.lastMusicUrl = url;
+        this.lastMusicTitle = title && !isPlaceholderSongTitle(title) ? title : "";
+      } else if (title && !isPlaceholderSongTitle(title)) {
+        this.lastMusicTitle = title;
+      }
+    });
   }
 
   isExpanded(): boolean {
@@ -336,6 +370,10 @@ export class EntertainmentWebLayer {
       this.videoApiJson === wantJson &&
       this.panelLayout === layout &&
       (wantVideo ? this.videoApi === nextApi : this.currentUrl === url);
+    if (!same) {
+      this.lastMusicUrl = "";
+      this.lastMusicTitle = "";
+    }
 
     this.currentUrl = url;
     this.currentTitle = title || "娱乐";
@@ -440,6 +478,8 @@ export class EntertainmentWebLayer {
     this.videoMode = false;
     this.videoApiJson = false;
     this.lastPlayableUrl = "";
+    this.lastMusicUrl = "";
+    this.lastMusicTitle = "";
     this.videoLoadGen++;
     this.noteEl.style.display = "none";
     if (this.noteTimer) {
@@ -532,6 +572,7 @@ export class EntertainmentWebLayer {
       this.videoBar.style.display = "none";
       this.frame.style.display = "block";
     }
+    this.syncMusicDlBtn();
   }
 
   private loadNextVideo(): void {
@@ -615,6 +656,48 @@ export class EntertainmentWebLayer {
     this.muteBtn.textContent = this.video.muted ? "有声" : "静音";
   }
 
+  private isMusicPage(): boolean {
+    return !this.videoMode && /qqmp3\.vip/i.test(this.currentUrl);
+  }
+
+  private syncMusicDlBtn(): void {
+    this.musicDlBtn.style.display = this.isMusicPage() ? "" : "none";
+  }
+
+  private async currentMusicSrc(): Promise<string> {
+    const fromFrame = audioSrcInFrame(this.frame);
+    if (fromFrame) {
+      this.lastMusicUrl = fromFrame;
+      return fromFrame;
+    }
+    if (isHttpUrl(this.lastMusicUrl) && looksLikeMusicFile(this.lastMusicUrl)) {
+      return this.lastMusicUrl;
+    }
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const got = await EntertainmentHttp.currentMedia();
+        const url = (got?.url || "").trim();
+        if (isHttpUrl(url) && looksLikeMusicFile(url)) {
+          this.lastMusicUrl = url;
+          return url;
+        }
+      } catch (e) {
+        console.warn("[ent-web] currentMedia", e);
+      }
+    }
+    return "";
+  }
+
+  private async downloadCurrentMusic(): Promise<void> {
+    if (!this.isMusicPage()) return;
+    const src = await this.currentMusicSrc();
+    if (!src) {
+      this.flashNote("还没抓到正在播放的歌曲，请先播放几秒");
+      return;
+    }
+    await this.saveRemoteFile(src, musicDownloadName(src, this.lastMusicTitle));
+  }
+
   private openExternal(): void {
     if (!this.currentUrl) return;
     try {
@@ -622,6 +705,55 @@ export class EntertainmentWebLayer {
     } catch {
       /* ignore */
     }
+  }
+
+  private currentVideoSrc(): string {
+    const src = (this.lastPlayableUrl || this.video.currentSrc || "").trim();
+    if (!src || src === "about:blank") return "";
+    if (sameVideoEndpoint(src, this.videoApi)) return "";
+    return src;
+  }
+
+  private flashNote(text: string, ms = 1800): void {
+    this.noteEl.textContent = text;
+    this.noteEl.style.display = "block";
+    if (this.noteTimer) window.clearTimeout(this.noteTimer);
+    this.noteTimer = window.setTimeout(() => {
+      this.noteTimer = null;
+      if ((this.videoMode || this.isMusicPage()) && this.noteEl.textContent === text) {
+        this.noteEl.style.display = "none";
+      }
+    }, ms);
+  }
+
+  private async downloadCurrentVideo(): Promise<void> {
+    const src = this.currentVideoSrc();
+    if (!src) {
+      this.flashNote("当前没有可下载的视频");
+      return;
+    }
+    const name = videoDownloadName(src);
+    await this.saveRemoteFile(src, name);
+  }
+
+  private async saveRemoteFile(src: string, name: string): Promise<void> {
+    this.flashNote("开始下载…");
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await EntertainmentHttp.download({ url: src, filename: name });
+      } catch (e) {
+        console.warn("[ent-web] download failed", e);
+        this.flashNote("下载失败");
+      }
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = src;
+    a.download = name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 }
 
@@ -654,6 +786,106 @@ function withCacheBust(url: string): string {
 
 function stripCacheBust(url: string): string {
   return url.replace(/([?&])_t=\d+(\.\d+)?/g, "").replace(/[?&]$/, "");
+}
+
+function videoDownloadName(url: string): string {
+  try {
+    const path = new URL(url).pathname;
+    const base = path.split("/").pop() || "";
+    const clean = decodeURIComponent(base).split("?")[0].replace(/[\\/:*?"<>|]/g, "_");
+    if (/\.(mp4|m3u8|webm|mov)$/i.test(clean)) return clean;
+  } catch {
+    /* ignore */
+  }
+  return `video_${Date.now()}.mp4`;
+}
+
+function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+function isPlaceholderSongTitle(title: string): boolean {
+  return title === "歌曲名称" || title === "歌手名称";
+}
+
+function looksLikeMusicFile(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const host = url.hostname.toLowerCase();
+  if (host === "localhost" || host === "127.0.0.1") return false;
+  const path = url.pathname.toLowerCase();
+  if (/\.(mp4|m3u8|webm|jpe?g|png|gif|webp|js|css|html|json|lrc)$/.test(path)) return false;
+  if (path.includes("/api/")) return false;
+  if (/\.(mp3|flac|m4a|aac|wav|ogg|ape|wma)$/.test(path)) return true;
+  const q = url.search.toLowerCase();
+  if (
+    q.includes("format=mp3") ||
+    q.includes("format=flac") ||
+    q.includes("format=aac") ||
+    q.includes("format=m4a") ||
+    q.includes("type=convert_url")
+  ) {
+    return true;
+  }
+  return (
+    host.includes("kuwo.cn") ||
+    host.includes("qqmusic") ||
+    host.includes("music.126.net") ||
+    host.includes("kugou.com")
+  );
+}
+
+function acceptMusicMessage(origin: string, url: string): boolean {
+  if (!looksLikeMusicFile(url)) return false;
+  if (origin === window.location.origin) return true;
+  try {
+    return /(^|\.)qqmp3\.vip$/i.test(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function audioSrcInFrame(frame: HTMLIFrameElement): string {
+  try {
+    const audio = frame.contentDocument?.querySelector("audio");
+    const src = (audio?.currentSrc || audio?.src || "").trim();
+    return isHttpUrl(src) ? src : "";
+  } catch {
+    return "";
+  }
+}
+
+function audioExtFromUrl(url: string): string {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    const m = path.match(/\.(mp3|flac|m4a|aac|wav|ogg|ape|wma)$/);
+    if (m?.[1]) return m[1];
+  } catch {
+    /* ignore */
+  }
+  if (/format=flac/i.test(url)) return "flac";
+  if (/format=aac/i.test(url)) return "aac";
+  if (/format=m4a/i.test(url)) return "m4a";
+  return "mp3";
+}
+
+function musicDownloadName(url: string, title: string): string {
+  const ext = audioExtFromUrl(url);
+  const base = title.replace(/[\\/:*?"<>|\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  if (base && !isPlaceholderSongTitle(base)) return `${base}.${ext}`;
+  try {
+    const leaf = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    const clean = leaf.split("?")[0].replace(/[\\/:*?"<>|]/g, "_");
+    if (new RegExp(`\\.${ext}$`, "i").test(clean) && clean.length > ext.length + 1) return clean;
+  } catch {
+    /* ignore */
+  }
+  return `song_${Date.now()}.${ext}`;
 }
 
 /** True when `url` is still the rotate API (not a final CDN mp4). */

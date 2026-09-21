@@ -3,7 +3,7 @@
  * Evidence: docs/re/2026-07-19-equipment-enhancement.md,
  * docs/re/2026-08-02-equipment-enhance-transfer-29-5.md, screenshots.
  */
-import { Container, Graphics } from "pixi.js";
+import { Container, Graphics, Rectangle } from "pixi.js";
 import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
@@ -94,11 +94,18 @@ export class EnhancePanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-        .fill({ color: 0x000000, alpha: 0.45 }),
-    );
+    // HUD 挂机热区在软键之上。面板不接点击时，点遮罩/面板会落到下层挂机按钮。
+    this.eventMode = "static";
+    this.hitArea = new Rectangle(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
+    this.on("pointertap", (e) => {
+      e.stopPropagation();
+    });
+    const dim = new Graphics()
+      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+      .fill({ color: 0x000000, alpha: 0.45 });
+    dim.eventMode = "static";
+    dim.on("pointertap", (e) => e.stopPropagation());
+    this.addChild(dim);
     this.addChild(this.box);
   }
 
@@ -401,6 +408,8 @@ export class EnhancePanel extends Container {
     }
     const rows: CrystalRow[] = [];
     for (let id = ENHANCE_CRYSTAL_FIRST; id <= ENHANCE_CRYSTAL_LAST; id++) {
+      const count = counts.get(id) || 0;
+      if (count <= 0) continue;
       const tier = id - ENHANCE_CRYSTAL_FIRST + 1;
       const unit =
         this.openInfo?.crystalPower[tier - 1] ??
@@ -410,7 +419,7 @@ export class EnhancePanel extends Container {
         tier,
         name: enhanceCrystalName(id),
         rate: unit,
-        count: counts.get(id) || 0,
+        count,
       });
     }
     return rows;
@@ -480,7 +489,7 @@ export class EnhancePanel extends Container {
     const L = this.openInfo?.curLevel ?? it.enhance ?? 0;
     const next = Math.min(L + 1, this.openInfo?.maxLevel ?? ENHANCE_MAX_LEVEL);
 
-    this.addAttr(`[强化]: ${L} ${next}`, x + 14, bodyTop, EQUIP_DETAIL_YELLOW);
+    this.addAttr(`[强化]: ${L}→${next}`, x + 14, bodyTop, EQUIP_DETAIL_YELLOW);
 
     let ly = bodyTop + 16;
     const compare = buildEnhanceCompareLines(it, L, next).slice(0, 4);
@@ -562,10 +571,13 @@ export class EnhancePanel extends Container {
     const bodyTop = this.drawTitle(it.name, x, y, w);
     const L = this.openInfo?.curLevel ?? it.enhance ?? 0;
     const next = Math.min(L + 1, ENHANCE_MAX_LEVEL);
-    this.addAttr(`[强化]: ${L} ${next}`, x + 14, bodyTop, EQUIP_DETAIL_YELLOW);
+    this.addAttr(`[强化]: ${L}→${next}`, x + 14, bodyTop, EQUIP_DETAIL_YELLOW);
     this.addAttr("请放入玄晶", x + 14, bodyTop + 16, INK_CYAN);
 
     const rows = this.crystalRows();
+    if (this.listCursor >= rows.length) {
+      this.listCursor = Math.max(0, rows.length - 1);
+    }
     const visible = 7;
     this.ensureListVisible(rows.length, visible);
     const listTop = bodyTop + 36;
@@ -577,6 +589,9 @@ export class EnhancePanel extends Container {
       .rect(x + 8, listTop - 2, w - 16, visible * 16 + 4)
       .stroke({ width: 1, color: CBE.borderDim });
 
+    if (!rows.length) {
+      this.addAttr("背包无玄晶", x + 14, listTop + 1, CBE.inkWarn);
+    }
     for (let i = 0; i < visible; i++) {
       const idx = pageStart + i;
       const row = rows[idx];

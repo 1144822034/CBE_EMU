@@ -257,6 +257,7 @@ static void vm_net_mock_ensure_star_sky_stone_catalog_item(void);
 static void vm_net_mock_ensure_rename_card_catalog_item(void);
 static void vm_net_mock_ensure_gold_scroll_catalog_item(void);
 static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void);
+static void vm_net_mock_ensure_gem_catalog_items(void);
 static void vm_net_mock_ensure_gold_scroll_item_effect(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 
@@ -1673,6 +1674,7 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_net_mock_ensure_rename_card_catalog_item();
     vm_net_mock_ensure_gold_scroll_catalog_item();
     vm_net_mock_ensure_crystal_extract_stone_catalog_item();
+    vm_net_mock_ensure_gem_catalog_items();
 
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
@@ -2412,7 +2414,7 @@ static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_cata
  * onto item+0xe used by backpack name 「(+N)」 (warehouse (1,0) → (+1) bug).
  * For equipment the first i16 is the current enhance level; callers still pass
  * stackRuntimeByte=0 and the real level via enhanceLevel — see
- * vm_net_mock_seq_put_item_common_extra.
+ * vm_net_mock_seq_put_item_common_extra_plain.
  */
 static u8 vm_net_mock_item_common_extra_stack_byte(u32 itemId, u32 count)
 {
@@ -2691,6 +2693,95 @@ static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void)
     }
 }
 
+/*
+ * Pixi 宝石孔道具（不在 item.dsh）：注入商店目录，供后台给予/掉落/宝箱选择。
+ * IDs 对齐 docs/re/2026-09-19-pixi-gem-sockets.md 与 mock_server_gem_config：
+ * 922–937 反伤、942–957 连击、962–977 复活、978 碎片。
+ * 类别用 21（活动道具），enabled=0，避免误入 14/5 酷宝页。
+ */
+static bool vm_net_mock_ensure_one_gem_catalog_item(u32 itemId,
+                                                    const char *nameUtf8,
+                                                    const char *descUtf8)
+{
+    u8 nameGbk[64];
+    u8 descGbk[192];
+    u32 i = 0;
+    vm_net_mock_shop_catalog_item *item = NULL;
+
+    if (itemId == 0 || nameUtf8 == NULL || nameUtf8[0] == 0)
+        return false;
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId == itemId)
+            return false;
+    }
+    memset(nameGbk, 0, sizeof(nameGbk));
+    memset(descGbk, 0, sizeof(descGbk));
+    utf8_to_gbk((u8 *)nameUtf8, nameGbk, sizeof(nameGbk));
+    if (descUtf8 != NULL && descUtf8[0] != 0)
+        utf8_to_gbk((u8 *)descUtf8, descGbk, sizeof(descGbk));
+    if (nameGbk[0] == 0)
+        return false;
+    if (!vm_net_mock_add_shop_catalog_item(
+            itemId, nameGbk, (u32)strlen((const char *)nameGbk),
+            descGbk[0] ? descGbk : NULL,
+            descGbk[0] ? (u32)strlen((const char *)descGbk) : 0, 1, 99, 99, 1,
+            false, 21))
+    {
+        return false;
+    }
+    item = &g_vm_net_mock_shop_catalog[g_vm_net_mock_shop_catalog_count - 1];
+    item->enabled = 0;
+    item->shopDbListed = 0;
+    return true;
+}
+
+static void vm_net_mock_ensure_gem_catalog_items(void)
+{
+    static const struct
+    {
+        u32 baseId;
+        const char *prefix;
+        const char *effect;
+    } gemTypes[] = {
+        {922u, "反伤宝石", "反伤"},
+        {942u, "连击宝石", "连击"},
+        {962u, "复活宝石", "复活"},
+    };
+    u32 added = 0;
+    u32 t = 0;
+    u32 level = 0;
+    char nameUtf8[48];
+    char descUtf8[96];
+
+    if (vm_net_mock_ensure_one_gem_catalog_item(
+            978u, "宝石碎片", "3个可合成随机1级宝石。"))
+        ++added;
+
+    for (t = 0; t < sizeof(gemTypes) / sizeof(gemTypes[0]); ++t)
+    {
+        for (level = 1; level <= 16; ++level)
+        {
+            snprintf(nameUtf8, sizeof(nameUtf8), "%s%u级", gemTypes[t].prefix,
+                     level);
+            snprintf(descUtf8, sizeof(descUtf8),
+                     "镶嵌后获得%u%%%s。3个合成更高1级。", level,
+                     gemTypes[t].effect);
+            if (vm_net_mock_ensure_one_gem_catalog_item(
+                    gemTypes[t].baseId + level - 1u, nameUtf8, descUtf8))
+                ++added;
+        }
+    }
+
+    if (added > 0)
+    {
+        vm_net_mock_sort_shop_catalog();
+        printf("[info][network] mock_gem_catalog_items_added count=%u "
+               "evidence=custom:pixi-gem-sockets\n",
+               added);
+    }
+}
+
 /* 853 打金心得：不在 item.dsh，注入时效目录（类别10、持续60分钟）. */
 static void vm_net_mock_ensure_gold_scroll_item_effect(void)
 {
@@ -2732,15 +2823,24 @@ static const vm_net_mock_item_effect_catalog_item *vm_net_mock_find_item_effect_
 }
 
 /* Mirror PixiJS_web itemCatalog.isTradeableItem — server-side guard against
- * crafted trade offers that bypass the client pick filter. */
-static bool vm_net_mock_item_is_tradeable(u32 itemId, u16 enhanceLevel)
+ * crafted trade offers that bypass the client pick filter.
+ * ignoreCategory: auction listings skip 玄晶(901–916) / 类别11 / 类别23.
+ * Bind, quest link, enhanced gear, gems stay blocked. */
+static bool vm_net_mock_item_is_tradeable_ex(u32 itemId, u16 enhanceLevel,
+                                             bool ignoreCategory)
 {
     const vm_net_mock_equipment_catalog_item *equip = NULL;
     const vm_net_mock_item_effect_catalog_item *item = NULL;
 
-    if (itemId >= 901 && itemId <= 916)
+    if (!ignoreCategory && itemId >= 901 && itemId <= 916)
         return false;
     if (itemId == 840)
+        return false;
+    /* Pixi gem sockets / fragment — never tradeable or auctionable. */
+    if (itemId == 978)
+        return false;
+    if ((itemId >= 922 && itemId <= 937) || (itemId >= 942 && itemId <= 957) ||
+        (itemId >= 962 && itemId <= 977))
         return false;
     if (enhanceLevel > 0)
         return false;
@@ -2752,15 +2852,26 @@ static bool vm_net_mock_item_is_tradeable(u32 itemId, u16 enhanceLevel)
     item = vm_net_mock_find_item_effect_catalog_item(itemId);
     if (item == NULL)
         return true;
-    if (item->category == 23)
+    if (!ignoreCategory && item->category == 23)
         return false;
-    if (item->category == 11)
+    if (!ignoreCategory && item->category == 11)
         return false;
     if (item->questLink != 0)
         return false;
     if (item->bindAttr != 0)
         return false;
     return true;
+}
+
+static bool vm_net_mock_item_is_tradeable(u32 itemId, u16 enhanceLevel)
+{
+    return vm_net_mock_item_is_tradeable_ex(itemId, enhanceLevel, false);
+}
+
+/* Auction house is on: do not reject by item category. */
+static bool vm_net_mock_item_is_auctionable(u32 itemId, u16 enhanceLevel)
+{
+    return vm_net_mock_item_is_tradeable_ex(itemId, enhanceLevel, true);
 }
 
 /* These ids have client-side request/response handlers that are distinct from
@@ -2799,8 +2910,14 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 833:
     case 920:
     case 921:
+    case 978: /* 宝石碎片：走 29/22 */
         return true;
     default:
+        /* Gem id ranges reserved for socket ops (29/17–21), not 7/1. */
+        if ((itemId >= 922 && itemId <= 937) ||
+            (itemId >= 942 && itemId <= 957) ||
+            (itemId >= 962 && itemId <= 977))
+            return true;
         return false;
     }
 }
@@ -3548,7 +3665,8 @@ vm_net_mock_equip_enhance_attrs_for_slot(u8 slot, u8 *countOut)
 
 static bool vm_net_mock_seq_put_item_common_extra(
     u8 *out, u32 outCap, u32 *pos, u8 stackRuntimeByte, u8 enhanceLevel,
-    u32 itemId, const vm_net_mock_enhance_wash_state *wash)
+    u32 itemId, const vm_net_mock_enhance_wash_state *wash,
+    u8 gemReflect, u8 gemCombo, u8 gemRevive)
 {
     /*
      * JianghuOL.CBE:ParseEquipAttributes reads tagged i16, i16, u8 attr_count,
@@ -3571,6 +3689,10 @@ static bool vm_net_mock_seq_put_item_common_extra(
  *      equipment so clients can gray-paint unlock > enhance (incl. +0..+3)
  *   2) then M(L)-base for 护甲/物攻 with base>0 (unlock=1) when L>=1,
  *      until CLIENT_CAP
+ *
+ * Pixi-only trailer after attrs (ignored by CBE stop-at-attrCount):
+ *   tagged u8 0x47, tagged u8 reflect, combo, revive
+ *   (seq_put_u8 → 00 01 <value>; Pixi must consume these or the next row desyncs)
  */
     const vm_net_mock_equipment_catalog_item *equip = NULL;
     u8 level = enhanceLevel;
@@ -3692,7 +3814,32 @@ static bool vm_net_mock_seq_put_item_common_extra(
             return false;
         }
     }
+    /* Pixi gem socket trailer — only on equipment rows. */
+    if (equip != NULL)
+    {
+        if (!vm_net_mock_seq_put_u8(out, outCap, pos, 0x47) ||
+            !vm_net_mock_seq_put_u8(out, outCap, pos, gemReflect) ||
+            !vm_net_mock_seq_put_u8(out, outCap, pos, gemCombo) ||
+            !vm_net_mock_seq_put_u8(out, outCap, pos, gemRevive))
+            return false;
+    }
+    else
+    {
+        (void)gemReflect;
+        (void)gemCombo;
+        (void)gemRevive;
+    }
     return true;
+}
+
+/* Non-equipment / zero-socket shorthand. */
+static bool vm_net_mock_seq_put_item_common_extra_plain(
+    u8 *out, u32 outCap, u32 *pos, u8 stackRuntimeByte, u8 enhanceLevel,
+    u32 itemId, const vm_net_mock_enhance_wash_state *wash)
+{
+    return vm_net_mock_seq_put_item_common_extra(out, outCap, pos,
+                                                  stackRuntimeByte, enhanceLevel,
+                                                  itemId, wash, 0, 0, 0);
 }
 
 static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap, u32 *pos, u8 stackRuntimeByte)
@@ -3738,7 +3885,8 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
                 out, outCap, &pos, vm_net_mock_backpack_stack_byte(item),
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                item->itemId, &item->enhanceWash))
+                item->itemId, &item->enhanceWash, item->gemReflectLevel,
+                item->gemComboLevel, item->gemReviveLevel))
         {
             return false;
         }
@@ -3838,7 +3986,7 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
                 continue;
             if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
                 return false;
-            if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos,
+            if (!vm_net_mock_seq_put_item_common_extra_plain(out, outCap, &pos,
                                                        item->stack, 0,
                                                        item->itemId, NULL))
                 return false;
@@ -3880,7 +4028,8 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
                 out, outCap, &pos, 0,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                item->itemId, &item->enhanceWash))
+                item->itemId, &item->enhanceWash, item->gemReflectLevel,
+                item->gemComboLevel, item->gemReviveLevel))
             return false;
     }
     *blobLenOut = pos;
@@ -4919,6 +5068,9 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
         (u8)SDL_min(enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
     const vm_net_mock_enhance_wash_state *wash = NULL;
     vm_net_mock_role_state *role = NULL;
+    u8 gemReflect = 0;
+    u8 gemCombo = 0;
+    u8 gemRevive = 0;
 
     if (blobLenOut)
         *blobLenOut = 0;
@@ -4939,7 +5091,27 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
         vm_net_mock_backpack_item_state *bp =
             vm_net_mock_role_find_backpack_item(role, 0, seq);
         if (bp != NULL && bp->itemId == itemId)
+        {
             wash = &bp->enhanceWash;
+            gemReflect = bp->gemReflectLevel;
+            gemCombo = bp->gemComboLevel;
+            gemRevive = bp->gemReviveLevel;
+        }
+        else
+        {
+            /* Worn equipment uses seq = slot+1. */
+            if (seq >= 1 && seq <= (u16)VM_NET_MOCK_EQUIP_SLOT_COUNT)
+            {
+                u8 slot = (u8)(seq - 1u);
+                if (role->equippedItemIds[slot] == itemId)
+                {
+                    wash = &role->equippedEnhanceWash[slot];
+                    gemReflect = role->equippedGemReflect[slot];
+                    gemCombo = role->equippedGemCombo[slot];
+                    gemRevive = role->equippedGemRevive[slot];
+                }
+            }
+        }
     }
     stackRuntime = vm_net_mock_item_common_extra_stack_byte(itemId, count);
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
@@ -4951,7 +5123,8 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
         return false;
     if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, stackRuntime,
-                                                enhance, itemId, wash))
+                                                enhance, itemId, wash,
+                                                gemReflect, gemCombo, gemRevive))
         return false;
 
     *blobLenOut = pos;
@@ -4988,7 +5161,7 @@ static bool vm_net_mock_build_chest_open_info_blob(u8 *out, u32 outCap,
         return false;
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
         return false;
-    if (!vm_net_mock_seq_put_item_common_extra(
+    if (!vm_net_mock_seq_put_item_common_extra_plain(
             out, outCap, &pos,
             vm_net_mock_item_common_extra_stack_byte(itemId, count), 0,
             itemId, NULL))
@@ -5040,7 +5213,7 @@ static bool vm_net_mock_build_item_use_iteminfo_rows_blob(
             !vm_net_mock_seq_put_i16(out, outCap, &pos, rows[i].seq) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].itemId) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
-            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos,
+            !vm_net_mock_seq_put_item_common_extra_plain(out, outCap, &pos,
                                                     stackRuntime, enhance,
                                                     rows[i].itemId, NULL))
         {
@@ -5288,7 +5461,9 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
                 out, outCap, &pos, 0,
                 (u8)SDL_min(role->equippedEnhanceLevels[slot],
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                itemId, &role->equippedEnhanceWash[slot]))
+                itemId, &role->equippedEnhanceWash[slot],
+                role->equippedGemReflect[slot], role->equippedGemCombo[slot],
+                role->equippedGemRevive[slot]))
         {
             return false;
         }
@@ -8261,7 +8436,7 @@ static bool vm_net_mock_build_chest_open_info_blob_rows(
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, rows[i].seq) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
-            !vm_net_mock_seq_put_item_common_extra(
+            !vm_net_mock_seq_put_item_common_extra_plain(
                 out, outCap, &pos,
                 vm_net_mock_item_common_extra_stack_byte(rows[i].itemId,
                                                          rows[i].count),
@@ -9916,6 +10091,17 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
              */
             if (parsed.count == 0 && equipment != NULL)
                 discardCount = 1;
+            if (equipment != NULL &&
+                (item->gemReflectLevel != 0 || item->gemComboLevel != 0 ||
+                 item->gemReviveLevel != 0))
+            {
+                result = 2;
+                printf("[info][network] mock_item_discard_socketed item=%u seq=%u "
+                       "reason=请先拆除宝石\n",
+                       itemId, seq);
+            }
+            else
+            {
             before = *role;
             haveBefore = true;
             consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq,
@@ -9941,6 +10127,7 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
                         }
                     }
                 }
+            }
             }
         }
         else

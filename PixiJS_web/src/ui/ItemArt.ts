@@ -6,25 +6,54 @@ import { loadUiCrop, tryLoadUiTexture, uiSprite } from "./UiAssets";
 export const SLOT_FRAME_SIZE = 25;
 /** equipico.gif cell size. */
 export const EQUIP_ICON_SIZE = 16;
+/**
+ * Worn-panel part labels `0.gif`..`7.gif` (帽衣披束裤鞋饰品武器).
+ * Index matches EQUIP_SLOT_UI visual order, not body slot id.
+ */
+export const EQUIP_PART_LABEL_COUNT = 8;
+/** Widest part label (饰品/武器 are 25×13). */
+export const EQUIP_PART_LABEL_MAX_W = 25;
 
 const iconCache = new Map<number, Texture | null>();
+const partLabelCache: (Texture | null)[] = [];
 let frameTex: Texture | null | undefined;
 let artWarm: Promise<void> | null = null;
 
-/** Prefetch handkuang + all equipico tiles. */
+/** Prefetch handkuang + equipico tiles + worn part labels 0.gif..7.gif. */
 export async function warmEquipArt(): Promise<void> {
   if (!artWarm) {
     artWarm = (async () => {
       frameTex = await tryLoadUiTexture("handkuang.gif");
-      await Promise.all(
-        Array.from({ length: 10 }, (_, i) => equipIconTexture(i)),
-      );
+      await Promise.all([
+        ...Array.from({ length: 10 }, (_, i) => equipIconTexture(i)),
+        ...Array.from({ length: EQUIP_PART_LABEL_COUNT }, (_, i) =>
+          equipPartLabelTexture(i),
+        ),
+      ]);
     })().catch((e) => {
       artWarm = null;
       throw e;
     });
   }
   await artWarm;
+}
+
+/** `0.gif`..`7.gif` — cyan part name beside each worn slot. */
+export async function equipPartLabelTexture(
+  uiIndex: number,
+): Promise<Texture | null> {
+  const idx = uiIndex | 0;
+  if (idx < 0 || idx >= EQUIP_PART_LABEL_COUNT) return null;
+  if (partLabelCache[idx] !== undefined) return partLabelCache[idx]!;
+  const tex = await tryLoadUiTexture(`${idx}.gif`);
+  partLabelCache[idx] = tex;
+  return tex;
+}
+
+export function equipPartLabelTextureSync(uiIndex: number): Texture | null {
+  const idx = uiIndex | 0;
+  if (idx < 0 || idx >= EQUIP_PART_LABEL_COUNT) return null;
+  return partLabelCache[idx] ?? null;
 }
 
 export async function slotFrameTexture(): Promise<Texture | null> {
@@ -102,6 +131,7 @@ export function slotFrameTextureSync(): Texture | null {
  */
 export function invalidateEquipArtGpu(): void {
   iconCache.clear();
+  partLabelCache.length = 0;
   frameTex = undefined;
   artWarm = null;
 }

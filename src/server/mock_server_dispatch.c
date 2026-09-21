@@ -1387,6 +1387,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_dream_hud_remain_query_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-dream-hud-remain-query", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_star_sky_stone_wash_reset_response(
         request, requestLen, out, outCap);
     if (hookedLen)
@@ -1411,6 +1420,60 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     {
         vm_net_log_handled_packet("builtin-crystal-extract", request, requestLen,
                                   hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_gem_embed_response(request, requestLen, out,
+                                                     outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-gem-embed", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_gem_remove_response(request, requestLen, out,
+                                                      outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-gem-remove", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_gem_combine_response(request, requestLen, out,
+                                                       outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-gem-combine", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_gem_type_exchange_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-gem-type-exchange", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_gem_from_crystal16_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-gem-from-crystal16", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_gem_fragment_combine_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-gem-fragment-combine", request,
+                                  requestLen, hookedLen);
         return hookedLen;
     }
 

@@ -2,6 +2,7 @@
  * Shared center toast for LCD panels (auction / wager / arena / social / HUD…).
  * Tip host stays above panel labels; tip Songti uses a top DOM z band.
  * Overlapping Songti is covered by a solid DOM plate (not whole-line hidden).
+ * UC3 tips stay on the canvas — no DOM plate (it would cover canvas glyphs).
  */
 import { Container, Graphics } from "pixi.js";
 import {
@@ -12,6 +13,7 @@ import {
   makePixelText,
   paintCbePanel,
 } from "./constants";
+import { preferSystemFont } from "../resources/systemFont";
 import { UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
 import {
   clearLcdDomTipOccludeRect,
@@ -181,17 +183,22 @@ export function drawPanelTipOverlay(
   const textBlockH = lines.length * lineH;
   const boxH = Math.max(textBlockH + padY * 2, 36);
 
-  // Nudge above mid-LCD so softkey chrome does not clip the toast.
+  // Mid-LCD, then +76 (= prior -24 nudge + 100px down).
   const bx = Math.floor((LCD_WIDTH - boxW) / 2) - padFrame;
   const by =
-    Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2) - padFrame - 24;
+    Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2) - padFrame + 76;
   const fw = boxW + padFrame * 2;
   const fh = boxH + padFrame * 2;
   // Solid canvas fill under chrome so map pixels cannot peek through.
   state.gfx.roundRect(bx, by, fw, fh, 2).fill({ color: CBE.bgPanelDark, alpha: 1 });
   paintCbePanel(state.host, state.gfx, bx, by, fw, fh, CBE.bgPanelDark);
-  // DOM plate under tip Songti — covers behind text in place (no display:none).
-  setLcdDomTipOccludeRect(state.host, bx, by, fw, fh, CBE.bgPanelDark);
+  // Songti tip text is DOM above this plate; UC3 tip text is canvas under
+  // #lcd-dom-text — a DOM plate would hide the glyphs (十连 tip empty box).
+  if (preferSystemFont()) {
+    setLcdDomTipOccludeRect(state.host, bx, by, fw, fh, CBE.bgPanelDark);
+  } else {
+    clearLcdDomTipOccludeRect();
+  }
 
   const textCx = Math.round(bx + padFrame + boxW / 2);
   const textTop =

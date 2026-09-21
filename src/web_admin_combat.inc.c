@@ -102,6 +102,14 @@ static void vm_mock_admin_render_combat_page(char *response, size_t responseCap,
     vm_mock_admin_combat_field(
         &page, "命中基础值", "panel_hit_base",
         cfg ? cfg->panelHitBase : 101, "hit = 基础 + 装备命中");
+    vm_mock_admin_combat_field(
+        &page, "力量→气血系数×100", "panel_strength_hp_coeff_x100",
+        cfg ? cfg->panelStrengthHpCoeffX100 : 50,
+        "气血 += 力量×此值/100；50=0.5（含装备力量）");
+    vm_mock_admin_combat_field(
+        &page, "智慧→法力系数×100", "panel_wisdom_mp_coeff_x100",
+        cfg ? cfg->panelWisdomMpCoeffX100 : 50,
+        "法力 += 智慧×此值/100；50=0.5（在成长智慧×3 之外；含装备智慧）");
     vm_mock_admin_text_appendf(&page, "</div></section>");
 
     vm_mock_admin_text_appendf(
@@ -238,6 +246,10 @@ static void vm_mock_admin_handle_combat_action(vm_mock_service_socket client,
                                  &cfg.panelDefenseEnduranceDiv);
     (void)vm_mock_admin_form_u32(body, "panel_hit_base", 100000u,
                                  &cfg.panelHitBase);
+    (void)vm_mock_admin_form_u32(body, "panel_strength_hp_coeff_x100", 1000u,
+                                 &cfg.panelStrengthHpCoeffX100);
+    (void)vm_mock_admin_form_u32(body, "panel_wisdom_mp_coeff_x100", 1000u,
+                                 &cfg.panelWisdomMpCoeffX100);
     (void)vm_mock_admin_form_u32(body, "primary_attack_coeff_tianji_percent",
                                  1000u, &cfg.primaryAttackCoeffTianjiPercent);
     (void)vm_mock_admin_form_u32(body, "primary_attack_coeff_huanjian_percent",

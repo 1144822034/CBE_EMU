@@ -58,7 +58,7 @@ typedef struct
     u8 wagerCurrency;
     /* Timed-arena duel rules (admin). Defaults preserve historical contract. */
     u8 damageScaleEnabled; /* round damage/hit 2^n */
-    u8 allowHeal;          /* heal/revive skills (items still client-gated) */
+    u8 allowHeal;          /* 1: each seat, one heal/buff/silence/dispel; items stay banned */
     u8 allowDodge;         /* physical hit vs dodge roll */
     u8 allowCombatPill;    /* 大力丸/神力丸 ATK% in arena duel */
 } vm_mock_arena_config;

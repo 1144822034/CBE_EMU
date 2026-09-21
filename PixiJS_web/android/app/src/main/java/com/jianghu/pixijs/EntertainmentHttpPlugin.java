@@ -1,5 +1,9 @@
 package com.jianghu.pixijs;
 
+import android.app.DownloadManager;
+import android.content.Context;
+import android.net.Uri;
+import android.os.Environment;
 import android.util.Log;
 
 import com.getcapacitor.JSObject;
@@ -46,6 +50,71 @@ public class EntertainmentHttpPlugin extends Plugin {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private static volatile SSLSocketFactory laxSocketFactory;
+    private static volatile String lastMediaUrl = "";
+
+    /** Remember the latest entertainment audio request seen by the WebView. */
+    public static void noteMediaUrl(String raw) {
+        if (raw == null) return;
+        String url = raw.trim();
+        if (!isMusicFileUrl(url)) return;
+        lastMediaUrl = url;
+    }
+
+    static boolean isMusicFileUrl(String raw) {
+        android.net.Uri uri;
+        try {
+            uri = android.net.Uri.parse(raw);
+        } catch (Throwable t) {
+            return false;
+        }
+        String scheme = uri.getScheme();
+        if (scheme == null) return false;
+        scheme = scheme.toLowerCase(Locale.US);
+        if (!scheme.equals("http") && !scheme.equals("https")) return false;
+        String host = uri.getHost();
+        if (host == null) return false;
+        host = host.toLowerCase(Locale.US);
+        if (host.equals("localhost") || host.equals("127.0.0.1")) return false;
+        String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase(Locale.US);
+        if (path.contains("/api/")
+                || path.endsWith(".mp4")
+                || path.endsWith(".m3u8")
+                || path.endsWith(".webm")
+                || path.endsWith(".jpg")
+                || path.endsWith(".jpeg")
+                || path.endsWith(".png")
+                || path.endsWith(".gif")
+                || path.endsWith(".webp")
+                || path.endsWith(".js")
+                || path.endsWith(".css")
+                || path.endsWith(".html")
+                || path.endsWith(".json")
+                || path.endsWith(".lrc")) {
+            return false;
+        }
+        if (path.endsWith(".mp3")
+                || path.endsWith(".flac")
+                || path.endsWith(".m4a")
+                || path.endsWith(".aac")
+                || path.endsWith(".wav")
+                || path.endsWith(".ogg")
+                || path.endsWith(".ape")
+                || path.endsWith(".wma")) {
+            return true;
+        }
+        String q = uri.getQuery() == null ? "" : uri.getQuery().toLowerCase(Locale.US);
+        if (q.contains("format=mp3")
+                || q.contains("format=flac")
+                || q.contains("format=aac")
+                || q.contains("format=m4a")
+                || q.contains("type=convert_url")) {
+            return true;
+        }
+        return host.contains("kuwo.cn")
+                || host.contains("qqmusic")
+                || host.contains("music.126.net")
+                || host.contains("kugou.com");
+    }
 
     @PluginMethod
     public void resolve(PluginCall call) {
@@ -71,6 +140,59 @@ public class EntertainmentHttpPlugin extends Plugin {
                 call.reject(e.getMessage() != null ? e.getMessage() : "resolve failed", e);
             }
         });
+    }
+
+    /** Enqueue the current playable mp4 into the system DownloadManager. */
+    @PluginMethod
+    public void download(PluginCall call) {
+        String url = call.getString("url", "");
+        if (url == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
+            call.reject("bad url");
+            return;
+        }
+        String filename = call.getString("filename", "");
+        if (filename == null || filename.trim().isEmpty()) {
+            filename = "video_" + System.currentTimeMillis() + ".mp4";
+        }
+        filename = filename.replaceAll("[\\\\/:*?\"<>|]", "_");
+        try {
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url.trim()));
+            req.setTitle(filename);
+            req.setDescription(filename.toLowerCase(Locale.US).endsWith(".mp4") ? "娱乐视频" : "娱乐音乐");
+            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename);
+            req.setMimeType(mimeForName(filename));
+            DownloadManager dm = (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) {
+                call.reject("no download manager");
+                return;
+            }
+            dm.enqueue(req);
+            JSObject out = new JSObject();
+            out.put("ok", true);
+            call.resolve(out);
+        } catch (Exception e) {
+            Log.w(TAG, "download failed url=" + url, e);
+            call.reject(e.getMessage() != null ? e.getMessage() : "download failed", e);
+        }
+    }
+
+    @PluginMethod
+    public void currentMedia(PluginCall call) {
+        JSObject out = new JSObject();
+        out.put("url", lastMediaUrl == null ? "" : lastMediaUrl);
+        call.resolve(out);
+    }
+
+    private static String mimeForName(String filename) {
+        String n = filename.toLowerCase(Locale.US);
+        if (n.endsWith(".mp3")) return "audio/mpeg";
+        if (n.endsWith(".flac")) return "audio/flac";
+        if (n.endsWith(".m4a") || n.endsWith(".aac")) return "audio/mp4";
+        if (n.endsWith(".wav")) return "audio/wav";
+        if (n.endsWith(".ogg")) return "audio/ogg";
+        if (n.endsWith(".mp4")) return "video/mp4";
+        return "application/octet-stream";
     }
 
     private static ResolveResult resolveInternal(String startUrl, boolean preferJson, int timeoutMs)

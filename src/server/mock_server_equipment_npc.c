@@ -103,6 +103,12 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
         u32 oldInstanceId = role->equippedEnhanceInstanceIds[slot];
         vm_net_mock_enhance_wash_state newWash;
         vm_net_mock_enhance_wash_state oldWash;
+        u8 newGemR = backpackItem->gemReflectLevel;
+        u8 newGemC = backpackItem->gemComboLevel;
+        u8 newGemV = backpackItem->gemReviveLevel;
+        u8 oldGemR = role->equippedGemReflect[slot];
+        u8 oldGemC = role->equippedGemCombo[slot];
+        u8 oldGemV = role->equippedGemRevive[slot];
 
         vm_net_mock_enhance_wash_copy(&newWash, &backpackItem->enhanceWash);
         vm_net_mock_enhance_wash_copy(&oldWash, &role->equippedEnhanceWash[slot]);
@@ -124,10 +130,16 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
         backpackItem->enhanceLevel = oldEnhance;
         backpackItem->enhanceInstanceId = oldInstanceId;
         vm_net_mock_enhance_wash_copy(&backpackItem->enhanceWash, &oldWash);
+        backpackItem->gemReflectLevel = oldGemR;
+        backpackItem->gemComboLevel = oldGemC;
+        backpackItem->gemReviveLevel = oldGemV;
         role->equippedItemIds[slot] = newItemId;
         role->equippedEnhanceLevels[slot] = newEnhance;
         role->equippedEnhanceInstanceIds[slot] = newInstanceId;
         vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot], &newWash);
+        role->equippedGemReflect[slot] = newGemR;
+        role->equippedGemCombo[slot] = newGemC;
+        role->equippedGemRevive[slot] = newGemV;
         if (!vm_net_mock_enhance_wash_is_empty(&oldWash))
         {
             (void)vm_net_mock_enhance_wash_record_relocate_seq(
@@ -266,6 +278,9 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         u16 unequipEnhance = role->equippedEnhanceLevels[slot];
         u32 unequipInstanceId = role->equippedEnhanceInstanceIds[slot];
         vm_net_mock_enhance_wash_state unequipWash;
+        u8 unequipGemR = role->equippedGemReflect[slot];
+        u8 unequipGemC = role->equippedGemCombo[slot];
+        u8 unequipGemV = role->equippedGemRevive[slot];
 
         vm_net_mock_enhance_wash_copy(&unequipWash, &role->equippedEnhanceWash[slot]);
         unequipInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
@@ -287,6 +302,16 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
                 *reasonOut = "bag-full";
             return false;
         }
+        {
+            vm_net_mock_backpack_item_state *bagRow =
+                vm_net_mock_role_find_backpack_item(role, 0, seq);
+            if (bagRow != NULL)
+            {
+                bagRow->gemReflectLevel = unequipGemR;
+                bagRow->gemComboLevel = unequipGemC;
+                bagRow->gemReviveLevel = unequipGemV;
+            }
+        }
         if (!vm_net_mock_enhance_wash_is_empty(&unequipWash))
         {
             (void)vm_net_mock_enhance_wash_record_relocate_seq(
@@ -299,6 +324,9 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
     role->equippedEnhanceLevels[slot] = 0;
     role->equippedEnhanceInstanceIds[slot] = 0;
     vm_net_mock_enhance_wash_clear(&role->equippedEnhanceWash[slot]);
+    role->equippedGemReflect[slot] = 0;
+    role->equippedGemCombo[slot] = 0;
+    role->equippedGemRevive[slot] = 0;
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-unequip");
     (void)vm_net_mock_role_refresh_special_designations(role);
@@ -3264,6 +3292,7 @@ static void vm_net_mock_battle_arm_subtype10_multi_pve_start(
     g_mockBattleStartUsesSceneWireMaps = 0;
     g_mockBattleEnemyCountCurrent = enemyCount;
     g_mockBattleOperateTurnCounter = 0;
+    vm_net_mock_battle_gem_reset();
     memset(&g_vm_net_mock_battle_solo_modifier, 0,
            sizeof(g_vm_net_mock_battle_solo_modifier));
     memset(&g_vm_net_mock_battle_active_modifier_current, 0,
@@ -3490,6 +3519,39 @@ static u32 vm_net_mock_battle_reward_gold_for_enemy(u32 enemyId)
 static bool vm_mock_service_battle_reward_allowed(u32 *remainingMsOut);
 static void vm_mock_service_battle_reward_mark(void);
 
+/* Ladder milestone copper folded into this battle's gold delta. Zero unless
+ * the armed floor has an exact server_ladder_rewards row. */
+static u32 g_vm_net_mock_battle_ladder_milestone_money = 0;
+
+static void vm_net_mock_battle_fold_ladder_milestone(
+    u32 *rewardExp, vm_net_mock_battle_drop_result *results, u8 *resultCount,
+    u32 enemyCount)
+{
+    u32 msExp = 0;
+    u32 msMoney = 0;
+    u32 msItem = 0;
+    u32 msCount = 0;
+    u8 before = resultCount != NULL ? *resultCount : 0;
+
+    g_vm_net_mock_battle_ladder_milestone_money = 0;
+    if (!vm_mock_ladder_copy_active_milestone(&msExp, &msMoney, &msItem,
+                                              &msCount))
+        return;
+    if (rewardExp != NULL && msExp != 0)
+        *rewardExp = vm_net_mock_add_capped_u32(*rewardExp, msExp);
+    g_vm_net_mock_battle_ladder_milestone_money = msMoney;
+    if (msItem != 0 && msCount != 0 && results != NULL && resultCount != NULL)
+    {
+        *resultCount = vm_net_mock_battle_commit_drop_grant(
+            msItem, msCount, enemyCount, results, *resultCount);
+    }
+    vm_mock_ladder_note_milestone_settled();
+    printf("[info][network] mock_battle_ladder_milestone exp=%u money=%u "
+           "item=%u x%u drops=%u->%u evidence=server_ladder_rewards-exact-floor\n",
+           msExp, msMoney, msItem, msCount, (u32)before,
+           resultCount != NULL ? (u32)*resultCount : 0u);
+}
+
 static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                                                 u16 *dropSeqOut,
                                                 u32 *dropCountOut,
@@ -3566,7 +3628,19 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
          * are rate-limited. */
         vm_net_mock_task_progress_after_battle(
             g_vm_net_mock_battle_enemy_id_current, enemyCount, 0, 0);
-        return 1;
+        {
+            u8 folded = 0;
+
+            vm_net_mock_battle_fold_ladder_milestone(
+                &g_vm_net_mock_battle_rewarded_exp, results, &folded, enemyCount);
+            if (folded != 0)
+            {
+                memcpy(g_vm_net_mock_battle_rewarded_drops, results,
+                       sizeof(results));
+                g_vm_net_mock_battle_rewarded_drop_result_count = folded;
+            }
+        }
+        return g_vm_net_mock_battle_rewarded_exp;
     }
 
     baseRewardExp = vm_net_mock_mul_capped_u32(
@@ -3798,6 +3872,9 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     vm_net_mock_task_progress_after_battle(
         g_vm_net_mock_battle_enemy_id_current, enemyCount, 0, 0);
 
+    vm_net_mock_battle_fold_ladder_milestone(&rewardExp, results, &resultCount,
+                                             enemyCount);
+
     g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
     g_vm_net_mock_battle_rewarded_exp = rewardExp;
     if (g_vm_net_mock_battle_reward_rate_suppressed_serial ==
@@ -4011,6 +4088,12 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
         {
             rewardGold = vm_net_mock_add_capped_u32(
                 rewardGold, g_vm_net_mock_battle_rewarded_auto_sell_gold);
+        }
+        if (!rewardAlreadyGranted &&
+            g_vm_net_mock_battle_ladder_milestone_money != 0)
+        {
+            rewardGold = vm_net_mock_add_capped_u32(
+                rewardGold, g_vm_net_mock_battle_ladder_milestone_money);
         }
     }
     roleMp = vm_net_mock_battle_apply_mp_recovery_once(role, roleMp, recoverMp,
@@ -4682,6 +4765,7 @@ typedef struct vm_mock_service_account_state
     u32 mockBattleEnemyHpMax;
     vm_net_mock_battle_enemy_ailment mockBattleEnemyAilments[3];
     vm_net_mock_battle_stat_modifier mockBattleSoloModifier;
+    u8 mockBattleGemReviveUsed;
 
     u8 netMockTitleServerListPending;
     u8 netMockTitleServerSelectConfirmed;
@@ -4925,6 +5009,20 @@ typedef struct
     bool supportNoDamage;
     /* mmBattle child_flag: 2=暴击, 3=闪躲; 0=normal numeric float. */
     u8 childFlag;
+    /* Pixi gems, same contract as PvE. Combo is a second beat of this hit.
+     * Reflect is a second child on that beat (damages the attacker). Revive
+     * is a later type-0; valueA is the HP written back. */
+    u8 hasCombo;
+    u32 comboDamage;
+    u8 comboChildFlag;
+    u32 reflectDamage;
+    u32 comboReflectDamage;
+    u8 targetRevived;
+    u32 targetReviveHp;
+    u32 targetMpAfter;
+    u8 sourceRevived;
+    u32 sourceReviveHp;
+    u32 sourceHpAfter;
 } vm_mock_service_duel_hit;
 
 typedef struct
@@ -5626,6 +5724,8 @@ typedef struct
     /* Shared enemy DoT / silence / debuff — must not live only in per-account
      * globals or each seat gets a private “先手” copy of 毒/沉默/破甲. */
     vm_net_mock_battle_enemy_ailment battleEnemyAilments[3];
+    /* Per-seat gem revive latch for this shared battle (1 = already used). */
+    u8 battleMemberGemReviveUsed[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     u8 battleRoundActedMask;
     /* Members who successfully fled (or otherwise left) while the party fight
      * continues.  They stay in the frozen battleMember* roster for teaminfo
@@ -5713,6 +5813,14 @@ typedef struct
      * Force-PK keeps false (no ring credit).
      */
     bool friendlyMode;
+    /* One gem revive per seat for this duel. Cleared with the struct. */
+    u8 gemReviveUsed[2];
+    /* Arena allow_heal=1: one landed use per seat for heal, buff, silence,
+     * and dispel. Set only after duel_apply_operate accepts the cast. */
+    u8 arenaHealUsed[2];
+    u8 arenaBuffUsed[2];
+    u8 arenaSilenceUsed[2];
+    u8 arenaDispelUsed[2];
 } vm_mock_service_duel;
 
 static vm_mock_service_team g_vm_mock_service_teams[VM_MOCK_SERVICE_TEAM_MAX];
@@ -6055,6 +6163,7 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     memcpy(state->mockBattleEnemyAilments, g_mockBattleEnemyAilments,
            sizeof(state->mockBattleEnemyAilments));
     state->mockBattleSoloModifier = g_vm_net_mock_battle_solo_modifier;
+    state->mockBattleGemReviveUsed = g_mockBattleGemReviveUsed;
 
     state->netMockTitleServerListPending = g_netMockTitleServerListPending;
     state->netMockTitleServerSelectConfirmed = g_netMockTitleServerSelectConfirmed;
@@ -6310,6 +6419,7 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
            sizeof(g_mockBattleEnemyAilments));
     g_vm_net_mock_battle_solo_modifier = state->mockBattleSoloModifier;
     g_vm_net_mock_battle_active_modifier_current = state->mockBattleSoloModifier;
+    g_mockBattleGemReviveUsed = state->mockBattleGemReviveUsed;
 
     g_netMockTitleServerListPending = state->netMockTitleServerListPending;
     g_netMockTitleServerSelectConfirmed = state->netMockTitleServerSelectConfirmed;
@@ -7094,6 +7204,13 @@ static u32 vm_net_mock_build_crystal_extract_response(const u8 *request,
             result = 4;
             reason = "not-enhanced";
         }
+        else if (vm_net_mock_gem_sockets_occupied(equipment->gemReflectLevel,
+                                                  equipment->gemComboLevel,
+                                                  equipment->gemReviveLevel))
+        {
+            result = 8;
+            reason = "请先拆除宝石";
+        }
         else
         {
             stoneSeq = stone->seq;
@@ -7190,7 +7307,10 @@ static u32 vm_net_mock_build_crystal_extract_response(const u8 *request,
         !vm_net_mock_put_object_u32(out, outCap, &pos, "freeslots", freeSlots) ||
         !vm_net_mock_put_object_string(
             out, outCap, &pos, "spent",
-            (result == 1 || result == 5) ? spentText : ""))
+            (result == 1 || result == 5) ? spentText : "") ||
+        !vm_net_mock_put_object_string(
+            out, outCap, &pos, "message",
+            result == 8 ? "请先拆除宝石" : ""))
     {
         return 0;
     }
@@ -7209,6 +7329,8 @@ static u32 vm_net_mock_build_crystal_extract_response(const u8 *request,
         equipSeq, result, needSlots, freeSlots, reason);
     return pos;
 }
+
+#include "mock_server_gem_ops.inc.c"
 
 /* GBK: 请更新客户端 */
 static const char g_vm_net_mock_login_update_required_gbk[] =
@@ -9883,7 +10005,7 @@ static const char *vm_mock_service_session_take_spar_result_text(
 {
     /* GBK: 挑战成功 / 挑战失败 经验-%u 金钱-%u */
     static const char sparWinGbk[] =
-        "\xcc\xf8\xd5\xbd\xb3\xc9\xb9\xa6";
+        "\xcc\xf4\xd5\xbd\xb3\xc9\xb9\xa6";
     static char sparLoseBuf[96];
     static char arenaBuf[96];
     const char *text = NULL;
@@ -9919,7 +10041,7 @@ static const char *vm_mock_service_session_take_spar_result_text(
         else
         {
             snprintf(sparLoseBuf, sizeof(sparLoseBuf),
-                     "\xcc\xf8\xd5\xbd\xca\xa7\xb0\xdc"
+                     "\xcc\xf4\xd5\xbd\xca\xa7\xb0\xdc"
                      " \xbe\xad\xd1\xe9-%u"
                      " \xbd\xf0\xc7\xae-%u",
                      session->sparDeathExpPenalty,
@@ -10205,12 +10327,37 @@ static void vm_mock_service_team_queue_follow_leader_scene(
     const vm_net_mock_scene_change_target *target,
     const char *reason);
 
+/*
+ * Dream / FB instance maps: 29* or b_29* (ops: no nearby peers on these shells).
+ * Strip path/.sce so both role->scene and visible leaf match.
+ */
+static bool vm_net_mock_scene_is_dream_instance_name(const char *scene)
+{
+    const char *leaf = scene;
+    const char *p = NULL;
+
+    if (scene == NULL || scene[0] == '\0')
+        return false;
+    for (p = scene; *p != '\0'; ++p)
+    {
+        if (*p == '/' || *p == '\\')
+            leaf = p + 1;
+    }
+    if (leaf[0] == '2' && leaf[1] == '9')
+        return true;
+    if ((leaf[0] == 'b' || leaf[0] == 'B') && leaf[1] == '_' &&
+        leaf[2] == '2' && leaf[3] == '9')
+    {
+        return true;
+    }
+    return false;
+}
+
 static bool vm_mock_service_session_on_dream_instance(const vm_mock_service_client_session *session)
 {
     return session != NULL &&
            vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
-           session->sceneVisibleScene[0] == '2' &&
-           session->sceneVisibleScene[1] == '9';
+           vm_net_mock_scene_is_dream_instance_name(session->sceneVisibleScene);
 }
 
 /* Purge dream material 841 on leave; arm list-only 17/1 poll for UI sync. */
@@ -11535,6 +11682,26 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
                 session->accountId, session->onlineRoleId);
             (void)vm_net_mock_role_gold_scroll_pause_on_logout(
                 session->accountId, session->onlineRoleId);
+            (void)vm_net_mock_role_combat_pill_pause_on_logout(
+                session->accountId, session->onlineRoleId);
+            /* Freeze dream HUD TTL across disconnect (same contract as exp card). */
+            if (session->dreamHudTtlArmed &&
+                session->dreamHudTtlRoleId == session->onlineRoleId)
+            {
+                u32 nowMs = scheduler_get_tick_ms();
+                u32 remainMs = 0;
+
+                if (session->dreamHudExpireAtMs > nowMs)
+                    remainMs = session->dreamHudExpireAtMs - nowMs;
+                if (vm_net_mock_dream_hud_remaining_save(
+                        session->accountId, session->onlineRoleId, remainMs))
+                {
+                    printf("[info][mock-service] dream_hud_ttl_paused "
+                           "account=%s role=%u remain_ms=%u "
+                           "evidence=offline-does-not-consume-dream-ttl\n",
+                           session->accountId, session->onlineRoleId, remainMs);
+                }
+            }
         }
         printf("[info][mock-service] session_offline client=%08x account=%s role=%u name=%s scene=%s pos=(%u,%u) reason=%s\n",
                session->clientId,
@@ -13530,6 +13697,8 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
      * must never inherit a previous encounter's modifier rows. */
     memset(team->battleMemberModifiers, 0, sizeof(team->battleMemberModifiers));
     memset(team->battleEnemyAilments, 0, sizeof(team->battleEnemyAilments));
+    memset(team->battleMemberGemReviveUsed, 0,
+           sizeof(team->battleMemberGemReviveUsed));
     for (u8 i = 0; i < participantCount; ++i)
     {
         vm_mock_service_client_session *member =

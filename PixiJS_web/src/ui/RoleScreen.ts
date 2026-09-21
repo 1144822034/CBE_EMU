@@ -19,6 +19,7 @@ import {
   setLcdDomTipOccludeRect,
   unregisterLcdDomPanelTip,
 } from "./lcdDomText";
+import { preferSystemFont } from "../resources/systemFont";
 import type { RoleRow } from "../net/protocol";
 import { TITLE_ROLE_MAX } from "../net/protocol";
 import {
@@ -312,8 +313,12 @@ export class RoleScreen extends Container {
     // Opaque fill under 边花 — same contract as panelTip toast.
     panel.roundRect(px, py, pw, ph, 2).fill({ color: CBE.bgPanelDark, alpha: 1 });
     paintCbePanel(this.confirmHost, panel, px, py, pw, ph, CBE.bgPanelDark);
-    // DOM plate under confirm Songti — covers list text in place (no display:none).
-    setLcdDomTipOccludeRect(this.confirmHost, px, py, pw, ph, CBE.bgPanelDark);
+    // Songti: DOM plate under confirm labels. UC3 confirm is canvas — no plate.
+    if (preferSystemFont()) {
+      setLcdDomTipOccludeRect(this.confirmHost, px, py, pw, ph, CBE.bgPanelDark);
+    } else {
+      clearLcdDomTipOccludeRect();
+    }
 
     const title = makePixelText("删除确认", 14, CBE.inkTip);
     title.anchor.set(0.5, 0);

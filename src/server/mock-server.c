@@ -107,6 +107,13 @@ static void vm_mock_service_team_battle_note_roster_disconnect(
     struct vm_mock_service_client_session *leaver,
     const char *reason);
 
+/* Defined in mock_server_ladder.c. Battle reward (equipment_npc.c) folds the
+ * exact-floor milestone into 4/7 before the slot is disarmed. */
+static bool vm_mock_ladder_copy_active_milestone(u32 *expOut, u32 *moneyOut,
+                                                 u32 *itemIdOut,
+                                                 u32 *itemCountOut);
+static void vm_mock_ladder_note_milestone_settled(void);
+
 #include "mock_server_equipment_npc.c"
 #include "mock_server_cosmetics.c"
 #include "mock_server_recovered_helpers.inc"

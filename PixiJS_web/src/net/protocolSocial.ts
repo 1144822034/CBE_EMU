@@ -432,7 +432,12 @@ export function parsePlayerInfo(packet: WtPacket): PlayerInfoView | null {
   return { lines, fdegree };
 }
 
-/** Skip ParseEquipAttributes common-extra. */
+/**
+ * Skip ParseEquipAttributes common-extra.
+ * Equipment rows append a Pixi gem trailer (tagged u8 0x47 + 3 tagged u8).
+ * CBE stops at attr_count and ignores it; this reader must consume it or the
+ * next equipinfo row's tagged u32 throws and only the first piece is kept.
+ */
 function skipItemCommonExtra(r: SeqReader): number {
   let enhance = 0;
   try {
@@ -445,6 +450,17 @@ function skipItemCommonExtra(r: SeqReader): number {
       r.u8();
       r.u8();
       r.i16();
+    }
+    if (
+      r.remaining() >= 12 &&
+      r.buf[r.pos] === 0x00 &&
+      r.buf[r.pos + 1] === 0x01 &&
+      r.buf[r.pos + 2] === 0x47
+    ) {
+      r.u8();
+      r.u8();
+      r.u8();
+      r.u8();
     }
   } catch {
     /* truncated */

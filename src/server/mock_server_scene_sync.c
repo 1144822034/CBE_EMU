@@ -137,6 +137,9 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
      * VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX); clients page the cache locally.
      */
     allowNearbyList = page == 0 && vm_net_mock_active_client_scene_ready_for_nearby(scene);
+    /* Dream instances: 2/7 must stay empty (same ops rule as nearby append). */
+    if (allowNearbyList && vm_net_mock_scene_is_dream_instance_name(scene))
+        allowNearbyList = false;
     if (allowNearbyList)
     {
         if (!vm_net_mock_build_scene_list_otherinfo_blob(scene,
@@ -3297,7 +3300,7 @@ static bool vm_net_mock_build_task_awardinfo(
         !vm_net_mock_seq_put_i16(out, outCap, &pos, rewardSeq) ||
         !vm_net_mock_seq_put_u32(out, outCap, &pos, task->rewardItemId) ||
         !vm_net_mock_seq_put_u32(out, outCap, &pos, incrementalCount) ||
-        !vm_net_mock_seq_put_item_common_extra(
+        !vm_net_mock_seq_put_item_common_extra_plain(
             out, outCap, &pos,
             vm_net_mock_item_common_extra_stack_byte(task->rewardItemId,
                                                     incrementalCount),
@@ -5401,6 +5404,34 @@ static u32 vm_net_mock_build_instance_enter_response(
     }
 
     /*
+     * Dream 29* enter while in a multi-member party: refuse *before* consume so
+     * daily enter count / gold / kubao are not charged.  Same tip as the
+     * in-instance 10s ban.  Exit 29*→outdoor is unaffected (target ≠ 29*).
+     */
+    if (target.scene[0] == '2' && target.scene[1] == '9' && session != NULL)
+    {
+        static const char dreamTeamBanGbk[] =
+            "\xc3\xce\xbe\xb5\xb8\xb1\xb1\xbe\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3"; /* 梦境副本禁止组队 */
+        vm_mock_service_team *party =
+            vm_mock_service_team_find_for_client(session->clientId);
+
+        g_vm_net_mock_instance_enter_refuse_tip = NULL;
+        if (party != NULL && party->active && party->memberCount >= 2)
+        {
+            g_vm_net_mock_instance_enter_refuse_tip = dreamTeamBanGbk;
+            (void)vm_mock_service_session_enqueue_system_message(session,
+                                                                 dreamTeamBanGbk);
+            printf("[info][network] mock_npc_instance_enter_team_refuse "
+                   "scene=%s role=%u client=%08x members=%u "
+                   "action=no-consume "
+                   "evidence=dream-ops-no-team-at-npc-enter\n",
+                   target.scene, session->onlineRoleId, session->clientId,
+                   (u32)party->memberCount);
+            return 0;
+        }
+    }
+
+    /*
      * Daily enter rules (admin 次数/金币/酷宝): charge against *target* scene
      * before emitting 30/1.  No rule / all-zero ⇒ free.  Eject to outdoor with
      * no outdoor rule also stays free.  Packet build failure rolls back.
@@ -5518,6 +5549,9 @@ static u32 vm_net_mock_build_instance_enter_response(
         session->dreamHudTtlRoleId = 0;
         session->dreamHudExpireAtMs = 0;
         session->dreamHudWarnSent = false;
+        if (session->accountId[0] != '\0' && session->onlineRoleId != 0)
+            (void)vm_net_mock_dream_hud_remaining_clear(session->accountId,
+                                                         session->onlineRoleId);
         (void)vm_net_mock_dream_purge_item_841_and_resync(
             vm_net_mock_active_role(), "dream-instance-exit");
         vm_mock_service_session_arm_map_stone_loading_clear(session,
@@ -5558,19 +5592,55 @@ static u32 vm_net_mock_build_instance_enter_response(
             u32 ttlMs = vm_net_mock_dream_hud_ttl_ms();
             u32 nowMs = scheduler_get_tick_ms();
             u32 roleId = session->onlineRoleId;
+            const char *accountId = session->accountId;
+            u32 remainMs = 0;
+            u32 armMs = 0;
+
             if (roleId == 0 && g_vm_net_mock_role_db_valid)
                 roleId = g_vm_net_mock_role_db.activeRoleId;
-            session->dreamHudTtlArmed = true;
-            session->dreamHudTtlRoleId = roleId;
-            session->dreamHudExpireAtMs = nowMs + ttlMs;
-            session->dreamHudWarnSent = false;
-            printf("[info][network] mock_npc_instance_dream_hud_ttl_arm "
-                   "actor=%u scene=%s role=%u client=%08x "
-                   "server_minutes=%u client_remain_units=60 "
-                   "ttl_ms=%u expire_at=%u now=%u "
-                   "evidence=debug-0b451a-per-role-ttl\n",
-                   seed->actorId, target.scene, roleId, session->clientId,
-                   ttlMs / 60000u, ttlMs, session->dreamHudExpireAtMs, nowMs);
+            /*
+             * Do not clobber an already-armed clock (login resume / same-session
+             * floor move). Prefer account_roles checkpoint over a fresh full TTL
+             * so offline freeze survives a late 29* enter rebuild.
+             */
+            if (session->dreamHudTtlArmed &&
+                session->dreamHudTtlRoleId == roleId &&
+                session->dreamHudExpireAtMs > nowMs)
+            {
+                remainMs = session->dreamHudExpireAtMs - nowMs;
+                if (accountId[0] != '\0' && roleId != 0)
+                    (void)vm_net_mock_dream_hud_remaining_save(accountId, roleId,
+                                                               remainMs);
+                printf("[info][network] mock_npc_instance_dream_hud_ttl_keep "
+                       "actor=%u scene=%s role=%u client=%08x remain_ms=%u "
+                       "expire_at=%u now=%u "
+                       "evidence=offline-freeze-keep-armed\n",
+                       seed->actorId, target.scene, roleId, session->clientId,
+                       remainMs, session->dreamHudExpireAtMs, nowMs);
+            }
+            else
+            {
+                if (accountId[0] != '\0' && roleId != 0)
+                    remainMs = vm_net_mock_dream_hud_remaining_load(accountId,
+                                                                    roleId);
+                armMs = (remainMs > 0) ? remainMs : ttlMs;
+                session->dreamHudTtlArmed = true;
+                session->dreamHudTtlRoleId = roleId;
+                session->dreamHudExpireAtMs = nowMs + armMs;
+                session->dreamHudWarnSent = (armMs <= 60000u);
+                if (accountId[0] != '\0' && roleId != 0)
+                    (void)vm_net_mock_dream_hud_remaining_save(accountId, roleId,
+                                                               armMs);
+                printf("[info][network] mock_npc_instance_dream_hud_ttl_arm "
+                       "actor=%u scene=%s role=%u client=%08x "
+                       "server_minutes=%u arm_ms=%u from_checkpoint=%u "
+                       "ttl_ms=%u expire_at=%u now=%u "
+                       "evidence=debug-0b451a-per-role-ttl;"
+                       "offline-freeze-prefer-remain\n",
+                       seed->actorId, target.scene, roleId, session->clientId,
+                       armMs / 60000u, armMs, remainMs > 0 ? 1u : 0u,
+                       ttlMs, session->dreamHudExpireAtMs, nowMs);
+            }
             /* #region agent log */
             {
                 FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
@@ -5810,7 +5880,114 @@ vm_net_mock_dream_exit_guide_seed(const char *scene, u32 *actorIdOut)
  * Per-client / per-role dream HUD wall TTL.  Each role's enter arms its own
  * expireAt; poll only ejects the session whose onlineRoleId still owns the
  * timer (multi-account isolation + title rebind safety).
+ * Offline freezes leftover into account_roles.dream_hud_remaining_ms; login
+ * resumes via vm_net_mock_dream_hud_ttl_resume_on_login.
  */
+static void vm_net_mock_dream_hud_ttl_resume_on_login(vm_net_mock_role_state *role)
+{
+    vm_mock_service_client_session *session = NULL;
+    const char *accountId = NULL;
+    u32 remainMs = 0;
+    u32 nowMs = 0;
+
+    if (role == NULL || role->roleId == 0)
+        return;
+    accountId = g_vm_mock_service_active_account_id;
+    if (accountId == NULL || accountId[0] == '\0')
+        return;
+    remainMs = vm_net_mock_dream_hud_remaining_load(accountId, role->roleId);
+    if (remainMs == 0)
+        return;
+    session = vm_mock_service_get_active_client_session();
+    if (session == NULL)
+        return;
+    if (session->dreamHudTtlArmed &&
+        session->dreamHudTtlRoleId == role->roleId &&
+        session->dreamHudExpireAtMs > scheduler_get_tick_ms())
+    {
+        return;
+    }
+    nowMs = scheduler_get_tick_ms();
+    session->dreamHudTtlArmed = true;
+    session->dreamHudTtlRoleId = role->roleId;
+    session->dreamHudExpireAtMs = nowMs + remainMs;
+    session->dreamHudWarnSent = (remainMs <= 60000u);
+    printf("[info][network] mock_dream_hud_ttl_resumed role=%u client=%08x "
+           "remain_ms=%u expire_at=%u now=%u "
+           "evidence=offline-freeze-resume-on-login\n",
+           role->roleId, session->clientId, remainMs,
+           session->dreamHudExpireAtMs, nowMs);
+}
+
+/*
+ * PixiJS-only: 1/29/23 → 29/23 { result, remaining }.
+ * remaining = live session expire leftover, else account_roles checkpoint.
+ * HUD must arm from this value (not local full TTL) after re-login.
+ */
+static u32 vm_net_mock_build_dream_hud_remain_query_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 offset = 4;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 1;
+    vm_net_mock_request_object object;
+    vm_mock_service_client_session *session = NULL;
+    vm_net_mock_role_state *role = NULL;
+    const char *accountId = NULL;
+    u32 roleId = 0;
+    u32 remainMs = 0;
+    u32 nowMs = 0;
+
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 23)
+    {
+        return 0;
+    }
+
+    nowMs = scheduler_get_tick_ms();
+    session = vm_mock_service_get_active_client_session();
+    role = vm_net_mock_active_role();
+    accountId = g_vm_mock_service_active_account_id;
+    if (role != NULL)
+        roleId = role->roleId;
+    if (roleId == 0 && session != NULL)
+        roleId = session->onlineRoleId;
+
+    if (session != NULL && session->dreamHudTtlArmed &&
+        (session->dreamHudTtlRoleId == 0 ||
+         session->dreamHudTtlRoleId == roleId) &&
+        session->dreamHudExpireAtMs > nowMs)
+    {
+        remainMs = session->dreamHudExpireAtMs - nowMs;
+    }
+    else if (accountId != NULL && accountId[0] != '\0' && roleId != 0)
+    {
+        remainMs = vm_net_mock_dream_hud_remaining_load(accountId, roleId);
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 23,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining", remainMs))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_dream_hud_remain_query role=%u client=%08x "
+           "remain_ms=%u armed=%u evidence=pixijs-only-29/23\n",
+           roleId,
+           session != NULL ? session->clientId : 0u,
+           remainMs,
+           session != NULL && session->dreamHudTtlArmed ? 1u : 0u);
+    return pos;
+}
+
 static u32 vm_net_mock_dream_hud_ttl_poll(u8 *out, u32 outCap)
 {
     vm_mock_service_client_session *session = NULL;
@@ -5819,6 +5996,7 @@ static u32 vm_net_mock_dream_hud_ttl_poll(u8 *out, u32 outCap)
     u32 len = 0;
     u32 exitActor = 0;
     static u32 s_lastWaitLogMs = 0;
+    static u32 s_lastCheckpointMs = 0;
 
     if (out == NULL || outCap < 5)
         return 0;
@@ -5867,6 +6045,15 @@ static u32 vm_net_mock_dream_hud_ttl_poll(u8 *out, u32 outCap)
     if (nowMs < session->dreamHudExpireAtMs)
     {
         u32 remainMs = session->dreamHudExpireAtMs - nowMs;
+
+        /* Crash-safe checkpoint while online (offline freeze reads this). */
+        if (session->accountId[0] != '\0' &&
+            (s_lastCheckpointMs == 0 || nowMs - s_lastCheckpointMs >= 15000u))
+        {
+            (void)vm_net_mock_dream_hud_remaining_save(
+                session->accountId, session->onlineRoleId, remainMs);
+            s_lastCheckpointMs = nowMs;
+        }
 
         /* One-shot tip when ≤60s remain. */
         if (!session->dreamHudWarnSent && remainMs <= 60000u)
@@ -5940,6 +6127,9 @@ static u32 vm_net_mock_dream_hud_ttl_poll(u8 *out, u32 outCap)
         session->dreamHudExpireAtMs = 0;
         return 0;
     }
+    if (session->accountId[0] != '\0')
+        (void)vm_net_mock_dream_hud_remaining_clear(session->accountId,
+                                                     session->onlineRoleId);
     session->dreamHudTtlArmed = false;
     session->dreamHudTtlRoleId = 0;
     session->dreamHudExpireAtMs = 0;
@@ -5948,8 +6138,8 @@ static u32 vm_net_mock_dream_hud_ttl_poll(u8 *out, u32 outCap)
     len = vm_net_mock_build_instance_enter_response(seed, out, outCap);
     printf("[info][network] mock_dream_hud_ttl_exit actor=%u scene=%s "
            "role=%u client=%08x to=%s resp=%u now=%u "
-           "action=per-role-60min-eject "
-           "evidence=debug-0b451a-client-remain60-as-60min\n",
+           "action=per-role-ttl-eject "
+           "evidence=dream-hud-offline-freeze\n",
            exitActor, session->sceneVisibleScene, session->onlineRoleId,
            session->clientId,
            seed->instanceScene ? seed->instanceScene : "-", len, nowMs);
@@ -5976,7 +6166,7 @@ static u32 vm_net_mock_dream_hud_ttl_poll(u8 *out, u32 outCap)
     return len;
 }
 
-/* Every ~10s on 29*: tip + disband + eject if still in a party. */
+/* Every ~10s on 29*: tip + disband + eject if still in a multi-member party. */
 static u32 vm_net_mock_dream_team_ban_poll(u8 *out, u32 outCap)
 {
     static u32 s_lastCheckMs = 0;
@@ -6007,7 +6197,8 @@ static u32 vm_net_mock_dream_team_ban_poll(u8 *out, u32 outCap)
     }
     s_lastCheckMs = nowMs;
     team = vm_mock_service_team_find_for_client(session->clientId);
-    if (team == NULL || !team->active)
+    /* Solo/orphan roster (count<2) is not 组队 — match NPC enter gate. */
+    if (team == NULL || !team->active || team->memberCount < 2)
         return 0;
 
     (void)vm_mock_service_session_enqueue_system_message(session,
@@ -9072,6 +9263,13 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 printf("[info][network] mock_equip_sell_dialog role=%u seq=%u "
                        "item=%u price=%u money=%u evidence=full-价值-copper\n",
                        role->roleId, value, soldItemId, soldPrice, role->money);
+            }
+            else if (failReason != NULL && strcmp(failReason, "socketed") == 0)
+            {
+                dialogText =
+                    "\xc7\xeb\xcf\xc8\xb2\xf0\xb3\xfd\xb1\xa6\xca\xaf\xa1\xa3"; /* 请先拆除宝石。 */
+                fillSellMenu = true;
+                page = returnPage;
             }
             else if (failReason != NULL &&
                      strcmp(failReason, "price-unresolved") == 0)

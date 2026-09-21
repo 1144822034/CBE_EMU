@@ -4907,8 +4907,8 @@ static u8 vm_net_mock_append_scene_nearby_role_objects(u8 *out, u32 outCap, u32 
     {
         return 0;
     }
-    /* Dream 29*: suppress nearby role otherinfo/moveinfo (ops rule). */
-    if (scene[0] == '2' && scene[1] == '9')
+    /* Dream 29-star / b_29-star: suppress nearby role otherinfo/moveinfo. */
+    if (vm_net_mock_scene_is_dream_instance_name(scene))
         return 0;
 
     savedPos = *pos;

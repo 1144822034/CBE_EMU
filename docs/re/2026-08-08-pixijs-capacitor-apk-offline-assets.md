@@ -68,3 +68,7 @@ APK：`android/app/release/jh_ol.apk`；PC：`electron-release/江湖OL-1.0.48-p
 
 `versionCode` **42** / `1.0.42`，`client_code_version` **22**（`bundledCodeVersion.ts` 同步），服端 `web/fs` 与 `bin/JHOnlineData/server_code_version.txt` 同为 **22**。  
 `BUILD SUCCESSFUL`；产物 `PixiJS_web/android/app/release/jh_ol.apk`（54.6 MB）。含黑屏 recover 修补。覆盖安装会清 WebView。线上服读到 22 后，旧包登录会「请更新客户端」。
+
+## 2026-09-20 dist 热更新
+
+冷启动比对 `http://106.54.59.92:8081/hot-manifest.json`，只下载与包内 sha256 不同的 dist 文件。见 [2026-09-20-pixi-android-dist-hot-update.md](2026-09-20-pixi-android-dist-hot-update.md)。

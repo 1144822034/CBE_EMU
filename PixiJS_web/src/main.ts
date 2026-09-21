@@ -64,7 +64,7 @@ import { PhoneShell } from "./ui/PhoneShell";
 import { TitleScreen } from "./ui/TitleScreen";
 import { RoleScreen } from "./ui/RoleScreen";
 import { CreateRoleScreen } from "./ui/CreateRoleScreen";
-import { WorldHud, sceneDisplayName, TEAM_MEMBER_MAX } from "./ui/WorldHud";
+import { WorldHud, sceneDisplayName, TEAM_MEMBER_MAX, isDreamInstanceScene } from "./ui/WorldHud";
 import { MenuScreen, type MenuLeaf } from "./ui/MenuScreen";
 import { BattleScreen, flushBattleSleepsForBackground } from "./ui/BattleScreen";
 import { DialogPanel } from "./ui/DialogPanel";
@@ -73,10 +73,7 @@ import { SystemPanel, type SystemKind } from "./ui/SystemPanel";
 import { EnhancePanel } from "./ui/EnhancePanel";
 import { WashPanel } from "./ui/WashPanel";
 import { SocialPanel } from "./ui/SocialPanel";
-import type {
-  OtherEquipView,
-  PlayerInfoView,
-} from "./net/protocolSocial";
+import type { OtherEquipView } from "./net/protocolSocial";
 import { ArenaHud } from "./ui/ArenaHud";
 import { ArenaPanel } from "./ui/ArenaPanel";
 import { WagerPanel } from "./ui/WagerPanel";
@@ -159,6 +156,9 @@ import type { RoleRow } from "./net/protocol";
 import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
 import {
   augmentEquipSellDialog,
+  augmentWarehouseDialog,
+  isWarehouseItemListDialog,
+  WarehouseService,
   EQUIP_SELL_QUALITY_OPTIONS,
   EquipSellBatchAction,
   EquipSellService,
@@ -170,12 +170,15 @@ import {
   isBattleMedicineOrFlask,
   isCrystalFragment,
   isDreamBadge,
+  isGemFragment,
+  isDurableMallPassItemId,
   isStarSkyStone,
   isRenameCard,
   isCrystalExtractStone,
   canFitCrystalExtractInBag,
   estimateCrystalExtractBagSpace,
   isCultivationBookItem,
+  parseGemItem,
   NpcServiceOpcode,
   npcServiceOpcode,
 } from "./net/protocolExtras";
@@ -185,6 +188,7 @@ import {
   lookupItemSync,
   warmItemCatalogs,
   weaponJobRestrictTip,
+  BACKPACK_EXPAND_ITEM_ID,
 } from "./resources/itemCatalog";
 import {
   resumeBgmAfterForeground,
@@ -1070,6 +1074,9 @@ async function main(): Promise<void> {
     ];
     for (const h of hosts) {
       if (h.visible) {
+        // Dialog-phase progress tips land on the HUD; the result then opens
+        // on the bag panel. Both are center toasts, so clear the HUD one.
+        hud.clearTip();
         h.showTip(msg);
         return;
       }
@@ -1087,6 +1094,20 @@ async function main(): Promise<void> {
   let pendingRoles: RoleRow[] = [];
   let activeRole: RoleRow | null = null;
   let mapUiMode: MapUiMode = "off";
+  /**
+   * Spar / 比武 / 赏金：map durable HP/MP are not overwritten by duel seats.
+   * Sticky flag — do not re-query isSparBattle() after settle (state may linger
+   * but visual0 heuristics can fail); snapshot at enter for exit restore.
+   */
+  let sparMapVitalsLatch = false;
+  /** Set on 赏金 EVT_FIGHT so non-arena wager still arms the map full-heal. */
+  let wagerMapHealLatch = false;
+  let mapVitalsAtSparEnter: {
+    hp: number;
+    hpMax: number;
+    mp: number;
+    mpMax: number;
+  } | null = null;
 
 
 
@@ -2449,6 +2470,16 @@ async function main(): Promise<void> {
     );
   };
 
+  const applyEquipActor = (): void => {
+    const role =
+      activeRole ||
+      pendingRoles.find((r) => r.roleId === session.selectedRoleId) ||
+      pendingRoles[0] ||
+      null;
+    if (role) system.setEquipActor(role.jobIndex, role.sex);
+    else system.setEquipActor(session.roleJobIndex, 1);
+  };
+
   const openSystem = (kind: SystemKind, hint?: string) => {
     if (kind === "quest") {
       void openTaskList();
@@ -2481,17 +2512,18 @@ async function main(): Promise<void> {
     if (kind === "equip") {
       system.setWorn([]);
       system.setBag([]);
-      const role =
-        activeRole ||
-        pendingRoles.find((r) => r.roleId === session.selectedRoleId) ||
-        pendingRoles[0] ||
-        null;
-      if (role) system.setEquipActor(role.jobIndex, role.sex);
-      else system.setEquipActor(session.roleJobIndex, 1);
+      applyEquipActor();
       void Promise.all([session.openWornEquipment(), session.openBag()]);
     }
     if (kind === "mall") {
       system.setMall({ coolmoney: session.mallState?.coolmoney ?? 0, ticket: 0, goods: [] });
+      // 壶类可购份数依赖背包储量；先用缓存，再拉一次背包。
+      system.setBag(session.bagItems);
+      const cap =
+        session.characterStats?.backpackCapacity ||
+        Math.max(20, session.bagItems.length);
+      system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+      void session.openBag();
       void session.openMall();
     }
     if (kind === "skill") {
@@ -2507,46 +2539,38 @@ async function main(): Promise<void> {
     }
   };
 
-  /** 「查看玩家信息」= 10/2 资料 + 29/4 装备列表（同屏合并）. */
+  /** 「查看玩家信息」只列 29/4 穿戴装备，不拼 10/2 资料. */
+  const OTHER_EQUIP_SLOT_LABEL = ["武器", "帽", "衣", "披", "束", "裤", "鞋", "饰品"];
+  const OTHER_EQUIP_SLOT_ORDER = [1, 2, 3, 4, 5, 6, 7, 0];
   let playerCardCombine = false;
-  let pendingPlayerInfo: PlayerInfoView | null = null;
   let pendingOtherEquip: OtherEquipView | null = null;
 
   const flushPlayerCard = () => {
-    if (!pendingPlayerInfo) return;
-    const lines = [...pendingPlayerInfo.lines];
-    lines.push("");
-    lines.push("—— 装备 ——");
-    if (pendingOtherEquip) {
-      if (pendingOtherEquip.items.length) {
-        for (const it of pendingOtherEquip.items) {
-          lines.push(
-            `${it.name}${it.enhance ? `+${it.enhance}` : ""}`,
-          );
-        }
-      } else {
-        lines.push("(无装备)");
-      }
-    } else {
-      lines.push("加载中…");
-    }
-    social.showPlayerInfo({
-      lines,
-      fdegree: pendingPlayerInfo.fdegree,
+    if (!pendingOtherEquip) return;
+    const items = [...pendingOtherEquip.items].sort((a, b) => {
+      const ai = OTHER_EQUIP_SLOT_ORDER.indexOf(a.equipSlot);
+      const bi = OTHER_EQUIP_SLOT_ORDER.indexOf(b.equipSlot);
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
     });
+    const lines = items.length
+      ? items.map((it) => {
+          const part = OTHER_EQUIP_SLOT_LABEL[it.equipSlot] ?? "";
+          const name = `${it.name}${it.enhance ? `+${it.enhance}` : ""}`;
+          return part ? `${part} ${name}` : name;
+        })
+      : ["(无装备)"];
+    social.showPlayerInfo({ lines, fdegree: "" });
     showPhase("social");
-    if (pendingOtherEquip) playerCardCombine = false;
+    playerCardCombine = false;
   };
 
   const openPlayerCard = (actorId: number, tipName?: string) => {
     if (!actorId) return;
     playerCardCombine = true;
-    pendingPlayerInfo = null;
     pendingOtherEquip = null;
     showGameTip(
       tipName ? `查看玩家信息 · ${tipName}` : "查看玩家信息",
     );
-    void session.requestPlayerInfo(actorId);
     void session.requestOtherEquip(actorId);
   };
 
@@ -2596,8 +2620,11 @@ async function main(): Promise<void> {
     },
     onRoleSwitch: () => {
       // Drop previous role's painted map + party strip before 1/6 scene arrives.
+      // Freeze dream leftover first so leave-role does not wipe the checkpoint.
+      hud.pauseDreamTimer();
       view.invalidateMap();
       hud.setParty([]);
+      hud.setDreamRoleId(0);
       hud.setIdentity("", "", "");
       cachedRingStatus = null;
       questTracker.setTasks([]);
@@ -2630,11 +2657,19 @@ async function main(): Promise<void> {
       if (role) activeRole = role;
       const titleTag = session.roleTitle || "";
       const titleGif = session.roleTitleGif || "";
+      hud.setDreamRoleId(session.selectedRoleId || role?.roleId || 0);
       hud.setIdentity(
         role?.name ?? session.roleName ?? "侠客",
         loadedScene,
         titleTag,
       );
+      // Dream HUD: pull server remain like exp-card 7/31 after pause/resume.
+      if (isDreamInstanceScene(loadedScene)) {
+        void session.fetchDreamHudRemainingMs().then((ms) => {
+          if (ms == null) return;
+          hud.applyServerDreamRemainMs(ms, loadedScene);
+        });
+      }
       hud.setVitals(session.hp, session.hpMax, session.mp, session.mpMax);
       hud.setLevel(session.level || role?.level || 1, 0.08);
       hud.setBagSlots(15, 20);
@@ -2657,7 +2692,6 @@ async function main(): Promise<void> {
               }))
           : [];
       hud.setParty(party);
-      hud.pushChat("[系]系统: 欢迎进入江湖世界");
       if (role) {
         void hud.setPortraitActor(uiActorResourceForJobSex(role.jobIndex, role.sex));
         void view.setPlayerActor(role.jobIndex, role.sex);
@@ -2683,6 +2717,11 @@ async function main(): Promise<void> {
       // Same-town role switch: showScene skips marker clear on identical map —
       // force catalog/peer refresh so role A's NPCs/players do not linger.
       view.actors.clearPeers();
+      if (isDreamInstanceScene(loadedScene)) {
+        // Ops: dream shells are solo — drop stale outdoor peers / 2/7 paint.
+        session.nearbyList = [];
+        session.syncMapPeersFromNearbyPage([]);
+      }
       view.actors.setNpcs(session.npcs);
       view.actors.setTaskPrompts(session.npcTaskPrompts);
       view.actors.setSceneMonsters(session.sceneMonsters);
@@ -2755,6 +2794,16 @@ async function main(): Promise<void> {
     },
     onPeerMoves: (moves) => view.actors.applyPeerMoves(moves),
     onNearbyPage: (page) => {
+      // Dream 29*: server should return empty; never paint peers onto the map.
+      if (isDreamInstanceScene(session.scene || "")) {
+        session.nearbyList = [];
+        view.actors.clearPeers();
+        session.syncMapPeersFromNearbyPage([]);
+        if (phase === "social" && social.panelKind === "nearby")
+          social.openNearby([]);
+        setChromeStatus("周围玩家 ×0（梦境副本）");
+        return;
+      }
       session.nearbyList = page.peers;
       /*
        * 2/7 list rows share otherinfo with map peers.  Also paint them so
@@ -3102,11 +3151,7 @@ async function main(): Promise<void> {
       }
     },
     onPlayerInfo: (info) => {
-      if (playerCardCombine) {
-        pendingPlayerInfo = info;
-        flushPlayerCard();
-        return;
-      }
+      if (playerCardCombine) return;
       social.showPlayerInfo(info);
       showPhase("social");
     },
@@ -3191,6 +3236,25 @@ async function main(): Promise<void> {
         u.visual0 != null &&
         u.visual0 >= 1 &&
         u.visual0 <= 2;
+      // Snapshot map durable BEFORE async show / mid-fight vitals overwrite.
+      {
+        const sparEnter =
+          state.subtype === 10 &&
+          state.left.length === 1 &&
+          leftIsSparPlayer(state.left[0]!);
+        if (sparEnter || session.isArenaScene() || wagerMapHealLatch) {
+          sparMapVitalsLatch = true;
+          mapVitalsAtSparEnter = {
+            hp: session.hp,
+            hpMax: session.hpMax,
+            mp: session.mp,
+            mpMax: session.mpMax,
+          };
+        } else {
+          sparMapVitalsLatch = false;
+          mapVitalsAtSparEnter = null;
+        }
+      }
       /* One encounter → one species for every PvE left clone (CBE clones the
        * touched SCE row). Resolve once from collide spawn / sceneMonster pos. */
       const encounterId =
@@ -3371,6 +3435,7 @@ async function main(): Promise<void> {
           session.mp = selfSlot.mp;
           session.mpMax = Math.max(selfSlot.maxMp, selfSlot.mp, 1);
         }
+        // sparMapVitalsLatch / mapVitalsAtSparEnter already armed at onBattle entry.
         showPhase("battle");
         if (arenaDuel) {
           shell.setSoftkeys({ left: "确定", right: "" });
@@ -3467,6 +3532,21 @@ async function main(): Promise<void> {
       }
     },
     onWagerEvent: (ev) => {
+      if (ev.eventKind === 2) {
+        // 赏金开战：与切磋/比武一样，离场后地图血蓝回满。
+        wagerMapHealLatch = true;
+        if (phase === "battle" || session.inBattle) {
+          sparMapVitalsLatch = true;
+          if (!mapVitalsAtSparEnter) {
+            mapVitalsAtSparEnter = {
+              hp: session.hp,
+              hpMax: session.hpMax,
+              mp: session.mp,
+              mpMax: session.mpMax,
+            };
+          }
+        }
+      }
       const kind =
         ev.eventKind === 1
           ? "有人应战，请确认"
@@ -3527,7 +3607,7 @@ async function main(): Promise<void> {
     },
     onNpcDialog: (d) => {
       if (session.equipSellBatchSilent) return;
-      const shown = augmentEquipSellDialog(d);
+      const shown = augmentWarehouseDialog(augmentEquipSellDialog(d), session.bagItems);
       dialog.show(shown);
       showPhase("dialog");
       setChromeStatus(`对话 · ${shown.options.length} 选项`);
@@ -3680,6 +3760,12 @@ async function main(): Promise<void> {
     onCharacterStats: (stats) => {
       system.setStats(stats);
       system.setBagMeta(stats.money, stats.backpackCapacity || 20);
+      hud.setVitals(
+        stats.hp,
+        Math.max(stats.hpMax, stats.hp, 1),
+        stats.mp,
+        Math.max(stats.mpMax, stats.mp, 1),
+      );
       const name =
         stats.name ||
         session.roleName ||
@@ -4215,6 +4301,13 @@ async function main(): Promise<void> {
   let starSkyStonePickTierOpen = false;
   let pendingStarSkyStone: import("./net/protocolExtras").BagItem | null = null;
   let pendingStarSkyEquip: import("./net/protocolExtras").BagItem | null = null;
+  /** Gem embed / type exchange / remove pickers (actions 310–314). */
+  let gemPickOpen = false;
+  let gemReturnPanel: "bag" | "equip" = "bag";
+  let pendingGem: import("./net/protocolExtras").BagItem | null = null;
+  let pendingGemEquip: import("./net/protocolExtras").BagItem | null = null;
+  let gemPickMode: "exchange" | "embed_from_equip" | "remove" | null = null;
+  let gemTargetWorn = false;
 
   const returnFromSkillForgetDialog = (): void => {
     skillForgetDialogOpen = false;
@@ -4283,6 +4376,164 @@ async function main(): Promise<void> {
       session.characterStats?.backpackCapacity ||
       Math.max(20, session.bagItems.length);
     system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+  };
+
+  type GemBag = import("./net/protocolExtras").BagItem;
+  const GEM_TYPE_NAME = ["", "反伤", "连击", "复活"];
+
+  const gemSocketsOccupied = (it: GemBag): boolean => {
+    const sg = it.socketGems;
+    return !!(sg && (sg.reflect || sg.combo || sg.revive));
+  };
+
+  const gemSlotLevel = (it: GemBag, type: number): number => {
+    const sg = it.socketGems;
+    if (!sg) return 0;
+    if (type === 1) return sg.reflect | 0;
+    if (type === 2) return sg.combo | 0;
+    return sg.revive | 0;
+  };
+
+  const returnFromGemPick = (): void => {
+    const panel = gemReturnPanel;
+    gemPickOpen = false;
+    gemPickMode = null;
+    pendingGem = null;
+    pendingGemEquip = null;
+    gemTargetWorn = false;
+    showPhase("system");
+    system.open(panel);
+    if (panel === "equip") applyEquipActor();
+    system.setBag(session.bagItems);
+    system.setWorn(session.wornItems);
+    const cap =
+      session.characterStats?.backpackCapacity ||
+      Math.max(20, session.bagItems.length);
+    system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+  };
+
+  const refreshAfterGem = async (panel: "bag" | "equip"): Promise<void> => {
+    await Promise.all([
+      session.openBag(),
+      session.openWornEquipment(),
+      session.openCharacterStats(),
+    ]);
+    system.setBag(session.bagItems);
+    system.setWorn(session.wornItems);
+    if (session.characterStats) system.setStats(session.characterStats);
+    const cap =
+      session.characterStats?.backpackCapacity ||
+      Math.max(20, session.bagItems.length);
+    system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+    showPhase("system");
+    system.open(panel);
+    if (panel === "equip") applyEquipActor();
+  };
+
+  const openGemExchangeDialog = (gem: GemBag): void => {
+    const parsed = parseGemItem(gem.itemId);
+    if (!parsed) {
+      showGameTip("不是宝石");
+      return;
+    }
+    pendingGem = gem;
+    gemPickMode = "exchange";
+    gemPickOpen = true;
+    gemReturnPanel = "bag";
+    const options = [1, 2, 3]
+      .filter((t) => t !== parsed.type)
+      .map((t) => ({
+        label: `${GEM_TYPE_NAME[t]}1级`,
+        action: 310,
+        value: t,
+      }));
+    options.push({ label: "取消", action: 311, value: 0 });
+    dialog.show({
+      title: "兑换宝石",
+      body: "消耗2颗1级宝石，兑换为其它属性",
+      options,
+    });
+    showPhase("dialog");
+  };
+
+  const openWornGemEmbedDialog = (equip: GemBag): void => {
+    if (equip.kind !== "equip" || !(equip.seq > 0) || (equip.enhance | 0) < 16) {
+      showGameTip("只能镶嵌强化到+16的穿戴装备");
+      return;
+    }
+    const socketsFull = [1, 2, 3].every((t) => gemSlotLevel(equip, t) > 0);
+    if (socketsFull) {
+      showGameTip("该装备宝石孔已满");
+      return;
+    }
+    const maxLv = session.characterStats?.maxGemLevel || 3;
+    const options: { label: string; action: number; value: number }[] = [];
+    for (const it of session.bagItems) {
+      const parsed = parseGemItem(it.itemId);
+      if (!parsed || !(it.seq > 0) || (it.count | 0) < 1) continue;
+      if (parsed.level < 1 || parsed.level > maxLv) continue;
+      if (gemSlotLevel(equip, parsed.type) > 0) continue;
+      const name = (it.name || `${GEM_TYPE_NAME[parsed.type]}${parsed.level}级`).slice(0, 8);
+      const qty = (it.count | 0) > 1 ? `×${it.count | 0}` : "";
+      options.push({
+        label: `${name}${qty}`,
+        action: 315,
+        value: it.seq & 0xffff,
+      });
+    }
+    if (!options.length) {
+      showGameTip("背包没有可镶嵌的宝石");
+      return;
+    }
+    options.push({ label: "取消", action: 311, value: 0 });
+    pendingGemEquip = equip;
+    pendingGem = null;
+    gemTargetWorn = true;
+    gemPickMode = "embed_from_equip";
+    gemPickOpen = true;
+    gemReturnPanel = "equip";
+    dialog.show({
+      title: "镶嵌宝石",
+      body: `选择镶嵌到「${(equip.name || "装备").slice(0, 6)}+${equip.enhance | 0}」的宝石`,
+      options,
+    });
+    showPhase("dialog");
+  };
+
+  const openGemRemoveDialog = (equip: GemBag, worn: boolean): void => {
+    const sg = equip.socketGems;
+    const filled = [1, 2, 3].filter((t) => gemSlotLevel(equip, t) > 0);
+    if (!sg || !filled.length) {
+      showGameTip("没有可拆除的宝石");
+      return;
+    }
+    gemTargetWorn = worn;
+    pendingGemEquip = equip;
+    gemReturnPanel = worn ? "equip" : "bag";
+    if (filled.length === 1) {
+      const type = filled[0]!;
+      void (async () => {
+        showGameTip(`拆除${GEM_TYPE_NAME[type]}…`);
+        const fb = await session.removeGem(equip.seq, type, worn);
+        await refreshAfterGem(gemReturnPanel);
+        showGameTip(fb.message || (fb.ok ? "拆除成功" : "拆除失败"));
+      })();
+      return;
+    }
+    gemPickMode = "remove";
+    gemPickOpen = true;
+    const options = filled.map((t) => ({
+      label: `拆除${GEM_TYPE_NAME[t]}${gemSlotLevel(equip, t)}级`,
+      action: 314,
+      value: t,
+    }));
+    options.push({ label: "取消", action: 311, value: 0 });
+    dialog.show({
+      title: "拆除宝石",
+      body: "选择要拆除的宝石",
+      options,
+    });
+    showPhase("dialog");
   };
 
   const openStarSkyStoneEquipDialog = (
@@ -4453,15 +4704,43 @@ async function main(): Promise<void> {
   };
 
   const endBattleToWorld = (log: string) => {
-    // Pull seat vitals before hide() clears battle state.
+    // Resolve post-battle map vitals BEFORE hide(). hide() flushes seat HP via
+    // onVitalsChanged — for spar losers that seat is 0 and would stomp the restore.
     const vitals = battle.allyVitals();
-    if (vitals) {
-      session.hp = vitals.hp;
-      session.hpMax = Math.max(vitals.maxHp, vitals.hp, 1);
-      session.mp = vitals.mp;
-      session.mpMax = Math.max(vitals.maxMp, vitals.mp, 1);
+    const panel = session.characterStats;
+    let hp = session.hp;
+    let hpMax = session.hpMax;
+    let mp = session.mp;
+    let mpMax = session.mpMax;
+    if (sparMapVitalsLatch) {
+      // 切磋/比武/赏金：战损不落地图；胜负双方都回满血蓝。
+      if (mapVitalsAtSparEnter) {
+        hpMax = Math.max(mapVitalsAtSparEnter.hpMax, mapVitalsAtSparEnter.hp, 1);
+        mpMax = Math.max(mapVitalsAtSparEnter.mpMax, mapVitalsAtSparEnter.mp, 1);
+      } else if (panel && (panel.hpMax > 0 || panel.mpMax > 0)) {
+        hpMax = Math.max(panel.hpMax, panel.hp, 1);
+        mpMax = Math.max(panel.mpMax, panel.mp, 1);
+      } else if (vitals) {
+        hpMax = Math.max(vitals.maxHp, vitals.hp, 1);
+        mpMax = Math.max(vitals.maxMp, vitals.mp, 1);
+      }
+      hp = hpMax;
+      mp = mpMax;
+    } else if (vitals) {
+      hp = vitals.hp;
+      hpMax = Math.max(vitals.maxHp, vitals.hp, 1);
+      mp = vitals.mp;
+      mpMax = Math.max(vitals.maxMp, vitals.mp, 1);
     }
+    sparMapVitalsLatch = false;
+    wagerMapHealLatch = false;
+    mapVitalsAtSparEnter = null;
     battle.hide();
+    // Re-apply after hide() seat flush (loser seat hp=0 must not stick on map).
+    session.hp = hp;
+    session.hpMax = hpMax;
+    session.mp = mp;
+    session.mpMax = mpMax;
     session.inBattle = false;
     touch.releaseAll();
     view.clearHeldKeys();
@@ -4478,8 +4757,7 @@ async function main(): Promise<void> {
     });
     view.armCollideCooldown(2000);
     showPhase("world");
-    // HUD was hidden in battle — re-paint top-left bars with post-fight vitals.
-    hud.setVitals(session.hp, session.hpMax, session.mp, session.mpMax);
+    hud.setVitals(hp, hpMax, mp, mpMax);
     setChromeStatus(`[${session.transport?.mode}] ${log}`);
     session.onLeftBattleForHangup();
     syncWorldStatusBadges();
@@ -4574,13 +4852,19 @@ async function main(): Promise<void> {
         ...pendingRoles.filter((r) => r.roleId !== role.roleId),
       ];
       hud.setParty([]);
+      hud.setDreamRoleId(role.roleId);
       hud.setIdentity(role.name, "", "");
       hud.setVitals(500, 500, 200, 200);
       hud.setLevel(role.level || 1, 0.08);
       void hud.setPortraitActor(
         uiActorResourceForJobSex(role.jobIndex, role.sex),
       );
-      if (snap.hangupDesired) session.markHangupDesired();
+      if (snap.hangupDesired) {
+        // Restore skill before selectRole clearRoleBoundState keeps it when
+        // hangupDesired is already armed.
+        session.hangupSkillOperate = snap.hangupSkillOperate | 0;
+        session.markHangupDesired();
+      }
       if (snap.autoBattle) {
         try {
           await session.setBattleAutoPrefer(true);
@@ -4590,6 +4874,11 @@ async function main(): Promise<void> {
       }
       setChromeStatus(`恢复进入 ${role.name}…`);
       await session.selectRole(role.roleId);
+      if (snap.hangupDesired) {
+        // selectRole clears hangupActive; re-arm client collide loop with
+        // restored hangupSkillOperate (not LastOperate).
+        void session.startHangup();
+      }
       setChromeStatus("黑屏恢复完成");
       return true;
     } catch (err) {
@@ -4773,6 +5062,7 @@ async function main(): Promise<void> {
     pendingRoles = [role, ...pendingRoles.filter((r) => r.roleId !== role.roleId)];
     // UI-side wipe before enter — party strip / vitals must not flash role A.
     hud.setParty([]);
+    hud.setDreamRoleId(role.roleId);
     hud.setIdentity(role.name, "", "");
     hud.setVitals(500, 500, 200, 200);
     hud.setLevel(role.level || 1, 0.08);
@@ -4858,6 +5148,9 @@ async function main(): Promise<void> {
       guildUi.hide();
       createRole.close();
       hud.setParty([]);
+      // Freeze dream leftover before wiping identity — logout closes WS without
+      // onConnectionLost (Transport.close nulls the hook first).
+      hud.pauseDreamTimer();
       hud.setIdentity("", "", "");
       hud.setVitals(500, 500, 200, 200);
       view.invalidateMap();
@@ -5485,11 +5778,14 @@ async function main(): Promise<void> {
             showGameTip(fb.message || (fb.ok ? "改名成功" : "改名失败"));
             return;
           }
-          showGameTip(`使用 ${bag.name}…`);
+          const opensPanel = isDurableMallPassItemId(bag.itemId);
+          if (!opensPanel) showGameTip(`使用 ${bag.name}…`);
           const fb = await session.useItem(bag.itemId, bag.seq);
           // Success: refresh bag from server. Failure: keep local stack
           // (CBE only deducts on result=1; do not openBag-resync a fail).
           if (fb.ok) await session.openBag();
+          // 仓库凭证 / 装备出售凭证成功后马上出操作面板，不叠「使用成功」。
+          if (opensPanel && fb.ok && !fb.message) return;
           showGameTip(fb.message || (fb.ok ? "使用成功" : "使用失败"));
         })();
         return;
@@ -5501,22 +5797,50 @@ async function main(): Promise<void> {
         }
         void (async () => {
           showGameTip(`合成 ${bag.name}…`);
-          const fb = isCrystalFragment(bag.itemId)
-              ? await session.combineCrystalFragment(bag.itemId, bag.seq)
-              : await session.combineCrystal(bag.itemId, bag.seq);
-          if (fb.ok) {
-            await session.openBag();
-            system.setBag(session.bagItems);
-            const cap =
-              session.characterStats?.backpackCapacity ||
-              Math.max(20, session.bagItems.length);
-            system.setBagMeta(
-              session.characterStats?.money ?? session.gold,
-              cap,
-            );
-          }
+          const fb = isGemFragment(bag.itemId)
+            ? await session.combineGemFragment(bag.itemId, bag.seq)
+            : parseGemItem(bag.itemId)
+              ? await session.combineGem(bag.itemId, bag.seq)
+              : isCrystalFragment(bag.itemId)
+                ? await session.combineCrystalFragment(bag.itemId, bag.seq)
+                : await session.combineCrystal(bag.itemId, bag.seq);
+          if (fb.ok) await refreshAfterGem("bag");
+          else showPhase("system");
           showGameTip(fb.message || (fb.ok ? "合成成功" : "合成失败"));
         })();
+        return;
+      }
+      if (action === "gem_batch_combine") {
+        void (async () => {
+          const times = Math.floor((bag.count | 0) / 3);
+          showGameTip(`批量合成 ${bag.name}×${times}…`);
+          try {
+            const fb = await session.combineGem(bag.itemId, bag.seq, times);
+            if (fb.ok) await refreshAfterGem("bag");
+            else showPhase("system");
+            showGameTip(fb.message || (fb.ok ? "合成成功" : "合成失败"));
+          } catch (e) {
+            showPhase("system");
+            showGameTip(e instanceof Error ? e.message : "合成失败");
+          }
+        })();
+        return;
+      }
+      if (action === "gem_exchange") {
+        openGemExchangeDialog(bag);
+        return;
+      }
+      if (action === "gem_from_crystal") {
+        void (async () => {
+          showGameTip("兑换宝石…");
+          const fb = await session.gemFromCrystal16(bag.itemId, bag.seq);
+          if (fb.ok) await refreshAfterGem("bag");
+          showGameTip(fb.message || (fb.ok ? "兑换成功" : "兑换失败"));
+        })();
+        return;
+      }
+      if (action === "gem_remove") {
+        openGemRemoveDialog(bag, false);
         return;
       }
       if (action === "batch_open") {
@@ -5559,6 +5883,10 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "extract") {
+        if (gemSocketsOccupied(bag)) {
+          showGameTip("请先拆除宝石");
+          return;
+        }
         if ((bag.enhance | 0) <= 0) {
           showGameTip("未强化装备无法提炼");
           return;
@@ -5613,6 +5941,10 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "discard") {
+        if (gemSocketsOccupied(bag)) {
+          showGameTip("请先拆除宝石");
+          return;
+        }
         pendingDiscard = bag;
         discardConfirmOpen = true;
         const vis = Math.max(1, bagVisibleStackCount(bag));
@@ -5641,14 +5973,24 @@ async function main(): Promise<void> {
     if (kind === "equip") {
       const bag = item && "seq" in item ? (item as import("./net/protocolExtras").BagItem) : null;
       if (!bag) return;
-      const refreshEquip = () =>
-        Promise.all([session.openWornEquipment(), session.openBag()]);
+      const refreshEquip = () => {
+        applyEquipActor();
+        return Promise.all([session.openWornEquipment(), session.openBag()]);
+      };
       if (action === "unequip") {
         const bodySeq = system.getEquipFocusBodySeq();
         void session
           .unequipItem(bag.itemId, bodySeq)
           .then(() => refreshEquip());
         showGameTip(`卸载 ${bag.name}`);
+        return;
+      }
+      if (action === "gem_remove") {
+        openGemRemoveDialog(bag, true);
+        return;
+      }
+      if (action === "gem_embed") {
+        openWornGemEmbedDialog(bag);
         return;
       }
       if (action === "equip") {
@@ -5681,6 +6023,15 @@ async function main(): Promise<void> {
     if (kind === "mall" && action === "buy" && item && "price" in item) {
       const g = item as import("./net/protocolExtras").ShopGoods;
       const n = system.getMallBuyQty();
+      if (n < 1) {
+        const id = g.itemId >>> 0;
+        showGameTip(
+          id === BACKPACK_EXPAND_ITEM_ID
+            ? "背包已达上限，不能再扩容"
+            : "壶储量已满，请清理后再试",
+        );
+        return;
+      }
       const total = (g.price >>> 0) * (n >>> 0);
       const bal = session.mallState?.coolmoney ?? 0;
       if (total > 0 && bal < total) {
@@ -6247,6 +6598,10 @@ async function main(): Promise<void> {
       returnFromDreamBadgeCombine();
       return;
     }
+    if (gemPickOpen) {
+      returnFromGemPick();
+      return;
+    }
     // Closing approach prompt while still in range keeps latch (no spam).
     showPhase("world");
     // Visit-type ring completes on NPC talk — refresh tracker after dialog.
@@ -6256,6 +6611,15 @@ async function main(): Promise<void> {
     void session.pickNpcOption(1, 0xe7000001, "药品").then(() => {
       if (!dialog.visible) showPhase("world");
     });
+  };
+  /** 存入/取回列表软键返回 → 仓库主界面，不退出对话. */
+  dialog.onCancelRequest = () => {
+    const d = dialog.getDialog();
+    if (!d || !isWarehouseItemListDialog(d)) return false;
+    void session.pickNpcOption(1, WarehouseService.OPEN, "返回仓库").then(() => {
+      if (!dialog.visible) showPhase("world");
+    });
+    return true;
   };
   dialog.onPick = (action, value, label) => {
     setChromeStatus(`NPC ${label} a=${action} v=${value >>> 0}`);
@@ -6486,10 +6850,9 @@ async function main(): Promise<void> {
     }
     if (action === 260) {
       dialog.hide();
+      // Hangup skill only — never write lastBattleOperate / server LastOperate.
       session.hangupSkillOperate = value | 0;
       if (session.hangupDesired) session.markHangupDesired();
-      // Keep in-battle [自动] in sync with the configured hangup skill.
-      session.lastBattleOperate = value | 0;
       const tip =
         value === 0
           ? "普通攻击"
@@ -6508,6 +6871,73 @@ async function main(): Promise<void> {
       hud.pushChat(`[挂]已记录技能 ${tip}，点挂机开始`);
       showGameTip(`挂机技能已记录: ${tip}`);
       showPhase("world");
+      return;
+    }
+    if (action === 310 && gemPickOpen && gemPickMode === "exchange") {
+      dialog.hide();
+      const gem = pendingGem;
+      gemPickOpen = false;
+      gemPickMode = null;
+      pendingGem = null;
+      const destType = value | 0;
+      if (!gem) {
+        returnFromGemPick();
+        return;
+      }
+      void (async () => {
+        showGameTip("兑换宝石…");
+        const fb = await session.exchangeGemType(gem.itemId, gem.seq, destType);
+        await refreshAfterGem("bag");
+        showGameTip(fb.message || (fb.ok ? "兑换成功" : "兑换失败"));
+      })();
+      return;
+    }
+    if (action === 315 && gemPickOpen && gemPickMode === "embed_from_equip") {
+      dialog.hide();
+      const equip = pendingGemEquip;
+      const gemSeq = value & 0xffff;
+      const gem = session.bagItems.find(
+        (it) => it.seq === gemSeq && !!parseGemItem(it.itemId),
+      );
+      gemPickOpen = false;
+      gemPickMode = null;
+      pendingGemEquip = null;
+      pendingGem = null;
+      if (!equip || !gem) {
+        returnFromGemPick();
+        return;
+      }
+      void (async () => {
+        showGameTip("镶嵌宝石…");
+        const fb = await session.embedGem(equip.seq, gem.seq, true);
+        await refreshAfterGem("equip");
+        showGameTip(fb.message || (fb.ok ? "镶嵌成功" : "镶嵌失败"));
+      })();
+      return;
+    }
+    if (action === 314 && gemPickOpen && gemPickMode === "remove") {
+      dialog.hide();
+      const equip = pendingGemEquip;
+      const worn = gemTargetWorn;
+      const panel = gemReturnPanel;
+      gemPickOpen = false;
+      gemPickMode = null;
+      pendingGemEquip = null;
+      if (!equip) {
+        returnFromGemPick();
+        return;
+      }
+      void (async () => {
+        showGameTip("拆除宝石…");
+        const fb = await session.removeGem(equip.seq, value | 0, worn);
+        await refreshAfterGem(panel);
+        showGameTip(fb.message || (fb.ok ? "拆除成功" : "拆除失败"));
+      })();
+      return;
+    }
+    if (action === 311 && gemPickOpen) {
+      dialog.hide();
+      returnFromGemPick();
       return;
     }
     // Dream-badge combine only — do not swallow other dialogs that reused 290/291.
@@ -6696,7 +7126,7 @@ async function main(): Promise<void> {
       returnFromDiscardConfirm();
       return;
     }
-    if (action === 296) {
+    if (action === 296 && extractConfirmOpen) {
       dialog.hide();
       extractConfirmOpen = false;
       const bag = pendingExtract;
@@ -6723,7 +7153,7 @@ async function main(): Promise<void> {
       })();
       return;
     }
-    if (action === 297) {
+    if (action === 297 && extractConfirmOpen) {
       dialog.hide();
       returnFromExtractConfirm();
       return;
@@ -6754,7 +7184,7 @@ async function main(): Promise<void> {
       return;
     }
     // Equip-sell voucher: client-only batch / quality sell of unenhanced bag equips.
-    // 293..295 all-sell; 296..298 quality-sell (avoid dream-badge / star-sky ids).
+    // 293..295 all-sell; 320..322 quality-sell (296/297 are extract confirm).
     if (action === EquipSellBatchAction.OPEN_CONFIRM) {
       dialog.show({
         title: "确认出售",
@@ -6977,28 +7407,37 @@ dialog.hide();
   };
 
   battle.onAttack = () => {
-    // Manual / timeout 普攻 — may intentionally replace skill memory.
-    session.noteManualBattleOperate(0, "manual");
+    const hangupAlone = session.shouldClientDriveInBattleAuto();
+    if (hangupAlone) session.noteManualBattleOperate(0, "hangup");
+    else session.noteManualBattleOperate(0, "manual");
     const id = battle.targetIndex();
     if (battle.isAwaitingRound()) {
       shell.setSoftkeys({ left: "", right: "" });
     }
-    void session.battleOperate(id, 0).catch(() => {
-      if (phase === "battle") battle.clearAwaitingRound();
-    });
+    void session
+      .battleOperate(id, 0, hangupAlone ? { hangup: true } : undefined)
+      .catch(() => {
+        if (phase === "battle") battle.clearAwaitingRound();
+      });
   };
   battle.onSkill = (operate) => {
-    // Hangup/[自动] share this path (incl. submitAutoOperate 普攻 → onSkill(0)).
-    // "auto" only blocks Operate=0 from erasing a remembered skill.
-    const fromAuto = session.shouldInBattleAuto();
-    session.noteManualBattleOperate(operate, fromAuto ? "auto" : "manual");
+    // Hangup alone: do not touch [自动] lastBattleOperate; tag 4/2 hangup=1.
+    // [自动] poll-synth does not use this path; submitAutoOperate 普攻 may.
+    const hangupAlone = session.shouldClientDriveInBattleAuto();
+    const fromAuto = session.shouldInBattleAuto() && !hangupAlone;
+    session.noteManualBattleOperate(
+      operate,
+      hangupAlone ? "hangup" : fromAuto ? "auto" : "manual",
+    );
     const id = battle.targetIndex();
     if (battle.isAwaitingRound()) {
       shell.setSoftkeys({ left: "", right: "" });
     }
-    void session.battleOperate(id, operate).catch(() => {
-      if (phase === "battle") battle.clearAwaitingRound();
-    });
+    void session
+      .battleOperate(id, operate, hangupAlone ? { hangup: true } : undefined)
+      .catch(() => {
+        if (phase === "battle") battle.clearAwaitingRound();
+      });
   };
   battle.onFlee = () => {
     if (battle.isAwaitingRound()) {
@@ -8269,6 +8708,25 @@ dialog.hide();
     setChromeStatus("就绪");
   })();
 
+  // Dream HUD: freeze leftover when live WS drops (server pauses the same way).
+  session.onConnectionLost = () => {
+    hud.pauseDreamTimer();
+  };
+  session.onConnectionRestored = () => {
+    hud.resumeDreamTimer();
+    // Re-sync from server after reconnect (exp-card style refresh).
+    if (isDreamInstanceScene(session.scene || "")) {
+      void session.fetchDreamHudRemainingMs().then((ms) => {
+        if (ms == null) return;
+        hud.applyServerDreamRemainMs(ms, session.scene);
+      });
+    }
+  };
+  session.onDreamHudRemain = (ms) => {
+    if (!isDreamInstanceScene(session.scene || "")) return;
+    hud.applyServerDreamRemainMs(ms, session.scene);
+  };
+
   // Screen unlock / return to app: heal Live WS if OEM suspended the WebView.
   // Native FGS also injects window.__pixiNativeKeepAlive every ~2s while in-world.
   // That tick must also drive hangup / [自动] — Chromium starves setTimeout while hidden.
@@ -8412,6 +8870,7 @@ dialog.hide();
           serverId: session.selectedServerId || 1,
           roleId,
           hangupDesired: !!session.hangupDesired,
+          hangupSkillOperate: session.hangupSkillOperate | 0,
           autoBattle: !!session.autoBattleActive,
           why,
         });
@@ -9201,6 +9660,7 @@ dialog.hide();
       extra: { shell: shellViewportSnapshot() },
     });
     void session.wakeFromBackground();
+    hud.resumeDreamTimer();
     void recoverDisplayAfterForeground("visibility");
     // 水果机内世界 BGM 保持静音，机内音效独立常开
     if (!fruitPanel.visible) void resumeBgmAfterForeground();

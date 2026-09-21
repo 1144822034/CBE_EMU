@@ -247,6 +247,9 @@ CREATE TABLE IF NOT EXISTS `account_role_equipment` (
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `item_instance_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
+  `gem_reflect` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `gem_combo` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `gem_revive` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_role`
     FOREIGN KEY (`account_id`, `role_id`)
@@ -292,6 +295,9 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `item_instance_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
+  `gem_reflect` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `gem_combo` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `gem_revive` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_backpack_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
   CONSTRAINT `fk_account_role_backpack_role`
@@ -325,6 +331,9 @@ CREATE TABLE IF NOT EXISTS `account_role_warehouse` (
   `item_count` INT UNSIGNED NOT NULL,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
+  `gem_reflect` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `gem_combo` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `gem_revive` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
@@ -822,6 +831,7 @@ CREATE TABLE IF NOT EXISTS `server_auction_config` (
   `min_bid_step` INT UNSIGNED NOT NULL DEFAULT 1,
   `currency_mask` TINYINT UNSIGNED NOT NULL DEFAULT 3,
   `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 2,
+  `category_gate` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB;
@@ -893,6 +903,8 @@ CREATE TABLE IF NOT EXISTS `server_combat_formula_config` (
   `panel_defense_level_coeff` INT UNSIGNED NOT NULL DEFAULT 1,
   `panel_defense_endurance_div` INT UNSIGNED NOT NULL DEFAULT 2,
   `panel_hit_base` INT UNSIGNED NOT NULL DEFAULT 101,
+  `panel_strength_hp_coeff_x100` INT UNSIGNED NOT NULL DEFAULT 50,
+  `panel_wisdom_mp_coeff_x100` INT UNSIGNED NOT NULL DEFAULT 50,
   `primary_attack_coeff_tianji_percent` INT UNSIGNED NOT NULL DEFAULT 100,
   `primary_attack_coeff_huanjian_percent` INT UNSIGNED NOT NULL DEFAULT 100,
   `primary_attack_coeff_guidao_percent` INT UNSIGNED NOT NULL DEFAULT 100,

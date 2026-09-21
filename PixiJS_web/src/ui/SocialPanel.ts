@@ -391,14 +391,21 @@ export class SocialPanel extends Container {
   showOtherEquip(eq: OtherEquipView): void {
     this.kind = "otherequip";
     this.title = `装备·${eq.name}`;
-    const lines = [
-      `Lv${eq.level} ${JOBS[eq.jobIndex] ?? "?"} ${eq.sex ? "女" : "男"}`,
-      ...eq.items.map(
-        (it) =>
-          `${it.name}${it.enhance ? `+${it.enhance}` : ""}`,
-      ),
-    ];
-    this.textLines = lines.length ? lines : ["(无装备)"];
+    const slotLabel = ["武器", "帽", "衣", "披", "束", "裤", "鞋", "饰品"];
+    const slotOrder = [1, 2, 3, 4, 5, 6, 7, 0];
+    const items = [...eq.items].sort((a, b) => {
+      const ai = slotOrder.indexOf(a.equipSlot);
+      const bi = slotOrder.indexOf(b.equipSlot);
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    });
+    const lines = items.length
+      ? items.map((it) => {
+          const part = slotLabel[it.equipSlot] ?? "";
+          const name = `${it.name}${it.enhance ? `+${it.enhance}` : ""}`;
+          return part ? `${part} ${name}` : name;
+        })
+      : ["(无装备)"];
+    this.textLines = lines;
     this.textPage = 0;
     this.mode = "text";
     this.visible = true;

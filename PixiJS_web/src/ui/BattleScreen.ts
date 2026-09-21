@@ -94,6 +94,12 @@ const HIT_FLASH_MS = 200;
 const FX_FRAME_MS = 100;
 /** After damage floats: hold before starting death pose. */
 const AFTER_DAMAGE_BEFORE_DEATH_MS = 200;
+/** Extra pause after the prior hit fully settles, before gem 连击 starts. */
+const BEFORE_COMBO_ACTION_MS = 200;
+/** actioninfo child: 5 = gem combo, 7 = combo that also crit. */
+function childFlagIsCombo(flag: number): boolean {
+  return flag === 5 || flag === 7;
+}
 /** After death pose: brief gray freeze so splash is not the first death cue. */
 const BEFORE_DEATH_SPLASH_MS = 280;
 /** Monster death splash frame step. */
@@ -118,6 +124,11 @@ const BOTTOM_H = BATTLE_PARTY_HUD_H;
 /** Battle log sits above party HUD — right of portrait so face stays visible. */
 const BOTTOM_LOG_X = 36;
 const BOTTOM_LOG_MAX_W = LCD_WIDTH - BOTTOM_LOG_X - 8;
+/**
+ * Bottom battle log text (combat narrative, 施展…, menu tips).
+ * Off for now. Flip to true to show the log again.
+ */
+const SHOW_BATTLE_COMBAT_LOG = false;
 const STAGE_TOP = TOP_H;
 const STAGE_BOTTOM = LCD_HEIGHT - BOTTOM_H;
 const UNIT_LEFT_X = 22;
@@ -189,7 +200,7 @@ const MENU_ITEMS_SPAR: readonly MenuItem[] = [
   "自动",
   "查看",
 ];
-/** 比武：禁逃跑、禁自动、禁物品（防对刷 / 挂机）。 */
+/** 比武：禁逃跑、禁自动、禁物品。 */
 const MENU_ITEMS_ARENA: readonly MenuItem[] = [
   "攻击",
   "仙术",
@@ -708,7 +719,9 @@ export class BattleScreen extends Container {
     // Always lock: spar uses duel_round_defer (empty WT) like team; solo
     // clears on the same exchange's applyUpdate.
     this.awaitingRound = true;
-    void this.log.setText(tip, CBE.inkBody, { maxWidth: LCD_WIDTH - 16 });
+    if (SHOW_BATTLE_COMBAT_LOG) {
+      void this.log.setText(tip, CBE.inkBody, { maxWidth: LCD_WIDTH - 16 });
+    }
   }
 
   show(state: BattleState): void {
@@ -772,20 +785,22 @@ export class BattleScreen extends Container {
     this.menuOpen = false;
     this.resetTargetPick();
     this.redrawMenu();
-    const settleLog = up.settlement != null;
-    if (settleLog) {
-      const text = formatBattleBottomLog(up.log);
-      if (text) {
-        this.log.visible = true;
-        void this.log.setText(text, CBE.ink, { maxWidth: BOTTOM_LOG_MAX_W });
+    if (SHOW_BATTLE_COMBAT_LOG) {
+      const settleLog = up.settlement != null;
+      if (settleLog) {
+        const text = formatBattleBottomLog(up.log);
+        if (text) {
+          this.log.visible = true;
+          void this.log.setText(text, CBE.ink, { maxWidth: BOTTOM_LOG_MAX_W });
+        } else {
+          this.log.visible = false;
+        }
       } else {
-        this.log.visible = false;
+        this.log.visible = true;
+        void this.log.setText(up.log, CBE.inkBody, {
+          maxWidth: LCD_WIDTH - 16,
+        });
       }
-    } else {
-      this.log.visible = true;
-      void this.log.setText(up.log, CBE.inkBody, {
-        maxWidth: LCD_WIDTH - 16,
-      });
     }
 
     /*
@@ -1859,6 +1874,7 @@ export class BattleScreen extends Container {
     this.bottomHost.y = STAGE_BOTTOM;
     this.log.anchor.set(0, 1);
     this.log.position.set(BOTTOM_LOG_X, -4);
+    this.log.visible = SHOW_BATTLE_COMBAT_LOG;
     // Log before partyHud so portrait / vitals paint above any wrap spill.
     this.bottomHost.addChild(this.log);
     this.bottomHost.addChild(this.partyHud);
@@ -2580,6 +2596,52 @@ export class BattleScreen extends Container {
     if (extraMs > 0) await sleep(extraMs);
   }
 
+  /** Skip type-3/4 death records; used to see if a gem 连击 follows this beat. */
+  private nextNonDeathAction(
+    actions: BattleActionUpdate["actions"],
+    fromIndex: number,
+  ): BattleActionUpdate["actions"][number] | null {
+    for (let j = fromIndex; j < actions.length; j++) {
+      const n = actions[j]!;
+      if (n.type === 3 || n.type === 4) continue;
+      return n;
+    }
+    return null;
+  }
+
+  private actionIsCombo(
+    rec: BattleActionUpdate["actions"][number] | null | undefined,
+  ): boolean {
+    return !!rec?.children.some((c) => childFlagIsCombo(c.flag));
+  }
+
+  /**
+   * Combo must not overlap the prior operate beat: wait out eidolon FX and any
+   * leftover attack/cast hold, snap the actor home, then a short pause.
+   */
+  private async waitUntilReadyForCombo(actor: UnitView | null): Promise<void> {
+    await this.waitBattleVisualSettle(0);
+    if (actor && !actor.dead && !actor.hidden) {
+      const deadline = performance.now() + 1500;
+      while (performance.now() < deadline) {
+        const busy =
+          actor.pose === "attack" ||
+          actor.pose === "cast" ||
+          (actor.poseUntil > 0 && performance.now() < actor.poseUntil);
+        if (!busy) break;
+        await sleep(30);
+      }
+      actor.pose = "idle";
+      actor.poseUntil = 0;
+      actor.root.x = actor.homeX;
+      actor.root.y = actor.homeY;
+      actor.feetX = actor.homeX;
+      actor.feetY = actor.homeY;
+      this.paintUnitSprite(actor);
+    }
+    if (BEFORE_COMBO_ACTION_MS > 0) await sleep(BEFORE_COMBO_ACTION_MS);
+  }
+
   /** Left-side units are monsters (or spar foes); facing can flip mid-cast. */
   private isEnemyUnit(u: UnitView): boolean {
     return !!this.state?.left.includes(u.side);
@@ -3132,11 +3194,23 @@ export class BattleScreen extends Container {
       }
 
       const actor = this.unitForWire(rec.actorWire);
+      const reflectOnly =
+        rec.children.length > 0 &&
+        rec.children.every((c) => c.flag === 4);
+      const reviveOnly =
+        rec.children.length > 0 &&
+        rec.children.every((c) => c.flag === 6);
+      const isComboAction = this.actionIsCombo(rec);
+      // Gem 连击: never overlap the prior operate beat (FX / cast / dash home).
+      if (isComboAction) {
+        await this.waitUntilReadyForCombo(actor);
+      }
       const offensiveGroup =
         rec.children.length > 1 && rec.children.some((c) => c.delta < 0);
       const childWires = rec.children.map((c) => c.wire);
+      // Reflect is a float/HP-only sibling on the enemy strike — not a dash target.
       const offensiveChildren = rec.children.filter(
-        (c) => c.delta < 0 && c.flag !== 3,
+        (c) => c.delta < 0 && c.flag !== 3 && c.flag !== 4,
       );
       const livingOffensiveWires = offensiveChildren
         .map((c) => c.wire)
@@ -3187,7 +3261,7 @@ export class BattleScreen extends Container {
       let skillFx: Promise<void> | null = null;
       const hitWaits: Promise<void>[] = [];
 
-      if (actor && !actor.dead) {
+      if (!reflectOnly && !reviveOnly && actor && !actor.dead) {
         const actorEnemy = this.isEnemyUnit(actor);
         const targetEnemy = !!firstTarget && this.isEnemyUnit(firstTarget);
         // True wire desync is distinct enemy wires. Same-wire is boss self-heal
@@ -3206,22 +3280,42 @@ export class BattleScreen extends Container {
           );
         }
         if (isSkill) {
-          // Planted cast windup, then eidolon + damage on the same beat.
-          await this.playAttackMotion(
-            actor,
-            firstTarget && !this.isUnitDefeated(firstTarget)
-              ? firstTarget
-              : null,
-            "cast",
-            { windupOnly: true },
-          );
-          if (effectIndex > 0) {
-            skillFx = this.playSkillEffects(
-              effectIndex,
-              fxWires,
+          // Combo waits out the full cast + eidolon before the enemy turn.
+          // Primary hits still overlap eidolon after a short windup.
+          if (isComboAction) {
+            await this.playAttackMotion(
               actor,
-              /* fallbackToActor */ !offensiveGroup,
+              firstTarget && !this.isUnitDefeated(firstTarget)
+                ? firstTarget
+                : null,
+              "cast",
             );
+            if (effectIndex > 0) {
+              skillFx = this.playSkillEffects(
+                effectIndex,
+                fxWires,
+                actor,
+                !offensiveGroup,
+              );
+            }
+          } else {
+            // Planted cast windup, then eidolon + damage on the same beat.
+            await this.playAttackMotion(
+              actor,
+              firstTarget && !this.isUnitDefeated(firstTarget)
+                ? firstTarget
+                : null,
+              "cast",
+              { windupOnly: true },
+            );
+            if (effectIndex > 0) {
+              skillFx = this.playSkillEffects(
+                effectIndex,
+                fxWires,
+                actor,
+                /* fallbackToActor */ !offensiveGroup,
+              );
+            }
           }
         } else {
           await this.playAttackMotion(
@@ -3232,7 +3326,7 @@ export class BattleScreen extends Container {
             "attack",
           );
         }
-      } else if (effectIndex > 0) {
+      } else if (!reflectOnly && !reviveOnly && effectIndex > 0) {
         skillFx = this.playSkillEffects(
           effectIndex,
           fxWires,
@@ -3243,17 +3337,36 @@ export class BattleScreen extends Container {
 
       // Damage floats land with FX start (same beat). Death waits until after.
       const deathTargets: UnitView[] = [];
+      let comboTipOnActor = false;
       for (let i = 0; i < rec.children.length; i++) {
         const c = rec.children[i]!;
         const wire = childWires[i] ?? c.wire;
         const tgt = this.unitForWire(wire);
-        const offensiveHit = c.delta < 0 && c.flag !== 3;
+        const offensiveHit = c.delta < 0 && c.flag !== 3 && c.flag !== 4;
         if (offensiveHit && this.isUnitDefeated(tgt)) {
           this.applyWireHpDelta(wire, c.delta);
           continue;
         }
         this.spawnFloatAtWire(wire, c.delta, c.flag, rec.effectText);
+        if (childFlagIsCombo(c.flag) && !comboTipOnActor) {
+          comboTipOnActor = true;
+          const ax = actor?.root.x ?? actor?.feetX ?? UNIT_RIGHT_X;
+          const ay = (actor?.root.y ?? actor?.feetY ?? UNIT_FEET_Y) - 48;
+          this.spawnTextFloat("连击", ax, ay + 14, CBE.inkTip, 0x000000, true);
+        }
         this.applyWireHpDelta(wire, c.delta);
+        if (c.flag === 6 && tgt && tgt.side.hp > 0) {
+          tgt.dead = false;
+          tgt.hidden = false;
+          tgt.root.visible = true;
+          if (tgt.pose === "death") {
+            tgt.pose = "idle";
+            tgt.poseUntil = 0;
+            tgt.root.x = tgt.homeX;
+            tgt.root.y = tgt.homeY;
+            this.paintUnitSprite(tgt);
+          }
+        }
         if (
           tgt &&
           !tgt.hidden &&
@@ -3275,17 +3388,21 @@ export class BattleScreen extends Container {
 
       if (hitWaits.length) await Promise.all(hitWaits);
 
+      const nextPlayable = this.nextNonDeathAction(actions, ai + 1);
+      const nextIsCombo = this.actionIsCombo(nextPlayable);
+
       // Death after damage: pose → brief hold → splash (fade is async).
       if (deathTargets.length) {
         await sleep(AFTER_DAMAGE_BEFORE_DEATH_MS);
         await Promise.all(deathTargets.map((t) => this.playDeathMotion(t)));
+        if ((nextIsCombo || isComboAction) && skillFx) await skillFx;
       } else if (skillFx) {
         // Killing blow already waited through splash; do not hold settle/next
         // actor on leftover eidolon frames under an empty stage.
         await skillFx;
       }
 
-      if (actor && actor.pose === "cast") {
+      if (actor && (actor.pose === "cast" || (isComboAction && actor.pose !== "death"))) {
         actor.pose = "idle";
         actor.poseUntil = 0;
         actor.root.x = actor.homeX;
@@ -3295,9 +3412,11 @@ export class BattleScreen extends Container {
         this.paintUnitSprite(actor);
       }
 
-      // Gap only before the next *actor* action — not before merged type-3.
+      // After 连击 fully settles, enemy counters (next records) may start.
       const next = actions[ai + 1];
-      if (next && next.type !== 3 && next.type !== 4) {
+      if (isComboAction) {
+        await this.waitUntilReadyForCombo(actor);
+      } else if (next && next.type !== 3 && next.type !== 4 && !nextIsCombo) {
         await this.waitBattleVisualSettle(60);
       }
     }
@@ -3433,10 +3552,33 @@ export class BattleScreen extends Container {
       this.spawnTextFloat("闪躲", x, yBody, CBE.inkTip, 0x000000, true);
       return;
     }
-    if (flag === 2) {
+    if (flag === 2 || flag === 7) {
       // Damage higher so 「暴击」 below does not cover it.
+      // Flag 7 is a gem combo that also crit; 「连击」 is drawn on the actor.
       if (delta !== 0) this.spawnDigitFloat(delta, x, yBody - 22);
       this.spawnTextFloat("暴击", x, yBody + 14, CBE.inkTip, 0x000000, true);
+      return;
+    }
+    if (flag === 4) {
+      if (delta !== 0) this.spawnDigitFloat(delta, x, yBody - 22);
+      this.spawnTextFloat("反伤", x, yBody + 14, CBE.inkTip, 0x000000, true);
+      return;
+    }
+    if (flag === 5) {
+      // Digits stay on the hit target; 「连击」tip is drawn once on the actor.
+      if (delta !== 0) this.spawnDigitFloat(delta, x, yBody - 22);
+      return;
+    }
+    if (flag === 6) {
+      if (delta > 0) this.spawnDigitFloat(delta, x, yBody - 22);
+      this.spawnTextFloat(
+        "复活",
+        x,
+        delta > 0 ? yBody + 14 : yBody,
+        CBE.inkTip,
+        0x000000,
+        true,
+      );
       return;
     }
     if (delta !== 0) {

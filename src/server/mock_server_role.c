@@ -503,10 +503,18 @@ static bool vm_net_mock_role_dream_kind3_on_disk(const char *scene)
     return false;
 }
 
+static u32 vm_net_mock_dream_hud_remaining_load(const char *accountId, u32 roleId);
+static bool vm_net_mock_dream_hud_remaining_save(const char *accountId, u32 roleId,
+                                                  u32 remainingMs);
+static bool vm_net_mock_dream_hud_remaining_clear(const char *accountId, u32 roleId);
+
 /* Relocate login out of dream/instance kind=3 shells so cold DF never
  * ParseMinfo's them; ?? instance enter still loads kind=3 for ??.
  * Also covers experimental twin 28????_01 (debug-0b451a redirect left
- * roles stuck there; relocate previously only matched 29*). */
+ * roles stuck there; relocate previously only matched 29*).
+ *
+ * Dream 29* with checkpoint remaining > 0 stays in-instance: offline freezes
+ * the HUD TTL and login resumes it (kick only when remaining hits 0 online). */
 static bool vm_net_mock_role_relocate_dream_kind3_login(
     vm_net_mock_role_state *role)
 {
@@ -519,6 +527,8 @@ static bool vm_net_mock_role_relocate_dream_kind3_login(
     u16 y = 50;
     u8 isDream29 = 0;
     u8 isFieldTwin = 0;
+    const char *accountId = NULL;
+    u32 dreamRemainMs = 0;
 
     if (role == NULL || role->scene[0] == 0)
         return false;
@@ -529,6 +539,21 @@ static bool vm_net_mock_role_relocate_dream_kind3_login(
         return false;
     if (isDream29 && !vm_net_mock_role_dream_kind3_on_disk(role->scene))
         return false;
+    accountId = g_vm_mock_service_active_account_id;
+    if (isDream29 && accountId != NULL && accountId[0] != '\0')
+    {
+        dreamRemainMs =
+            vm_net_mock_dream_hud_remaining_load(accountId, role->roleId);
+        if (dreamRemainMs > 0)
+        {
+            printf("[info][mock-service] role_dream_login_keep_instance "
+                   "role=%u scene=%s remain_ms=%u "
+                   "action=skip-relocate-resume-ttl "
+                   "evidence=dream-hud-offline-freeze\n",
+                   role->roleId, role->scene, dreamRemainMs);
+            return false;
+        }
+    }
     snprintf(from, sizeof(from), "%s", role->scene);
     snprintf(role->scene, sizeof(role->scene), "%s", kOutdoor);
     if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene, &x, &y,
@@ -3858,6 +3883,7 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
 }
 
 #include "mock_server_combat_formula_config.inc.c"
+#include "mock_server_gem_config.inc.c"
 
 /* jobPrimary → panel/battle attack contribution percent (admin-configurable). */
 static u32 vm_net_mock_role_job_primary_attack_coeff_percent(u32 job)
@@ -3926,14 +3952,25 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->charm = vm_net_mock_cap_u32(stats->baseCharm, 65535);
 
     /*
-     * HP/MP pools use job growth bases only.  Equipment 智慧 must not feed
-     * maxMp (帽子 +16 智慧×3 曾把战斗/HUD 法力抬高数百).  Flat HP/MP
-     * milestones stay absolute; 气血%/法力% use character bare pools
+     * HP/MP pools: level/耐力/成长智慧×3 + 力量→血 / 智慧→法（含装备三围）。
+     * Flat HP/MP milestones stay absolute; 气血%/法力% use character bare pools
      * (same rule for both — not item dsh hp/mp columns).
+     * Extra: bareHp += strength * strHpX100/100;
+     *        bareMp += wisdom * wisMpX100/100 (admin panel attrs; default 0.5).
      */
     {
-        u32 bareHp = 90 + level * 8 + stats->endurance * 2;
-        u32 bareMp = 70 + level * 9 + stats->baseWisdom * 3;
+        const vm_net_mock_combat_formula_config *combatCfg =
+            vm_net_mock_combat_formula_config_get();
+        u32 strHpX100 =
+            combatCfg ? combatCfg->panelStrengthHpCoeffX100 : 50u;
+        u32 wisMpX100 =
+            combatCfg ? combatCfg->panelWisdomMpCoeffX100 : 50u;
+        u32 bareHp =
+            90 + level * 8 + stats->endurance * 2 +
+            (u32)(((uint64_t)stats->strength * (uint64_t)strHpX100) / 100ull);
+        u32 bareMp =
+            70 + level * 9 + stats->baseWisdom * 3 +
+            (u32)(((uint64_t)stats->wisdom * (uint64_t)wisMpX100) / 100ull);
         u32 hpFromPct = 0;
         u32 mpFromPct = 0;
 
@@ -3985,6 +4022,8 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->dodge = equipment.dodge;
     stats->crit = equipment.crit;
     stats->resist = equipment.resist;
+    vm_net_mock_role_collect_gem_percents(role, &stats->reflectPct,
+                                          &stats->comboPct, &stats->revivePct);
 
     stats->maxHp = vm_net_mock_cap_u32(stats->maxHp, 65535);
     stats->maxMp = vm_net_mock_cap_u32(stats->maxMp, 65535);
@@ -4268,6 +4307,18 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
         !vm_net_mock_put_object_u32(out, outCap, &pos, "dodge", stats.dodge) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "crit", stats.crit) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "resist", stats.resist) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "reflectPct",
+                                     stats.reflectPct) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "comboPct",
+                                     stats.comboPct) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "revivePct",
+                                     stats.revivePct) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "maxGemLevel",
+                                     vm_net_mock_gem_max_level()) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "crystal16ExchangeEnabled",
+                                     vm_net_mock_gem_crystal16_exchange_enabled()
+                                         ? 1u
+                                         : 0u) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseStrength",
                                      stats.baseStrength) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseAgility",
@@ -5919,9 +5970,11 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_hit(u32 baseHit)
 
     if (idx >= 3 || g_mockBattleEnemyAilments[idx].stat.remainingRounds == 0)
         return baseHit;
+    /* Direct skill.dsh 命中变化 only. Agility debuffs (雷震八方 敏捷-40/-80/-120)
+     * must not be folded in: *2 on a 0–100 hit stat zeros monster hit, then
+     * hitChanceMin makes player dodge 17 look like a guaranteed 闪躲. */
     return vm_net_mock_battle_apply_signed_stat_change(
-        baseHit, g_mockBattleEnemyAilments[idx].stat.hit +
-                     g_mockBattleEnemyAilments[idx].stat.agility * 2, 65535u);
+        baseHit, g_mockBattleEnemyAilments[idx].stat.hit, 65535u);
 }
 
 static u32 vm_net_mock_battle_enemy_ailment_adjust_resist(u32 baseResist)
@@ -5973,6 +6026,7 @@ static u32 vm_net_mock_battle_role_defense_default(void)
  *     resist is a percent reduction, clamped to 70%
  *     (wisdomCoeff dominant among ?/?/???)
  *   Player hit = 101 + equipment.hit; dodge/crit/resist = equipment columns only
+ *   Monster hit debuff = skill.dsh 命中变化 only (not agility*2)
  *   Player NA defense = bare + equip.armor/5 (panel still full armor)
  *   Monster resist defaults to 0 (CBE_BATTLE_MONSTER_RESIST)
  *   Monster NA defense = catalog/MySQL stats.defense (CBE_BATTLE_ENEMY_DEFENSE)
@@ -6073,8 +6127,23 @@ enum
 {
     VM_NET_MOCK_BATTLE_CHILD_FLAG_NORMAL = 0,
     VM_NET_MOCK_BATTLE_CHILD_FLAG_CRIT = 2,
-    VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE = 3
+    VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE = 3,
+    /* Pixi-only gem floats (BattleScreen childFlagLabel). */
+    VM_NET_MOCK_BATTLE_CHILD_FLAG_REFLECT = 4,
+    VM_NET_MOCK_BATTLE_CHILD_FLAG_COMBO = 5,
+    VM_NET_MOCK_BATTLE_CHILD_FLAG_REVIVE = 6,
+    /* Combo replay that also crit. Pixi draws 「连击」 on the actor and 「暴击」 on the target. */
+    VM_NET_MOCK_BATTLE_CHILD_FLAG_COMBO_CRIT = 7
 };
+
+/* Combo still rolls hit/crit. Crit stays visible as flag 7 instead of being
+ * overwritten by the combo marker. */
+static u8 vm_net_mock_battle_combo_wire_flag(u8 rolled)
+{
+    if (rolled == VM_NET_MOCK_BATTLE_CHILD_FLAG_CRIT)
+        return VM_NET_MOCK_BATTLE_CHILD_FLAG_COMBO_CRIT;
+    return VM_NET_MOCK_BATTLE_CHILD_FLAG_COMBO;
+}
 
 /* Flat attack bonus applied to all player job offensive skill raw damage. */
 static u8 g_mockBattleLastOutcomeChildFlag = 0;
@@ -6094,6 +6163,166 @@ static u8 vm_net_mock_battle_take_outcome_child_flag(void)
     u8 flag = g_mockBattleLastOutcomeChildFlag;
     g_mockBattleLastOutcomeChildFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_NORMAL;
     return flag;
+}
+
+/* Pixi gem combat: revive keeps the fight; reflect hits the attacker once. */
+static u8 g_mockBattleGemReviveUsed = 0;
+/* Team seats: each member gets one gem revive per shared battle. */
+static u8 g_mockBattleGemReviveUsedBySeat[3];
+static u8 g_mockBattleGemReviveFired = 0;
+/* HP written back on proc. Client must receive this as valueA or the bar
+ * stays at 0 and the death prompt hides the revive float. */
+static u32 g_mockBattleGemReviveHp = 0;
+static u8 g_mockBattleGemReviveStrike = 0xff;
+static u8 g_mockBattleGemReflectGuard = 0;
+/* Pending reflect from the latest player hit — encode as 2nd child on that
+ * enemy strike (not a separate player-attack action). */
+static u32 g_mockBattleGemReflectPendingDmg = 0;
+static u8 g_mockBattleGemReflectPendingEnemyIndex = 0xff;
+static u8 g_mockBattleGemReflectPendingKilled = 0;
+static u8 g_mockBattleGemComboHalf = 0;
+
+/* Fired/pending only — Used survives the whole battle across requests. */
+static void vm_net_mock_battle_gem_reset_request_local(void)
+{
+    g_mockBattleGemReviveFired = 0;
+    g_mockBattleGemReviveHp = 0;
+    g_mockBattleGemReviveStrike = 0xff;
+    g_mockBattleGemReflectGuard = 0;
+    g_mockBattleGemReflectPendingDmg = 0;
+    g_mockBattleGemReflectPendingEnemyIndex = 0xff;
+    g_mockBattleGemReflectPendingKilled = 0;
+    g_mockBattleGemComboHalf = 0;
+}
+
+static void vm_net_mock_battle_gem_reset(void)
+{
+    g_mockBattleGemReviveUsed = 0;
+    memset(g_mockBattleGemReviveUsedBySeat, 0,
+           sizeof(g_mockBattleGemReviveUsedBySeat));
+    g_vm_net_mock_battle_damage_member_index = 0xff;
+    vm_net_mock_battle_gem_reset_request_local();
+}
+
+static bool vm_net_mock_battle_gem_revive_already_used(void)
+{
+    u8 seat = g_vm_net_mock_battle_damage_member_index;
+
+    if (g_vm_net_mock_team_battle_party_count_current >= 2)
+    {
+        if (seat >= 3)
+            seat = g_vm_net_mock_team_battle_actor_slot_current;
+        if (seat < 3)
+            return g_mockBattleGemReviveUsedBySeat[seat] != 0;
+        return false;
+    }
+    return g_mockBattleGemReviveUsed != 0;
+}
+
+static void vm_net_mock_battle_gem_revive_mark_used(void)
+{
+    u8 seat = g_vm_net_mock_battle_damage_member_index;
+
+    if (g_vm_net_mock_team_battle_party_count_current >= 2)
+    {
+        if (seat >= 3)
+            seat = g_vm_net_mock_team_battle_actor_slot_current;
+        if (seat < 3)
+            g_mockBattleGemReviveUsedBySeat[seat] = 1;
+        return;
+    }
+    g_mockBattleGemReviveUsed = 1;
+}
+
+static bool vm_net_mock_battle_gem_roll(u32 percent)
+{
+    if (percent == 0)
+        return false;
+    if (percent >= 100u)
+        return true;
+    return ((u32)rand() % 100u) < percent;
+}
+
+/* Consume pending reflect from the last apply_damage_to_role call. */
+static u32 vm_net_mock_battle_take_gem_reflect_pending(u8 *enemyIndexOut,
+                                                      u8 *killedOut)
+{
+    u32 dmg = g_mockBattleGemReflectPendingDmg;
+
+    if (enemyIndexOut)
+        *enemyIndexOut = g_mockBattleGemReflectPendingEnemyIndex;
+    if (killedOut)
+        *killedOut = g_mockBattleGemReflectPendingKilled;
+    g_mockBattleGemReflectPendingDmg = 0;
+    g_mockBattleGemReflectPendingEnemyIndex = 0xff;
+    g_mockBattleGemReflectPendingKilled = 0;
+    return dmg;
+}
+
+static void vm_net_mock_battle_try_gem_after_player_hit(u32 actualDamage)
+{
+    vm_net_mock_role_state *role = NULL;
+    u32 reflect = 0;
+    u32 combo = 0;
+    u32 revive = 0;
+    u8 idx = 0;
+
+    (void)combo;
+    if (g_mockBattleGemReflectGuard)
+        return;
+    role = vm_net_mock_active_role();
+    if (role == NULL || actualDamage == 0)
+        return;
+    vm_net_mock_role_collect_gem_percents(role, &reflect, &combo, &revive);
+    if (g_mockBattleRoleHpCurrent == 0 &&
+        !vm_net_mock_battle_gem_revive_already_used() &&
+        vm_net_mock_battle_gem_roll(revive))
+    {
+        u32 hp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpMax : role->hpMax;
+        u32 mp = g_mockBattleRoleMpMax != 0 ? g_mockBattleRoleMpMax : role->mpMax;
+        if (hp == 0)
+            hp = 1;
+        g_mockBattleRoleHpCurrent = hp;
+        g_mockBattleRoleMpCurrent = mp;
+        role->hp = hp;
+        role->mp = mp;
+        vm_net_mock_battle_gem_revive_mark_used();
+        g_mockBattleGemReviveFired = 1;
+        g_mockBattleGemReviveHp = g_mockBattleRoleHpCurrent;
+        printf("[info][network] mock_gem_revive hp=%u mp=%u pct=%u seat=%u "
+               "party=%u\n",
+               hp, mp, revive, g_vm_net_mock_battle_damage_member_index,
+               g_vm_net_mock_team_battle_party_count_current);
+    }
+    if (reflect == 0)
+        return;
+    /* Must be the striking enemy; never fall back to slot0 (wrong target). */
+    idx = g_vm_net_mock_battle_formula_enemy_index;
+    if (idx > 2)
+        return;
+    {
+        u32 rdmg = (actualDamage * reflect) / 100u;
+        if (rdmg == 0)
+            return;
+        if (g_mockBattleEnemyHpSlots[idx] == 0)
+            return;
+        g_mockBattleGemReflectGuard = 1;
+        if (g_mockBattleEnemyHpSlots[idx] > rdmg)
+            g_mockBattleEnemyHpSlots[idx] -= rdmg;
+        else
+        {
+            rdmg = g_mockBattleEnemyHpSlots[idx];
+            g_mockBattleEnemyHpSlots[idx] = 0;
+        }
+        vm_net_mock_battle_sync_enemy_hp_totals();
+        g_mockBattleGemReflectGuard = 0;
+        g_mockBattleGemReflectPendingDmg = rdmg;
+        g_mockBattleGemReflectPendingEnemyIndex = idx;
+        g_mockBattleGemReflectPendingKilled =
+            (g_mockBattleEnemyHpSlots[idx] == 0) ? 1 : 0;
+        printf("[info][network] mock_gem_reflect enemy=%u dmg=%u pct=%u killed=%u\n",
+               idx, rdmg, reflect, g_mockBattleGemReflectPendingKilled);
+    }
 }
 
 static u8 vm_net_mock_battle_child_flag_with_env(const char *envName, u8 computed)
@@ -6365,6 +6594,8 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
     critical = vm_net_mock_battle_roll_crit(playerStats.crit);
     if (critical)
         damage = vm_net_mock_battle_apply_crit_damage(damage);
+    if (g_mockBattleGemComboHalf)
+        damage = damage / 2u;
     if (critical)
     {
         vm_net_mock_battle_note_outcome_child_flag(VM_NET_MOCK_BATTLE_CHILD_FLAG_CRIT);
@@ -6482,6 +6713,8 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     critical = vm_net_mock_battle_roll_crit(playerStats.crit);
     if (critical)
         damage = vm_net_mock_battle_apply_crit_damage(damage);
+    if (g_mockBattleGemComboHalf)
+        damage = damage / 2u;
     if (critical)
         vm_net_mock_battle_note_outcome_child_flag(VM_NET_MOCK_BATTLE_CHILD_FLAG_CRIT);
     if (critical || magical)
@@ -7178,10 +7411,10 @@ static bool vm_mock_mysql_role_item_effect_row(void *context_value,
 /* Returns false only for a storage or contract error.  A zero expiresUnix in
  * effectOut means that no currently active record exists.
  *
- * Exp cards and battle insight may be paused offline: paused_remaining_sec > 0
- * with expires_unix=0.  Readers see a synthetic expiresUnix = now + paused so
- * remaining UI / stack / battle bonus stay consistent until resume writes a
- * wall-clock end.
+ * Exp cards, battle insight, gold scroll, and combat pills may be paused
+ * offline: paused_remaining_sec > 0 with expires_unix=0.  Readers see a
+ * synthetic expiresUnix = now + paused so remaining UI / stack / battle bonus
+ * stay consistent until resume writes a wall-clock end.
  *
  * Timed-effect rows are keyed by (account_id, role_id).  Duel / arena round
  * resolve often runs under the *second submitter's* active account while still
@@ -7199,7 +7432,8 @@ static bool vm_net_mock_role_get_active_timed_item_effect_for(
     size_t account_len;
     bool pausable = effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ||
                     effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT ||
-                    effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL;
+                    effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL ||
+                    effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL;
 
     if (effectOut)
         memset(effectOut, 0, sizeof(*effectOut));
@@ -8176,9 +8410,12 @@ static bool vm_mock_mysql_role_equipment_row(void *context_value,
     u32 slot_index = 0;
     u32 item_id = 0;
     u32 enhance_level = 0;
+    u32 gemReflect = 0;
+    u32 gemCombo = 0;
+    u32 gemRevive = 0;
     if (context == NULL || context->database == NULL ||
         (column_count != 3 && column_count != 4 && column_count != 5 &&
-         column_count != 6) ||
+         column_count != 6 && column_count != 9) ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &role_id) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &slot_index) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &item_id) ||
@@ -8207,6 +8444,9 @@ static bool vm_mock_mysql_role_equipment_row(void *context_value,
     role->equippedEnhanceLevels[slot_index] = (u16)enhance_level;
     role->equippedEnhanceInstanceIds[slot_index] = 0;
     vm_net_mock_enhance_wash_clear(&role->equippedEnhanceWash[slot_index]);
+    role->equippedGemReflect[slot_index] = 0;
+    role->equippedGemCombo[slot_index] = 0;
+    role->equippedGemRevive[slot_index] = 0;
     if (column_count == 5 && values[4] != NULL)
         (void)vm_net_mock_enhance_wash_decode(values[4], lengths[4],
                                               &role->equippedEnhanceWash[slot_index]);
@@ -8218,6 +8458,35 @@ static bool vm_mock_mysql_role_equipment_row(void *context_value,
         if (values[5] != NULL)
             (void)vm_net_mock_enhance_wash_decode(values[5], lengths[5],
                                                   &role->equippedEnhanceWash[slot_index]);
+    }
+    if (column_count >= 9)
+    {
+        if (values[6] != NULL &&
+            !vm_mock_mysql_parse_u32(values[6], lengths[6], &gemReflect))
+        {
+            context->invalid = true;
+            return true;
+        }
+        if (values[7] != NULL &&
+            !vm_mock_mysql_parse_u32(values[7], lengths[7], &gemCombo))
+        {
+            context->invalid = true;
+            return true;
+        }
+        if (values[8] != NULL &&
+            !vm_mock_mysql_parse_u32(values[8], lengths[8], &gemRevive))
+        {
+            context->invalid = true;
+            return true;
+        }
+        if (gemReflect > 255u || gemCombo > 255u || gemRevive > 255u)
+        {
+            context->invalid = true;
+            return true;
+        }
+        role->equippedGemReflect[slot_index] = (u8)gemReflect;
+        role->equippedGemCombo[slot_index] = (u8)gemCombo;
+        role->equippedGemRevive[slot_index] = (u8)gemRevive;
     }
     return true;
 }
@@ -8234,8 +8503,12 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
     u32 item_seq = 0;
     u32 item_count = 0;
     u32 enhance_level = 0;
+    u32 gemReflect = 0;
+    u32 gemCombo = 0;
+    u32 gemRevive = 0;
     if (context == NULL || context->database == NULL ||
-        (column_count != 6 && column_count != 7 && column_count != 8) ||
+        (column_count != 6 && column_count != 7 && column_count != 8 &&
+         column_count != 11) ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &role_id) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &slot_index) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &item_id) ||
@@ -8261,6 +8534,9 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
     role->backpackItems[slot_index].enhanceInstanceId = 0;
     role->backpackItems[slot_index].count = item_count;
     vm_net_mock_enhance_wash_clear(&role->backpackItems[slot_index].enhanceWash);
+    role->backpackItems[slot_index].gemReflectLevel = 0;
+    role->backpackItems[slot_index].gemComboLevel = 0;
+    role->backpackItems[slot_index].gemReviveLevel = 0;
     if (column_count == 7 && values[6] != NULL)
         (void)vm_net_mock_enhance_wash_decode(
             values[6], lengths[6], &role->backpackItems[slot_index].enhanceWash);
@@ -8272,6 +8548,35 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
         if (values[7] != NULL)
             (void)vm_net_mock_enhance_wash_decode(
                 values[7], lengths[7], &role->backpackItems[slot_index].enhanceWash);
+    }
+    if (column_count >= 11)
+    {
+        if (values[8] != NULL &&
+            !vm_mock_mysql_parse_u32(values[8], lengths[8], &gemReflect))
+        {
+            context->invalid = true;
+            return true;
+        }
+        if (values[9] != NULL &&
+            !vm_mock_mysql_parse_u32(values[9], lengths[9], &gemCombo))
+        {
+            context->invalid = true;
+            return true;
+        }
+        if (values[10] != NULL &&
+            !vm_mock_mysql_parse_u32(values[10], lengths[10], &gemRevive))
+        {
+            context->invalid = true;
+            return true;
+        }
+        if (gemReflect > 255u || gemCombo > 255u || gemRevive > 255u)
+        {
+            context->invalid = true;
+            return true;
+        }
+        role->backpackItems[slot_index].gemReflectLevel = (u8)gemReflect;
+        role->backpackItems[slot_index].gemComboLevel = (u8)gemCombo;
+        role->backpackItems[slot_index].gemReviveLevel = (u8)gemRevive;
     }
     return true;
 }
@@ -8385,7 +8690,43 @@ static bool vm_net_mock_role_equipment_ensure_enhance_column(void)
             "ALTER TABLE account_role_backpack "
             "ADD COLUMN item_instance_id INT UNSIGNED NOT NULL DEFAULT 0 "
             "AFTER enhance_level",
-            "backpack_item_instance_id_column"))
+            "backpack_item_instance_id_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_equipment", "gem_reflect",
+            "ALTER TABLE account_role_equipment "
+            "ADD COLUMN gem_reflect TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER enhance_wash",
+            "equipment_gem_reflect_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_equipment", "gem_combo",
+            "ALTER TABLE account_role_equipment "
+            "ADD COLUMN gem_combo TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER gem_reflect",
+            "equipment_gem_combo_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_equipment", "gem_revive",
+            "ALTER TABLE account_role_equipment "
+            "ADD COLUMN gem_revive TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER gem_combo",
+            "equipment_gem_revive_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_backpack", "gem_reflect",
+            "ALTER TABLE account_role_backpack "
+            "ADD COLUMN gem_reflect TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER enhance_wash",
+            "backpack_gem_reflect_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_backpack", "gem_combo",
+            "ALTER TABLE account_role_backpack "
+            "ADD COLUMN gem_combo TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER gem_reflect",
+            "backpack_gem_combo_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_role_backpack", "gem_revive",
+            "ALTER TABLE account_role_backpack "
+            "ADD COLUMN gem_revive TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER gem_combo",
+            "backpack_gem_revive_column"))
     {
         ok = false;
         return false;
@@ -8707,6 +9048,26 @@ static bool vm_net_mock_warehouse_ensure_enhance_wash_column(void)
         "'0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0' "
         "AFTER enhance_level",
         "warehouse_enhance_wash_column");
+    if (!ok)
+        return false;
+    ok = vm_net_mock_role_table_ensure_column(
+             "account_role_warehouse", "gem_reflect",
+             "ALTER TABLE account_role_warehouse "
+             "ADD COLUMN gem_reflect TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+             "AFTER enhance_wash",
+             "warehouse_gem_reflect_column") &&
+         vm_net_mock_role_table_ensure_column(
+             "account_role_warehouse", "gem_combo",
+             "ALTER TABLE account_role_warehouse "
+             "ADD COLUMN gem_combo TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+             "AFTER gem_reflect",
+             "warehouse_gem_combo_column") &&
+         vm_net_mock_role_table_ensure_column(
+             "account_role_warehouse", "gem_revive",
+             "ALTER TABLE account_role_warehouse "
+             "ADD COLUMN gem_revive TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+             "AFTER gem_combo",
+             "warehouse_gem_revive_column");
     return ok;
 }
 
@@ -8821,12 +9182,17 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
     if (!vm_net_mock_role_equipment_ensure_enhance_column())
         return false;
     snprintf(query, sizeof(query),
-             "SELECT role_id,slot_index,item_id,enhance_level,item_instance_id,enhance_wash FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
+             "SELECT role_id,slot_index,item_id,enhance_level,item_instance_id,enhance_wash,"
+             "gem_reflect,gem_combo,gem_revive FROM account_role_equipment "
+             "WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_equipment_row, &context) || context.invalid)
         return false;
     snprintf(query, sizeof(query),
-             "SELECT role_id,slot_index,item_id,item_seq,item_count,enhance_level,item_instance_id,enhance_wash FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
+             "SELECT role_id,slot_index,item_id,item_seq,item_count,enhance_level,"
+             "item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive "
+             "FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) "
+             "ORDER BY role_id,slot_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_backpack_row, &context) || context.invalid)
         return false;
@@ -9249,7 +9615,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
 
     size_t bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
-        "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id,enhance_level,item_instance_id,enhance_wash) VALUES");
+        "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id,"
+        "enhance_level,item_instance_id,enhance_wash,gem_reflect,gem_combo,gem_revive) VALUES");
     u32 bulk_rows = 0;
     for (u32 i = 0; i < db->roleCount; ++i)
     {
@@ -9267,10 +9634,13 @@ static bool vm_net_mock_role_db_save_relational_ex(
             (void)vm_net_mock_enhance_wash_sql_text(&role->equippedEnhanceWash[slot],
                                                     washText, sizeof(washText));
             int written = snprintf(bulk_query + bulk_len, bulk_capacity - bulk_len,
-                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,'%s')",
+                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,'%s',%u,%u,%u)",
                                    bulk_rows ? "," : "", account_hex, role->roleId,
                                    slot, role->equippedItemIds[slot], enhance,
-                                   role->equippedEnhanceInstanceIds[slot], washText);
+                                   role->equippedEnhanceInstanceIds[slot], washText,
+                                   (u32)role->equippedGemReflect[slot],
+                                   (u32)role->equippedGemCombo[slot],
+                                   (u32)role->equippedGemRevive[slot]);
             if (written < 0 || (size_t)written >= bulk_capacity - bulk_len)
             {
                 snprintf(mysql_error, sizeof(mysql_error), "equipment query too large");
@@ -9288,7 +9658,9 @@ static bool vm_net_mock_role_db_save_relational_ex(
 
     bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
-        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,item_instance_id,enhance_wash) VALUES");
+        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,"
+        "item_seq,item_count,enhance_level,item_instance_id,enhance_wash,"
+        "gem_reflect,gem_combo,gem_revive) VALUES");
     bulk_rows = 0;
     for (u32 i = 0; i < db->roleCount; ++i)
     {
@@ -9305,11 +9677,13 @@ static bool vm_net_mock_role_db_save_relational_ex(
             (void)vm_net_mock_enhance_wash_sql_text(&item->enhanceWash, washText,
                                                     sizeof(washText));
             int written = snprintf(bulk_query + bulk_len, bulk_capacity - bulk_len,
-                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,'%s')",
+                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,'%s',%u,%u,%u)",
                                    bulk_rows ? "," : "", account_hex, role->roleId,
                                    slot, item->itemId, item->seq, item->count,
                                    item->enhanceLevel, item->enhanceInstanceId,
-                                   washText);
+                                   washText, (u32)item->gemReflectLevel,
+                                   (u32)item->gemComboLevel,
+                                   (u32)item->gemReviveLevel);
             if (written < 0 || (size_t)written >= bulk_capacity - bulk_len)
             {
                 snprintf(mysql_error, sizeof(mysql_error), "backpack query too large");
@@ -9537,6 +9911,8 @@ static const char *vm_net_mock_role_pausable_timed_effect_name(u8 effectKind)
         return "battle-insight";
     if (effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL)
         return "gold-scroll";
+    if (effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL)
+        return "combat-pill";
     return "timed-effect";
 }
 
@@ -9544,13 +9920,14 @@ static bool vm_net_mock_role_timed_effect_is_pausable(u8 effectKind)
 {
     return effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ||
            effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT ||
-           effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL;
+           effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL ||
+           effectKind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL;
 }
 
 /*
  * Freeze pausable timed-effect duration across disconnect: store leftover
  * seconds in paused_remaining_sec and clear wall-clock expires_unix.
- * Idempotent if already paused.  Combat pills keep wall-clock expiry.
+ * Idempotent if already paused.
  */
 static bool vm_net_mock_role_pausable_timed_effect_pause_on_logout(
     const char *accountId, u32 roleId, u8 effectKind)
@@ -9710,6 +10087,125 @@ static bool vm_net_mock_role_gold_scroll_resume_on_login(
         role, VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL);
 }
 
+static bool vm_net_mock_role_combat_pill_pause_on_logout(const char *accountId,
+                                                          u32 roleId)
+{
+    return vm_net_mock_role_pausable_timed_effect_pause_on_logout(
+        accountId, roleId, VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL);
+}
+
+static bool vm_net_mock_role_combat_pill_resume_on_login(
+    vm_net_mock_role_state *role)
+{
+    return vm_net_mock_role_pausable_timed_effect_resume_on_login(
+        role, VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL);
+}
+
+/*
+ * Dream instance HUD TTL checkpoint (ms).  Offline does not consume duration:
+ * logout / disconnect stores leftover here; login resumes the session arm.
+ * While online, arm/poll refresh the same column as a crash-safe checkpoint.
+ */
+static bool vm_net_mock_dream_hud_remaining_ensure_column(void)
+{
+    static bool ensured = false;
+    static bool ok = false;
+
+    if (ensured)
+        return ok;
+    ensured = true;
+    ok = vm_net_mock_role_table_ensure_column(
+        "account_roles", "dream_hud_remaining_ms",
+        "ALTER TABLE account_roles "
+        "ADD COLUMN dream_hud_remaining_ms INT UNSIGNED NOT NULL DEFAULT 0",
+        "dream_hud_remaining_ms_column");
+    return ok;
+}
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 remainingMs;
+} vm_mock_mysql_dream_hud_remaining_context;
+
+static bool vm_mock_mysql_dream_hud_remaining_row(void *context_value,
+                                                   unsigned int column_count,
+                                                   const char *const *values,
+                                                   const size_t *lengths)
+{
+    vm_mock_mysql_dream_hud_remaining_context *context =
+        (vm_mock_mysql_dream_hud_remaining_context *)context_value;
+    u32 remaining = 0;
+
+    if (context == NULL || column_count < 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &remaining))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    context->remainingMs = remaining;
+    return true;
+}
+
+static u32 vm_net_mock_dream_hud_remaining_load(const char *accountId, u32 roleId)
+{
+    char account_hex[129];
+    char query[384];
+    vm_mock_mysql_dream_hud_remaining_context context;
+
+    if (roleId == 0 || accountId == NULL || accountId[0] == '\0' ||
+        !vm_net_mock_dream_hud_remaining_ensure_column() ||
+        !vm_net_mock_mysql_account_hex_for(accountId, account_hex))
+    {
+        return 0;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT dream_hud_remaining_ms FROM account_roles "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             account_hex, roleId);
+    if (!vm_mysql_query(query, vm_mock_mysql_dream_hud_remaining_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return 0;
+    }
+    return context.remainingMs;
+}
+
+static bool vm_net_mock_dream_hud_remaining_save(const char *accountId, u32 roleId,
+                                                  u32 remainingMs)
+{
+    char account_hex[129];
+    char query[384];
+
+    if (roleId == 0 || accountId == NULL || accountId[0] == '\0' ||
+        !vm_net_mock_dream_hud_remaining_ensure_column() ||
+        !vm_net_mock_mysql_account_hex_for(accountId, account_hex))
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_roles SET dream_hud_remaining_ms=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             remainingMs, account_hex, roleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] dream_hud_remaining_save_failed "
+               "account=%s role=%u remain_ms=%u error=%s\n",
+               accountId, roleId, remainingMs, vm_mysql_last_error());
+        return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_dream_hud_remaining_clear(const char *accountId, u32 roleId)
+{
+    return vm_net_mock_dream_hud_remaining_save(accountId, roleId, 0);
+}
+
 /* item.dsh describes ???? as a one-hour, +20% experience status. Its
  * multiplier column therefore denotes an additive percentage for this kind,
  * unlike the factor stored for experience cards. */
@@ -9867,27 +10363,37 @@ static u32 vm_net_mock_role_active_combat_pill_item_id(
     return effect.itemId;
 }
 
-/* Exp-card stack ceiling: same multiplier may extend remaining time, but never
- * past 8 hours wall-clock leftover (offline pause does not count). */
+/* Exp-card / combat-pill stack ceiling: same multiplier may extend remaining
+ * time, but never past 8 hours wall-clock leftover (offline pause does not
+ * count). */
 #define VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC (8u * 3600u)
+#define VM_NET_MOCK_COMBAT_PILL_MAX_REMAINING_SEC \
+    VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC
 
-/* GBK tips for exp-card stack rejects (iteminfo / 7/1 hint). */
+/* GBK tips for exp-card / combat-pill stack rejects (iteminfo / 7/1 / 22/3). */
 static const char k_vm_net_mock_exp_card_tip_same_effect[] =
     "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
 static const char k_vm_net_mock_exp_card_tip_max_duration[] =
     "\xBE\xAD\xD1\xE9\xBF\xA8\xB3\xD6\xD0\xF8\xCA\xB1\xBC\xE4\xD2\xD1\xB4\xEF\xC9\xCF\xCF\xDE\xA3\xA8\x38\xD0\xA1\xCA\xB1\xA3\xA9\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xCA\xB1\xBC\xE4\xBC\xF5\xC9\xD9\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
+/* 「大力丸/神力丸持续时间已达上限（8小时），请等待时间减少后再使用。」 */
+static const char k_vm_net_mock_combat_pill_tip_max_duration[] =
+    "\xB4\xF3\xC1\xA6\xCD\xE5\x2F\xC9\xF1\xC1\xA6\xCD\xE5"
+    "\xB3\xD6\xD0\xF8\xCA\xB1\xBC\xE4\xD2\xD1\xB4\xEF\xC9\xCF\xCF\xDE"
+    "\xA3\xA8\x38\xD0\xA1\xCA\xB1\xA3\xA9\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD"
+    "\xCA\xB1\xBC\xE4\xBC\xF5\xC9\xD9\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
 
 /* The backpack decrement and the timed effect belong to one durable action.
  * The row is only changed in memory before the relational transaction has
  * committed; on any failure restore the exact previous role state so a retry
  * cannot lose an item or create an unbacked effect.
  *
- * Experience cards may stack only at the same multiplier: remaining wall-clock
- * end gains another item duration, item_id/multiplier stay on the active card,
- * and leftover must stay <= 8h.  Different multipliers reject without consume.
- * Battle insight may still stack duration.  Combat pills reject a second use
- * until expiry.  Effects live in account_role_item_effects and are not cleared
- * on disconnect � pausable kinds freeze duration offline and resume on login. */
+ * Experience cards and combat pills may stack only at the same multiplier:
+ * remaining wall-clock end gains another item duration, item_id/multiplier
+ * stay on the active effect, and leftover must stay <= 8h.  Different
+ * multipliers reject without consume.  Battle insight / gold scroll may still
+ * stack duration without the 8h ceiling.  Effects live in
+ * account_role_item_effects and are not cleared on disconnect — pausable kinds
+ * freeze duration offline and resume on login. */
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
     const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
@@ -9903,6 +10409,10 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     u32 remainingBefore = 0;
     u32 remainingAfter = 0;
     bool stackable = false;
+    bool sameTypeOnly = false;
+    u32 maxRemainingSec = 0;
+    const char *maxDurationTip = NULL;
+    const char *stackKindName = NULL;
 
     if (remainingOut)
         *remainingOut = 0;
@@ -9916,7 +10426,30 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     stacked = *effect;
     stackable = effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ||
                 effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT ||
-                effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL;
+                effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL ||
+                effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL;
+    sameTypeOnly = effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD ||
+                   effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL;
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD)
+    {
+        maxRemainingSec = VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC;
+        maxDurationTip = k_vm_net_mock_exp_card_tip_max_duration;
+        stackKindName = "exp_card";
+    }
+    else if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL)
+    {
+        maxRemainingSec = VM_NET_MOCK_COMBAT_PILL_MAX_REMAINING_SEC;
+        maxDurationTip = k_vm_net_mock_combat_pill_tip_max_duration;
+        stackKindName = "combat_pill";
+    }
+    else if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL)
+    {
+        stackKindName = "gold_scroll";
+    }
+    else
+    {
+        stackKindName = "battle_insight";
+    }
     memset(&active, 0, sizeof(active));
     if (!vm_net_mock_role_get_active_timed_item_effect(role, effect->kind, &active))
         return false;
@@ -9932,12 +10465,12 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
                 *failInfoOut = k_vm_net_mock_exp_card_tip_same_effect;
             return false;
         }
-        if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD &&
-            active.multiplier != effect->multiplier)
+        if (sameTypeOnly && active.multiplier != effect->multiplier)
         {
-            printf("[info][network] mock_exp_card_rejected_different_type account=%s role=%u "
+            printf("[info][network] mock_%s_rejected_different_type account=%s role=%u "
                    "active_item=%u active_mult=%u active_until=%u requested_item=%u "
                    "requested_mult=%u\n",
+                   stackKindName,
                    g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
                    role->roleId, active.itemId, active.multiplier, active.expiresUnix,
                    itemId, effect->multiplier);
@@ -9954,32 +10487,28 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
             stacked.expiresUnix = 0xffffffffu;
         else
             stacked.expiresUnix = baseExpires + addSeconds;
-        /* Keep the active card identity; only extend its end time. */
+        /* Keep the active effect identity; only extend its end time. */
         stacked.multiplier = active.multiplier;
         stacked.itemId = active.itemId;
         remainingAfter =
             stacked.expiresUnix > now ? stacked.expiresUnix - now : 0;
-        if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD &&
-            remainingAfter > VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC)
+        if (maxRemainingSec != 0 && remainingAfter > maxRemainingSec)
         {
-            printf("[info][network] mock_exp_card_rejected_max_duration account=%s role=%u "
+            printf("[info][network] mock_%s_rejected_max_duration account=%s role=%u "
                    "active_item=%u active_mult=%u remaining_before=%u add_s=%u "
                    "remaining_after=%u max_s=%u\n",
+                   stackKindName,
                    g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
                    role->roleId, active.itemId, active.multiplier, remainingBefore,
-                   addSeconds, remainingAfter, VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC);
+                   addSeconds, remainingAfter, maxRemainingSec);
             if (failInfoOut)
-                *failInfoOut = k_vm_net_mock_exp_card_tip_max_duration;
+                *failInfoOut = maxDurationTip;
             return false;
         }
         if (!vm_net_mock_role_item_effect_is_valid(&stacked))
             return false;
         printf("[info][network] mock_%s_stacked account=%s role=%u active_item=%u active_until=%u add_s=%u new_item=%u new_mult=%u new_until=%u\n",
-               effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD
-                   ? "exp_card"
-                   : (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_GOLD_SCROLL
-                          ? "gold_scroll"
-                          : "battle_insight"),
+               stackKindName,
                g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
                role->roleId, active.itemId, active.expiresUnix, addSeconds,
                stacked.itemId, stacked.multiplier, stacked.expiresUnix);
@@ -11843,9 +12372,12 @@ static bool vm_net_mock_warehouse_load_row(void *context_value,
     u32 itemSeq = 0;
     u32 itemCount = 0;
     u32 enhance = 0;
+    u32 gemReflect = 0;
+    u32 gemCombo = 0;
+    u32 gemRevive = 0;
 
     if (context == NULL || context->state == NULL ||
-        (column_count != 5 && column_count != 6) ||
+        (column_count != 5 && column_count != 6 && column_count != 9) ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &slot) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &itemId) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &itemSeq) ||
@@ -11868,9 +12400,26 @@ static bool vm_net_mock_warehouse_load_row(void *context_value,
         item->count = itemCount;
         item->enhanceLevel = (u16)enhance;
         vm_net_mock_enhance_wash_clear(&item->enhanceWash);
-        if (column_count == 6 && values[5] != NULL)
+        if (column_count >= 6 && values[5] != NULL)
             (void)vm_net_mock_enhance_wash_decode(values[5], lengths[5],
                                                   &item->enhanceWash);
+        if (column_count >= 9)
+        {
+            if ((values[6] != NULL &&
+                 !vm_mock_mysql_parse_u32(values[6], lengths[6], &gemReflect)) ||
+                (values[7] != NULL &&
+                 !vm_mock_mysql_parse_u32(values[7], lengths[7], &gemCombo)) ||
+                (values[8] != NULL &&
+                 !vm_mock_mysql_parse_u32(values[8], lengths[8], &gemRevive)) ||
+                gemReflect > 255u || gemCombo > 255u || gemRevive > 255u)
+            {
+                context->invalid = true;
+                return true;
+            }
+            item->gemReflectLevel = (u8)gemReflect;
+            item->gemComboLevel = (u8)gemCombo;
+            item->gemReviveLevel = (u8)gemRevive;
+        }
         if (item->seq >= context->state->nextSeq)
             context->state->nextSeq = (u16)(item->seq + 1u);
     }
@@ -11936,7 +12485,8 @@ static bool vm_net_mock_warehouse_load_for_role(vm_net_mock_role_state *role)
     context.state = &g_vm_net_mock_warehouse;
     context.invalid = false;
     snprintf(query, sizeof(query),
-             "SELECT slot_index,item_id,item_seq,item_count,enhance_level,enhance_wash "
+             "SELECT slot_index,item_id,item_seq,item_count,enhance_level,enhance_wash,"
+             "gem_reflect,gem_combo,gem_revive "
              "FROM account_role_warehouse WHERE account_id=CAST(X'%s' AS CHAR) "
              "AND role_id=%u ORDER BY slot_index",
              account_hex, role->roleId);
@@ -12031,7 +12581,8 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
         prefixLen = (u32)snprintf(
             query, queryCap,
             "INSERT INTO account_role_warehouse(account_id,role_id,slot_index,item_id,"
-            "item_seq,item_count,enhance_level,enhance_wash) VALUES");
+            "item_seq,item_count,enhance_level,enhance_wash,gem_reflect,gem_combo,"
+            "gem_revive) VALUES");
         if (prefixLen == 0 || prefixLen >= queryCap)
         {
             if (mysql_error != NULL && mysql_error_cap > 0)
@@ -12051,10 +12602,12 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
             (void)vm_net_mock_enhance_wash_sql_text(&item->enhanceWash, washText,
                                                     sizeof(washText));
             written = snprintf(query + queryLen, queryCap - queryLen,
-                               "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s')",
+                               "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s',%u,%u,%u)",
                                valueCount > 0u ? "," : "",
                                account_hex, role->roleId, slot, item->itemId,
-                               item->seq, item->count, item->enhanceLevel, washText);
+                               item->seq, item->count, item->enhanceLevel, washText,
+                               (u32)item->gemReflectLevel, (u32)item->gemComboLevel,
+                               (u32)item->gemReviveLevel);
             if (written <= 0 || (u32)written >= queryCap - queryLen)
             {
                 if (mysql_error != NULL && mysql_error_cap > 0)
@@ -12284,6 +12837,14 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
     {
         if (reasonOut)
             *reasonOut = "item-not-sellable";
+        return false;
+    }
+    if (vm_net_mock_gem_sockets_occupied(bagItem->gemReflectLevel,
+                                         bagItem->gemComboLevel,
+                                         bagItem->gemReviveLevel))
+    {
+        if (reasonOut)
+            *reasonOut = "socketed";
         return false;
     }
     itemId = bagItem->itemId;
@@ -12568,6 +13129,16 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
             if (reasonOut)
                 *reasonOut = "backpack-full";
             return false;
+        }
+        {
+            vm_net_mock_backpack_item_state *added =
+                vm_net_mock_role_find_backpack_item(role, 0, addedSeq);
+            if (added != NULL)
+            {
+                added->gemReflectLevel = moved.gemReflectLevel;
+                added->gemComboLevel = moved.gemComboLevel;
+                added->gemReviveLevel = moved.gemReviveLevel;
+            }
         }
     }
     /* add_backpack may already have saved wash rows; force one more save so
@@ -13426,6 +13997,12 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
         u32 oldInstanceId = role->equippedEnhanceInstanceIds[slot];
         vm_net_mock_enhance_wash_state newWash;
         vm_net_mock_enhance_wash_state oldWash;
+        u8 newGemR = item->gemReflectLevel;
+        u8 newGemC = item->gemComboLevel;
+        u8 newGemV = item->gemReviveLevel;
+        u8 oldGemR = role->equippedGemReflect[slot];
+        u8 oldGemC = role->equippedGemCombo[slot];
+        u8 oldGemV = role->equippedGemRevive[slot];
 
         vm_net_mock_enhance_wash_copy(&newWash, &item->enhanceWash);
         vm_net_mock_enhance_wash_copy(&oldWash, &role->equippedEnhanceWash[slot]);
@@ -13452,6 +14029,9 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
         role->equippedEnhanceLevels[slot] = newEnhance;
         role->equippedEnhanceInstanceIds[slot] = newInstanceId;
         vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot], &newWash);
+        role->equippedGemReflect[slot] = newGemR;
+        role->equippedGemCombo[slot] = newGemC;
+        role->equippedGemRevive[slot] = newGemV;
         if (oldItemId != 0)
         {
             u16 oldSeq = 0;
@@ -13464,12 +14044,35 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
                 role->equippedEnhanceInstanceIds[slot] = oldInstanceId;
                 vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot],
                                               &oldWash);
+                role->equippedGemReflect[slot] = oldGemR;
+                role->equippedGemCombo[slot] = oldGemC;
+                role->equippedGemRevive[slot] = oldGemV;
                 (void)vm_net_mock_role_add_backpack_item_to_role(
                     role, itemId, 1, newEnhance, NULL, NULL, &newWash,
                     newInstanceId);
+                {
+                    vm_net_mock_backpack_item_state *rollback =
+                        vm_net_mock_role_find_backpack_item(role, itemId, 0);
+                    if (rollback != NULL && rollback->enhanceInstanceId == newInstanceId)
+                    {
+                        rollback->gemReflectLevel = newGemR;
+                        rollback->gemComboLevel = newGemC;
+                        rollback->gemReviveLevel = newGemV;
+                    }
+                }
                 if (reasonOut)
                     *reasonOut = "old-return-failed";
                 return false;
+            }
+            {
+                vm_net_mock_backpack_item_state *oldRow =
+                    vm_net_mock_role_find_backpack_item(role, 0, oldSeq);
+                if (oldRow != NULL)
+                {
+                    oldRow->gemReflectLevel = oldGemR;
+                    oldRow->gemComboLevel = oldGemC;
+                    oldRow->gemReviveLevel = oldGemV;
+                }
             }
             if (!vm_net_mock_enhance_wash_is_empty(&oldWash))
             {

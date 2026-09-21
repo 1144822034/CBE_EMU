@@ -9,6 +9,10 @@ typedef struct
     u32 panelDefenseLevelCoeff;     /* defense += level * coeff; default 1 */
     u32 panelDefenseEnduranceDiv;   /* endurance / div; default 2; min 1 */
     u32 panelHitBase;               /* hit = base + equip.hit; default 101 */
+    /* bareHp += strength * x100 / 100; bareMp += wisdom * x100 / 100
+     * (panel totals = base + equip; default 50 = 0.5) */
+    u32 panelStrengthHpCoeffX100;   /* default 50 (=0.5) */
+    u32 panelWisdomMpCoeffX100;     /* default 50 (=0.5) */
 
     /* Panel/battle attack: attack = jobPrimary * coeff% / 100 + equip.attack */
     u32 primaryAttackCoeffTianjiPercent;   /* job 1; default 100 */
@@ -58,6 +62,8 @@ static void vm_net_mock_combat_formula_config_set_defaults(
     cfg->panelDefenseLevelCoeff = 1;
     cfg->panelDefenseEnduranceDiv = 2;
     cfg->panelHitBase = 101;
+    cfg->panelStrengthHpCoeffX100 = 50;
+    cfg->panelWisdomMpCoeffX100 = 50;
     cfg->primaryAttackCoeffTianjiPercent = 100;
     cfg->primaryAttackCoeffHuanjianPercent = 100;
     cfg->primaryAttackCoeffGuidaoPercent = 100;
@@ -89,6 +95,10 @@ static void vm_net_mock_combat_formula_config_sanitize(
         return;
     if (cfg->panelDefenseEnduranceDiv == 0)
         cfg->panelDefenseEnduranceDiv = 1;
+    if (cfg->panelStrengthHpCoeffX100 > 1000u)
+        cfg->panelStrengthHpCoeffX100 = 1000u;
+    if (cfg->panelWisdomMpCoeffX100 > 1000u)
+        cfg->panelWisdomMpCoeffX100 = 1000u;
     if (cfg->primaryAttackCoeffTianjiPercent > 1000u)
         cfg->primaryAttackCoeffTianjiPercent = 1000u;
     if (cfg->primaryAttackCoeffHuanjianPercent > 1000u)
@@ -220,6 +230,8 @@ static bool vm_net_mock_combat_formula_ensure_table(void)
             "panel_defense_level_coeff INT UNSIGNED NOT NULL DEFAULT 1,"
             "panel_defense_endurance_div INT UNSIGNED NOT NULL DEFAULT 2,"
             "panel_hit_base INT UNSIGNED NOT NULL DEFAULT 101,"
+            "panel_strength_hp_coeff_x100 INT UNSIGNED NOT NULL DEFAULT 50,"
+            "panel_wisdom_mp_coeff_x100 INT UNSIGNED NOT NULL DEFAULT 50,"
             "primary_attack_coeff_tianji_percent INT UNSIGNED NOT NULL "
             "DEFAULT 100,"
             "primary_attack_coeff_huanjian_percent INT UNSIGNED NOT NULL "
@@ -270,7 +282,17 @@ static bool vm_net_mock_combat_formula_ensure_table(void)
             "primary_attack_coeff_guidao_percent",
             "ALTER TABLE server_combat_formula_config ADD COLUMN "
             "primary_attack_coeff_guidao_percent INT UNSIGNED NOT NULL "
-            "DEFAULT 100 AFTER primary_attack_coeff_huanjian_percent"))
+            "DEFAULT 100 AFTER primary_attack_coeff_huanjian_percent") ||
+        !vm_net_mock_combat_formula_ensure_column(
+            "panel_strength_hp_coeff_x100",
+            "ALTER TABLE server_combat_formula_config ADD COLUMN "
+            "panel_strength_hp_coeff_x100 INT UNSIGNED NOT NULL "
+            "DEFAULT 50 AFTER panel_hit_base") ||
+        !vm_net_mock_combat_formula_ensure_column(
+            "panel_wisdom_mp_coeff_x100",
+            "ALTER TABLE server_combat_formula_config ADD COLUMN "
+            "panel_wisdom_mp_coeff_x100 INT UNSIGNED NOT NULL "
+            "DEFAULT 50 AFTER panel_strength_hp_coeff_x100"))
     {
         return false;
     }
@@ -300,13 +322,13 @@ static bool vm_net_mock_combat_formula_config_row_ctx(void *contextValue,
     vm_net_mock_combat_formula_load_ctx *ctx =
         (vm_net_mock_combat_formula_load_ctx *)contextValue;
     vm_net_mock_combat_formula_config *cfg;
-    u32 fields[26];
+    u32 fields[28];
     u32 i;
 
-    if (ctx == NULL || ctx->cfg == NULL || columnCount < 26)
+    if (ctx == NULL || ctx->cfg == NULL || columnCount < 28)
         return true;
     cfg = ctx->cfg;
-    for (i = 0; i < 26; ++i)
+    for (i = 0; i < 28; ++i)
     {
         if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &fields[i]))
             return true;
@@ -315,28 +337,30 @@ static bool vm_net_mock_combat_formula_config_row_ctx(void *contextValue,
     cfg->panelDefenseLevelCoeff = fields[1];
     cfg->panelDefenseEnduranceDiv = fields[2];
     cfg->panelHitBase = fields[3];
-    cfg->primaryAttackCoeffTianjiPercent = fields[4];
-    cfg->primaryAttackCoeffHuanjianPercent = fields[5];
-    cfg->primaryAttackCoeffGuidaoPercent = fields[6];
-    cfg->softArmorK = fields[7];
-    cfg->equipArmorDivisor = fields[8];
-    cfg->hitChanceMin = fields[9];
-    cfg->hitChanceMax = fields[10];
-    cfg->critDamagePercent = fields[11];
-    cfg->resistCapPercent = fields[12];
-    cfg->jobSkillAttackBonusPercent = fields[13];
-    cfg->naVariancePercent = fields[14];
-    cfg->skillVariancePercent = fields[15];
-    cfg->duelJobBonusTianjiPercent = fields[16];
-    cfg->duelJobBonusHuanjianPercent = fields[17];
-    cfg->duelJobBonusGuidaoPercent = fields[18];
-    cfg->skillVsNaFloorPercent = fields[19];
-    cfg->monsterHitDefault = fields[20];
-    cfg->monsterDodgeDefault = fields[21];
-    cfg->monsterCritDefault = fields[22];
-    cfg->monsterResistDefault = fields[23];
-    cfg->bossSkillChancePercent = fields[24];
-    cfg->bossSkillDamagePercent = fields[25];
+    cfg->panelStrengthHpCoeffX100 = fields[4];
+    cfg->panelWisdomMpCoeffX100 = fields[5];
+    cfg->primaryAttackCoeffTianjiPercent = fields[6];
+    cfg->primaryAttackCoeffHuanjianPercent = fields[7];
+    cfg->primaryAttackCoeffGuidaoPercent = fields[8];
+    cfg->softArmorK = fields[9];
+    cfg->equipArmorDivisor = fields[10];
+    cfg->hitChanceMin = fields[11];
+    cfg->hitChanceMax = fields[12];
+    cfg->critDamagePercent = fields[13];
+    cfg->resistCapPercent = fields[14];
+    cfg->jobSkillAttackBonusPercent = fields[15];
+    cfg->naVariancePercent = fields[16];
+    cfg->skillVariancePercent = fields[17];
+    cfg->duelJobBonusTianjiPercent = fields[18];
+    cfg->duelJobBonusHuanjianPercent = fields[19];
+    cfg->duelJobBonusGuidaoPercent = fields[20];
+    cfg->skillVsNaFloorPercent = fields[21];
+    cfg->monsterHitDefault = fields[22];
+    cfg->monsterDodgeDefault = fields[23];
+    cfg->monsterCritDefault = fields[24];
+    cfg->monsterResistDefault = fields[25];
+    cfg->bossSkillChancePercent = fields[26];
+    cfg->bossSkillDamagePercent = fields[27];
     vm_net_mock_combat_formula_config_sanitize(cfg);
     ctx->loaded = 1;
     return true;
@@ -354,6 +378,7 @@ static bool vm_net_mock_combat_formula_config_seed_if_empty(void)
         "INSERT IGNORE INTO server_combat_formula_config ("
         "id,panel_defense_base,panel_defense_level_coeff,"
         "panel_defense_endurance_div,panel_hit_base,"
+        "panel_strength_hp_coeff_x100,panel_wisdom_mp_coeff_x100,"
         "primary_attack_coeff_tianji_percent,"
         "primary_attack_coeff_huanjian_percent,"
         "primary_attack_coeff_guidao_percent,"
@@ -366,9 +391,10 @@ static bool vm_net_mock_combat_formula_config_seed_if_empty(void)
         "monster_crit_default,monster_resist_default,boss_skill_chance_percent,"
         "boss_skill_damage_percent) VALUES ("
         "1,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-        "%u,%u,%u)",
+        "%u,%u,%u,%u,%u)",
         def.panelDefenseBase, def.panelDefenseLevelCoeff,
         def.panelDefenseEnduranceDiv, def.panelHitBase,
+        def.panelStrengthHpCoeffX100, def.panelWisdomMpCoeffX100,
         def.primaryAttackCoeffTianjiPercent,
         def.primaryAttackCoeffHuanjianPercent,
         def.primaryAttackCoeffGuidaoPercent, def.softArmorK,
@@ -405,6 +431,7 @@ static bool vm_net_mock_combat_formula_config_load(bool force)
     if (!vm_mysql_query(
             "SELECT panel_defense_base,panel_defense_level_coeff,"
             "panel_defense_endurance_div,panel_hit_base,"
+            "panel_strength_hp_coeff_x100,panel_wisdom_mp_coeff_x100,"
             "primary_attack_coeff_tianji_percent,"
             "primary_attack_coeff_huanjian_percent,"
             "primary_attack_coeff_guidao_percent,"
@@ -433,7 +460,7 @@ static bool vm_net_mock_combat_formula_config_load(bool force)
     g_vm_net_mock_combat_formula_config_loaded = true;
     printf("[info][mock-service] combat_formula_config_load soft_k=%u "
            "armor_div=%u crit%%=%u resist_cap=%u hit=%u..%u "
-           "primary_atk_coeff=%u/%u/%u\n",
+           "primary_atk_coeff=%u/%u/%u str_hp_x100=%u wis_mp_x100=%u\n",
            g_vm_net_mock_combat_formula_config.softArmorK,
            g_vm_net_mock_combat_formula_config.equipArmorDivisor,
            g_vm_net_mock_combat_formula_config.critDamagePercent,
@@ -442,7 +469,9 @@ static bool vm_net_mock_combat_formula_config_load(bool force)
            g_vm_net_mock_combat_formula_config.hitChanceMax,
            g_vm_net_mock_combat_formula_config.primaryAttackCoeffTianjiPercent,
            g_vm_net_mock_combat_formula_config.primaryAttackCoeffHuanjianPercent,
-           g_vm_net_mock_combat_formula_config.primaryAttackCoeffGuidaoPercent);
+           g_vm_net_mock_combat_formula_config.primaryAttackCoeffGuidaoPercent,
+           g_vm_net_mock_combat_formula_config.panelStrengthHpCoeffX100,
+           g_vm_net_mock_combat_formula_config.panelWisdomMpCoeffX100);
     return true;
 }
 
@@ -471,6 +500,7 @@ static bool vm_net_mock_combat_formula_admin_save(
         "INSERT INTO server_combat_formula_config ("
         "id,panel_defense_base,panel_defense_level_coeff,"
         "panel_defense_endurance_div,panel_hit_base,"
+        "panel_strength_hp_coeff_x100,panel_wisdom_mp_coeff_x100,"
         "primary_attack_coeff_tianji_percent,"
         "primary_attack_coeff_huanjian_percent,"
         "primary_attack_coeff_guidao_percent,"
@@ -483,12 +513,14 @@ static bool vm_net_mock_combat_formula_admin_save(
         "monster_crit_default,monster_resist_default,boss_skill_chance_percent,"
         "boss_skill_damage_percent) VALUES ("
         "1,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-        "%u,%u,%u) "
+        "%u,%u,%u,%u,%u) "
         "ON DUPLICATE KEY UPDATE "
         "panel_defense_base=VALUES(panel_defense_base),"
         "panel_defense_level_coeff=VALUES(panel_defense_level_coeff),"
         "panel_defense_endurance_div=VALUES(panel_defense_endurance_div),"
         "panel_hit_base=VALUES(panel_hit_base),"
+        "panel_strength_hp_coeff_x100=VALUES(panel_strength_hp_coeff_x100),"
+        "panel_wisdom_mp_coeff_x100=VALUES(panel_wisdom_mp_coeff_x100),"
         "primary_attack_coeff_tianji_percent="
         "VALUES(primary_attack_coeff_tianji_percent),"
         "primary_attack_coeff_huanjian_percent="
@@ -516,6 +548,7 @@ static bool vm_net_mock_combat_formula_admin_save(
         "boss_skill_damage_percent=VALUES(boss_skill_damage_percent)",
         cfg.panelDefenseBase, cfg.panelDefenseLevelCoeff,
         cfg.panelDefenseEnduranceDiv, cfg.panelHitBase,
+        cfg.panelStrengthHpCoeffX100, cfg.panelWisdomMpCoeffX100,
         cfg.primaryAttackCoeffTianjiPercent,
         cfg.primaryAttackCoeffHuanjianPercent,
         cfg.primaryAttackCoeffGuidaoPercent, cfg.softArmorK,

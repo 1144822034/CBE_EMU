@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { writeHotManifest } from "./scripts/write-hot-manifest.mjs";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(rootDir, "..");
@@ -195,8 +196,21 @@ function jhOnlineDataPlugin(): Plugin {
   };
 }
 
+/** Android hot-update index. Must run after Vite has written dist (including public/). */
+function hotManifestPlugin(): Plugin {
+  return {
+    name: "jh-hot-manifest",
+    apply: "build",
+    async closeBundle() {
+      const dist = path.join(rootDir, "dist");
+      const count = await writeHotManifest(dist);
+      console.log(`[hot-manifest] ${count} files → dist/hot-manifest.json`);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [jhOnlineDataPlugin()],
+  plugins: [jhOnlineDataPlugin(), hotManifestPlugin()],
   // Relative base so Capacitor/file hosts resolve assets correctly.
   base: "./",
   build: {

@@ -145,6 +145,9 @@ static u32 g_vmNetMockFollowupResponseEventType = 7;
  * The values describe the subtype-5 right-side roster in server wire order. */
 static u8 g_vm_net_mock_team_battle_party_count_current = 0;
 static u8 g_vm_net_mock_team_battle_actor_slot_current = 0;
+/* Seat whose HP currently lives in g_mockBattleRoleHp* (team damage/revive).
+ * 0xff = solo / unset — gem revive uses the account-scoped Used flag. */
+static u8 g_vm_net_mock_battle_damage_member_index = 0xff;
 /* The active team-battle operation snapshots all three party HP rows before a
  * skill is evaluated.  Friendly group skills update this authoritative copy;
  * finish_operation then commits it atomically to the shared team state. */
@@ -620,6 +623,8 @@ static u32 vm_net_mock_battle_negative_delta_u32(u32 value)
     return (u32)(0u - value);
 }
 
+static void vm_net_mock_battle_try_gem_after_player_hit(u32 actualDamage);
+
 static u32 vm_net_mock_battle_apply_damage_to_role(u32 damage)
 {
     u32 actualDamage = damage;
@@ -632,6 +637,7 @@ static u32 vm_net_mock_battle_apply_damage_to_role(u32 damage)
     if (actualDamage > g_mockBattleRoleHpCurrent)
         actualDamage = g_mockBattleRoleHpCurrent;
     g_mockBattleRoleHpCurrent -= actualDamage;
+    vm_net_mock_battle_try_gem_after_player_hit(actualDamage);
     return actualDamage;
 }
 
@@ -3102,6 +3108,68 @@ static bool vm_net_mock_utf8_has_cjk(const char *utf8)
     return false;
 }
 
+/* Non-ASCII outside Han and the punctuation blocks CBE labels actually use. */
+static bool vm_net_mock_utf8_cp_is_foreign_script(u32 cp)
+{
+    if (cp < 0x80u)
+        return false;
+    if (cp >= 0x4e00u && cp <= 0x9fffu)
+        return false;
+    if (cp >= 0x3400u && cp <= 0x4dbfu)
+        return false;
+    if (cp >= 0x3000u && cp <= 0x303fu)
+        return false;
+    if (cp >= 0x2000u && cp <= 0x206fu)
+        return false;
+    if (cp >= 0xff00u && cp <= 0xffefu)
+        return false;
+    if (cp >= 0xfe30u && cp <= 0xfe4fu)
+        return false;
+    return true;
+}
+
+static bool vm_net_mock_utf8_has_foreign_script(const char *utf8)
+{
+    const unsigned char *p = (const unsigned char *)utf8;
+
+    if (utf8 == NULL)
+        return false;
+    while (*p)
+    {
+        u32 cp;
+
+        if (*p < 0x80)
+        {
+            ++p;
+            continue;
+        }
+        if ((*p & 0xe0) == 0xc0 && (p[1] & 0xc0) == 0x80)
+        {
+            cp = ((u32)(p[0] & 0x1f) << 6) | (u32)(p[1] & 0x3f);
+            p += 2;
+        }
+        else if ((*p & 0xf0) == 0xe0 && (p[1] & 0xc0) == 0x80 &&
+                 (p[2] & 0xc0) == 0x80)
+        {
+            cp = ((u32)(p[0] & 0x0f) << 12) | ((u32)(p[1] & 0x3f) << 6) |
+                 (u32)(p[2] & 0x3f);
+            p += 3;
+        }
+        else if ((*p & 0xf8) == 0xf0 && (p[1] & 0xc0) == 0x80 &&
+                 (p[2] & 0xc0) == 0x80 && (p[3] & 0xc0) == 0x80)
+        {
+            cp = ((u32)(p[0] & 0x07) << 18) | ((u32)(p[1] & 0x3f) << 12) |
+                 ((u32)(p[2] & 0x3f) << 6) | (u32)(p[3] & 0x3f);
+            p += 4;
+        }
+        else
+            return false;
+        if (vm_net_mock_utf8_cp_is_foreign_script(cp))
+            return true;
+    }
+    return false;
+}
+
 static void vm_net_mock_gbk_label_to_utf8(const char *gbk, char *out, size_t outCap)
 {
     bool hasHighByte = false;
@@ -3140,6 +3208,8 @@ static void vm_net_mock_gbk_label_to_utf8(const char *gbk, char *out, size_t out
      * U+0329/U+027D; admin then shows 07⌜_02 and /api/npc-scenes poisons the
      * Pixi quest tracker (only「南」visible). Match PixiJS decodeGbk:
      * prefer GBK when it yields Han and the UTF-8 view does not.
+     * Also prefer GBK when the UTF-8 view has Han plus a foreign script:
+     * 飓风布靴 GBK EC AB B7 E7 B2 BC D1 A5 is well-formed UTF-8 쫷粼ѥ.
      */
     memset(fromGbk, 0, sizeof(fromGbk));
     gbk_to_utf8((u8 *)gbk, (u8 *)fromGbk, sizeof(fromGbk));
@@ -3154,6 +3224,11 @@ static void vm_net_mock_gbk_label_to_utf8(const char *gbk, char *out, size_t out
     }
     if (utf8HasCjk)
     {
+        if (gbkHasCjk && vm_net_mock_utf8_has_foreign_script(gbk))
+        {
+            snprintf(out, outCap, "%s", fromGbk);
+            return;
+        }
         snprintf(out, outCap, "%s", gbk);
         return;
     }
@@ -5200,6 +5275,10 @@ typedef struct
     /* Per-equipment instance id; disambiguates same item_id+level on restore. */
     u32 enhanceInstanceId;
     vm_net_mock_enhance_wash_state enhanceWash;
+    /* Pixi gem sockets on this equip instance; 0 = empty. */
+    u8 gemReflectLevel;
+    u8 gemComboLevel;
+    u8 gemReviveLevel;
 } vm_net_mock_backpack_item_state;
 
 typedef struct
@@ -5272,6 +5351,10 @@ typedef struct
     u16 equippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     u32 equippedEnhanceInstanceIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_enhance_wash_state equippedEnhanceWash[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    /* Parallel gem sockets for worn gear (0 = empty). */
+    u8 equippedGemReflect[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    u8 equippedGemCombo[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    u8 equippedGemRevive[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
     /* Ephemeral wash replace confirm (29/9 → 29/14); not MySQL-backed. */
     vm_net_mock_enhance_wash_pending enhanceWashPending;
@@ -5642,6 +5725,10 @@ typedef struct
     u32 dodge;
     u32 crit;
     u32 resist;
+    /* Pixi gem panel percents (sum of worn sockets; durability 0 excluded). */
+    u32 reflectPct;
+    u32 comboPct;
+    u32 revivePct;
     vm_net_mock_equipment_bonus equipment;
 } vm_net_mock_player_stats;
 
@@ -5736,6 +5823,10 @@ static bool vm_net_mock_role_battle_insight_resume_on_login(
 static bool vm_net_mock_role_gold_scroll_pause_on_logout(const char *accountId,
                                                           u32 roleId);
 static bool vm_net_mock_role_gold_scroll_resume_on_login(
+    vm_net_mock_role_state *role);
+static bool vm_net_mock_role_combat_pill_pause_on_logout(const char *accountId,
+                                                          u32 roleId);
+static bool vm_net_mock_role_combat_pill_resume_on_login(
     vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     const vm_net_mock_role_state *role);

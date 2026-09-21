@@ -284,7 +284,7 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<option value=\"0\"%s>关闭</option></select></div>"
         "<div><label>是否允许回血</label><select name=\"allow_heal\">"
         "<option value=\"0\"%s>禁止</option>"
-        "<option value=\"1\"%s>允许(回血/复活技)</option></select></div>"
+        "<option value=\"1\"%s>允许(每方每场各一次)</option></select></div>"
         "<div><label>是否允许闪躲</label><select name=\"allow_dodge\">"
         "<option value=\"1\"%s>允许</option>"
         "<option value=\"0\"%s>禁止(物理必中)</option></select></div>"
@@ -298,7 +298,8 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "默认周一70/周二50-69/周三10-49/周四70/周五50-69/周六日大乱斗；"
         "进场 20:20–20:29，比赛 20:30–21:00。"
         "战斗规则默认：伤害加深开、禁回血、允许闪躲、神力丸不生效；"
-        "增益/封魔/战斗物品仍固定禁用。"
+        "开启回血后每方每场可各用一次回血/复活、增益、封魔、驱散；"
+        "药品和壶仍固定禁用。"
         "</p></section>",
         cfg ? cfg->roundSeconds : 300,
         cfg ? cfg->battleTimeoutSeconds : 240,

@@ -2924,32 +2924,50 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
              * direct capacity update (+4 on manager +0x26). That success
              * branch ignores seq and does not route through the normal
              * backpack add/sync path.
-             * Cap / count failures must use result=3 (bag UI), not result=2
+             * Cap / zero-room failures must use result=3 (bag UI), not result=2
              * (酷宝不足充值提示).
+             * count>1 is allowed: apply min(requested, remaining expand slots)
+             * and charge only the applied units (same unit price × N).
              */
-            if (count <= 1)
+            u32 want = count ? (u32)count : 1u;
+            u32 usable =
+                vm_net_mock_role_backpack_expand_usable_count(role, want);
+
+            if (usable == 0)
             {
-                directExpandApplied = vm_net_mock_role_expand_backpack_capacity(role, 1);
-                if (directExpandApplied != 0)
-                {
-                    role->wcoin = wcoinBefore - cost;
-                    wcoinAfter = role->wcoin;
-                    g_netMockShop17ListPending = 0;
-                    g_netMockBackpackPreferRoleListAfterShopBuy = 0;
-                    g_netMockBackpackGridSeededRoleId = 0;
-                    capacityAfter = role->backpackCapacity;
-                    vm_net_mock_role_mark_inventory_dirty("shop-buy14-expand");
-                    result = 1;
-                }
-                else
-                {
-                    result = vm_net_mock_shop_buy14_backpack_fail_result(type);
-                }
+                result = vm_net_mock_shop_buy14_backpack_fail_result(type);
             }
             else
             {
-                directExpandRejectedCount = true;
-                result = vm_net_mock_shop_buy14_backpack_fail_result(type);
+                if (unitPrice != 0 && usable > 0xffffffffu / unitPrice)
+                    cost = 0xffffffffu;
+                else
+                    cost = unitPrice * usable;
+                if (wcoinBefore < cost)
+                {
+                    insufficientFunds = true;
+                    result = vm_net_mock_shop_buy14_insufficient_funds_result(type);
+                }
+                else
+                {
+                    directExpandApplied =
+                        vm_net_mock_role_expand_backpack_capacity(role, usable);
+                    if (directExpandApplied != 0)
+                    {
+                        role->wcoin = wcoinBefore - cost;
+                        wcoinAfter = role->wcoin;
+                        g_netMockShop17ListPending = 0;
+                        g_netMockBackpackPreferRoleListAfterShopBuy = 0;
+                        g_netMockBackpackGridSeededRoleId = 0;
+                        capacityAfter = role->backpackCapacity;
+                        vm_net_mock_role_mark_inventory_dirty("shop-buy14-expand");
+                        result = 1;
+                    }
+                    else
+                    {
+                        result = vm_net_mock_shop_buy14_backpack_fail_result(type);
+                    }
+                }
             }
         }
         else if (directGoldYuanbao)
@@ -4938,11 +4956,14 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
 
         (void)vm_net_mock_role_offline_practise_settle_on_login(
             role, &settleMinutes, &settleExp);
-        /* Exp-card / battle-insight duration is frozen at disconnect; resume
-         * wall-clock end before any bonus reads for this role. */
+        /* Exp-card / battle-insight / gold-scroll / combat-pill duration is
+         * frozen at disconnect; resume wall-clock end before any bonus reads. */
         (void)vm_net_mock_role_exp_card_resume_on_login(role);
         (void)vm_net_mock_role_battle_insight_resume_on_login(role);
         (void)vm_net_mock_role_gold_scroll_resume_on_login(role);
+        (void)vm_net_mock_role_combat_pill_resume_on_login(role);
+        /* Dream HUD TTL: freeze offline; resume leftover and keep 29* if any. */
+        vm_net_mock_dream_hud_ttl_resume_on_login(role);
         /* 比武未结束且本场已进场：选角后立刻写回擂台场景，避免重登落原图仍被匹配。 */
         vm_mock_arena_restore_venue_scene_if_needed(role);
         /*

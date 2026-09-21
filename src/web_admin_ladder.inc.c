@@ -75,7 +75,7 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "a.btn-cancel{margin-left:10px;color:#667085;font-size:13px}"
         "</style></head><body><h1>天梯挑战</h1>"
         "<p>每日挑战（次数与层数进度均按自然日重置）；对手为天机/幻剑/鬼道三人。"
-        "层数越高属性与伤害越高；每N层发里程碑奖励（并系统提示）。"
+        "层数越高属性与伤害越高；通关后台配置的层数时发放该行里程碑奖励（并系统提示）。"
         "每日每个10倍数层（10/20/30…）首位通关者会世界播报。</p>");
     vm_mock_admin_append_tabs(&page, "ladder");
 
@@ -124,7 +124,7 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
 
     vm_mock_admin_text_appendf(
         &page,
-        "<section class=\"card\"><h2>里程碑奖励（每N层，N=里程碑值）</h2>"
+        "<section class=\"card\"><h2>里程碑奖励（通关该层发放，不叠加其它行）</h2>"
         "<table><tr><th>层数</th><th>经验</th><th>金钱</th><th>物品</th><th>数量</th>"
         "<th></th></tr>");
     for (i = 0; i < rewardCount; ++i)
@@ -145,7 +145,7 @@ static void vm_mock_admin_render_ladder_page(char *response, size_t responseCap,
         "<form method=\"post\" action=\"/action\" style=\"margin-top:12px\" id=\"ladder-reward-form\">"
         "<input type=\"hidden\" name=\"action\" value=\"save-ladder-reward\">"
         "<div class=\"grid\">"
-        "<div><label>里程碑层数(如10)</label>");
+        "<div><label>层数(如10，仅该层发放)</label>");
     if (editReward != NULL)
     {
         vm_mock_admin_text_appendf(

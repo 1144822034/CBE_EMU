@@ -55,6 +55,7 @@ typedef struct
     u32 roleId;
     u16 floor;
     u8 armed;
+    u32 dayYmd;
     u32 enemyIds[VM_MOCK_LADDER_JOB_COUNT];
     u32 hp[VM_MOCK_LADDER_JOB_COUNT];
     u32 mp[VM_MOCK_LADDER_JOB_COUNT];
@@ -62,6 +63,10 @@ typedef struct
 
 static vm_mock_ladder_battle_slot
     g_vm_mock_ladder_battles[VM_MOCK_LADDER_ACTIVE_MAX];
+
+/* Set when 4/7 already folded this floor's milestone, so battle-end does not pay twice. */
+static u32 g_vm_mock_ladder_ms_applied_role = 0;
+static u16 g_vm_mock_ladder_ms_applied_floor = 0;
 
 static vm_mock_ladder_battle_slot *vm_mock_ladder_battle_find(u32 roleId)
 {
@@ -636,6 +641,7 @@ static u32 vm_net_mock_build_ladder_start_response(u8 *out, u32 outCap)
         best = vm_mock_ladder_role_best_floor(role);
         floor = (u16)(best + 1u);
         slot->floor = floor;
+        slot->dayYmd = vm_mock_ladder_day_ymd();
         slot->enemyIds[0] = g_vm_mock_ladder_config.enemyIdTianji;
         slot->enemyIds[1] = g_vm_mock_ladder_config.enemyIdHuanjian;
         slot->enemyIds[2] = g_vm_mock_ladder_config.enemyIdGuidao;
@@ -646,6 +652,9 @@ static u32 vm_net_mock_build_ladder_start_response(u8 *out, u32 outCap)
             slot->mp[i] = mp;
         }
         slot->armed = 1;
+        /* New attempt must not inherit a previous floor's "already paid" mark. */
+        g_vm_mock_ladder_ms_applied_role = 0;
+        g_vm_mock_ladder_ms_applied_floor = 0;
         return vm_net_mock_build_ladder_battle_response(out, outCap, slot);
     }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_LADDER_WT_KIND,
@@ -702,30 +711,51 @@ u32 vm_mock_ladder_damage_scale_percent(void)
 }
 
 static bool vm_mock_ladder_persist_best_floor(vm_net_mock_role_state *role,
-                                              u16 floor)
+                                              u16 floor, u32 armedDayYmd)
 {
     char accountHex[160];
     char query[640];
-    u32 dayYmd = vm_mock_ladder_day_ymd();
+    u32 today = vm_mock_ladder_day_ymd();
     bool okDaily = false;
     bool okProgress = false;
 
-    if (role == NULL || floor == 0 || dayYmd == 0 ||
+    if (role == NULL || floor == 0 || today == 0 ||
         !vm_mock_ladder_account_hex(accountHex, sizeof(accountHex)))
         return false;
+    if (armedDayYmd == 0)
+        armedDayYmd = today;
     /*
-     * UPSERT: UPDATE-only used to silently no-op if the daily row vanished
-     * (day rollover mid-fight / consume failed to insert). Progress table is
-     * lifetime mirror for ops; climb authority for nextFloor stays daily.
+     * Climb authority is the calendar day the attempt was consumed.  A fight
+     * still running at midnight must not INSERT today's row with yesterday's
+     * floor — that is what left 今日最高层 unreset.
      */
-    snprintf(query, sizeof(query),
-             "INSERT INTO server_ladder_daily "
-             "(account_id,role_id,day_ymd,attempt_count,best_floor) VALUES "
-             "(UNHEX('%s'),%u,%u,0,%u) "
-             "ON DUPLICATE KEY UPDATE "
-             "best_floor=GREATEST(best_floor,VALUES(best_floor))",
-             accountHex, role->roleId, dayYmd, (u32)floor);
-    okDaily = vm_mysql_exec(query);
+    if (armedDayYmd != today)
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE server_ladder_daily SET "
+                 "best_floor=GREATEST(best_floor,%u) "
+                 "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u",
+                 (u32)floor, accountHex, role->roleId, armedDayYmd);
+        okDaily = vm_mysql_exec(query);
+        printf("[info][mock-service] ladder_best_floor_rollover_skip role=%u "
+               "floor=%u armed_day=%u today=%u daily_update=%u\n",
+               role->roleId, (u32)floor, armedDayYmd, today, okDaily ? 1u : 0u);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_ladder_daily "
+                 "(account_id,role_id,day_ymd,attempt_count,best_floor) VALUES "
+                 "(UNHEX('%s'),%u,%u,0,%u) "
+                 "ON DUPLICATE KEY UPDATE "
+                 "best_floor=GREATEST(best_floor,VALUES(best_floor))",
+                 accountHex, role->roleId, today, (u32)floor);
+        okDaily = vm_mysql_exec(query);
+        if (!okDaily)
+            printf("[warn][mock-service] ladder_best_floor_daily_fail role=%u "
+                   "floor=%u\n",
+                   role->roleId, (u32)floor);
+    }
     snprintf(query, sizeof(query),
              "INSERT INTO server_ladder_progress "
              "(account_id,role_id,best_floor) VALUES "
@@ -734,10 +764,6 @@ static bool vm_mock_ladder_persist_best_floor(vm_net_mock_role_state *role,
              "best_floor=GREATEST(best_floor,VALUES(best_floor))",
              accountHex, role->roleId, (u32)floor);
     okProgress = vm_mysql_exec(query);
-    if (!okDaily)
-        printf("[warn][mock-service] ladder_best_floor_daily_fail role=%u "
-               "floor=%u\n",
-               role->roleId, (u32)floor);
     return okDaily || okProgress;
 }
 
@@ -907,18 +933,93 @@ enqueue:
         printf("[info][mock-service] ladder_milestone_tip tip=%s\n", tip);
 }
 
+/*
+ * One admin row = one floor.  floor%N used to stack every divisor (configured
+ * 10 and 20 both paid on floor 20) and also paid unconfigured multiples.
+ */
+static const vm_mock_ladder_reward *vm_mock_ladder_reward_exact(u16 floor)
+{
+    u32 i;
+
+    if (floor == 0)
+        return NULL;
+    vm_mock_ladder_load_config(false);
+    for (i = 0; i < g_vm_mock_ladder_reward_count; ++i)
+    {
+        if (g_vm_mock_ladder_rewards[i].floorMilestone == floor)
+            return &g_vm_mock_ladder_rewards[i];
+    }
+    return NULL;
+}
+
+static bool vm_mock_ladder_copy_active_milestone(u32 *expOut, u32 *moneyOut,
+                                                 u32 *itemIdOut,
+                                                 u32 *itemCountOut)
+{
+    vm_mock_ladder_battle_slot *slot;
+    const vm_mock_ladder_reward *rw;
+
+    if (expOut)
+        *expOut = 0;
+    if (moneyOut)
+        *moneyOut = 0;
+    if (itemIdOut)
+        *itemIdOut = 0;
+    if (itemCountOut)
+        *itemCountOut = 0;
+    slot = vm_mock_ladder_battle_active_slot();
+    if (slot == NULL || !slot->armed)
+        return false;
+    rw = vm_mock_ladder_reward_exact(slot->floor);
+    if (rw == NULL)
+        return false;
+    if (rw->rewardExp == 0 && rw->rewardMoney == 0 &&
+        (rw->rewardItemId == 0 || rw->rewardItemCount == 0))
+        return false;
+    if (expOut)
+        *expOut = rw->rewardExp;
+    if (moneyOut)
+        *moneyOut = rw->rewardMoney;
+    if (itemIdOut)
+        *itemIdOut = rw->rewardItemId;
+    if (itemCountOut)
+        *itemCountOut = rw->rewardItemCount;
+    return true;
+}
+
+static void vm_mock_ladder_note_milestone_settled(void)
+{
+    vm_mock_ladder_battle_slot *slot = vm_mock_ladder_battle_active_slot();
+
+    if (slot == NULL || !slot->armed)
+        return;
+    g_vm_mock_ladder_ms_applied_role = slot->roleId;
+    g_vm_mock_ladder_ms_applied_floor = slot->floor;
+}
+
+static bool vm_mock_ladder_milestone_already_settled(u32 roleId, u16 floor)
+{
+    return roleId != 0 && floor != 0 &&
+           g_vm_mock_ladder_ms_applied_role == roleId &&
+           g_vm_mock_ladder_ms_applied_floor == floor;
+}
+
 void vm_mock_ladder_on_battle_end(bool victory)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_mock_ladder_battle_slot *slot = NULL;
     u16 floor = 0;
     u16 prevBest = 0;
-    u32 i;
+    u32 armedDay = 0;
+    u32 today = 0;
+    bool sameDay = false;
     u32 grantedExp = 0;
     u32 grantedMoney = 0;
     u32 grantedItemId = 0;
     u32 grantedItemCount = 0;
     const char *playerName = NULL;
+    const vm_mock_ladder_reward *rw = NULL;
+    bool milestoneAlreadyPaid = false;
 
     /*
      * Only the role that armed the ladder may clear/settle.  Other clients'
@@ -930,6 +1031,7 @@ void vm_mock_ladder_on_battle_end(bool victory)
     if (slot == NULL || !slot->armed)
         return;
     floor = slot->floor;
+    armedDay = slot->dayYmd;
     slot->armed = 0;
     if (!victory)
     {
@@ -938,55 +1040,74 @@ void vm_mock_ladder_on_battle_end(bool victory)
                role->roleId, (u32)floor);
         return;
     }
-    prevBest = vm_mock_ladder_role_best_floor(role);
-    (void)vm_mock_ladder_persist_best_floor(role, floor);
+    today = vm_mock_ladder_day_ymd();
+    sameDay = armedDay == 0 || armedDay == today;
+    prevBest = sameDay ? vm_mock_ladder_role_best_floor(role) : 0;
+    (void)vm_mock_ladder_persist_best_floor(role, floor, armedDay);
     vm_mock_activities_on_ladder_victory(role);
     playerName = vm_mock_ladder_player_name_gbk(role);
-    if (floor > prevBest && (floor % 10u) == 0 &&
+    if (sameDay && floor > prevBest && (floor % 10u) == 0 &&
         vm_mock_ladder_claim_daily_ten_lead(floor, role->roleId))
         vm_mock_ladder_announce_daily_ten_lead(floor, playerName);
-    for (i = 0; i < g_vm_mock_ladder_reward_count; ++i)
+    rw = vm_mock_ladder_reward_exact(floor);
+    milestoneAlreadyPaid =
+        vm_mock_ladder_milestone_already_settled(role->roleId, floor);
+    if (rw != NULL && !milestoneAlreadyPaid)
     {
-        const vm_mock_ladder_reward *rw = &g_vm_mock_ladder_rewards[i];
         u16 itemSeq = 0;
-        if (rw->floorMilestone == 0 || floor < rw->floorMilestone ||
-            (floor % rw->floorMilestone) != 0)
-            continue;
+
         if (rw->rewardExp)
         {
             (void)vm_net_mock_role_add_exp(role, rw->rewardExp);
-            grantedExp = vm_net_mock_add_capped_u32(grantedExp, rw->rewardExp);
+            grantedExp = rw->rewardExp;
         }
         if (rw->rewardMoney)
         {
             role->money = vm_net_mock_add_capped_u32(role->money, rw->rewardMoney);
-            grantedMoney =
-                vm_net_mock_add_capped_u32(grantedMoney, rw->rewardMoney);
+            grantedMoney = rw->rewardMoney;
             vm_net_mock_role_mark_inventory_dirty("ladder-milestone-money");
         }
         if (rw->rewardItemId && rw->rewardItemCount)
         {
-            (void)vm_net_mock_role_add_backpack_item_to_role(
-                role, rw->rewardItemId, rw->rewardItemCount, 0, &itemSeq,
-                "ladder-milestone-item", NULL, 0);
-            /* Tip lists first item id; later different ids still granted. */
-            if (grantedItemId == 0)
+            if (vm_net_mock_role_add_backpack_item_to_role(
+                    role, rw->rewardItemId, rw->rewardItemCount, 0, &itemSeq,
+                    "ladder-milestone-item", NULL, 0))
+            {
                 grantedItemId = rw->rewardItemId;
-            if (grantedItemId == rw->rewardItemId)
-                grantedItemCount = vm_net_mock_add_capped_u32(
-                    grantedItemCount, rw->rewardItemCount);
+                grantedItemCount = rw->rewardItemCount;
+            }
+            else
+            {
+                printf("[warn][mock-service] ladder_milestone_item_fail "
+                       "role=%u floor=%u item=%u x%u\n",
+                       role->roleId, (u32)floor, rw->rewardItemId,
+                       rw->rewardItemCount);
+            }
         }
     }
+    else if (rw != NULL && milestoneAlreadyPaid)
+    {
+        /* 4/7 already folded this row into the settle panel / bag refresh. */
+        grantedExp = rw->rewardExp;
+        grantedMoney = rw->rewardMoney;
+        if (rw->rewardItemId && rw->rewardItemCount)
+        {
+            grantedItemId = rw->rewardItemId;
+            grantedItemCount = rw->rewardItemCount;
+        }
+    }
+    g_vm_mock_ladder_ms_applied_role = 0;
+    g_vm_mock_ladder_ms_applied_floor = 0;
     if (grantedExp || grantedMoney ||
         (grantedItemId && grantedItemCount))
         vm_mock_ladder_notify_milestone_tip(grantedExp, grantedMoney,
                                             grantedItemId, grantedItemCount);
     vm_net_mock_role_db_save("ladder-victory");
     printf("[info][mock-service] ladder_victory role=%u floor=%u best=%u "
-           "milestone_exp=%u money=%u item=%u x%u\n",
+           "milestone_exp=%u money=%u item=%u x%u paid_in_settle=%u\n",
            role->roleId, (u32)floor,
            (u32)vm_mock_ladder_role_best_floor(role), grantedExp, grantedMoney,
-           grantedItemId, grantedItemCount);
+           grantedItemId, grantedItemCount, milestoneAlreadyPaid ? 1u : 0u);
 }
 
 bool vm_mock_ladder_admin_save_config(

@@ -21,6 +21,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.SslErrorHandler;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 
 import androidx.core.app.ActivityCompat;
@@ -91,9 +92,19 @@ public class MainActivity extends BridgeActivity {
         // Defer settings intents: some Android 8 OEMs crash if started during onCreate.
         mainHandler.postDelayed(this::maybeRequestPostNotifications, 800L);
         mainHandler.postDelayed(this::maybeRequestIgnoreBatteryOptimizations, 1600L);
-        // Bridge WebView exists after super.onCreate — install SSL bypass for
-        // entertainment hosts with expired certs (api.qemao.com 抖音源).
+        // Re-install in case a later bridge reset replaced the client from load().
         mainHandler.post(this::installEntertainmentSslBypass);
+    }
+
+    /**
+     * Bridge.load() already called loadUrl. Swap the client and pause that load
+     * before the looper runs it, so hot-update files win the first real navigation.
+     */
+    @Override
+    protected void load() {
+        super.load();
+        installEntertainmentSslBypass();
+        DistHotUpdate.start(this);
     }
 
     @Override
@@ -173,6 +184,28 @@ public class MainActivity extends BridgeActivity {
                             }
                             handler.cancel();
                         }
+
+                        @Override
+                        public android.webkit.WebResourceResponse shouldInterceptRequest(
+                                WebView view, WebResourceRequest request) {
+                            try {
+                                if (request != null && request.getUrl() != null) {
+                                    EntertainmentHttpPlugin.noteMediaUrl(request.getUrl().toString());
+                                }
+                            } catch (Throwable ignored) {
+                                /* ignore */
+                            }
+                            android.webkit.WebResourceResponse hot =
+                                    DistHotUpdate.intercept(getBridge(), request);
+                            if (hot != null) return hot;
+                            return super.shouldInterceptRequest(view, request);
+                        }
+
+                        @Override
+                        public void onPageFinished(WebView view, String url) {
+                            super.onPageFinished(view, url);
+                            DistHotUpdate.onPageFinished(url);
+                        }
                     });
         } catch (Throwable t) {
             Log.w(TAG, "installEntertainmentSslBypass failed", t);
@@ -217,6 +250,7 @@ public class MainActivity extends BridgeActivity {
         if (sInstance != null && sInstance.get() == this) {
             sInstance.clear();
         }
+        DistHotUpdate.onHostDestroy();
         super.onDestroy();
     }
 
@@ -263,6 +297,7 @@ public class MainActivity extends BridgeActivity {
             if (cache != null) deleteRecursive(cache);
             File codeCache = getCodeCacheDir();
             if (codeCache != null) deleteRecursive(codeCache);
+            DistHotUpdate.wipe(this);
         } catch (Throwable t) {
             Log.w(TAG, "webview wipe failed", t);
         }

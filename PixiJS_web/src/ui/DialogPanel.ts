@@ -1,5 +1,13 @@
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, makePixelText, paintCbePanel } from "./constants";
+import {
+  CBE,
+  LCD_HEIGHT,
+  LCD_WIDTH,
+  SOFTKEY_H,
+  WORLD_BOTTOM_H,
+  makePixelText,
+  paintCbePanel,
+} from "./constants";
 import { BitmapLabel, UI_FONT_SIZE, wrapChars } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -31,6 +39,11 @@ export class DialogPanel extends Container {
   onClose: (() => void) | null = null;
   /** Fired when medicine qty confirm is cancelled (return to shop list). */
   onMedicineBuyCancel: (() => void) | null = null;
+  /**
+   * Softkey 返回 / cancel before hide+onClose.
+   * Return true if handled (e.g. warehouse list → warehouse root).
+   */
+  onCancelRequest: (() => boolean) | null = null;
 
   constructor() {
     super();
@@ -66,6 +79,11 @@ export class DialogPanel extends Container {
     this.eventMode = "none";
     for (const t of this.labels) t.destroy();
     this.labels = [];
+  }
+
+  /** Current NPC dialog (null during medicine qty confirm). */
+  getDialog(): NpcDialog | null {
+    return this.dialog;
   }
 
   show(dialog: NpcDialog): void {
@@ -146,6 +164,7 @@ export class DialogPanel extends Container {
       this.onMedicineBuyCancel?.();
       return;
     }
+    if (this.onCancelRequest?.()) return;
     this.hide();
     this.onClose?.();
   }
@@ -169,47 +188,73 @@ export class DialogPanel extends Container {
     }
     if (!this.dialog) return;
 
+    const tall = !!this.dialog.tallList;
+    const pageSize = Math.max(
+      1,
+      this.dialog.optionPageSize ?? OPTION_PAGE_SIZE,
+    );
     const x = 12;
-    const y = 60;
+    // Bottom edge sits just above the hang softkey row (y342).
+    const hangRowTop = LCD_HEIGHT - WORLD_BOTTOM_H;
+    const gap = 8;
+    const hNormal = 220;
+    const y = tall ? 18 : hangRowTop - hNormal - gap;
     const w = LCD_WIDTH - 24;
-    const h = 220;
+    const h = tall
+      ? Math.max(280, hangRowTop - y - gap)
+      : hNormal;
     paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     const opts = this.dialog.options;
-    const pages = Math.max(1, Math.ceil(Math.max(opts.length, 1) / OPTION_PAGE_SIZE));
-    const page = Math.min(
-      pages - 1,
-      Math.floor(this.cursorIndex / OPTION_PAGE_SIZE),
-    );
-    const pageStart = page * OPTION_PAGE_SIZE;
-    const pageOpts = opts.slice(pageStart, pageStart + OPTION_PAGE_SIZE);
+    const pages = Math.max(1, Math.ceil(Math.max(opts.length, 1) / pageSize));
+    const page = Math.min(pages - 1, Math.floor(this.cursorIndex / pageSize));
+    const pageStart = page * pageSize;
+    const pageOpts = opts.slice(pageStart, pageStart + pageSize);
 
     const titleText =
       pages > 1 ? `${this.dialog.title} ${page + 1}/${pages}` : this.dialog.title;
-    this.addDialogTitle(titleText, y + 8);
+    this.addDialogTitle(titleText, y + 6);
 
-    const bodyLines = wrapChars(this.dialog.body).slice(0, 8);
+    const bodyMax = tall ? 2 : 8;
+    const bodyLines = wrapChars(this.dialog.body).slice(0, bodyMax);
     bodyLines.forEach((line, i) => {
       const t = makePixelText(line, 11, CBE.inkBody);
-      t.position.set(x + 10, y + 32 + i * 16);
+      t.position.set(x + 10, y + 28 + i * 15);
       this.addChild(t);
       this.labels.push(t);
     });
 
-    const optTop = y + 36 + Math.max(bodyLines.length, 1) * 16;
+    const navH = pages > 1 ? 24 : 8;
+    const optTop = y + 30 + Math.max(bodyLines.length, 1) * 15;
+    const listBottom = y + h - navH;
+    const rowH = tall
+      ? Math.max(15, Math.floor((listBottom - optTop) / pageSize))
+      : 18;
+
     pageOpts.forEach((opt, i) => {
       const abs = pageStart + i;
       const hi = abs === this.cursorIndex;
+      const ry = optTop + i * rowH;
+      const ty = ry + Math.floor((rowH - 14) / 2);
       if (hi) {
-        this.box.rect(x + 6, optTop + i * 18, w - 12, 16).fill({ color: CBE.select });
+        this.box.rect(x + 6, ry, w - 12, rowH - 1).fill({ color: CBE.select });
       }
-      const t = makePixelText(opt.label || `选项${abs + 1}`, 12, hi ? CBE.ink : CBE.inkMint);
-      t.position.set(x + 12, optTop + 1 + i * 18);
+      const ink = hi ? CBE.ink : (opt.nameColor ?? CBE.inkMint);
+      const t = makePixelText(opt.label || `选项${abs + 1}`, 12, ink);
+      t.position.set(x + 12, ty);
       t.eventMode = "none";
       this.addChild(t);
       this.labels.push(t);
+      if (opt.count != null && opt.count >= 0) {
+        const ct = makePixelText(String(opt.count), 12, ink);
+        ct.anchor.set(1, 0);
+        ct.position.set(x + w - 12, ty);
+        ct.eventMode = "none";
+        this.addChild(ct);
+        this.labels.push(ct);
+      }
       this.rowHits.push(
-        attachRowPointerHit(this, x + 6, optTop + i * 18, w - 12, 16, () => {
+        attachRowPointerHit(this, x + 6, ry, w - 12, rowH - 1, () => {
           this.cursorIndex = abs;
           void this.redraw();
           this.confirm();
@@ -227,21 +272,18 @@ export class DialogPanel extends Container {
         w: w - 16,
         page: page + 1,
         pages,
-        addLabel: (t, lx, ly, c) => {
-          const lab = makePixelText(t, 11, c);
+        addLabel: (text, lx, ly, c) => {
+          const lab = makePixelText(text, 11, c);
           lab.position.set(lx, ly);
           this.addChild(lab);
           this.labels.push(lab);
         },
         onPrev: () => {
-          this.cursorIndex = Math.max(0, pageStart - OPTION_PAGE_SIZE);
+          this.cursorIndex = Math.max(0, pageStart - pageSize);
           void this.redraw();
         },
         onNext: () => {
-          this.cursorIndex = Math.min(
-            opts.length - 1,
-            pageStart + OPTION_PAGE_SIZE,
-          );
+          this.cursorIndex = Math.min(opts.length - 1, pageStart + pageSize);
           void this.redraw();
         },
       });
@@ -252,9 +294,10 @@ export class DialogPanel extends Container {
     const s = this.medicineBuy;
     if (!s) return;
     const x = 12;
-    const y = 60;
-    const w = LCD_WIDTH - 24;
     const h = 220;
+    const hangRowTop = LCD_HEIGHT - WORLD_BOTTOM_H;
+    const y = hangRowTop - h - 8;
+    const w = LCD_WIDTH - 24;
     paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 
     this.addDialogTitle("购买药品", y + 8);

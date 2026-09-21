@@ -12,7 +12,8 @@
 | 掉线 | 若 `expires_unix > now`：`paused_remaining_sec = expires - now`，`expires_unix=0`（离线不计时） |
 | 重登选角 | 若 `paused_remaining_sec > 0`：`expires_unix = now + paused`，`paused=0` |
 | 战斗心得 | 与经验卡相同：掉线冻结（见 battle-insight 文档） |
-| 大力丸等 | 仍按墙钟到期，不改 |
+| 大力丸 / 神力丸 | 与经验卡相同：掉线冻结、同种可叠、异种拒绝、剩余上限 8h（见 `2026-09-20-combat-pill-stack-and-offline-freeze.md`） |
+| 其它未列入 pausable 的时效 | 仍按墙钟到期 |
 
 ## 证据与归属
 

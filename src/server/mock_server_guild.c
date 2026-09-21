@@ -211,6 +211,9 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
     }
     if (!vm_net_mock_scene_name_is_safe(scene))
         return 0;
+    /* Ops: dream 29-star / b_29-star are solo shells — never seed nearby peers. */
+    if (vm_net_mock_scene_is_dream_instance_name(scene))
+        return 0;
 
     {
         vm_mock_service_client_session *observer =
@@ -1076,7 +1079,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
             continue;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
-            !vm_net_mock_seq_put_item_common_extra(
+            !vm_net_mock_seq_put_item_common_extra_plain(
                 out, outCap, &pos, 0,
                 (u8)SDL_min(session->onlineEquippedEnhanceLevels[slot],
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
@@ -1095,7 +1098,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
         if (vm_net_mock_find_equipment_catalog_item(itemId) == NULL ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
-            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0,
+            !vm_net_mock_seq_put_item_common_extra_plain(out, outCap, &pos, 0, 0,
                                                    itemId, NULL))
         {
             return false;
@@ -3326,6 +3329,10 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
             return false;
         if (!vm_net_mock_item_is_tradeable(item->itemId, item->enhanceLevel))
             return false;
+        if (vm_net_mock_gem_sockets_occupied(item->gemReflectLevel,
+                                             item->gemComboLevel,
+                                             item->gemReviveLevel))
+            return false;
         /* 921 未注满不可交易；注满后才可给低级号使用。 */
         if (item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID &&
             !vm_net_mock_cultivation_book_is_tradeable_instance(item))
@@ -3384,7 +3391,7 @@ static bool vm_net_mock_append_trade_offer_object(
             (item->itemId < 1000 &&
              !vm_net_mock_seq_put_string(itemInfo, sizeof(itemInfo),
                                          &itemInfoLen, itemNameGbk)) ||
-            !vm_net_mock_seq_put_item_common_extra(
+            !vm_net_mock_seq_put_item_common_extra_plain(
                 itemInfo, sizeof(itemInfo), &itemInfoLen,
                 vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL
                     ? 0
@@ -3459,7 +3466,7 @@ static bool vm_net_mock_append_trade_terminal_object(
                                          item->itemId) ||
                 !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
                                          item->count) ||
-                !vm_net_mock_seq_put_item_common_extra(
+                !vm_net_mock_seq_put_item_common_extra_plain(
                     itemInfo, sizeof(itemInfo), &itemInfoLen, stackRuntime,
                     (u8)SDL_min(item->enhanceLevel,
                                 VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),

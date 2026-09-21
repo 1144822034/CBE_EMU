@@ -16,7 +16,7 @@ import {
 import { decodeGbk, encodeWireString } from "./gbk";
 import { ensureSceneFile } from "./protocol";
 import { starterSkillIdForJob } from "../resources/skill";
-import { lookupItemSync, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
+import { lookupItemSync, lookupItemByNameSync, qualityColor, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
 export {
   buildTeamInviteRequest,
   buildTeamReplyRequest,
@@ -203,9 +203,20 @@ export function parseMapTeleportConfirm(
   return null;
 }
 
-export function buildBattleOperateRequest(index: number, operate: number): Uint8Array {
+/**
+ * Battle turn: WT 1/4/2 { index, Operate }.
+ * Optional hangup=1: Pixi hangup-alone client cast — server must not write
+ * LastOperate (hangup skill memory is client hangupSkillOperate only;
+ * [自动] keeps its own LastOperate).
+ */
+export function buildBattleOperateRequest(
+  index: number,
+  operate: number,
+  opts?: { hangup?: boolean },
+): Uint8Array {
   const b = new WtBuilder();
-  b.object(1, 4, 2).u32("index", index).u32("Operate", operate);
+  const o = b.object(1, 4, 2).u32("index", index).u32("Operate", operate);
+  if (opts?.hangup) o.u32("hangup", 1);
   return b.finish();
 }
 
@@ -452,15 +463,15 @@ export function isEquipSellDialog(dialog: NpcDialog): boolean {
 /**
  * Client-only dialog actions for equip-sell batch.
  * 293..295: all-sell (guarded vs star-sky 293..295 in main.ts).
- * 296..298: quality sell (avoid star-sky / dream-badge ids).
+ * 320..322: quality sell. Do not reuse 296/297 (crystal-extract confirm).
  */
 export const EquipSellBatchAction = {
   OPEN_CONFIRM: 293,
   CONFIRM: 294,
   CANCEL: 295,
-  OPEN_QUALITY_MENU: 296,
-  OPEN_QUALITY_CONFIRM: 297,
-  CONFIRM_QUALITY: 298,
+  OPEN_QUALITY_MENU: 320,
+  OPEN_QUALITY_CONFIRM: 321,
+  CONFIRM_QUALITY: 322,
 } as const;
 
 /** 品质选项：0白/1绿/2青/3紫/4红。 */
@@ -2903,6 +2914,10 @@ export function parseActionInfoDeltas(
 function childFlagLabel(flag: number): string {
   if (flag === 2) return "暴击";
   if (flag === 3) return "闪躲";
+  if (flag === 4) return "反伤";
+  if (flag === 5) return "连击";
+  if (flag === 6) return "复活";
+  if (flag === 7) return "连击暴击";
   return "";
 }
 
@@ -3086,10 +3101,18 @@ export type NpcDialog = {
     value: number;
     description?: string;
     displayType?: number;
+    /** Pixi: option ink (e.g. equip quality); selected row still uses white. */
+    nameColor?: number;
+    /** Pixi: bag-style right-aligned stack count (warehouse deposit). */
+    count?: number;
   }[];
   /** Soft buttons from dialog blob (usually empty). */
   buttons?: { label: string; type: number }[];
   hidebtn?: number;
+  /** Pixi: override DialogPanel rows/page (warehouse item list = bag 14). */
+  optionPageSize?: number;
+  /** Pixi: taller panel for long warehouse item lists. */
+  tallList?: boolean;
 };
 
 export function parseTaskDetail(packet: WtPacket): string | null {
@@ -3467,6 +3490,8 @@ export type BagItem = {
   bookLevel?: number;
   /** 921 修炼天书：是否已注满. */
   bookFull?: boolean;
+  /** Pixi gem sockets on equip (levels; 0 = empty). */
+  socketGems?: { reflect: number; combo: number; revive: number };
 };
 
 /** 920 空白 / 921 实例共用展示名基名. */
@@ -3478,6 +3503,167 @@ export function formatCultivationBookName(
   const base = (baseName || "修炼天书").trim() || "修炼天书";
   if (!bookLevel || bookLevel <= 0) return base;
   return `${base} Lv${bookLevel}·${bookFull ? "满" : "未满"}`;
+}
+
+/**
+ * Warehouse 26/1 service values — mirror mock_server_core.c.
+ * Pixi rebuilds deposit list from bag (14/page like bag UI); no server change.
+ */
+export const WarehouseService = {
+  OPEN: 0xee000001,
+  RETRIEVE_MENU: 0xee010000,
+  DEPOSIT_MENU: 0xee020000,
+  RETRIEVE_BASE: 0xef000000,
+  DEPOSIT_BASE: 0xf0000000,
+} as const;
+
+/** Same visible rows as SystemPanel bag list. */
+export const WAREHOUSE_LIST_PAGE_SIZE = 14;
+
+const WAREHOUSE_PASS_ITEM_ID = 834;
+const EQUIP_SELL_PASS_ITEM_ID = 839;
+
+export function isWarehouseDepositableItemId(itemId: number): boolean {
+  const id = itemId >>> 0;
+  if (!id || id === WAREHOUSE_PASS_ITEM_ID || id === EQUIP_SELL_PASS_ITEM_ID) {
+    return false;
+  }
+  /* Direct-store mall values — never ordinary bag rows. */
+  if (id === 808 || id === 817 || id === 818 || id === 819) return false;
+  return true;
+}
+
+function warehouseOpcode(value: number): number {
+  return (value >>> 24) & 0xff;
+}
+
+function bagEquipHasWash(it: BagItem): boolean {
+  if (it.kind !== "equip" || !it.enhanceAttrs?.length) return false;
+  return it.enhanceAttrs.some((a) => !!a.washed);
+}
+
+function warehouseBagDisplayName(it: BagItem): string {
+  if (isCultivationBookItem(it.itemId) && (it.bookLevel ?? 0) > 0) {
+    const base = lookupItemSync(it.itemId)?.name ?? "修炼天书";
+    return formatCultivationBookName(base, it.bookLevel, it.bookFull);
+  }
+  return it.name;
+}
+
+/** Bag-list style: name[洗](+enhance). */
+export function formatWarehouseBagLabel(it: BagItem): string {
+  const wash = bagEquipHasWash(it) ? "[洗]" : "";
+  const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
+  return `${warehouseBagDisplayName(it)}${wash}${plus}`;
+}
+
+export function isWarehouseDepositListDialog(dialog: NpcDialog): boolean {
+  if (/请选择要存入的物品|存入成功|背包没有可存入|背包已无可存/.test(dialog.body)) {
+    return true;
+  }
+  return dialog.options.some(
+    (o) => warehouseOpcode(o.value) === (WarehouseService.DEPOSIT_BASE >>> 24),
+  );
+}
+
+export function isWarehouseRetrieveListDialog(dialog: NpcDialog): boolean {
+  if (/请选择要取回的物品|取回成功|仓库为空|仓库已空/.test(dialog.body)) {
+    return true;
+  }
+  return dialog.options.some(
+    (o) => warehouseOpcode(o.value) === (WarehouseService.RETRIEVE_BASE >>> 24),
+  );
+}
+
+export function isWarehouseItemListDialog(dialog: NpcDialog): boolean {
+  return (
+    isWarehouseDepositListDialog(dialog) || isWarehouseRetrieveListDialog(dialog)
+  );
+}
+
+function warehouseNavOptions(
+  dialog: NpcDialog,
+  itemOpcode: number,
+): NpcDialog["options"] {
+  return dialog.options.filter((o) => {
+    const v = o.value >>> 0;
+    if (warehouseOpcode(v) === itemOpcode) return false;
+    /* Drop server 上一页/下一页 — client pages like bag. */
+    if (o.label === "上一页" || o.label === "下一页") return false;
+    return true;
+  });
+}
+
+function augmentWarehouseDepositFromBag(
+  dialog: NpcDialog,
+  bagItems: BagItem[],
+): NpcDialog {
+  const nav = warehouseNavOptions(dialog, WarehouseService.DEPOSIT_BASE >>> 24);
+  const depositable = bagItems.filter((it) =>
+    isWarehouseDepositableItemId(it.itemId),
+  );
+  if (!depositable.length) {
+    return {
+      ...dialog,
+      options: nav.length ? nav : dialog.options,
+      optionPageSize: WAREHOUSE_LIST_PAGE_SIZE,
+      tallList: true,
+    };
+  }
+  const items: NpcDialog["options"] = depositable.map((it) => ({
+    label: formatWarehouseBagLabel(it),
+    action: 1,
+    value: (WarehouseService.DEPOSIT_BASE | (it.seq & 0xffffff)) >>> 0,
+    description: "背包",
+    nameColor: qualityColor(it.quality),
+    count: it.count,
+  }));
+  return {
+    ...dialog,
+    options: [...items, ...nav],
+    optionPageSize: WAREHOUSE_LIST_PAGE_SIZE,
+    tallList: true,
+  };
+}
+
+/** Retrieve keeps server rows + paging; color via DSH name (wash unknown). */
+function augmentWarehouseRetrieveColors(dialog: NpcDialog): NpcDialog {
+  const options = dialog.options.map((o) => {
+    if (warehouseOpcode(o.value) !== (WarehouseService.RETRIEVE_BASE >>> 24)) {
+      return o;
+    }
+    const m =
+      /^取回(.+?)\s+x\d+$/.exec(o.label) ||
+      /^取回(.+)$/.exec(o.label);
+    let raw = (m?.[1] ?? "").trim();
+    raw = raw.replace(/\[洗\]/g, "").replace(/\(\+\d+\)/g, "").trim();
+    const cat = lookupItemByNameSync(raw);
+    if (!cat) return o;
+    return { ...o, nameColor: qualityColor(cat.quality) };
+  });
+  return {
+    ...dialog,
+    options,
+    optionPageSize: WAREHOUSE_LIST_PAGE_SIZE,
+    tallList: true,
+  };
+}
+
+/**
+ * Pixi-only: deposit list = full bag (14/page, quality+[洗]);
+ * retrieve = taller list + catalog quality color.
+ */
+export function augmentWarehouseDialog(
+  dialog: NpcDialog,
+  bagItems: BagItem[],
+): NpcDialog {
+  if (isWarehouseDepositListDialog(dialog)) {
+    return augmentWarehouseDepositFromBag(dialog, bagItems);
+  }
+  if (isWarehouseRetrieveListDialog(dialog)) {
+    return augmentWarehouseRetrieveColors(dialog);
+  }
+  return dialog;
 }
 
 /** Parse 7/38 bookdes produced by mock_cultivation_book_format_des. */
@@ -3499,6 +3685,38 @@ export function parseCultivationBookMetaFromDes(
  */
 export function isReservoirFlaskItemId(itemId: number): boolean {
   return itemId === 802 || itemId === 803;
+}
+
+/** 商城买一把壶写入的储量点数（与 server VM_NET_MOCK_FLASK_UNIT_RESERVOIR 一致）。 */
+export const FLASK_UNIT_RESERVOIR = 50000;
+/** 单行超级储量硬上限（docs/re/2026-08-02-flask-super-reservoir-merge.md）。 */
+export const FLASK_MAX_RESERVOIR = 5_000_000;
+
+/** 背包中同 ID 壶的当前储量合计（多行时求和，与服务端合并语义一致）。 */
+export function flaskReservoirPointsInBag(
+  items: readonly BagItem[],
+  itemId: number,
+): number {
+  if (!isReservoirFlaskItemId(itemId)) return 0;
+  let sum = 0;
+  for (const it of items) {
+    if (it.itemId === itemId && it.count > 0) sum += it.count >>> 0;
+  }
+  return sum;
+}
+
+/**
+ * 按剩余储量可再买几「份」（每份 +FLASK_UNIT_RESERVOIR）。
+ * 已满或不足以再装一整份时返回 0。
+ */
+export function maxFlaskBuyUnitsFromBag(
+  items: readonly BagItem[],
+  itemId: number,
+): number {
+  if (!isReservoirFlaskItemId(itemId)) return 99;
+  const cur = flaskReservoirPointsInBag(items, itemId);
+  if (cur >= FLASK_MAX_RESERVOIR) return 0;
+  return Math.floor((FLASK_MAX_RESERVOIR - cur) / FLASK_UNIT_RESERVOIR);
 }
 
 /** 商城仓库/出售凭证：bag.count = 剩余耐久（打开次数），非堆叠张数。 */
@@ -3592,6 +3810,14 @@ export type CharacterStats = {
   dodge: number;
   crit: number;
   resist: number;
+  /** Pixi gem panel percents. */
+  reflectPct: number;
+  comboPct: number;
+  revivePct: number;
+  /** Admin max gem level (1–16). 0 means the packet omitted it. */
+  maxGemLevel: number;
+  /** Admin gate for 916 → Lv1 gems (29/21). 0 = closed. */
+  crystal16ExchangeEnabled: number;
   baseStrength: number;
   baseAgility: number;
   baseWisdom: number;
@@ -3615,10 +3841,12 @@ export function readItemCommonExtra(r: SeqReader): {
   enhance: number;
   stackHint: number;
   attrs: BagEnhanceAttr[];
+  socketGems?: { reflect: number; combo: number; revive: number };
 } {
   let enhance = 0;
   let stackHint = 1;
   const attrs: BagEnhanceAttr[] = [];
+  let socketGems: { reflect: number; combo: number; revive: number } | undefined;
   try {
     const first = r.i16();
     const second = r.i16();
@@ -3635,10 +3863,25 @@ export function readItemCommonExtra(r: SeqReader): {
       const flag = rawFlag & 0x01;
       attrs.push({ unlock, type, flag, value, ...(washed ? { washed: true } : {}) });
     }
+    // Pixi gem trailer: tagged u8 0x47 + 3 tagged u8 levels
+    // (server seq_put_u8 is 00 01 <value>, not a raw byte).
+    // Next row starts with tagged u32 (00 04), so 00 01 47 cannot be an item id.
+    if (
+      r.remaining() >= 12 &&
+      r.buf[r.pos] === 0x00 &&
+      r.buf[r.pos + 1] === 0x01 &&
+      r.buf[r.pos + 2] === 0x47
+    ) {
+      r.u8();
+      const reflect = r.u8();
+      const combo = r.u8();
+      const revive = r.u8();
+      socketGems = { reflect, combo, revive };
+    }
   } catch {
     /* truncated extra ok */
   }
-  return { enhance, stackHint, attrs };
+  return { enhance, stackHint, attrs, ...(socketGems ? { socketGems } : {}) };
 }
 
 export function enrichBagRow(
@@ -4005,10 +4248,14 @@ export function parseWornEquipmentSnapshot(packet: WtPacket): BagItem[] | null {
         const count = r.u32();
         const extra = readItemCommonExtra(r);
         // type=2 wire count = current durability (mmGame:sub_D04 / item+0x110).
-        worn.push({
+        // Gem trailer is on the same extra; dropping it made the worn panel
+        // paint every socket as 「未镶嵌」 after a successful 29/17.
+        const row = {
           ...enrichBagRow(itemId, seq, count, extra.enhance, extra.attrs),
           durability: count >>> 0,
-        });
+        };
+        if (extra.socketGems) row.socketGems = extra.socketGems;
+        worn.push(row);
       }
     } catch {
       /* truncated */
@@ -4041,9 +4288,9 @@ function parseBagItems17(packet: WtPacket): BagItem[] {
         ? 1
         : Math.max(1, extra.stackHint || 1);
       // 17/1 has no wire seq — leave 0 until 30/21 overlay (do not invent i+1).
-      items.push(
-        enrichBagRow(itemId, 0, qty, isEquip ? extra.enhance : 0, isEquip ? extra.attrs : undefined),
-      );
+      const row = enrichBagRow(itemId, 0, qty, isEquip ? extra.enhance : 0, isEquip ? extra.attrs : undefined);
+      if (isEquip && extra.socketGems) row.socketGems = extra.socketGems;
+      items.push(row);
     } catch {
       // Resync attempt: skip one tagged field and continue next row.
       r.pos = mark;
@@ -4072,7 +4319,9 @@ function parseBagGrid30(packet: WtPacket): BagItem[] {
       const seq = r.i16();
       const count = r.u32();
       const extra = readItemCommonExtra(r);
-      items.push(enrichBagRow(itemId, seq, count, extra.enhance, extra.attrs));
+      const row = enrichBagRow(itemId, seq, count, extra.enhance, extra.attrs);
+      if (extra.socketGems) row.socketGems = extra.socketGems;
+      items.push(row);
     } catch {
       r.pos = mark + 1;
       if (r.pos >= raw.length) break;
@@ -4099,6 +4348,7 @@ function parseItemManager77(packet: WtPacket): { bag: BagItem[]; worn: BagItem[]
         const count = r.u32();
         const extra = readItemCommonExtra(r);
         const row = enrichBagRow(itemId, seq, count, extra.enhance, extra.attrs);
+        if (extra.socketGems) row.socketGems = extra.socketGems;
         if (type === 2) {
           worn.push({ ...row, durability: count >>> 0 });
         } else {
@@ -4216,6 +4466,11 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
     dodge: fieldU32(obj, "dodge"),
     crit: fieldU32(obj, "crit"),
     resist: fieldU32(obj, "resist"),
+    reflectPct: fieldU32(obj, "reflectPct"),
+    comboPct: fieldU32(obj, "comboPct"),
+    revivePct: fieldU32(obj, "revivePct"),
+    maxGemLevel: fieldU32(obj, "maxGemLevel") || 3,
+    crystal16ExchangeEnabled: fieldU32(obj, "crystal16ExchangeEnabled") ? 1 : 0,
     baseStrength: fieldU32(obj, "baseStrength"),
     baseAgility: fieldU32(obj, "baseAgility"),
     baseWisdom: fieldU32(obj, "baseWisdom"),
@@ -4642,4 +4897,140 @@ export function parseSpouseTeleportAck(
     result: fieldU32(obj, "result"),
     tip: fieldStringNamed(obj, "tip"),
   };
+}
+
+
+/** Pixi gem socket item IDs. */
+export const GEM_FRAGMENT_ITEM_ID = 978;
+export const GEM_REFLECT_BASE_ID = 922;
+export const GEM_COMBO_BASE_ID = 942;
+export const GEM_REVIVE_BASE_ID = 962;
+
+export function isGemFragment(itemId: number): boolean {
+  return (itemId | 0) === GEM_FRAGMENT_ITEM_ID;
+}
+
+export function parseGemItem(itemId: number): { type: 1 | 2 | 3; level: number } | null {
+  const id = itemId | 0;
+  if (id >= 922 && id <= 937) return { type: 1, level: id - 922 + 1 };
+  if (id >= 942 && id <= 957) return { type: 2, level: id - 942 + 1 };
+  if (id >= 962 && id <= 977) return { type: 3, level: id - 962 + 1 };
+  return null;
+}
+
+export function canCombineGem(itemId: number, count: number, maxLevel = 3): boolean {
+  const g = parseGemItem(itemId);
+  return !!g && g.level < maxLevel && count >= 3;
+}
+
+/** How many +1 gems one batch of this stack can produce. 0 unless at least 2. */
+export function gemCombineBatchTimes(count: number): number {
+  const n = Math.floor(Math.max(0, count | 0) / 3);
+  return n >= 2 ? n : 0;
+}
+
+export function canBatchCombineGem(itemId: number, count: number, maxLevel = 3): boolean {
+  return canCombineGem(itemId, count, maxLevel) && gemCombineBatchTimes(count) > 0;
+}
+
+export function canCombineGemFragment(itemId: number, count: number): boolean {
+  return isGemFragment(itemId) && count >= 3;
+}
+
+export function canExchangeGemType(itemId: number, count: number): boolean {
+  const g = parseGemItem(itemId);
+  return !!g && g.level === 1 && count >= 2;
+}
+
+export function buildGemEmbedRequest(
+  equipSeq: number,
+  gemSeq: number,
+  worn = false,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 17)
+    .u16("equipseq", equipSeq & 0xffff)
+    .u16("gemseq", gemSeq & 0xffff)
+    .u8("worn", worn ? 1 : 0);
+  return b.finish();
+}
+
+export function buildGemRemoveRequest(
+  equipSeq: number,
+  gemType: number,
+  worn = false,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 18)
+    .u16("equipseq", equipSeq & 0xffff)
+    .u8("gemtype", gemType & 0xff)
+    .u8("worn", worn ? 1 : 0);
+  return b.finish();
+}
+
+export function buildGemCombineRequest(seq: number, times = 1): Uint8Array {
+  const b = new WtBuilder();
+  const obj = b.object(1, 29, 19).u16("seq", seq & 0xffff);
+  const n = times | 0;
+  if (n > 1) obj.u32("times", n >>> 0);
+  return b.finish();
+}
+
+export function buildGemTypeExchangeRequest(seq: number, destType: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 20).u16("seq", seq & 0xffff).u8("desttype", destType & 0xff);
+  return b.finish();
+}
+
+export function buildGemFromCrystal16Request(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 21).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+export function buildGemFragmentCombineRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 22).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+/**
+ * PixiJS-only dream HUD remain — same freeze/resume contract as exp card.
+ * Request 1/29/23 → 29/23 { result, remaining } (ms). Server authority after
+ * offline pause / login resume (account_roles.dream_hud_remaining_ms).
+ */
+export function buildDreamHudRemainQueryRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 23);
+  return b.finish();
+}
+
+/** Parse 29/23 { remaining } — null if packet absent. remaining may be 0. */
+export function parseDreamHudRemainMs(packet: WtPacket): number | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 23);
+  if (!obj) return null;
+  if (!findField(obj, "remaining")) return null;
+  return fieldU32(obj, "remaining") >>> 0;
+}
+
+export function parseDreamHudRemainMsFromBodies(bodies: Uint8Array[]): number | null {
+  for (const body of bodies) {
+    let packet: WtPacket;
+    try {
+      packet = decodeWtPacket(body);
+    } catch {
+      continue;
+    }
+    const ms = parseDreamHudRemainMs(packet);
+    if (ms != null) return ms;
+  }
+  return null;
+}
+
+export function parseGemOpResult(packet: WtPacket, subtype: number): { result: number; message: string } | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === subtype);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result") || 0;
+  const message = fieldStringNamed(obj, "message") || "";
+  return { result, message };
 }

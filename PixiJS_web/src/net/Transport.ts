@@ -10,8 +10,8 @@ import {
 } from "./cbms";
 
 /** Live gateway on this machine's LAN IP (PixiJS web / APK). */
-//export const FIXED_LIVE_GATEWAY = "ws://106.54.59.92:19093";
-export const FIXED_LIVE_GATEWAY = "ws://192.1.1.1:19092";
+export const FIXED_LIVE_GATEWAY = "ws://106.54.59.92:19093";
+//export const FIXED_LIVE_GATEWAY = "ws://192.1.1.1:19092";
 
 export type TransportMode = "live";
 
@@ -75,6 +75,10 @@ export class LiveTransport implements GameTransport {
    * Unsolicited CBMR (gateway idle scene-poll). GameSession applies via handleBodies.
    */
   onPushBodies: ((bodies: Uint8Array[]) => void) | null = null;
+  /** Fired when the live WS drops (server marks role offline / freezes timers). */
+  onConnectionLost: (() => void) | null = null;
+  /** Fired after a successful reconnect (thaw frozen dream HUD). */
+  onConnectionRestored: (() => void) | null = null;
   clientId = ((Math.random() * 0xffffff) >>> 0) || 1;
   constructor(private readonly url = defaultLiveGatewayUrl()) {}
 
@@ -102,7 +106,14 @@ export class LiveTransport implements GameTransport {
         reject(new Error(`gateway failed ${this.url}`));
       };
       ws.onclose = () => {
-        if (this.ws === ws) this.ws = null;
+        if (this.ws === ws) {
+          this.ws = null;
+          try {
+            this.onConnectionLost?.();
+          } catch (e) {
+            console.warn("[live] onConnectionLost", e);
+          }
+        }
         this.rejectWaiters(new Error("socket closed"));
       };
     });
@@ -156,6 +167,11 @@ export class LiveTransport implements GameTransport {
     this.inbox = [];
     this.rejectWaiters(new Error("socket closed"));
     await this.connect();
+    try {
+      this.onConnectionRestored?.();
+    } catch (e) {
+      console.warn("[live] onConnectionRestored", e);
+    }
   }
 
   close(): void {
@@ -170,6 +186,16 @@ export class LiveTransport implements GameTransport {
     this.rejectWaiters(new Error("socket closed"));
     this.inbox = [];
     this.onPushBodies = null;
+    // Fire lost before dropping hooks so intentional logout still freezes
+    // dream HUD leftover (server pauses the same way on mark_offline).
+    const lost = this.onConnectionLost;
+    this.onConnectionLost = null;
+    this.onConnectionRestored = null;
+    try {
+      lost?.();
+    } catch (e) {
+      console.warn("[live] onConnectionLost(close)", e);
+    }
     this.ws?.close();
     this.ws = null;
   }

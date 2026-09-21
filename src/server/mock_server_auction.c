@@ -57,6 +57,8 @@ typedef struct
     u32 minBidStep;
     u8 currencyMask;
     u32 maxActiveListings;
+    /* 1: reject 玄晶 / 任务物品类别 on list. 0: no category gate. */
+    u8 categoryGate;
 } vm_mock_auction_config;
 
 typedef struct
@@ -135,6 +137,7 @@ static void vm_mock_auction_config_set_defaults(vm_mock_auction_config *cfg)
     cfg->minBidStep = 1;
     cfg->currencyMask = 3;
     cfg->maxActiveListings = VM_MOCK_AUCTION_DEFAULT_MAX_ACTIVE;
+    cfg->categoryGate = 0;
 }
 
 static bool vm_mock_auction_ensure_tables(void)
@@ -194,6 +197,9 @@ static bool vm_mock_auction_ensure_tables(void)
         "ALTER TABLE server_auction_claims ADD COLUMN enhance_wash "
         "VARCHAR(96) NOT NULL DEFAULT "
         "'0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0' AFTER enhance_level");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_auction_config ADD COLUMN category_gate "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0");
     (void)vm_mysql_exec(
         "ALTER TABLE server_auction_listings ADD COLUMN item_instance_id "
         "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level");
@@ -261,6 +267,8 @@ static bool vm_mock_auction_config_row(void *contextValue, unsigned int columnCo
     if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
         cfg->maxActiveListings =
             tmp ? tmp : (u32)VM_MOCK_AUCTION_DEFAULT_MAX_ACTIVE;
+    if (values[6] && lengths[6])
+        cfg->categoryGate = (u8)(values[6][0] == '0' ? 0 : 1);
     return true;
 }
 
@@ -280,8 +288,8 @@ static bool vm_mock_auction_load_config(bool force)
         "max_active_listings=2");
     (void)vm_mysql_query(
         "SELECT enabled,fee_percent_base,fee_percent_per_tier,min_bid_step,"
-        "currency_mask,max_active_listings FROM server_auction_config "
-        "WHERE id=1 LIMIT 1",
+        "currency_mask,max_active_listings,category_gate "
+        "FROM server_auction_config WHERE id=1 LIMIT 1",
         vm_mock_auction_config_row, &g_vm_mock_auction_config);
     g_vm_mock_auction_config_loaded = true;
     return true;
@@ -293,18 +301,20 @@ const vm_mock_auction_config *vm_net_mock_auction_config_get(void)
     return &g_vm_mock_auction_config;
 }
 
-bool vm_mock_auction_admin_save_config(u8 enabled)
+bool vm_mock_auction_admin_save_config(u8 enabled, u8 categoryGate)
 {
-    char query[320];
+    char query[512];
 
     if (!vm_mock_auction_ensure_tables())
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_auction_config ("
              "id,enabled,fee_percent_base,fee_percent_per_tier,min_bid_step,"
-             "currency_mask,max_active_listings) VALUES (1,%u,2,2,1,3,2) "
-             "ON DUPLICATE KEY UPDATE enabled=VALUES(enabled)",
-             enabled ? 1u : 0u);
+             "currency_mask,max_active_listings,category_gate) "
+             "VALUES (1,%u,2,2,1,3,2,%u) "
+             "ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),"
+             "category_gate=VALUES(category_gate)",
+             enabled ? 1u : 0u, categoryGate ? 1u : 0u);
     if (!vm_mysql_exec(query))
         return false;
     g_vm_mock_auction_config_loaded = false;
@@ -1178,7 +1188,7 @@ static u32 vm_net_mock_build_auction_browse_response(const u8 *request, u32 requ
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].itemId) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].itemCount) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].enhanceLevel) ||
-            !vm_net_mock_seq_put_item_common_extra(
+            !vm_net_mock_seq_put_item_common_extra_plain(
                 blob, sizeof(blob), &blobLen,
                 (u8)SDL_min(rows[i].itemCount, 255u),
                 (u8)SDL_min(rows[i].enhanceLevel,
@@ -1291,6 +1301,13 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
                                                    6, 0, "no-item");
     itemId = bag->itemId;
     enhance = bag->enhanceLevel;
+    if (!(g_vm_mock_auction_config.categoryGate
+              ? vm_net_mock_item_is_tradeable(itemId, enhance)
+              : vm_net_mock_item_is_auctionable(itemId, enhance)) ||
+        vm_net_mock_gem_sockets_occupied(bag->gemReflectLevel, bag->gemComboLevel,
+                                         bag->gemReviveLevel))
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
+                                                   4, 0, "not-tradeable");
     listInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
         role, bag->enhanceInstanceId, itemId);
     vm_net_mock_enhance_wash_copy(&listWash, &bag->enhanceWash);

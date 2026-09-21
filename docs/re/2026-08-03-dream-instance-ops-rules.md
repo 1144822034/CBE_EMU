@@ -5,8 +5,9 @@
 | 项 | 行为 |
 |----|------|
 | 1 分钟提醒 | TTL 剩余 ≤60s 时系统消息一次：`1分钟后强制离开梦境副本！` |
-| 周围玩家 | `29*` 场景不 append nearby role / moveinfo |
-| 禁组队 | 梦境内每 10s 检测；组队则提示 `梦境副本禁止组队`、拆队并出口；创建/加人亦拦截 |
+| TTL 下线冻结 | 断线把剩余写入 `account_roles.dream_hud_remaining_ms`；重登恢复并保留 `29*`（剩余>0 不迁出）；到 0 再踢。见 `2026-09-20-dream-hud-ttl-offline-freeze.md` |
+| 周围玩家 | `29*` / `b_29*`：`build_scene_role_seeds` 直接返回 0；2/7 附近列表空；Pixi 进本清 peer 且忽略附近绘制 |
+| 禁组队 | 梦境内每 10s 检测；组队则提示 `梦境副本禁止组队`、拆队并出口；创建/加人亦拦截；**使者/NPC 进本传送**在扣次前同样拦截（`memberCount>=2` 不发 30/1、不扣次数/费用） |
 | 地图显示名 | 场景设计页可改：MySQL `server_scene_display_names` + 回写 SCE 具名传送 `0x16` 名牌并发布 |
 | 怪物显示名 | 怪物管理保存可改 `display_name`（目录表） |
 | 每日进入 | 场景设计页配置 `daily_limit` / `gold_cost`(金) / `kubao_cost`；`build_instance_enter_response` 发 30/1 前调用 `instance_enter_try_consume` 扣次+扣费，不足拒绝（对话 + 系统消息）；组包失败回滚 |
@@ -38,6 +39,12 @@
 `vm_net_mock_instance_enter_try_consume` 此前仅定义、未调用，后台配置不生效。
 已接到 `vm_net_mock_build_instance_enter_response`（使者进本 / smoke / 同路径 30/1）。
 目标场景无规则或三项皆 0 → 免费；出本到无规则户外不扣费。
+
+## 2026-09-19 NPC 进本组队闸
+
+组队（`memberCount>=2`）点使者「进入副本」时，`build_instance_enter_response` 在
+`instance_enter_try_consume` **之前**拒绝：对话/系统消息 `梦境副本禁止组队`，
+不发 30/1，不扣每日次数与费用。出本（目标非 `29*`）不受影响。
 
 ## 已知边界
 

@@ -35,14 +35,16 @@ npm run electron
 - 窗口内容区默认 **360×800**，`setAspectRatio` 锁竖屏；不可最大化/全屏
 - 加载 `dist/index.html`（`vite base: './'`），含同步后的 `JHOnlineData` / `client_code_version.txt`
 - Electron 用自定义协议 `pix://app/…` 托管 `dist/`（避免 `file://` 下 `/JHOnlineData` 指到盘符根导致状态栏 `Failed to fetch`）；客户端资源 URL 亦改为相对/`publicAssetUrl`
+- **打包便携 exe**（`app.isPackaged`）冷启动走与 Android 相同的 dist 热更契约，但实现只在 Electron：`electron/dist-hot.cjs` + `main.cjs`。覆盖层在 `%APPDATA%/江湖OL/dist-hot/`（`userData`）。开发态 `npm run electron` **不**拉热更，继续用本机 `dist/`
 - Gateway 仍为 `FIXED_LIVE_GATEWAY`（`ws://…`）；与 APK 相同，明文 WS
-- 不改玩法协议；无 Android FGS / WakeLock（桌面不需要）
+- 不改玩法协议；无 Android FGS / WakeLock（桌面不需要）；**不改** `android/` 下 `DistHotUpdate` / `MainActivity`
 
 ## 实现
 
 | 路径 | 作用 |
 |------|------|
-| `electron/main.cjs` | BrowserWindow 竖屏壳 + `pix://` 静态资源（CJS，勿写 TS 注解） |
+| `electron/main.cjs` | BrowserWindow 竖屏壳 + `pix://` 静态资源（CJS，勿写 TS 注解）；打包态启动热更 |
+| `electron/dist-hot.cjs` | PC 端清单比对 / 差量下载（与 APK 同 BASE_URL，独立实现） |
 | `package.json` → `build` / `build:exe` | electron-builder Windows portable |
 
 ## 体积

@@ -63,10 +63,17 @@ static void vm_mock_admin_render_auction_page(char *response, size_t responseCap
         "<div class=\"grid\">"
         "<div><label>启用</label><select name=\"enabled\">"
         "<option value=\"1\"%s>开</option><option value=\"0\"%s>关</option></select></div>"
-        "</div><button type=\"submit\">保存配置</button></form></section>"
+        "<div><label>按类别拦截</label><select name=\"category_gate\">"
+        "<option value=\"1\"%s>开</option><option value=\"0\"%s>关</option></select></div>"
+        "</div>"
+        "<p class=\"hint\">按类别拦截开启时，玄晶（901–916 / 类别23）和任务物品（类别11）"
+        "不可上架。关闭后不按类别拦截。绑定、已强化、宝石、碎片和已镶嵌装备始终不可拍卖。</p>"
+        "<button type=\"submit\">保存配置</button></form></section>"
         "</body></html>",
         cfg && cfg->enabled ? " selected" : "",
-        cfg && !cfg->enabled ? " selected" : "");
+        cfg && !cfg->enabled ? " selected" : "",
+        cfg && cfg->categoryGate ? " selected" : "",
+        cfg && !cfg->categoryGate ? " selected" : "");
 }
 
 static void vm_mock_admin_handle_auction_action(vm_mock_service_socket client,
@@ -76,14 +83,16 @@ static void vm_mock_admin_handle_auction_action(vm_mock_service_socket client,
     if (strcmp(action, "save-auction-config") == 0)
     {
         u32 enabled = 1;
+        u32 categoryGate = 0;
         char errMsg[384];
 
-        if (!vm_mock_admin_form_u32(body, "enabled", 1u, &enabled))
+        if (!vm_mock_admin_form_u32(body, "enabled", 1u, &enabled) ||
+            !vm_mock_admin_form_u32(body, "category_gate", 1u, &categoryGate))
         {
             vm_mock_admin_redirect_auction(client, "error", "表单数值无效");
             return;
         }
-        if (vm_mock_auction_admin_save_config((u8)enabled))
+        if (vm_mock_auction_admin_save_config((u8)enabled, (u8)categoryGate))
         {
             vm_mock_admin_redirect_auction(client, "ok", "拍卖行配置已保存");
             return;

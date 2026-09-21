@@ -190,7 +190,9 @@ share `vm_net_mock_role_build_player_stats`:
 maxHp   = bareHp + equipment.hp
 maxMp   = bareMp + equipment.mp
   bareHp = 90 + level * 8 + endurance * 2
+           + strength * panel_strength_hp_coeff_x100 / 100
   bareMp = 70 + level * 9 + baseWisdom * 3
+           + wisdom * panel_wisdom_mp_coeff_x100 / 100
   equipment.hp/mp 含定值里程碑 + 气血%/法力%×对应裸池
 attack  = jobPrimary + equipment.attack   (cap 65535)
 defense = 4 + level + endurance / 2 + equipment.armor   (裸+全额装甲)
@@ -199,6 +201,9 @@ dodge   = equipment.dodge
 crit    = equipment.crit
 resist  = equipment.resist
 ```
+
+力量→气血 / 智慧→法力系数默认 ×100=50（即 0.5），后台战斗公式「面板属性」可改；
+`strength` / `wisdom` 为面板合计（成长 + 装备）。成长智慧×3 仍只用 `baseWisdom`，避免装备智慧再乘 3。
 
 See `2026-08-05-hp-mp-percent-character-bare-base.md` for % base.
 

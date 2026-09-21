@@ -85,12 +85,12 @@ export class ApproachPrompt extends Container {
 
     const body = `和${this.npcName}对话?`;
     // Compact CBE-style plate; no full-screen dim so the map stays playable.
+    // Sit just above the hang softkey row (WORLD_BOTTOM_H band @ y342).
     const w = Math.min(200, LCD_WIDTH - 28);
     const h = 52;
     const x = Math.floor((LCD_WIDTH - w) / 2);
-    const mapMid =
-      WORLD_TOP_H + Math.floor((LCD_HEIGHT - WORLD_TOP_H - WORLD_BOTTOM_H) / 2);
-    const y = Math.max(WORLD_TOP_H + 8, mapMid - Math.floor(h / 2) - 24);
+    const hangRowTop = LCD_HEIGHT - WORLD_BOTTOM_H;
+    const y = Math.max(WORLD_TOP_H + 8, hangRowTop - h - 8);
 
     paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
 

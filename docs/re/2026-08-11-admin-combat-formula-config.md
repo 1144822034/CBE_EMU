@@ -9,7 +9,8 @@
 - 管理页：`http://127.0.0.1:19091/?tab=combat`
 - 表：`server_combat_formula_config`（`id=1`）
 - 迁移：`server/mysql/migrate_add_combat_formula_config.sql`；
-  主属性物攻系数追加：`server/mysql/migrate_add_primary_attack_coeff.sql`
+  主属性物攻系数追加：`server/mysql/migrate_add_primary_attack_coeff.sql`；
+  力量→血 / 智慧→法追加：`server/mysql/migrate_add_panel_str_hp_wis_mp_coeff.sql`
   （运行时也会 `ALTER` 补列）
 - 运行时也会 `CREATE TABLE IF NOT EXISTS` 并 `INSERT IGNORE` 默认行
 
@@ -19,6 +20,8 @@
 |----|------|------|
 | panel_defense_base / level_coeff / endurance_div | 4 / 1 / 2 | `defense = base + level*coeff + endurance/div + equip.armor` |
 | panel_hit_base | 101 | `hit = base + equip.hit` |
+| panel_strength_hp_coeff_x100 | 50 | `bareHp += strength × x100/100`（50=0.5；含装备力量） |
+| panel_wisdom_mp_coeff_x100 | 50 | `bareMp += wisdom × x100/100`（50=0.5；在成长智慧×3 之外；含装备智慧） |
 | primary_attack_coeff_* | 天机100 / 幻剑100 / 鬼道100 | `attack = jobPrimary×coeff%/100 + equip.attack` |
 | soft_armor_k | 2000 | 普攻软护甲 `damage=(atk*K+def/2)/(K+def)` |
 | equip_armor_divisor | 5 | 战斗减伤用 `bare + equip.armor/div` |

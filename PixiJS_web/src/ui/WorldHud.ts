@@ -27,6 +27,7 @@ import { lookupSMapAlias } from "../resources/smap";
 import { replaceGraphics } from "../render/gpuResume";
 import {
   createPanelTipState,
+  clearPanelTip,
   drawPanelTipOverlay,
   showPanelTip,
   tryDismissPanelTipOnSoftRight,
@@ -178,16 +179,23 @@ export class WorldHud extends Container {
 
   /**
    * Dream 29* instance countdown (CBE local timer; no WT packet).
-   * Paint wall-clock remaining as MM:SS (ttl 3600000 → 60:00, ticks every second).
+   * Paint remaining as MM:SS. Offline freezes leftover (server
+   * account_roles.dream_hud_remaining_ms); resume from storage / thaw.
    * Evidence: mock dreamHudTtl + docs/re/2026-08-07-pixi-dream-hud-countdown.md.
    */
   private dreamTimerHost = new Container();
   private dreamTimerIcon: Sprite | null = null;
   private dreamTimerDigits: DigitStrip | null = null;
   private dreamExpireAtMs = 0;
+  /** Non-null while disconnected: leftover ms frozen (not wall-clock). */
+  private dreamFrozenRemainMs: number | null = null;
   private dreamTimerTick: ReturnType<typeof setInterval> | null = null;
   private dreamTtlMsCached: number | null = null;
   private dreamSceneKey = "";
+  /** Role-scoped localStorage checkpoint (matches account_roles row). */
+  private dreamRoleId = 0;
+  /** Bumps on each sync so overlapping async arms cannot overwrite leftover. */
+  private dreamSyncGen = 0;
   /** Last vitals / party for Graphics rebuild after webglcontextrestored. */
   private lastHp = 0;
   private lastMaxHp = 1;
@@ -286,15 +294,15 @@ export class WorldHud extends Container {
     this.chatHit.on("pointertap", () => this.onChat?.());
 
     this.setVitals(500, 500, 200, 200);
-    this.pushChat("[系]系统: 欢迎进入江湖世界");
 
     this.partyHost.position.set(0, PARTY_Y0);
     this.partyHost.visible = false;
     this.addChild(this.partyHost);
 
-    // Top-right of location band; hidden until dream enter.
+    // Top-left of location band; hidden until dream enter.
+    // Left avoids the map-corner status strip white dot on the right.
     this.dreamTimerHost.visible = false;
-    this.dreamTimerHost.position.set(LCD_WIDTH - 54, 6);
+    this.dreamTimerHost.position.set(4, 6);
     this.top.addChild(this.dreamTimerHost);
   }
 
@@ -477,17 +485,58 @@ export class WorldHud extends Container {
   }
 
   /**
+   * Arm HUD from server remain (29/23), mirroring exp-card wall-clock after
+   * pause/resume. Prefer this over local full TTL / localStorage.
+   */
+  applyServerDreamRemainMs(remainMs: number, scene?: string): void {
+    const ms = Math.max(0, remainMs | 0);
+    if (scene && isDreamInstanceScene(scene)) {
+      this.dreamSceneKey = dreamSceneLeaf(scene);
+    }
+    if (!this.dreamSceneKey) return;
+    this.dreamSyncGen++;
+    if (ms <= 0) {
+      this.clearDreamTimer(true);
+      return;
+    }
+    this.dreamFrozenRemainMs = null;
+    this.dreamExpireAtMs = Date.now() + ms;
+    this.dreamTimerHost.visible = true;
+    this.persistDreamRemainMs();
+    this.paintDreamTimer();
+    if (this.dreamTimerTick == null) {
+      this.dreamTimerTick = setInterval(() => this.paintDreamTimer(), 1000);
+    }
+  }
+
+  /**
    * Arm / keep / clear dream HUD countdown from the visible scene key.
-   * Same-scene identity refresh (称号) keeps the clock; outdoor clears;
-   * entering a different 29* leaf re-arms (matches server TTL arm on enter).
+   * Server remain (applyServerDreamRemainMs / 29/23) is authoritative after
+   * login resume — local frozen/LS are only optimistic until that arrives.
    */
   async syncDreamTimerForScene(scene: string): Promise<void> {
     if (!isDreamInstanceScene(scene)) {
-      this.dreamSceneKey = "";
-      this.clearDreamTimer();
+      if (scene.trim()) {
+        this.clearDreamTimer(true);
+      } else {
+        this.pauseDreamTimer();
+        this.dreamTimerHost.visible = false;
+        if (this.dreamTimerTick != null) {
+          clearInterval(this.dreamTimerTick);
+          this.dreamTimerTick = null;
+        }
+      }
       return;
     }
     const key = dreamSceneLeaf(scene);
+    if (
+      this.dreamFrozenRemainMs != null &&
+      this.dreamFrozenRemainMs > 0 &&
+      this.dreamSceneKey === key
+    ) {
+      this.resumeDreamTimer();
+      return;
+    }
     if (
       this.dreamExpireAtMs > Date.now() &&
       this.dreamSceneKey === key &&
@@ -496,18 +545,78 @@ export class WorldHud extends Container {
       this.paintDreamTimer();
       return;
     }
+    // Mark leaf; wait for 29/23 server remain (exp-card style). Soft-show
+    // local leftover only so the digit strip is not empty during the roundtrip.
     this.dreamSceneKey = key;
-    const ttlMs = await this.loadDreamHudTtlMs();
-    this.dreamExpireAtMs = Date.now() + ttlMs;
+    const stored = this.loadStoredDreamRemainMs(key);
+    if (stored != null && stored > 0) {
+      this.dreamFrozenRemainMs = null;
+      this.dreamExpireAtMs = Date.now() + stored;
+      this.dreamTimerHost.visible = true;
+      this.paintDreamTimer();
+      if (this.dreamTimerTick == null) {
+        this.dreamTimerTick = setInterval(() => this.paintDreamTimer(), 1000);
+      }
+    }
+  }
+
+  /** Bind role id so dream remain checkpoints do not leak across characters. */
+  setDreamRoleId(roleId: number): void {
+    const next = roleId >>> 0;
+    // Switching to a different character drops in-memory clock (LS is role-scoped).
+    if (this.dreamRoleId !== 0 && next !== 0 && this.dreamRoleId !== next) {
+      this.dreamFrozenRemainMs = null;
+      this.dreamExpireAtMs = 0;
+      this.dreamSceneKey = "";
+      this.dreamTimerHost.visible = false;
+      if (this.dreamTimerTick != null) {
+        clearInterval(this.dreamTimerTick);
+        this.dreamTimerTick = null;
+      }
+    }
+    this.dreamRoleId = next;
+  }
+
+  /** Freeze leftover across disconnect / leave-game; wall clock must not consume it. */
+  pauseDreamTimer(): void {
+    if (this.dreamFrozenRemainMs != null) return;
+    if (this.dreamExpireAtMs <= 0) return;
+    if (!this.dreamSceneKey) return;
+    const remain = Math.max(0, this.dreamExpireAtMs - Date.now());
+    this.dreamFrozenRemainMs = remain;
+    this.dreamExpireAtMs = 0;
+    this.persistDreamRemainMs();
+    if (this.dreamTimerHost.visible) this.paintDreamTimer();
+  }
+
+  /** Resume after reconnect / re-enter with the same dream leaf. */
+  resumeDreamTimer(): void {
+    if (this.dreamFrozenRemainMs == null) return;
+    const remain = this.dreamFrozenRemainMs;
+    this.dreamFrozenRemainMs = null;
+    if (remain <= 0 || !this.dreamSceneKey) {
+      this.clearDreamTimer(true);
+      return;
+    }
+    this.dreamExpireAtMs = Date.now() + remain;
     this.dreamTimerHost.visible = true;
+    this.persistDreamRemainMs();
     this.paintDreamTimer();
     if (this.dreamTimerTick == null) {
       this.dreamTimerTick = setInterval(() => this.paintDreamTimer(), 1000);
     }
   }
 
-  clearDreamTimer(): void {
+  /**
+   * @param wipeStorage true when leaving 29* for outdoor / expired;
+   *   false on logout so re-login can restore leftover.
+   */
+  clearDreamTimer(wipeStorage = true): void {
     this.dreamExpireAtMs = 0;
+    this.dreamFrozenRemainMs = null;
+    if (wipeStorage && this.dreamSceneKey) {
+      this.clearStoredDreamRemainMs(this.dreamSceneKey);
+    }
     this.dreamSceneKey = "";
     this.dreamTimerHost.visible = false;
     if (this.dreamTimerTick != null) {
@@ -554,8 +663,16 @@ export class WorldHud extends Container {
   }
 
   private paintDreamTimer(): void {
-    if (!this.dreamTimerHost.visible || this.dreamExpireAtMs <= 0) return;
-    const remainMs = Math.max(0, this.dreamExpireAtMs - Date.now());
+    if (!this.dreamTimerHost.visible) return;
+    let remainMs = 0;
+    if (this.dreamFrozenRemainMs != null) {
+      remainMs = Math.max(0, this.dreamFrozenRemainMs);
+    } else if (this.dreamExpireAtMs > 0) {
+      remainMs = Math.max(0, this.dreamExpireAtMs - Date.now());
+      this.persistDreamRemainMs();
+    } else {
+      return;
+    }
     const totalSec = Math.ceil(remainMs / 1000);
     const mm = Math.floor(totalSec / 60);
     const ss = totalSec % 60;
@@ -568,9 +685,72 @@ export class WorldHud extends Container {
     this.layoutDreamTimer();
   }
 
+  private dreamRemainStorageKey(sceneKey: string, roleId = this.dreamRoleId): string {
+    const role = roleId >>> 0;
+    return role
+      ? `pix_dream_hud_remain:${role}:${sceneKey}`
+      : `pix_dream_hud_remain:${sceneKey}`;
+  }
+
+  private persistDreamRemainMs(): void {
+    if (!this.dreamSceneKey || typeof localStorage === "undefined") return;
+    let remain = 0;
+    if (this.dreamFrozenRemainMs != null) remain = this.dreamFrozenRemainMs;
+    else if (this.dreamExpireAtMs > 0)
+      remain = Math.max(0, this.dreamExpireAtMs - Date.now());
+    try {
+      if (remain > 0) {
+        localStorage.setItem(
+          this.dreamRemainStorageKey(this.dreamSceneKey),
+          String(remain),
+        );
+      } else {
+        localStorage.removeItem(this.dreamRemainStorageKey(this.dreamSceneKey));
+      }
+    } catch {
+      /* private mode */
+    }
+  }
+
+  private loadStoredDreamRemainMs(sceneKey: string): number | null {
+    if (typeof localStorage === "undefined") return null;
+    try {
+      const scoped = localStorage.getItem(this.dreamRemainStorageKey(sceneKey));
+      if (scoped) {
+        const n = parseInt(scoped, 10);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      // Legacy key (pre role-scope) — migrate once.
+      const legacy = localStorage.getItem(`pix_dream_hud_remain:${sceneKey}`);
+      if (!legacy) return null;
+      const n = parseInt(legacy, 10);
+      if (!Number.isFinite(n) || n <= 0) return null;
+      if (this.dreamRoleId) {
+        try {
+          localStorage.setItem(this.dreamRemainStorageKey(sceneKey), String(n));
+          localStorage.removeItem(`pix_dream_hud_remain:${sceneKey}`);
+        } catch {
+          /* keep legacy readable */
+        }
+      }
+      return n;
+    } catch {
+      return null;
+    }
+  }
+
+  private clearStoredDreamRemainMs(sceneKey: string): void {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.removeItem(this.dreamRemainStorageKey(sceneKey));
+      localStorage.removeItem(`pix_dream_hud_remain:${sceneKey}`);
+    } catch {
+      /* private mode */
+    }
+  }
+
   private layoutDreamTimer(): void {
-    const w = this.dreamTimerHost.width || 50;
-    this.dreamTimerHost.position.set(Math.max(4, LCD_WIDTH - w - 4), 6);
+    this.dreamTimerHost.position.set(4, 6);
   }
 
   setVitals(hp: number, maxHp: number, mp: number, maxMp: number): void {
@@ -870,6 +1050,11 @@ export class WorldHud extends Container {
     showPanelTip(this.toast, text, () => {
       if (this.visible) drawPanelTipOverlay(this, this.toast);
     }, ms);
+  }
+
+  /** Drop a leftover center toast so a panel tip is not drawn on top of it. */
+  clearTip(): void {
+    clearPanelTip(this.toast);
   }
 
   /** Right softkey closes stuck/transient toast without opening 菜单. */

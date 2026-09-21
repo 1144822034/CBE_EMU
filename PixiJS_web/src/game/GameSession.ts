@@ -60,6 +60,13 @@ import {
   buildCrystalCombineRequest,
   buildCrystalFragmentCombineRequest,
   buildDreamBadgeCombineRequest,
+  buildDreamHudRemainQueryRequest,
+  buildGemCombineRequest,
+  buildGemEmbedRequest,
+  buildGemFragmentCombineRequest,
+  buildGemFromCrystal16Request,
+  buildGemRemoveRequest,
+  buildGemTypeExchangeRequest,
   buildStarSkyStoneWashResetRequest,
   buildRenameCardRequest,
   buildCrystalExtractRequest,
@@ -75,6 +82,9 @@ import {
   parseCrystalCombineResult,
   parseCrystalFragmentCombineResult,
   parseDreamBadgeCombineResult,
+  parseDreamHudRemainMs,
+  parseDreamHudRemainMsFromBodies,
+  parseGemOpResult,
   parseStarSkyStoneWashResetResult,
   parseRenameCardResult,
   parseCrystalExtractResult,
@@ -84,6 +94,11 @@ import {
   canCombineCrystalFragment,
   canCombineDreamBadge,
   canCombineEnhanceCrystal,
+  canCombineGem,
+  canCombineGemFragment,
+  canExchangeGemType,
+  isGemFragment,
+  parseGemItem,
   CRYSTAL_FRAGMENT_COMBINE_COST,
   DREAM_BADGE_COMBINE_COST,
   ENHANCE_CRYSTAL_FIRST,
@@ -147,6 +162,7 @@ import {
   isChestBoxItem,
   isChestKeyItem,
   isExpCardItem,
+  isDurableMallPassItemId,
   isGoldScrollItem,
   isOfficialExpCardItem,
   buildMallBalanceRequest,
@@ -667,8 +683,8 @@ export class GameSession {
   /** NPC display-name → prompt type (1 submit / 2 accept / 3 incomplete). */
   npcTaskPrompts: Map<string, NpcTaskPromptType> = new Map();
   /**
-   * Hangup / in-battle auto operate: 0 = normal attack; skill = skillId+2
-   * (same as BattleScreen). Set via 挂机战斗 skill dialog; does not start hangup.
+   * Hangup-only operate: 0 = normal attack; skill = skillId+2.
+   * Set only via 挂机战斗 skill dialog. Independent of [自动] LastOperate.
    */
   hangupSkillOperate = 0;
   /**
@@ -683,6 +699,13 @@ export class GameSession {
   private battleInsightExpireAtMs = 0;
   /** True after at least one 7/31 / iteminfo parse this session. */
   private battleInsightStatusKnown = false;
+  /**
+   * Dream HUD remain (ms) from server 29/23 — same authority as
+   * account_roles.dream_hud_remaining_ms after pause/resume.
+   */
+  dreamHudRemainMs: number | null = null;
+  /** Fired when 29/23 remain arrives (enter query or push). */
+  onDreamHudRemain: ((remainMs: number) => void) | null = null;
   /**
    * Player intent to keep hangup running across disconnect/relogin / between fights.
    */
@@ -704,14 +727,18 @@ export class GameSession {
    * must drive them while Chromium starves setTimeout (document.hidden).
    */
   onBackgroundGameplayTick: (() => void) | null = null;
+  /** Live WS dropped — freeze dream HUD leftover (server also pauses). */
+  onConnectionLost: (() => void) | null = null;
+  /** Live WS re-opened — thaw dream HUD leftover. */
+  onConnectionRestored: (() => void) | null = null;
   /**
    * In-battle [自动] switch. Gateway 4/11 prefer + poll synth (no client 4/2).
    * hangup=0 so it does not arm map HangupLoop / auto-encounter.
    */
   autoBattleActive = false;
   /**
-   * Last manual 4/2 operate this session. In-battle auto prefers this over
-   * hangupSkillOperate when set.
+   * Last manual / [自动] 4/2 operate. Used only by [自动] (server LastOperate).
+   * Hangup never reads or writes this.
    */
   lastBattleOperate: number | null = null;
   /** Pending invite awaiting softkey confirm (5/2, 10/4, 21/2). */
@@ -877,6 +904,20 @@ export class GameSession {
         console.warn("[session] gateway push", e);
       }
     };
+    transport.onConnectionLost = () => {
+      try {
+        this.onConnectionLost?.();
+      } catch (e) {
+        console.warn("[session] connection lost", e);
+      }
+    };
+    transport.onConnectionRestored = () => {
+      try {
+        this.onConnectionRestored?.();
+      } catch (e) {
+        console.warn("[session] connection restored", e);
+      }
+    };
   }
 
   stop(): void {
@@ -983,6 +1024,7 @@ export class GameSession {
     this.roleTitle = "";
     this.roleTitleGif = "";
     this.localChenghaoId = 0;
+    this.dreamHudRemainMs = null;
     this.cosmetics = {
       unlockedChenghao: [],
       unlockedWing: [],
@@ -2002,11 +2044,15 @@ export class GameSession {
     return true;
   }
 
-  async battleOperate(targetIndex: number, operate = 0): Promise<void> {
+  async battleOperate(
+    targetIndex: number,
+    operate = 0,
+    opts?: { hangup?: boolean },
+  ): Promise<void> {
     if (!this.transport) return;
     const bodies = await this.transport.exchange(
       0,
-      buildBattleOperateRequest(targetIndex, operate),
+      buildBattleOperateRequest(targetIndex, operate, opts),
     );
     this.handleBodies(bodies);
   }
@@ -2027,29 +2073,27 @@ export class GameSession {
   }
 
   /**
-   * Hangup prefers configured hangup skill; if unset (0) fall back to last
-   * manual / [自动] memory so screen-off hangup alone does not lock 普攻.
-   * [自动] prefers last manual, then hangup skill.
+   * Hangup alone: only hangupSkillOperate (set when starting hangup).
+   * [自动]: only lastBattleOperate / server LastOperate — never share.
    */
   inBattleAutoOperate(): number {
     if (this.hangupActive && !this.autoBattleActive) {
-      if ((this.hangupSkillOperate | 0) !== 0) return this.hangupSkillOperate | 0;
-      if (this.lastBattleOperate != null) return this.lastBattleOperate | 0;
-      return 0;
+      return this.hangupSkillOperate | 0;
     }
     if (this.lastBattleOperate != null) return this.lastBattleOperate | 0;
-    return this.hangupSkillOperate | 0;
+    return 0;
   }
 
   /**
-   * Record a battle operate for subsequent [自动] / hangup fallback.
-   * `source: "auto"` — hangup/[自动] 普攻 must not erase a remembered skill
-   * (mirrors server remember_last_operate synth guard).
+   * Record a battle operate for subsequent [自动] only.
+   * Hangup casts never write this (source "hangup").
+   * `source: "auto"` — [自动] 普攻 must not erase a remembered skill.
    */
   noteManualBattleOperate(
     operate: number,
-    source: "manual" | "auto" = "manual",
+    source: "manual" | "auto" | "hangup" = "manual",
   ): void {
+    if (source === "hangup") return;
     const op = operate | 0;
     if (
       source === "auto" &&
@@ -2064,9 +2108,9 @@ export class GameSession {
 
   /**
    * Open/close gateway in-battle auto (1/4/11).
-   * On: seed Operate + hangup=0; Off: type=0 stops poll synth.
-   * Omit Operate when unset — seeding Operate=0 wipes server LastOperate and
-   * locks later poll synth to 普攻 (screen-off cross-fight re-arm).
+   * On: seed Operate from [自动] memory only + hangup=0; Off: type=0.
+   * Never seed hangupSkillOperate into LastOperate (hangup / auto separated).
+   * Omit Operate when unset — seeding Operate=0 wipes server LastOperate.
    */
   async setBattleAutoPrefer(on: boolean): Promise<void> {
     if (!this.transport) {
@@ -2078,8 +2122,6 @@ export class GameSession {
     if (this.lastBattleOperate != null) {
       // Explicit memory including intentional 普攻 (0).
       seedOpts.operate = this.lastBattleOperate | 0;
-    } else if ((this.hangupSkillOperate | 0) !== 0) {
-      seedOpts.operate = this.hangupSkillOperate | 0;
     }
     const bodies = await this.transport.exchange(
       0,
@@ -3804,6 +3846,10 @@ export class GameSession {
         it.kind === "equip" &&
         (it.enhance | 0) === 0 &&
         it.seq > 0 &&
+        !(
+          it.socketGems &&
+          (it.socketGems.reflect || it.socketGems.combo || it.socketGems.revive)
+        ) &&
         (qualityFilter === undefined ||
           matchEquipSellQuality(it.quality, qualityFilter)),
     );
@@ -4240,6 +4286,15 @@ export class GameSession {
     } else if (!fb.message) {
       fb = { ...fb, message: "使用失败" };
     }
+    // 834/839 open a follow-up 26/1 (仓库 / 装备出售). Generic「使用成功」
+    // lands on that panel and overlaps it.
+    if (
+      isDurableMallPassItemId(itemId) &&
+      fb.ok &&
+      (!fb.message || fb.message === "使用成功")
+    ) {
+      fb = { ...fb, message: "" };
+    }
     this.emitItemUseFeedback(fb);
     return fb;
   }
@@ -4258,6 +4313,30 @@ export class GameSession {
       this.battleInsightExpireAtMs = 0;
     }
     return info || "当前没有生效的增益物品";
+  }
+
+  /**
+   * Dream HUD remain — same freeze/resume contract as exp card.
+   * WT 1/29/23 → 29/23 { remaining } after server pause/resume.
+   */
+  async fetchDreamHudRemainingMs(): Promise<number | null> {
+    if (!this.transport) return null;
+    try {
+      const bodies = await this.transport.exchange(
+        0,
+        buildDreamHudRemainQueryRequest(),
+      );
+      this.handleBodies(bodies);
+      const ms = parseDreamHudRemainMsFromBodies(bodies);
+      if (ms != null) {
+        this.dreamHudRemainMs = ms;
+        return ms;
+      }
+      return this.dreamHudRemainMs;
+    } catch (e) {
+      console.warn("[session] dream hud remain query", e);
+      return this.dreamHudRemainMs;
+    }
   }
 
   /**
@@ -4305,6 +4384,17 @@ export class GameSession {
     }
     const iteminfo = parseBattleInsightIteminfoFromPacket(packet);
     if (iteminfo) this.noteBattleInsightFromStatus(iteminfo);
+  }
+
+  private noteDreamHudRemainFromPacket(packet: WtPacket): void {
+    const ms = parseDreamHudRemainMs(packet);
+    if (ms == null) return;
+    this.dreamHudRemainMs = ms;
+    try {
+      this.onDreamHudRemain?.(ms);
+    } catch (e) {
+      console.warn("[session] onDreamHudRemain", e);
+    }
   }
 
   /**
@@ -4908,6 +4998,7 @@ export class GameSession {
   }
 
   private emitItemUseFeedback(fb: ItemUseFeedback): void {
+    if (!fb.message) return;
     this.cb.onItemUseFeedback?.(fb);
     this.cb.onChat?.([{ type: 5, text: `[系]系统: ${fb.message}` }]);
   }
@@ -5092,6 +5183,14 @@ export class GameSession {
       buildMallBalanceRequest(),
     );
     this.handleBodies(balBodies);
+    if (result === 1 && (itemId >>> 0) === expandId) {
+      // Direct expand updates role capacity — refresh panel stats for bag meta.
+      try {
+        await this.openCharacterStats();
+      } catch {
+        /* tip still reports purchase ok */
+      }
+    }
     if (result < 0) {
       return { ok: false, result: 0, message: "购买无响应" };
     }
@@ -5754,6 +5853,142 @@ export class GameSession {
       }
     }
     return fail("合成无响应");
+  }
+
+  private async exchangeGemOp(
+    subtype: number,
+    body: Uint8Array,
+    failMessage: string,
+  ): Promise<{ result: number; ok: boolean; message: string }> {
+    if (!this.transport) return { result: 0, ok: false, message: "未连接" };
+    const bodies = await this.transport.exchange(0, body);
+    this.handleBodies(bodies);
+    for (const raw of bodies) {
+      try {
+        const packet = ingestPacket(raw);
+        if (!packet) continue;
+        const parsed = parseGemOpResult(packet, subtype);
+        if (parsed) {
+          return {
+            result: parsed.result,
+            ok: parsed.result === 1,
+            message:
+              parsed.message || (parsed.result === 1 ? "成功" : failMessage),
+          };
+        }
+      } catch {
+        /* skip */
+      }
+    }
+    return { result: 0, ok: false, message: failMessage };
+  }
+
+  /** Pixi-only 29/17. worn=true uses body slot seq (slot+1), not a bag seq. */
+  async embedGem(
+    equipSeq: number,
+    gemSeq: number,
+    worn: boolean,
+  ): Promise<{ result: number; ok: boolean; message: string }> {
+    if (!(equipSeq > 0) || !(gemSeq > 0)) {
+      return { result: 2, ok: false, message: "参数无效" };
+    }
+    return this.exchangeGemOp(
+      17,
+      buildGemEmbedRequest(equipSeq, gemSeq, worn),
+      "镶嵌失败",
+    );
+  }
+
+  /** Pixi-only 29/18. gemType 1反伤 2连击 3复活. */
+  async removeGem(
+    equipSeq: number,
+    gemType: number,
+    worn: boolean,
+  ): Promise<{ result: number; ok: boolean; message: string }> {
+    if (!(equipSeq > 0) || gemType < 1 || gemType > 3) {
+      return { result: 2, ok: false, message: "参数无效" };
+    }
+    return this.exchangeGemOp(
+      18,
+      buildGemRemoveRequest(equipSeq, gemType, worn),
+      "拆除失败",
+    );
+  }
+
+  /** Pixi-only 29/19: 3× same gem → next level. times>1 is one-level batch. */
+  async combineGem(
+    itemId: number,
+    seq: number,
+    times = 1,
+  ): Promise<{ result: number; ok: boolean; message: string }> {
+    const n = Math.max(1, times | 0);
+    if (!(seq > 0) || !parseGemItem(itemId)) {
+      return { result: 2, ok: false, message: "不是宝石" };
+    }
+    const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
+    const have = row?.count ?? 0;
+    const maxLevel = this.characterStats?.maxGemLevel || 3;
+    if (!canCombineGem(itemId, have, maxLevel) || Math.floor(have / 3) < n) {
+      return { result: 4, ok: false, message: "宝石不足3颗或已达最高等级" };
+    }
+    return this.exchangeGemOp(19, buildGemCombineRequest(seq, n), "合成失败");
+  }
+
+  /** Pixi-only 29/20: 2× Lv1 → 1× other-type Lv1. */
+  async exchangeGemType(
+    itemId: number,
+    seq: number,
+    destType: number,
+  ): Promise<{ result: number; ok: boolean; message: string }> {
+    if (!(seq > 0) || !canExchangeGemType(itemId, 2) || destType < 1 || destType > 3) {
+      return { result: 2, ok: false, message: "不是1级宝石" };
+    }
+    const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
+    if (!canExchangeGemType(itemId, row?.count ?? 0)) {
+      return { result: 4, ok: false, message: "1级宝石不足2颗" };
+    }
+    const src = parseGemItem(itemId);
+    if (src && src.type === destType) {
+      return { result: 2, ok: false, message: "请选择其它属性" };
+    }
+    return this.exchangeGemOp(
+      20,
+      buildGemTypeExchangeRequest(seq, destType),
+      "兑换失败",
+    );
+  }
+
+  /** Pixi-only 29/21: 1×916 → N random Lv1 gems (N from server gem config). */
+  async gemFromCrystal16(
+    itemId: number,
+    seq: number,
+  ): Promise<{ result: number; ok: boolean; message: string }> {
+    if (!(seq > 0) || itemId !== 916) {
+      return { result: 2, ok: false, message: "不是十六级玄晶" };
+    }
+    if (!(this.characterStats?.crystal16ExchangeEnabled ? 1 : 0)) {
+      return { result: 7, ok: false, message: "十六级玄晶兑换未开放" };
+    }
+    return this.exchangeGemOp(21, buildGemFromCrystal16Request(seq), "兑换失败");
+  }
+
+  /** Pixi-only 29/22: 3×978 → 1 random Lv1 gem. */
+  async combineGemFragment(
+    itemId: number,
+    seq: number,
+  ): Promise<{ result: number; ok: boolean; message: string }> {
+    if (!(seq > 0) || !isGemFragment(itemId)) {
+      return { result: 2, ok: false, message: "不是宝石碎片" };
+    }
+    const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
+    if (!canCombineGemFragment(itemId, row?.count ?? 0)) {
+      return { result: 4, ok: false, message: "碎片不足3个" };
+    }
+    return this.exchangeGemOp(
+      22,
+      buildGemFragmentCombineRequest(seq),
+      "合成失败",
+    );
   }
 
   /**
@@ -6710,6 +6945,7 @@ export class GameSession {
       if (!packet) continue;
 
       this.noteBattleInsightFromPacket(packet);
+      this.noteDreamHudRemainFromPacket(packet);
 
       const list = parseServerList(packet);
       if (list.result === 3 && list.username && list.password) {
@@ -6908,16 +7144,37 @@ export class GameSession {
 
       const peers = parseNearbyPeers(packet);
       const removed = parseRemovedPeers(packet);
-      for (const id of removed) this.scenePeerById.delete(id >>> 0);
-      for (const p of peers) this.scenePeerById.set(p.actorId >>> 0, p);
-      if (peers.length || removed.length) this.cb.onPeers(peers, removed);
-      const peerMoves = parsePeerMoveUpdates(packet);
-      if (peerMoves.length) this.cb.onPeerMoves?.(peerMoves);
+      // Dream shells are solo — ignore peer paint / moves from any leftover path.
+      const dreamSolo = (() => {
+        const s = (this.scene || this.loadedScene || "").trim();
+        if (!s) return false;
+        const leaf = s
+          .replace(/^.*[/\\]/, "")
+          .replace(/\.sce$/i, "")
+          .toLowerCase();
+        return leaf.startsWith("29") || leaf.startsWith("b_29");
+      })();
+      if (dreamSolo) {
+        if (peers.length || removed.length || this.scenePeerById.size) {
+          const drop = [...this.scenePeerById.keys()];
+          this.scenePeerById.clear();
+          this.nearbyList = [];
+          if (drop.length) this.cb.onPeers([], drop);
+        }
+      } else {
+        for (const id of removed) this.scenePeerById.delete(id >>> 0);
+        for (const p of peers) this.scenePeerById.set(p.actorId >>> 0, p);
+        if (peers.length || removed.length) this.cb.onPeers(peers, removed);
+        const peerMoves = parsePeerMoveUpdates(packet);
+        if (peerMoves.length) this.cb.onPeerMoves?.(peerMoves);
+      }
 
       const nearbyPage = parseNearbyPage(packet);
       if (nearbyPage) {
-        this.nearbyList = nearbyPage.peers;
-        this.cb.onNearbyPage?.(nearbyPage);
+        this.nearbyList = dreamSolo ? [] : nearbyPage.peers;
+        this.cb.onNearbyPage?.(
+          dreamSolo ? { peers: [], allpgs: nearbyPage.allpgs } : nearbyPage,
+        );
       }
 
       const playerInfo = parsePlayerInfo(packet);
@@ -7375,6 +7632,12 @@ export class GameSession {
         this.gold = stats.money >>> 0;
         this.pkPoints = stats.pkPoints >>> 0;
         if (stats.level > 0) this.level = stats.level;
+        // Panel 生命/法力 is map durable authority — keep WorldHud bars in sync.
+        this.hp = stats.hp;
+        this.hpMax = Math.max(stats.hpMax, stats.hp, 1);
+        this.mp = stats.mp;
+        this.mpMax = Math.max(stats.mpMax, stats.mp, 1);
+        this.emitVitals();
         {
           const g = (stats.guild || "").replace(/\0+$/g, "").trim();
           if (g && g !== "无" && g !== "无帮派") this.guildName = g;

@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS `server_combat_formula_config` (
   `panel_defense_level_coeff` INT UNSIGNED NOT NULL DEFAULT 1,
   `panel_defense_endurance_div` INT UNSIGNED NOT NULL DEFAULT 2,
   `panel_hit_base` INT UNSIGNED NOT NULL DEFAULT 101,
+  `panel_strength_hp_coeff_x100` INT UNSIGNED NOT NULL DEFAULT 50,
+  `panel_wisdom_mp_coeff_x100` INT UNSIGNED NOT NULL DEFAULT 50,
   `primary_attack_coeff_tianji_percent` INT UNSIGNED NOT NULL DEFAULT 100,
   `primary_attack_coeff_huanjian_percent` INT UNSIGNED NOT NULL DEFAULT 100,
   `primary_attack_coeff_guidao_percent` INT UNSIGNED NOT NULL DEFAULT 100,

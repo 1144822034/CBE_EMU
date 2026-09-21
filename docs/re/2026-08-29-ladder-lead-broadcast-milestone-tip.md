@@ -15,7 +15,7 @@
 ## 触发条件
 
 - 播报：本场 `floor > prevBest` 且 `floor % 10 == 0`，且日首通 claim 成功
-- 提示：本场至少发出经验 / 金钱 / 物品之一（按 `server_ladder_rewards` 的 `floor % milestone == 0` 规则）
+- 提示：本场至少发出经验 / 金钱 / 物品之一（按 `server_ladder_rewards` 中 **层数等于本场层数** 的那一行；不按倍数叠加）
 
 ## 复测
 

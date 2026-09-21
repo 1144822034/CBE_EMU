@@ -13,8 +13,10 @@ import { tryLoadUiTexture, uiSprite } from "./UiAssets";
 import { rgbaToTexture } from "../render/rgbaTexture";
 import {
   EQUIP_ICON_SIZE,
+  EQUIP_PART_LABEL_MAX_W,
   SLOT_FRAME_SIZE,
   equipIconTextureSync,
+  equipPartLabelTextureSync,
   mountEquipIconOnly,
   mountEquipSlot,
   slotFrameTextureSync,
@@ -24,6 +26,12 @@ import {
   canCombineCrystalFragment,
   canCombineDreamBadge,
   canCombineEnhanceCrystal,
+  canCombineGem,
+  canBatchCombineGem,
+  canCombineGemFragment,
+  canExchangeGemType,
+  isGemFragment,
+  parseGemItem,
   formatCultivationBookName,
   isChestBoxItem,
   isCrystalFragment,
@@ -31,6 +39,8 @@ import {
   isDreamBadge,
   isEnhanceCrystal,
   isCrystalExtractStone,
+  isReservoirFlaskItemId,
+  maxFlaskBuyUnitsFromBag,
   type BagItem,
   type CharacterStats,
   type MallState,
@@ -43,6 +53,8 @@ import {
   lookupItemSync,
   qualityColor,
   WORN_SLOT_NAMES,
+  BACKPACK_EXPAND_ITEM_ID,
+  maxBackpackExpandBuyUnits,
 } from "../resources/itemCatalog";
 import {
   actorResourceForJobSex,
@@ -98,16 +110,26 @@ export type SystemAction =
   | "extract"
   | "discard"
   | "auction"
+  | "gem_embed"
+  | "gem_remove"
+  | "gem_exchange"
+  | "gem_from_crystal"
+  | "gem_batch_combine"
   | "buy"
   | "recharge_alipay"
   | "recharge_wechat"
   | "skill_use"
   | "skill_forget"
+  | "gem_embed"
+  | "gem_remove"
+  | "gem_exchange"
+  | "gem_crystal16"
   | "refresh";
 
 /**
  * Worn panel visual grid (screenshot)：左帽衣披束 / 右裤鞋饰品武器.
  * slot = body slot index (0 武器 … 7 戒指).
+ * Array index i → JHOnlineData `{i}.gif` part label (帽…武器).
  */
 const EQUIP_SLOT_UI: { slot: number; label: string; col: number; row: number }[] = [
   { slot: 1, label: "帽", col: 0, row: 0 },
@@ -119,6 +141,9 @@ const EQUIP_SLOT_UI: { slot: number; label: string; col: number; row: number }[]
   { slot: 7, label: "饰品", col: 1, row: 2 },
   { slot: 0, label: "武器", col: 1, row: 3 },
 ];
+
+/** Gap between handkuang slot and inward part label (`0.gif`..`7.gif`). */
+const EQUIP_PART_LABEL_GAP = 2;
 
 const EQUIP_REPLACE_PART: Record<number, string> = {
   0: "手部",
@@ -137,7 +162,7 @@ const EQUIP_BROKEN_RED = 0xff2020;
 const EQUIP_BROKEN_RED_HI = 0xff6060;
 
 /** Rows visible per page on bag list (CBE 240×400). */
-const BAG_VISIBLE_ROWS = 14;
+const BAG_VISIBLE_ROWS = 13;
 /** Rows visible per page on mall / other generic lists. */
 const PAGE_SIZE = 10;
 /** Bottom inset only — L/R actions live on HTML softkeys, not in-panel buttons. */
@@ -306,6 +331,10 @@ export class SystemPanel extends Container {
   /** Cached stand-frame for worn-panel center actor. */
   private equipActorTex: Texture | null = null;
   private equipActorKey = "";
+  /** Last job/sex passed to setEquipActor — kept across hide/GPU strip for reload. */
+  private equipActorJob = 0;
+  private equipActorSex = 1;
+  private equipActorConfigured = false;
   /** Transient server feedback (item use / chest reward). */
   private toast: PanelTipState = createPanelTipState();
   /** Pulsing red glow over durability-0 worn slots (equip panel only). */
@@ -381,9 +410,35 @@ export class SystemPanel extends Container {
     if (this.kind === "bag") this.ensureMoneyIcons();
     if (this.kind === "equip") {
       this.ensureEquipArt();
-      // Actor stand is rebuilt on next setEquipActor from main; redraw chrome now.
+      // Equip-op redraws can trip alphaMode strip; reload stand here — do not
+      // wait for the next openSystem("equip") which is the only main caller.
+      this.ensureEquipActorTex();
     }
     this.redraw();
+  }
+
+  /** True when the cached center-stand texture is still GPU-usable. */
+  private equipActorTexAlive(): boolean {
+    const tex = this.equipActorTex;
+    if (!tex || tex.destroyed) return false;
+    try {
+      const src = tex.source;
+      if (!src || src.destroyed) return false;
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Reload center stand when tex was cleared (GPU strip / hide) but job/sex
+   * is still known. Safe no-op before the first setEquipActor.
+   */
+  private ensureEquipActorTex(): void {
+    if (!this.equipActorConfigured) return;
+    if (this.equipActorTexAlive()) return;
+    this.equipActorKey = "";
+    this.setEquipActor(this.equipActorJob, this.equipActorSex);
   }
 
   open(kind: SystemKind, _hint = ""): void {
@@ -435,9 +490,12 @@ export class SystemPanel extends Container {
 
   /** Full-body stand for worn-panel center (job/sex from selected role). */
   setEquipActor(jobIndex: number, sex: number): void {
+    this.equipActorConfigured = true;
+    this.equipActorJob = jobIndex | 0;
+    this.equipActorSex = sex | 0;
     const name = actorResourceForJobSex(jobIndex, sex);
     const cacheKey = `${name}#d3`;
-    if (cacheKey === this.equipActorKey && this.equipActorTex) return;
+    if (cacheKey === this.equipActorKey && this.equipActorTexAlive()) return;
     this.equipActorKey = cacheKey;
     const prevTex = this.equipActorTex;
     this.equipActorTex = null;
@@ -471,6 +529,8 @@ export class SystemPanel extends Container {
   /** Show a short in-panel tip (item use / 获得奖励). */
   showTip(text: string, ms = 1200): void {
     if (!this.visible) return;
+    // Item operation panel already covers the LCD; generic success overlaps it.
+    if (this.mode === "actions" && text.trim() === "使用成功") return;
     showPanelTip(this.toast, text, () => {
       if (this.visible) this.redraw();
     }, ms);
@@ -516,6 +576,18 @@ export class SystemPanel extends Container {
         this.selected = this.replaceCandidates[this.cursorIndex] ?? null;
       }
       this.redraw();
+      return;
+    }
+    // 商城买壶：背包储量刷新后夹住可购数量提示。
+    if (
+      this.visible &&
+      this.kind === "mall" &&
+      this.mode === "actions" &&
+      this.selected &&
+      isGoods(this.selected) &&
+      isReservoirFlaskItemId(this.selected.itemId)
+    ) {
+      this.redraw();
     }
   }
 
@@ -524,6 +596,17 @@ export class SystemPanel extends Container {
     this.bagMoney = money >>> 0;
     this.bagCapacity = Math.max(1, capacity | 0);
     if (this.visible && this.kind === "bag") this.redraw();
+    // Mall 806 qty max depends on live capacity after multi-buy expand.
+    if (
+      this.visible &&
+      this.kind === "mall" &&
+      this.mode === "actions" &&
+      this.selected &&
+      isGoods(this.selected) &&
+      (this.selected.itemId >>> 0) === BACKPACK_EXPAND_ITEM_ID
+    ) {
+      this.redraw();
+    }
   }
 
   setWorn(items: BagItem[]): void {
@@ -562,8 +645,20 @@ export class SystemPanel extends Container {
   }
 
   setStats(stats: CharacterStats): void {
+    const prevMax = this.stats?.maxGemLevel ?? 0;
+    const prevCrystal =
+      this.stats?.crystal16ExchangeEnabled ?? 0;
     this.stats = stats;
     if (this.visible && this.kind === "status") this.redraw();
+    else if (
+      this.visible &&
+      this.kind === "bag" &&
+      this.mode === "list" &&
+      ((stats.maxGemLevel || 0) !== prevMax ||
+        (stats.crystal16ExchangeEnabled ? 1 : 0) !== prevCrystal)
+    ) {
+      this.redraw();
+    }
   }
 
   setLines(lines: string[]): void {
@@ -703,7 +798,14 @@ export class SystemPanel extends Container {
   private adjustBuyQty(delta: number): void {
     if (!this.selected || !isGoods(this.selected)) return;
     const max = this.maxBuyQty(this.selected);
-    // 数量为 1 再按 ←：绕到最大可购（受库存/余额/99 限制）
+    if (max < 1) {
+      if (this.buyQty !== 0) {
+        this.buyQty = 0;
+        this.redraw();
+      }
+      return;
+    }
+    // 数量为 1 再按 ←：绕到最大可购（余额/库存/壶储量/99）
     let next: number;
     if (delta < 0 && this.buyQty <= 1) {
       next = max;
@@ -718,8 +820,24 @@ export class SystemPanel extends Container {
   private maxBuyQty(g: ShopGoods): number {
     const bal = this.mall?.coolmoney ?? 0;
     const byMoney = g.price > 0 ? Math.floor(bal / g.price) : 99;
+    if (isReservoirFlaskItemId(g.itemId)) {
+      // Mall wire `stock` is item.dsh 堆叠数 (=1 for 802/803), not shop
+      // inventory — using it caps qty at 1. Cap by balance + reservoir room.
+      const byFlask = maxFlaskBuyUnitsFromBag(this.bagItems, g.itemId);
+      return Math.max(0, Math.min(99, Math.max(0, byMoney), byFlask));
+    }
+    if ((g.itemId >>> 0) === BACKPACK_EXPAND_ITEM_ID) {
+      // Direct capacity expand (+4/unit). Ignore DSH stock; clamp by remaining
+      // slots to 256 and coolmoney.
+      const cap =
+        this.stats?.backpackCapacity ||
+        this.bagCapacity ||
+        20;
+      const byExpand = maxBackpackExpandBuyUnits(cap);
+      return Math.max(0, Math.min(99, Math.max(0, byMoney), byExpand));
+    }
     const byStock = g.stock > 0 ? g.stock : 99;
-    return Math.max(1, Math.min(99, byStock, Math.max(1, byMoney)));
+    return Math.max(1, Math.min(99, byStock, Math.max(0, byMoney)));
   }
 
   move(delta: number): void {
@@ -820,6 +938,11 @@ export class SystemPanel extends Container {
       action === "discard" ||
       action === "use" ||
       action === "combine" ||
+      action === "gem_batch_combine" ||
+      action === "gem_embed" ||
+      action === "gem_remove" ||
+      action === "gem_exchange" ||
+      action === "gem_from_crystal" ||
       action === "equip" ||
       action === "buy" ||
       action === "skill_forget"
@@ -846,7 +969,25 @@ export class SystemPanel extends Container {
       const ui = EQUIP_SLOT_UI[this.cursorIndex] ?? EQUIP_SLOT_UI[0]!;
       this.equipFocusSlot = ui.slot;
       this.selected = this.wornBySlot(ui.slot);
-      this.actionLabels = this.selected ? ["替换", "卸载"] : ["替换"];
+      if (!this.selected) {
+        this.actionLabels = ["替换"];
+      } else {
+        const labels = ["替换"];
+        // 强化上限 +16；三孔都满时不再显示镶嵌。
+        const sg = this.selected.socketGems;
+        const socketsFull = !!(
+          sg &&
+          sg.reflect &&
+          sg.combo &&
+          sg.revive
+        );
+        if ((this.selected.enhance | 0) >= 16 && !socketsFull) {
+          labels.push("镶嵌");
+        }
+        if (sg && (sg.reflect || sg.combo || sg.revive)) labels.push("拆宝石");
+        labels.push("卸载");
+        this.actionLabels = labels;
+      }
       this.actionCursor = 0;
       this.mode = "actions";
       this.redraw();
@@ -862,6 +1003,22 @@ export class SystemPanel extends Container {
         const worn = this.wornBySlot(this.equipFocusSlot);
         if (!worn) return;
         this.onAction?.(this.kind, "unequip", worn);
+        this.mode = "list";
+        this.redraw();
+        return;
+      }
+      if (label === "拆宝石") {
+        const worn = this.wornBySlot(this.equipFocusSlot);
+        if (!worn) return;
+        this.onAction?.(this.kind, "gem_remove", worn);
+        this.mode = "list";
+        this.redraw();
+        return;
+      }
+      if (label === "镶嵌") {
+        const worn = this.wornBySlot(this.equipFocusSlot);
+        if (!worn) return;
+        this.onAction?.(this.kind, "gem_embed", worn);
         this.mode = "list";
         this.redraw();
         return;
@@ -1077,6 +1234,8 @@ export class SystemPanel extends Container {
     if (!this.actionLabels.length) return;
     this.actionCursor = 0;
     this.mode = "actions";
+    // Selecting an item opens this panel; drop a leftover「使用成功」toast.
+    this.clearTip();
     this.redraw();
   }
 
@@ -1090,12 +1249,28 @@ export class SystemPanel extends Container {
         if (it.enhance >= 4) acts.push("洗练");
         if (it.enhance > 0) acts.push("重铸");
         if (it.enhance > 0) acts.push("提炼");
+        const sg = it.socketGems;
+        if (sg && (sg.reflect || sg.combo || sg.revive)) acts.push("拆宝石");
       } else if (isEnhanceCrystal(it.itemId)) {
         // 玄晶：≥3 且非十六级 →「合成」代替「使用」
         if (canCombineEnhanceCrystal(it.itemId, it.count)) acts.push("合成");
+        if (
+          it.itemId === 916 &&
+          (this.stats?.crystal16ExchangeEnabled ? 1 : 0) === 1
+        ) {
+          acts.push("换宝石");
+        }
       } else if (isCrystalFragment(it.itemId)) {
         // 玄晶碎片：≥10 →「合成」一级玄晶
         if (canCombineCrystalFragment(it.itemId, it.count)) acts.push("合成");
+      } else if (isGemFragment(it.itemId)) {
+        if (canCombineGemFragment(it.itemId, it.count)) acts.push("合成");
+      } else if (parseGemItem(it.itemId)) {
+        const gemMax = this.stats?.maxGemLevel || 3;
+        // 镶嵌只出现在装备栏 ≥+16 的穿戴装备上，背包不提供。
+        if (canCombineGem(it.itemId, it.count, gemMax)) acts.push("合成");
+        if (canBatchCombineGem(it.itemId, it.count, gemMax)) acts.push("批量合成");
+        if (canExchangeGemType(it.itemId, it.count)) acts.push("兑换");
       } else if (isDreamBadge(it.itemId)) {
         // 梦境徽章：≥300 →「合成」随机梦境装备
         if (canCombineDreamBadge(it.itemId, it.count)) acts.push("合成");
@@ -1106,13 +1281,23 @@ export class SystemPanel extends Container {
         acts.push("使用");
         if (isChestBoxItem(it.itemId)) acts.push("批量开启");
       }
-      acts.push("拍卖");
+      const socketed =
+        it.kind === "equip" &&
+        !!it.socketGems &&
+        !!(it.socketGems.reflect || it.socketGems.combo || it.socketGems.revive);
+      if (!parseGemItem(it.itemId) && !isGemFragment(it.itemId) && !socketed) {
+        acts.push("拍卖");
+      }
       acts.push("丢弃");
       acts.push("返回");
       return acts;
     }
     if (this.kind === "equip" && this.selected && isBag(this.selected)) {
-      return ["卸下", "返回"];
+      const acts = ["卸下"];
+      const sg = this.selected.socketGems;
+      if (sg && (sg.reflect || sg.combo || sg.revive)) acts.push("拆宝石");
+      acts.push("返回");
+      return acts;
     }
     if (this.kind === "enhance" && this.selected && isBag(this.selected)) {
       const acts = ["强化"];
@@ -1357,12 +1542,19 @@ export class SystemPanel extends Container {
     const actorCx = LCD_WIDTH / 2;
     const actorCy = gridTop + gridH / 2;
 
-    if (this.equipActorTex) {
-      const spr = new Sprite(this.equipActorTex);
+    // Worn/bag refresh after equip ops never calls setEquipActor; if GPU strip
+    // or hide() cleared the stand, rebuild from the last configured job/sex.
+    this.ensureEquipActorTex();
+    if (this.equipActorTexAlive()) {
+      const spr = new Sprite(this.equipActorTex!);
       spr.anchor.set(0.5, 0.5);
-      // Fit full body between slot columns without clipping feet/head.
+      // Fit full body between slot columns + part labels without clipping.
       const maxH = gridH + 4;
-      const maxW = Math.max(40, rightX - leftX - slotSize - 8);
+      const partReserve = EQUIP_PART_LABEL_MAX_W + EQUIP_PART_LABEL_GAP;
+      const maxW = Math.max(
+        40,
+        rightX - leftX - slotSize - 8 - 2 * partReserve,
+      );
       const sx = Math.min(maxW / spr.texture.width, maxH / spr.texture.height);
       spr.scale.set(sx);
       spr.position.set(actorCx, actorCy);
@@ -1394,6 +1586,24 @@ export class SystemPanel extends Container {
       });
       this.addChild(host);
       this.uiSprites.push(host);
+
+      // Part label (帽/衣/…/武器) in the strip between slot and center actor.
+      const partTex = equipPartLabelTextureSync(i);
+      if (partTex && !partTex.destroyed) {
+        const pw = partTex.width;
+        const ph = partTex.height;
+        const partSpr = uiSprite(partTex, pw, ph);
+        const py = sy + Math.floor((slotSize - ph) / 2);
+        const px =
+          ui.col === 0
+            ? sx + slotSize + EQUIP_PART_LABEL_GAP
+            : sx - EQUIP_PART_LABEL_GAP - pw;
+        partSpr.position.set(px, py);
+        partSpr.eventMode = "none";
+        this.addChild(partSpr);
+        this.uiSprites.push(partSpr);
+      }
+
       if (focused || broken) {
         this.box
           .rect(sx - 1, sy - 1, slotSize + 2, slotSize + 2)
@@ -1813,7 +2023,7 @@ export class SystemPanel extends Container {
     });
   }
 
-  /** Prefetch handkuang.gif + equipico.gif tiles for worn / replace UI. */
+  /** Prefetch handkuang.gif + equipico.gif + part labels 0.gif..7.gif. */
   private ensureEquipArt(): void {
     if (this.equipArtReady || this.equipArtLoading) return;
     this.equipArtLoading = true;
@@ -2062,9 +2272,13 @@ export class SystemPanel extends Container {
     const descH = Math.max(40, actionTop - descY - 8);
     this.box.rect(descX, descY, descW, descH).fill({ color: 0x0a1410 });
 
+    const stockHint =
+      !isReservoirFlaskItemId(g.itemId) && g.stock > 0
+        ? `  库存 ${g.stock}`
+        : "";
     const desc =
       (g.desc && g.desc !== "-" ? g.desc : "") ||
-      `酷宝 ${g.price}` + (g.stock > 0 ? `  库存 ${g.stock}` : "");
+      `酷宝 ${g.price}` + stockHint;
     const wrapped = wrapUc3Lines(desc, descW - 12);
     const maxLines = Math.max(1, Math.floor((descH - 28) / 16));
     wrapped.slice(0, maxLines).forEach((line, i) => {
@@ -2083,9 +2297,17 @@ export class SystemPanel extends Container {
       .stroke({ width: 1, color: CBE.borderDim });
 
     const maxQty = this.maxBuyQty(g);
-    if (this.buyQty > maxQty) this.buyQty = maxQty;
+    if (maxQty < 1) this.buyQty = 0;
+    else if (this.buyQty < 1 || this.buyQty > maxQty) {
+      this.buyQty = Math.min(Math.max(1, this.buyQty), maxQty);
+    }
     const qtyY = actionTop + 10;
-    const qtyHint = `⇦ 数量 ${this.buyQty}/${maxQty} ⇨`;
+    const qtyHint =
+      maxQty < 1 && isReservoirFlaskItemId(g.itemId)
+        ? "储量已满，无法购买"
+        : maxQty < 1 && (g.itemId >>> 0) === BACKPACK_EXPAND_ITEM_ID
+          ? "背包已达上限，不能再扩容"
+          : `⇦ 数量 ${this.buyQty}/${maxQty} ⇨`;
     this.addLabelCentered(qtyHint, LCD_WIDTH / 2, qtyY + btnH / 2, CBE.inkTipGreen);
 
     const btnW = 72;
@@ -2476,6 +2698,9 @@ export class SystemPanel extends Container {
       { label: "命中", value: String(s.hit) },
       { label: "暴击", value: String(s.crit) },
       { label: "抗性", value: String(s.resist) },
+      { label: "反伤", value: `${s.reflectPct ?? 0}%` },
+      { label: "连击", value: `${s.comboPct ?? 0}%` },
+      { label: "复活", value: `${s.revivePct ?? 0}%` },
       {
         label: "活力",
         value: `${s.vitality ?? 0}/${s.vitalityMax ?? 0}`,
@@ -2665,12 +2890,11 @@ export class SystemPanel extends Container {
     }
     if (this.selected && isGoods(this.selected)) {
       const g = this.selected;
-      return [
-        g.name,
-        `价格 ${g.price} 酷宝`,
-        `库存 ${g.stock}`,
-        `id ${g.itemId}`,
-      ];
+      const lines = [g.name, `价格 ${g.price} 酷宝`];
+      // Flask wire stock = DSH 堆叠数, not mall inventory.
+      if (!isReservoirFlaskItemId(g.itemId)) lines.push(`库存 ${g.stock}`);
+      lines.push(`id ${g.itemId}`);
+      return lines;
     }
     if (this.selected && isSkill(this.selected)) {
       const sk = this.selected;
@@ -2829,6 +3053,8 @@ function actionKey(label: string): SystemAction | string {
       return "use";
     case "合成":
       return "combine";
+    case "批量合成":
+      return "gem_batch_combine";
     case "批量开启":
       return "batch_open";
     case "装备":
@@ -2846,6 +3072,14 @@ function actionKey(label: string): SystemAction | string {
       return "recast";
     case "提炼":
       return "extract";
+    case "镶嵌":
+      return "gem_embed";
+    case "拆宝石":
+      return "gem_remove";
+    case "兑换":
+      return "gem_exchange";
+    case "换宝石":
+      return "gem_from_crystal";
     case "丢弃":
       return "discard";
     case "拍卖":

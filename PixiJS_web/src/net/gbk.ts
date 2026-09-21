@@ -36,6 +36,26 @@ function ensureGbkEncodeTable(): Map<number, number> {
   return gbkEncodeTable;
 }
 
+/**
+ * Non-ASCII outside Han and the punctuation blocks used by CBE labels.
+ * Hangul / Cyrillic / Latin-1 leftovers mean a GBK string that only
+ * accidentally decoded as UTF-8 (飓风布靴 → 쫷粼ѥ).
+ */
+function utf8ViewHasForeignScript(text: string): boolean {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp < 0x80) continue;
+    if (cp >= 0x4e00 && cp <= 0x9fff) continue;
+    if (cp >= 0x3400 && cp <= 0x4dbf) continue;
+    if (cp >= 0x3000 && cp <= 0x303f) continue;
+    if (cp >= 0x2000 && cp <= 0x206f) continue;
+    if (cp >= 0xff00 && cp <= 0xffef) continue;
+    if (cp >= 0xfe30 && cp <= 0xfe4f) continue;
+    return true;
+  }
+  return false;
+}
+
 /** Decode GBK/GB18030 wire strings; prefer UTF-8 only when bytes are valid UTF-8. */
 export function decodeGbk(bytes: Uint8Array): string {
   if (bytes.length === 0) return "";
@@ -71,7 +91,16 @@ export function decodeGbk(bytes: Uint8Array): string {
    * 404s against the real Unicode filename 07泰山_02.sce.
    */
   if (gbkHasCjk && !utf8HasCjk) return asGbk;
-  if (utf8HasCjk && utf8RoundTrip) return asUtf8;
+  /*
+   * GBK can be well-formed UTF-8 and still contain one Han. 飓风布靴 is
+   * EC AB B7 E7 B2 BC D1 A5, which round-trips as 쫷粼ѥ (Hangul + 粼 + Cyrillic).
+   * Prefer GBK when that UTF-8 view mixes in a non-Han script. Clean UTF-8 Han
+   * (你好 / 07泰山_02 / 等级：55) stays UTF-8.
+   */
+  if (utf8HasCjk && utf8RoundTrip) {
+    if (gbkHasCjk && utf8ViewHasForeignScript(asUtf8)) return asGbk;
+    return asUtf8;
+  }
   if (gbkHasCjk) return asGbk;
   if (utf8RoundTrip) return asUtf8;
   return asGbk;

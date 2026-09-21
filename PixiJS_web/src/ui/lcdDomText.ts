@@ -35,6 +35,8 @@ const chromeBranches = new Set<Container>();
  * Visible center toast hosts ({@link registerLcdDomPanelTip}).
  * Tip Songti uses a top CSS z band; overlapping labels stay drawn and are
  * covered by a solid DOM plate ({@link setLcdDomTipOccludeRect}) — not hidden.
+ * Only set the plate when preferSystemFont() — UC3 tip glyphs live on the
+ * canvas under #lcd-dom-text and would be covered by an opaque DOM plate.
  */
 const panelTipHosts = new Set<Container>();
 /** Tip frame in host-local LCD px — solid DOM cover under tip Songti. */
@@ -157,6 +159,7 @@ export function lcdDomIsPanelTip(label: Container): boolean {
 /**
  * Tip toast frame (host-local LCD). Places a solid DOM plate under tip Songti
  * so overlapping panel/world text is covered in place (not whole-line hidden).
+ * Callers must only use this for the Songti (cn) path — see panelTip.ts.
  */
 export function setLcdDomTipOccludeRect(
   host: Container,

@@ -244,6 +244,7 @@ static void vm_mock_admin_append_tabs(vm_mock_admin_text *page, const char *acti
         {"shop", "商品管理"},
         {"chests", "宝箱奖励"},
         {"enhance", "强化配置"},
+        {"gem", "宝石配置"},
         {"combat", "战斗公式"},
         {"arena", "比武"},
         {"worldboss", "世界BOSS"},
@@ -7021,6 +7022,11 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
 static void vm_mock_admin_handle_enhance_action(vm_mock_service_socket client,
                                                 const char *action,
                                                 const char *body);
+static void vm_mock_admin_render_gem_page(char *response, size_t responseCap,
+                                          const char *query);
+static void vm_mock_admin_handle_gem_action(vm_mock_service_socket client,
+                                            const char *action,
+                                            const char *body);
 static void vm_mock_admin_render_combat_page(char *response, size_t responseCap,
                                              const char *query);
 static void vm_mock_admin_handle_combat_action(vm_mock_service_socket client,
@@ -7132,6 +7138,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "enhance") == 0)
     {
         vm_mock_admin_render_enhance_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "gem") == 0)
+    {
+        vm_mock_admin_render_gem_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "combat") == 0)
@@ -8150,6 +8161,7 @@ static bool vm_mock_admin_form_u32_or_default(const char *body, const char *fiel
 
 #include "web_admin_chests.inc.c"
 #include "web_admin_enhance.inc.c"
+#include "web_admin_gem.inc.c"
 #include "web_admin_combat.inc.c"
 #include "web_admin_arena.inc.c"
 #include "web_admin_world_boss.inc.c"
@@ -10776,6 +10788,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "enhance-wash-quality-scale-save") == 0)
     {
         vm_mock_admin_handle_enhance_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-gem-config") == 0)
+    {
+        vm_mock_admin_handle_gem_action(client, action, body);
         return;
     }
     if (strcmp(action, "save-combat-formula") == 0)

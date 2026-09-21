@@ -43,6 +43,21 @@ let equipCache: Map<number, ItemCatalogRow> | null = null;
 /** Mall / bag item 806 — server hard cap (Pixi; CBE 64 no longer binding). */
 export const BACKPACK_EXPAND_ITEM_ID = 806;
 export const BACKPACK_EXPAND_MAX_CAPACITY = 256;
+/** Per purchase / use: +4 slots (item.dsh + server VM_NET_MOCK_BACKPACK_EXPAND_STEP). */
+export const BACKPACK_EXPAND_STEP = 4;
+
+/**
+ * How many 806 units fit before hitting {@link BACKPACK_EXPAND_MAX_CAPACITY}.
+ * Matches server `vm_net_mock_role_backpack_expand_usable_count`.
+ */
+export function maxBackpackExpandBuyUnits(currentCapacity: number): number {
+  const cur = Math.max(0, currentCapacity | 0);
+  if (cur >= BACKPACK_EXPAND_MAX_CAPACITY) return 0;
+  const room = BACKPACK_EXPAND_MAX_CAPACITY - cur;
+  let usable = Math.floor(room / BACKPACK_EXPAND_STEP);
+  if (room % BACKPACK_EXPAND_STEP) usable += 1;
+  return usable;
+}
 
 /**
  * Append expand-cap note on 806 detail text (bag / mall「查看」).
@@ -325,6 +340,50 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
       durabilityMax: 1,
     });
   }
+
+  // Pixi gem sockets / fragment (922+/942+/962+/978).
+  const gemDefs: { id: number; name: string; desc: string }[] = [
+    { id: 978, name: "宝石碎片", desc: "3个可合成随机1级宝石。" },
+  ];
+  for (let lv = 1; lv <= 16; lv++) {
+    gemDefs.push({
+      id: 921 + lv,
+      name: `反伤宝石${lv}级`,
+      desc: `镶嵌后获得${lv}%反伤。3个合成更高1级。`,
+    });
+    gemDefs.push({
+      id: 941 + lv,
+      name: `连击宝石${lv}级`,
+      desc: `镶嵌后获得${lv}%连击。3个合成更高1级。`,
+    });
+    gemDefs.push({
+      id: 961 + lv,
+      name: `复活宝石${lv}级`,
+      desc: `镶嵌后获得${lv}%复活。3个合成更高1级。`,
+    });
+  }
+  for (const g of gemDefs) {
+    if (!itemCache.has(g.id)) {
+      itemCache.set(g.id, {
+        id: g.id,
+        name: g.name,
+        desc: g.desc,
+        category: 14,
+        level: 1,
+        quality: 0,
+        stack: 99,
+        price: 0,
+        coolPrice: 0,
+        hpChange: 0,
+        mpChange: 0,
+        expChange: 0,
+        consumable: true,
+        kind: "item",
+        durabilityMax: 1,
+      });
+    }
+  }
+
   if (!itemCache.has(854)) {
     itemCache.set(854, {
       id: 854,
@@ -364,6 +423,23 @@ export function lookupItemSync(itemId: number): ItemCatalogRow | null {
   return equipCache?.get(itemId) ?? itemCache?.get(itemId) ?? null;
 }
 
+/** Exact DSH name match (equip first). Used by warehouse retrieve label coloring. */
+export function lookupItemByNameSync(name: string): ItemCatalogRow | null {
+  const key = name.trim();
+  if (!key) return null;
+  if (equipCache) {
+    for (const row of equipCache.values()) {
+      if (row.name === key) return row;
+    }
+  }
+  if (itemCache) {
+    for (const row of itemCache.values()) {
+      if (row.name === key) return row;
+    }
+  }
+  return null;
+}
+
 /**
  * Trade pick filter — exclude 特殊/任务/绑定、玄晶、已强化装备.
  * Evidence: item.dsh 关联任务(col2)/绑定属性(col7); 玄晶 901–916 / 类别23;
@@ -377,6 +453,14 @@ export function isTradeableItem(
   if (itemId >= 901 && itemId <= 916) return false;
   // 梦境徽章（BOSS 掉落 / 任务相关，不可交易）
   if (itemId === 840) return false;
+  // 宝石 / 碎片不可交易
+  if (itemId === 978) return false;
+  if (
+    (itemId >= 922 && itemId <= 937) ||
+    (itemId >= 942 && itemId <= 957) ||
+    (itemId >= 962 && itemId <= 977)
+  )
+    return false;
   // 未注满的修炼天书实例由服务端按 book 状态拒绝；客户端放行 921 交给校验
   // 已强化装备不可交易
   if ((opts?.enhance ?? 0) > 0) return false;

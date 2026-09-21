@@ -622,5 +622,23 @@ export function buildEquipDetailLines(
   // 物攻/护甲 M(L) 缩放已并入主属性行。
   lines.push(...enhanceLines(cat, enhance, it.enhanceAttrs));
 
+  // 宝石孔仅强化 ≥ +16 可镶嵌；详情也只在这一档显示三行。
+  if ((enhance | 0) >= 16) {
+    const sg = it.socketGems;
+    const gemLine = (label: string, lv: number) =>
+      ({
+        kind: "kv" as const,
+        key: `[${label}]:`,
+        value: lv > 0 ? `Lv${lv}` : "未镶嵌",
+        keyColor: qColor,
+        valueColor: qColor,
+      });
+    lines.push(
+      gemLine("反伤", sg?.reflect ?? 0),
+      gemLine("连击", sg?.combo ?? 0),
+      gemLine("复活", sg?.revive ?? 0),
+    );
+  }
+
   return lines;
 }
