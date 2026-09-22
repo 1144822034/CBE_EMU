@@ -16,6 +16,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  cbePopupBounds,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import type { BagItem } from "../net/protocolExtras";
@@ -116,6 +118,7 @@ export class WashPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    blockPanelPointerPassthrough(this);
     this.addChild(this.box);
     this.addChild(this.toast.host);
   }
@@ -439,10 +442,7 @@ export class WashPanel extends Container {
   redraw(): void {
     this.clearLabels();
     this.box.clear();
-    const x = 8;
-    const y = 18;
-    const w = LCD_WIDTH - 16;
-    const h = LCD_HEIGHT - SOFTKEY_H - y - 4;
+    const { x, y, w, h } = cbePopupBounds();
     paintCbePanel(this, this.box, x, y, w, h);
     if (!this.equip || !this.openInfo) return;
 

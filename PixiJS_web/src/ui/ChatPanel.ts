@@ -10,6 +10,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  cbePopupBounds,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
@@ -62,6 +64,17 @@ const CHANNELS: ChannelDef[] = [
 
 const LOCAL_CHANNEL_IDX = 2;
 const MSG_PAGE = 12;
+/** Same display size as 高清/宋体（{@link UC3_CELL}）；tabs / soft hints already use it. */
+const CHAT_MSG_FONT_SIZE = UC3_CELL;
+const CHAT_MSG_LINE_H = UC3_CELL;
+/** Wrap budget ≈ panel inner width (LCD − side padding). */
+const CHAT_MSG_WRAP_PX = LCD_WIDTH - 20;
+const COMPOSE_ROWS = 2;
+const COMPOSE_PAD_Y = 4;
+const COMPOSE_BAR_H = COMPOSE_ROWS * CHAT_MSG_FONT_SIZE + COMPOSE_PAD_Y * 2;
+/** Gap under popup bottom edge above compose bar (hint sits in this band). */
+const COMPOSE_BOTTOM_GAP = 6;
+const COMPOSE_HINT_LIFT = 8;
 
 export function chatPrefixForType(type: number): string {
   switch (type) {
@@ -197,6 +210,7 @@ export class ChatPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    blockPanelPointerPassthrough(this);
     this.paintShade();
     this.addChild(this.shade);
     this.addChild(this.box);
@@ -440,16 +454,20 @@ export class ChatPanel extends Container {
   }
 
   private clampScroll(): void {
-    const maxW = LCD_WIDTH - 16 - 20;
-    const n = this.buildDisplayLines(maxW).length;
+    const n = this.buildDisplayLines().length;
     const maxScroll = Math.max(0, n - MSG_PAGE);
     this.scroll = Math.min(Math.max(0, this.scroll), maxScroll);
   }
 
   private inputRect(): { x: number; y: number; w: number; h: number } {
-    const x = 12;
-    const y = LCD_HEIGHT - SOFTKEY_H - 36;
-    return { x: x + 36, y: y + 4, w: LCD_WIDTH - 28 - 36, h: 22 };
+    const { x, y, w, h } = cbePopupBounds();
+    const barY = y + h - (COMPOSE_BAR_H + COMPOSE_BOTTOM_GAP);
+    return {
+      x: x + 40,
+      y: barY + COMPOSE_PAD_Y,
+      w: w - 50,
+      h: COMPOSE_ROWS * CHAT_MSG_FONT_SIZE,
+    };
   }
 
   private canWhisperEntry(entry: ChatEntry): boolean {
@@ -467,10 +485,7 @@ export class ChatPanel extends Container {
     clearPointerHits(this.rowHits);
     this.box.clear();
 
-    const x = 8;
-    const y = 24;
-    const w = LCD_WIDTH - 16;
-    const h = LCD_HEIGHT - SOFTKEY_H - 32;
+    const { x, y, w, h } = cbePopupBounds();
     paintCbePanel(this, this.box, x, y, w, h, 0x0a1812);
 
     // Tab strip
@@ -518,26 +533,27 @@ export class ChatPanel extends Container {
 
     // Messages → explicit wrap lines (avoid Text wordWrap stacking in 16px rows)
     const msgTop = tabY + tabH + 10;
-    const msgMaxW = w - 20;
-    const displayLines = this.buildDisplayLines(msgMaxW);
+    const displayLines = this.buildDisplayLines();
     const maxScroll = Math.max(0, displayLines.length - MSG_PAGE);
     this.scroll = Math.min(this.scroll, maxScroll);
     const end = displayLines.length - this.scroll;
     const start = Math.max(0, end - MSG_PAGE);
     const shown = displayLines.slice(start, end);
     shown.forEach((row, i) => {
-      const ly = msgTop + i * UC3_CELL;
+      const ly = msgTop + i * CHAT_MSG_LINE_H;
       let lx = x + 10;
       const runs = chatLineColorRuns(row.text, row.color, row.entry);
       for (const run of runs) {
         if (!run.text) continue;
-        this.addLabel(run.text, lx, ly, run.color);
-        lx += measureUiTextWidth(run.text, UC3_CELL);
+        this.addLabel(run.text, lx, ly, run.color, {
+          fontSize: CHAT_MSG_FONT_SIZE,
+        });
+        lx += measureUiTextWidth(run.text, CHAT_MSG_FONT_SIZE);
       }
       if (this.canWhisperEntry(row.entry)) {
         const entry = row.entry;
         this.rowHits.push(
-          attachRowPointerHit(this, x + 8, ly, w - 16, UC3_CELL, () => {
+          attachRowPointerHit(this, x + 8, ly, w - 16, CHAT_MSG_LINE_H, () => {
             const sid = (entry.senderRoleId ?? 0) >>> 0;
             const sname =
               (entry.senderName || "").trim() ||
@@ -550,18 +566,20 @@ export class ChatPanel extends Container {
       }
     });
     if (!shown.length) {
-      this.addLabel("(暂无消息)", x + 10, msgTop + 8, CBE.inkLabel);
+      this.addLabel("(暂无消息)", x + 10, msgTop + 8, CBE.inkLabel, {
+        fontSize: CHAT_MSG_FONT_SIZE,
+      });
     }
 
-    // Compose bar
+    // Compose bar (2 rows × UC3_CELL)
     const ch = CHANNELS[this.channelIdx]!;
     const whisper =
       this.pmTarget && this.channelIdx === LOCAL_CHANNEL_IDX
         ? this.pmTarget
         : null;
-    const barY = y + h - 34;
+    const barY = y + h - (COMPOSE_BAR_H + COMPOSE_BOTTOM_GAP);
     this.box
-      .roundRect(x + 6, barY, w - 12, 28, 2)
+      .roundRect(x + 6, barY, w - 12, COMPOSE_BAR_H, 2)
       .fill({ color: 0x12241c })
       .stroke({ width: 1, color: CBE.borderDim });
     const tag =
@@ -570,7 +588,9 @@ export class ChatPanel extends Container {
         : whisper
           ? "[私]"
           : `[${chatPrefixForType(ch.sendType)}]`;
-    this.addLabel(tag, x + 12, barY + 8, whisper ? CHAT_PRIVATE_COLOR : ch.color);
+    this.addLabel(tag, x + 12, barY + COMPOSE_PAD_Y, whisper ? CHAT_PRIVATE_COLOR : ch.color, {
+      fontSize: CHAT_MSG_FONT_SIZE,
+    });
     let placeholder: string;
     if (ch.sendType < 0) placeholder = "系统频道不可发送";
     else if (whisper) {
@@ -579,18 +599,26 @@ export class ChatPanel extends Container {
     } else {
       placeholder = this.draft || "点击输入…";
     }
-    this.addLabel(
+    const draftMaxW = w - 56;
+    const draftLines = wrapUiText(
       placeholder,
-      x + 44,
-      barY + 8,
-      this.draft ? CBE.ink : CBE.inkLabel,
-      { maxWidth: w - 56 },
-    );
+      draftMaxW,
+      CHAT_MSG_FONT_SIZE,
+    ).slice(0, COMPOSE_ROWS);
+    draftLines.forEach((line, i) => {
+      this.addLabel(
+        line,
+        x + 44,
+        barY + COMPOSE_PAD_Y + i * CHAT_MSG_FONT_SIZE,
+        this.draft ? CBE.ink : CBE.inkLabel,
+        { fontSize: CHAT_MSG_FONT_SIZE },
+      );
+    });
 
     this.inputHit.clear();
     if (ch.sendType >= 0) {
       this.inputHit
-        .rect(x + 40, barY, w - 50, 28)
+        .rect(x + 40, barY, w - 50, COMPOSE_BAR_H)
         .fill({ color: 0xffffff, alpha: 0.001 });
     }
 
@@ -600,21 +628,32 @@ export class ChatPanel extends Container {
         : whisper
           ? `私聊:${whisper.name.slice(0, 8)}  点消息可选人`
           : "←→频道  ↑↓翻阅  点消息可私聊";
-    this.addLabelCentered(hint, x + w / 2, y + h - 42, CBE.inkLabel);
+    this.addLabelCentered(
+      hint,
+      x + w / 2,
+      barY - COMPOSE_HINT_LIFT,
+      CBE.inkLabel,
+    );
 
     drawPanelTipOverlay(this, this.toast);
   }
 
   /** One painted row per wrapped line (preserves \n and width wrap). */
-  private buildDisplayLines(
-    maxWidth: number,
-  ): { text: string; color: number; entry: ChatEntry }[] {
+  private buildDisplayLines(): {
+    text: string;
+    color: number;
+    entry: ChatEntry;
+  }[] {
     const out: { text: string; color: number; entry: ChatEntry }[] = [];
     for (const entry of this.filtered()) {
       const color = colorForChatEntry(entry);
       const paragraphs = entry.text.split(/\n/);
       for (const para of paragraphs) {
-        const wrapped = wrapUiText(para.length ? para : " ", maxWidth, UC3_CELL);
+        const wrapped = wrapUiText(
+          para.length ? para : " ",
+          CHAT_MSG_WRAP_PX,
+          CHAT_MSG_FONT_SIZE,
+        );
         for (const line of wrapped) {
           out.push({ text: line, color, entry });
         }
@@ -628,14 +667,14 @@ export class ChatPanel extends Container {
     x: number,
     y: number,
     color: number,
-    opts?: { maxWidth?: number },
+    opts?: { maxWidth?: number; fontSize?: number },
   ): void {
     const lab = new BitmapLabel();
     lab.position.set(x, y);
     void lab.setText(text, color, {
       smooth: false,
       outline: false,
-      fontSize: UC3_CELL,
+      fontSize: opts?.fontSize ?? UC3_CELL,
       maxWidth: opts?.maxWidth,
       // Compose bar may clip; list rows are pre-wrapped — never stack in-label.
       wordWrap: false,

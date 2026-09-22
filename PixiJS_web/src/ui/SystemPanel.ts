@@ -6,7 +6,10 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapChars, wrapUiText } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
@@ -78,7 +81,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons, preloadPageNavTextures } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY, preloadPageNavTextures } from "./pageNav";
 
 export type SystemKind =
   | "bag"
@@ -360,7 +363,7 @@ export class SystemPanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    this.eventMode = "static";
+    blockPanelPointerPassthrough(this);
     this.paintDim();
     this.addChild(this.dim, this.box, this.brokenGlowGfx);
     preloadPageNavTextures(() => {
@@ -1411,10 +1414,7 @@ export class SystemPanel extends Container {
       this.selected &&
       isGoods(this.selected)
     ) {
-      const x = 4;
-      const y = 2;
-      const w = LCD_WIDTH - 8;
-      const h = LCD_HEIGHT - 4;
+      const { x, y, w, h } = cbePopupBounds();
       this.drawMallItemDetail(x, y, w, h);
     } else if (
       this.kind === "skill" &&
@@ -1422,43 +1422,22 @@ export class SystemPanel extends Container {
       this.selected &&
       isSkill(this.selected)
     ) {
-      const x = 4;
-      const y = 2;
-      const w = LCD_WIDTH - 8;
-      const h = LCD_HEIGHT - 4;
+      const { x, y, w, h } = cbePopupBounds();
       this.drawSkillDetail(x, y, w, h);
     } else {
-      const x = 10;
-      const y = 48;
-      const w = LCD_WIDTH - 20;
-      const h = LCD_HEIGHT - SOFTKEY_H - 64;
-      paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
-
+      const { x, y, w, h } = cbePopupBounds();
       const rechargeOverlay =
         this.mode === "recharge_amount" || this.mode === "recharge_pay";
-      const pillH = 22;
-      const pillY = y + 8;
-      {
-        const title = rechargeOverlay
-          ? this.mode === "recharge_amount"
-            ? "赞助金额(元)"
-            : "赞助支付"
-          : titleOf(this.kind);
-        const pillW = Math.min(
-          w - 20,
-          Math.max(72, measureUiTextWidth(title) + 24),
-        );
-        drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
-        this.addLabelCentered(
-          title,
-          LCD_WIDTH / 2,
-          pillY + pillH / 2,
-          CBE.ink,
-        );
-      }
+      const title = rechargeOverlay
+        ? this.mode === "recharge_amount"
+          ? "赞助金额(元)"
+          : "赞助支付"
+        : titleOf(this.kind);
+      const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
+      this.addLabelCentered(title, x + w / 2, chrome.titleCy, CBE.ink);
       const showCatTabs = this.mode === "list" && this.usesCategoryTabs();
       const tabH = 20;
-      const tabY = pillY + pillH + 6;
+      const tabY = chrome.bodyY + 6;
       if (showCatTabs) {
         this.drawCategoryTabStrip(
           x + 6,
@@ -1508,11 +1487,7 @@ export class SystemPanel extends Container {
    * 确定→替换/卸载弹层；替换→背包同部位列表。
    */
   private drawWornEquipPanel(): void {
-    const x = 4;
-    const y = 2;
-    const w = LCD_WIDTH - 8;
-    const h = LCD_HEIGHT - 4;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
+    const { x, y, w, h } = cbePopupBounds();
 
     if (this.mode === "detail") {
       this.brokenSlotRects = [];
@@ -1522,18 +1497,15 @@ export class SystemPanel extends Container {
       return;
     }
 
-    const pillW = 72;
-    const pillH = 22;
-    const pillY = y + 8;
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
-    this.addLabelCentered("装备", LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.addLabelCentered("装备", x + w / 2, chrome.titleCy, CBE.ink);
 
     const softY = y + h - PANEL_BOTTOM_PAD;
     // handkuang 25×25; leave room for attr lines + center full-body actor.
     this.ensureEquipArt();
     const slotSize = SLOT_FRAME_SIZE;
     const slotGapY = 3;
-    const gridTop = pillY + pillH + 8;
+    const gridTop = chrome.bodyY + 8;
     const gridH = 4 * slotSize + 3 * slotGapY;
     const leftX = x + 10;
     const rightX = x + w - 10 - slotSize;
@@ -1699,15 +1671,12 @@ export class SystemPanel extends Container {
   private drawEquipReplacePanel(x: number, y: number, w: number, h: number): void {
     this.ensureEquipArt();
     const part = EQUIP_REPLACE_PART[this.equipFocusSlot] ?? "部位";
-    const pillW = Math.min(160, 28 + part.length * 14 + 56);
-    const pillH = 22;
-    const pillY = y + 8;
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
-    this.addLabelCentered(`替换${part}装备`, LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.addLabelCentered(`替换${part}装备`, x + w / 2, chrome.titleCy, CBE.ink);
 
     const softY = y + h - PANEL_BOTTOM_PAD;
     const splitY = Math.floor(y + h * 0.42);
-    const listTop = pillY + pillH + 16;
+    const listTop = chrome.bodyY + 10;
     const listBottom = splitY - 8;
     const rows = this.replaceCandidates;
     const total = Math.max(1, rows.length);
@@ -1810,12 +1779,9 @@ export class SystemPanel extends Container {
    * 胶囊「背包」、六分类 Tab、黄字 `%d/%d个`、品质色列表、金/银/铜栏；操作走 HTML 软键。
    */
   private drawBagPanel(): void {
-    const x = 4;
-    const y = 2;
-    const w = LCD_WIDTH - 8;
-    const h = LCD_HEIGHT - 4;
+    const { x, y, w, h } = cbePopupBounds();
 
-    const softY = y + h - PANEL_BOTTOM_PAD;
+    const softY = panelSafeFootY(y + h - PANEL_BOTTOM_PAD);
     const moneyH = 22;
     const moneyY = softY - moneyH - 4;
 
@@ -1830,26 +1796,21 @@ export class SystemPanel extends Container {
       return;
     }
 
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
-
-    const pillW = 72;
-    const pillH = 22;
-    const pillY = y + 8;
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
-    this.addLabelCentered("背包", LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.addLabelCentered("背包", x + w / 2, chrome.titleCy, CBE.ink);
 
     if (this.mode === "actions") {
-      this.drawBagInnerActions(x, y, w, pillY + pillH + 8, moneyY - 8);
+      this.drawBagInnerActions(x, y, w, chrome.bodyY + 8, moneyY - 8);
       return;
     }
     if (this.mode === "detail") {
-      this.drawBagInnerDetail(x, y, w, pillY + pillH + 8, moneyY - 8);
+      this.drawBagInnerDetail(x, y, w, chrome.bodyY + 8, moneyY - 8);
       this.drawBagMoneyBar(x + 8, moneyY, w - 16, moneyH);
       return;
     }
 
     // —— list ——
-    const tabY = pillY + pillH + 6;
+    const tabY = chrome.bodyY + 6;
     const tabH = 20;
     this.drawBagTabs(x + 6, tabY, w - 12, tabH);
 
@@ -2344,7 +2305,7 @@ export class SystemPanel extends Container {
     const it = this.selected;
     if (!it || !isBag(it)) return;
 
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     const qColor = qualityColor(it.quality);
     const titleH = 28;
@@ -2561,43 +2522,26 @@ export class SystemPanel extends Container {
 
   /**
    * CBE 属性页（docs/re/2026-08-04-attr-panel-label-value-mismatch.md）：
-   * 顶栏胶囊「属性」、黄名、标签左/数值右两列、暗行底、▲▼、右下「返回」。
+   * 顶栏胶囊用玩家名、标签左/数值右两列、暗行底、▲▼、右下「返回」。
    * ↑↓ 按整页翻；经验单行。
    */
   private drawStatusPanel(): void {
-    const x = 4;
-    const y = 2;
-    const w = LCD_WIDTH - 8;
-    const h = LCD_HEIGHT - 4;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
-
-    const pillW = 72;
-    const pillH = 22;
-    const pillY = y + 8;
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
-    this.addLabelCentered("属性", LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
-
+    const { x, y, w, h } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
     const name = this.stats?.name || (this.detailLines[0] ?? "…");
-    // Role name: system font (not title UC3).
-    const nameLab = new BitmapLabel();
-    nameLab.anchor.set(0.5, 0.5);
-    nameLab.position.set(Math.round(LCD_WIDTH / 2), Math.round(pillY + pillH + 16));
-    void nameLab.setText(name, CBE.inkChat, {
-      smooth: false,
-      outline: false,
-    });
-    this.addChild(nameLab);
-    this.labels.push(nameLab);
+    this.addLabelCentered(name, x + w / 2, chrome.titleCy, CBE.ink);
 
     const rows = this.statusRows();
     const pageCount = Math.max(1, Math.ceil(rows.length / STATUS_VISIBLE_ROWS));
     const page = Math.min(Math.max(0, this.cursorIndex), pageCount - 1);
     const scroll = page * STATUS_VISIBLE_ROWS;
 
-    const softY = y + h - PANEL_BOTTOM_PAD;
+    // Keep page nav above softkey band (see pageNav.clampPageNavY /
+    // docs/re/2026-09-22-status-panel-page-nav-hitarea.md).
+    const contentBottom = panelSafeFootY(y + h - PANEL_BOTTOM_PAD);
     const arrowH = 14;
-    const arrowY = softY - arrowH - 2;
-    const rowTop = y + 54;
+    const arrowY = contentBottom - arrowH - 2;
+    const rowTop = chrome.bodyY + 6;
     const listBottom = arrowY - 4;
     const rowH = Math.max(16, Math.floor((listBottom - rowTop) / STATUS_VISIBLE_ROWS));
     const listX = x + 8;

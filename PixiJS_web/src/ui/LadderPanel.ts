@@ -6,6 +6,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -23,8 +25,6 @@ import {
 
 export type LadderPanelAction = "challenge" | "close";
 
-const PANEL_X = 8;
-const PANEL_Y = 36;
 
 /**
  * 天梯挑战：每日次数、最高层、开始下一层 PvE 三职业战。
@@ -117,15 +117,12 @@ export class LadderPanel extends Container {
     this.clearLabels();
     this.box.clear();
 
-    const pw = LCD_WIDTH - PANEL_X * 2;
-    const ph = LCD_HEIGHT - SOFTKEY_H - PANEL_Y - 8;
-    paintCbePanel(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgDeep);
-    const pillW = Math.min(pw - 24, 100);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, PANEL_Y + 6, pillW, 22);
+    const { x: PANEL_X, y: PANEL_Y, w: pw, h: ph } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgPanel);
     const title = makePixelText("天梯挑战", 12, CBE.cream);
     title.anchor.set(0.5, 0.5);
     title.x = LCD_WIDTH / 2;
-    title.y = PANEL_Y + 17;
+    title.y = chrome.titleCy;
     this.addChild(title);
     this.labels.push(title);
 
@@ -138,7 +135,7 @@ export class LadderPanel extends Container {
       "对手：天机 / 幻剑 / 鬼道",
       "层数越高，怪物越强",
     ];
-    let y = PANEL_Y + 38;
+    let y = chrome.bodyY + 8;
     for (const line of lines) {
       this.addLabel(line, PANEL_X + 14, y);
       y += 18;

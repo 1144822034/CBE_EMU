@@ -6,8 +6,11 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
   makePixelText,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
@@ -46,7 +49,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons, preloadPageNavTextures } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY, preloadPageNavTextures } from "./pageNav";
 
 export type AuctionPanelAction =
   | "bid"
@@ -175,7 +178,7 @@ export class AuctionPanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    this.eventMode = "static";
+    blockPanelPointerPassthrough(this);
     this.addChild(this.box);
     this.inputHit.eventMode = "static";
     this.inputHit.cursor = "text";
@@ -1225,15 +1228,11 @@ export class AuctionPanel extends Container {
     clearPointerHits(this.rowHits);
     this.box.clear();
     this.inputHit.clear();
-    const x = 4;
-    const y = 2;
-    const w = LCD_WIDTH - 8;
-    const h = LCD_HEIGHT - SOFTKEY_H - 4;
-    paintCbePanel(this, this.box, x, y, w, h);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 4, Math.min(w - 20, 120), 18);
-    this.addLabelCentered("物品竞拍", LCD_WIDTH / 2, y + 13, CBE.cream);
+    const { x, y, w, h } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h);
+    this.addLabelCentered("物品竞拍", x + w / 2, chrome.titleCy, CBE.cream);
 
-    const tabY = y + 26;
+    const tabY = chrome.bodyY + 6;
     const tabH = 20;
     this.drawTabs(x + 6, tabY, w - 12, tabH);
 
@@ -1263,7 +1262,7 @@ export class AuctionPanel extends Container {
   ): void {
     const r = this.detailListing;
     if (!r) return;
-    const tipY = bodyTop + bodyH - 16;
+    const tipY = panelSafeFootY(bodyTop + bodyH - 16);
     const item = listingAsBagItem(r);
     const qColor = qualityColor(item.quality);
     const titleH = 20;
@@ -1315,7 +1314,7 @@ export class AuctionPanel extends Container {
     if (!r) return;
     const item = listingAsBagItem(r);
     const qColor = qualityColor(item.quality);
-    const tipY = bodyTop + bodyH - 16;
+    const tipY = panelSafeFootY(bodyTop + bodyH - 16);
     const acts = this.detailActions();
     const btnH = 18;
     const actionH = acts.length * (btnH + 2) + 8;
@@ -1428,7 +1427,7 @@ export class AuctionPanel extends Container {
     bodyH: number,
   ): void {
     const rows = this.listRows();
-    const tipY = bodyTop + bodyH - 16;
+    const tipY = panelSafeFootY(bodyTop + bodyH - 16);
     const pager = this.serverListPages();
     /** Always reserve strip so 上一页/下一页 stay visible (灰显 when edge). */
     const listBottom = tipY - 24;
@@ -1528,7 +1527,7 @@ export class AuctionPanel extends Container {
     w: number,
     bodyH: number,
   ): void {
-    const tipY = bodyTop + bodyH - 16;
+    const tipY = panelSafeFootY(bodyTop + bodyH - 16);
     if (this.listMode === "bag") {
       this.addLabel("选择物品（确定选入）", x + 10, bodyTop, CBE.inkLabel);
       if (!this.bag.length) {

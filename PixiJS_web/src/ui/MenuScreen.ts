@@ -11,6 +11,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { isSoundEnabled } from "../audio/GameBgm";
@@ -140,7 +141,7 @@ export class MenuScreen extends Container {
     this.scrollHost.eventMode = "none";
     this.addChild(this.scrollHost);
     this.addChild(this.box);
-    this.eventMode = "static";
+    blockPanelPointerPassthrough(this);
     preloadMenuScrollTexture(() => this.redraw());
     preloadPageNavTextures(() => this.redraw());
     this.reset();

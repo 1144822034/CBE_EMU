@@ -7,11 +7,12 @@ import {
   WORLD_BOTTOM_H,
   makePixelText,
   paintCbePanel,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, UC3_CELL, wrapChars } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import { replaceGraphics } from "../render/gpuResume";
 
 /** Visible option rows per page (hangup skill list / long NPC menus). */
@@ -52,6 +53,7 @@ export class DialogPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    blockPanelPointerPassthrough(this);
     this.eventMode = "none";
     this.paintDim();
     this.dim.eventMode = "static";
@@ -221,7 +223,7 @@ export class DialogPanel extends Container {
     const h = tall
       ? Math.max(280, hangRowTop - y - gap)
       : hNormal;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     const opts = this.dialog.options;
     const pages = Math.max(1, Math.ceil(Math.max(opts.length, 1) / pageSize));
@@ -286,7 +288,7 @@ export class DialogPanel extends Container {
         hits: this.rowHits,
         box: this.box,
         x: x + 8,
-        y: y + h - 22,
+        y: panelSafeFootY(y + h - 22, 14),
         w: w - 16,
         page: page + 1,
         pages,
@@ -316,7 +318,7 @@ export class DialogPanel extends Container {
     const hangRowTop = LCD_HEIGHT - WORLD_BOTTOM_H;
     const y = hangRowTop - h - 8;
     const w = LCD_WIDTH - 24;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     this.addDialogTitle("购买药品", y + 8);
 

@@ -6,6 +6,10 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
+  CBE_POPUP_X,
+  CBE_POPUP_W,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -54,8 +58,6 @@ const PAGE_SIZE = 5;
 const TAB_BG = 0x375946;
 const TAB_H = 18;
 /** 面板相对 LCD 顶/侧留白，避免贴顶盖住世界 HUD. */
-const PANEL_X = 6;
-const PANEL_Y = 28;
 const PANEL_BOTTOM_GAP = 6;
 const TABS: { id: WagerTab; label: string }[] = [
   { id: "host", label: "摆擂" },
@@ -550,7 +552,7 @@ export class WagerPanel extends Container {
   }
 
   private panelInnerRight(): number {
-    return PANEL_X + (LCD_WIDTH - PANEL_X * 2) - 8;
+    return CBE_POPUP_X + CBE_POPUP_W - 8;
   }
 
   private drawActionButton(
@@ -558,7 +560,7 @@ export class WagerPanel extends Container {
     y: number,
     onTap: () => void,
   ): number {
-    const bw = Math.min(140, LCD_WIDTH - PANEL_X * 2 - 24);
+    const bw = Math.min(140, CBE_POPUP_W - 24);
     const bh = 22;
     const bx = Math.floor((LCD_WIDTH - bw) / 2);
     this.box
@@ -577,8 +579,8 @@ export class WagerPanel extends Container {
     const openId =
       board?.challengeId ||
       (this.mine?.status === 0 ? this.mine.challengeId : 0);
-    const lx = PANEL_X + 8;
-    const cardW = LCD_WIDTH - PANEL_X * 2 - 16;
+    const lx = CBE_POPUP_X + 8;
+    const cardW = CBE_POPUP_W - 16;
     let y = top;
     this.addLabel("我的擂台", lx, y, CBE.inkMint);
     y += 16;
@@ -640,8 +642,8 @@ export class WagerPanel extends Container {
   private drawListBody(top: number): void {
     const actions = this.actions();
     if (this.listCursor >= actions.length) this.listCursor = 0;
-    const lx = PANEL_X + 8;
-    const rowW = LCD_WIDTH - PANEL_X * 2 - 12;
+    const lx = CBE_POPUP_X + 8;
+    const rowW = CBE_POPUP_W - 12;
     let y = top;
     this.addLabel(
       this.tab === "challenge" ? "选择擂台应战" : "查看进行中",
@@ -703,14 +705,11 @@ export class WagerPanel extends Container {
   private redraw(): void {
     this.clearLabels();
     this.box.clear();
-    const panelW = LCD_WIDTH - PANEL_X * 2;
-    const panelH = LCD_HEIGHT - SOFTKEY_H - PANEL_Y - PANEL_BOTTOM_GAP;
-    paintCbePanel(this, this.box, PANEL_X, PANEL_Y, panelW, panelH, CBE.bgDeep);
-    const pillW = Math.min(panelW - 24, 100);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, PANEL_Y + 6, pillW, 22);
-    this.addLabelCentered("赏金擂台", LCD_WIDTH / 2, PANEL_Y + 17, CBE.cream);
+    const { x: PANEL_X, y: PANEL_Y, w: panelW, h: panelH } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, PANEL_X, PANEL_Y, panelW, panelH, CBE.bgPanel);
+    this.addLabelCentered("赏金擂台", LCD_WIDTH / 2, chrome.titleCy, CBE.cream);
 
-    const tabY = PANEL_Y + 32;
+    const tabY = chrome.bodyY + 6;
     const tabLabels = TABS.map((t) => t.label);
     const activeIndex = TABS.findIndex((t) => t.id === this.tab);
     this.drawRankStyleTabs(

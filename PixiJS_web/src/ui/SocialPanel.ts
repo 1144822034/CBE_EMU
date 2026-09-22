@@ -9,6 +9,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   drawCbeTitlePill,
+  cbePopupBounds,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
@@ -28,7 +30,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import {
   listShellPageInfo,
   listShellStepPage,
@@ -147,6 +149,7 @@ export class SocialPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    blockPanelPointerPassthrough(this);
     this.addChild(
       new Graphics()
         .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
@@ -732,10 +735,10 @@ export class SocialPanel extends Container {
     this.uiSprites = [];
     clearPointerHits(this.rowHits);
     this.box.clear();
-    const bounds = { x: 8, y: 28, w: LCD_WIDTH - 16, h: LCD_HEIGHT - SOFTKEY_H - 40 };
+    const bounds = cbePopupBounds();
     const { x, y, w, h } = bounds;
     const ctx = this.shellCtx();
-    paintListShellChrome(ctx, this.title, CBE.bgDeep, bounds);
+    const shell = paintListShellChrome(ctx, this.title, CBE.bgPanel, bounds);
 
     try {
       if (this.mode === "text") {
@@ -747,7 +750,7 @@ export class SocialPanel extends Container {
         const pages = Math.max(1, Math.ceil(this.textLines.length / ps));
         const start = this.textPage * ps;
         const shown = this.textLines.slice(start, start + ps);
-        let ly = y + 36;
+        let ly = (shell.bodyY ?? y) + 8;
         for (const line of shown.flatMap((l) => wrapChars(l))) {
           this.addLabel(line, x + 10, ly, CBE.inkMint);
           ly += 15;
@@ -763,7 +766,7 @@ export class SocialPanel extends Container {
             hits: this.rowHits,
             box: this.box,
             x: x + 8,
-            y: y + h - 40,
+            y: panelSafeFootY(y + h - 40, 14),
             w: w - 16,
             page: this.textPage + 1,
             pages,
@@ -779,23 +782,31 @@ export class SocialPanel extends Container {
           });
         }
         this.rowHits.push(
-          attachRowPointerHit(this, x + 6, y + 36, w - 12, h - 70, () => this.confirm()),
+          attachRowPointerHit(
+            this,
+            x + 6,
+            (shell.bodyY ?? y) + 8,
+            w - 12,
+            h - 70,
+            () => this.confirm(),
+          ),
         );
         return;
       }
 
       if (this.mode === "actions") {
+        const actionTop = (shell.bodyY ?? y) + 8;
         this.actionLabels.forEach((lab, i) => {
           const hi = i === this.actionCursor;
           if (hi) {
             this.box
-              .rect(x + 6, y + 36 + i * 18, w - 12, 16)
+              .rect(x + 6, actionTop + i * 18, w - 12, 16)
               .fill({ color: CBE.select });
           }
-          this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
+          this.addLabel(lab, x + 12, actionTop + 2 + i * 18, hi ? CBE.ink : CBE.inkMint);
           const idx = i;
           this.rowHits.push(
-            attachRowPointerHit(this, x + 6, y + 36 + i * 18, w - 12, 16, () => {
+            attachRowPointerHit(this, x + 6, actionTop + i * 18, w - 12, 16, () => {
               this.actionCursor = idx;
               this.redraw();
               this.confirm();
@@ -806,12 +817,12 @@ export class SocialPanel extends Container {
       }
 
       if (this.kind === "rank") {
-        this.drawRankList(x, y, w, h);
+        this.drawRankList(x, y, w, h, shell.bodyY ?? y);
         return;
       }
 
       if (this.kind === "friends" || this.kind === "enmity") {
-        this.drawFriendHubList(x, y, w, h);
+        this.drawFriendHubList(x, y, w, h, shell.bodyY ?? y);
         return;
       }
 
@@ -819,9 +830,9 @@ export class SocialPanel extends Container {
       paintListShellBody({
         ctx,
         x,
-        listTop: y + 36,
+        listTop: (shell.bodyY ?? y) + 8,
         w,
-        footY: y + h - 18,
+        footY: panelSafeFootY(y + h - 18),
         rows: this.rows.map((r) =>
           this.kind === "titles"
             ? { name: r.name }
@@ -860,8 +871,14 @@ export class SocialPanel extends Container {
     }
   }
 
-  private drawFriendHubList(x: number, y: number, w: number, h: number): void {
-    const tabY = y + 30;
+  private drawFriendHubList(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    bodyY: number,
+  ): void {
+    const tabY = bodyY + 6;
     const tabH = 20;
     this.drawGenericTabs(
       x + 6,
@@ -903,7 +920,7 @@ export class SocialPanel extends Container {
       listTop += tabH + 4;
     }
 
-    const footY = y + h - 18;
+    const footY = panelSafeFootY(y + h - 18);
     if (this.rows.length) {
       this.listCursor = Math.min(this.listCursor, this.rows.length - 1);
     }
@@ -993,13 +1010,19 @@ export class SocialPanel extends Container {
     }
   }
 
-  private drawRankList(x: number, y: number, w: number, h: number): void {
-    const tabY = y + 30;
+  private drawRankList(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    bodyY: number,
+  ): void {
+    const tabY = bodyY + 6;
     const tabH = 20;
     this.drawRankTabs(x + 6, tabY, w - 12, tabH);
 
     const listTop = tabY + tabH + 6;
-    const footY = y + h - 34;
+    const footY = panelSafeFootY(y + h - 34);
     const wealth = this.rankType === 1;
     /* 财富榜右侧为金元宝图标，仍走自定义副列；其它榜用 shell 行. */
     if (wealth) {
@@ -1173,7 +1196,7 @@ export class SocialPanel extends Container {
     const descX = x + 10;
     const descY = titleY + titleH + 8;
     const descW = w - 20;
-    const footY = y + h - 18;
+    const footY = panelSafeFootY(y + h - 18);
     const descH = Math.max(48, footY - descY - 22);
     this.box.rect(descX, descY, descW, descH).fill({ color: 0x0a1410 });
     this.addLabel("称号说明", descX + 6, descY + 6, CBE.inkTip);

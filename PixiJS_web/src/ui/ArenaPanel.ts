@@ -6,6 +6,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -345,19 +347,19 @@ export class ArenaPanel extends Container {
   private redraw(): void {
     this.clearLabels();
     this.box.clear();
-    paintCbePanel(this, this.box, 0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
-    const pillW = Math.min(LCD_WIDTH - 32, 120);
-    const pillH = 22;
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, 6, pillW, pillH);
-    this.addLabelCentered("比武排行榜", LCD_WIDTH / 2, 6 + pillH / 2, CBE.cream);
+    const { x, y, w, h } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h);
+    this.addLabelCentered("比武排行榜", LCD_WIDTH / 2, chrome.titleCy, CBE.cream);
 
-    const jobY = 32;
+    const jobY = chrome.bodyY + 6;
     const tabH = 18;
+    const tabX = x + 4;
+    const tabW = w - 8;
     if (this.isFfa) {
       this.drawTabs(
-        8,
+        tabX,
         jobY,
-        LCD_WIDTH - 16,
+        tabW,
         tabH,
         ["全职业"],
         0,
@@ -366,9 +368,9 @@ export class ArenaPanel extends Container {
       );
     } else {
       this.drawTabs(
-        8,
+        tabX,
         jobY,
-        LCD_WIDTH - 16,
+        tabW,
         tabH,
         JOBS,
         this.jobIndex,
@@ -382,9 +384,9 @@ export class ArenaPanel extends Container {
       b === 77 ? "乱斗" : b === 70 ? "70" : bracketLabel(b),
     );
     this.drawTabs(
-      8,
+      tabX,
       brY,
-      LCD_WIDTH - 16,
+      tabW,
       tabH,
       brLabels,
       this.bracketIndex,
@@ -396,7 +398,7 @@ export class ArenaPanel extends Container {
       ? `大乱斗 · ${bracketLabel(this.bracket)}`
       : `${JOBS[this.jobIndex]} · ${bracketLabel(this.bracket)}`;
     const infoY = brY + tabH + 4;
-    this.addLabel(bucketHint, 12, infoY, CBE.inkMint);
+    this.addLabel(bucketHint, x + 8, infoY, CBE.inkMint);
     const mineReward = formatArenaRewardLine(
       this.page?.myRewardName || "",
       this.page?.myRewardCount || 0,
@@ -412,7 +414,7 @@ export class ArenaPanel extends Container {
     const mine = this.page
       ? `我:第${this.page.myRank || "-"} 分${this.page.myScore}${claimMark}${mineRewardFrag}`
       : "加载中…";
-    this.addLabel(mine, 12, infoY + 14, CBE.inkLabel);
+    this.addLabel(mine, x + 8, infoY + 14, CBE.inkLabel);
     this.addLabel(
       this.tabFocus === "job" ? "←→职业" : "←→段位",
       LCD_WIDTH - 64,
@@ -507,7 +509,7 @@ export class ArenaPanel extends Container {
     const actionGap = 4;
     const actionBtnW = Math.max(
       48,
-      Math.floor((LCD_WIDTH - 16 - actionGap * (actions.length - 1)) / actions.length),
+      Math.floor((w - 8 - actionGap * (actions.length - 1)) / actions.length),
     );
     for (let i = 0; i < actions.length; i++) {
       const idx = rows.length + i;

@@ -6,6 +6,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -23,8 +25,6 @@ import {
 
 export type YanmenPanelAction = "exchange" | "close";
 
-const PANEL_X = 8;
-const PANEL_Y = 36;
 
 export class YanmenPanel extends Container {
   private box = new Graphics();
@@ -108,19 +108,17 @@ export class YanmenPanel extends Container {
   private redraw(): void {
     this.clearLabels();
     this.box.clear();
-    const pw = LCD_WIDTH - PANEL_X * 2;
-    const ph = LCD_HEIGHT - SOFTKEY_H - PANEL_Y - 8;
-    paintCbePanel(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgDeep);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, PANEL_Y + 6, Math.min(pw - 24, 100), 22);
+    const { x: PANEL_X, y: PANEL_Y, w: pw, h: ph } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgPanel);
     const title = makePixelText("材料兑换", 12, CBE.cream);
     title.anchor.set(0.5, 0.5);
     title.x = LCD_WIDTH / 2;
-    title.y = PANEL_Y + 17;
+    title.y = chrome.titleCy;
     this.addChild(title);
     this.labels.push(title);
 
     const st = this.status;
-    let y = PANEL_Y + 38;
+    let y = chrome.bodyY + 8;
     this.addLabel(`木料：${st?.woodCount ?? 0}`, PANEL_X + 14, y);
     y += 16;
     this.addLabel(`石材：${st?.stoneCount ?? 0}`, PANEL_X + 14, y);

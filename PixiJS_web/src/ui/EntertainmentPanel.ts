@@ -2,7 +2,7 @@
  * Entertainment entry list (棋牌/音乐/视频) — Yinhe 时辰.lua URLs.
  */
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
+import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, blockPanelPointerPassthrough } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { replaceGraphics } from "../render/gpuResume";
@@ -113,6 +113,8 @@ export class EntertainmentPanel extends Container {
     dim.on("pointertap", (e) => e.stopPropagation());
     this.addChild(dim);
     this.addChild(this.box);
+    blockPanelPointerPassthrough(this);
+    this.eventMode = "none";
   }
 
   open(entries?: EntertainmentEntry[]): void {
@@ -198,8 +200,8 @@ export class EntertainmentPanel extends Container {
       addLabelCentered: (text, cx, cy, color) =>
         this.addLabelCentered(text, cx, cy, color),
     };
-    paintListShellChrome(ctx, "娱乐", CBE.bgDeep, bounds);
-    const listTop = bounds.y + 32;
+    const shell = paintListShellChrome(ctx, "娱乐", CBE.bgPanel, bounds);
+    const listTop = (shell.bodyY ?? bounds.y) + 8;
     const footY = bounds.y + bounds.h - 28;
     paintListShellBody({
       ctx,

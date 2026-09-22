@@ -13,7 +13,10 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, wrapChars, measureUiTextWidth } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
@@ -23,7 +26,7 @@ import type { TradeOfferItem, TradeOfferView } from "../net/protocolSocial";
 import { COPPER_PER_GOLD } from "../net/protocolAuction";
 import { isTradeableItem, lookupItemSync, qualityColor } from "../resources/itemCatalog";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import {
   buildEquipDetailLines,
   equipHasWashedAttr,
@@ -95,6 +98,7 @@ export class TradePanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    blockPanelPointerPassthrough(this);
     this.addChild(
       new Graphics()
         .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
@@ -732,11 +736,9 @@ export class TradePanel extends Container {
   }
 
   private moneyInputRect(): { x: number; y: number; w: number; h: number } {
-    const x = 6;
-    const y = 24;
-    const h = LCD_HEIGHT - SOFTKEY_H - 32;
+    const { x, y, w, h } = cbePopupBounds();
     const barY = y + h - 52;
-    return { x: x + 14, y: barY + 4, w: LCD_WIDTH - 12 - 28, h: 22 };
+    return { x: x + 14, y: barY + 4, w: w - 28, h: 22 };
   }
 
   private redraw(): void {
@@ -745,51 +747,46 @@ export class TradePanel extends Container {
     clearPointerHits(this.rowHits);
     this.box.clear();
     this.inputHit.clear();
-    const x = 6;
-    const y = 24;
-    const w = LCD_WIDTH - 12;
-    const h = LCD_HEIGHT - SOFTKEY_H - 32;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
+    const { x, y, w, h } = cbePopupBounds();
     const title = `交易·${this.peerName}`;
-    const pillW = Math.min(w - 16, title.length * 12 + 20);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 18);
-    this.addTitleCentered(title, y + 6 + 9, CBE.ink);
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.addTitleCentered(title, chrome.titleCy, CBE.ink);
 
     const leftX = x + 8;
     const rightX = x + w / 2 + 2;
-    this.addLabel("我的报价", leftX, y + 28, CBE.inkLabel);
+    this.addLabel("我的报价", leftX, chrome.bodyY + 6, CBE.inkLabel);
     this.addLabel(
       `金${copperToGold(this.myMoney)}${this.offerSubmitted ? "*" : ""}`,
       leftX,
-      y + 42,
+      chrome.bodyY + 20,
       CBE.inkMint,
     );
     this.myItems.slice(0, 4).forEach((it, i) => {
       const line = formatOfferLine(it);
-      this.addLabel(line, leftX, y + 56 + i * 14, CBE.inkBody);
+      this.addLabel(line, leftX, chrome.bodyY + 34 + i * 14, CBE.inkBody);
       if (this.flowStep === 1 && this.mode === "list") {
         const idx = i;
         this.rowHits.push(
-          attachRowPointerHit(this, leftX - 2, y + 54 + i * 14, w / 2 - 12, 14, () => {
+          attachRowPointerHit(this, leftX - 2, chrome.bodyY + 34 + i * 14, w / 2 - 12, 14, () => {
             this.removeMineAt(idx);
           }),
         );
       }
     });
     if (!this.myItems.length) {
-      this.addLabel("(空)", leftX, y + 56, CBE.inkLabel);
+      this.addLabel("(空)", leftX, chrome.bodyY + 34, CBE.inkLabel);
     }
 
-    this.addLabel("对方报价", rightX, y + 28, CBE.inkLabel);
+    this.addLabel("对方报价", rightX, chrome.bodyY + 6, CBE.inkLabel);
     this.addLabel(
       `金${copperToGold(this.peerOffer.money)}${this.peerSubmitted ? "*" : ""}`,
       rightX,
-      y + 42,
+      chrome.bodyY + 20,
       CBE.inkMint,
     );
     this.peerOffer.items.slice(0, 4).forEach((it, i) => {
       const line = formatOfferLine(it);
-      const rowY = y + 56 + i * 14;
+      const rowY = chrome.bodyY + 34 + i * 14;
       this.addLabel(line, rightX, rowY, CBE.inkBody);
       const canView =
         this.bothSubmitted() &&
@@ -810,10 +807,10 @@ export class TradePanel extends Container {
       }
     });
     if (!this.peerOffer.items.length) {
-      this.addLabel("(空)", rightX, y + 56, CBE.inkLabel);
+      this.addLabel("(空)", rightX, chrome.bodyY + 34, CBE.inkLabel);
     }
 
-    const midY = y + 118;
+    const midY = chrome.bodyY + 89;
     this.box.rect(x + 4, midY - 2, w - 8, 1).fill({ color: CBE.inkLabel });
 
     if (this.mode === "peer_detail" && this.peerDetailItem) {
@@ -921,7 +918,10 @@ export class TradePanel extends Container {
     if (this.bag.length > BAG_PAGE_SIZE) {
       const pages = Math.max(1, Math.ceil(this.bag.length / BAG_PAGE_SIZE));
       const page = Math.floor(this.bagScroll / BAG_PAGE_SIZE) + 1;
-      const navY = midY + 18 + (1 + Math.min(BAG_PAGE_SIZE, this.bag.length)) * 16;
+      const navY = panelSafeFootY(
+        midY + 18 + (1 + Math.min(BAG_PAGE_SIZE, this.bag.length)) * 16,
+        14,
+      );
       attachPageNavButtons({
         host: this,
         hits: this.rowHits,

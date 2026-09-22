@@ -8,6 +8,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, UI_WRAP_CHARS, wrapChars } from "./BitmapLabel";
 import type { TaskCandidateRow, TaskListRow } from "../net/protocolExtras";
@@ -20,7 +21,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import {
   listShellBounds,
   listShellStepPage,
@@ -63,6 +64,7 @@ export class TaskPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    blockPanelPointerPassthrough(this);
     this.addChild(
       new Graphics()
         .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
@@ -280,9 +282,9 @@ export class TaskPanel extends Container {
     const bounds = listShellBounds();
     const { x, y, w, h } = bounds;
     const ctx = this.shellCtx();
-    paintListShellChrome(ctx, "任务列表", CBE.bgDeep, bounds);
+    const shell = paintListShellChrome(ctx, "任务列表", CBE.bgPanel, bounds);
 
-    const tabY = y + 30;
+    const tabY = (shell.bodyY ?? y) + 6;
     this.addLabel(
       this.tab === "accepted" ? "[已接]" : " 已接 ",
       x + 10,
@@ -331,7 +333,7 @@ export class TaskPanel extends Container {
             hits: this.rowHits,
             box: this.box,
             x: x + 8,
-            y: y + h - 40,
+            y: panelSafeFootY(y + h - 40, 14),
             w: w - 16,
             page: this.detailPage + 1,
             pages,
@@ -399,7 +401,7 @@ export class TaskPanel extends Container {
           x,
           listTop: tabY + 18,
           w,
-          footY: y + h - 36,
+          footY: panelSafeFootY(y + h - 36),
           rows: rows.map((r) => ({ name: r.name, subtitle: r.subtitle })),
           cursor: this.listCursor,
           pageSize: LIST_PAGE_SIZE,

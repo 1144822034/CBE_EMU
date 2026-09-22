@@ -5,7 +5,10 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
@@ -91,7 +94,7 @@ export class WorldMapPanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    this.eventMode = "static";
+    blockPanelPointerPassthrough(this);
     this.addChild(this.box, this.graph);
   }
 
@@ -315,18 +318,10 @@ export class WorldMapPanel extends Container {
     if (!this.catalog) return;
 
     // Full-screen panel like CBE bag / attr (covers HUD).
-    const x = 2;
-    const y = 2;
-    const w = LCD_WIDTH - 4;
-    const h = LCD_HEIGHT - 4;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
-
+    const { x, y, w, h } = cbePopupBounds();
     const title = this.mode === "world" ? "世界地图" : "区域地图";
-    const pillW = 88;
-    const pillH = 22;
-    const pillY = y + 8;
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
-    this.addLabelCentered(title, LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.addLabelCentered(title, x + w / 2, chrome.titleCy, CBE.ink);
 
     // Bottom L/R chrome removed — HTML softkeys carry 确定/返回/瞬移.
     const softY = y + h - 6;
@@ -343,8 +338,8 @@ export class WorldMapPanel extends Container {
           : scenesForWorld(this.catalog, this.regionWorld!.id)[this.regionCursor];
       const name = focus?.alias || "—";
       const level = focus?.level || "无";
-      this.addKv(x + 10, pillY + pillH + 8, "名称:", name);
-      this.addKv(x + 10, pillY + pillH + 24, "等级:", level);
+      this.addKv(x + 10, chrome.bodyY + 8, "名称:", name);
+      this.addKv(x + 10, chrome.bodyY + 24, "等级:", level);
 
       if (this.mode === "world") {
         this.drawGraph(

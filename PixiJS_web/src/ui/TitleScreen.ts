@@ -966,7 +966,7 @@ export class TitleScreen extends Container {
     const boxY = 44;
     const boxW = LCD_WIDTH - 16;
     const boxH = LCD_HEIGHT - SOFTKEY_H - boxY - TIP_STRIP_H;
-    paintCbePanel(this, this.serverGfx, boxX, boxY, boxW, boxH, CBE.bgDeep);
+    paintCbePanel(this, this.serverGfx, boxX, boxY, boxW, boxH, CBE.bgPanel);
 
     this.serverGfx.rect(boxX + 2, boxY + 2, boxW - 4, 24).fill({ color: CBE.bgPanel });
     this.serverGfx
@@ -1032,7 +1032,7 @@ export class TitleScreen extends Container {
     const boxY = 44;
     const boxW = LCD_WIDTH - 16;
     const boxH = LCD_HEIGHT - SOFTKEY_H - boxY - TIP_STRIP_H;
-    paintCbePanel(this, this.zoneGfx, boxX, boxY, boxW, boxH, CBE.bgDeep);
+    paintCbePanel(this, this.zoneGfx, boxX, boxY, boxW, boxH, CBE.bgPanel);
 
     this.zoneGfx.rect(boxX + 2, boxY + 2, boxW - 4, 24).fill({ color: CBE.bgPanel });
     this.zoneGfx

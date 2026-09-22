@@ -110,7 +110,7 @@ export class CreateRoleScreen extends Container {
       PANEL_TOP,
       LCD_WIDTH - 12,
       PANEL_H,
-      CBE.bgDeep,
+      CBE.bgPanel,
     );
   }
 

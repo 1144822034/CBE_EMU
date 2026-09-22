@@ -2966,7 +2966,7 @@ export class BattleScreen extends Container {
 
     const chrome = new Graphics();
     chrome.eventMode = "none";
-    paintCbePanel(this.menuHost, chrome, panelX, panelY, panelW, panelH, CBE.bgDeep);
+    paintCbePanel(this.menuHost, chrome, panelX, panelY, panelW, panelH, CBE.bgPanel);
     this.menuHost.addChild(chrome);
 
     this.addBattleLabelCentered(

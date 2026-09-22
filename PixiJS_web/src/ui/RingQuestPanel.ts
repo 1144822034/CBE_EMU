@@ -6,6 +6,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -23,8 +25,6 @@ import {
 
 export type RingQuestPanelAction = "accept" | "submit" | "claim" | "close";
 
-const PANEL_X = 8;
-const PANEL_Y = 36;
 const DESC_CHARS_PER_LINE = 14;
 
 /** Mirror server VM_MOCK_RING_TYPE_* */
@@ -156,14 +156,12 @@ export class RingQuestPanel extends Container {
   private redraw(): void {
     this.clearLabels();
     this.box.clear();
-    const pw = LCD_WIDTH - PANEL_X * 2;
-    const ph = LCD_HEIGHT - SOFTKEY_H - PANEL_Y - 8;
-    paintCbePanel(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgDeep);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, PANEL_Y + 6, Math.min(pw - 24, 100), 22);
+    const { x: PANEL_X, y: PANEL_Y, w: pw, h: ph } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgPanel);
     const title = makePixelText("跑环任务", 12, CBE.cream);
     title.anchor.set(0.5, 0.5);
     title.x = LCD_WIDTH / 2;
-    title.y = PANEL_Y + 17;
+    title.y = chrome.titleCy;
     this.addChild(title);
     this.labels.push(title);
 
@@ -186,7 +184,7 @@ export class RingQuestPanel extends Container {
       lines.push("左键接取随机环任务");
       lines.push("奖励：经验/金币/低概率钥匙");
     }
-    let y = PANEL_Y + 38;
+    let y = chrome.bodyY + 8;
     for (const line of lines) {
       this.addLabel(line, PANEL_X + 14, y);
       y += 15;

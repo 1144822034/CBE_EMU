@@ -8,7 +8,12 @@ import {
   WORLD_TOP_H,
   makePixelText,
 } from "./constants";
-import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
+import {
+  BitmapLabel,
+  UC3_CELL,
+  measureUiTextWidth,
+  wrapUiText,
+} from "./BitmapLabel";
 import { DigitStrip, tryLoadUiTexture, uiSprite } from "./UiAssets";
 import { SLOT_FRAME_SIZE } from "./ItemArt";
 import {
@@ -93,10 +98,14 @@ const ICON_Y = 39;
 const ICON_PITCH = 31; // 21px art + 10px gap
 const EXP_Y = 63;
 const SOFT_H = 22;
-/** Bottom chat strip: ~14 CJK chars/line (UC3_CELL), 2 visual rows. */
-const CHAT_WRAP_CHARS = 14;
+/**
+ * Bottom chat strip under 挂机 soft row.
+ * Size matches 高清/宋体 display cell ({@link UC3_CELL}); band is 36px → 2 rows.
+ */
+const CHAT_FONT_SIZE = UC3_CELL;
+const CHAT_WRAP_PX = LCD_WIDTH - 8;
 const CHAT_VISIBLE_ROWS = 2;
-const CHAT_LINE_H = UC3_CELL;
+const CHAT_LINE_H = CHAT_FONT_SIZE;
 /**
  * Party mates under the HUD chrome, left of the map.
  * Must clear SceneView map-corner status strip (修/拍/… flush under exp).
@@ -1110,16 +1119,15 @@ export class WorldHud extends Container {
     this.refreshChatStrip();
   }
 
-  /** Newest messages → wrap ~14 CJK/line → paint first {@link CHAT_VISIBLE_ROWS} rows. */
+  /** Newest messages → wrap to strip width → paint first {@link CHAT_VISIBLE_ROWS} rows. */
   private refreshChatStrip(): void {
-    const maxW = CHAT_WRAP_CHARS * UC3_CELL;
     type Row = { text: string; baseColor: number; entry: ChatEntry };
     const rows: Row[] = [];
     for (const entry of this.chatEntries) {
       const raw = (entry.text ?? "").replace(/\s*\n\s*/g, " ").trim();
       if (!raw) continue;
       const baseColor = colorForChatEntry(entry);
-      for (const part of wrapUiText(raw, maxW, UC3_CELL)) {
+      for (const part of wrapUiText(raw, CHAT_WRAP_PX, CHAT_FONT_SIZE)) {
         rows.push({ text: part, baseColor, entry });
         if (rows.length >= CHAT_VISIBLE_ROWS) break;
       }
@@ -1148,11 +1156,11 @@ export class WorldHud extends Container {
         void lab.setText(run.text, run.color, {
           outline: false,
           wordWrap: false,
-          fontSize: UC3_CELL,
+          fontSize: CHAT_FONT_SIZE,
         });
         this.chatStripHost.addChild(lab);
         this.chatLines.push(lab);
-        x += measureUiTextWidth(run.text, UC3_CELL);
+        x += measureUiTextWidth(run.text, CHAT_FONT_SIZE);
       }
     }
   }

@@ -1,5 +1,5 @@
 import { Container, Graphics, Texture } from "pixi.js";
-import { CBE } from "./constants";
+import { CBE, LCD_HEIGHT, SOFTKEY_H } from "./constants";
 import { attachRowPointerHit } from "./pointerHit";
 import { loadUiCrop, uiSprite } from "./UiAssets";
 
@@ -95,10 +95,32 @@ function pageNavBtnSize(
 }
 
 /**
+ * Max top Y for a page-nav strip so the whole button stays inside the panel
+ * hitArea (LCD_HEIGHT - SOFTKEY_H). Pixi prunes hits outside parent hitArea.
+ */
+export function pageNavMaxTop(btnH = SHEET_H): number {
+  return LCD_HEIGHT - SOFTKEY_H - Math.max(10, btnH) - 2;
+}
+
+/** Clamp a preferred nav Y into the tappable band above softkeys. */
+export function clampPageNavY(y: number, btnH = SHEET_H): number {
+  return Math.min(y, pageNavMaxTop(btnH));
+}
+
+/**
+ * Safe footer Y for list shells / call sites that used popup `y+h-N`
+ * (popup chrome often extends into the softkey band).
+ */
+export function panelSafeFootY(preferred: number, reserveBelow = 0): number {
+  return Math.min(preferred, LCD_HEIGHT - SOFTKEY_H - 2 - Math.max(0, reserveBelow));
+}
+
+/**
  * Draw tappable 上一页 / 下一页 when pages > 1 (or forceShow).
  * Uses half-crops of frontmsg/backmsg (enabled|disabled); falls back to text.
  * GIF sprites live in a strip Container pushed to `hits` so redraws clean up.
  * Returns strip height (0 if not drawn).
+ * Y is clamped above the softkey band so hits work on full-LCD popups.
  */
 export function attachPageNavButtons(opts: PageNavDrawOpts): number {
   const pages = Math.max(1, opts.pages | 0);
@@ -108,7 +130,6 @@ export function attachPageNavButtons(opts: PageNavDrawOpts): number {
 
   const prevOn = opts.canPrev ?? page > 1;
   const nextOn = opts.canNext ?? page < pages;
-  const y = opts.y;
   const pageGap = 28;
 
   const strip = new Container();
@@ -120,6 +141,7 @@ export function attachPageNavButtons(opts: PageNavDrawOpts): number {
     const size = pageNavBtnSize(navTex.prevOn, opts.w, opts.h);
     const btnW = size.w;
     const btnH = size.h;
+    const y = clampPageNavY(opts.y, btnH);
     const totalW = btnW * 2 + pageGap;
     const leftX = opts.x + Math.max(0, Math.floor((opts.w - totalW) / 2));
     const rightX = leftX + btnW + pageGap;
@@ -163,6 +185,7 @@ export function attachPageNavButtons(opts: PageNavDrawOpts): number {
 
   // Fallback: text buttons (assets not loaded yet).
   const h = opts.h ?? 18;
+  const y = clampPageNavY(opts.y, h);
   const gap = 4;
   const btnW = Math.max(48, Math.floor((opts.w - gap) / 2));
   const leftX = opts.x;

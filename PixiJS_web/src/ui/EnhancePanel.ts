@@ -3,7 +3,7 @@
  * Evidence: docs/re/2026-07-19-equipment-enhancement.md,
  * docs/re/2026-08-02-equipment-enhance-transfer-29-5.md, screenshots.
  */
-import { Container, Graphics, Rectangle } from "pixi.js";
+import { Container, Graphics } from "pixi.js";
 import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
@@ -11,6 +11,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  cbePopupBounds,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
 import type { BagItem } from "../net/protocolExtras";
@@ -41,7 +43,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 
 export type EnhanceAction =
   | "submit"
@@ -95,11 +97,7 @@ export class EnhancePanel extends Container {
     super();
     this.visible = false;
     // HUD 挂机热区在软键之上。面板不接点击时，点遮罩/面板会落到下层挂机按钮。
-    this.eventMode = "static";
-    this.hitArea = new Rectangle(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
-    this.on("pointertap", (e) => {
-      e.stopPropagation();
-    });
+    blockPanelPointerPassthrough(this);
     const dim = new Graphics()
       .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
       .fill({ color: 0x000000, alpha: 0.45 });
@@ -453,11 +451,8 @@ export class EnhancePanel extends Container {
     clearPointerHits(this.rowHits);
     this.box.clear();
 
-    const x = 8;
-    const y = 20;
-    const w = LCD_WIDTH - 16;
-    const h = LCD_HEIGHT - SOFTKEY_H - 28;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
+    const { x, y, w, h } = cbePopupBounds();
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     if (this.mode === "transferPick" || this.mode === "transferConfirm") {
       this.drawTransfer(x, y, w, h);
@@ -505,7 +500,7 @@ export class EnhancePanel extends Container {
       this.addAttr(`消耗: ${formatCopper(this.money)}`, x + 14, ly, CBE.inkMint);
     }
 
-    const softY = y + h - 28;
+    const softY = panelSafeFootY(y + h - 28);
     const slotTop = softY - 20 - ENHANCE_MAX_SLOTS * 16;
     // Slot box
     this.box
@@ -718,7 +713,7 @@ export class EnhancePanel extends Container {
     );
 
     const listTop = Math.max(bodyTop + 56, instructBottom + 6);
-    const listBottom = y + h - 36;
+    const listBottom = panelSafeFootY(y + h - 36);
     const visible = Math.max(3, Math.floor((listBottom - listTop) / 16));
     this.box
       .rect(x + 8, listTop - 2, w - 16, visible * 16 + 4)
@@ -762,7 +757,7 @@ export class EnhancePanel extends Container {
           hits: this.rowHits,
           box: this.box,
           x: x + 10,
-          y: Math.min(listTop + visible * 16 + 4, y + h - 24),
+          y: Math.min(listTop + visible * 16 + 4, panelSafeFootY(y + h - 24, 14)),
           w: w - 20,
           page,
           pages: pageCount,

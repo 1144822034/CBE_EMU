@@ -6,6 +6,8 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
   makePixelText,
 } from "./constants";
@@ -45,8 +47,6 @@ export type GuessPanelAction =
 
 type GuessTab = "bet" | "history";
 
-const PANEL_X = 6;
-const PANEL_Y = 28;
 const TAB_H = 18;
 const TAB_BG = 0x375946;
 
@@ -601,21 +601,18 @@ export class GuessPanel extends Container {
     this.box.clear();
     this.box.removeChildren();
 
-    const pw = LCD_WIDTH - PANEL_X * 2;
-    const ph = LCD_HEIGHT - SOFTKEY_H - PANEL_Y - 6;
-    paintCbePanel(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgDeep);
-    const pillW = Math.min(pw - 24, 88);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, PANEL_Y + 6, pillW, 22);
+    const { x: PANEL_X, y: PANEL_Y, w: pw, h: ph } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, PANEL_X, PANEL_Y, pw, ph, CBE.bgPanel);
     const title = makePixelText("猜猜看", 12, CBE.cream);
     title.anchor.set(0.5, 0.5);
     title.x = LCD_WIDTH / 2;
-    title.y = PANEL_Y + 17;
+    title.y = chrome.titleCy;
     this.addChild(title);
     this.labels.push(title);
 
     const innerX = PANEL_X + 8;
     const innerW = pw - 16;
-    let bodyTop = PANEL_Y + 34;
+    let bodyTop = chrome.bodyY + 8;
     bodyTop = this.drawTabs(innerX, bodyTop, innerW);
     const bodyBottom = PANEL_Y + ph - 8;
     if (this.tab === "bet") this.drawBetBody(innerX, bodyTop, innerW, bodyBottom);

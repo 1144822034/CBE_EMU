@@ -2,7 +2,7 @@
  * Mount picker — only unlocked ids from server 1/31.
  */
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
+import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, blockPanelPointerPassthrough } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { clearPointerHits } from "./pointerHit";
 import { replaceGraphics } from "../render/gpuResume";
@@ -39,6 +39,8 @@ export class MountPanel extends Container {
     dim.on("pointertap", (e) => e.stopPropagation());
     this.addChild(dim);
     this.addChild(this.box);
+    blockPanelPointerPassthrough(this);
+    this.eventMode = "none";
   }
 
   open(currentMountId = 0, unlockedIds: number[] = []): void {
@@ -133,8 +135,8 @@ export class MountPanel extends Container {
       addLabelCentered: (text, cx, cy, color) =>
         this.addLabelCentered(text, cx, cy, color),
     };
-    paintListShellChrome(ctx, "坐骑", CBE.bgDeep, bounds);
-    const listTop = bounds.y + 32;
+    const shell = paintListShellChrome(ctx, "坐骑", CBE.bgPanel, bounds);
+    const listTop = (shell.bodyY ?? bounds.y) + 8;
     const footY = bounds.y + bounds.h - 28;
     paintListShellBody({
       ctx,

@@ -5,14 +5,12 @@
 import { Container, Graphics } from "pixi.js";
 import {
   CBE,
-  LCD_HEIGHT,
   LCD_WIDTH,
-  SOFTKEY_H,
-  drawCbeTitlePill,
-  paintCbePanel,
+  cbePopupBounds,
+  paintCbeTitledChrome,
 } from "./constants";
 import { attachRowPointerHit } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import {
   UI_WRAP_CHARS,
   UC3_CELL,
@@ -46,6 +44,10 @@ export type ListShellBounds = {
   y: number;
   w: number;
   h: number;
+  /** Set by {@link paintListShellChrome}: body panel top. */
+  bodyY?: number;
+  bodyH?: number;
+  titleCy?: number;
 };
 
 export type ListShellRow = {
@@ -55,14 +57,9 @@ export type ListShellRow = {
   subtitleColor?: number;
 };
 
-/** Standard overlay panel inset (matches Social / Task). */
+/** Full-LCD overlay bounds (same as 背包 / 属性 main popup). */
 export function listShellBounds(): ListShellBounds {
-  return {
-    x: 8,
-    y: 28,
-    w: LCD_WIDTH - 16,
-    h: LCD_HEIGHT - SOFTKEY_H - 40,
-  };
+  return cbePopupBounds();
 }
 
 export function listShellPageStart(cursor: number, pageSize: number): number {
@@ -101,26 +98,29 @@ export function listShellStepPage(
 export function paintListShellChrome(
   ctx: ListShellCtx,
   title: string,
-  fill: number = CBE.bgDeep,
+  fill: number = CBE.bgPanel,
   bounds: ListShellBounds = listShellBounds(),
 ): ListShellBounds {
   const { x, y, w, h } = bounds;
-  paintCbePanel(ctx.host, ctx.box, x, y, w, h, fill);
-  const pillW = Math.min(120, Math.max(56, title.length * 12 + 24));
-  const pillH = 20;
-  drawCbeTitlePill(ctx.box, LCD_WIDTH / 2, y + 6, pillW, pillH);
+  // Title capsule floats above a separate body panel (ref chrome).
+  const chrome = paintCbeTitledChrome(ctx.host, ctx.box, x, y, w, h, fill);
   if (ctx.addLabelCentered) {
-    ctx.addLabelCentered(title, LCD_WIDTH / 2, y + 6 + pillH / 2, CBE.ink);
+    ctx.addLabelCentered(title, x + w / 2, chrome.titleCy, CBE.ink);
   } else {
     const tw = measureUiTextWidth(title);
     ctx.addLabel(
       title,
-      Math.round(LCD_WIDTH / 2 - tw / 2),
-      y + 6 + Math.floor((pillH - UC3_CELL) / 2),
+      Math.round(x + w / 2 - tw / 2),
+      Math.round(chrome.titleCy - UC3_CELL / 2),
       CBE.ink,
     );
   }
-  return bounds;
+  return {
+    ...bounds,
+    bodyY: chrome.bodyY,
+    bodyH: chrome.bodyH,
+    titleCy: chrome.titleCy,
+  };
 }
 
 /** Generic equal-width tab strip. Returns Y just below the tabs. */
@@ -212,13 +212,14 @@ export function paintListShellBody(
     x,
     listTop,
     w,
-    footY,
     rows,
     cursor,
     dualLine = false,
     emptyText = "(空)",
     onRow,
   } = opts;
+  // Popup chrome often extends into softkey band; keep foot/nav tappable.
+  const footY = panelSafeFootY(opts.footY);
   const paging = opts.paging ?? "local";
   const pageSize = Math.max(1, opts.pageSize | 0);
   const rowH = opts.rowH ?? (dualLine ? LIST_DUAL_LINE_ROW_H : 20);

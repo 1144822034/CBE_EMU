@@ -9,7 +9,10 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintCbeTitledChrome,
+  cbePopupBounds,
   drawCbeTitlePill,
+  blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import type {
@@ -87,6 +90,7 @@ export class GuildPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    blockPanelPointerPassthrough(this);
     this.addChild(
       new Graphics()
         .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
@@ -411,18 +415,13 @@ export class GuildPanel extends Container {
     this.labels = [];
     clearPointerHits(this.rowHits);
     this.box.clear();
-    const x = 8;
-    const y = 28;
-    const w = LCD_WIDTH - 16;
-    const h = LCD_HEIGHT - SOFTKEY_H - 40;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
-    const pillW = Math.min(w - 20, Math.max(80, this.title.length * 12 + 20));
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 20);
-    this.addTitleCentered(this.title.slice(0, 14), y + 6 + 10, CBE.ink);
+    const { x, y, w, h } = cbePopupBounds();
+    const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.addTitleCentered(this.title.slice(0, 14), chrome.titleCy, CBE.ink);
 
     try {
       if (this.mode === "text") {
-        let ly = y + 36;
+        let ly = chrome.bodyY + 8;
         for (const line of this.textLines.flatMap((l) => wrapChars(l)).slice(0, 24)) {
           this.addLabel(line, x + 10, ly, CBE.inkMint);
           ly += 15;
@@ -434,7 +433,7 @@ export class GuildPanel extends Container {
           CBE.inkLabel,
         );
         this.rowHits.push(
-          attachRowPointerHit(this, x + 6, y + 36, w - 12, h - 60, () => this.confirm()),
+          attachRowPointerHit(this, x + 6, chrome.bodyY + 8, w - 12, h - 60, () => this.confirm()),
         );
         return;
       }
@@ -444,13 +443,13 @@ export class GuildPanel extends Container {
           const hi = i === this.actionCursor;
           if (hi) {
             this.box
-              .rect(x + 6, y + 36 + i * 18, w - 12, 16)
+              .rect(x + 6, chrome.bodyY + 8 + i * 18, w - 12, 16)
               .fill({ color: CBE.select });
           }
           this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
           const idx = i;
           this.rowHits.push(
-            attachRowPointerHit(this, x + 6, y + 36 + i * 18, w - 12, 16, () => {
+            attachRowPointerHit(this, x + 6, chrome.bodyY + 8 + i * 18, w - 12, 16, () => {
               this.actionCursor = idx;
               this.redraw();
               this.confirm();
@@ -465,13 +464,13 @@ export class GuildPanel extends Container {
           const hi = i === this.listCursor;
           if (hi) {
             this.box
-              .rect(x + 6, y + 36 + i * 18, w - 12, 16)
+              .rect(x + 6, chrome.bodyY + 8 + i * 18, w - 12, 16)
               .fill({ color: CBE.select });
           }
           this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
           const idx = i;
           this.rowHits.push(
-            attachRowPointerHit(this, x + 6, y + 36 + i * 18, w - 12, 16, () => {
+            attachRowPointerHit(this, x + 6, chrome.bodyY + 8 + i * 18, w - 12, 16, () => {
               this.listCursor = idx;
               this.redraw();
               this.confirm();
@@ -495,10 +494,10 @@ export class GuildPanel extends Container {
           this.addLabel(
             `${row.guildName} Lv${row.guildLevel}`.slice(0, 14),
             x + 10,
-            y + 36 + i * 18,
+            chrome.bodyY + 8 + i * 18,
             hi ? CBE.ink : CBE.inkMint,
           );
-          this.addLabel(`${row.memberCount}人`, x + 140, y + 36 + i * 18, CBE.inkLabel);
+          this.addLabel(`${row.memberCount}人`, x + 140, chrome.bodyY + 8 + i * 18, CBE.inkLabel);
           const idx = i;
           this.rowHits.push(
             attachRowPointerHit(this, x + 6, y + 34 + i * 18, w - 12, 16, () => {
@@ -527,13 +526,13 @@ export class GuildPanel extends Container {
           this.addLabel(
             `${row.roleName}${on}`.slice(0, 10),
             x + 10,
-            y + 36 + i * 18,
+            chrome.bodyY + 8 + i * 18,
             hi ? CBE.ink : CBE.inkMint,
           );
           this.addLabel(
             `${row.title} Lv${row.level}`.slice(0, 12),
             x + 100,
-            y + 36 + i * 18,
+            chrome.bodyY + 8 + i * 18,
             CBE.inkLabel,
           );
           const idx = i;
@@ -570,10 +569,10 @@ export class GuildPanel extends Container {
           this.addLabel(
             row.roleName.slice(0, 12),
             x + 10,
-            y + 36 + i * 18,
+            chrome.bodyY + 8 + i * 18,
             hi ? CBE.ink : CBE.inkMint,
           );
-          this.addLabel(`Lv${row.level}`, x + 140, y + 36 + i * 18, CBE.inkLabel);
+          this.addLabel(`Lv${row.level}`, x + 140, chrome.bodyY + 8 + i * 18, CBE.inkLabel);
           const idx = i;
           this.rowHits.push(
             attachRowPointerHit(this, x + 6, y + 34 + i * 18, w - 12, 16, () => {

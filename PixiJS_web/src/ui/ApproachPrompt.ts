@@ -92,7 +92,7 @@ export class ApproachPrompt extends Container {
     const hangRowTop = LCD_HEIGHT - WORLD_BOTTOM_H;
     const y = Math.max(WORLD_TOP_H + 8, hangRowTop - h - 8);
 
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgDeep);
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
     const text = makePixelText(body, 12, CBE.ink);
     text.anchor.set(0.5, 0.5);
