@@ -27,14 +27,14 @@ status: implemented
 response:
   wt_kind: 10
   wt_subtype: 2
-  fields: `result:u8=1`, `type:u8=2`, `fdegree:GBK-string`, `num:u8=2`, `playerinfo:two serial strings`
+  fields: `result:u8=1`, `type:u8=2`, `fdegree:GBK-string`, `num:u8=4`, `playerinfo:four serial strings`
 
 ida_evidence:
   binary: 江湖OL.CBE
   function: `HandleFactionDegreeResponse`, `0x010211A8`
   parser_reads: `result`, `type`, `fdegree`, `num`, `playerinfo`
 
-`playerinfo` 使用客户端序列阅读器所需的 16 位长度前缀字符串。客户端按 `playerinfo` 的 `num` 条目依次显示，随后固定追加 `fdegree`；当前响应采用三行 GBK 中文排版：`姓名：<名称>`、`等级：<等级>级　职业：<战士/刺客/法师>`、`帮派：<真实帮派名/无帮派>　性别：<男/女>`。固定标签使用显式 GBK 字节，目标角色名保留其角色数据库中的 GBK 显示名；帮派名由目标在线会话的账号与角色 ID 查询 `guild_members`，不再写死“暂无”。
+`playerinfo` 使用客户端序列阅读器所需的 16 位长度前缀字符串。客户端按 `playerinfo` 的 `num` 条目依次显示，随后固定追加 `fdegree`。2026-09-21 起为五行：`姓名`、`称号`、`等级：<n>级　职业：<天机/幻剑/鬼道>`、`配偶`，`fdegree` 为 `帮派`。称号来自在线会话的头顶称号，配偶来自会话上镜像的 `spouse_name`（无则「无」），帮派仍查 `guild_members`，查不到时用会话里的帮派名。详见 `docs/re/2026-09-21-nearby-player-info-profile.md`。
 
 ### 查看装备 `29/4`
 

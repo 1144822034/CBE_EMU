@@ -40,6 +40,14 @@ export const NPC_YANMEN_EXCHANGE = 0xf7000002;
 export const NPC_RING_QUEST = 0xf7000003;
 /** 跑环使者：刷新当前环（消耗酷宝，客户端先确认） */
 export const NPC_RING_REFRESH = 0xf7000005;
+/** 宣阳广场天下第一雕像：膜拜 / 接受膜拜（服务端抽黄金宝箱奖池）. */
+export const NPC_TIANXIA_WORSHIP = 0xf7000006;
+/** 冠军本人：江湖签名（输入后走 29/24 保存）. */
+export const NPC_TIANXIA_SIGNATURE = 0xf7000007;
+export const TIANXIA_FIRST_NPC_ACTOR_ID = 20094;
+export const TIANXIA_FIRST_TITLE = "天下第一";
+export const TIANXIA_SIGNATURE_MAX_CHARS = 32;
+export const TIANXIA_SIGNATURE_DEFAULT = "这个冠军很高冷,什么也没说!";
 /** 与服务端 VM_MOCK_RING_REFRESH_WCOIN 一致 */
 export const RING_REFRESH_WCOIN = 10;
 

@@ -114,7 +114,8 @@ export async function paintHangupPanel(
   host.eventMode = "static";
 
   const panelX = 10;
-  const panelY = 42;
+  /* Clear BattleEnemyHud top-left vitals strip. */
+  const panelY = 102;
   const panelW = LCD_WIDTH - 20;
   const pad = 8;
   const rowH = 16;

@@ -1285,9 +1285,7 @@ export class SystemPanel extends Container {
         it.kind === "equip" &&
         !!it.socketGems &&
         !!(it.socketGems.reflect || it.socketGems.combo || it.socketGems.revive);
-      if (!parseGemItem(it.itemId) && !isGemFragment(it.itemId) && !socketed) {
-        acts.push("拍卖");
-      }
+      if (!socketed) acts.push("拍卖");
       acts.push("丢弃");
       acts.push("返回");
       return acts;
@@ -2806,7 +2804,7 @@ export class SystemPanel extends Container {
     } else if (this.usesCategoryTabs() && this.mode === "list") {
       const total =
         this.kind === "mall" ? this.filteredMall().length : this.filteredBag().length;
-      this.addLabel(`共 ${total} 件`, x + 10, footY, CBE.inkTip);
+      this.addLabelCentered(`共 ${total} 件`, x + w / 2, footY + 6, CBE.inkTip);
     }
   }
 

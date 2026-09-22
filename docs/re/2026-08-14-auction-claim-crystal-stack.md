@@ -32,9 +32,22 @@
 | `protocolExtras.ts` | 可堆叠：`count = max(17/1, 30/21)`；装备/壶仍跟网格 |
 | `mock_server_auction.c` | `auction_return_item` 打 `bag_before/bag_after`；领取同包附 `17/1+30/21(+7/11)`；去掉半武装 resync |
 
-## 验证
+## 2026-09-22 梦境徽章×N 领取后背包×1
 
-1. 待领 `十二级玄晶x10` → 领取 → 背包 `X10`；日志 `auction_return_item ... grant=10 bag_after=` 升到 ≥10。
-2. 已有同级×1 再领×10 → 背包 11。
-3. 撤拍退回堆叠物数量正确。
-4. `make -j2`；Pixi 相关解析无回归。
+同类症状：`item_id=840` 可堆叠（非装备，stack=99）。服务端领取走
+`return_item_to_bag(item_count)`，不应砍成 1。
+
+客户端在 `auctionClaim` 成功后又 `openBag()`，用第二次 7/23 整表替换领取包
+已带的 17/1+30/21，堆叠行可能被显示成 ×1。
+
+修改：`PixiJS_web/src/main.ts` 领取成功后不再 `openBag`，只刷新拍卖 UI（领取
+回包已含背包权威列表）。
+
+核对服务端（若 log/`item_count` 已是 10 则为纯展示问题）：
+
+```sql
+SELECT claim_id,item_id,item_count,claimed FROM server_auction_claims
+WHERE item_id=840 ORDER BY claim_id DESC LIMIT 20;
+```
+
+日志：`auction_return_item ... item=840 grant=10 bag_after=`

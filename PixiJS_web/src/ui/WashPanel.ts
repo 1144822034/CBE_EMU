@@ -338,6 +338,20 @@ export class WashPanel extends Container {
     this.labels.push(t);
   }
 
+  private addAttrCentered(
+    text: string,
+    cx: number,
+    cy: number,
+    color: number,
+  ): void {
+    const t = new BitmapLabel();
+    t.anchor.set(0.5, 0.5);
+    t.position.set(Math.round(cx), Math.round(cy));
+    void t.setText(text, color);
+    this.addChild(t);
+    this.labels.push(t);
+  }
+
   private tierLine(t: EnhanceWashTier): string {
     const name = ATTR_NAMES[t.type] ?? `属性${t.type}`;
     const pct = t.flag ? "%" : "";
@@ -498,7 +512,7 @@ export class WashPanel extends Container {
       : this.unlock === 16
         ? "↑↓选档 ←→数量(十六级) 左软洗练 OK玄晶 右关"
         : "↑↓选档 左软洗练 OK玄晶 右键关闭";
-    this.addAttr(hint, x + 8, y + h - 16, CBE.inkLabel);
+    this.addAttrCentered(hint, x + w / 2, y + h - 10, CBE.inkLabel);
     drawPanelTipOverlay(this, this.toast);
   }
 
@@ -526,10 +540,10 @@ export class WashPanel extends Container {
       y + 98,
       INK_RED,
     );
-    this.addAttr(
+    this.addAttrCentered(
       "左软替换  右软保留",
-      x + 8,
-      y + h - 16,
+      x + w / 2,
+      y + h - 10,
       CBE.inkLabel,
     );
     const hitReplace = attachRowPointerHit(
@@ -590,10 +604,10 @@ export class WashPanel extends Container {
     if (!rows.length) {
       this.addAttr("背包无玄晶", x + 10, ly, CBE.inkWarn);
     }
-    this.addAttr(
+    this.addAttrCentered(
       "↑↓选择 左软确定 右键返回",
-      x + 8,
-      y + h - 16,
+      x + w / 2,
+      y + h - 10,
       CBE.inkLabel,
     );
   }

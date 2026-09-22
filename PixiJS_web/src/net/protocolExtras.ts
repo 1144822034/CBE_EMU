@@ -5005,6 +5005,57 @@ export function buildDreamHudRemainQueryRequest(): Uint8Array {
   return b.finish();
 }
 
+/** Pixi 天下第一江湖签名: 1/29/24 { signature } → 29/24 { result, signature }. */
+export type TianxiaSignatureResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  signature: string;
+};
+
+export function buildTianxiaSignatureRequest(signature: string): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 24).string("signature", signature);
+  return b.finish();
+}
+
+function tianxiaSignatureFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "仅冠军可设置签名";
+    case 4:
+      return "签名过长";
+    case 5:
+      return "签名保存失败";
+    default:
+      return "签名失败";
+  }
+}
+
+export function parseTianxiaSignatureResult(
+  packet: WtPacket,
+): TianxiaSignatureResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 24);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const raw = findField(obj, "signature");
+  const signature = raw ? decodeFieldString(raw).replace(/\0+$/g, "") : "";
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: signature ? "签名已更新" : "签名已清空",
+      signature,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: tianxiaSignatureFailMessage(result),
+    signature,
+  };
+}
+
 /** Parse 29/23 { remaining } — null if packet absent. remaining may be 0. */
 export function parseDreamHudRemainMs(packet: WtPacket): number | null {
   const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 23);

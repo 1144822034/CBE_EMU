@@ -230,6 +230,7 @@ static void vm_net_mock_role_clear_equipped_chenghao(vm_net_mock_role_state *rol
            reason ? reason : "clear");
     role->equippedChenghaoId = 0;
     vm_net_mock_role_mark_inventory_dirty("cosmetic-clear-chenghao");
+    vm_mock_tianxia_on_champ_cosmetics_changed(role->roleId);
 }
 
 static bool vm_net_mock_role_equip_cosmetic(vm_net_mock_role_state *role,
@@ -257,6 +258,7 @@ static bool vm_net_mock_role_equip_cosmetic(vm_net_mock_role_state *role,
         }
         role->equippedChenghaoId = id;
         vm_net_mock_role_mark_inventory_dirty("cosmetic-equip-chenghao");
+        vm_mock_tianxia_on_champ_cosmetics_changed(role->roleId);
         return true;
     }
     if (kind == VM_NET_MOCK_COSMETIC_KIND_WING)
@@ -271,6 +273,7 @@ static bool vm_net_mock_role_equip_cosmetic(vm_net_mock_role_state *role,
         }
         role->equippedWingId = id;
         vm_net_mock_role_mark_inventory_dirty("cosmetic-equip-wing");
+        vm_mock_tianxia_on_champ_cosmetics_changed(role->roleId);
         return true;
     }
     if (kind == VM_NET_MOCK_COSMETIC_KIND_MOUNT)
@@ -285,6 +288,7 @@ static bool vm_net_mock_role_equip_cosmetic(vm_net_mock_role_state *role,
         }
         role->equippedMountId = id;
         vm_net_mock_role_mark_inventory_dirty("cosmetic-equip-mount");
+        vm_mock_tianxia_on_champ_cosmetics_changed(role->roleId);
         return true;
     }
     if (errOut)

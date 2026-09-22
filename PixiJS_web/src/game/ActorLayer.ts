@@ -1,7 +1,7 @@
 import { Container, Graphics, Sprite, type Texture } from "pixi.js";
 import type { NpcActor, PeerActor } from "../net/protocol";
 import { isRedNamePk } from "../net/protocol";
-import { BitmapLabel } from "../ui/BitmapLabel";
+import { BitmapLabel, UC3_CELL } from "../ui/BitmapLabel";
 import { ACTOR_DISPLAY_SCALE, CBE, NAMEPLATE_SCALE, actorSpriteScale } from "../ui/constants";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
 import { tryLoadUiTexture } from "../ui/UiAssets";
@@ -19,6 +19,10 @@ import {
 import { WingOverlay } from "../resources/wingFx";
 import { isPeerCosmeticsVisible } from "../resources/peerCosmeticsPref";
 import type { NpcTaskPromptType } from "../net/protocolExtras";
+import {
+  TIANXIA_FIRST_NPC_ACTOR_ID,
+  TIANXIA_FIRST_TITLE,
+} from "../net/protocolActivities";
 import {
   actorResourceForJobSex,
   composeAnimationFrame,
@@ -130,6 +134,20 @@ const MAP_WALK_FRAME_MS = 140;
 /** Map idle flap — match battle 鼠尾/呼吸节奏. */
 const MAP_IDLE_FRAME_MS = 360;
 
+/** 天下第一雕像头顶字：赤橙黄绿青蓝紫. */
+const TIANXIA_TITLE_RAINBOW = [
+  0xff2020, // 赤
+  0xff8800, // 橙
+  0xffe020, // 黄
+  0x40ee40, // 绿
+  0x20e8e8, // 青
+  0x4080ff, // 蓝
+  0xc060ff, // 紫
+] as const;
+/** 比普通头顶称号略大；UC3 固定格点时再靠 scale 放大. */
+const TIANXIA_TITLE_FONT = UC3_CELL + 4;
+const TIANXIA_TITLE_SCALE = NAMEPLATE_SCALE * 1.35;
+
 type Marker = {
   id: number;
   root: Container;
@@ -165,6 +183,10 @@ type Marker = {
   kind: "npc" | "peer" | "monster";
   actorName: string;
   nameLabel: string;
+  /** Pixi 天下第一雕像：身体相对 ACTOR_DISPLAY_SCALE 的倍数. */
+  bodyScaleMul: number;
+  /** Pixi 天下第一雕像：头顶后台文字走彩虹加粗加大. */
+  isTianxiaNpc: boolean;
   loaded: LoadedActor | null;
   /** CBE dir 1..4 */
   dir: number;
@@ -716,15 +738,38 @@ export class ActorLayer {
     const pending = this.pendingPeerCosmetics.get(id);
     if (!pending) return;
     const m = this.markers.get(id);
-    if (!m || m.kind !== "peer") {
+    if (!m) return;
+    if (m.kind === "peer") {
+      m.eqChenghao = pending.eqChenghao;
+      m.eqWing = pending.eqWing;
+      m.eqMount = pending.eqMount;
+      m.guildName = pending.guild || "";
+      this.applyPeerCosmeticsVisual(m);
+      void this.refreshPeerGuild(m);
       return;
     }
-    m.eqChenghao = pending.eqChenghao;
-    m.eqWing = pending.eqWing;
-    m.eqMount = pending.eqMount;
-    m.guildName = pending.guild || "";
-    this.applyPeerCosmeticsVisual(m);
-    void this.refreshPeerGuild(m);
+    /* 天下第一雕像：31/5 用雕像 actorId 推送时同步翅膀/动态称号/坐骑. */
+    if (m.kind === "npc" && m.isTianxiaNpc) {
+      m.eqChenghao = pending.eqChenghao;
+      m.eqWing = pending.eqWing;
+      m.eqMount = pending.eqMount;
+      m.titleGifKey = "";
+      if (m.classicTitle || m.classicTitleGif || m.eqChenghao) {
+        void this.refreshCatalogNpcTitle(m);
+      } else {
+        m.titleBadge.visible = false;
+        this.layoutNameplate(m);
+      }
+      if (m.eqWing || m.eqMount) {
+        void this.refreshPeerWing(m);
+        void this.refreshPeerMount(m);
+      } else {
+        m.wing?.clear();
+        m.mount?.clear();
+        if (m.sprite) m.sprite.y = 0;
+        this.layoutNameplate(m);
+      }
+    }
   }
 
   /**
@@ -1203,6 +1248,10 @@ export class ActorLayer {
       const monster = isMonsterLike(npc.scriptName || "", npc.actorResource || "");
       keep.add(npc.actorId);
       const rawName = npc.name || (monster ? "怪" : "NPC");
+      const tx = npc.tianxia;
+      const isTianxia =
+        !!tx || (npc.actorId >>> 0) === TIANXIA_FIRST_NPC_ACTOR_ID;
+      const title = tx?.title || (isTianxia ? TIANXIA_FIRST_TITLE : "");
       void this.upsert(
         npc.actorId,
         npc.x,
@@ -1215,6 +1264,16 @@ export class ActorLayer {
         monster ? MONSTER_GREEN : NPC_CYAN,
         monster,
         "catalog",
+        title,
+        isTianxia ? tx?.playerTitle || "" : "",
+        true,
+        isTianxia ? tx?.plus16Count ?? 0 : 0,
+        tx?.scale ?? (isTianxia ? 2 : 1),
+        tx?.chenghaoId ?? 0,
+        tx?.wingId ?? 0,
+        tx?.mountId ?? 0,
+        isTianxia ? 4 : 0,
+        isTianxia,
       );
     }
     for (const mon of this.sceMonsters) {
@@ -1273,6 +1332,13 @@ export class ActorLayer {
     /** Map player / monster / NPC nameplates only. */
     nameOutline = true,
     plus16Count = 0,
+    bodyScaleMul = 1,
+    eqChenghao = 0,
+    eqWing = 0,
+    eqMount = 0,
+    /** 1..4 locks facing (雕像朝左 = 4). 0 keeps the current dir. */
+    faceDir = 0,
+    isTianxiaNpc = false,
   ): Promise<void> {
     // Engage can destroy the marker while an earlier syncMarkers upsert is
     // still awaiting UC3/actor load — never recreate a suppressed SCE spawn.
@@ -1334,6 +1400,8 @@ export class ActorLayer {
         kind,
         actorName: "",
         nameLabel: label,
+        bodyScaleMul: 1,
+        isTianxiaNpc: false,
         loaded: null,
         dir: 1 + ((Math.random() * 4) | 0),
         phase: 0,
@@ -1360,6 +1428,12 @@ export class ActorLayer {
     m.root.zIndex = m.y | 0;
     m.kind = kind;
     m.animate = animate;
+    if (faceDir >= 1 && faceDir <= 4) {
+      const turned = m.dir !== faceDir;
+      m.dir = faceDir;
+      m.animate = false;
+      if (turned && m.loaded && m.sprite) this.applyFrame(m);
+    }
     m.source = source;
     m.nameLabel = label;
     // Catalog / peer: snap to server coords. SCE patrol keeps live x/y unless home moved.
@@ -1418,6 +1492,43 @@ export class ActorLayer {
       }
       m.plus16Sparkles.setCount(plus16Count);
     } else if (kind === "npc" && source === "catalog") {
+      m.bodyScaleMul = Math.max(0.5, Math.min(4, bodyScaleMul || 1));
+      m.isTianxiaNpc = !!isTianxiaNpc;
+      m.eqChenghao = eqChenghao >>> 0;
+      m.eqWing = eqWing >>> 0;
+      m.eqMount = eqMount >>> 0;
+      /* Live 31/5 for statue may arrive before / between catalog refreshes. */
+      if (m.isTianxiaNpc) {
+        const pending = this.pendingPeerCosmetics.get(id >>> 0);
+        if (pending) {
+          m.eqChenghao = pending.eqChenghao;
+          m.eqWing = pending.eqWing;
+          m.eqMount = pending.eqMount;
+        }
+      }
+      if (title || titleGif || m.eqChenghao) {
+        m.classicTitle = title || "";
+        m.classicTitleGif = titleGif || "";
+        void this.refreshCatalogNpcTitle(m);
+      }
+      if (m.eqWing || m.eqMount) {
+        void this.refreshPeerWing(m);
+        void this.refreshPeerMount(m);
+      } else {
+        m.wing?.clear();
+        m.mount?.clear();
+        if (m.sprite) m.sprite.y = 0;
+      }
+      if (m.isTianxiaNpc) {
+        if (!m.plus16Sparkles) {
+          m.plus16Sparkles = new Plus16Sparkles();
+          m.root.addChild(m.plus16Sparkles.root);
+        }
+        m.plus16Sparkles.setCount(plus16Count);
+        m.plus16Sparkles.root.scale.set(m.bodyScaleMul || 1);
+      } else if (m.plus16Sparkles) {
+        m.plus16Sparkles.setCount(0);
+      }
       void this.refreshQuestMark(m);
     }
 
@@ -1436,6 +1547,10 @@ export class ActorLayer {
         const parts = loaded.animations[0]?.parts.length ?? 0;
         const anims = loaded.animations.length;
         m.animate = animate && (parts > 1 || anims > 1);
+        if (faceDir >= 1 && faceDir <= 4) {
+          m.dir = faceDir;
+          m.animate = false;
+        }
         if (kind === "peer" && !this.peerPoseNear(m)) {
           m.poseLod = true;
         } else {
@@ -1505,6 +1620,152 @@ export class ActorLayer {
     m.plate.addChild(spr);
     m.questMark = spr;
     this.layoutNameplate(m);
+  }
+
+  /**
+   * Catalog NPC overhead: admin text plus optional dynamic title / worn designation.
+   * Text is not limited to the arena-streak list.
+   */
+  private async refreshCatalogNpcTitle(m: Marker): Promise<void> {
+    const text = (m.classicTitle || "").replace(/\0+$/g, "").trim();
+    const extra = (m.classicTitleGif || "").replace(/\0+$/g, "").trim();
+    const chenghaoId = m.eqChenghao | 0;
+    const key = `npc:${chenghaoId}|${extra}|${text}`;
+    if (key === m.titleGifKey) {
+      this.layoutNameplate(m);
+      return;
+    }
+    m.titleGifKey = key;
+    if (m.chenghao && m.chenghao.root.parent === m.titleBadge) {
+      m.titleBadge.removeChild(m.chenghao.root);
+    }
+    m.titleBadge.removeChildren().forEach((c) => c.destroy());
+    m.titleSpr = null;
+    m.titleTextLabel = null;
+    if (!text && !extra && !chenghaoId) {
+      m.chenghao?.clear();
+      m.titleBadge.visible = false;
+      this.layoutNameplate(m);
+      return;
+    }
+
+    const paintText = async (line: string, y: number): Promise<BitmapLabel | null> => {
+      const lab = new BitmapLabel();
+      await lab.setText(line.slice(0, 16), arenaTextTitleColor(line), {
+        smooth: false,
+        outline: true,
+        outlineThin: true,
+      });
+      if (this.markers.get(m.id) !== m || m.titleGifKey !== key || lab.destroyed) {
+        lab.destroy();
+        return null;
+      }
+      lab.anchor.set(0.5, 1);
+      lab.scale.set(NAMEPLATE_SCALE);
+      lab.position.set(0, y);
+      m.titleBadge.addChild(lab);
+      return lab;
+    };
+
+    let stack = 0;
+    if (text) {
+      if (m.isTianxiaNpc) {
+        const host = await this.paintTianxiaRainbowTitle(m, text, 0, key);
+        if (!host) return;
+        stack = Math.round(host.height) + 2;
+      } else {
+        const lab = await paintText(text, 0);
+        if (!lab) return;
+        m.titleTextLabel = lab;
+        stack = Math.round(lab.height) + 2;
+      }
+    }
+    if (this.markers.get(m.id) !== m || m.titleGifKey !== key) return;
+
+    if (chenghaoId) {
+      if (!m.chenghao) m.chenghao = new ChenghaoOverlay();
+      await m.chenghao.setTitleId(chenghaoId);
+      if (this.markers.get(m.id) !== m || m.titleGifKey !== key) return;
+      if (m.chenghao.root.visible) {
+        m.chenghao.root.position.set(0, -stack);
+        m.titleBadge.addChild(m.chenghao.root);
+      } else {
+        m.chenghao.clear();
+        const lab = await paintText(chenghaoLabel(chenghaoId).slice(0, 8), -stack);
+        if (!lab) return;
+      }
+    } else if (extra && extra !== text) {
+      const gif =
+        resolveTitleGif(extra) || (/\.gif$/i.test(extra) ? extra : null);
+      if (gif) {
+        const tex = await tryLoadUiTexture(gif);
+        if (this.markers.get(m.id) !== m || m.titleGifKey !== key) return;
+        if (tex) {
+          const spr = new Sprite(tex);
+          spr.anchor.set(0.5, 1);
+          spr.position.set(0, -stack);
+          m.titleSpr = spr;
+          m.titleBadge.addChild(spr);
+        }
+      } else {
+        const lab = await paintText(extra, -stack);
+        if (!lab) return;
+      }
+    }
+    if (this.markers.get(m.id) !== m || m.titleGifKey !== key) return;
+    m.titleBadge.visible = m.titleBadge.children.length > 0;
+    this.layoutNameplate(m);
+  }
+
+  /**
+   * 天下第一雕像后台头顶字：加粗加大，每字赤橙黄绿青蓝紫随机一色.
+   */
+  private async paintTianxiaRainbowTitle(
+    m: Marker,
+    line: string,
+    y: number,
+    key: string,
+  ): Promise<Container | null> {
+    const host = new Container();
+    host.eventMode = "none";
+    const chars = [...line.slice(0, 16)];
+    let x = 0;
+    const labs: BitmapLabel[] = [];
+    for (const ch of chars) {
+      const color =
+        TIANXIA_TITLE_RAINBOW[
+          (Math.random() * TIANXIA_TITLE_RAINBOW.length) | 0
+        ]!;
+      const lab = new BitmapLabel();
+      await lab.setText(ch, color, {
+        smooth: false,
+        outline: true,
+        outlineThin: false,
+        bold: true,
+        fontSize: TIANXIA_TITLE_FONT,
+        wordWrap: false,
+      });
+      if (
+        this.markers.get(m.id) !== m ||
+        m.titleGifKey !== key ||
+        lab.destroyed
+      ) {
+        lab.destroy();
+        host.destroy({ children: true });
+        return null;
+      }
+      lab.anchor.set(0, 1);
+      lab.scale.set(TIANXIA_TITLE_SCALE);
+      lab.position.set(x, 0);
+      host.addChild(lab);
+      labs.push(lab);
+      x += Math.max(1, Math.round(lab.width));
+    }
+    const half = x / 2;
+    for (const lab of labs) lab.x -= half;
+    host.position.set(0, y);
+    m.titleBadge.addChild(host);
+    return host;
   }
 
   private async refreshPeerTitle(m: Marker): Promise<void> {
@@ -1723,11 +1984,13 @@ export class ActorLayer {
     let topY = m.label.y;
     if (m.titleBadge.visible) {
       m.titleBadge.position.set(0, m.label.y - 2);
-      const titleH =
-        m.chenghao?.root.parent === m.titleBadge
-          ? m.chenghao.root.height || 12
-          : m.titleSpr?.height || m.titleTextLabel?.height || 12;
-      topY = m.titleBadge.y - titleH;
+      let titleH = 0;
+      for (const child of m.titleBadge.children) {
+        const h = Math.round(child.height) || 12;
+        const up = -Math.round(child.y) + h;
+        if (up > titleH) titleH = up;
+      }
+      topY = m.titleBadge.y - (titleH || 12);
     }
     if (m.guildLabel?.visible) {
       const guildH = m.guildLabel.height || 12;
@@ -1827,10 +2090,12 @@ export class ActorLayer {
       m.sprite.texture = tex;
     }
     m.sprite.scale.set(
-      actorSpriteScale(composed.artScale, !!composed.flipX).x,
-      actorSpriteScale(composed.artScale, !!composed.flipX).y,
+      actorSpriteScale(composed.artScale, !!composed.flipX).x *
+        (m.bodyScaleMul || 1),
+      actorSpriteScale(composed.artScale, !!composed.flipX).y *
+        (m.bodyScaleMul || 1),
     );
-    if (m.kind === "peer") {
+    if (m.kind === "peer" || (m.kind === "npc" && (m.eqWing || m.eqMount))) {
       m.sprite.y = m.eqMount ? -MOUNT_BODY_LIFT : 0;
       m.wing?.setBodyDisplayHeight(Math.round(m.sprite.height));
       m.wing?.setFacing(m.dir);
@@ -1901,7 +2166,9 @@ export class ActorLayer {
       // Title GIF sprites share UiAssets cache — bust key and rebuild after invalidate.
       m.titleGifKey = "";
       if (m.kind === "peer") void this.refreshPeerTitle(m);
-      else void this.refreshTitleBadge(m, m.classicTitle, m.classicTitleGif);
+      else if (m.kind === "npc" && m.source === "catalog") {
+        void this.refreshCatalogNpcTitle(m);
+      } else void this.refreshTitleBadge(m, m.classicTitle, m.classicTitleGif);
     }
   }
 }

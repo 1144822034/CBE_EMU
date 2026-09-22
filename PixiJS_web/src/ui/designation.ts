@@ -45,6 +45,7 @@ export const ARENA_TEXT_TITLE_COLORS: { title: string; color: number }[] = [
   { title: "万夫莫敌", color: 0xc080ff },
   { title: "举世无双", color: 0xff60c8 },
   { title: "天下无敌", color: 0xff2020 },
+  { title: "天下第一", color: 0xffd040 },
 ];
 
 const ARENA_TEXT_TITLE_SET = new Set(

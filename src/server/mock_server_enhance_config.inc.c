@@ -1065,40 +1065,35 @@ static bool vm_net_mock_equip_enhance_resolve_milestone(
 }
 
 /* -------------------------------------------------------------------------
- * account_role_enhance_wash_record — last wash snapshot keyed by
- * item_instance_id (fallback by bag_seq for legacy rows without instance id).
+ * account_role_enhance_wash_record — audit log only.
+ * Write on wash apply / relocate / ownership change / retire.
+ * Never SELECT back into bag/equip/warehouse enhance_wash (those columns
+ * are the sole runtime authority).
  * ------------------------------------------------------------------------- */
 
-typedef struct
-{
-    char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
-    bool found;
-} vm_net_mock_enhance_wash_record_lookup_ctx;
-
-static bool vm_net_mock_enhance_wash_record_wash_row_cb(
+static bool vm_net_mock_enhance_wash_record_flag_row(
     void *contextValue, unsigned int columnCount, const char *const *values,
     const size_t *lengths)
 {
-    vm_net_mock_enhance_wash_record_lookup_ctx *ctx =
-        (vm_net_mock_enhance_wash_record_lookup_ctx *)contextValue;
+    u32 *found = (u32 *)contextValue;
 
     (void)columnCount;
-    if (ctx == NULL || values == NULL || lengths == NULL || values[0] == NULL)
-        return false;
-    if (lengths[0] >= sizeof(ctx->washText))
-        return false;
-    memcpy(ctx->washText, values[0], lengths[0]);
-    ctx->washText[lengths[0]] = 0;
-    ctx->found = true;
+    (void)values;
+    (void)lengths;
+    if (found != NULL)
+        *found = 1;
     return true;
 }
 
 static bool vm_net_mock_enhance_wash_record_ensure_table(void)
 {
     static bool ready = false;
+    u32 pkUsesBagSeq = 0;
 
     if (ready)
         return true;
+    /* PK is (role_id, item_instance_id): bag_seq=0 is shared by worn/listing
+     * seats and must not collide under the old (role_id, bag_seq) key. */
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS account_role_enhance_wash_record ("
             "role_id INT UNSIGNED NOT NULL,"
@@ -1112,16 +1107,50 @@ static bool vm_net_mock_enhance_wash_record_ensure_table(void)
             "washed_unix INT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
-            "PRIMARY KEY(role_id,bag_seq),"
-            "KEY idx_role_item_instance(role_id,item_instance_id)"
+            "PRIMARY KEY(role_id,item_instance_id),"
+            "KEY idx_role_bag_seq(role_id,bag_seq)"
             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
         return false;
     (void)vm_mysql_exec(
         "ALTER TABLE account_role_enhance_wash_record ADD COLUMN "
         "item_instance_id INT UNSIGNED NOT NULL DEFAULT 0 AFTER role_id");
-    (void)vm_mysql_exec(
-        "ALTER TABLE account_role_enhance_wash_record ADD KEY "
-        "idx_role_item_instance (role_id,item_instance_id)");
+    pkUsesBagSeq = 0;
+    (void)vm_mysql_query(
+        "SELECT 1 FROM information_schema.statistics "
+        "WHERE table_schema=DATABASE() "
+        "AND table_name='account_role_enhance_wash_record' "
+        "AND index_name='PRIMARY' AND column_name='bag_seq' LIMIT 1",
+        vm_net_mock_enhance_wash_record_flag_row, &pkUsesBagSeq);
+    if (pkUsesBagSeq != 0)
+    {
+        (void)vm_mysql_exec(
+            "DELETE t1 FROM account_role_enhance_wash_record t1 "
+            "INNER JOIN account_role_enhance_wash_record t2 "
+            "WHERE t1.role_id=t2.role_id AND "
+            "t1.item_instance_id=t2.item_instance_id "
+            "AND t1.item_instance_id<>0 AND ("
+            "t1.bag_seq>t2.bag_seq OR "
+            "(t1.bag_seq=t2.bag_seq AND t1.washed_unix<t2.washed_unix))");
+        (void)vm_mysql_exec(
+            "DELETE FROM account_role_enhance_wash_record "
+            "WHERE item_instance_id=0");
+        if (!vm_mysql_exec(
+                "ALTER TABLE account_role_enhance_wash_record DROP PRIMARY KEY") ||
+            !vm_mysql_exec(
+                "ALTER TABLE account_role_enhance_wash_record "
+                "ADD PRIMARY KEY(role_id,item_instance_id)"))
+        {
+            printf("[error][mock-service] enhance_wash_record pk migrate "
+                   "error=%s\n",
+                   vm_mysql_last_error());
+            return false;
+        }
+        (void)vm_mysql_exec(
+            "ALTER TABLE account_role_enhance_wash_record ADD KEY "
+            "idx_role_bag_seq (role_id,bag_seq)");
+        printf("[info][mock-service] enhance_wash_record pk migrated to "
+               "(role_id,item_instance_id)\n");
+    }
     ready = true;
     return true;
 }
@@ -1157,26 +1186,19 @@ static bool vm_net_mock_enhance_wash_record_upsert(
     char query[512];
     u32 now = (u32)time(NULL);
 
-    if (roleId == 0 || itemId == 0 || wash == NULL ||
+    /* Track id is required — PK is (role_id, item_instance_id). */
+    if (roleId == 0 || itemInstanceId == 0 || itemId == 0 || wash == NULL ||
         vm_net_mock_enhance_wash_is_empty(wash))
         return false;
     if (!vm_net_mock_enhance_wash_record_ensure_table())
         return false;
     (void)vm_net_mock_enhance_wash_record_wash_sql_text(wash, washText,
                                                         sizeof(washText));
-    if (itemInstanceId != 0)
-    {
-        snprintf(query, sizeof(query),
-                 "DELETE FROM account_role_enhance_wash_record "
-                 "WHERE role_id=%u AND item_instance_id=%u",
-                 roleId, itemInstanceId);
-        (void)vm_mysql_exec(query);
-    }
     snprintf(query, sizeof(query),
              "INSERT INTO account_role_enhance_wash_record "
              "(role_id,item_instance_id,bag_seq,item_id,enhance_level,enhance_wash,"
              "unlock_level,washed_unix) VALUES (%u,%u,%u,%u,%u,'%s',%u,%u) "
-             "ON DUPLICATE KEY UPDATE item_instance_id=VALUES(item_instance_id),"
+             "ON DUPLICATE KEY UPDATE bag_seq=VALUES(bag_seq),"
              "item_id=VALUES(item_id),"
              "enhance_level=VALUES(enhance_level),"
              "enhance_wash=VALUES(enhance_wash),"
@@ -1187,7 +1209,7 @@ static bool vm_net_mock_enhance_wash_record_upsert(
     if (!vm_mysql_exec(query))
         return false;
     printf("[info][mock-service] enhance_wash_record_upsert role=%u instance=%u "
-           "seq=%u item=%u level=%u unlock=%u evidence=last-wash-snapshot\n",
+           "seq=%u item=%u level=%u unlock=%u evidence=audit-wash-log\n",
            roleId, itemInstanceId, (u32)bagSeq, itemId, (u32)enhanceLevel,
            (u32)unlockLevel);
     return true;
@@ -1199,86 +1221,19 @@ static bool vm_net_mock_enhance_wash_record_relocate_seq(u32 roleId,
                                                          u32 itemId, u16 enhanceLevel,
                                                          const vm_net_mock_enhance_wash_state *wash)
 {
-    char query[384];
-
-    if (roleId == 0 || newSeq == 0)
+    (void)oldSeq;
+    if (roleId == 0 || itemInstanceId == 0 || newSeq == 0)
         return false;
     if (!vm_net_mock_enhance_wash_record_ensure_table())
         return false;
-    if (oldSeq != 0 && oldSeq != newSeq)
-    {
-        snprintf(query, sizeof(query),
-                 "DELETE FROM account_role_enhance_wash_record "
-                 "WHERE role_id=%u AND bag_seq=%u AND item_instance_id=0",
-                 roleId, (u32)oldSeq);
-        (void)vm_mysql_exec(query);
-    }
     return vm_net_mock_enhance_wash_record_upsert(roleId, itemInstanceId, newSeq,
                                                   itemId, enhanceLevel, wash, 0);
 }
 
-static bool vm_net_mock_enhance_wash_record_restore(u32 roleId, u32 itemInstanceId,
-                                                    u32 itemId, u16 enhanceLevel,
-                                                    u16 bagSeq,
-                                                    vm_net_mock_enhance_wash_state *washOut)
-{
-    vm_net_mock_enhance_wash_record_lookup_ctx ctx;
-    char query[320];
-
-    (void)itemId;
-    (void)enhanceLevel;
-    if (roleId == 0 || washOut == NULL || !vm_net_mock_enhance_wash_is_empty(washOut))
-        return false;
-    if (!vm_net_mock_enhance_wash_record_ensure_table())
-        return false;
-    memset(&ctx, 0, sizeof(ctx));
-    if (itemInstanceId != 0)
-    {
-        snprintf(query, sizeof(query),
-                 "SELECT enhance_wash FROM account_role_enhance_wash_record "
-                 "WHERE role_id=%u AND item_instance_id=%u LIMIT 1",
-                 roleId, itemInstanceId);
-        (void)vm_mysql_query(query, vm_net_mock_enhance_wash_record_wash_row_cb,
-                             &ctx);
-    }
-    if (!ctx.found && bagSeq != 0)
-    {
-        memset(&ctx, 0, sizeof(ctx));
-        snprintf(query, sizeof(query),
-                 "SELECT enhance_wash FROM account_role_enhance_wash_record "
-                 "WHERE role_id=%u AND bag_seq=%u LIMIT 1",
-                 roleId, (u32)bagSeq);
-        (void)vm_mysql_query(query, vm_net_mock_enhance_wash_record_wash_row_cb,
-                             &ctx);
-    }
-    if (!ctx.found)
-        return false;
-    (void)vm_net_mock_enhance_wash_decode(ctx.washText, strlen(ctx.washText),
-                                          washOut);
-    if (vm_net_mock_enhance_wash_is_empty(washOut))
-        return false;
-    printf("[info][mock-service] enhance_wash_record_restore role=%u instance=%u "
-           "seq=%u item=%u level=%u evidence=fallback-from-record\n",
-           roleId, itemInstanceId, (u32)bagSeq, itemId, (u32)enhanceLevel);
-    return true;
-}
-
-static void vm_net_mock_enhance_wash_coalesce_from_record(
-    u32 roleId, u32 itemInstanceId, u32 itemId, u16 enhanceLevel, u16 bagSeq,
-    vm_net_mock_enhance_wash_state *wash)
-{
-    if (wash == NULL || roleId == 0 || itemId == 0)
-        return;
-    if (!vm_net_mock_enhance_wash_is_empty(wash))
-        return;
-    (void)vm_net_mock_enhance_wash_record_restore(roleId, itemInstanceId, itemId,
-                                                  enhanceLevel, bagSeq, wash);
-}
-
 /*
- * Drop wash-record rows so coalesce cannot resurrect attrs after intentional
- * clear (e.g. 29/6 enhance transfer source seat). Delete by instance id and by
- * bag_seq — restore falls back to bag_seq when instance lookup misses.
+ * Drop audit rows after intentional clear / destroy (e.g. 29/6 enhance
+ * transfer source seat). Prefer instance id; bag_seq only for legacy rows
+ * that never received a track id.
  */
 static bool vm_net_mock_enhance_wash_record_delete(u32 roleId, u32 itemInstanceId,
                                                    u16 bagSeq)
@@ -1299,11 +1254,11 @@ static bool vm_net_mock_enhance_wash_record_delete(u32 roleId, u32 itemInstanceI
         if (!vm_mysql_exec(query))
             ok = false;
     }
-    if (bagSeq != 0)
+    else if (bagSeq != 0)
     {
         snprintf(query, sizeof(query),
                  "DELETE FROM account_role_enhance_wash_record "
-                 "WHERE role_id=%u AND bag_seq=%u",
+                 "WHERE role_id=%u AND bag_seq=%u AND item_instance_id=0",
                  roleId, (u32)bagSeq);
         if (!vm_mysql_exec(query))
             ok = false;
@@ -1698,3 +1653,5 @@ static void vm_net_mock_enhance_crystal_spent_resolve(
     if (rowCountOut)
         *rowCountOut = rowCount;
 }
+
+#include "mock_server_equipment_instance.inc.c"

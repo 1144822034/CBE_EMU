@@ -2556,6 +2556,9 @@ static void vm_mock_arena_settle(void)
             if (live->rankPos <= 3)
                 vm_mock_arena_apply_title(live, (u8)live->rankPos);
         }
+        /* FFA70 冠军变更后刷新宣阳广场雕像缓存. */
+        if (ffa)
+            vm_mock_tianxia_champ_invalidate();
     }
     printf("[info][mock-service] arena_settled session=%u parts=%u\n",
            g_vm_mock_arena_rt.sessionId, g_vm_mock_arena_part_count);

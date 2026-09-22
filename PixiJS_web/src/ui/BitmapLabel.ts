@@ -1162,7 +1162,23 @@ export function layoutSameColorRuns(
 
 /** GBK-style display bytes: CJK=2, ASCII=1 (matches UC3 advance ratio). */
 export function uiCharByteWidth(ch: string): number {
-  return (ch.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
+  return (ch.codePointAt(0) ?? 0) > 0xff || isUiCjkPunctuation(ch) ? 2 : 1;
+}
+
+/**
+ * CJK / fullwidth / CN punctuation (not Han ideographs).
+ * Songti advances for these can exceed the UC3 em cell (… — 《》 etc.).
+ */
+export function isUiCjkPunctuation(ch: string): boolean {
+  if (ch === "·" || ch === "•") return true;
+  const cp = ch.codePointAt(0) ?? 0;
+  return (
+    (cp >= 0x3000 && cp <= 0x303f) || // CJK Symbols and Punctuation
+    (cp >= 0xff00 && cp <= 0xffef) || // Halfwidth and Fullwidth Forms
+    (cp >= 0x2000 && cp <= 0x206f) || // General Punctuation
+    (cp >= 0xfe10 && cp <= 0xfe1f) || // Vertical Forms
+    (cp >= 0xfe30 && cp <= 0xfe4f) // CJK Compatibility Forms
+  );
 }
 
 export function measureUiTextBytes(text: string): number {
@@ -1180,8 +1196,14 @@ export function measureUiTextWidth(text: string, cell = UC3_CELL): number {
       ctx.font = `400 ${fs}px ${activeWebFontFamily()}`;
       let w = 0;
       for (const ch of text) {
-        if ((ch.codePointAt(0) ?? 0) > 0xff) w += fs;
-        else w += Math.max(1, Math.ceil(ctx.measureText(ch).width));
+        if (isUiCjkPunctuation(ch)) {
+          // Ellipsis / dash / brackets often exceed the em cell under SimSun.
+          w += Math.max(fs, Math.ceil(ctx.measureText(ch).width));
+        } else if ((ch.codePointAt(0) ?? 0) > 0xff) {
+          w += fs;
+        } else {
+          w += Math.max(1, Math.ceil(ctx.measureText(ch).width));
+        }
       }
       return Math.ceil(w);
     }
@@ -1189,36 +1211,35 @@ export function measureUiTextWidth(text: string, cell = UC3_CELL): number {
   const ascii = cell * 0.5;
   let w = 0;
   for (const ch of text) {
-    w += (ch.codePointAt(0) ?? 0) > 0xff ? cell : ascii;
+    if (isUiCjkPunctuation(ch)) {
+      // Match wrapUiText: +1px so UC3 outline / Songti ink do not spill.
+      w += cell + 1;
+    } else if ((ch.codePointAt(0) ?? 0) > 0xff) {
+      w += cell;
+    } else {
+      w += ascii;
+    }
   }
   return w;
 }
 
 /**
- * Wrap by GBK byte width (CJK=2, ASCII=1). `maxCols` = full-width char budget
- * (default {@link UI_WRAP_CHARS}). Honors existing `\n` paragraphs.
+ * Wrap to `maxCols` full-width cells (default {@link UI_WRAP_CHARS}).
+ * Always goes through {@link wrapUiText} so CJK punctuation slack applies to
+ * both UC3 bitmap and system Songti (byte-only wrap let punct spill panels).
  */
 export function wrapChars(
   text: string,
   maxCols = UI_WRAP_CHARS,
 ): string[] {
-  const maxBytes = Math.max(2, (Math.max(1, maxCols | 0)) * 2);
+  const cols = Math.max(1, maxCols | 0);
+  const maxW = cols * UC3_CELL;
   const lines: string[] = [];
-  for (const para of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
-    let cur = "";
-    let bytes = 0;
-    for (const ch of para) {
-      const bw = uiCharByteWidth(ch);
-      if (bytes + bw > maxBytes && cur) {
-        lines.push(cur);
-        cur = ch;
-        bytes = bw;
-      } else {
-        cur += ch;
-        bytes += bw;
-      }
-    }
-    lines.push(cur || " ");
+  for (const para of text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")) {
+    lines.push(...wrapUiText(para.length ? para : " ", maxW, UC3_CELL));
   }
   return lines.length ? lines : [""];
 }
@@ -1232,8 +1253,8 @@ export function formatUiMultiline(
 }
 
 /**
- * Wrap by glyph advances. UC3 uses a fixed CJK/ASCII grid; Songti/web faces
- * measure real advances so chat/panels stay aligned.
+ * Wrap by glyph advances. UC3 uses a fixed CJK/ASCII grid with +1px punct
+ * slack; Songti measures real advances so chat/panels stay aligned.
  */
 export function wrapUiText(
   text: string,
@@ -1249,14 +1270,22 @@ export function wrapUiText(
       measure.font = `400 ${fontSize}px ${activeWebFontFamily()}`;
     }
   }
-  // Songti canvas metrics run slightly narrow vs DOM SimSun — keep 1px slack
-  // so the last glyph does not spill / look like a 2–3 char overlap.
-  const budget = Math.max(fontSize, maxWidth - (useMeasure ? 1 : 0));
+  // Keep 1px line slack: Songti canvas under-reports vs DOM; UC3 outline can
+  // spill the last cell when the line ends on punctuation.
+  const budget = Math.max(fontSize, maxWidth - 1);
   const cjk = fontSize;
   const ascii = fontSize * 0.5;
   const charW = (ch: string): number => {
+    if (isUiCjkPunctuation(ch)) {
+      if (measure) {
+        // Songti punctuation can exceed the em cell; +1 covers text-shadow.
+        return Math.max(cjk, Math.ceil(measure.measureText(ch).width)) + 1;
+      }
+      // UC3: glyph is one cell, but neighbor-outline can ink past the edge.
+      return cjk + 1;
+    }
     if (measure) {
-      // Prefer full-cell for CJK — measureText(SimSun) often under-reports.
+      // Prefer full-cell for Han — measureText(SimSun) often under-reports.
       if ((ch.codePointAt(0) ?? 0) > 0xff) return cjk;
       return Math.max(1, Math.ceil(measure.measureText(ch).width));
     }

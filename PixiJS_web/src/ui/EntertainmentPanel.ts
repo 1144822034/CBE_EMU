@@ -218,10 +218,10 @@ export class EntertainmentPanel extends Container {
         this.confirm();
       },
     });
-    this.addLabel(
+    this.addLabelCentered(
       "部分站点可能拒绝内嵌",
-      bounds.x + 10,
-      footY + 6,
+      bounds.x + bounds.w / 2,
+      footY + 12,
       CBE.inkLabel,
     );
   }

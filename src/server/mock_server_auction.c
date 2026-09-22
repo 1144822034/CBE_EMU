@@ -1032,6 +1032,12 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
             return false;
         }
 
+        if (row.itemInstanceId != 0)
+        {
+            (void)vm_net_mock_equipment_instance_transfer_owner(
+                row.sellerRoleId, row.highBidderRoleId, row.itemInstanceId, 0);
+        }
+
         vm_mock_auction_notify_role(row.sellerRoleId, listingId,
                                     VM_MOCK_AUCTION_EVT_CLAIM, 0);
         vm_mock_auction_notify_role(row.highBidderRoleId, listingId,
@@ -1407,9 +1413,8 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
                                                    4, 0, "not-tradeable");
     listInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
         role, bag->enhanceInstanceId, itemId);
+    /* Listing wash comes from bag enhance_wash only — wash_record is audit. */
     vm_net_mock_enhance_wash_copy(&listWash, &bag->enhanceWash);
-    vm_net_mock_enhance_wash_coalesce_from_record(
-        role->roleId, listInstanceId, itemId, enhance, (u16)bagSeq, &listWash);
     if (count == 0 || count > bag->count)
         count = bag->count;
     if (vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
@@ -2215,8 +2220,7 @@ static u32 vm_net_mock_build_auction_cancel_response(const u8 *request, u32 requ
                                                    5, listingId, "has-bid");
 
     /* Return item first; only then mark cancelled so bag-full cannot destroy items.
-     * Listing enhance_wash is authority — do not coalesce_from_record (instance
-     * ids are per-role counters; stale wash_record can resurrect foreign attrs). */
+     * Listing enhance_wash is authority; wash_record is audit-only. */
     before = *role;
     if (!vm_mock_auction_return_item_to_bag(role, row.itemId, row.itemCount,
                                             row.enhanceLevel, row.itemInstanceId,
@@ -2532,10 +2536,8 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
         {
             /*
              * Claim/listing enhance_wash is the transfer authority (may be empty
-             * when first_seed_percent=0 or seller never washed). Do not
-             * coalesce_from_record under the *claimer* roleId: seller instance
-             * ids collide with the buyer's own wash_record keys and would paint
-             * red wash onto items the auction UI correctly showed as unwashed.
+             * when first_seed_percent=0 or seller never washed). wash_record is
+             * audit-only and is never read back into live gear.
              */
             if (rows[i].itemId == 0 || rows[i].itemCount == 0 ||
                 !vm_mock_auction_return_item_to_bag(

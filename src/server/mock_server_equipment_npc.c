@@ -116,11 +116,6 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
             role, newInstanceId, newItemId);
         oldInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
             role, oldInstanceId, oldItemId);
-        vm_net_mock_enhance_wash_coalesce_from_record(
-            role->roleId, newInstanceId, newItemId, newEnhance, backpackSeq,
-            &newWash);
-        vm_net_mock_enhance_wash_coalesce_from_record(
-            role->roleId, oldInstanceId, oldItemId, oldEnhance, 0, &oldWash);
         if (newEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             newEnhance = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         if (oldEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
@@ -285,15 +280,8 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         vm_net_mock_enhance_wash_copy(&unequipWash, &role->equippedEnhanceWash[slot]);
         unequipInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
             role, unequipInstanceId, itemId);
-        /*
-         * Keep the same item_instance_id across wear↔bag.  The old
-         * add_backpack_item_enhanced(..., instanceId=0) path minted a new id
-         * and dropped the wash-record key, so a later empty in-memory wash
-         * could not coalesce and 17/1 reopened as default yellow milestones.
-         */
-        vm_net_mock_enhance_wash_coalesce_from_record(
-            role->roleId, unequipInstanceId, itemId, unequipEnhance, 0,
-            &unequipWash);
+        /* Keep the same item_instance_id across wear↔bag; wash rides the
+         * equip/bag enhance_wash columns (wash_record is audit-only). */
         if (!vm_net_mock_role_add_backpack_item_to_role(
                 role, itemId, 1, unequipEnhance, &seq, NULL, &unequipWash,
                 unequipInstanceId))
@@ -1588,10 +1576,8 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
             destLevelAfter = sourceLevel; /* no level loss */
             sourceLevelAfter = 0;
             /*
-             * Wash must move with enhance. Coalesce source first so an empty
-             * in-memory seat still transfers the last wash-record snapshot;
-             * then rewrite records so equip coalesce cannot resurrect the
-             * source snapshot (duplicate wash on both seats).
+             * Wash must move with enhance from source column only. Rewrite
+             * audit wash_record so the log follows dest and source is cleared.
              */
             sourceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
                 role, source->enhanceInstanceId, source->itemId);
@@ -1599,9 +1585,6 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
                 role, dest->enhanceInstanceId, dest->itemId);
             source->enhanceInstanceId = sourceInstanceId;
             dest->enhanceInstanceId = destInstanceId;
-            vm_net_mock_enhance_wash_coalesce_from_record(
-                role->roleId, sourceInstanceId, source->itemId, sourceLevel,
-                source->seq, &source->enhanceWash);
             source->enhanceLevel = sourceLevelAfter;
             dest->enhanceLevel = destLevelAfter;
             vm_net_mock_enhance_wash_copy(&dest->enhanceWash, &source->enhanceWash);
@@ -5108,6 +5091,8 @@ typedef struct vm_mock_service_client_session
     char onlineRoleName[32];
     char onlineRoleTitle[32];
     char onlineRoleTitleBadge[32];
+    /* GBK spouse display name, or 无. Mirrored with presence for 10/2. */
+    char onlineSpouseName[32];
     u8 onlineJob;
     u8 onlineSex;
     u16 onlineLevel;
@@ -7260,10 +7245,8 @@ static u32 vm_net_mock_build_crystal_extract_response(const u8 *request,
                     u32 i;
                     bool grantOk = true;
 
-                    (void)vm_net_mock_enhance_wash_record_delete(
+                    (void)vm_net_mock_equipment_instance_retire(
                         role->roleId, instanceId, equipSeq);
-                    (void)vm_net_mock_enhance_crystal_spent_delete(
-                        role->roleId, instanceId);
                     for (i = 0; i < crystalRows; ++i)
                     {
                         if (crystals[i].itemId == 0 || crystals[i].count == 0)
@@ -11721,6 +11704,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->onlineRoleName[0] = 0;
     session->onlineRoleTitle[0] = 0;
     session->onlineRoleTitleBadge[0] = 0;
+    session->onlineSpouseName[0] = 0;
     session->onlinePkPoints = 0;
     session->onlineEqChenghaoId = 0;
     session->onlineEqWingId = 0;
@@ -12172,6 +12156,12 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
              vm_net_mock_role_title(role));
     snprintf(session->onlineRoleTitleBadge, sizeof(session->onlineRoleTitleBadge), "%s",
              designation ? designation->overheadResource : "");
+    {
+        const char *spouseName = vm_net_mock_role_spouse_name(role);
+
+        snprintf(session->onlineSpouseName, sizeof(session->onlineSpouseName), "%s",
+                 spouseName && spouseName[0] ? spouseName : "\xce\xde"); /* GBK: 无 */
+    }
     session->onlineJob = role->job;
     session->onlineSex = role->sex;
     session->onlineLevel = (u16)(role->level ? role->level : 1);
@@ -14573,7 +14563,8 @@ typedef struct
     u32 serviceMask;
     char actorResource[64];
     char displayName[32];
-    char scriptName[64];
+    /* 160: Pixi 雕像 script `pixi_tx1|…|titleHex|称号` 超过 64. */
+    char scriptName[160];
     char instanceScene[64];
 } vm_net_mock_scene_npcinfo_seed;
 

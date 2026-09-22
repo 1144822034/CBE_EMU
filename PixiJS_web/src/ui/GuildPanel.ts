@@ -427,10 +427,10 @@ export class GuildPanel extends Container {
           this.addLabel(line, x + 10, ly, CBE.inkMint);
           ly += 15;
         }
-        this.addLabel(
+        this.addLabelCentered(
           this.actionLabels.includes("申请入帮") ? "确定=操作" : "确定=返回",
-          x + 10,
-          y + h - 18,
+          x + w / 2,
+          y + h - 12,
           CBE.inkLabel,
         );
         this.rowHits.push(
@@ -629,6 +629,21 @@ export class GuildPanel extends Container {
     t.eventMode = "none";
     t.anchor.set(0.5, 0.5);
     t.position.set(LCD_WIDTH / 2, Math.round(cy));
+    void t.setText(text, color, { outline: false });
+    this.addChild(t);
+    this.labels.push(t);
+  }
+
+  private addLabelCentered(
+    text: string,
+    cx: number,
+    cy: number,
+    color: number,
+  ): void {
+    const t = new BitmapLabel();
+    t.eventMode = "none";
+    t.anchor.set(0.5, 0.5);
+    t.position.set(Math.round(cx), Math.round(cy));
     void t.setText(text, color, { outline: false });
     this.addChild(t);
     this.labels.push(t);

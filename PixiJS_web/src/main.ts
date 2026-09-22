@@ -88,8 +88,12 @@ import {
   NPC_FESTIVAL_EXCHANGE,
   NPC_RING_QUEST,
   NPC_RING_REFRESH,
+  NPC_TIANXIA_SIGNATURE,
   NPC_YANMEN_EXCHANGE,
   RING_REFRESH_WCOIN,
+  TIANXIA_FIRST_NPC_ACTOR_ID,
+  TIANXIA_SIGNATURE_DEFAULT,
+  TIANXIA_SIGNATURE_MAX_CHARS,
   activityMsgTip,
   type RingStatus,
 } from "./net/protocolActivities";
@@ -111,9 +115,9 @@ import {
   bracketForLevel,
 } from "./net/protocolArena";
 import {
+  auctionBidStep,
   formatAuctionPrice,
   formatAuctionClaimTip,
-  goldToCopper,
   type AuctionListing,
   type AuctionStatus,
 } from "./net/protocolAuction";
@@ -157,6 +161,7 @@ import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
 import {
   augmentEquipSellDialog,
   augmentWarehouseDialog,
+  isWarehouseDepositListDialog,
   isWarehouseItemListDialog,
   WarehouseService,
   EQUIP_SELL_QUALITY_OPTIONS,
@@ -197,6 +202,12 @@ import {
   unlockAndResumeBgm,
 } from "./audio/GameBgm";
 import { isPeerCosmeticsVisible, togglePeerCosmeticsVisible } from "./resources/peerCosmeticsPref";
+import {
+  ENEMY_HP_BAR_OPTIONS,
+  enemyHpBarPlacementLabel,
+  setEnemyHpBarPlacement,
+  type EnemyHpBarPlacement,
+} from "./resources/enemyHpBarPref";
 import {
   playKillStreakTitle,
   preloadKillStreakSfx,
@@ -313,6 +324,8 @@ function auctionMsgTip(code: string | undefined, okText: string): string {
     save: "保存失败",
     encode: "编码失败",
     insert: "写入失败",
+    "not-tradeable": "该物品不可拍卖",
+    socketed: "请先拆除宝石",
     "not-open": "该拍品已结束",
     self: "不能竞拍自己的物品",
     "self-account": "不能竞拍同账号上架",
@@ -1357,7 +1370,13 @@ async function main(): Promise<void> {
         }
         const tip = formatAuctionClaimTip(r, auctionMsgTip);
         showGameTip(tip);
-        void session.openBag().then(() => refresh(tip));
+        /*
+         * Claim WT already appends 17/1+30/21 (see mock_server_auction claim /
+         * docs/re/2026-08-14-auction-claim-crystal-stack.md). A follow-up
+         * openBag() used to replace the bag and could paint stackables as ×1
+         * (梦境徽章 840 / 玄晶 same class). Refresh auction UI only.
+         */
+        refresh(tip);
       });
       return;
     }
@@ -1384,12 +1403,12 @@ async function main(): Promise<void> {
         showGameTip("条目不存在");
         return;
       }
-      const stepRaw = auctionCache.status?.minBidStep || 1;
-      // 铜币档按金展示/加价：至少加 1 金（10000 铜）
-      const step =
-        row.currency === 0 ? Math.max(stepRaw, goldToCopper(1)) : stepRaw;
+      // 已有出价时加价 = floor(起拍价/10)，至少 1；与按钮文案、服务端 minNeed 一致。
+      const step = auctionBidStep(row.startPrice);
       const amount =
-        row.highBidderRoleId > 0 ? row.currentPrice + step : row.currentPrice;
+        row.highBidderRoleId > 0
+          ? (row.currentPrice + step) >>> 0
+          : row.currentPrice;
       void session.auctionBid(listingId, amount).then((r) => {
         const tip =
           r?.result === 1
@@ -2539,39 +2558,79 @@ async function main(): Promise<void> {
     }
   };
 
-  /** 「查看玩家信息」只列 29/4 穿戴装备，不拼 10/2 资料. */
+  /** 「查看玩家信息」：10/2 资料 + 29/4 穿戴装备. */
   const OTHER_EQUIP_SLOT_LABEL = ["武器", "帽", "衣", "披", "束", "裤", "鞋", "饰品"];
   const OTHER_EQUIP_SLOT_ORDER = [1, 2, 3, 4, 5, 6, 7, 0];
+  const OTHER_JOB_NAMES = ["天机", "幻剑", "鬼道"];
   let playerCardCombine = false;
-  let pendingOtherEquip: OtherEquipView | null = null;
+  let playerCardGen = 0;
 
-  const flushPlayerCard = () => {
-    if (!pendingOtherEquip) return;
-    const items = [...pendingOtherEquip.items].sort((a, b) => {
+  const otherEquipLines = (eq: OtherEquipView): string[] => {
+    const items = [...eq.items].sort((a, b) => {
       const ai = OTHER_EQUIP_SLOT_ORDER.indexOf(a.equipSlot);
       const bi = OTHER_EQUIP_SLOT_ORDER.indexOf(b.equipSlot);
       return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
     });
-    const lines = items.length
+    return items.length
       ? items.map((it) => {
           const part = OTHER_EQUIP_SLOT_LABEL[it.equipSlot] ?? "";
           const name = `${it.name}${it.enhance ? `+${it.enhance}` : ""}`;
           return part ? `${part} ${name}` : name;
         })
       : ["(无装备)"];
-    social.showPlayerInfo({ lines, fdegree: "" });
-    showPhase("social");
-    playerCardCombine = false;
+  };
+
+  const profileLinesFromEquip = (eq: OtherEquipView): string[] => {
+    const job = OTHER_JOB_NAMES[eq.jobIndex] ?? "无";
+    return [
+      `姓名：${eq.name || "侠客"}`,
+      "称号：无",
+      `等级：${eq.level || 1}级　职业：${job}`,
+      "配偶：无",
+      "帮派：无帮派",
+    ];
+  };
+
+  const joinLevelJobLine = (lines: string[]): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? "";
+      const next = lines[i + 1] ?? "";
+      if (line.startsWith("等级：") && next.startsWith("职业：")) {
+        out.push(`${line}　${next}`);
+        i++;
+        continue;
+      }
+      out.push(line);
+    }
+    return out;
   };
 
   const openPlayerCard = (actorId: number, tipName?: string) => {
     if (!actorId) return;
+    const gen = ++playerCardGen;
     playerCardCombine = true;
-    pendingOtherEquip = null;
     showGameTip(
       tipName ? `查看玩家信息 · ${tipName}` : "查看玩家信息",
     );
-    void session.requestOtherEquip(actorId);
+    void Promise.all([
+      session.requestPlayerInfo(actorId),
+      session.requestOtherEquip(actorId),
+    ])
+      .then(([info, eq]) => {
+        if (gen !== playerCardGen) return;
+        const profile = joinLevelJobLine(
+          info?.lines?.length ? info.lines : eq ? profileLinesFromEquip(eq) : [],
+        );
+        const lines = profile.length
+          ? [...profile, ...(eq ? otherEquipLines(eq) : ["(无装备)"])]
+          : ["(无信息)"];
+        social.showPlayerInfo({ lines, fdegree: "" });
+        showPhase("social");
+      })
+      .finally(() => {
+        if (gen === playerCardGen) playerCardCombine = false;
+      });
   };
 
   /** Hide map SCE spawn on engage; restore only if 4/5 never arrives. */
@@ -2597,6 +2656,23 @@ async function main(): Promise<void> {
       const id = view.actors.suppressSceneMonsterAt(x, y);
       if (id) view.actors.restoreSceneMonster(id);
     }
+  };
+
+  /** Bag seq of the row just sent to warehouse. Applied when「存入成功」arrives. */
+  let pendingWarehouseDepositSeq = 0;
+
+  /** Deposit list is a bag snapshot; rebuild it when that snapshot changes. */
+  const refreshOpenWarehouseDepositList = (): void => {
+    if (!dialog.visible) return;
+    const cur = dialog.getDialog();
+    if (!cur || !isWarehouseDepositListDialog(cur)) return;
+    const shown = augmentWarehouseDialog(cur, session.bagItems);
+    const sig = (opts: { value: number; count?: number; label: string }[]) =>
+      opts
+        .map((o) => `${o.value >>> 0}:${o.count ?? ""}:${o.label}`)
+        .join("\n");
+    if (sig(shown.options) === sig(cur.options)) return;
+    dialog.show(shown, { keepCursor: true });
   };
 
   const session = new GameSession({
@@ -3156,11 +3232,7 @@ async function main(): Promise<void> {
       showPhase("social");
     },
     onOtherEquip: (eq) => {
-      if (playerCardCombine) {
-        pendingOtherEquip = eq;
-        flushPlayerCard();
-        return;
-      }
+      if (playerCardCombine) return;
       social.showOtherEquip(eq);
       showPhase("social");
     },
@@ -3607,6 +3679,15 @@ async function main(): Promise<void> {
     },
     onNpcDialog: (d) => {
       if (session.equipSellBatchSilent) return;
+      const pending = pendingWarehouseDepositSeq;
+      pendingWarehouseDepositSeq = 0;
+      if (
+        pending > 0 &&
+        isWarehouseDepositListDialog(d) &&
+        d.body.includes("存入成功")
+      ) {
+        session.dropDepositedBagRow(pending);
+      }
       const shown = augmentWarehouseDialog(augmentEquipSellDialog(d), session.bagItems);
       dialog.show(shown);
       showPhase("dialog");
@@ -3748,6 +3829,7 @@ async function main(): Promise<void> {
       system.setBagMeta(money, cap);
       hud.setBagSlots(items.length, Math.max(cap, items.length));
       if (phase === "system") setChromeStatus(`背包 ${items.length} 件`);
+      refreshOpenWarehouseDepositList();
     },
     onWorn: (items) => {
       system.setWorn(items);
@@ -5357,6 +5439,22 @@ async function main(): Promise<void> {
       );
       return;
     }
+    if (leaf === "enemy_hp_bar") {
+      dialog.show({
+        title: "敌方血条",
+        body: "选择战斗中敌方血条显示位置",
+        options: [
+          ...ENEMY_HP_BAR_OPTIONS.map((o, i) => ({
+            label: o.label,
+            action: 271,
+            value: i,
+          })),
+          { label: "取消", action: 101, value: 0 },
+        ],
+      });
+      showPhase("dialog");
+      return;
+    }
     setChromeStatus(`菜单: ${label}`);
     showPhase("world");
   };
@@ -5962,6 +6060,11 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "auction") {
+        const sg = bag.socketGems;
+        if (sg && (sg.reflect || sg.combo || sg.revive)) {
+          showGameTip("请先拆除宝石");
+          return;
+        }
         system.visible = false;
         showPhase("world");
         void openAuctionPanel({ preferTab: "list", preselect: bag }).then(() => {
@@ -7183,6 +7286,20 @@ async function main(): Promise<void> {
       })();
       return;
     }
+    if (action === 271) {
+      dialog.hide();
+      const opt = ENEMY_HP_BAR_OPTIONS[value | 0];
+      if (!opt) {
+        showPhase("world");
+        return;
+      }
+      setEnemyHpBarPlacement(opt.id as EnemyHpBarPlacement);
+      battle.refreshEnemyHpBarPlacement();
+      showGameTip(`敌方血条: ${opt.label}`);
+      setChromeStatus(`敌方血条 · ${enemyHpBarPlacementLabel()}`);
+      showPhase("world");
+      return;
+    }
     // Equip-sell voucher: client-only batch / quality sell of unenhanced bag equips.
     // 293..295 all-sell; 320..322 quality-sell (296/297 are extract confirm).
     if (action === EquipSellBatchAction.OPEN_CONFIRM) {
@@ -7293,6 +7410,33 @@ async function main(): Promise<void> {
       void openYanmenPanel();
       return;
     }
+    if ((value >>> 0) === NPC_TIANXIA_SIGNATURE) {
+      const current = dialog.currentBody || "";
+      dialog.hide();
+      const seed =
+        current && current !== TIANXIA_SIGNATURE_DEFAULT ? current : "";
+      const draft = window.prompt(
+        `江湖签名（最多${TIANXIA_SIGNATURE_MAX_CHARS}字，留空恢复默认）`,
+        seed,
+      );
+      if (draft == null) {
+        showPhase("world");
+        return;
+      }
+      const text = draft.trim();
+      if ([...text].length > TIANXIA_SIGNATURE_MAX_CHARS) {
+        showGameTip(`签名最多${TIANXIA_SIGNATURE_MAX_CHARS}个字`);
+        showPhase("world");
+        return;
+      }
+      void (async () => {
+        const fb = await session.setTianxiaSignature(text);
+        showGameTip(fb.message || (fb.ok ? "签名已更新" : "签名失败"));
+        if (fb.ok) void session.openNpc(TIANXIA_FIRST_NPC_ACTOR_ID);
+        else showPhase("world");
+      })();
+      return;
+    }
     if ((value >>> 0) === NPC_RING_QUEST) {
       dialog.hide();
       void openRingQuestPanel();
@@ -7338,7 +7482,12 @@ async function main(): Promise<void> {
       });
       return;
     }
-dialog.hide();
+    const depositSeq = value & 0xffffff;
+    pendingWarehouseDepositSeq =
+      (value >>> 24) === (WarehouseService.DEPOSIT_BASE >>> 24) && depositSeq > 0
+        ? depositSeq
+        : 0;
+    dialog.hide();
     void session.pickNpcOption(action, value, label).then(() => {
       if (session.inBattle) {
         showPhase("battle");

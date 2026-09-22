@@ -49,7 +49,8 @@ export async function paintBattleSettlePanel(
 
   const drops = opts.drops.map((d) => d.trim()).filter(Boolean);
   const panelX = 10;
-  const panelY = 52;
+  /* Clear BattleEnemyHud (STAGE_TOP+2 + up to 3×SLOT_H ≈ y98). */
+  const panelY = 102;
   const panelW = LCD_WIDTH - 20;
   const pad = 8;
   const rowH = 16;

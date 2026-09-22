@@ -10802,7 +10802,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     }
     if (strcmp(action, "save-arena-config") == 0 ||
         strcmp(action, "save-arena-reward") == 0 ||
-        strcmp(action, "save-arena-wager") == 0)
+        strcmp(action, "save-arena-wager") == 0 ||
+        strcmp(action, "save-tianxia-statue") == 0)
     {
         vm_mock_admin_handle_arena_action(client, action, body);
         return;

@@ -22,3 +22,5 @@ status: fixed
 ## 未改
 
 CBE `HandleEquipInfoResponse` 仍按 `attr_count` 停止，不读宝石孔尾。多件装备的 `29/4` 对 CBE 纸娃娃仍可能从第二件起错位。这次只修 Pixi 列表。
+
+2026-09-21：装备行解析已能读完多件后，Pixi「玩家信息」重新拼接 `10/2` 资料与 `29/4` 装备。见 `docs/re/2026-09-21-nearby-player-info-profile.md`。

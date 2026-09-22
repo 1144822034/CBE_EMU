@@ -332,7 +332,16 @@ export function paintListShellBody(
   }
 
   if (opts.footerHint) {
-    ctx.addLabel(opts.footerHint, x + 10, footY, CBE.inkLabel);
+    if (ctx.addLabelCentered) {
+      ctx.addLabelCentered(
+        opts.footerHint,
+        x + w / 2,
+        footY + 6,
+        CBE.inkLabel,
+      );
+    } else {
+      ctx.addLabel(opts.footerHint, x + 10, footY, CBE.inkLabel);
+    }
   }
 
   return { page, pages, pageStart, navH };

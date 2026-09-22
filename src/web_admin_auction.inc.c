@@ -66,8 +66,9 @@ static void vm_mock_admin_render_auction_page(char *response, size_t responseCap
         "<div><label>按类别拦截</label><select name=\"category_gate\">"
         "<option value=\"1\"%s>开</option><option value=\"0\"%s>关</option></select></div>"
         "</div>"
-        "<p class=\"hint\">按类别拦截开启时，玄晶（901–916 / 类别23）和任务物品（类别11）"
-        "不可上架。关闭后不按类别拦截。绑定、已强化、宝石、碎片和已镶嵌装备始终不可拍卖。</p>"
+        "<p class=\"hint\">按类别拦截开启时，与玩家交易相同：玄晶、任务物品、绑定、"
+        "已强化、宝石和碎片不可上架。关闭后上述物品可拍卖。"
+        "已镶嵌装备无论开关都需先拆除宝石。玩家交易始终受交易限制。</p>"
         "<button type=\"submit\">保存配置</button></form></section>"
         "</body></html>",
         cfg && cfg->enabled ? " selected" : "",

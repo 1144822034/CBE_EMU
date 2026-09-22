@@ -862,6 +862,8 @@ static bool vm_mock_service_mysql_authority_prepare(void)
            "storage=InnoDB marker=%s\n",
            g_vm_mock_mysql_authority_sealed ? 1u : 0u,
            VM_MOCK_MYSQL_AUTHORITY_MIGRATION);
+    /* Remap live duplicate/zero item_instance_id before roles load. */
+    vm_net_mock_equipment_instance_migrate_once();
     return true;
 }
 
@@ -6907,7 +6909,9 @@ static void vm_net_mock_role_init_default_equipment(vm_net_mock_role_state *role
     memset(role->equippedItemIds, 0, sizeof(role->equippedItemIds));
     memset(role->equippedEnhanceLevels, 0, sizeof(role->equippedEnhanceLevels));
     memset(role->equippedEnhanceWash, 0, sizeof(role->equippedEnhanceWash));
-    role->equippedItemIds[0] = vm_net_mock_role_default_weapon_for_job(role->job);
+    memset(role->equippedEnhanceInstanceIds, 0,
+           sizeof(role->equippedEnhanceInstanceIds));
+    /* No starter weapon — new roles begin unequipped. */
 }
 
 static void vm_net_mock_role_init_default_backpack(vm_net_mock_role_state *role)
@@ -9068,6 +9072,14 @@ static bool vm_net_mock_warehouse_ensure_enhance_wash_column(void)
              "ADD COLUMN gem_revive TINYINT UNSIGNED NOT NULL DEFAULT 0 "
              "AFTER gem_combo",
              "warehouse_gem_revive_column");
+    if (!ok)
+        return false;
+    ok = vm_net_mock_role_table_ensure_column(
+        "account_role_warehouse", "item_instance_id",
+        "ALTER TABLE account_role_warehouse "
+        "ADD COLUMN item_instance_id INT UNSIGNED NOT NULL DEFAULT 0 "
+        "AFTER enhance_level",
+        "warehouse_item_instance_id_column");
     return ok;
 }
 
@@ -12172,6 +12184,7 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
             *roleCountOut = before.roleCount;
         return false;
     }
+    (void)vm_net_mock_equipment_instance_retire_role(actorId);
     result = 0;
     if (resultOut)
         *resultOut = result;
@@ -12372,12 +12385,17 @@ static bool vm_net_mock_warehouse_load_row(void *context_value,
     u32 itemSeq = 0;
     u32 itemCount = 0;
     u32 enhance = 0;
+    u32 instanceId = 0;
     u32 gemReflect = 0;
     u32 gemCombo = 0;
     u32 gemRevive = 0;
+    u32 washCol = 5;
+    u32 gemBase = 6;
+    bool hasInstance = false;
 
     if (context == NULL || context->state == NULL ||
-        (column_count != 5 && column_count != 6 && column_count != 9) ||
+        (column_count != 5 && column_count != 6 && column_count != 9 &&
+         column_count != 10) ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &slot) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &itemId) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &itemSeq) ||
@@ -12390,6 +12408,18 @@ static bool vm_net_mock_warehouse_load_row(void *context_value,
             context->invalid = true;
         return true;
     }
+    if (column_count == 10)
+    {
+        hasInstance = true;
+        washCol = 6;
+        gemBase = 7;
+        if (values[5] != NULL &&
+            !vm_mock_mysql_parse_u32(values[5], lengths[5], &instanceId))
+        {
+            context->invalid = true;
+            return true;
+        }
+    }
     if (context->state->itemCount < VM_NET_MOCK_WAREHOUSE_MAX_ITEMS)
     {
         vm_net_mock_backpack_item_state *item =
@@ -12399,18 +12429,23 @@ static bool vm_net_mock_warehouse_load_row(void *context_value,
         item->seq = (u16)itemSeq;
         item->count = itemCount;
         item->enhanceLevel = (u16)enhance;
+        if (hasInstance)
+            item->enhanceInstanceId = instanceId;
         vm_net_mock_enhance_wash_clear(&item->enhanceWash);
-        if (column_count >= 6 && values[5] != NULL)
-            (void)vm_net_mock_enhance_wash_decode(values[5], lengths[5],
+        if (column_count >= 6 && values[washCol] != NULL)
+            (void)vm_net_mock_enhance_wash_decode(values[washCol], lengths[washCol],
                                                   &item->enhanceWash);
-        if (column_count >= 9)
+        if (column_count == 9 || column_count == 10)
         {
-            if ((values[6] != NULL &&
-                 !vm_mock_mysql_parse_u32(values[6], lengths[6], &gemReflect)) ||
-                (values[7] != NULL &&
-                 !vm_mock_mysql_parse_u32(values[7], lengths[7], &gemCombo)) ||
-                (values[8] != NULL &&
-                 !vm_mock_mysql_parse_u32(values[8], lengths[8], &gemRevive)) ||
+            if ((values[gemBase] != NULL &&
+                 !vm_mock_mysql_parse_u32(values[gemBase], lengths[gemBase],
+                                          &gemReflect)) ||
+                (values[gemBase + 1] != NULL &&
+                 !vm_mock_mysql_parse_u32(values[gemBase + 1],
+                                          lengths[gemBase + 1], &gemCombo)) ||
+                (values[gemBase + 2] != NULL &&
+                 !vm_mock_mysql_parse_u32(values[gemBase + 2],
+                                          lengths[gemBase + 2], &gemRevive)) ||
                 gemReflect > 255u || gemCombo > 255u || gemRevive > 255u)
             {
                 context->invalid = true;
@@ -12485,7 +12520,8 @@ static bool vm_net_mock_warehouse_load_for_role(vm_net_mock_role_state *role)
     context.state = &g_vm_net_mock_warehouse;
     context.invalid = false;
     snprintf(query, sizeof(query),
-             "SELECT slot_index,item_id,item_seq,item_count,enhance_level,enhance_wash,"
+             "SELECT slot_index,item_id,item_seq,item_count,enhance_level,"
+             "item_instance_id,enhance_wash,"
              "gem_reflect,gem_combo,gem_revive "
              "FROM account_role_warehouse WHERE account_id=CAST(X'%s' AS CHAR) "
              "AND role_id=%u ORDER BY slot_index",
@@ -12581,8 +12617,8 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
         prefixLen = (u32)snprintf(
             query, queryCap,
             "INSERT INTO account_role_warehouse(account_id,role_id,slot_index,item_id,"
-            "item_seq,item_count,enhance_level,enhance_wash,gem_reflect,gem_combo,"
-            "gem_revive) VALUES");
+            "item_seq,item_count,enhance_level,item_instance_id,enhance_wash,"
+            "gem_reflect,gem_combo,gem_revive) VALUES");
         if (prefixLen == 0 || prefixLen >= queryCap)
         {
             if (mysql_error != NULL && mysql_error_cap > 0)
@@ -12602,10 +12638,11 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
             (void)vm_net_mock_enhance_wash_sql_text(&item->enhanceWash, washText,
                                                     sizeof(washText));
             written = snprintf(query + queryLen, queryCap - queryLen,
-                               "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s',%u,%u,%u)",
+                               "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,'%s',%u,%u,%u)",
                                valueCount > 0u ? "," : "",
                                account_hex, role->roleId, slot, item->itemId,
-                               item->seq, item->count, item->enhanceLevel, washText,
+                               item->seq, item->count, item->enhanceLevel,
+                               item->enhanceInstanceId, washText,
                                (u32)item->gemReflectLevel, (u32)item->gemComboLevel,
                                (u32)item->gemReviveLevel);
             if (written <= 0 || (u32)written >= queryCap - queryLen)
@@ -12857,12 +12894,18 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
     }
     price = catalog->price;
     beforeRole = *role;
-    if (!vm_net_mock_role_consume_backpack_item(role, itemId, backpackSeq, 1,
-                                                &remaining))
     {
-        if (reasonOut)
-            *reasonOut = "consume-failed";
-        return false;
+        u32 soldInstanceId = bagItem->enhanceInstanceId;
+        if (!vm_net_mock_role_consume_backpack_item(role, itemId, backpackSeq, 1,
+                                                    &remaining))
+        {
+            if (reasonOut)
+                *reasonOut = "consume-failed";
+            return false;
+        }
+        if (soldInstanceId != 0 || backpackSeq != 0)
+            (void)vm_net_mock_equipment_instance_retire(role->roleId, soldInstanceId,
+                                                        backpackSeq);
     }
     role->money = vm_net_mock_add_capped_u32(role->money, price);
     (void)beforeRole;
@@ -13034,6 +13077,14 @@ static bool vm_net_mock_warehouse_deposit_backpack_seq(vm_net_mock_role_state *r
     warehouse->items[warehouse->itemCount++] = moved;
     bagItem->count = 0;
     vm_net_mock_role_normalize_backpack(role);
+    if (moved.enhanceInstanceId != 0 &&
+        vm_net_mock_find_equipment_catalog_item(moved.itemId) != NULL &&
+        !vm_net_mock_enhance_wash_is_empty(&moved.enhanceWash))
+    {
+        (void)vm_net_mock_enhance_wash_record_relocate_seq(
+            role->roleId, moved.enhanceInstanceId, backpackSeq, moved.seq,
+            moved.itemId, moved.enhanceLevel, &moved.enhanceWash);
+    }
     (void)beforeRole;
     (void)beforeWarehouse;
     /* Bag remove + warehouse add must land together before kill/relogin. */
@@ -13138,6 +13189,14 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
                 added->gemReflectLevel = moved.gemReflectLevel;
                 added->gemComboLevel = moved.gemComboLevel;
                 added->gemReviveLevel = moved.gemReviveLevel;
+            }
+            if (moved.enhanceInstanceId != 0 && addedSeq != 0 &&
+                vm_net_mock_find_equipment_catalog_item(moved.itemId) != NULL &&
+                !vm_net_mock_enhance_wash_is_empty(&moved.enhanceWash))
+            {
+                (void)vm_net_mock_enhance_wash_record_relocate_seq(
+                    role->roleId, moved.enhanceInstanceId, moved.seq, addedSeq,
+                    moved.itemId, moved.enhanceLevel, &moved.enhanceWash);
             }
         }
     }
@@ -13327,17 +13386,10 @@ static bool vm_net_mock_role_grant_flask_reservoir_points(
 
 static u32 vm_net_mock_role_alloc_enhance_instance_id(vm_net_mock_role_state *role)
 {
-    u32 id = 0;
-
-    if (role == NULL)
-        return 0;
-    id = role->nextEnhanceInstanceId;
-    if (id == 0)
-        id = 1;
-    role->nextEnhanceInstanceId = id + 1;
-    if (role->nextEnhanceInstanceId == 0)
-        role->nextEnhanceInstanceId = 1;
-    return id;
+    /* Equipment tracking ids are full-DB unique (server_equipment_instance_seq).
+     * role->nextEnhanceInstanceId is no longer used for gear. */
+    (void)role;
+    return vm_net_mock_equipment_instance_alloc();
 }
 
 static u32 vm_net_mock_role_ensure_equipment_instance_id(vm_net_mock_role_state *role,
@@ -13348,7 +13400,7 @@ static u32 vm_net_mock_role_ensure_equipment_instance_id(vm_net_mock_role_state 
         return 0;
     if (existingId != 0)
         return existingId;
-    return vm_net_mock_role_alloc_enhance_instance_id(role);
+    return vm_net_mock_equipment_instance_alloc();
 }
 
 static void vm_net_mock_role_refresh_enhance_instance_counter(
@@ -14008,12 +14060,6 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
         vm_net_mock_enhance_wash_copy(&oldWash, &role->equippedEnhanceWash[slot]);
         newInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
             role, newInstanceId, itemId);
-        vm_net_mock_enhance_wash_coalesce_from_record(
-            role->roleId, newInstanceId, itemId, item->enhanceLevel, seq,
-            &newWash);
-        vm_net_mock_enhance_wash_coalesce_from_record(
-            role->roleId, oldInstanceId, role->equippedItemIds[slot],
-            role->equippedEnhanceLevels[slot], 0, &oldWash);
         if (newEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             newEnhance = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         if (oldEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)

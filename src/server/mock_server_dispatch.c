@@ -1414,6 +1414,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_tianxia_signature_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-tianxia-signature", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_crystal_extract_response(request, requestLen,
                                                            out, outCap);
     if (hookedLen)

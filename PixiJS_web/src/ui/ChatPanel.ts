@@ -600,7 +600,7 @@ export class ChatPanel extends Container {
         : whisper
           ? `私聊:${whisper.name.slice(0, 8)}  点消息可选人`
           : "←→频道  ↑↓翻阅  点消息可私聊";
-    this.addLabel(hint, x + 10, y + h - 48, CBE.inkLabel);
+    this.addLabelCentered(hint, x + w / 2, y + h - 42, CBE.inkLabel);
 
     drawPanelTipOverlay(this, this.toast);
   }
@@ -638,6 +638,25 @@ export class ChatPanel extends Container {
       fontSize: UC3_CELL,
       maxWidth: opts?.maxWidth,
       // Compose bar may clip; list rows are pre-wrapped — never stack in-label.
+      wordWrap: false,
+    });
+    this.addChild(lab);
+    this.labels.push(lab);
+  }
+
+  private addLabelCentered(
+    text: string,
+    cx: number,
+    cy: number,
+    color: number,
+  ): void {
+    const lab = new BitmapLabel();
+    lab.anchor.set(0.5, 0.5);
+    lab.position.set(Math.round(cx), Math.round(cy));
+    void lab.setText(text, color, {
+      smooth: false,
+      outline: false,
+      fontSize: UC3_CELL,
       wordWrap: false,
     });
     this.addChild(lab);

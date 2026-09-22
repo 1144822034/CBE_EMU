@@ -2822,21 +2822,18 @@ static const vm_net_mock_item_effect_catalog_item *vm_net_mock_find_item_effect_
     return NULL;
 }
 
-/* Mirror PixiJS_web itemCatalog.isTradeableItem — server-side guard against
- * crafted trade offers that bypass the client pick filter.
- * ignoreCategory: auction listings skip 玄晶(901–916) / 类别11 / 类别23.
- * Bind, quest link, enhanced gear, gems stay blocked. */
-static bool vm_net_mock_item_is_tradeable_ex(u32 itemId, u16 enhanceLevel,
-                                             bool ignoreCategory)
+/* Mirror PixiJS_web itemCatalog.isTradeableItem — player trade / guild only.
+ * Auction listings do not call this; category_gate=1 is the only auction use. */
+static bool vm_net_mock_item_is_tradeable(u32 itemId, u16 enhanceLevel)
 {
     const vm_net_mock_equipment_catalog_item *equip = NULL;
     const vm_net_mock_item_effect_catalog_item *item = NULL;
 
-    if (!ignoreCategory && itemId >= 901 && itemId <= 916)
+    if (itemId >= 901 && itemId <= 916)
         return false;
     if (itemId == 840)
         return false;
-    /* Pixi gem sockets / fragment — never tradeable or auctionable. */
+    /* Pixi gem sockets / fragment — not player-tradeable. */
     if (itemId == 978)
         return false;
     if ((itemId >= 922 && itemId <= 937) || (itemId >= 942 && itemId <= 957) ||
@@ -2852,26 +2849,15 @@ static bool vm_net_mock_item_is_tradeable_ex(u32 itemId, u16 enhanceLevel,
     item = vm_net_mock_find_item_effect_catalog_item(itemId);
     if (item == NULL)
         return true;
-    if (!ignoreCategory && item->category == 23)
+    if (item->category == 23)
         return false;
-    if (!ignoreCategory && item->category == 11)
+    if (item->category == 11)
         return false;
     if (item->questLink != 0)
         return false;
     if (item->bindAttr != 0)
         return false;
     return true;
-}
-
-static bool vm_net_mock_item_is_tradeable(u32 itemId, u16 enhanceLevel)
-{
-    return vm_net_mock_item_is_tradeable_ex(itemId, enhanceLevel, false);
-}
-
-/* Auction house is on: do not reject by item category. */
-static bool vm_net_mock_item_is_auctionable(u32 itemId, u16 enhanceLevel)
-{
-    return vm_net_mock_item_is_tradeable_ex(itemId, enhanceLevel, true);
 }
 
 /* These ids have client-side request/response handlers that are distinct from
@@ -10102,6 +10088,7 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
             }
             else
             {
+            u32 retireInstanceId = item->enhanceInstanceId;
             before = *role;
             haveBefore = true;
             consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq,
@@ -10109,6 +10096,9 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
             if (consumed)
             {
                 result = 1;
+                if (equipment != NULL && remaining == 0)
+                    (void)vm_net_mock_equipment_instance_retire(
+                        role->roleId, retireInstanceId, seq);
                 /*
                  * Equipment discard refunds floor(equip.dsh 价值 / 10) copper
                  * per removed instance.  Ordinary item.dsh rows get no refund.

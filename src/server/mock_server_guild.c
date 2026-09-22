@@ -618,6 +618,10 @@ static bool vm_net_mock_find_friend_role_seed_by_role_id(
              friendRecord.targetRoleName[0] ? friendRecord.targetRoleName : "Player");
     seed.roleName = onlineSession && onlineSession->onlineRoleName[0] ?
                     onlineSession->onlineRoleName : offlineFriendName;
+    seed.titleText = onlineSession && onlineSession->onlineRoleTitle[0] ?
+                     onlineSession->onlineRoleTitle : "";
+    seed.titleBadge = onlineSession && onlineSession->onlineRoleTitleBadge[0] ?
+                      onlineSession->onlineRoleTitleBadge : "";
     seed.stateText = onlineSession ? "Online" : "Offline";
     seed.session = onlineSession;
     if (seedOut)
@@ -932,10 +936,12 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
                                                           u8 *out, u32 outCap)
 {
     vm_net_mock_scene_role_seed targetSeed;
-    u8 playerInfo[256];
+    u8 playerInfo[384];
     char nameLine[96];
-    char levelJobLine[128];
-    char factionSexLine[128];
+    char titleLine[96];
+    char levelJobLine[96];
+    char spouseLine[96];
+    char factionLine[128];
     u32 playerInfoLen = 0;
     u32 objectStart = 0;
     u32 actorId = 0;
@@ -943,7 +949,8 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     const char *scene = vm_net_mock_current_scene_name();
     const char *displayName = NULL;
     const char *jobName = NULL;
-    const char *sexName = NULL;
+    const char *titleName = "\xce\xde"; /* GBK: 无 */
+    const char *spouseName = "\xce\xde"; /* GBK: 无 */
     const char *guildName = "\xce\xde\xb0\xef\xc5\xc9"; /* GBK: 无帮派 */
     const char *targetScope = "unresolved";
     vm_net_mock_guild_record guild;
@@ -951,8 +958,10 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     memset(&targetSeed, 0, sizeof(targetSeed));
     memset(playerInfo, 0, sizeof(playerInfo));
     memset(nameLine, 0, sizeof(nameLine));
+    memset(titleLine, 0, sizeof(titleLine));
     memset(levelJobLine, 0, sizeof(levelJobLine));
-    memset(factionSexLine, 0, sizeof(factionSexLine));
+    memset(spouseLine, 0, sizeof(spouseLine));
+    memset(factionLine, 0, sizeof(factionLine));
     memset(&guild, 0, sizeof(guild));
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_nearby_player_info_request(request, requestLen, &actorId))
@@ -990,46 +999,65 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     switch (targetSeed.job)
     {
     case 2:
-        jobName = "\xb4\xcc\xbf\xcd"; /* GBK: 刺客 */
+        jobName = "\xbb\xc3\xbd\xa3"; /* GBK: 幻剑 */
         break;
     case 3:
-        jobName = "\xb7\xa8\xca\xa6"; /* GBK: 法师 */
+        jobName = "\xb9\xed\xb5\xc0"; /* GBK: 鬼道 */
         break;
     case 1:
     default:
-        jobName = "\xd5\xbd\xca\xbf"; /* GBK: 战士 */
+        jobName = "\xcc\xec\xbb\xfa"; /* GBK: 天机 */
         break;
     }
-    sexName = targetSeed.sex == 1 ? "\xc5\xae" : "\xc4\xd0"; /* GBK: 女 / 男 */
-    if (targetSeed.session != NULL &&
-        vm_net_mock_guild_find_membership_for_account(targetSeed.session->accountId,
-                                                       targetSeed.actorId,
-                                                       &guild, NULL) &&
-        guild.guildName[0] != 0)
+    if (targetSeed.titleText != NULL && targetSeed.titleText[0] != 0)
+        titleName = targetSeed.titleText;
+    else if (targetSeed.session != NULL && targetSeed.session->onlineRoleTitle[0] != 0)
+        titleName = targetSeed.session->onlineRoleTitle;
+    if (targetSeed.session != NULL && targetSeed.session->onlineSpouseName[0] != 0)
+        spouseName = targetSeed.session->onlineSpouseName;
     {
-        guildName = guild.guildName;
+        u32 guildRoleId = targetSeed.actorId;
+
+        if (targetSeed.session != NULL && targetSeed.session->onlineRoleId != 0)
+            guildRoleId = targetSeed.session->onlineRoleId;
+        if (targetSeed.session != NULL &&
+            vm_net_mock_guild_find_membership_for_account(targetSeed.session->accountId,
+                                                           guildRoleId,
+                                                           &guild, NULL) &&
+            guild.guildName[0] != 0)
+        {
+            guildName = guild.guildName;
+        }
+        else if (targetSeed.session != NULL &&
+                 targetSeed.session->onlineGuildName[0] != 0)
+        {
+            guildName = targetSeed.session->onlineGuildName;
+        }
     }
     snprintf(nameLine, sizeof(nameLine), "\xd0\xd5\xc3\xfb\xa3\xba%s", displayName); /* 姓名： */
+    snprintf(titleLine, sizeof(titleLine), "\xb3\xc6\xba\xc5\xa3\xba%s", titleName); /* 称号： */
     snprintf(levelJobLine, sizeof(levelJobLine),
              "\xb5\xc8\xbc\xb6\xa3\xba%u\xbc\xb6\xa1\xa1\xd6\xb0\xd2\xb5\xa3\xba%s",
              targetSeed.level ? targetSeed.level : 1, jobName); /* 等级：<n>级　职业： */
-    snprintf(factionSexLine, sizeof(factionSexLine),
-             "\xb0\xef\xc5\xc9\xa3\xba%s\xa1\xa1\xd0\xd4\xb1\xf0\xa3\xba%s",
-             guildName, sexName); /* 帮派：<name>　性别： */
+    snprintf(spouseLine, sizeof(spouseLine), "\xc5\xe4\xc5\xbc\xa3\xba%s", spouseName); /* 配偶： */
+    snprintf(factionLine, sizeof(factionLine),
+             "\xb0\xef\xc5\xc9\xa3\xba%s", guildName); /* 帮派： */
     /* HandleFactionDegreeResponse reads each playerinfo element as a normal
-     * length-prefixed serial string, then appends fdegree as its final row.
-     * Two playerinfo rows plus fdegree make a compact, evenly spaced Chinese
-     * profile without changing the client's list renderer. */
+     * length-prefixed serial string, then appends fdegree as its final row. */
     if (!vm_net_mock_seq_put_string(playerInfo, sizeof(playerInfo), &playerInfoLen,
                                     nameLine) ||
         !vm_net_mock_seq_put_string(playerInfo, sizeof(playerInfo), &playerInfoLen,
+                                    titleLine) ||
+        !vm_net_mock_seq_put_string(playerInfo, sizeof(playerInfo), &playerInfoLen,
                                     levelJobLine) ||
+        !vm_net_mock_seq_put_string(playerInfo, sizeof(playerInfo), &playerInfoLen,
+                                    spouseLine) ||
         playerInfoLen == 0 || playerInfoLen > 0xffffu ||
         !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 2, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2) ||
-        !vm_net_mock_put_object_string(out, outCap, &pos, "fdegree", factionSexLine) ||
-        !vm_net_mock_put_object_u8(out, outCap, &pos, "num", 2) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "fdegree", factionLine) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "num", 4) ||
         !vm_net_mock_put_object_raw(out, outCap, &pos, "playerinfo",
                                     playerInfo, (u16)playerInfoLen))
     {
@@ -1090,20 +1118,14 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
         ++rowCount;
     }
 
-    /* Every newly created role has this weapon.  The fallback also covers a
-     * visible session captured before its first post-upgrade presence refresh. */
+    /* Empty worn set is valid (new roles have no starter weapon). */
     if (rowCount == 0)
     {
-        u32 itemId = vm_net_mock_role_default_weapon_for_job(targetSeed->job);
-        if (vm_net_mock_find_equipment_catalog_item(itemId) == NULL ||
-            !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
-            !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
-            !vm_net_mock_seq_put_item_common_extra_plain(out, outCap, &pos, 0, 0,
-                                                   itemId, NULL))
-        {
-            return false;
-        }
-        rowCount = 1;
+        if (blobLenOut)
+            *blobLenOut = pos;
+        if (rowCountOut)
+            *rowCountOut = 0;
+        return true;
     }
 
     if (blobLenOut)
@@ -3342,8 +3364,8 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
         offer->items[i].itemId = item->itemId;
         offer->items[i].enhanceLevel = item->enhanceLevel;
         offer->items[i].enhanceInstanceId = item->enhanceInstanceId;
-        /* First-obtain seed lives on backpack.enhance_wash; players who have
-         * not 洗练 yet often have no wash_record row — do not coalesce. */
+        /* Trade wash comes from backpack.enhance_wash only (audit wash_record
+         * is never read back into live gear). */
         vm_net_mock_enhance_wash_copy(&offer->items[i].enhanceWash,
                                       &item->enhanceWash);
     }
@@ -3661,6 +3683,14 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
                                 &roles[side], row->itemId, row->destinationSeq);
                         if (added != NULL)
                             row->enhanceInstanceId = added->enhanceInstanceId;
+                        if (incomingItem->enhanceInstanceId != 0 &&
+                            row->destinationSeq != 0)
+                        {
+                            (void)vm_net_mock_equipment_instance_transfer_owner(
+                                roles[1 - side].roleId, roles[side].roleId,
+                                incomingItem->enhanceInstanceId,
+                                row->destinationSeq);
+                        }
                     }
                     receipt->itemCount =
                         (u8)(receipt->itemCount + 1);

@@ -10,6 +10,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - 上架：选背包物品 → 设起拍价 / 可选一口价（铜币或酷宝）与时长档 → **先扣手续费并删除背包物品**，再写入拍卖行。
 - 一口价：`buyout_price=0` 表示无；若设置必须 `≥ startPrice` 且 **`≤ startPrice×10`**。买家可在详情「一口价」经验证码成交；普通出价不得直接按一口价秒成。
 - 加价幅度：每次加价为 **起拍价的 1/10**（`max(1, startPrice/10)`）；首次无人出价可按起拍价成交。
+- 第二次出价（2026-09-21）：已有最高出价时，请求金额为 `currentPrice + auctionBidStep(startPrice)`（`floor(起拍价/10)`，至少 1）。原先用配置 `minBidStep`（默认 1；铜币档被抬成固定 1 金）。起拍价超过 10 金或酷宝超过 10 时，该步长小于服务端要求，返回 `low`。详情按钮按同一函数显示加价。`status.minBidStep` 不参与这次加价。
 - 手续费：`fee = max(1, startPrice * feePercent / 100)`；`feePercent = base(2) + tier * perTier(2)`（1/6/12/24 时 → **2/4/6/8%**）。
 - 竞拍：同货币出价；被超价后拍金进入 **待领退款**（不自动入账）。
 - 禁止同 `roleId` 与同 `accountId` 自拍。

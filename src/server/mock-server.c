@@ -34,6 +34,7 @@ static void vm_net_mock_gold_chest_announce_rare_reward_count(u32 chestItemId,
                                                              u32 count);
 /* Flush overdue 7/15 coalesce pending (also after non-rare opens). */
 static void vm_net_mock_gold_chest_announce_flush_if_due(void);
+static bool vm_net_mock_gold_chest_reward_warrants_world_announce(u32 itemId);
 
 /* Flask reservoir tip: enqueue 1/3/3 system chat from equipment_npc.c. */
 static void vm_net_mock_notify_flask_reservoir_system_tip(u32 itemId,
@@ -68,6 +69,17 @@ static void vm_mock_service_account_note_durable_role_write(
  * account_role_vitality as festival exchange. */
 static void vm_mock_activities_vitality_wire(vm_net_mock_role_state *role,
                                              u32 *energyOut, u32 *energyMaxOut);
+
+/* Full-DB equipment tracking ids (defined with enhance_config / instance.inc). */
+static u32 vm_net_mock_equipment_instance_alloc(void);
+static void vm_net_mock_equipment_instance_migrate_once(void);
+static bool vm_net_mock_equipment_instance_retire(u32 roleId, u32 instanceId,
+                                                  u16 bagSeq);
+static bool vm_net_mock_equipment_instance_transfer_owner(u32 fromRoleId,
+                                                          u32 toRoleId,
+                                                          u32 instanceId,
+                                                          u16 newBagSeq);
+static bool vm_net_mock_equipment_instance_retire_role(u32 roleId);
 
 #include "mock_server_role.c"
 
@@ -114,9 +126,19 @@ static bool vm_mock_ladder_copy_active_milestone(u32 *expOut, u32 *moneyOut,
                                                  u32 *itemCountOut);
 static void vm_mock_ladder_note_milestone_settled(void);
 
+/* 天下第一雕像：cosmetics 切换时刷新缓存（定义在 tianxia_first.inc）. */
+static void vm_mock_tianxia_champ_invalidate(void);
+static void vm_mock_tianxia_on_champ_cosmetics_changed(u32 roleId);
+
 #include "mock_server_equipment_npc.c"
 #include "mock_server_cosmetics.c"
 #include "mock_server_recovered_helpers.inc"
+
+/* 天下第一雕像：定义在 activities 之后的 tianxia_first.inc；scene_task 注入时调用. */
+static bool vm_mock_tianxia_append_builtin_if_plaza(
+    const char *scene, vm_net_mock_scene_npcinfo_seed *seeds, u32 seedCap,
+    u32 *countInOut);
+
 #include "mock_server_scene_task.c"
 
 static void vm_mock_service_maintenance_tick(void);
@@ -184,6 +206,7 @@ static u32 vm_net_mock_build_ring_protocol_response(const u8 *request,
                                                     u32 outCap);
 
 #include "mock_server_activities.c"
+#include "mock_server_tianxia_first.inc.c"
 
 #include "mock_server_guess.c"
 #include "mock_server_fruit.c"

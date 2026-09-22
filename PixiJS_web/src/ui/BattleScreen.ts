@@ -49,6 +49,8 @@ import {
   DigitStrip,
 } from "./UiAssets";
 import { BattlePartyHud, BATTLE_PARTY_HUD_H } from "./BattlePartyHud";
+import { BattleEnemyHud, type EnemyHudAnchor } from "./BattleEnemyHud";
+import { getEnemyHpBarPlacement } from "../resources/enemyHpBarPref";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons, preloadPageNavTextures } from "./pageNav";
 import {
@@ -285,6 +287,8 @@ export class BattleScreen extends Container {
   };
   private hangupTallyArmed = false;
   private partyHud = new BattlePartyHud();
+  /** Top-left enemy name + HP (under title bar). */
+  private enemyHud = new BattleEnemyHud();
   private log = new BitmapLabel();
   private topTitle = new BitmapLabel();
   private timerDigits: DigitStrip | null = null;
@@ -425,6 +429,8 @@ export class BattleScreen extends Container {
     this.addChild(this.settleHost);
     this.addChild(this.topHost);
     this.addChild(this.bottomHost);
+    // Above stage map so enemy vitals stay readable over the battlefield.
+    this.addChild(this.enemyHud);
     // Above stage/menu so the 关闭 hit target stays tappable.
     this.addChild(this.autoBannerHost);
     this.buildChrome();
@@ -955,6 +961,7 @@ export class BattleScreen extends Container {
     if (this.state) this.notifyVitalsChanged();
     this.visible = false;
     this.state = null;
+    this.enemyHud.clear();
     this.arenaDuel = false;
     this.hangupActive = false;
     /* Keep hangupTallyArmed so the next fight continues session 战斗场次. */
@@ -1130,6 +1137,10 @@ export class BattleScreen extends Container {
       this.partyHud.nudgeAfterGpuResume(this.state.right, {
         playerName: this.visuals.playerName,
       });
+      this.enemyHud.nudgeAfterGpuResume(
+        this.state.left,
+        this.enemyHudAnchors(),
+      );
     }
   }
 
@@ -1879,6 +1890,8 @@ export class BattleScreen extends Container {
     this.bottomHost.addChild(this.log);
     this.bottomHost.addChild(this.partyHud);
     void this.partyHud.mount();
+    this.enemyHud.position.set(4, STAGE_TOP + 2);
+    void this.enemyHud.mount();
     void this.mountFloatDigits();
     this.ensureAutoBanner();
   }
@@ -2117,6 +2130,8 @@ export class BattleScreen extends Container {
   }
 
   private rebuildUnits(): void {
+    // Detach follow-mode bars before destroying unit roots.
+    this.enemyHud.clear();
     this.unitsHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.units = [];
     if (!this.state) return;
@@ -2211,6 +2226,10 @@ export class BattleScreen extends Container {
       );
       root.addChildAt(spr, 1);
       view.sprite = spr;
+      // Sprite size known — re-seat follow-mode bars to the real head.
+      if (facingRight && this.state) {
+        this.enemyHud.setEnemies(this.state.left, this.enemyHudAnchors());
+      }
     } catch (e) {
       console.warn("[battle] actor", actorName, e);
       root.addChildAt(
@@ -2270,6 +2289,14 @@ export class BattleScreen extends Container {
     } else {
       u.sprite.tint = 0xffffff;
       u.sprite.alpha = 1;
+    }
+    // Track body height so follow-mode bars stay just above the head.
+    if (
+      this.isEnemyUnit(u) &&
+      this.state &&
+      getEnemyHpBarPlacement() === "follow"
+    ) {
+      this.enemyHud.syncFollowHeads(this.enemyHudAnchors());
     }
   }
 
@@ -2695,10 +2722,47 @@ export class BattleScreen extends Container {
     u.hidden = true;
     u.root.visible = false;
     if (u.sprite && !u.sprite.destroyed) u.sprite.alpha = 0;
+    if (this.state) {
+      this.enemyHud.setEnemies(this.state.left, this.enemyHudAnchors());
+    }
   }
 
   private refreshUnitBars(): void {
-    /* overhead HP removed — vitals live in BattlePartyHud */
+    /* enemy vitals live in BattleEnemyHud */
+  }
+
+  private enemyHudAnchors(): EnemyHudAnchor[] {
+    if (!this.state) return [];
+    // Index-aligned with state.left — never fold by id (clones share catalog id).
+    return this.state.left.map((row) => {
+      const view = this.units.find((u) => u.side === row);
+      if (!view) {
+        return {
+          side: row,
+          root: this,
+          hidden: true,
+          headLocalY: -36,
+        };
+      }
+      const spr = view.sprite;
+      const bodyH =
+        spr && !spr.destroyed && spr.height > 4
+          ? Math.ceil(Math.abs(spr.height))
+          : 36;
+      return {
+        side: row,
+        root: view.root,
+        hidden: view.hidden,
+        // Foot-anchored sprite: top of the body is at -height.
+        headLocalY: -bodyH,
+      };
+    });
+  }
+
+  /** Re-apply corner/follow placement after preference change. */
+  refreshEnemyHpBarPlacement(): void {
+    if (!this.state || !this.visible) return;
+    this.enemyHud.setEnemies(this.state.left, this.enemyHudAnchors());
   }
 
   private refreshBottomHud(): void {
@@ -2707,6 +2771,7 @@ export class BattleScreen extends Container {
       playerName: this.visuals.playerName,
     });
     this.partyHud.refresh(this.state.right);
+    this.enemyHud.setEnemies(this.state.left, this.enemyHudAnchors());
   }
 
   private notifyVitalsChanged(): void {
@@ -3881,7 +3946,7 @@ export class BattleScreen extends Container {
   ): Promise<void> {
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     const panelX = 10;
-    const panelY = 48;
+    const panelY = 102;
     const panelW = LCD_WIDTH - 20;
     const box = new Graphics();
     paintCbePanel(this.settleHost, box, panelX, panelY, panelW, 180, CBE.bgPanelDark);
@@ -4021,7 +4086,7 @@ export class BattleScreen extends Container {
     }
 
     const panelX = 14;
-    const panelY = 70;
+    const panelY = 102;
     const panelW = LCD_WIDTH - 28;
     const rowH = 16;
     const titleH = 22;

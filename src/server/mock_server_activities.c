@@ -1021,6 +1021,31 @@ static bool vm_mock_ring_daily_row_cb(void *ctx, unsigned int cc,
     return true;
 }
 
+/* 当日跑环已满（ring_count >= daily_max）；膜拜天下第一前置. */
+static bool vm_mock_ring_role_finished_daily(vm_net_mock_role_state *role)
+{
+    char accountHex[160];
+    char query[640];
+    vm_mock_ring_daily_ctx row;
+    u32 dayYmd;
+
+    if (role == NULL ||
+        !vm_mock_activities_account_hex(accountHex, sizeof(accountHex)))
+        return false;
+    vm_mock_ring_load_config(false);
+    dayYmd = vm_mock_activities_day_ymd();
+    if (dayYmd == 0)
+        return false;
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active FROM account_role_ring_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, role->roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
+    return row.found && row.ringCount >= g_vm_mock_ring_config.dailyMax;
+}
+
 static void vm_mock_ring_format_desc(void);
 
 static void vm_mock_ring_sync_runtime_from_db(vm_net_mock_role_state *role)
@@ -1159,14 +1184,22 @@ static bool vm_mock_ring_consume_matching_items(vm_net_mock_role_state *role,
             u32 itemId = role->backpackItems[i].itemId;
             u32 have = role->backpackItems[i].count;
             u32 take;
+            u32 instanceId = role->backpackItems[i].enhanceInstanceId;
+            u16 seq = role->backpackItems[i].seq;
+            bool isEquip = vm_mock_ring_item_is_equipment(itemId);
 
             if (have == 0 || !match(itemId))
                 continue;
             take = have < remain ? have : remain;
+            if (isEquip)
+                take = 1;
             if (!vm_net_mock_role_consume_backpack_item_amount(
                     role, itemId, take, sync, VM_NET_MOCK_CONSUME_SYNC_MAX,
                     &syncCount))
                 return false;
+            if (isEquip && take >= have)
+                (void)vm_net_mock_equipment_instance_retire(role->roleId,
+                                                            instanceId, seq);
             remain -= take;
             consumed = true;
             break;
@@ -2793,13 +2826,45 @@ static u32 vm_net_mock_build_ring_submit_response(u8 *out, u32 outCap)
     {
         if (g_vm_mock_ring_rt.targetId != 0)
         {
-            vm_net_mock_consume_sync_row sync[VM_NET_MOCK_CONSUME_SYNC_MAX];
-            u32 syncCount = 0;
+            u32 need = g_vm_mock_ring_rt.targetCount;
+            u32 guard = 0;
 
-            if (!vm_net_mock_role_consume_backpack_item_amount(
-                    role, g_vm_mock_ring_rt.targetId,
-                    g_vm_mock_ring_rt.targetCount, sync,
-                    VM_NET_MOCK_CONSUME_SYNC_MAX, &syncCount))
+            while (need > 0 && guard < 256)
+            {
+                vm_net_mock_backpack_item_state *row = NULL;
+                u32 instanceId = 0;
+                u16 seq = 0;
+                u32 itemId = g_vm_mock_ring_rt.targetId;
+                u32 i;
+
+                ++guard;
+                for (i = 0; i < role->backpackItemCount &&
+                            i < VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+                     ++i)
+                {
+                    if (role->backpackItems[i].itemId == itemId &&
+                        role->backpackItems[i].count != 0)
+                    {
+                        row = &role->backpackItems[i];
+                        break;
+                    }
+                }
+                if (row == NULL)
+                    return vm_mock_activities_build_op_result(
+                        out, outCap, VM_MOCK_RING_WT_KIND, VM_MOCK_RING_WT_SUBMIT,
+                        5, "consume");
+                instanceId = row->enhanceInstanceId;
+                seq = row->seq;
+                if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1,
+                                                            NULL))
+                    return vm_mock_activities_build_op_result(
+                        out, outCap, VM_MOCK_RING_WT_KIND, VM_MOCK_RING_WT_SUBMIT,
+                        5, "consume");
+                (void)vm_net_mock_equipment_instance_retire(role->roleId,
+                                                            instanceId, seq);
+                need -= 1;
+            }
+            if (need != 0)
                 return vm_mock_activities_build_op_result(
                     out, outCap, VM_MOCK_RING_WT_KIND, VM_MOCK_RING_WT_SUBMIT, 5,
                     "consume");

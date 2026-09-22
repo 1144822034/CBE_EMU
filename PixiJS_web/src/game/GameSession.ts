@@ -69,6 +69,7 @@ import {
   buildGemTypeExchangeRequest,
   buildStarSkyStoneWashResetRequest,
   buildRenameCardRequest,
+  buildTianxiaSignatureRequest,
   buildCrystalExtractRequest,
   parseEnhanceOpenResult,
   parseEnhancePreviewResult,
@@ -87,6 +88,7 @@ import {
   parseGemOpResult,
   parseStarSkyStoneWashResetResult,
   parseRenameCardResult,
+  parseTianxiaSignatureResult,
   parseCrystalExtractResult,
   buildSkillForgetRequest,
   parseSkillForgetResult,
@@ -124,6 +126,7 @@ import {
   type CrystalCombineResult,
   type StarSkyStoneWashResetResult,
   type RenameCardResult,
+  type TianxiaSignatureResult,
   type CrystalExtractResult,
   type SkillForgetResult,
   buildBattleInsightFollowupRequest,
@@ -661,10 +664,12 @@ export class GameSession {
   /** Live team roster (5/3, 5/10, …). */
   teamMembers: TeamMember[] = [];
   teamLeaderId = 0;
-  /** Friend list cache (10/1). */
+  /** Friend list cache (10/1), one display page after online-first ordering. */
   friends: FriendRow[] = [];
   friendPage = 1;
   friendAllPages = 1;
+  /** Ignore partial 10/1 pages while the full list is being assembled. */
+  private suppressFriendPageApply = false;
   /** Enmity list cache (43/1). */
   enmityRows: EnmityRow[] = [];
   enmityDir = 0;
@@ -4503,6 +4508,22 @@ export class GameSession {
     return fb;
   }
 
+  /**
+   * Warehouse deposit: the success 26/1 is rebuilt from bagItems before the
+   * later peel poll (equipment 17/1, stack 7/7). Drop the whole row now so
+   * the deposit list does not keep showing an item already stored.
+   */
+  dropDepositedBagRow(seq: number): void {
+    const s = seq & 0xffffff;
+    if (!s) return;
+    const idx = this.bagItems.findIndex((it) => (it.seq & 0xffffff) === s);
+    if (idx < 0) return;
+    this.pendingBagEquipDurability.delete(s);
+    this.pendingBagEquipEnhance.delete(s);
+    this.bagItems = this.bagItems.filter((_, i) => i !== idx);
+    this.cb.onBag?.(this.bagItems);
+  }
+
   /** CBE client-side row remove after dedicated use success (22/3 / similar). */
   private consumeBagSeqLocally(seq: number): void {
     const idx = this.bagItems.findIndex((it) => it.seq === seq);
@@ -6100,6 +6121,35 @@ export class GameSession {
     return fail("改名无响应");
   }
 
+  /** PixiJS-only: 天下第一冠军江湖签名。空串清空（对话显示默认高冷文案）. */
+  async setTianxiaSignature(signature: string): Promise<TianxiaSignatureResult> {
+    const fail = (message: string, result = 0): TianxiaSignatureResult => ({
+      result,
+      ok: false,
+      message,
+      signature: "",
+    });
+    if (!this.transport) return fail("未连接");
+    const trimmed = signature.trim();
+    if ([...trimmed].length > 32) return fail("签名过长", 4);
+    const bodies = await this.transport.exchange(
+      0,
+      buildTianxiaSignatureRequest(trimmed),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseTianxiaSignatureResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("签名无响应");
+  }
+
   /**
    * PixiJS-only: 消耗1×玄晶提炼石(854)提炼已强化装备投入的玄晶，并销毁装备。
    * Server 29/16 is authoritative.
@@ -6213,23 +6263,36 @@ export class GameSession {
     this.handleBodies(bodies);
   }
 
-  async requestPlayerInfo(actorId: number): Promise<void> {
-    if (!this.transport) return;
+  async requestPlayerInfo(actorId: number): Promise<PlayerInfoView | null> {
+    if (!this.transport) return null;
     const bodies = await this.transport.exchange(0, buildPlayerInfoRequest(actorId));
+    let info: PlayerInfoView | null = null;
+    for (const body of bodies) {
+      const packet = ingestPacket(body);
+      const parsed = packet ? parsePlayerInfo(packet) : null;
+      if (parsed) info = parsed;
+    }
     this.handleBodies(bodies);
+    return info;
   }
 
-  async requestOtherEquip(actorId: number): Promise<void> {
-    if (!this.transport) return;
+  async requestOtherEquip(actorId: number): Promise<OtherEquipView | null> {
+    if (!this.transport) return null;
     const bodies = await this.transport.exchange(0, buildOtherEquipRequest(actorId));
+    let equip: OtherEquipView | null = null;
+    for (const body of bodies) {
+      const packet = ingestPacket(body);
+      const parsed = packet ? parseOtherEquip(packet) : null;
+      if (parsed) equip = parsed;
+    }
     this.handleBodies(bodies);
+    return equip;
   }
 
   async openFriends(page = 1): Promise<void> {
     if (!this.transport) return;
-    const p = Math.max(1, page | 0);
-    this.friendPage = p;
-    const index = (p - 1) * FRIEND_PAGE_SIZE;
+    const requested = Math.max(1, page | 0);
+    this.friendPage = requested;
     /* Refresh spouseRoleId so friend list can mark 配偶. */
     if (!this.characterStats || !(this.characterStats.spouseRoleId > 0)) {
       try {
@@ -6238,11 +6301,68 @@ export class GameSession {
         /* optional */
       }
     }
-    const bodies = await this.transport.exchange(
-      0,
-      buildFriendPageRequest(index, FRIEND_PAGE_SIZE),
+    const ordered = this.orderFriendsOnlineFirst(await this.loadFriendCatalog());
+    const allPages = Math.max(
+      1,
+      Math.ceil(ordered.length / FRIEND_PAGE_SIZE) || 1,
     );
-    this.handleBodies(bodies);
+    const pageIndex = Math.min(requested, allPages);
+    const start = (pageIndex - 1) * FRIEND_PAGE_SIZE;
+    this.friendPage = pageIndex;
+    this.friendAllPages = allPages;
+    this.friends = ordered.slice(start, start + FRIEND_PAGE_SIZE);
+    this.cb.onFriends?.(this.friends);
+  }
+
+  /**
+   * Server pages friends by role id. Pull the whole list, then put online
+   * rows first so later pages are not stuck behind offline role ids.
+   */
+  private async loadFriendCatalog(): Promise<FriendRow[]> {
+    if (!this.transport) return [];
+    const chunk = 255;
+    const all: FriendRow[] = [];
+    let index = 0;
+    for (let n = 0; n < 8; n++) {
+      this.suppressFriendPageApply = true;
+      let bodies: Uint8Array[] = [];
+      try {
+        bodies = await this.transport.exchange(
+          0,
+          buildFriendPageRequest(index, chunk),
+        );
+        this.handleBodies(bodies);
+      } finally {
+        this.suppressFriendPageApply = false;
+      }
+      let pageFriends: FriendRow[] = [];
+      let allpgs = 1;
+      for (const body of bodies) {
+        const packet = ingestPacket(body);
+        const parsed = packet ? parseFriendPage(packet) : null;
+        if (!parsed) continue;
+        pageFriends = parsed.friends;
+        allpgs = parsed.allpgs;
+      }
+      if (!pageFriends.length) break;
+      all.push(...pageFriends);
+      if (pageFriends.length < chunk || allpgs <= 1) break;
+      index += pageFriends.length;
+    }
+    return all;
+  }
+
+  private orderFriendsOnlineFirst(rows: FriendRow[]): FriendRow[] {
+    const spouseId = this.characterStats?.spouseRoleId ?? 0;
+    return [...rows]
+      .map((f) => ({
+        ...f,
+        isSpouse: spouseId > 0 && f.id === spouseId,
+      }))
+      .sort((a, b) => {
+        if (a.online === b.online) return 0;
+        return a.online ? -1 : 1;
+      });
   }
 
   /** Warp to spouse (WT 1/32/1). Server returns scene-enter or 32/2 fail tip. */
@@ -7184,7 +7304,7 @@ export class GameSession {
       if (otherEquip) this.cb.onOtherEquip?.(otherEquip);
 
       const friendPage = parseFriendPage(packet);
-      if (friendPage) {
+      if (friendPage && !this.suppressFriendPageApply) {
         const spouseId = this.characterStats?.spouseRoleId ?? 0;
         this.friends = friendPage.friends.map((f) => ({
           ...f,

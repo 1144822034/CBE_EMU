@@ -4562,8 +4562,10 @@ static u32 vm_net_mock_append_builtin_scene_npcinfo_seeds(
         return count;
     }
 
+    /* Pixi：宣阳广场天下第一雕像（非南宣门场景也要注入）. */
+    (void)vm_mock_tianxia_append_builtin_if_plaza(scene, seeds, seedCap, &count);
     if (!vm_net_mock_scene_is_linan_south_gate(scene))
-        return 0;
+        return count;
 
     /* sMap.dsh row 47 maps 临安-南宣门 to c04临安府_01.sce. Wang Chao,
      * Ma Han and Hu Fei belong to this scene, not c04临安府_09 (北宣门).

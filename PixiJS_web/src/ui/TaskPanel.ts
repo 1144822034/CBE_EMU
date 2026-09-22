@@ -319,10 +319,10 @@ export class TaskPanel extends Container {
           this.addLabel(line, x + 10, ly, CBE.inkMint);
           ly += 14;
         }
-        this.addLabel(
+        this.addLabelCentered(
           `详情 ${this.detailPage + 1}/${pages}`,
-          x + 10,
-          y + h - 18,
+          x + w / 2,
+          y + h - 12,
           CBE.inkLabel,
         );
         if (pages > 1) {
@@ -434,10 +434,10 @@ export class TaskPanel extends Container {
           1,
           Math.ceil(rows.length / LIST_PAGE_SIZE),
         );
-        this.addLabel(
+        this.addLabelCentered(
           `${this.tab === "accepted" ? "已接" : "可接"} ${infoPage}/${infoPages}`,
-          x + 10,
-          y + h - 18,
+          x + w / 2,
+          y + h - 12,
           CBE.inkLabel,
         );
       }

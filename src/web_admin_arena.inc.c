@@ -402,11 +402,84 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<input name=\"wager_currency\" value=\"%u\"></div></div>"
         "<button type=\"submit\">保存赏金配置</button></form>"
         "<p class=\"muted\">玩家在含关键字NPC打开赏金擂台：摆擂扣全队押金；等人数挑战队压同额后，擂主方全员确认开战。1v1直接决斗；2v2/3v3按座位逐对决斗、胜场多者获胜；胜方均分奖池（扣系统抽成）；平局全额退押。</p>"
-        "</section></main></body></html>",
+        "</section>",
         cfg && !cfg->wagerEnabled ? " selected" : "",
         cfg && cfg->wagerEnabled ? " selected" : "",
         cfg ? cfg->wagerFeePercent : 10,
         cfg ? cfg->wagerCurrency : 0);
+
+    /* 天下第一雕像（宣阳广场） */
+    {
+        const vm_mock_tianxia_config *tx = vm_mock_tianxia_config_get();
+        char titleUtf8[64];
+        char otherUtf8[64];
+        char champUtf8[64];
+        char sigUtf8[160];
+
+        memset(titleUtf8, 0, sizeof(titleUtf8));
+        memset(otherUtf8, 0, sizeof(otherUtf8));
+        memset(champUtf8, 0, sizeof(champUtf8));
+        memset(sigUtf8, 0, sizeof(sigUtf8));
+        if (tx != NULL)
+        {
+            vm_net_mock_gbk_label_to_utf8(tx->titleText, titleUtf8,
+                                          sizeof(titleUtf8));
+            vm_net_mock_gbk_label_to_utf8(tx->optionOther, otherUtf8,
+                                          sizeof(otherUtf8));
+            vm_net_mock_gbk_label_to_utf8(tx->optionChamp, champUtf8,
+                                          sizeof(champUtf8));
+            if (tx->signature[0] != 0)
+                vm_net_mock_gbk_label_to_utf8(tx->signature, sigUtf8,
+                                              sizeof(sigUtf8));
+        }
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>天下第一雕像（宣阳广场）</h2>"
+            "<p class=\"muted\">展示最近一次 70 大乱斗第一名，雕像面朝左。坐标/放大/文案/翅膀·动态称号·坐骑可配；"
+            "特效取冠军当前装备。未装备动态称号时，显示角色当前称号。头顶文字显示在名字上方。"
+            "江湖签名显示在雕像对话框主文；留空则显示默认"
+            "「这个冠军很高冷,什么也没说!」。冠军本人也可在游戏内设置。Pixi 生效；改坐标后需重新进图。</p>"
+            "<form method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" value=\"save-tianxia-statue\">"
+            "<div class=\"grid2\">"
+            "<div><label>启用</label><select name=\"tx_enabled\">"
+            "<option value=\"0\"%s>关闭</option>"
+            "<option value=\"1\"%s>开启</option></select></div>"
+            "<div><label>坐标 X</label><input name=\"tx_pos_x\" value=\"%u\"></div>"
+            "<div><label>坐标 Y</label><input name=\"tx_pos_y\" value=\"%u\"></div>"
+            "<div><label>放大×100（200=2倍）</label>"
+            "<input name=\"tx_scale\" value=\"%u\"></div>"
+            "<div><label>头顶文字</label><input name=\"tx_title\" value=\"%s\"></div>"
+            "<div><label>交互选项（其他人）</label>"
+            "<input name=\"tx_opt_other\" value=\"%s\"></div>"
+            "<div><label>交互选项（冠军本人）</label>"
+            "<input name=\"tx_opt_champ\" value=\"%s\"></div>"
+            "<div><label>江湖签名（≤32字，可空）</label>"
+            "<input name=\"tx_signature\" value=\"%s\" maxlength=\"32\"></div>"
+            "<div><label>显示翅膀</label><select name=\"tx_wing\">"
+            "<option value=\"0\"%s>否</option>"
+            "<option value=\"1\"%s>是</option></select></div>"
+            "<div><label>显示动态称号</label><select name=\"tx_chenghao\">"
+            "<option value=\"0\"%s>否</option>"
+            "<option value=\"1\"%s>是</option></select></div>"
+            "<div><label>显示坐骑</label><select name=\"tx_mount\">"
+            "<option value=\"0\"%s>否</option>"
+            "<option value=\"1\"%s>是</option></select></div>"
+            "</div>"
+            "<button type=\"submit\">保存雕像配置</button></form></section>"
+            "</main></body></html>",
+            tx && !tx->enabled ? " selected" : "",
+            tx && tx->enabled ? " selected" : "",
+            tx ? (u32)tx->posX : 168u, tx ? (u32)tx->posY : 200u,
+            tx ? (u32)tx->scaleX100 : 200u, titleUtf8, otherUtf8, champUtf8,
+            sigUtf8,
+            tx && !tx->showWing ? " selected" : "",
+            tx && tx->showWing ? " selected" : "",
+            tx && !tx->showChenghao ? " selected" : "",
+            tx && tx->showChenghao ? " selected" : "",
+            tx && !tx->showMount ? " selected" : "",
+            tx && tx->showMount ? " selected" : "");
+    }
 }
 
 static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
@@ -567,6 +640,82 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
             vm_mock_admin_redirect_arena(client, "ok", "赏金擂台配置已保存");
         else
             vm_mock_admin_redirect_arena(client, "error", "保存失败");
+        return;
+    }
+
+    if (strcmp(action, "save-tianxia-statue") == 0)
+    {
+        u32 txEnabled = 1;
+        u32 txPosX = 168;
+        u32 txPosY = 200;
+        u32 txScale = 200;
+        u32 txWing = 0;
+        u32 txChenghao = 0;
+        u32 txMount = 0;
+        char titleUtf8[64];
+        char otherUtf8[64];
+        char champUtf8[64];
+        char sigUtf8[160];
+        char titleGbk[32];
+        char otherGbk[32];
+        char champGbk[32];
+        char sigGbk[65];
+
+        memset(titleUtf8, 0, sizeof(titleUtf8));
+        memset(otherUtf8, 0, sizeof(otherUtf8));
+        memset(champUtf8, 0, sizeof(champUtf8));
+        memset(sigUtf8, 0, sizeof(sigUtf8));
+        memset(titleGbk, 0, sizeof(titleGbk));
+        memset(otherGbk, 0, sizeof(otherGbk));
+        memset(champGbk, 0, sizeof(champGbk));
+        memset(sigGbk, 0, sizeof(sigGbk));
+        (void)vm_mock_admin_form_u32(body, "tx_enabled", 1u, &txEnabled);
+        (void)vm_mock_admin_form_u32(body, "tx_pos_x", 0xffffu, &txPosX);
+        (void)vm_mock_admin_form_u32(body, "tx_pos_y", 0xffffu, &txPosY);
+        (void)vm_mock_admin_form_u32(body, "tx_scale", 400u, &txScale);
+        (void)vm_mock_admin_form_u32(body, "tx_wing", 1u, &txWing);
+        (void)vm_mock_admin_form_u32(body, "tx_chenghao", 1u, &txChenghao);
+        (void)vm_mock_admin_form_u32(body, "tx_mount", 1u, &txMount);
+        (void)vm_mock_admin_form_value(body, "tx_title", titleUtf8,
+                                       sizeof(titleUtf8));
+        (void)vm_mock_admin_form_value(body, "tx_opt_other", otherUtf8,
+                                       sizeof(otherUtf8));
+        (void)vm_mock_admin_form_value(body, "tx_opt_champ", champUtf8,
+                                       sizeof(champUtf8));
+        (void)vm_mock_admin_form_value(body, "tx_signature", sigUtf8,
+                                       sizeof(sigUtf8));
+        if (titleUtf8[0] == 0)
+            snprintf(titleUtf8, sizeof(titleUtf8), "%s", "天下第一");
+        if (otherUtf8[0] == 0)
+            snprintf(otherUtf8, sizeof(otherUtf8), "%s", "膜拜大侠");
+        if (champUtf8[0] == 0)
+            snprintf(champUtf8, sizeof(champUtf8), "%s", "接受膜拜");
+        if (!vm_mock_admin_utf8_to_gbk_text(titleUtf8, titleGbk, sizeof(titleGbk),
+                                            false))
+            snprintf(titleGbk, sizeof(titleGbk), "%s",
+                     "\xcc\xec\xcf\xc2\xb5\xda\xd2\xbb");
+        if (!vm_mock_admin_utf8_to_gbk_text(otherUtf8, otherGbk, sizeof(otherGbk),
+                                            false))
+            snprintf(otherGbk, sizeof(otherGbk), "%s",
+                     "\xc4\xa4\xb0\xdd\xb4\xf3\xcf\xc0");
+        if (!vm_mock_admin_utf8_to_gbk_text(champUtf8, champGbk, sizeof(champGbk),
+                                            false))
+            snprintf(champGbk, sizeof(champGbk), "%s",
+                     "\xbd\xd3\xca\xdc\xc4\xa4\xb0\xdd");
+        if (sigUtf8[0] != 0 &&
+            !vm_mock_admin_utf8_to_gbk_text(sigUtf8, sigGbk, sizeof(sigGbk),
+                                            false))
+        {
+            vm_mock_admin_redirect_arena(client, "error", "江湖签名编码失败");
+            return;
+        }
+        if (vm_mock_tianxia_admin_save_config(
+                (u8)txEnabled, (u16)txPosX, (u16)txPosY, (u16)txScale,
+                (u8)txWing, (u8)txChenghao, (u8)txMount, titleGbk, otherGbk,
+                champGbk, sigGbk))
+            vm_mock_admin_redirect_arena(client, "ok", "天下第一雕像配置已保存");
+        else
+            vm_mock_admin_redirect_arena(client, "error", "保存雕像配置失败");
         return;
     }
 

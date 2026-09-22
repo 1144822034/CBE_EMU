@@ -4944,8 +4944,18 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_RING_QUEST               0xf7000003u
 #define VM_NET_MOCK_NPC_SERVICE_LADDER_CHALLENGE         0xf7000004u
 #define VM_NET_MOCK_NPC_SERVICE_RING_REFRESH             0xf7000005u
+/* Pixi：宣阳广场「天下第一」雕像膜拜（黄金宝箱奖池一次）. */
+#define VM_NET_MOCK_NPC_SERVICE_TIANXIA_WORSHIP           0xf7000006u
+/* Pixi：冠军本人「江湖签名」选项（实际保存走 29/24）. */
+#define VM_NET_MOCK_NPC_SERVICE_TIANXIA_SIGNATURE         0xf7000007u
 #define VM_NET_MOCK_MARRY_MIN_DEGREE                     3000u
 #define VM_NET_MOCK_YUELAO_ACTOR_ID                      20093u
+#define VM_NET_MOCK_TIANXIA_FIRST_ACTOR_ID                20094u
+#define VM_NET_MOCK_TIANXIA_WORSHIP_DAILY_OTHER           1u
+#define VM_NET_MOCK_TIANXIA_WORSHIP_DAILY_CHAMP           3u
+/* 江湖签名：最多 32 个字符；GBK 存储上限 64 字节. */
+#define VM_NET_MOCK_TIANXIA_SIGNATURE_MAX_CHARS           32u
+#define VM_NET_MOCK_TIANXIA_SIGNATURE_GBK_BYTES           64u
 /* ParseNPCDialogData main-text paint uses #0xc8 including NUL. */
 #define VM_NET_MOCK_NPC_DIALOG_MAIN_TEXT_BYTES            199u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu

@@ -11,6 +11,57 @@ import {
   type WtObject,
   type WtPacket,
 } from "./wt";
+import { decodeGbk } from "./gbk";
+
+/** Pixi-only：天下第一雕像视觉（服务端写入 NPC scriptName）. */
+export type TianxiaNpcVisual = {
+  scale: number;
+  /** 后台头顶文字. */
+  title: string;
+  /** 动态称号未装备时的角色当前称号（gif 名或文字）. */
+  playerTitle: string;
+  wingId: number;
+  chenghaoId: number;
+  mountId: number;
+  /** 冠军穿戴 +16 件数（脚底强化光环环数，0..8）. */
+  plus16Count: number;
+};
+
+function decodePixiHexGbk(hex: string): string {
+  const h = hex.trim();
+  if (!h || !/^[0-9a-fA-F]+$/.test(h) || h.length % 2 !== 0) return "";
+  const bytes = new Uint8Array(h.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16) & 0xff;
+  }
+  return decodeGbk(bytes).replace(/\0+$/g, "").trim();
+}
+
+/** Parse `pixi_tx1|scale|wing|chenghao|mount|titleHex|playerTitleHex|plus16`. */
+export function parseTianxiaNpcScript(
+  scriptName: string | undefined | null,
+): TianxiaNpcVisual | null {
+  const s = (scriptName || "").trim();
+  if (!s.startsWith("pixi_tx1|")) return null;
+  const parts = s.split("|");
+  if (parts.length < 5) return null;
+  const scaleX100 = Math.max(50, Math.min(400, Number(parts[1]) || 200));
+  const wingId = Math.max(0, Number(parts[2]) || 0) >>> 0;
+  const chenghaoId = Math.max(0, Number(parts[3]) || 0) >>> 0;
+  const mountId = Math.max(0, Number(parts[4]) || 0) >>> 0;
+  const decodedTitle = decodePixiHexGbk(parts[5] || "");
+  const playerTitle = decodePixiHexGbk(parts[6] || "");
+  const plus16Count = Math.max(0, Math.min(8, Number(parts[7]) || 0)) | 0;
+  return {
+    scale: scaleX100 / 100,
+    title: decodedTitle || "天下第一",
+    playerTitle,
+    wingId,
+    chenghaoId,
+    mountId,
+    plus16Count,
+  };
+}
 
 export type ServerRow = {
   name: string;
@@ -42,6 +93,8 @@ export type NpcActor = {
   battleActorId?: number;
   /** SCE field 0x11 battle body (.actor); map uses actorResource / dual. */
   battleActorResource?: string;
+  /** Pixi：天下第一雕像 scriptName `pixi_tx1|…` 解析结果. */
+  tianxia?: TianxiaNpcVisual;
 };
 
 export type PeerActor = {
@@ -802,7 +855,16 @@ export function parseNpcCatalog(packet: WtPacket): NpcActor[] {
       const scriptName = r.string();
       r.string(); // dynamic resource key
       r.u32(); // repeated id
-      list.push({ actorId, x, y, name, actorResource, scriptName });
+      const tianxia = parseTianxiaNpcScript(scriptName) ?? undefined;
+      list.push({
+        actorId,
+        x,
+        y,
+        name,
+        actorResource,
+        scriptName,
+        ...(tianxia ? { tianxia } : {}),
+      });
     } catch {
       break;
     }

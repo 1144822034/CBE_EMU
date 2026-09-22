@@ -8,7 +8,7 @@ import {
   makePixelText,
   paintCbePanel,
 } from "./constants";
-import { BitmapLabel, UI_FONT_SIZE, wrapChars } from "./BitmapLabel";
+import { BitmapLabel, UC3_CELL, wrapChars } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
@@ -44,6 +44,10 @@ export class DialogPanel extends Container {
    * Return true if handled (e.g. warehouse list → warehouse root).
    */
   onCancelRequest: (() => boolean) | null = null;
+
+  get currentBody(): string {
+    return this.dialog?.body ?? "";
+  }
 
   constructor() {
     super();
@@ -86,13 +90,27 @@ export class DialogPanel extends Container {
     return this.dialog;
   }
 
-  show(dialog: NpcDialog): void {
+  show(dialog: NpcDialog, opts?: { keepCursor?: boolean }): void {
+    const prevIndex = this.cursorIndex;
+    const prevValue = this.dialog?.options[prevIndex]?.value;
     this.medicineBuy = null;
     this.dialog = dialog;
-    this.cursorIndex = 0;
     this.eventMode = "static";
     this.remountChrome();
     this.visible = true;
+    if (opts?.keepCursor) {
+      const n = dialog.options.length;
+      let next = 0;
+      if (n > 0 && prevValue != null) {
+        const idx = dialog.options.findIndex(
+          (o) => (o.value >>> 0) === (prevValue >>> 0),
+        );
+        next = idx >= 0 ? idx : Math.min(prevIndex, n - 1);
+      }
+      this.cursorIndex = next;
+    } else {
+      this.cursorIndex = 0;
+    }
     void this.redraw();
   }
 
@@ -218,7 +236,7 @@ export class DialogPanel extends Container {
     const bodyMax = tall ? 2 : 8;
     const bodyLines = wrapChars(this.dialog.body).slice(0, bodyMax);
     bodyLines.forEach((line, i) => {
-      const t = makePixelText(line, 11, CBE.inkBody);
+      const t = makePixelText(line, UC3_CELL, CBE.inkBody);
       t.position.set(x + 10, y + 28 + i * 15);
       this.addChild(t);
       this.labels.push(t);
@@ -240,13 +258,13 @@ export class DialogPanel extends Container {
         this.box.rect(x + 6, ry, w - 12, rowH - 1).fill({ color: CBE.select });
       }
       const ink = hi ? CBE.ink : (opt.nameColor ?? CBE.inkMint);
-      const t = makePixelText(opt.label || `选项${abs + 1}`, 12, ink);
+      const t = makePixelText(opt.label || `选项${abs + 1}`, UC3_CELL, ink);
       t.position.set(x + 12, ty);
       t.eventMode = "none";
       this.addChild(t);
       this.labels.push(t);
       if (opt.count != null && opt.count >= 0) {
-        const ct = makePixelText(String(opt.count), 12, ink);
+        const ct = makePixelText(String(opt.count), UC3_CELL, ink);
         ct.anchor.set(1, 0);
         ct.position.set(x + w - 12, ty);
         ct.eventMode = "none";
@@ -273,7 +291,7 @@ export class DialogPanel extends Container {
         page: page + 1,
         pages,
         addLabel: (text, lx, ly, c) => {
-          const lab = makePixelText(text, 11, c);
+          const lab = makePixelText(text, UC3_CELL, c);
           lab.position.set(lx, ly);
           this.addChild(lab);
           this.labels.push(lab);
@@ -311,7 +329,7 @@ export class DialogPanel extends Container {
       s.maxQty <= 1 ? "余额仅够买1个" : `最多可买 ${s.maxQty}`,
     ];
     lines.forEach((line, i) => {
-      const t = makePixelText(line, 12, i === 3 ? CBE.inkTipGreen : CBE.inkBody);
+      const t = makePixelText(line, UC3_CELL, i === 3 ? CBE.inkTipGreen : CBE.inkBody);
       t.position.set(x + 10, y + 36 + i * 18);
       this.addChild(t);
       this.labels.push(t);
@@ -323,7 +341,7 @@ export class DialogPanel extends Container {
       .fill({ color: CBE.bgDeep })
       .stroke({ width: 1, color: CBE.borderBright });
     this.box.rect(x + 24, btnY, w - 48, 24).fill({ color: CBE.select });
-    const buyLab = makePixelText("确认购买", 12, CBE.inkMint);
+    const buyLab = makePixelText("确认购买", UC3_CELL, CBE.inkMint);
     buyLab.position.set(x + w / 2 - 28, btnY + 5);
     this.addChild(buyLab);
     this.labels.push(buyLab);
@@ -332,9 +350,9 @@ export class DialogPanel extends Container {
     );
   }
 
-  /** Match SystemPanel / bag popup titles: centered, default UI size (Songti→14). */
+  /** Centered title; UC3_CELL so Songti and bitmap match. */
   private addDialogTitle(text: string, y: number): void {
-    const title = makePixelText(text, UI_FONT_SIZE, CBE.ink);
+    const title = makePixelText(text, UC3_CELL, CBE.ink);
     title.eventMode = "none";
     title.anchor.set(0.5, 0);
     title.position.set(LCD_WIDTH / 2, y);

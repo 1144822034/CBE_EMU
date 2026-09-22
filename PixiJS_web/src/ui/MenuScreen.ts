@@ -49,7 +49,8 @@ export type MenuLeaf =
   | "hangup"
   | "font"
   | "sound"
-  | "peer_fx";
+  | "peer_fx"
+  | "enemy_hp_bar";
 
 type MenuNode = {
   label: string;
@@ -76,6 +77,7 @@ const ROOT: MenuNode[] = [
       { label: "字体切换", leaf: "font" },
       { label: "挂机战斗", leaf: "hangup" },
       { label: "屏蔽特效", leaf: "peer_fx" },
+      { label: "敌方血条", leaf: "enemy_hp_bar" },
     ],
   },
   {

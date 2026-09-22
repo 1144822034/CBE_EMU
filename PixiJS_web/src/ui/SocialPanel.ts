@@ -222,7 +222,11 @@ export class SocialPanel extends Container {
     }
     this.listPage = Math.max(1, page | 0);
     this.listPages = Math.max(1, allpgs | 0);
-    this.rows = friends.map((f) => ({
+    const ordered = [...friends].sort((a, b) => {
+      if (a.online === b.online) return 0;
+      return a.online ? -1 : 1;
+    });
+    this.rows = ordered.map((f) => ({
       id: f.id,
       name: f.isSpouse ? `${f.name}〔配偶〕` : f.name,
       subtitle: `${f.online ? "在线" : "离线"} 亲密度${f.degree}${
@@ -483,7 +487,7 @@ export class SocialPanel extends Container {
   }
 
   private textPageSize(): number {
-    return 12;
+    return 13;
   }
 
   move(delta: number): void {
@@ -752,7 +756,7 @@ export class SocialPanel extends Container {
           pages > 1
             ? `确定=${this.textPage + 1 < pages ? "下页" : "关闭"}`
             : "确定/取消=关闭";
-        this.addLabel(hint, x + 10, y + h - 18, CBE.inkLabel);
+        this.addLabelCentered(hint, x + w / 2, y + h - 12, CBE.inkLabel);
         if (pages > 1) {
           attachPageNavButtons({
             host: this,
@@ -948,7 +952,7 @@ export class SocialPanel extends Container {
       : this.kind === "enmity"
         ? "←→切方向  顶栏切好友"
         : "←→切恩怨";
-    this.addLabel(hint, x + 10, footY, CBE.inkLabel);
+    this.addLabelCentered(hint, x + w / 2, footY + 6, CBE.inkLabel);
   }
 
   private drawGenericTabs(
@@ -1186,7 +1190,7 @@ export class SocialPanel extends Container {
       pages > 1
         ? `↑↓翻页 ${this.textPage + 1}/${pages} · 左=操作 右=返回`
         : "左=操作 右=返回";
-    this.addLabel(hint, x + 10, footY, CBE.inkLabel);
+    this.addLabelCentered(hint, x + w / 2, footY + 6, CBE.inkLabel);
 
     if (pages > 1) {
       attachPageNavButtons({

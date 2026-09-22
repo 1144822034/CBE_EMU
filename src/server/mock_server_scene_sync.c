@@ -3839,6 +3839,8 @@ static const char *vm_net_mock_npc_dialog_text(u32 actorId)
         return "\xc8\xcb\xd4\xda\xbd\xad\xba\xfe\xc6\xae\xa3\xac\xc4\xc4\xc4\xdc\xb2\xbb\xb0\xa4\xb5\xb6\xa3\xbf\xb0\xa4\xb5\xb6\xb2\xbb\xd3\xc3\xc5\xc2\xa3\xac\xbc\xd7\xba\xf1\xc8\xcb\xb2\xbb\xb9\xd2\xa3\xa1";
     case VM_NET_MOCK_YUELAO_ACTOR_ID: /* 月老 @ 南宣门 */
         return "\xd3\xd0\xd4\xb5\xc7\xa7\xc0\xef\xc0\xb4\xcf\xe0\xbb\xe1\xa3\xac\xc7\xd7\xc3\xdc\xb6\xc8\xc2\xfa\xc8\xfd\xc7\xa7\xbf\xc9\xd4\xda\xb4\xcb\xb5\xde\xbd\xe1\xd2\xf6\xd4\xb5\xa1\xa3";
+    case VM_NET_MOCK_TIANXIA_FIRST_ACTOR_ID: /* 天下第一 @ 宣阳广场 */
+        return g_vm_mock_tianxia_signature_default;
     default:
         return "\xc9\xd9\xcf\xc0\xa3\xac\xd3\xd0\xca\xb2\xc3\xb4\xca\xc2\xc2\xf0\xa3\xbf"; /* 少侠，有什么事吗？ */
     }
@@ -3937,6 +3939,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     if (matchedSeed != NULL)
         vm_net_mock_task_offer_context_reset();
     dialogText = vm_net_mock_npc_dialog_text(actorId);
+    if (actorId == VM_NET_MOCK_TIANXIA_FIRST_ACTOR_ID)
+        dialogText = vm_mock_tianxia_signature_display();
     memset(&taskState, 0, sizeof(taskState));
     memset(&xseSummary, 0, sizeof(xseSummary));
     memset(allTaskStates, 0, sizeof(allTaskStates));
@@ -3945,6 +3949,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     memset(completedTaskIds, 0, sizeof(completedTaskIds));
     activeRole = vm_net_mock_active_role();
     if (matchedSeed != NULL && matchedSeed->scriptName[0] != 0 &&
+        actorId != VM_NET_MOCK_TIANXIA_FIRST_ACTOR_ID &&
         vm_net_mock_load_xse_summary(matchedSeed->scriptName, &xseSummary) &&
         xseSummary.idleDialog[0] != 0)
     {
@@ -4645,6 +4650,41 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 serviceOptionCount += 1;
             }
         }
+        /* Pixi：宣阳广场天下第一雕像 — 膜拜 / 接受膜拜 / 江湖签名 */
+        if (matchedSeed->actorId == VM_NET_MOCK_TIANXIA_FIRST_ACTOR_ID)
+        {
+            const vm_mock_tianxia_champion *champ = vm_mock_tianxia_champ_get();
+            const vm_mock_tianxia_config *txCfg = vm_mock_tianxia_config_get();
+            bool isChamp = activeRole != NULL && champ != NULL &&
+                           activeRole->roleId == champ->roleId;
+
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    isChamp
+                        ? (txCfg && txCfg->optionChamp[0] ? txCfg->optionChamp
+                                                         : "\xbd\xd3\xca\xdc\xc4\xa4\xb0\xdd")
+                        : (txCfg && txCfg->optionOther[0] ? txCfg->optionOther
+                                                         : "\xc4\xa4\xb0\xdd\xb4\xf3\xcf\xc0");
+                serviceOptionDescriptions[serviceOptionCount] =
+                    txCfg && txCfg->titleText[0]
+                        ? txCfg->titleText
+                        : "\xcc\xec\xcf\xc2\xb5\xda\xd2\xbb"; /* 天下第一 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_TIANXIA_WORSHIP;
+                serviceOptionCount += 1;
+            }
+            if (isChamp && serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xbd\xad\xba\xfe\xc7\xa9\xc3\xfb"; /* 江湖签名 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xc9\xe8\xd6\xc3\xb5\xf4\xcf\xf1\xb6\xd4\xbb\xb0"; /* 设置雕像对白 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_TIANXIA_SIGNATURE;
+                serviceOptionCount += 1;
+            }
+        }
     }
 
     /*
@@ -5131,7 +5171,7 @@ static bool vm_net_mock_is_npc_service_dialog_request(
             (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
         (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER &
+            (VM_NET_MOCK_NPC_SERVICE_TIANXIA_SIGNATURE &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
     {
         return false;
@@ -8123,6 +8163,127 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         optionValues[optionCount] = 0;
         ++optionCount;
     }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_TIANXIA_WORSHIP)
+    {
+        const vm_mock_tianxia_champion *champ = vm_mock_tianxia_champ_get();
+        bool isChamp = false;
+        u16 used = 0;
+        u16 dailyMax = VM_NET_MOCK_TIANXIA_WORSHIP_DAILY_OTHER;
+        u32 rewardItemId = 0;
+        u16 rewardSeq = 0;
+        bool pityForced = false;
+        vm_net_mock_role_state before;
+        const vm_net_mock_shop_catalog_item *shop = NULL;
+        const char *itemName = NULL;
+
+        action = "tianxia-worship";
+        dialogText =
+            "\xc4\xa4\xb0\xdd\xca\xa7\xb0\xdc\xa1\xa3"; /* 膜拜失败。 */
+        if (role == NULL || champ == NULL)
+        {
+            dialogText =
+                "\xc8\xd5\xc7\xb0\xce\xde\xcc\xec\xcf\xc2\xb5\xda\xd2\xbb"
+                "\xa1\xa3"; /* 目前无天下第一。 */
+        }
+        else
+        {
+            isChamp = role->roleId == champ->roleId;
+            dailyMax = isChamp ? VM_NET_MOCK_TIANXIA_WORSHIP_DAILY_CHAMP
+                               : VM_NET_MOCK_TIANXIA_WORSHIP_DAILY_OTHER;
+            used = vm_mock_tianxia_worship_used_today(role->roleId);
+            if (!isChamp && !vm_mock_ring_role_finished_daily(role))
+            {
+                dialogText =
+                    "\xbd\xf1\xc8\xd5\xbb\xb7\xca\xfd\xce\xb4\xc2\xfa\xa3\xac"
+                    "\xcd\xea\xb3\xc9\xc5\xdc\xbb\xb7\xba\xf3\xd4\xd9\xc0\xb4"
+                    "\xc4\xa4\xb0\xdd\xa1\xa3"; /* 今日环数未满，完成跑环后再来膜拜。 */
+            }
+            else if (used >= dailyMax)
+            {
+                dialogText =
+                    "\xbd\xf1\xc8\xd5\xc4\xa4\xb0\xdd\xb4\xce\xca\xfd\xd2\xd1"
+                    "\xd3\xc3\xcd\xea\xa1\xa3"; /* 今日膜拜次数已用完。 */
+            }
+            else if (!vm_net_mock_chest_roll_reward_item_with_pity(
+                         role, VM_NET_MOCK_GOLD_CHEST_ITEM_ID, &rewardItemId,
+                         &pityForced) ||
+                     rewardItemId == 0)
+            {
+                dialogText =
+                    "\xbd\xb1\xb3\xd8\xce\xde\xbb\xf1\xa1\xa3"; /* 奖池无获。 */
+            }
+            else
+            {
+                before = *role;
+                if (!vm_net_mock_role_add_backpack_item_to_role(
+                        role, rewardItemId, 1, 0, &rewardSeq, "tianxia-worship",
+                        NULL, 0))
+                {
+                    *role = before;
+                    dialogText =
+                        "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8"
+                        "\xbb\xf1\xb5\xc3\xce\xef\xc6\xb7\xa1\xa3"; /* 背包已满，无法获得物品。 */
+                }
+                else if (!vm_mock_tianxia_worship_inc_today(role->roleId))
+                {
+                    *role = before;
+                    (void)vm_net_mock_role_db_save("tianxia-worship-rollback");
+                    dialogText =
+                        "\xc4\xa4\xb0\xdd\xbc\xc7\xc2\xbc\xca\xa7\xb0\xdc\xa1\xa3"; /* 膜拜记录失败。 */
+                }
+                else
+                {
+                    vm_net_mock_chest_pity_note_open_result(
+                        role, VM_NET_MOCK_GOLD_CHEST_ITEM_ID, rewardItemId);
+                    (void)vm_net_mock_role_mark_inventory_dirty("tianxia-worship");
+                    vm_net_mock_tianxia_worship_maybe_announce(rewardItemId);
+                    shop = vm_net_mock_find_shop_catalog_item(rewardItemId);
+                    itemName = (shop != NULL && shop->name[0] != 0) ? shop->name
+                                                                   : "???";
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "\xc4\xa4\xb0\xdd\xb3\xc9\xb9\xa6\xa3\xac\xbb\xf1"
+                             "\xb5\xc3%s\xa1\xa3", /* 膜拜成功，获得%s。 */
+                             itemName);
+                    dialogText = dialogTextStorage;
+                    backpackAddItemId = rewardItemId;
+                    backpackAddCount = 1;
+                    backpackAddSeq = rewardSeq;
+                    appendBackpackAdd = true;
+                    action = "tianxia-worship-ok";
+                    printf("[info][mock-service] tianxia_worship role=%u "
+                           "champ=%u is_champ=%u used=%u/%u reward=%u pity=%u\n",
+                           role->roleId, champ->roleId, isChamp ? 1u : 0u,
+                           (u32)(used + 1u), (u32)dailyMax, rewardItemId,
+                           pityForced ? 1u : 0u);
+                }
+            }
+        }
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_TIANXIA_SIGNATURE)
+    {
+        const vm_mock_tianxia_champion *champ = vm_mock_tianxia_champ_get();
+        bool isChamp = role != NULL && champ != NULL &&
+                       role->roleId == champ->roleId;
+
+        action = "tianxia-signature";
+        /* Pixi 拦截选项后走 29/24；此处仅兜底提示. */
+        if (!isChamp)
+            dialogText =
+                "\xbd\xf6\xbd\xad\xba\xfe\xb5\xda\xd2\xbb\xbf\xc9\xc9\xe8"
+                "\xd6\xc3\xc7\xa9\xc3\xfb\xa1\xa3"; /* 仅江湖第一可设置签名。 */
+        else
+            dialogText =
+                "\xc7\xeb\xd4\xda\xbf\xcd\xbb\xa7\xb6\xcb\xca\xe4\xc8\xeb"
+                "\xc7\xa9\xc3\xfb\xa1\xa3"; /* 请在客户端输入签名。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_MARRY)
     {
         vm_mock_service_client_session *self =
@@ -8253,6 +8414,16 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                  sizeof(partnerRole->spouseName), "%s",
                                  selfRole->name);
                     }
+                    snprintf(self->onlineSpouseName, sizeof(self->onlineSpouseName),
+                             "%s",
+                             partner->onlineRoleName[0] ? partner->onlineRoleName
+                                                        : "Player");
+                    snprintf(partner->onlineSpouseName,
+                             sizeof(partner->onlineSpouseName), "%s",
+                             selfRole->name[0] ? selfRole->name
+                                               : (self->onlineRoleName[0]
+                                                      ? self->onlineRoleName
+                                                      : "Player"));
                     dialogText =
                         "\xba\xec\xc2\xeb\xcf\xdf\xd2\xd1\xc7\xa7\xa3\xac\xb5\xde"
                         "\xbd\xe1\xd2\xf6\xd4\xb5\xb3\xc9\xb9\xa6\xa1\xa3"; /* 红绳已牵，缔结姻缘成功。 */
