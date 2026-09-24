@@ -4541,7 +4541,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 serviceOptionNames[serviceOptionCount] =
                     "\xb1\xc8\xce\xe4\xc5\xc5\xd0\xd0\xb0\xf1"; /* 比武排行榜 */
                 serviceOptionDescriptions[serviceOptionCount] =
-                    "\xb2\xe9\xbf\xb4\xbb\xf1\xc1\xec\xbd\xac\xc0\xf8"; /* 查看或领取奖励 */
+                    "\xb2\xe9\xbf\xb4\xbb\xf2\xc1\xec\xc8\xa1\xbd\xb1\xc0\xf8"; /* 查看或领取奖励 */
                 serviceOptionValues[serviceOptionCount] =
                     VM_NET_MOCK_NPC_SERVICE_ARENA_RANK;
                 serviceOptionCount += 1;
@@ -8104,7 +8104,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         action = "arena-rank";
         dialogText =
             "\xc7\xeb\xb4\xf2\xbf\xaa\xb1\xc8\xce\xe4\xc5\xc5\xd0\xd0\xb0\xf1"
-            "\xb2\xe9\xbf\xb4\xbb\xf1\xc1\xec\xbd\xac\xc0\xf8\xa1\xa3"; /* 请打开比武排行榜查看或领取奖励。 */
+            "\xb2\xe9\xbf\xb4\xbb\xf2\xc1\xec\xc8\xa1\xbd\xb1\xc0\xf8\xa1\xa3"; /* 请打开比武排行榜查看或领取奖励。 */
         optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
         optionDescriptions[optionCount] = "";
         optionValues[optionCount] = 0;

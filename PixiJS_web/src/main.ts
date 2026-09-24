@@ -5913,7 +5913,9 @@ async function main(): Promise<void> {
           const times = Math.floor((bag.count | 0) / 3);
           showGameTip(`批量合成 ${bag.name}×${times}…`);
           try {
-            const fb = await session.combineGem(bag.itemId, bag.seq, times);
+            const fb = isGemFragment(bag.itemId)
+              ? await session.combineGemFragment(bag.itemId, bag.seq, times)
+              : await session.combineGem(bag.itemId, bag.seq, times);
             if (fb.ok) await refreshAfterGem("bag");
             else showPhase("system");
             showGameTip(fb.message || (fb.ok ? "合成成功" : "合成失败"));

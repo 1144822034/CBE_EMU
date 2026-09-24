@@ -27,7 +27,7 @@
 | 19 | `seq` `times?` | 同格 3 颗同级同属性 → 高 1 级。`times` 缺省 1；≥6 颗时背包多一个「批量合成」，一次升 `floor(count/3)` 颗，只升 1 级 |
 | 20 | `seq` `desttype` | 同格 2 颗 1 级 → 其它属性 1 级 |
 | 21 | `seq` | 1×916 → `crystal16_gem_count` 颗随机 1 级（默认 5）。须 `crystal16_exchange_enabled=1`，否则 result=7「十六级玄晶兑换未开放」 |
-| 22 | `seq` | 3×978 → 1 颗随机 1 级 |
+| 22 | `seq` `times?` | 3×978 → 1 颗随机 1 级。`times` 缺省 1；≥6 个时背包多一个「批量合成」，一次出 `floor(count/3)` 颗（每次独立随机属性） |
 
 装备详情尾随 `0x47` + 三个 `u8` 孔等级。属性面板带 `reflectPct` / `comboPct` / `revivePct`。客户端装备详情三行宝石孔只在强化 ≥ +16 时绘制。
 

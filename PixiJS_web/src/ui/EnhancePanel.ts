@@ -412,6 +412,8 @@ export class EnhancePanel extends Container {
       const unit =
         this.openInfo?.crystalPower[tier - 1] ??
         enhanceCrystalUnitRate(L, tier);
+      // 成功率为 0 的玄晶对当前强化档无贡献，不进入选择列表
+      if (unit <= 0) continue;
       rows.push({
         itemId: id,
         tier,

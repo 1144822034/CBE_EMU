@@ -5993,21 +5993,24 @@ export class GameSession {
     return this.exchangeGemOp(21, buildGemFromCrystal16Request(seq), "兑换失败");
   }
 
-  /** Pixi-only 29/22: 3×978 → 1 random Lv1 gem. */
+  /** Pixi-only 29/22: 3×978 → 1 random Lv1 gem. times>1 rolls each independently. */
   async combineGemFragment(
     itemId: number,
     seq: number,
+    times = 1,
   ): Promise<{ result: number; ok: boolean; message: string }> {
+    const n = Math.max(1, times | 0);
     if (!(seq > 0) || !isGemFragment(itemId)) {
       return { result: 2, ok: false, message: "不是宝石碎片" };
     }
     const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
-    if (!canCombineGemFragment(itemId, row?.count ?? 0)) {
-      return { result: 4, ok: false, message: "碎片不足3个" };
+    const have = row?.count ?? 0;
+    if (!canCombineGemFragment(itemId, have) || Math.floor(have / 3) < n) {
+      return { result: 4, ok: false, message: n > 1 ? "碎片不足" : "碎片不足3个" };
     }
     return this.exchangeGemOp(
       22,
-      buildGemFragmentCombineRequest(seq),
+      buildGemFragmentCombineRequest(seq, n),
       "合成失败",
     );
   }

@@ -1230,14 +1230,28 @@ static void vm_mock_admin_ensure_session_token(void)
              words[0], words[1], words[2], words[3]);
 }
 
+/* Cookie names ignore port by RFC; include listen port so one browser can keep
+ * sessions for multiple mock-admin instances on the same host. */
+static void vm_mock_admin_session_cookie_name(char *out, size_t outCap)
+{
+    snprintf(out, outCap, "cbe_admin_%u", (unsigned)g_mockAdminPort);
+}
+
 static bool vm_mock_admin_request_is_authenticated(const char *request,
                                                     size_t headerLen)
 {
     char cookie[1024];
-    const char key[] = "cbe_admin=";
+    char key[48];
+    size_t keyLen = 0;
     const char *cursor = NULL;
 
     vm_mock_admin_ensure_session_token();
+    vm_mock_admin_session_cookie_name(key, sizeof(key) - 1);
+    keyLen = strlen(key);
+    if (keyLen + 1 >= sizeof(key))
+        return false;
+    key[keyLen++] = '=';
+    key[keyLen] = 0;
     if (!vm_mock_admin_header_value(request, headerLen, "Cookie",
                                     cookie, sizeof(cookie)))
     {
@@ -1246,7 +1260,7 @@ static bool vm_mock_admin_request_is_authenticated(const char *request,
     cursor = cookie;
     while ((cursor = strstr(cursor, key)) != NULL)
     {
-        const char *value = cursor + sizeof(key) - 1;
+        const char *value = cursor + keyLen;
         size_t valueLen = strcspn(value, "; ");
         if (valueLen == strlen(g_vm_mock_admin_session_token) &&
             memcmp(value, g_vm_mock_admin_session_token, valueLen) == 0)
@@ -9071,6 +9085,24 @@ static void vm_mock_admin_handle_scene_combat_spawn_action(
         }
         for (u32 i = 0; i < count; ++i)
             spawns[i] = located[i].spawn;
+        /*
+         * locate_all remaps SCE keep-id wire (#250) → catalog real for admin.
+         * If remap missed, actorId may still be #250 which is often absent from
+         * the monster catalog — fill_from_catalog then fails and the pin snaps
+         * back (看起来像「不能拖动」).  Refuse with a clear tip instead.
+         */
+        for (u32 i = 0; i < count; ++i)
+        {
+            if (spawns[i].actorId == 0 ||
+                !vm_net_mock_monster_enemy_id_known(spawns[i].actorId))
+            {
+                free(located);
+                vm_mock_admin_redirect_content(
+                    client, sceneUtf8, "error",
+                    "刷怪点真实怪物 ID 无法解析，请先在表单中重新保存怪物 ID");
+                return;
+            }
+        }
         spawns[index].x = (u16)x;
         spawns[index].y = (u16)y;
         free(located);
@@ -12644,10 +12676,12 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         if (loginOk)
         {
             char cookieHeader[256];
+            char cookieName[40];
             vm_mock_admin_ensure_session_token();
+            vm_mock_admin_session_cookie_name(cookieName, sizeof(cookieName));
             snprintf(cookieHeader, sizeof(cookieHeader),
-                     "Set-Cookie: cbe_admin=%s; Path=" VM_MOCK_ADMIN_BASE_PATH "; HttpOnly; SameSite=Strict\r\n",
-                     g_vm_mock_admin_session_token);
+                     "Set-Cookie: %s=%s; Path=" VM_MOCK_ADMIN_BASE_PATH "; HttpOnly; SameSite=Strict\r\n",
+                     cookieName, g_vm_mock_admin_session_token);
             vm_mock_admin_send_location(client, VM_MOCK_ADMIN_ROOT_PATH,
                                         cookieHeader);
             return 1;
@@ -12691,9 +12725,17 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                         "Allow: POST\r\n", "退出只允许 POST。\n");
             return 0;
         }
-        vm_mock_admin_send_location(
-            client, VM_MOCK_ADMIN_LOGIN_PATH,
-            "Set-Cookie: cbe_admin=; Path=" VM_MOCK_ADMIN_BASE_PATH "; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
+        {
+            char cookieHeader[256];
+            char cookieName[40];
+            vm_mock_admin_session_cookie_name(cookieName, sizeof(cookieName));
+            snprintf(cookieHeader, sizeof(cookieHeader),
+                     "Set-Cookie: %s=; Path=" VM_MOCK_ADMIN_BASE_PATH "; Max-Age=0; HttpOnly; SameSite=Strict\r\n"
+                     "Set-Cookie: cbe_admin=; Path=" VM_MOCK_ADMIN_BASE_PATH "; Max-Age=0; HttpOnly; SameSite=Strict\r\n",
+                     cookieName);
+            vm_mock_admin_send_location(client, VM_MOCK_ADMIN_LOGIN_PATH,
+                                        cookieHeader);
+        }
         return 1;
     }
     if (!vm_mock_admin_request_is_authenticated(request, headerLen))

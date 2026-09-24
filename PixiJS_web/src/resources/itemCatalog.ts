@@ -343,7 +343,7 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
 
   // Pixi gem sockets / fragment (922+/942+/962+/978).
   const gemDefs: { id: number; name: string; desc: string }[] = [
-    { id: 978, name: "宝石碎片", desc: "3个可合成随机1级宝石。" },
+    { id: 978, name: "宝石碎片", desc: "3个可合成随机1级宝石；≥6可批量。" },
   ];
   for (let lv = 1; lv <= 16; lv++) {
     gemDefs.push({

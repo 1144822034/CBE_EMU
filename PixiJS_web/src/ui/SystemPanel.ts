@@ -31,6 +31,7 @@ import {
   canCombineEnhanceCrystal,
   canCombineGem,
   canBatchCombineGem,
+  canBatchCombineGemFragment,
   canCombineGemFragment,
   canExchangeGemType,
   isGemFragment,
@@ -1268,6 +1269,7 @@ export class SystemPanel extends Container {
         if (canCombineCrystalFragment(it.itemId, it.count)) acts.push("合成");
       } else if (isGemFragment(it.itemId)) {
         if (canCombineGemFragment(it.itemId, it.count)) acts.push("合成");
+        if (canBatchCombineGemFragment(it.itemId, it.count)) acts.push("批量合成");
       } else if (parseGemItem(it.itemId)) {
         const gemMax = this.stats?.maxGemLevel || 3;
         // 镶嵌只出现在装备栏 ≥+16 的穿戴装备上，背包不提供。

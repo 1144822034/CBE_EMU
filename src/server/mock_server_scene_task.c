@@ -2195,23 +2195,29 @@ bool vm_net_mock_sce_combat_spawn_bindings_purge_real_remaps(
 static void vm_net_mock_sce_combat_spawn_apply_bindings(
     const char *scene, vm_net_mock_sce_combat_spawn_located *rows, u32 count)
 {
+    /*
+     * Admin preview / drag-save must show catalog REAL ids.  SCE field 0x0E is
+     * often keep-id #250 (ParseMinfo-safe wire).  Matching only by (x,y) misses
+     * when binding coords drift; battle remap still works via wire-unique.
+     * Reuse label_enemy_for_wire (pos bind → wire-unique → keep wire).
+     */
     if (scene == NULL || scene[0] == 0 || rows == NULL || count == 0)
         return;
-    vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
     for (u32 i = 0; i < count; ++i)
     {
-        for (u32 j = 0; j < g_vm_net_mock_sce_combat_spawn_binding_count; ++j)
-        {
-            const vm_net_mock_sce_combat_spawn_binding *bind =
-                &g_vm_net_mock_sce_combat_spawn_bindings[j];
-            if (!vm_net_mock_scene_names_equal_loose(bind->scene, scene))
-                continue;
-            if (bind->x != rows[i].spawn.x || bind->y != rows[i].spawn.y)
-                continue;
-            if (bind->realActorId != 0)
-                rows[i].spawn.actorId = bind->realActorId;
-            break;
-        }
+        u32 wireId = rows[i].spawn.actorId;
+        u32 realId = 0;
+
+        if (wireId == 0)
+            continue;
+        realId = vm_net_mock_sce_combat_spawn_label_enemy_for_wire(
+            scene, rows[i].spawn.x, rows[i].spawn.y, wireId,
+            rows[i].spawn.actorResource[0] != 0 ? rows[i].spawn.actorResource
+                                                : NULL,
+            rows[i].spawn.displayName[0] != 0 ? rows[i].spawn.displayName
+                                              : NULL);
+        if (realId != 0)
+            rows[i].spawn.actorId = realId;
     }
 }
 
@@ -2410,10 +2416,20 @@ static u32 vm_net_mock_sce_combat_spawn_pick_map_wire_id(
 
     vm_net_mock_monster_resource_labels_load();
     realIndex = vm_net_mock_monster_catalog_index(realActorId);
+    /*
+     * Outdoor stock ids: keep self wire when the catalog (or the already-filled
+     * primary .actor from fill_from_catalog / admin override) proves the id is
+     * map-safe.  Previously empty resource_labels[] forced keep-id #250 even
+     * for known stock ids that had an override actor — admin then showed #250
+     * after refresh while battle still remapped via bindings.
+     */
     if (realIndex >= 0 &&
         !vm_net_mock_monster_catalog_is_custom(realActorId) &&
         realActorId <= 300u &&
-        g_vm_net_mock_monster_resource_labels[realIndex].actorResource[0] != 0)
+        ((g_vm_net_mock_monster_resource_labels[realIndex].actorResource[0] !=
+          0) ||
+         (primaryActor != NULL && primaryActor[0] != 0 &&
+          vm_net_mock_str_ends_with(primaryActor, ".actor"))))
     {
         return realActorId;
     }

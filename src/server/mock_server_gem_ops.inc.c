@@ -1020,7 +1020,8 @@ static u32 vm_net_mock_build_gem_from_crystal16_response(const u8 *request,
 }
 
 /*
- * 29/22 碎片合成: { seq }  3×978 → 1×随机 Lv1
+ * 29/22 碎片合成: { seq, times? }  每次 3×978 → 1×随机 Lv1
+ * times 缺省为 1。批量合成把本格能凑满的次数一次做完（每次独立随机属性）。
  * result: 1=ok 2=bad 3=bag 4=count 5=trade
  */
 static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
@@ -1029,6 +1030,9 @@ static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
 {
     u32 offset = 4;
     u32 seqValue = 0;
+    u32 timesValue = 0;
+    u32 times = 1;
+    u32 needCost = 0;
     u32 objectStart = 0;
     u32 pos = 5;
     u8 objectCount = 1;
@@ -1039,14 +1043,20 @@ static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
     u32 destItemId = 0;
     u32 srcRemaining = 0;
     u32 destCount = 0;
+    u32 typeCounts[3];
+    u32 needStacks = 0;
+    u32 seed = 0;
+    u32 i = 0;
     const u32 cost = (u32)VM_NET_MOCK_GEM_FRAGMENT_COMBINE_COST;
     const char *reason = "ok";
     const char *message = "";
+    char messageStore[48];
     vm_net_mock_request_object object;
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_backpack_item_state *src = NULL;
     vm_net_mock_backpack_item_state *dest = NULL;
 
+    memset(typeCounts, 0, sizeof(typeCounts));
     if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
         request[0] != 'W' || request[1] != 'T' ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
@@ -1062,9 +1072,18 @@ static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
         return 0;
     }
     srcSeq = (u16)seqValue;
+    if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                            "times", &timesValue))
+        times = timesValue;
 
     role = vm_net_mock_active_role();
-    if (role == NULL)
+    if (times == 0 || cost == 0 || times > (0xffffffffu / cost))
+    {
+        result = 2;
+        reason = "bad-times";
+        message = "合成数量无效";
+    }
+    else if (role == NULL)
     {
         result = 2;
         reason = "no-role";
@@ -1080,6 +1099,7 @@ static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
     {
         vm_net_mock_role_normalize_backpack(role);
         src = vm_net_mock_role_find_backpack_item(role, 0, srcSeq);
+        needCost = cost * times;
         if (src == NULL || src->count == 0)
         {
             result = 2;
@@ -1092,67 +1112,126 @@ static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
             reason = "not-fragment";
             message = "不是宝石碎片";
         }
-        else if (src->count < cost)
+        else if (src->count < needCost)
         {
             result = 4;
             reason = "count-lt-3";
-            message = "碎片不足3个";
+            message = times > 1 ? "碎片不足" : "碎片不足3个";
         }
         else
         {
-            u32 itemCount = vm_net_mock_role_backpack_count(role);
-            u32 freeSlots = role->backpackCapacity > itemCount
-                                ? (u32)role->backpackCapacity - itemCount
-                                : 0;
-            bool freesSlot = (src->count == cost);
             srcItemId = src->itemId;
-            destItemId = vm_net_mock_gem_random_lv1_item_id(
-                vm_net_mock_gem_ops_seed(role, srcSeq));
-            dest = vm_net_mock_role_find_backpack_item(role, destItemId, 0);
-            if (destItemId == 0)
+            seed = vm_net_mock_gem_ops_seed(role, srcSeq);
+            for (i = 0; i < times; ++i)
             {
-                result = 2;
-                reason = "dest-invalid";
-                message = "合成失败";
+                u8 gemType = 0;
+                u8 gemLevel = 0;
+                u32 gid = vm_net_mock_gem_random_lv1_item_id(seed + i * 17u);
+                if (!vm_net_mock_gem_parse_item(gid, &gemType, &gemLevel) ||
+                    gemType < 1 || gemType > 3)
+                {
+                    result = 2;
+                    reason = "dest-invalid";
+                    message = "合成失败";
+                    break;
+                }
+                typeCounts[gemType - 1u] += 1u;
+                if (destItemId == 0)
+                    destItemId = gid;
             }
-            else if (dest == NULL && freeSlots == 0 && !freesSlot)
+            if (result == 1)
             {
-                result = 3;
-                reason = "bag-full";
-                message = "背包空间不足";
+                for (i = 0; i < 3u; ++i)
+                {
+                    u32 gid = 0;
+                    if (typeCounts[i] == 0)
+                        continue;
+                    gid = vm_net_mock_gem_item_id_for((u8)(i + 1u), 1);
+                    if (gid == 0)
+                    {
+                        result = 2;
+                        reason = "dest-invalid";
+                        message = "合成失败";
+                        break;
+                    }
+                    if (vm_net_mock_role_find_backpack_item(role, gid, 0) == NULL)
+                        needStacks += 1u;
+                }
+            }
+            if (result == 1)
+            {
+                if (src->count == needCost && needStacks > 0)
+                    needStacks -= 1u; /* last fragment stack frees one slot */
+                if (!vm_net_mock_gem_bag_can_accept_n_stacks(role, needStacks))
+                {
+                    result = 3;
+                    reason = "bag-full";
+                    message = "背包空间不足";
+                }
             }
         }
     }
 
     if (result == 1 && role != NULL && src != NULL)
     {
-        if (!vm_net_mock_role_consume_backpack_item(role, srcItemId, srcSeq, cost,
-                                                     &srcRemaining))
+        if (!vm_net_mock_role_consume_backpack_item(role, srcItemId, srcSeq,
+                                                     needCost, &srcRemaining))
         {
             result = 4;
             reason = "consume-failed";
             message = "扣除失败";
         }
-        else if (!vm_net_mock_role_add_backpack_item_to_role(
-                     role, destItemId, 1, 0, &destSeq, "gem-fragment-combine",
-                     NULL, 0))
-        {
-            (void)vm_net_mock_role_add_backpack_item_to_role(
-                role, srcItemId, cost, 0, NULL, "gem-fragment-combine-rollback",
-                NULL, 0);
-            result = 3;
-            reason = "grant-failed";
-            message = "背包空间不足";
-            srcRemaining = srcRemaining + cost;
-        }
         else
         {
-            dest = vm_net_mock_role_find_backpack_item(role, destItemId, destSeq);
-            destCount = dest ? dest->count : 1;
-            if (!vm_net_mock_role_db_save("gem-fragment-combine"))
-                vm_net_mock_role_mark_inventory_dirty("gem-fragment-combine");
-            reason = "fragment-combine-ok";
-            message = "合成成功";
+            bool grantOk = true;
+            for (i = 0; i < 3u; ++i)
+            {
+                u32 gid = 0;
+                u16 grantedSeq = 0;
+                if (typeCounts[i] == 0)
+                    continue;
+                gid = vm_net_mock_gem_item_id_for((u8)(i + 1u), 1);
+                if (gid == 0 ||
+                    !vm_net_mock_role_add_backpack_item_to_role(
+                        role, gid, typeCounts[i], 0, &grantedSeq,
+                        "gem-fragment-combine", NULL, 0))
+                {
+                    grantOk = false;
+                    break;
+                }
+                if (destSeq == 0)
+                    destSeq = grantedSeq;
+                if (destItemId == 0)
+                    destItemId = gid;
+            }
+            if (!grantOk)
+            {
+                (void)vm_net_mock_role_add_backpack_item_to_role(
+                    role, srcItemId, needCost, 0, NULL,
+                    "gem-fragment-combine-rollback", NULL, 0);
+                result = 3;
+                reason = "grant-failed";
+                message = "背包空间不足";
+                srcRemaining = srcRemaining + needCost;
+            }
+            else
+            {
+                dest = vm_net_mock_role_find_backpack_item(role, destItemId,
+                                                           destSeq);
+                /* times=1 仍回报该格堆叠数；批量回报本次产出颗数。 */
+                destCount = times > 1 ? times : (dest ? dest->count : 1);
+                if (!vm_net_mock_role_db_save("gem-fragment-combine"))
+                    vm_net_mock_role_mark_inventory_dirty("gem-fragment-combine");
+                reason = "fragment-combine-ok";
+                if (times > 1)
+                {
+                    snprintf(messageStore, sizeof(messageStore),
+                             "合成成功，获得%u颗", times);
+                    message = messageStore;
+                }
+                else
+                    message = "合成成功";
+            }
         }
     }
 
@@ -1163,6 +1242,7 @@ static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
         !vm_net_mock_put_object_u32(out, outCap, &pos, "destid", destItemId) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining", srcRemaining) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "destcount", destCount) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "times", times) ||
         !vm_net_mock_put_object_string(out, outCap, &pos, "message", message))
     {
         return 0;
@@ -1170,10 +1250,11 @@ static u32 vm_net_mock_build_gem_fragment_combine_response(const u8 *request,
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     printf("[info][network] mock_gem_fragment_combine seq=%u src=%u dest=%u "
-           "result=%u reason=%s resp=29/22\n",
-           srcSeq, srcItemId, destItemId, result, reason);
+           "times=%u result=%u reason=%s resp=29/22\n",
+           srcSeq, srcItemId, destItemId, times, result, reason);
     vm_autotest_note(
-        "mock_gem_fragment_combine seq=%u result=%u reason=%s evidence=pixijs-only-29/22\n",
-        srcSeq, result, reason);
+        "mock_gem_fragment_combine seq=%u times=%u result=%u reason=%s "
+        "evidence=pixijs-only-29/22\n",
+        srcSeq, times, result, reason);
     return pos;
 }

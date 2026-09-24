@@ -4937,6 +4937,11 @@ export function canCombineGemFragment(itemId: number, count: number): boolean {
   return isGemFragment(itemId) && count >= 3;
 }
 
+/** ≥6 碎片时背包多一个「批量合成」，一次出 floor(count/3) 颗随机 1 级。 */
+export function canBatchCombineGemFragment(itemId: number, count: number): boolean {
+  return canCombineGemFragment(itemId, count) && gemCombineBatchTimes(count) > 0;
+}
+
 export function canExchangeGemType(itemId: number, count: number): boolean {
   const g = parseGemItem(itemId);
   return !!g && g.level === 1 && count >= 2;
@@ -4988,9 +4993,11 @@ export function buildGemFromCrystal16Request(seq: number): Uint8Array {
   return b.finish();
 }
 
-export function buildGemFragmentCombineRequest(seq: number): Uint8Array {
+export function buildGemFragmentCombineRequest(seq: number, times = 1): Uint8Array {
   const b = new WtBuilder();
-  b.object(1, 29, 22).u16("seq", seq & 0xffff);
+  const obj = b.object(1, 29, 22).u16("seq", seq & 0xffff);
+  const n = times | 0;
+  if (n > 1) obj.u32("times", n >>> 0);
   return b.finish();
 }
 
