@@ -106,6 +106,18 @@ static u8 g_netMockShop17ListPending = 0;
  * the end of catalog.c defines the remaining role globals. */
 static bool g_vm_net_mock_role_position_dirty = false;
 static bool g_vm_net_mock_role_inventory_dirty = false;
+/* Admin 清档: block role/account relational writes until SQL wipe finishes. */
+static volatile int g_vm_mock_player_data_writes_blocked = 0;
+
+static void vm_mock_player_data_set_writes_blocked(bool blocked)
+{
+    g_vm_mock_player_data_writes_blocked = blocked ? 1 : 0;
+}
+
+static bool vm_mock_player_data_writes_are_blocked(void)
+{
+    return g_vm_mock_player_data_writes_blocked != 0;
+}
 
 typedef struct vm_mock_service_client_session vm_mock_service_client_session;
 
@@ -798,13 +810,15 @@ static bool vm_net_mock_battle_enemy_wire_to_index(u8 wireSlot,
 
     /*
      * subtype-10 player-on-right (Pixi/CBE): player wire 0, monsters wire 1..N
-     * → enemy index N-1.  Needed when battle insight forces enemies=3 on the
-     * hangup non-scene path (no live-node → 4/10).
+     * → enemy index N-1.  Must cover enemyCount==1 as well as 2|3 — the old
+     * `> 1` gate fell through to fallback-only mapping when insight/random
+     * rolls changed 3→1, so auto/hangup group skills lost live targets and
+     * the next tick looked like 普攻 (mp_fallback / empty operate).
      */
     {
         u8 enemyCount = vm_net_mock_battle_enemy_count_current();
 
-        if (playerOnRight && side == 1 && enemyCount > 1)
+        if (playerOnRight && side == 1 && enemyCount >= 1)
         {
             if (wireSlot >= 1 && wireSlot <= enemyCount)
             {
@@ -850,7 +864,7 @@ static u8 vm_net_mock_battle_first_alive_enemy_wire(bool playerOnRight,
     u8 enemyCount = vm_net_mock_battle_enemy_count_current();
 
     if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side) ||
-        (playerOnRight && side == 1 && enemyCount > 1))
+        (playerOnRight && side == 1 && enemyCount >= 1))
     {
         for (u8 enemyIndex = 0; enemyIndex < enemyCount && enemyIndex < 3; ++enemyIndex)
         {
@@ -898,7 +912,8 @@ static u8 vm_net_mock_battle_enemy_wire_for_index(u8 enemyIndex,
             return 3;
         return 0;
     }
-    if (playerOnRight && side == 1 && enemyCount > 1)
+    /* subtype-10: monsters are always wire 1..N for any N in 1..3. */
+    if (playerOnRight && side == 1 && enemyCount >= 1)
     {
         if (enemyIndex >= enemyCount)
             enemyIndex = (u8)(enemyCount - 1);
@@ -4996,6 +5011,10 @@ enum
 #define VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID 854u
 #define VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_DURABILITY 1u
 #define VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_SHOP_PRICE 100u
+/* Pixi 自定义：跨品重铸石 — 强化转移可跨品质；跨品质确认耗1；耐久1。 */
+#define VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID 855u
+#define VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_DURABILITY 1u
+#define VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_SHOP_PRICE 100u
 /* Initiator cooldown after a successful nearby force-PK start (or doll block). */
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC    (VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS / 1000u)

@@ -555,6 +555,11 @@ export function buildEnhanceCompareLines(
 export type EquipDetailOpts = {
   /** Worn panel screenshot omits 类型/职业. */
   omitTypeJob?: boolean;
+  /**
+   * Admin「允许镶嵌」/ gemSocketEnabled.
+   * false → skip 反伤/连击/复活 lines (default true when omitted).
+   */
+  showSocketGems?: boolean;
 };
 
 export function buildEquipDetailLines(
@@ -623,7 +628,8 @@ export function buildEquipDetailLines(
   lines.push(...enhanceLines(cat, enhance, it.enhanceAttrs));
 
   // 宝石孔仅强化 ≥ +16 可镶嵌；详情也只在这一档显示三行。
-  if ((enhance | 0) >= 16) {
+  // 后台关「允许镶嵌」时不展示词条（与装备栏隐藏「镶嵌」一致）。
+  if ((enhance | 0) >= 16 && opts.showSocketGems !== false) {
     const sg = it.socketGems;
     const gemLine = (label: string, lv: number) =>
       ({

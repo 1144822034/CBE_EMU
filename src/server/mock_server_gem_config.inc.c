@@ -1,7 +1,7 @@
 /* Gem socket runtime knobs (MySQL server_gem_config).
  * Included from mock_server_role.c near combat_formula so panel/helpers share
  * one cache. Defaults: max_gem_level=3, gem_percent_per_level=1,
- * crystal16_gem_count=5, crystal16_exchange_enabled=0. */
+ * crystal16_gem_count=5, crystal16_exchange_enabled=0, socket_embed_enabled=1. */
 
 enum
 {
@@ -28,6 +28,7 @@ typedef struct
     u8 gemPercentPerLevel;          /* default 1; admin 1..100 */
     u8 crystal16GemCount;           /* default 5; admin 1..20 gems per 916 */
     u8 crystal16ExchangeEnabled;    /* default 0; admin 0/1 gate for 29/21 */
+    u8 socketEmbedEnabled;          /* default 1; admin 0/1 gate for 29/17 */
 } vm_net_mock_gem_config;
 
 static vm_net_mock_gem_config g_vm_net_mock_gem_config;
@@ -42,6 +43,7 @@ static void vm_net_mock_gem_config_set_defaults(vm_net_mock_gem_config *cfg)
     cfg->gemPercentPerLevel = 1;
     cfg->crystal16GemCount = (u8)VM_NET_MOCK_GEM_CRYSTAL16_GRANT_DEFAULT;
     cfg->crystal16ExchangeEnabled = 0;
+    cfg->socketEmbedEnabled = 1;
 }
 
 static void vm_net_mock_gem_config_sanitize(vm_net_mock_gem_config *cfg)
@@ -62,6 +64,8 @@ static void vm_net_mock_gem_config_sanitize(vm_net_mock_gem_config *cfg)
         cfg->crystal16GemCount = (u8)VM_NET_MOCK_GEM_CRYSTAL16_GRANT_MAX;
     if (cfg->crystal16ExchangeEnabled > 1)
         cfg->crystal16ExchangeEnabled = 1;
+    if (cfg->socketEmbedEnabled > 1)
+        cfg->socketEmbedEnabled = 1;
 }
 
 static bool vm_net_mock_gem_config_row(void *contextValue, unsigned int columnCount,
@@ -73,6 +77,7 @@ static bool vm_net_mock_gem_config_row(void *contextValue, unsigned int columnCo
     u32 percent = 1;
     u32 crystalGrant = (u32)VM_NET_MOCK_GEM_CRYSTAL16_GRANT_DEFAULT;
     u32 crystalEnabled = 0;
+    u32 socketEmbed = 1;
 
     (void)columnCount;
     if (cfg == NULL || values == NULL || lengths == NULL || values[0] == NULL)
@@ -94,10 +99,16 @@ static bool vm_net_mock_gem_config_row(void *contextValue, unsigned int columnCo
         if (!vm_mock_mysql_parse_u32(values[3], lengths[3], &crystalEnabled))
             return false;
     }
+    if (columnCount >= 5 && values[4] != NULL)
+    {
+        if (!vm_mock_mysql_parse_u32(values[4], lengths[4], &socketEmbed))
+            return false;
+    }
     cfg->maxGemLevel = (u8)maxLevel;
     cfg->gemPercentPerLevel = (u8)percent;
     cfg->crystal16GemCount = (u8)crystalGrant;
     cfg->crystal16ExchangeEnabled = crystalEnabled ? 1u : 0u;
+    cfg->socketEmbedEnabled = socketEmbed ? 1u : 0u;
     return true;
 }
 
@@ -170,6 +181,7 @@ static bool vm_net_mock_gem_config_ensure_table(void)
             "gem_percent_per_level TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "crystal16_gem_count TINYINT UNSIGNED NOT NULL DEFAULT 5,"
             "crystal16_exchange_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "socket_embed_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(id)"
@@ -187,11 +199,17 @@ static bool vm_net_mock_gem_config_ensure_table(void)
             "crystal16_exchange_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0 "
             "AFTER crystal16_gem_count"))
         return false;
+    if (!vm_net_mock_gem_config_ensure_column(
+            "socket_embed_enabled",
+            "ALTER TABLE server_gem_config ADD COLUMN "
+            "socket_embed_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1 "
+            "AFTER crystal16_exchange_enabled"))
+        return false;
     if (!vm_mysql_exec(
             "INSERT IGNORE INTO server_gem_config "
             "(id,max_gem_level,gem_percent_per_level,crystal16_gem_count,"
-            "crystal16_exchange_enabled) "
-            "VALUES (1,3,1,5,0)"))
+            "crystal16_exchange_enabled,socket_embed_enabled) "
+            "VALUES (1,3,1,5,0,1)"))
         return false;
     return true;
 }
@@ -211,7 +229,7 @@ static void vm_net_mock_gem_config_load(bool force)
     }
     if (!vm_mysql_query(
             "SELECT max_gem_level,gem_percent_per_level,crystal16_gem_count,"
-            "crystal16_exchange_enabled "
+            "crystal16_exchange_enabled,socket_embed_enabled "
             "FROM server_gem_config WHERE id=1 LIMIT 1",
             vm_net_mock_gem_config_row, &g_vm_net_mock_gem_config))
     {
@@ -223,40 +241,45 @@ static void vm_net_mock_gem_config_load(bool force)
     g_vm_net_mock_gem_config_loaded = true;
     printf("[info][mock-admin] gem_config_load max_gem_level=%u "
            "gem_percent_per_level=%u crystal16_gem_count=%u "
-           "crystal16_exchange_enabled=%u\n",
+           "crystal16_exchange_enabled=%u socket_embed_enabled=%u\n",
            (u32)g_vm_net_mock_gem_config.maxGemLevel,
            (u32)g_vm_net_mock_gem_config.gemPercentPerLevel,
            (u32)g_vm_net_mock_gem_config.crystal16GemCount,
-           (u32)g_vm_net_mock_gem_config.crystal16ExchangeEnabled);
+           (u32)g_vm_net_mock_gem_config.crystal16ExchangeEnabled,
+           (u32)g_vm_net_mock_gem_config.socketEmbedEnabled);
 }
 
 static bool vm_net_mock_gem_config_admin_save(u8 maxGemLevel, u8 gemPercentPerLevel,
                                               u8 crystal16GemCount,
-                                              u8 crystal16ExchangeEnabled)
+                                              u8 crystal16ExchangeEnabled,
+                                              u8 socketEmbedEnabled)
 {
     vm_net_mock_gem_config cfg;
-    char query[640];
+    char query[768];
 
     vm_net_mock_gem_config_set_defaults(&cfg);
     cfg.maxGemLevel = maxGemLevel;
     cfg.gemPercentPerLevel = gemPercentPerLevel;
     cfg.crystal16GemCount = crystal16GemCount;
     cfg.crystal16ExchangeEnabled = crystal16ExchangeEnabled ? 1u : 0u;
+    cfg.socketEmbedEnabled = socketEmbedEnabled ? 1u : 0u;
     vm_net_mock_gem_config_sanitize(&cfg);
     if (!vm_net_mock_gem_config_ensure_table())
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_gem_config "
              "(id,max_gem_level,gem_percent_per_level,crystal16_gem_count,"
-             "crystal16_exchange_enabled) "
-             "VALUES (1,%u,%u,%u,%u) "
+             "crystal16_exchange_enabled,socket_embed_enabled) "
+             "VALUES (1,%u,%u,%u,%u,%u) "
              "ON DUPLICATE KEY UPDATE "
              "max_gem_level=VALUES(max_gem_level),"
              "gem_percent_per_level=VALUES(gem_percent_per_level),"
              "crystal16_gem_count=VALUES(crystal16_gem_count),"
-             "crystal16_exchange_enabled=VALUES(crystal16_exchange_enabled)",
+             "crystal16_exchange_enabled=VALUES(crystal16_exchange_enabled),"
+             "socket_embed_enabled=VALUES(socket_embed_enabled)",
              (u32)cfg.maxGemLevel, (u32)cfg.gemPercentPerLevel,
-             (u32)cfg.crystal16GemCount, (u32)cfg.crystal16ExchangeEnabled);
+             (u32)cfg.crystal16GemCount, (u32)cfg.crystal16ExchangeEnabled,
+             (u32)cfg.socketEmbedEnabled);
     if (!vm_mysql_exec(query))
     {
         printf("[error][mock-admin] gem_config save failed error=%s\n",
@@ -292,6 +315,11 @@ static u8 vm_net_mock_gem_crystal16_grant(void)
 static bool vm_net_mock_gem_crystal16_exchange_enabled(void)
 {
     return vm_net_mock_gem_config_get()->crystal16ExchangeEnabled != 0;
+}
+
+static bool vm_net_mock_gem_socket_embed_enabled(void)
+{
+    return vm_net_mock_gem_config_get()->socketEmbedEnabled != 0;
 }
 
 static u8 vm_net_mock_gem_clamp_level(u8 level)

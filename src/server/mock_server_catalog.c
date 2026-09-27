@@ -228,6 +228,12 @@ static bool g_vm_net_mock_eidolon_catalog_loaded = false;
 static bool g_vm_net_mock_eidolon_heal_effect_found = false;
 static u32 g_vm_net_mock_eidolon_heal_effect_index = 0;
 
+/* Defined in mock_server_catalog_extra.inc.c (included at file end). */
+static void vm_net_mock_catalog_extra_apply_to_shop_catalog(void);
+static void vm_net_mock_catalog_extra_apply_to_item_effect_catalog(void);
+static void vm_net_mock_catalog_extra_apply_to_equipment_catalog(void);
+static void vm_net_mock_catalog_extra_apply_to_skill_catalog(void);
+
 typedef struct
 {
     bool used;
@@ -257,6 +263,7 @@ static void vm_net_mock_ensure_star_sky_stone_catalog_item(void);
 static void vm_net_mock_ensure_rename_card_catalog_item(void);
 static void vm_net_mock_ensure_gold_scroll_catalog_item(void);
 static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void);
+static void vm_net_mock_ensure_cross_quality_recast_stone_catalog_item(void);
 static void vm_net_mock_ensure_gem_catalog_items(void);
 static void vm_net_mock_ensure_gold_scroll_item_effect(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
@@ -834,6 +841,7 @@ static u32 vm_net_mock_load_skill_catalog(void)
         printf("[info][network] mock_skill_catalog total=%u source=skill.dsh\n",
                g_vm_net_mock_skill_catalog_count);
     }
+    vm_net_mock_catalog_extra_apply_to_skill_catalog();
     return g_vm_net_mock_skill_catalog_count;
 }
 
@@ -1674,7 +1682,9 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_net_mock_ensure_rename_card_catalog_item();
     vm_net_mock_ensure_gold_scroll_catalog_item();
     vm_net_mock_ensure_crystal_extract_stone_catalog_item();
+    vm_net_mock_ensure_cross_quality_recast_stone_catalog_item();
     vm_net_mock_ensure_gem_catalog_items();
+    vm_net_mock_catalog_extra_apply_to_shop_catalog();
 
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
@@ -2391,6 +2401,7 @@ static u32 vm_net_mock_load_equipment_catalog(void)
         printf("[info][network] mock_equip_catalog total=%u source=equip.dsh\n",
                g_vm_net_mock_equipment_catalog_count);
     }
+    vm_net_mock_catalog_extra_apply_to_equipment_catalog();
     return g_vm_net_mock_equipment_catalog_count;
 }
 
@@ -2617,6 +2628,7 @@ static u32 vm_net_mock_load_item_effect_catalog(void)
                g_vm_net_mock_item_effect_catalog_count);
     }
     vm_net_mock_ensure_gold_scroll_item_effect();
+    vm_net_mock_catalog_extra_apply_to_item_effect_catalog();
     return g_vm_net_mock_item_effect_catalog_count;
 }
 
@@ -2689,6 +2701,83 @@ static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void)
             true, &err))
     {
         printf("[warn][network] mock_crystal_extract_stone_shop_seed_failed error=%s\n",
+               err ? err : "?");
+    }
+}
+
+/* Pixi 自定义 855 跨品重铸石：注入商城目录并默认上架（酷宝）. */
+static void vm_net_mock_ensure_cross_quality_recast_stone_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xbf\xe7\xc6\xb7\xd6\xd8\xd6\xfd\xca\xaf"; /* 跨品重铸石 */
+    static const u8 descGbk[] =
+        "\xc7\xbf\xbb\xaf\xd7\xaa\xd2\xc6\xca\xb1\xbf\xc9\xbf\xe7\xd7\xb0"
+        "\xb1\xb8\xc6\xb7\xd6\xca\xa1\xa3\xbf\xe7\xc6\xb7\xd6\xca\xc8\xb7"
+        "\xcf\xfb\xba\xc4\x31\xb8\xf6\xa3\xac\xcd\xac\xc6\xb7\xd6\xca\xb2"
+        "\xbb\xcf\xfb\xba\xc4\xa3\xbb\xc8\xd4\xd0\xe8\xcd\xac\xc0\xe0\xb2"
+        "\xbf\xce\xbb\xb2\xa2\xbf\xdb\xd6\xd8\xd6\xfd\xbd\xf0\xc7\xae\xa1"
+        "\xa3";
+        /* 强化转移时可跨装备品质。跨品质确认消耗1个，同品质不消耗；仍需同类部位并扣重铸金钱。 */
+    const char *err = NULL;
+    vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
+    u32 i = 0;
+
+    memset(&one, 0, sizeof(one));
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId ==
+            VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID, nameGbk,
+                sizeof(nameGbk) - 1, descGbk, sizeof(descGbk) - 1,
+                VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_SHOP_PRICE, 99, 1, 1,
+                false, 14))
+        {
+            printf("[warn][network] "
+                   "mock_cross_quality_recast_stone_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+    }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
+    {
+        printf("[info][network] mock_cross_quality_recast_stone_catalog_bound "
+               "item=%u price=%u enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    if (!vm_net_mock_shop_admin_save(
+            VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID,
+            item->price ? item->price
+                        : VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_SHOP_PRICE,
+            true, &err))
+    {
+        printf("[warn][network] "
+               "mock_cross_quality_recast_stone_shop_seed_failed error=%s\n",
                err ? err : "?");
     }
 }
@@ -2886,6 +2975,7 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 852: /* 角色改名卡：走 29/15 改名，禁止通用 7/1 */
     case 853: /* 打金心得：走自定义 7/1 时效，禁止当普通药 */
     case 854: /* 玄晶提炼石：走 29/16 装备提炼，禁止通用 7/1 */
+    case 855: /* 跨品重铸石：29/5|6 跨品质时消耗，禁止通用 7/1 */
     case 813: /* chest keys must not fall into generic 7/1 category-10 consume */
     case 814:
     case 815:
@@ -11572,3 +11662,5 @@ static bool vm_net_mock_add_auto_monster_catalog_item(const u8 *scene,
     return true;
 }
 
+
+#include "mock_server_catalog_extra.inc.c"

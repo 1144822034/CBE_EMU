@@ -3886,6 +3886,8 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
 
 #include "mock_server_combat_formula_config.inc.c"
 #include "mock_server_gem_config.inc.c"
+#include "mock_server_client_ui_config.inc.c"
+#include "mock_server_monster_global_config.inc.c"
 
 /* jobPrimary → panel/battle attack contribution percent (admin-configurable). */
 static u32 vm_net_mock_role_job_primary_attack_coeff_percent(u32 job)
@@ -4319,6 +4321,22 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
                                      vm_net_mock_gem_max_level()) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "crystal16ExchangeEnabled",
                                      vm_net_mock_gem_crystal16_exchange_enabled()
+                                         ? 1u
+                                         : 0u) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "gemSocketEnabled",
+                                     vm_net_mock_gem_socket_embed_enabled()
+                                         ? 1u
+                                         : 0u) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "washButtonEnabled",
+                                     vm_net_mock_client_ui_wash_button_enabled()
+                                         ? 1u
+                                         : 0u) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "wingStatusEnabled",
+                                     vm_net_mock_client_ui_wing_status_enabled()
+                                         ? 1u
+                                         : 0u) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "mountStatusEnabled",
+                                     vm_net_mock_client_ui_mount_status_enabled()
                                          ? 1u
                                          : 0u) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseStrength",
@@ -4820,6 +4838,7 @@ static void vm_net_mock_monster_stats_apply_combat_attr_multiplier(
     vm_net_mock_monster_stats *stats, u8 family)
 {
     u32 multiplier;
+    const vm_net_mock_monster_global_config *globalCfg;
 
     if (stats == NULL)
         return;
@@ -4836,6 +4855,23 @@ static void vm_net_mock_monster_stats_apply_combat_attr_multiplier(
     }
     if (family == (u8)VM_NET_MOCK_MONSTER_BOSS)
         stats->hp = vm_net_mock_u32_mul_sat(stats->hp, 5u);
+    /* Whole-server percent knobs (admin 怪物管理). Applied after level/Boss
+     * scale so scene HP and battle damage stay consistent. Admin list/edit
+     * still uses raw bases via _raw. */
+    globalCfg = vm_net_mock_monster_global_config_get();
+    if (globalCfg != NULL)
+    {
+        stats->hp = vm_net_mock_scale_u32_by_percent(stats->hp,
+                                                    globalCfg->hpPercent);
+        stats->attack = vm_net_mock_scale_u32_by_percent(
+            stats->attack, globalCfg->attackPercent);
+        stats->defense = vm_net_mock_scale_u32_by_percent(
+            stats->defense, globalCfg->defensePercent);
+        stats->exp = vm_net_mock_scale_u32_by_percent(
+            stats->exp, globalCfg->rewardExpPercent);
+        stats->gold = vm_net_mock_scale_u32_by_percent(
+            stats->gold, globalCfg->rewardMoneyPercent);
+    }
     if (stats->hp == 0)
         stats->hp = 1;
     if (stats->mp == 0)
@@ -6538,11 +6574,11 @@ static bool vm_net_mock_battle_skill_is_magical(
            skill->wisdomCoeff >= skill->agilityCoeff;
 }
 
-/* ?? (job 3) ????????????????????? */
+/* 进攻技能（物技 + 鬼道法术）一律必中；仅普攻仍检定闪躲。 */
 static bool vm_net_mock_battle_skill_ignores_dodge(
     const vm_net_mock_skill_catalog_item *skill)
 {
-    return vm_net_mock_battle_skill_is_magical(skill);
+    return skill != NULL;
 }
 
 static u32 vm_net_mock_role_active_combat_pill_attack_bonus_percent(
@@ -9379,6 +9415,14 @@ static bool vm_net_mock_role_db_save_relational_ex(
     u32 scoped_role_id = 0;
     mysql_error[0] = 0;
 
+    if (vm_mock_player_data_writes_are_blocked())
+    {
+        printf("[warn][mock-service] role_db_save_blocked reason=%s account=%s "
+               "evidence=admin-player-data-wipe\n",
+               reason ? reason : "-",
+               account_id && account_id[0] ? account_id : "-");
+        return false;
+    }
     if (db == NULL || !db_valid ||
         !vm_net_mock_mysql_account_hex_for(account_id, account_hex))
         return false;
@@ -13503,7 +13547,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
         itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
         itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
-        itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID)
+        itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID ||
+        itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID)
     {
         u32 freeSlots = role->backpackCapacity > itemCount
                             ? (u32)role->backpackCapacity - itemCount
@@ -13518,7 +13563,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                            itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
                            itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
                            itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
-                           itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID
+                           itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID ||
+                           itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID
                        ? VM_NET_MOCK_GOLD_SCROLL_DURABILITY
                        : VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY);
         const char *saveReason =
@@ -13538,16 +13584,19 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                           ? "backpack-add-gold-scroll"
                                                           : (itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID
                                                                  ? "backpack-add-crystal-extract-stone"
-                                                                 : "backpack-add-warehouse-pass")))))));
+                                                                 : (itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID
+                                                                        ? "backpack-add-cross-quality-recast-stone"
+                                                                        : "backpack-add-warehouse-pass"))))))));
 
-        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得 / 玄晶提炼石：耐久1，叠加入已有堆或新行。 */
+        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得 / 玄晶提炼石 / 跨品重铸石：耐久1，叠加入已有堆或新行。 */
         if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
             itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
             itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
             itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
             itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
             itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
-            itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID)
+            itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID ||
+            itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID)
         {
             vm_net_mock_backpack_item_state *existing =
                 vm_net_mock_role_find_backpack_item(role, itemId, 0);

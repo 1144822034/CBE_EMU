@@ -1213,12 +1213,22 @@ export class BattleScreen extends Container {
     const sk = this.skills.find((s) => s.id + 2 === op);
     const kind = (sk?.targetKind ?? 3) as SkillTargetKind;
     const name = sk?.name ?? "仙术";
+    const self = this.selfWire();
+    const firstEnemy = (): number | null => {
+      const wires = this.livingEnemyWires();
+      const w = wires[0] ?? battleTargetWire(this.state!);
+      // Offensive auto must never submit the player wire (subtype-10 wire 0 /
+      // count-skew battleTargetWire). Server then aborts → client 普攻.
+      return w === self ? (wires.find((x) => x !== self) ?? null) : w;
+    };
     // Same branches as fireSkill / confirm（自动不弹选目标 UI，取首个合法 wire）.
     if (skillNeedsTargetPick(kind)) {
-      const wires =
-        kind === 1 ? this.livingAllyWires() : this.livingEnemyWires();
-      this.selectedTargetWire =
-        wires[0] ?? (kind === 1 ? this.selfWire() : null);
+      if (kind === 1) {
+        this.selectedTargetWire =
+          this.livingAllyWires()[0] ?? this.selfWire();
+      } else {
+        this.selectedTargetWire = firstEnemy();
+      }
       if (this.selectedTargetWire == null) return false;
       this.noteOperateSubmitted(tip || `施展${name}…`);
       this.onSkill?.(op);
@@ -1229,11 +1239,10 @@ export class BattleScreen extends Container {
     } else if (kind === 2) {
       this.selectedTargetWire =
         this.livingAllyWires()[0] ?? this.selfWire();
-    } else if (kind === 4) {
-      this.selectedTargetWire =
-        this.livingEnemyWires()[0] ?? battleTargetWire(this.state);
     } else {
-      this.selectedTargetWire = this.livingEnemyWires()[0] ?? null;
+      // kind 3 (default) and 4 (敌群): first living enemy wire.
+      this.selectedTargetWire = firstEnemy();
+      if (this.selectedTargetWire == null) return false;
     }
     this.noteOperateSubmitted(tip || `施展${name}…`);
     this.onSkill?.(op);
@@ -1630,10 +1639,23 @@ export class BattleScreen extends Container {
 
   private livingEnemyWires(): number[] {
     if (!this.state) return [];
-    return this.candidateWires().filter((w) => {
+    const fromTable = this.candidateWires().filter((w) => {
       const u = battleUnitForWire(this.state!, w);
       return !!u && this.state!.left.includes(u) && u.hp > 0;
     });
+    if (fromTable.length) return fromTable;
+    /*
+     * Enemy-count / subtype transitions can desync candidateWires from left[].
+     * Fall back to per-seat wire lookup so hangup/auto group skills still get
+     * a living monster index instead of failing open into 普攻.
+     */
+    const out: number[] = [];
+    for (const u of this.state.left) {
+      if (u.hp <= 0) continue;
+      const w = this.wireForUnit(u);
+      if (w != null) out.push(w);
+    }
+    return out;
   }
 
   private livingAllyWires(): number[] {
@@ -1743,11 +1765,12 @@ export class BattleScreen extends Container {
     } else if (kind === 2) {
       this.selectedTargetWire =
         this.livingAllyWires()[0] ?? this.selfWire();
-    } else if (kind === 4) {
-      this.selectedTargetWire =
-        this.livingEnemyWires()[0] ?? battleTargetWire(this.state);
     } else {
-      this.selectedTargetWire = this.livingEnemyWires()[0] ?? null;
+      const self = this.selfWire();
+      const wires = this.livingEnemyWires();
+      let w = wires[0] ?? battleTargetWire(this.state);
+      if (w === self) w = wires.find((x) => x !== self) ?? w;
+      this.selectedTargetWire = w;
     }
     this.noteOperateSubmitted(`施展${name}…`);
     this.onSkill?.(operate);

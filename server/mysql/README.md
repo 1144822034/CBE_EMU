@@ -153,6 +153,16 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_monst
 后台“怪物管理”中保存一次该怪物；新保存会以多掉落表为唯一来源，并清空旧列，
 避免已删除的旧掉落在重启后被重新导入。
 
+已有数据库升级到全服怪物百分比时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_monster_global_config.sql
+```
+
+脚本新增单例表 `server_monster_global_config`（默认全 100）。服务启动时也会
+自动 `CREATE TABLE IF NOT EXISTS` 并种子一行；后台「怪物管理」页顶部可改
+血量/攻击/防御/掉落概率/经验/金钱百分比。
+
 已有数据库升级到装备强化功能时，停止 mock-service 后执行：
 
 ```powershell

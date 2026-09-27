@@ -1,5 +1,9 @@
 import { decodeGbk, parseDshInt, readU32LE } from "./binary";
 import { fetchResourceBytes } from "./loader";
+import {
+  loadCustomCatalog,
+  mergeCustomIntoSkillCatalog,
+} from "./customCatalog";
 
 /** skill.dsh 目标指向 (col 10): 0己 / 1单友 / 2友群 / 3单敌 / 4敌群 */
 export type SkillTargetKind = 0 | 1 | 2 | 3 | 4;
@@ -36,6 +40,7 @@ export type BattleSkillRow = {
   hpChange?: number;
 };
 
+let dshBase: SkillCatalogItem[] | null = null;
 let cached: SkillCatalogItem[] | null = null;
 
 function clampTargetKind(v: number): SkillTargetKind {
@@ -112,9 +117,16 @@ export function isMapHealSkill(sk: {
 }
 
 export async function loadSkillCatalog(): Promise<SkillCatalogItem[]> {
-  if (cached) return cached;
-  const raw = await fetchResourceBytes("skill.dsh");
-  cached = parseSkillCatalogBytes(raw);
+  if (!dshBase) {
+    const raw = await fetchResourceBytes("skill.dsh");
+    dshBase = parseSkillCatalogBytes(raw);
+  }
+  try {
+    const custom = await loadCustomCatalog();
+    cached = mergeCustomIntoSkillCatalog(dshBase, custom);
+  } catch {
+    cached = dshBase;
+  }
   return cached;
 }
 

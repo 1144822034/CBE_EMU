@@ -307,3 +307,160 @@ bool vm_mock_maintenance_admin_stop(char *msgOut, size_t msgCap)
     printf("[info][mock-service] maintenance_stop\n");
     return true;
 }
+
+static void vm_mock_wipe_kick_all_online_no_flush(void)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+    u32 kicked = 0;
+
+    while (session != NULL)
+    {
+        vm_mock_service_client_session *next = session->next;
+
+        if (session->accountId[0] != 0)
+        {
+            /* Do not flush — wiped SQL must not be rewritten from dirty heap. */
+            session->maintenanceKickPending = true;
+            vm_mock_service_session_mark_offline(session, "player-data-wipe");
+            vm_mock_service_session_unbind_account(session);
+            ++kicked;
+        }
+        session = next;
+    }
+    printf("[info][mock-service] wipe_kick_no_flush count=%u\n", kicked);
+}
+
+static bool vm_mock_wipe_delete_table(const char *tableName, bool required,
+                                     char *errOut, size_t errCap)
+{
+    char query[192];
+
+    if (tableName == NULL || tableName[0] == 0)
+        return false;
+    snprintf(query, sizeof(query), "DELETE FROM `%s`", tableName);
+    if (vm_mysql_exec(query))
+        return true;
+    if (!required)
+    {
+        printf("[warn][mock-service] wipe_delete_optional_failed table=%s\n",
+               tableName);
+        return true;
+    }
+    if (errOut && errCap > 0)
+        snprintf(errOut, errCap, "清除表 %s 失败", tableName);
+    return false;
+}
+
+bool vm_mock_wipe_all_player_data_admin(char *msgOut, size_t msgCap)
+{
+    static const char *const kRequiredTables[] = {
+        "wcoin_recharge_orders",
+        "account_role_equipment",
+        "account_role_equipment_durability",
+        "account_role_backpack",
+        "account_role_skills",
+        "account_role_warehouse",
+        "account_role_warehouse_bank",
+        "account_role_item_effects",
+        "account_role_offline_practise",
+        "account_role_offline_exp",
+        "account_role_practise",
+        "account_role_training_books",
+        "account_role_monster_reward_cooldowns",
+        "account_role_battle_entry_state",
+        "account_role_rapid_battle_entry_audit",
+        "account_role_tasks",
+        "account_role_npc_task_daily",
+        "account_role_ring_daily",
+        "account_role_enhance_wash_record",
+        "account_role_vitality",
+        "account_roles",
+        "account_role_state",
+        "friendships",
+        "enmity_kills",
+        "guild_applications",
+        "guild_members",
+        "guilds",
+        "world_chat_messages",
+        "server_arena_scores",
+        "server_arena_titles",
+        "server_arena_wager_members",
+        "server_arena_wager_challenges",
+        "server_arena_sessions",
+        "server_ladder_progress",
+        "server_ladder_daily",
+        "server_guess_bets",
+        "server_guess_rounds",
+        "server_auction_bids",
+        "server_auction_claims",
+        "server_auction_listings",
+        "server_registration_daily",
+        "role_id_sequence",
+        "accounts",
+    };
+    static const char *const kOptionalTables[] = {
+        "account_role_enhance_crystal_spent",
+        "account_role_tianxia_worship_daily",
+        "account_cultivation_books",
+        "account_role_state_payload_backup",
+        "server_fruit_session",
+        "server_instance_enter_daily",
+    };
+    char err[192];
+    u32 i = 0;
+
+    vm_mock_maintenance_ensure_loaded();
+    if (!g_vm_mock_maintenance.active)
+    {
+        if (msgOut && msgCap > 0)
+            snprintf(msgOut, msgCap, "请先开启维护模式，再执行清档");
+        return false;
+    }
+
+    memset(err, 0, sizeof(err));
+    vm_mock_player_data_set_writes_blocked(true);
+    vm_mock_wipe_kick_all_online_no_flush();
+    vm_mock_service_account_purge_all_memory_for_wipe();
+
+    if (!vm_mysql_exec("SET FOREIGN_KEY_CHECKS=0"))
+    {
+        vm_mock_player_data_set_writes_blocked(false);
+        if (msgOut && msgCap > 0)
+            snprintf(msgOut, msgCap, "关闭外键检查失败");
+        return false;
+    }
+
+    for (i = 0; i < (u32)(sizeof(kOptionalTables) / sizeof(kOptionalTables[0])); ++i)
+    {
+        if (!vm_mock_wipe_delete_table(kOptionalTables[i], false, err, sizeof(err)))
+        {
+            (void)vm_mysql_exec("SET FOREIGN_KEY_CHECKS=1");
+            vm_mock_player_data_set_writes_blocked(false);
+            if (msgOut && msgCap > 0)
+                snprintf(msgOut, msgCap, "%s", err[0] ? err : "清档失败");
+            return false;
+        }
+    }
+    for (i = 0; i < (u32)(sizeof(kRequiredTables) / sizeof(kRequiredTables[0])); ++i)
+    {
+        if (!vm_mock_wipe_delete_table(kRequiredTables[i], true, err, sizeof(err)))
+        {
+            (void)vm_mysql_exec("SET FOREIGN_KEY_CHECKS=1");
+            vm_mock_player_data_set_writes_blocked(false);
+            if (msgOut && msgCap > 0)
+                snprintf(msgOut, msgCap, "%s", err[0] ? err : "清档失败");
+            return false;
+        }
+    }
+
+    (void)vm_mysql_exec("ALTER TABLE role_id_sequence AUTO_INCREMENT=10001");
+    (void)vm_mysql_exec("SET FOREIGN_KEY_CHECKS=1");
+    vm_mock_player_data_set_writes_blocked(false);
+
+    if (msgOut && msgCap > 0)
+        snprintf(msgOut, msgCap,
+                 "已清除全部玩家相关数据（账号/角色/背包/社交/公会/竞拍等），"
+                 "配置与内容表保留；角色 ID 序列已重置");
+    printf("[info][mock-service] wipe_all_player_data ok\n");
+    return true;
+}

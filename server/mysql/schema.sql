@@ -897,6 +897,18 @@ CREATE TABLE IF NOT EXISTS `server_auction_claims` (
   KEY `idx_auction_claims_role` (`role_id`, `claimed`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `server_monster_global_config` (
+  `id` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `hp_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `attack_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `defense_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `drop_rate_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `reward_exp_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `reward_money_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `server_combat_formula_config` (
   `id` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `panel_defense_base` INT UNSIGNED NOT NULL DEFAULT 4,

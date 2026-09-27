@@ -34,8 +34,8 @@ monster → player skill (2026-08-08): same resist % only — do NOT apply 护�
   (NA counter still uses defense soft curve; skill remits with ROLE_RESIST then ×mult)
 ```
 
-法术判定：`skill.dsh` 中 `智慧系数` 非零且 ≥ `力量系数`、`敏捷系数`（如绯炎幻法）——仅用于**忽略闪躲**；
-进攻技能减伤一律走抗性（2026-08-03）。玩家确认：**鬼道法术伤害忽略闪躲**；普攻与物技照常检定闪躲。
+法术判定：`skill.dsh` 中 `智慧系数` 非零且 ≥ `力量系数`、`敏捷系数`（如绯炎幻法）——用于日志/分类；
+进攻技能减伤一律走抗性（2026-08-03）。**全部进攻技能（物技+法术）忽略闪躲、必中**（2026-09-27）；仅普攻仍检定闪躲。
 
 怪物次级属性（暂无 `automonster` 列；抗性同样按百分比、上限 70% 减免）：
 

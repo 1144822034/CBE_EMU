@@ -242,9 +242,11 @@ static void vm_mock_admin_append_tabs(vm_mock_admin_text *page, const char *acti
         {"tasks", "任务管理"},
         {"monsters", "怪物管理"},
         {"shop", "商品管理"},
+        {"catalog", "目录管理"},
         {"chests", "宝箱奖励"},
         {"enhance", "强化配置"},
         {"gem", "宝石配置"},
+        {"clientui", "客户端UI"},
         {"combat", "战斗公式"},
         {"arena", "比武"},
         {"worldboss", "世界BOSS"},
@@ -7027,7 +7029,9 @@ static void vm_mock_admin_handle_gateway_zone_action(
     vm_mock_service_socket client, const char *action, const char *body);
 
 static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
-                                            const char *query);
+                                             const char *query);
+static void vm_mock_admin_render_catalog_page(char *response, size_t responseCap,
+                                               const char *query);
 static void vm_mock_admin_handle_chest_action(vm_mock_service_socket client,
                                               const char *action,
                                               const char *body);
@@ -7041,6 +7045,11 @@ static void vm_mock_admin_render_gem_page(char *response, size_t responseCap,
 static void vm_mock_admin_handle_gem_action(vm_mock_service_socket client,
                                             const char *action,
                                             const char *body);
+static void vm_mock_admin_render_client_ui_page(char *response, size_t responseCap,
+                                                const char *query);
+static void vm_mock_admin_handle_client_ui_action(vm_mock_service_socket client,
+                                                  const char *action,
+                                                  const char *body);
 static void vm_mock_admin_render_combat_page(char *response, size_t responseCap,
                                              const char *query);
 static void vm_mock_admin_handle_combat_action(vm_mock_service_socket client,
@@ -7144,6 +7153,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_shop_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "catalog") == 0)
+    {
+        vm_mock_admin_render_catalog_page(response, responseCap, query);
+        return;
+    }
     if (strcmp(tab, "chests") == 0)
     {
         vm_mock_admin_render_chest_page(response, responseCap, query);
@@ -7157,6 +7171,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "gem") == 0)
     {
         vm_mock_admin_render_gem_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "clientui") == 0)
+    {
+        vm_mock_admin_render_client_ui_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "combat") == 0)
@@ -8174,8 +8193,10 @@ static bool vm_mock_admin_form_u32_or_default(const char *body, const char *fiel
 }
 
 #include "web_admin_chests.inc.c"
+#include "web_admin_catalog.inc.c"
 #include "web_admin_enhance.inc.c"
 #include "web_admin_gem.inc.c"
+#include "web_admin_client_ui.inc.c"
 #include "web_admin_combat.inc.c"
 #include "web_admin_arena.inc.c"
 #include "web_admin_world_boss.inc.c"
@@ -8374,6 +8395,44 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
         return;
     }
     vm_mock_admin_redirect_tasks(client, taskId, "ok", "任务定义已保存并立即生效");
+}
+
+static void vm_mock_admin_handle_monster_global_action(
+    vm_mock_service_socket client, const char *action, const char *body)
+{
+    vm_net_mock_monster_global_config cfg;
+
+    memset(&cfg, 0, sizeof(cfg));
+    if (strcmp(action, "save-monster-global-config") != 0)
+    {
+        vm_mock_admin_redirect_monster_global(client, "error", "未知操作");
+        return;
+    }
+    if (!vm_mock_admin_form_u32(body, "hp_percent", 1000u, &cfg.hpPercent) ||
+        cfg.hpPercent == 0 ||
+        !vm_mock_admin_form_u32(body, "attack_percent", 1000u,
+                                &cfg.attackPercent) ||
+        cfg.attackPercent == 0 ||
+        !vm_mock_admin_form_u32(body, "defense_percent", 1000u,
+                                &cfg.defensePercent) ||
+        !vm_mock_admin_form_u32(body, "drop_rate_percent", 1000u,
+                                &cfg.dropRatePercent) ||
+        !vm_mock_admin_form_u32(body, "reward_exp_percent", 1000u,
+                                &cfg.rewardExpPercent) ||
+        !vm_mock_admin_form_u32(body, "reward_money_percent", 1000u,
+                                &cfg.rewardMoneyPercent))
+    {
+        vm_mock_admin_redirect_monster_global(
+            client, "error",
+            "百分比须为整数：血量/攻击 1–1000，其余 0–1000");
+        return;
+    }
+    if (vm_net_mock_monster_global_config_admin_save(&cfg))
+        vm_mock_admin_redirect_monster_global(client, "ok",
+                                              "全服怪物百分比已保存并立即生效");
+    else
+        vm_mock_admin_redirect_monster_global(client, "error",
+                                              "保存全服怪物百分比失败");
 }
 
 static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
@@ -10779,6 +10838,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_task_action(client, action, body);
         return;
     }
+    if (strcmp(action, "save-monster-global-config") == 0)
+    {
+        vm_mock_admin_handle_monster_global_action(client, action, body);
+        return;
+    }
     if (strcmp(action, "save-monster") == 0 ||
         strcmp(action, "reset-monster") == 0 ||
         strcmp(action, "create-monster") == 0 ||
@@ -10798,6 +10862,19 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     if (strcmp(action, "save-shop-item") == 0)
     {
         vm_mock_admin_handle_shop_action(client, body);
+        return;
+    }
+    if (strcmp(action, "create-catalog-item") == 0 ||
+        strcmp(action, "save-catalog-item") == 0 ||
+        strcmp(action, "delete-catalog-item") == 0 ||
+        strcmp(action, "create-catalog-equip") == 0 ||
+        strcmp(action, "save-catalog-equip") == 0 ||
+        strcmp(action, "delete-catalog-equip") == 0 ||
+        strcmp(action, "create-catalog-skill") == 0 ||
+        strcmp(action, "save-catalog-skill") == 0 ||
+        strcmp(action, "delete-catalog-skill") == 0)
+    {
+        vm_mock_admin_handle_catalog_action(client, action, body);
         return;
     }
     if (strcmp(action, "chest-upsert") == 0 ||
@@ -10827,6 +10904,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_gem_action(client, action, body);
         return;
     }
+    if (strcmp(action, "save-client-ui-config") == 0)
+    {
+        vm_mock_admin_handle_client_ui_action(client, action, body);
+        return;
+    }
     if (strcmp(action, "save-combat-formula") == 0)
     {
         vm_mock_admin_handle_combat_action(client, action, body);
@@ -10849,7 +10931,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         return;
     }
     if (strcmp(action, "maintenance-start") == 0 ||
-        strcmp(action, "maintenance-stop") == 0)
+        strcmp(action, "maintenance-stop") == 0 ||
+        strcmp(action, "wipe-all-player-data") == 0)
     {
         vm_mock_admin_handle_maintenance_action(client, action, body);
         return;
@@ -11461,6 +11544,215 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             memcpy(json + jsonLen, piece, (size_t)pieceLen);
             jsonLen += (size_t)pieceLen;
             ++written;
+        }
+        if (ok && jsonLen + 4u < jsonCap)
+        {
+            memcpy(json + jsonLen, "]}\n", 3);
+            jsonLen += 3;
+            json[jsonLen] = 0;
+            vm_mock_admin_send_response(client, "200 OK",
+                                        "application/json; charset=utf-8",
+                                        cors, json);
+            free(json);
+            return 1;
+        }
+        free(json);
+        vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                    "application/json; charset=utf-8", cors,
+                                    "{\"ok\":false,\"error\":\"encode\"}\n");
+        return 0;
+    }
+    /* Public custom catalog for Pixi (admin-created item/equip/skill extras). */
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, "/api/custom-catalog") == 0)
+    {
+        char *json = NULL;
+        size_t jsonCap = 0;
+        size_t jsonLen = 0;
+        int ok = 1;
+        const char *cors = "Access-Control-Allow-Origin: *\r\n";
+        u32 itemWritten = 0;
+        u32 equipWritten = 0;
+        u32 skillWritten = 0;
+
+        (void)vm_net_mock_catalog_extra_db_force_reload();
+        jsonCap = 512u +
+                  (size_t)g_vm_net_mock_item_catalog_extra_count * 320u +
+                  (size_t)g_vm_net_mock_equip_catalog_extra_count * 360u +
+                  (size_t)g_vm_net_mock_skill_catalog_extra_count * 280u;
+        if (jsonCap < 1024u)
+            jsonCap = 1024u;
+        json = (char *)malloc(jsonCap);
+        if (json == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        "application/json; charset=utf-8", cors,
+                                        "{\"ok\":false,\"error\":\"oom\"}\n");
+            return 0;
+        }
+        jsonLen = 0;
+        {
+            char head[48];
+            int headLen = snprintf(head, sizeof(head),
+                                   "{\"rev\":%u,\"items\":[",
+                                   g_vm_net_mock_catalog_extra_rev);
+            if (headLen <= 0 || (size_t)headLen >= sizeof(head) ||
+                (size_t)headLen >= jsonCap)
+            {
+                free(json);
+                vm_mock_admin_send_response(
+                    client, "500 Internal Server Error",
+                    "application/json; charset=utf-8", cors,
+                    "{\"ok\":false,\"error\":\"encode\"}\n");
+                return 0;
+            }
+            memcpy(json, head, (size_t)headLen);
+            jsonLen = (size_t)headLen;
+        }
+        for (u32 i = 0; ok && i < g_vm_net_mock_item_catalog_extra_count; ++i)
+        {
+            const vm_net_mock_item_catalog_extra_row *row =
+                &g_vm_net_mock_item_catalog_extra[i];
+            char nameUtf8[128];
+            char descUtf8[384];
+            char nameEsc[256];
+            char descEsc[768];
+            char piece[1200];
+            int pieceLen;
+
+            memset(nameUtf8, 0, sizeof(nameUtf8));
+            memset(descUtf8, 0, sizeof(descUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->name, nameUtf8, sizeof(nameUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->description, descUtf8,
+                                          sizeof(descUtf8));
+            if (!vm_mock_admin_json_escape(nameUtf8, nameEsc, sizeof(nameEsc)) ||
+                !vm_mock_admin_json_escape(descUtf8, descEsc, sizeof(descEsc)))
+            {
+                ok = 0;
+                break;
+            }
+            pieceLen = snprintf(
+                piece, sizeof(piece),
+                "%s{\"id\":%u,\"name\":\"%s\",\"desc\":\"%s\",\"category\":%u,"
+                "\"level\":%u,\"stack\":%u,\"consumeMode\":%u,"
+                "\"durationMinutes\":%u,\"hp\":%u,\"mp\":%u,\"exp\":%u,"
+                "\"questLink\":%u,\"bindAttr\":%u,\"visual\":%u,\"price\":%u,"
+                "\"coolPrice\":%u,\"shopEnabled\":%u}",
+                itemWritten ? "," : "", row->itemId, nameEsc, descEsc,
+                row->category, row->levelRequired, row->stack, row->consumeMode,
+                row->durationMinutes, row->hp, row->mp, row->exp, row->questLink,
+                row->bindAttr, row->visual, row->price, row->coolPrice,
+                row->shopEnabled ? 1u : 0u);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 64u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++itemWritten;
+        }
+        if (ok && jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "],\"equips\":[", 12);
+            jsonLen += 12;
+        }
+        else
+            ok = 0;
+        for (u32 i = 0; ok && i < g_vm_net_mock_equip_catalog_extra_count; ++i)
+        {
+            const vm_net_mock_equip_catalog_extra_row *row =
+                &g_vm_net_mock_equip_catalog_extra[i];
+            char nameUtf8[128];
+            char descUtf8[384];
+            char nameEsc[256];
+            char descEsc[768];
+            char piece[1400];
+            int pieceLen;
+
+            memset(nameUtf8, 0, sizeof(nameUtf8));
+            memset(descUtf8, 0, sizeof(descUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->name, nameUtf8, sizeof(nameUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->description, descUtf8,
+                                          sizeof(descUtf8));
+            if (!vm_mock_admin_json_escape(nameUtf8, nameEsc, sizeof(nameEsc)) ||
+                !vm_mock_admin_json_escape(descUtf8, descEsc, sizeof(descEsc)))
+            {
+                ok = 0;
+                break;
+            }
+            pieceLen = snprintf(
+                piece, sizeof(piece),
+                "%s{\"id\":%u,\"name\":\"%s\",\"desc\":\"%s\",\"category\":%u,"
+                "\"level\":%u,\"quality\":%u,\"durabilityMax\":%u,\"attack\":%u,"
+                "\"armor\":%u,\"hp\":%u,\"mp\":%u,\"strength\":%u,\"agility\":%u,"
+                "\"wisdom\":%u,\"dodge\":%u,\"hit\":%u,\"crit\":%u,\"resist\":%u,"
+                "\"price\":%u,\"shopEnabled\":%u}",
+                equipWritten ? "," : "", row->itemId, nameEsc, descEsc,
+                row->category, row->levelRequired, row->quality,
+                row->durabilityMax, row->bonus.attack, row->bonus.armor,
+                row->bonus.hp, row->bonus.mp, row->bonus.strength,
+                row->bonus.agility, row->bonus.wisdom, row->bonus.dodge,
+                row->bonus.hit, row->bonus.crit, row->bonus.resist, row->price,
+                row->shopEnabled ? 1u : 0u);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 64u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++equipWritten;
+        }
+        if (ok && jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "],\"skills\":[", 12);
+            jsonLen += 12;
+        }
+        else
+            ok = 0;
+        for (u32 i = 0; ok && i < g_vm_net_mock_skill_catalog_extra_count; ++i)
+        {
+            const vm_net_mock_skill_catalog_extra_row *row =
+                &g_vm_net_mock_skill_catalog_extra[i];
+            char nameUtf8[128];
+            char descUtf8[384];
+            char nameEsc[256];
+            char descEsc[768];
+            char piece[1200];
+            int pieceLen;
+
+            memset(nameUtf8, 0, sizeof(nameUtf8));
+            memset(descUtf8, 0, sizeof(descUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->name, nameUtf8, sizeof(nameUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->description, descUtf8,
+                                          sizeof(descUtf8));
+            if (!vm_mock_admin_json_escape(nameUtf8, nameEsc, sizeof(nameEsc)) ||
+                !vm_mock_admin_json_escape(descUtf8, descEsc, sizeof(descEsc)))
+            {
+                ok = 0;
+                break;
+            }
+            pieceLen = snprintf(
+                piece, sizeof(piece),
+                "%s{\"id\":%u,\"name\":\"%s\",\"desc\":\"%s\",\"effectIndex\":%u,"
+                "\"level\":%u,\"rawJob\":%u,\"learnPrice\":%u,\"useLimit\":%u,"
+                "\"targetKind\":%u,\"mpCost\":%u,\"hpChange\":%d}",
+                skillWritten ? "," : "", row->skillId, nameEsc, descEsc,
+                row->effectIndex, row->levelRequired, row->rawJob,
+                row->learnPrice, row->useLimit, row->targetDirection,
+                row->mpCost, row->hpChange);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 64u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++skillWritten;
         }
         if (ok && jsonLen + 4u < jsonCap)
         {
@@ -13006,7 +13298,8 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         (strcmp(target, "/api/monster-levels") == 0 ||
          strcmp(target, "/api/world-boss-active") == 0 ||
          strcmp(target, "/api/npc-scenes") == 0 ||
-         strcmp(target, "/api/zones") == 0))
+         strcmp(target, "/api/zones") == 0 ||
+         strcmp(target, "/api/custom-catalog") == 0))
     {
         g_vm_mock_admin_protocol_lock_depth = 0;
         g_vm_mock_admin_protocol_holder_label[0] = 0;

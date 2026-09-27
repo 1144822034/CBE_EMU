@@ -1687,6 +1687,8 @@ function enhanceWashFailMessage(result: number): string {
       return "档次未解锁";
     case 6:
       return "金钱不足";
+    case 7:
+      return "洗练未开放";
     default:
       return "洗练失败";
   }
@@ -2048,6 +2050,8 @@ function starSkyStoneWashResetFailMessage(result: number): string {
       return "扣除星空石失败";
     case 7:
       return "该档洗练次数已为0";
+    case 8:
+      return "洗练未开放";
     default:
       return "重置失败";
   }
@@ -2174,6 +2178,21 @@ export const CRYSTAL_EXTRACT_STONE_ITEM_ID = 854;
 
 export function isCrystalExtractStone(itemId: number): boolean {
   return (itemId | 0) === CRYSTAL_EXTRACT_STONE_ITEM_ID;
+}
+
+/** Pixi 自定义 855 跨品重铸石 — 强化转移可跨品质；跨品质确认消耗1个。 */
+export const CROSS_QUALITY_RECAST_STONE_ITEM_ID = 855;
+
+export function isCrossQualityRecastStone(itemId: number): boolean {
+  return (itemId | 0) === CROSS_QUALITY_RECAST_STONE_ITEM_ID;
+}
+
+export function bagHasCrossQualityRecastStone(
+  bag: { itemId: number; count: number }[],
+): boolean {
+  return bag.some(
+    (it) => isCrossQualityRecastStone(it.itemId) && (it.count | 0) > 0,
+  );
 }
 
 export type CrystalExtractResult = {
@@ -3818,6 +3837,14 @@ export type CharacterStats = {
   maxGemLevel: number;
   /** Admin gate for 916 → Lv1 gems (29/21). 0 = closed. */
   crystal16ExchangeEnabled: number;
+  /** Admin gate for +16 worn embed (29/17). 0 = hide「镶嵌」. */
+  gemSocketEnabled: number;
+  /** Admin: show bag/enhance「洗练」. 0 = hide + reject wash ops. */
+  washButtonEnabled: number;
+  /** Admin: map-corner「翅」status badge. 0 = hide. */
+  wingStatusEnabled: number;
+  /** Admin: map-corner「骑」status badge. 0 = hide. */
+  mountStatusEnabled: number;
   baseStrength: number;
   baseAgility: number;
   baseWisdom: number;
@@ -3926,6 +3953,45 @@ export function enrichBagRow(
     ...(kind === "equip" && enhanceAttrs && enhanceAttrs.length
       ? { enhanceAttrs }
       : {}),
+  };
+}
+
+/**
+ * Overlay live item/equip catalog fields onto an existing bag/worn row.
+ * Used after late custom-catalog fetch so `#id` placeholders become real names.
+ */
+export function overlayBagItemFromCatalog(it: BagItem): BagItem {
+  const cat = lookupItemSync(it.itemId);
+  if (!cat) return it;
+  const usable = !!(
+    cat.kind === "item" &&
+    (cat.category === 10 ||
+      cat.hpChange ||
+      cat.mpChange ||
+      cat.expChange ||
+      cat.consumable)
+  );
+  const nextEquipSlot = cat.equipSlot ?? it.equipSlot;
+  if (
+    it.name === cat.name &&
+    it.quality === cat.quality &&
+    it.kind === cat.kind &&
+    it.category === cat.category &&
+    it.desc === cat.desc &&
+    it.usable === (cat.kind === "item" ? usable : false) &&
+    it.equipSlot === nextEquipSlot
+  ) {
+    return it;
+  }
+  return {
+    ...it,
+    name: cat.name,
+    quality: cat.quality,
+    kind: cat.kind,
+    category: cat.category,
+    desc: cat.desc,
+    usable: cat.kind === "item" ? usable : false,
+    equipSlot: nextEquipSlot,
   };
 }
 
@@ -4471,6 +4537,28 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
     revivePct: fieldU32(obj, "revivePct"),
     maxGemLevel: fieldU32(obj, "maxGemLevel") || 3,
     crystal16ExchangeEnabled: fieldU32(obj, "crystal16ExchangeEnabled") ? 1 : 0,
+    /* Omitted packet → default ON (matches server_gem_config default). */
+    gemSocketEnabled: obj.fields.some((f) => f.name === "gemSocketEnabled")
+      ? fieldU32(obj, "gemSocketEnabled")
+        ? 1
+        : 0
+      : 1,
+    /* Omitted packet → default ON (matches server defaults). */
+    washButtonEnabled: obj.fields.some((f) => f.name === "washButtonEnabled")
+      ? fieldU32(obj, "washButtonEnabled")
+        ? 1
+        : 0
+      : 1,
+    wingStatusEnabled: obj.fields.some((f) => f.name === "wingStatusEnabled")
+      ? fieldU32(obj, "wingStatusEnabled")
+        ? 1
+        : 0
+      : 1,
+    mountStatusEnabled: obj.fields.some((f) => f.name === "mountStatusEnabled")
+      ? fieldU32(obj, "mountStatusEnabled")
+        ? 1
+        : 0
+      : 1,
     baseStrength: fieldU32(obj, "baseStrength"),
     baseAgility: fieldU32(obj, "baseAgility"),
     baseWisdom: fieldU32(obj, "baseWisdom"),

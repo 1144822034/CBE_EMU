@@ -1222,6 +1222,18 @@ export class SceneView {
     this.layoutStatusBadges();
   }
 
+  /** 「翅」tile: admin client-ui wing_status_enabled. */
+  setChiVisible(on: boolean): void {
+    this.chiBadge.visible = !!on;
+    this.layoutStatusBadges();
+  }
+
+  /** 「骑」tile: admin client-ui mount_status_enabled. */
+  setQiVisible(on: boolean): void {
+    this.qiBadge.visible = !!on;
+    this.layoutStatusBadges();
+  }
+
   /** Flash「擂」when wager notices need attention (应战/拒绝/结算等). */
   setLeiBlink(on: boolean): void {
     this.leiBlink = on;
@@ -1273,8 +1285,12 @@ export class SceneView {
       this.mountStatusBadgeSlot(this.lianBadge, next++);
     }
     this.mountStatusBadgeSlot(this.yuBadge, next++);
-    this.mountStatusBadgeSlot(this.chiBadge, next++);
-    this.mountStatusBadgeSlot(this.qiBadge, next++);
+    if (this.chiBadge.visible) {
+      this.mountStatusBadgeSlot(this.chiBadge, next++);
+    }
+    if (this.qiBadge.visible) {
+      this.mountStatusBadgeSlot(this.qiBadge, next++);
+    }
     this.mountStatusBadgeSlot(this.chenBadge, next++);
     this.paintStatusStripBg(next);
   }

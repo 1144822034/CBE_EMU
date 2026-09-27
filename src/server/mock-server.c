@@ -149,6 +149,7 @@ void vm_mock_maintenance_admin_get(u8 *activeOut, u32 *lastNoticeUnixOut,
                                    u32 *onlineCountOut, u32 *secondsLeftOut);
 bool vm_mock_maintenance_admin_start(char *msgOut, size_t msgCap);
 bool vm_mock_maintenance_admin_stop(char *msgOut, size_t msgCap);
+bool vm_mock_wipe_all_player_data_admin(char *msgOut, size_t msgCap);
 
 #include "mock_server_maintenance.c"
 

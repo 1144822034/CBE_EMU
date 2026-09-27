@@ -36,7 +36,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
   |------|------|------|
   | `damage_scale_enabled` | 1 | 回合伤害/命中 `2^n` 加深；关则恒 1× |
   | `allow_heal` | 0 | 开启后每方每场各一次回血/增益/封魔/驱散；物品仍禁（见 2026-09-19） |
-  | `allow_dodge` | 1 | 物理闪躲检定；关则物理必中（法术本就无视闪躲） |
+  | `allow_dodge` | 1 | 普攻闪躲检定；关则普攻必中（进攻技能本就无视闪躲） |
   | `allow_combat_pill` | 0 | 比武内套用大力丸/神力丸 ATK%（与 PvE 同口径） |
 - 战斗物品菜单仍客户端禁用；保存配置即热加载。迁移：`server/mysql/migrate_add_arena_battle_rules.sql`（启动 `ensure_tables` 也会 ALTER）。
 
@@ -91,7 +91,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 
 - 契约：比武 `arenaMode` 每完整结算一回合后 `resolvedRoundCount++`。
 - **伤害**：当前回合倍率 `2^resolvedRoundCount`（第 1 回合 1×，第 2 回合 2×，第 3 回合 4×…），在称号减伤之后、钳 HP 之前乘上。
-- **命中**：物理命中检定用 `hit * 同倍率`（法术仍忽略闪躲）。
+- **命中**：普攻命中检定用 `hit * 同倍率`（进攻技能忽略闪躲）。
 - 上限：指数封顶 `2^12`（4096×），防溢出。
 - 切磋 / 赏金不改。实现：`vm_mock_service_duel_arena_round_scale` + `duel_apply_operate` / `resolve_committed_round`。
 

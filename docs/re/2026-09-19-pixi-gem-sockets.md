@@ -16,13 +16,13 @@
 
 服务端启动时 `vm_net_mock_ensure_gem_catalog_items` 把上述 ID 注入商店目录（类别 21、默认 `enabled=0`），供后台「给予物品」、掉落/宝箱选择器使用；不写入 `server_shop_items`，也不会出现在 14/5 酷宝页。此前仅 Pixi `itemCatalog` 有定义，后台会报「物品目录中不存在该物品」。
 
-后台导航「宝石配置」（`/?tab=gem`）写入 `server_gem_config`：`max_gem_level` 1–16、`gem_percent_per_level` 1–100、`crystal16_exchange_enabled` 0/1（默认 0，开启后才允许 29/21）、`crystal16_gem_count` 1–20（每颗十六级玄晶换几颗随机 1 级宝石，默认 5）。保存后服务端合成/镶嵌/兑换/战斗立刻按新值。人物面板 `1/1/21` 带 `maxGemLevel` 与 `crystal16ExchangeEnabled`；背包「合成」「换宝石」在下次打开背包并收到面板后跟随。
+后台导航「宝石配置」（`/?tab=gem`）写入 `server_gem_config`：`max_gem_level` 1–16、`gem_percent_per_level` 1–100、`socket_embed_enabled` 0/1（默认 1；关则装备栏隐藏「镶嵌」、29/17 拒）、`crystal16_exchange_enabled` 0/1（默认 0，开启后才允许 29/21）、`crystal16_gem_count` 1–20（每颗十六级玄晶换几颗随机 1 级宝石，默认 5）。保存后服务端合成/镶嵌/兑换/战斗立刻按新值。人物面板 `1/1/21` 带 `maxGemLevel`、`gemSocketEnabled`、`crystal16ExchangeEnabled`；装备栏「镶嵌」、背包「合成」「换宝石」在下次打开并收到面板后跟随。
 
 ## 请求（1/29）
 
 | 子类型 | 请求 | 结果 |
 | --- | --- | --- |
-| 17 | `equipseq` `gemseq` `worn` | 镶嵌。只接受穿戴中且强化 ≥ +16 的装备；`worn=1`，`equipseq` 是身体槽+1。客户端入口在装备栏操作（「镶嵌」），背包宝石详情不显示 |
+| 17 | `equipseq` `gemseq` `worn` | 镶嵌。须 `socket_embed_enabled=1`，否则 result=7「宝石镶嵌未开放」。只接受穿戴中且强化 ≥ +16 的装备；`worn=1`，`equipseq` 是身体槽+1。客户端入口在装备栏操作（「镶嵌」），背包宝石详情不显示 |
 | 18 | `equipseq` `gemtype` `worn` | 拆除退回背包，先校验空位 |
 | 19 | `seq` `times?` | 同格 3 颗同级同属性 → 高 1 级。`times` 缺省 1；≥6 颗时背包多一个「批量合成」，一次升 `floor(count/3)` 颗，只升 1 级 |
 | 20 | `seq` `desttype` | 同格 2 颗 1 级 → 其它属性 1 级 |

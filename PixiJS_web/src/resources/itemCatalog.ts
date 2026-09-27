@@ -1,5 +1,14 @@
 import { decodeGbk, parseDshInt, readU32LE } from "./binary";
 import { fetchResourceBytes } from "./loader";
+import {
+  getAppliedCustomCatalogSig,
+  invalidateCustomCatalog,
+  loadCustomCatalog,
+  markCustomCatalogApplied,
+  mergeCustomEquipsIntoMap,
+  mergeCustomItemsIntoMap,
+} from "./customCatalog";
+import { loadSkillCatalog } from "./skill";
 
 /** item.dsh / equip.dsh lookup — names & quality come from local DSH (CBE paints the same). */
 
@@ -39,6 +48,8 @@ export type ItemCatalogRow = {
 
 let itemCache: Map<number, ItemCatalogRow> | null = null;
 let equipCache: Map<number, ItemCatalogRow> | null = null;
+let mergedCustomItemIds: number[] = [];
+let mergedCustomEquipIds: number[] = [];
 
 /** Mall / bag item 806 — server hard cap (Pixi; CBE 64 no longer binding). */
 export const BACKPACK_EXPAND_ITEM_ID = 806;
@@ -242,10 +253,10 @@ function parseEquipRows(raw: Uint8Array): Map<number, ItemCatalogRow> {
 }
 
 export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
-  if (itemCache) return itemCache;
-  itemCache = parseItemRows(await fetchResourceBytes("item.dsh"));
-  /* Pixi 自定义商城道具（不在 item.dsh）. */
-  if (!itemCache.has(847)) {
+  if (!itemCache) {
+    itemCache = parseItemRows(await fetchResourceBytes("item.dsh"));
+    /* Pixi 自定义商城道具（不在 item.dsh）. */
+    if (!itemCache.has(847)) {
     itemCache.set(847, {
       id: 847,
       name: "江湖追杀令",
@@ -403,12 +414,53 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
       durabilityMax: 1,
     });
   }
-  return itemCache;
+  if (!itemCache.has(855)) {
+    itemCache.set(855, {
+      id: 855,
+      name: "跨品重铸石",
+      desc: "强化转移时可跨装备品质。跨品质确认消耗1个，同品质不消耗；仍需同类部位并扣重铸金钱。",
+      category: 14,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 100,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
+  }
+  try {
+    const custom = await loadCustomCatalog();
+    mergedCustomItemIds = mergeCustomItemsIntoMap(
+      itemCache!,
+      custom,
+      mergedCustomItemIds,
+    );
+  } catch {
+    /* custom catalog optional */
+  }
+  return itemCache!;
 }
 
 export async function loadEquipCatalog(): Promise<Map<number, ItemCatalogRow>> {
-  if (equipCache) return equipCache;
-  equipCache = parseEquipRows(await fetchResourceBytes("equip.dsh"));
+  if (!equipCache) {
+    equipCache = parseEquipRows(await fetchResourceBytes("equip.dsh"));
+  }
+  try {
+    const custom = await loadCustomCatalog();
+    mergedCustomEquipIds = mergeCustomEquipsIntoMap(
+      equipCache,
+      custom,
+      mergedCustomEquipIds,
+    );
+  } catch {
+    /* custom catalog optional */
+  }
   return equipCache;
 }
 
@@ -475,9 +527,36 @@ export function isTradeableItem(
   return true;
 }
 
-/** Prefetch both catalogs (call at bag/shop open). */
+/** Prefetch catalogs; refetch admin extras so live edits apply. */
 export async function warmItemCatalogs(): Promise<void> {
-  await Promise.all([loadItemCatalog(), loadEquipCatalog()]);
+  /* Single-flight fetch first, then merge into maps (avoid empty-prune races). */
+  invalidateCustomCatalog();
+  const custom = await loadCustomCatalog(undefined, { force: true });
+  await Promise.all([
+    loadItemCatalog(),
+    loadEquipCatalog(),
+    loadSkillCatalog(),
+  ]);
+  if (custom.ok) markCustomCatalogApplied(custom);
+}
+
+/**
+ * Refetch admin extras if server content changed.
+ * @returns true when maps were rematched to a new signature.
+ */
+export async function refreshCustomCatalogIfChanged(): Promise<boolean> {
+  const before = getAppliedCustomCatalogSig();
+  invalidateCustomCatalog();
+  const latest = await loadCustomCatalog(undefined, { force: true });
+  if (!latest.ok) return false;
+  if (latest.sig && latest.sig === before) return false;
+  await Promise.all([
+    loadItemCatalog(),
+    loadEquipCatalog(),
+    loadSkillCatalog(),
+  ]);
+  markCustomCatalogApplied(latest);
+  return true;
 }
 
 /**

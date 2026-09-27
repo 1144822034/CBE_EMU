@@ -191,6 +191,7 @@ import { isMapHealSkill } from "./resources/skill";
 import {
   jobAllowsWeaponCategory,
   lookupItemSync,
+  refreshCustomCatalogIfChanged,
   warmItemCatalogs,
   weaponJobRestrictTip,
   BACKPACK_EXPAND_ITEM_ID,
@@ -3848,6 +3849,8 @@ async function main(): Promise<void> {
         stats.mp,
         Math.max(stats.mpMax, stats.mp, 1),
       );
+      view.setChiVisible((stats.wingStatusEnabled ? 1 : 0) === 1);
+      view.setQiVisible((stats.mountStatusEnabled ? 1 : 0) === 1);
       const name =
         stats.name ||
         session.roleName ||
@@ -4539,6 +4542,10 @@ async function main(): Promise<void> {
   };
 
   const openWornGemEmbedDialog = (equip: GemBag): void => {
+    if ((session.characterStats?.gemSocketEnabled ?? 1) !== 1) {
+      showGameTip("宝石镶嵌未开放");
+      return;
+    }
     if (equip.kind !== "equip" || !(equip.seq > 0) || (equip.enhance | 0) < 16) {
       showGameTip("只能镶嵌强化到+16的穿戴装备");
       return;
@@ -4657,11 +4664,24 @@ async function main(): Promise<void> {
     starSkyStonePickEquipOpen = false;
     starSkyStonePickTierOpen = true;
     showGameTip(`读取 ${equip.name} 洗练档…`);
+    if ((session.characterStats?.washButtonEnabled ?? 1) !== 1) {
+      starSkyStonePickTierOpen = false;
+      pendingStarSkyEquip = null;
+      showGameTip("洗练未开放");
+      returnFromStarSkyStone();
+      return;
+    }
     const info = await session.openEnhanceWash(equip.seq);
     if (!info || info.result !== 1) {
       starSkyStonePickTierOpen = false;
       pendingStarSkyEquip = null;
-      showGameTip(info?.result === 3 ? "装备不存在" : "无法读取洗练档");
+      showGameTip(
+        info?.result === 7
+          ? "洗练未开放"
+          : info?.result === 3
+            ? "装备不存在"
+            : "无法读取洗练档",
+      );
       returnFromStarSkyStone();
       return;
     }
@@ -5521,6 +5541,10 @@ async function main(): Promise<void> {
       system.showTip("装备无效");
       return;
     }
+    if ((session.characterStats?.washButtonEnabled ?? 1) !== 1) {
+      showGameTip("洗练未开放");
+      return;
+    }
     if ((bag.enhance | 0) < 4) {
       showGameTip("需强化到+4才可洗练");
       return;
@@ -5528,7 +5552,13 @@ async function main(): Promise<void> {
     showGameTip(`洗练 ${bag.name}…`);
     const info = await session.openEnhanceWash(bag.seq);
     if (!info || info.result !== 1) {
-      showGameTip(info?.result === 3 ? "装备不存在" : "无法打开洗练");
+      showGameTip(
+        info?.result === 7
+          ? "洗练未开放"
+          : info?.result === 3
+            ? "装备不存在"
+            : "无法打开洗练",
+      );
       return;
     }
     washUi.openWash(bag, session.bagItems, info);
@@ -5833,6 +5863,10 @@ async function main(): Promise<void> {
           }
           /* 星空石：选装备→选档位→29/13，不直接 7/1. */
           if (isStarSkyStone(bag.itemId)) {
+            if ((session.characterStats?.washButtonEnabled ?? 1) !== 1) {
+              showGameTip("洗练未开放");
+              return;
+            }
             openStarSkyStoneEquipDialog(bag);
             return;
           }
@@ -9812,6 +9846,11 @@ async function main(): Promise<void> {
     });
     void session.wakeFromBackground();
     hud.resumeDreamTimer();
+    void refreshCustomCatalogIfChanged()
+      .then((changed) => {
+        if (changed) session.refreshOwnedItemCatalogLabels();
+      })
+      .catch(() => {});
     void recoverDisplayAfterForeground("visibility");
     // 水果机内世界 BGM 保持静音，机内音效独立常开
     if (!fruitPanel.visible) void resumeBgmAfterForeground();
@@ -9882,6 +9921,17 @@ async function main(): Promise<void> {
       void recoverDisplayAfterForeground("interval-stall");
     }
   }, 2000);
+
+  // Admin custom item/equip/skill edits: pick up new rev without restarting gateway.
+  window.setInterval(() => {
+    if (document.visibilityState === "hidden") return;
+    if (!isGameDisplayPhase(phase)) return;
+    void refreshCustomCatalogIfChanged()
+      .then((changed) => {
+        if (changed) session.refreshOwnedItemCatalogLabels();
+      })
+      .catch(() => {});
+  }, 8000);
 
   // Quiet ring heartbeat (no console). Opt-in verbose: localStorage pix_gl_forensic=1
   // Dump still via __pixiDumpForensic / long-press status.

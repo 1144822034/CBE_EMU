@@ -6,8 +6,7 @@ import {
   tryLoadUiTexture,
   uiSprite,
 } from "./UiAssets";
-import { SLOT_FRAME_SIZE } from "./ItemArt";
-import { BitmapLabel } from "./BitmapLabel";
+import { BitmapLabel, UC3_CELL } from "./BitmapLabel";
 import {
   composeActorFrameIndex,
   loadActor,
@@ -18,21 +17,28 @@ import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
 const NAME_PINK = 0xff40c8;
 const HP_FILL = 0xe03828;
 const SP_FILL = 0x40e060;
+/** ui_hpspnum.gif opaque ink — HP/SP digit glyph color. */
+const HP_NUM = 0xd6f7a5;
 /** xuetiao.gif inner track — fill draws ABOVE opaque black pixels. */
 const BAR_FILL = { x: 5, y: 4, w: 34, h: 3 } as const;
 const SLOT_W = 78;
-/** Face inside handkuang.gif (25×25, pad 3 → 19×19). */
-const PORTRAIT_PAD = 3;
-const PORTRAIT = SLOT_FRAME_SIZE - PORTRAIT_PAD * 2;
+/** Left edge shared by face + HP/SP bars. */
+const FACE_X = 2;
+/** Shrunk handkuang (was SLOT_FRAME_SIZE=25) so face sits above the bars. */
+const FRAME = 16;
+const PORTRAIT_PAD = 2;
+const PORTRAIT = FRAME - PORTRAIT_PAD * 2;
+const NAME_SIZE = 10;
 /**
- * Layout (screenshot):
+ * Layout:
  *   [face] name
- *          HP bar
- *          HP nums
- *          SP bar
- *          SP nums
+ *   HP bar   (x = face)
+ *   HP nums
+ *   SP bar
+ *   SP nums
  */
-const Y_NAME = 2;
+const Y_NAME = 3;
+const Y_FACE = 1;
 const Y_HP_BAR = 18;
 const Y_HP_NUM = 30;
 const Y_SP_BAR = 42;
@@ -142,8 +148,13 @@ export class BattlePartyHud extends Container {
         row.name ||
         (isSelf ? opts?.playerName : "") ||
         `队友${i + 1}`
-      ).slice(0, 5);
-      void slot.name.setText(name, NAME_PINK, {
+      ).slice(0, 4);
+      // right[0] = leader keeps pink; others match HP digit ink.
+      const nameColor = i === 0 ? NAME_PINK : HP_NUM;
+      // UC3 ignores fontSize (always ~14); scale → visual NAME_SIZE.
+      // Songti DOM picks up the same container scale via worldTransform.
+      slot.name.scale.set(NAME_SIZE / UC3_CELL);
+      void slot.name.setText(name, nameColor, {
         smooth: false,
         outline: false,
       });
@@ -221,23 +232,19 @@ export class BattlePartyHud extends Container {
     const portrait = new Container();
     // HUD/battle face frame = handkuang.gif (same as world HUD / equip slots).
     if (this.handkuang) {
-      portrait.addChild(
-        uiSprite(this.handkuang, SLOT_FRAME_SIZE, SLOT_FRAME_SIZE),
-      );
+      portrait.addChild(uiSprite(this.handkuang, FRAME, FRAME));
     } else {
       portrait.addChild(
         new Graphics()
-          .rect(0, 0, SLOT_FRAME_SIZE, SLOT_FRAME_SIZE)
+          .rect(0, 0, FRAME, FRAME)
           .stroke({ width: 1, color: 0xd4c489 }),
       );
     }
-    portrait.position.set(2, 2);
+    portrait.position.set(FACE_X, Y_FACE);
 
-    const colX = SLOT_FRAME_SIZE + 8;
     const name = new BitmapLabel();
-    // System font at 1× so name stays readable beside the HP bar.
-    name.scale.set(1);
-    name.position.set(colX, Y_NAME);
+    name.scale.set(NAME_SIZE / UC3_CELL);
+    name.position.set(FACE_X + FRAME + 2, Y_NAME);
 
     const mkBar = () => {
       const host = new Container();
@@ -258,8 +265,9 @@ export class BattlePartyHud extends Container {
 
     const hp = mkBar();
     const sp = mkBar();
-    hp.host.position.set(colX, Y_HP_BAR);
-    sp.host.position.set(colX, Y_SP_BAR);
+    // Bars share the face left edge.
+    hp.host.position.set(FACE_X, Y_HP_BAR);
+    sp.host.position.set(FACE_X, Y_SP_BAR);
 
     const hpLabel = this.hpLabTex
       ? uiSprite(this.hpLabTex)
@@ -267,8 +275,8 @@ export class BattlePartyHud extends Container {
     const spLabel = this.spLabTex
       ? uiSprite(this.spLabTex)
       : new Sprite(Texture.EMPTY);
-    hpLabel.position.set(colX, Y_HP_NUM);
-    spLabel.position.set(colX, Y_SP_NUM);
+    hpLabel.position.set(FACE_X, Y_HP_NUM);
+    spLabel.position.set(FACE_X, Y_SP_NUM);
 
     const hpNum =
       (await DigitStrip.battleHpspNum()) || (await DigitStrip.hpspNum());
@@ -276,8 +284,8 @@ export class BattlePartyHud extends Container {
       (await DigitStrip.battleHpspNum()) || (await DigitStrip.hpspNum());
     const hpNumHost = new Container();
     const spNumHost = new Container();
-    hpNumHost.position.set(colX + 10, Y_HP_NUM);
-    spNumHost.position.set(colX + 10, Y_SP_NUM);
+    hpNumHost.position.set(FACE_X + 10, Y_HP_NUM);
+    spNumHost.position.set(FACE_X + 10, Y_SP_NUM);
     if (hpNum) {
       hpNum.setText("0/0");
       hpNumHost.addChild(hpNum.root);

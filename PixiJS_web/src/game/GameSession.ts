@@ -420,6 +420,7 @@ import {
   type TaskListRow,
   type NpcTaskPromptType,
   isReservoirFlaskItemId,
+  overlayBagItemFromCatalog,
 } from "../net/protocolExtras";
 import {
   parseNearbyPage,
@@ -1303,7 +1304,7 @@ export class GameSession {
       this.setPhase("enter-role", `actorID=${roleId}`);
       const bodies = await this.transport.exchange(0, buildRoleSelectRequest(roleId));
       this.handleBodies(bodies);
-      void warmItemCatalogs();
+      void warmItemCatalogs().then(() => this.refreshCatalogLabelsOnOwnedItems());
       // Live title path: 1/6+1/15 with actorinfo scene — not immediate 30/1.
       if (!this.scene) {
         throw new Error("选角后未解析到场景（1/6 actorinfo.scene），检查角色数据");
@@ -4118,8 +4119,37 @@ export class GameSession {
       const bodies = await this.transport.exchange(0, buildBagOpenRequest());
       this.bagItems = retained;
       this.handleBodies(bodies);
+      this.refreshCatalogLabelsOnOwnedItems();
     } catch (e) {
       this.notifyPanelFetchFailed("背包", e);
+    }
+  }
+
+  /** After custom-catalog merge, rewrite `#id` bag/worn placeholders to real names. */
+  refreshOwnedItemCatalogLabels(): void {
+    this.refreshCatalogLabelsOnOwnedItems();
+  }
+
+  private refreshCatalogLabelsOnOwnedItems(): void {
+    let bagChanged = false;
+    let wornChanged = false;
+    const nextBag = this.bagItems.map((it) => {
+      const n = overlayBagItemFromCatalog(it);
+      if (n !== it) bagChanged = true;
+      return n;
+    });
+    const nextWorn = this.wornItems.map((it) => {
+      const n = overlayBagItemFromCatalog(it);
+      if (n !== it) wornChanged = true;
+      return n;
+    });
+    if (bagChanged) {
+      this.bagItems = nextBag;
+      this.cb.onBag?.(this.bagItems);
+    }
+    if (wornChanged) {
+      this.wornItems = nextWorn;
+      this.cb.onWorn?.(this.wornItems);
     }
   }
 
@@ -5556,6 +5586,15 @@ export class GameSession {
 
   async openEnhanceWash(seq: number): Promise<EnhanceWashOpenResult | null> {
     if (!this.transport) return null;
+    if ((this.characterStats?.washButtonEnabled ?? 1) !== 1) {
+      return {
+        result: 7,
+        seq: seq & 0xffff,
+        curLevel: 0,
+        tiers: [],
+        pool: [],
+      };
+    }
     const bodies = await this.transport.exchange(
       0,
       buildEnhanceWashOpenRequest(seq),
@@ -5912,6 +5951,9 @@ export class GameSession {
   ): Promise<{ result: number; ok: boolean; message: string }> {
     if (!(equipSeq > 0) || !(gemSeq > 0)) {
       return { result: 2, ok: false, message: "参数无效" };
+    }
+    if ((this.characterStats?.gemSocketEnabled ?? 1) !== 1) {
+      return { result: 7, ok: false, message: "宝石镶嵌未开放" };
     }
     return this.exchangeGemOp(
       17,

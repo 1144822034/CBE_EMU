@@ -15,7 +15,7 @@ damage = raw * (100 - min(resist, 70)) / 100
 | 普攻 | `damage_after_defense`（怪/人 `defense`） |
 | 进攻技能 | `damage_after_resist`（怪次级抗性 / 人装备抗性） |
 
-- 物技仍检定闪躲；法术（智慧主导）仍忽略闪躲。
+- 物技与法术均忽略闪躲（必中）；仅普攻仍检定闪躲（2026-09-27）。
 - 怪抗性默认仍为 0（`CBE_BATTLE_MONSTER_RESIST` / `CBE_BATTLE_SKILL_ENEMY_RESIST`）。
 - 切磋同步：技能 → 抗性；普攻 → 防御。
 

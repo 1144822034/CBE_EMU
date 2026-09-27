@@ -2017,8 +2017,14 @@ static u8 vm_net_mock_battle_apply_player_attack_targets(
      * scene-wire flag would emit child wires [2,3,0] and paint wire 0 onto the
      * player for 天机/幻剑/鬼道 group skills alike.  Keep maps only for true
      * subtype-5 scene starts.
+     *
+     * Never clear while this seat owns an armed/settling fight — flipping the
+     * table mid subtype-5 operate after enemy-count changes made group skills
+     * collect zero live wires (abort) or hit the player wire.
      */
-    if (g_mockBattleSceneMonsterStartActive == 0 &&
+    if (g_mockBattleOperateSessionArmed == 0 &&
+        g_mockBattleAwaitingSettlement == 0 &&
+        g_mockBattleSceneMonsterStartActive == 0 &&
         g_mockBattleStartUsesSceneWireMaps != 0)
     {
         printf("[warn][network] mock_battle_clear_stale_scene_wire_maps "
@@ -2048,6 +2054,33 @@ static u8 vm_net_mock_battle_apply_player_attack_targets(
             vm_net_mock_battle_enemy_wire_is_alive(live, playerOnRight, battleSide,
                                                     fallbackEnemySlot))
         {
+            candidateSlots[candidateCount++] = live;
+        }
+    }
+    /*
+     * Enemy-count / wire-table skew: slots still have HP but every candidate
+     * was filtered (self-hit guard).  Re-collect once after forcing the
+     * fallback enemy wire so group skills do not abort into a silent miss
+     * that the client then replaces with 普攻.
+     */
+    if (candidateCount == 0 && g_mockBattleEnemyHpCurrent > 0 &&
+        !vm_net_mock_battle_all_enemies_defeated())
+    {
+        u8 live = fallbackEnemySlot;
+        if (live == playerSlot ||
+            !vm_net_mock_battle_enemy_wire_is_alive(live, playerOnRight, battleSide,
+                                                    fallbackEnemySlot))
+            live = vm_net_mock_battle_first_alive_enemy_wire(
+                playerOnRight, battleSide, fallbackEnemySlot);
+        if (live != playerSlot &&
+            vm_net_mock_battle_enemy_wire_is_alive(live, playerOnRight, battleSide,
+                                                    fallbackEnemySlot))
+        {
+            printf("[warn][network] mock_battle_attack_retarget_live "
+                   "operate=%u group=%u wire=%u enemies=%u "
+                   "evidence=enemy-count-wire-skew\n",
+                   operate, targetsEnemyGroup ? 1u : 0u, live,
+                   vm_net_mock_battle_enemy_count_current());
             candidateSlots[candidateCount++] = live;
         }
     }
@@ -9275,7 +9308,6 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
     {
         u32 rawDamage = 1;
         u32 mitigation = 0;
-        bool magical = false;
 
         source = vm_mock_service_find_client_session(duel->clientIds[sourceIndex]);
         target = vm_mock_service_find_client_session(duel->clientIds[targetIndex]);
@@ -9288,15 +9320,16 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
         vm_mock_service_duel_apply_seat_modifier(duel, sourceIndex, &sourceStats);
         vm_mock_service_duel_apply_seat_modifier(duel, targetIndex, &targetStats);
 
-        if (operate > 2 && skill != NULL)
-            magical = vm_net_mock_battle_skill_is_magical(skill);
-        /* 鬼道法术忽略闪躲；物理普攻/物技仍检定（admin allow_dodge=0 则必中）。 */
+        /* 进攻技能（物技+法术）忽略闪躲；普攻仍检定（admin allow_dodge=0 则必中）。 */
         {
             u32 attackHit = sourceStats.hit;
             const vm_mock_arena_config *arenaCfg =
                 duel->arenaMode ? vm_net_mock_arena_config_get() : NULL;
             bool dodgeEnabled =
                 !duel->arenaMode || arenaCfg == NULL || arenaCfg->allowDodge != 0;
+            bool skillIgnoresDodge =
+                operate > 2 && skill != NULL &&
+                vm_net_mock_battle_skill_ignores_dodge(skill);
 
             if (duel->arenaMode)
             {
@@ -9307,7 +9340,7 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
                 attackHit = scaledHit > 0xffffffffull ? 0xffffffffu
                                                          : (u32)scaledHit;
             }
-            if (dodgeEnabled && !magical &&
+            if (dodgeEnabled && !skillIgnoresDodge &&
                 !vm_net_mock_battle_roll_hit(attackHit, targetStats.dodge))
             {
                 hitOut->targetSelf = false;
@@ -15866,6 +15899,32 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     g_vm_net_mock_battle_formula_enemy_index = 0xff;
     ++g_mockBattleOperateSessionSerial;
     vm_net_mock_battle_reset_last_operate_target();
+    {
+        u8 defaultPlayerSlot = 0;
+        u8 defaultEnemySlot = 1;
+
+        vm_net_mock_battle_default_wire_slots(playerOnRight, battleSide,
+                                              &defaultPlayerSlot, &defaultEnemySlot);
+        /*
+         * Same rebind as hangup start: after enemies=3→1 (or subtype-10↔5),
+         * LastIndex=0 may be the player wire.  Auto synth must not keep a
+         * corpse/player index or group skills abort and look like 普攻.
+         */
+        if (g_mockBattleLastOperateValid != 0)
+        {
+            if (g_mockBattleLastIndex == defaultPlayerSlot ||
+                !vm_net_mock_battle_enemy_wire_is_alive(
+                    (u8)g_mockBattleLastIndex, playerOnRight, battleSide,
+                    defaultEnemySlot))
+            {
+                printf("[info][network] mock_challenge_rebind_last_index "
+                       "from=%u to=%u operate=%u evidence=wire-table-rearm\n",
+                       g_mockBattleLastIndex, defaultEnemySlot,
+                       g_mockBattleLastOperate);
+                g_mockBattleLastIndex = defaultEnemySlot;
+            }
+        }
+    }
     g_vm_net_mock_battle_rewarded_serial = 0;
     g_vm_net_mock_battle_rewarded_exp = 0;
     g_vm_net_mock_battle_rewarded_auto_sell_gold = 0;

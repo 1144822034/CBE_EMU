@@ -22,9 +22,11 @@ import {
   ENHANCE_MAX_LEVEL,
   ENHANCE_MAX_SLOTS,
   ENHANCE_TRANSFER_FEE_TEXT,
+  bagHasCrossQualityRecastStone,
   enhanceCrystalName,
   enhanceCrystalUnitRate,
   enhanceSuccessRate,
+  equipSellQualityLabel,
   isEnhanceCrystal,
   type EnhanceOpenResult,
 } from "../net/protocolExtras";
@@ -141,17 +143,7 @@ export class EnhancePanel extends Container {
     this.listScroll = 0;
     this.destPick = null;
     this.busy = false;
-    const slot = source.equipSlot;
-    const quality = source.quality | 0;
-    this.destCandidates = bag.filter(
-      (it) =>
-        it.kind === "equip" &&
-        it.seq > 0 &&
-        it.seq !== source.seq &&
-        it.equipSlot === slot &&
-        (it.quality | 0) === quality &&
-        (it.enhance | 0) < (source.enhance | 0),
-    );
+    this.destCandidates = this.buildTransferCandidates(source, bag);
     this.visible = true;
     this.redraw();
   }
@@ -163,23 +155,28 @@ export class EnhancePanel extends Container {
       if (fresh) this.equip = fresh;
     }
     if (this.mode === "transferPick" && this.equip) {
-      const slot = this.equip.equipSlot;
-      const quality = this.equip.quality | 0;
-      const srcEnhance = this.equip.enhance | 0;
-      this.destCandidates = bag.filter(
-        (it) =>
-          it.kind === "equip" &&
-          it.seq > 0 &&
-          it.seq !== this.equip!.seq &&
-          it.equipSlot === slot &&
-          (it.quality | 0) === quality &&
-          (it.enhance | 0) < srcEnhance,
-      );
+      this.destCandidates = this.buildTransferCandidates(this.equip, bag);
       if (this.listCursor >= this.destCandidates.length) {
         this.listCursor = Math.max(0, this.destCandidates.length - 1);
       }
     }
     if (this.visible) this.redraw();
+  }
+
+  /** Same slot + unenhanced (+0); same quality unless bag has 跨品重铸石. */
+  private buildTransferCandidates(source: BagItem, bag: BagItem[]): BagItem[] {
+    const slot = source.equipSlot;
+    const quality = source.quality | 0;
+    const allowCross = bagHasCrossQualityRecastStone(bag);
+    return bag.filter(
+      (it) =>
+        it.kind === "equip" &&
+        it.seq > 0 &&
+        it.seq !== source.seq &&
+        it.equipSlot === slot &&
+        (allowCross || (it.quality | 0) === quality) &&
+        (it.enhance | 0) === 0,
+    );
   }
 
   setOpenInfo(info: EnhanceOpenResult): void {
@@ -653,6 +650,8 @@ export class EnhancePanel extends Container {
     const bodyTop = this.drawTitle(src.name, x, y, w);
 
     if (this.mode === "transferConfirm" && this.destPick) {
+      const crossQuality =
+        (src.quality | 0) !== (this.destPick.quality | 0);
       this.addAttr("确认强化转移", x + 14, bodyTop, EQUIP_DETAIL_YELLOW);
       this.addAttr(
         `目标: ${this.destPick.name}`,
@@ -672,7 +671,19 @@ export class EnhancePanel extends Container {
         bodyTop + 54,
         INK_GREEN,
       );
-      this.addAttr("源装备强化将归零", x + 14, bodyTop + 72, CBE.inkWarn);
+      let warnY = bodyTop + 72;
+      if (crossQuality) {
+        this.addAttr(
+          `跨品质: ${equipSellQualityLabel(src.quality)}→${equipSellQualityLabel(this.destPick.quality)}`,
+          x + 14,
+          warnY,
+          CBE.inkWarn,
+        );
+        warnY += 18;
+        this.addAttr("将消耗1个跨品重铸石", x + 14, warnY, CBE.inkWarn);
+        warnY += 18;
+      }
+      this.addAttr("源装备强化将归零", x + 14, warnY, CBE.inkWarn);
 
       const acts = ["确认", "取消"] as const;
       const btnW = 64;
@@ -703,9 +714,11 @@ export class EnhancePanel extends Container {
       return;
     }
 
+    const allowCross = bagHasCrossQualityRecastStone(this.bag);
     // wrap instruction at full UC3 size; break by glyph width so lines fit panel
-    const instruct =
-      "使用强化转移功能可将强化效果100%转移到另一件同类装备上，请选择要转移到的目标装备：";
+    const instruct = allowCross
+      ? "已持有跨品重铸石，可转移到同部位不同品质装备；跨品质确认时消耗1个："
+      : "使用强化转移功能可将强化效果100%转移到另一件同类装备上，请选择要转移到的目标装备：";
     const instructBottom = this.wrapText(
       instruct,
       x + 12,
@@ -722,7 +735,12 @@ export class EnhancePanel extends Container {
       .stroke({ width: 1, color: CBE.borderDim });
 
     if (!this.destCandidates.length) {
-      this.addAttr("(无同品质同类可转移装备)", x + 14, listTop + 4, CBE.inkMint);
+      this.addAttr(
+        allowCross ? "(无同类可转移装备)" : "(无同品质同类可转移装备)",
+        x + 14,
+        listTop + 4,
+        CBE.inkMint,
+      );
     } else {
       this.ensureListVisible(this.destCandidates.length, visible);
       const pageStart = this.listScroll;
@@ -739,8 +757,12 @@ export class EnhancePanel extends Container {
         const hi = idx === this.listCursor;
         if (hi) this.box.rect(x + 10, sy, w - 20, 15).fill({ color: SELECT_BG });
         const en = row.enhance > 0 ? `(+${row.enhance})` : "";
+        const qTag =
+          allowCross && (row.quality | 0) !== (src.quality | 0)
+            ? `[${equipSellQualityLabel(row.quality)}]`
+            : "";
         this.addAttr(
-          `${row.name}${en}`,
+          `${row.name}${en}${qTag}`,
           x + 14,
           sy + 1,
           hi ? CBE.ink : CBE.inkMint,

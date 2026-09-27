@@ -5,21 +5,30 @@ import {
   tryLoadUiTexture,
   uiSprite,
 } from "./UiAssets";
+import {
+  BitmapLabel,
+  UC3_CELL,
+  measureUiTextWidth,
+} from "./BitmapLabel";
 import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
 import { getEnemyHpBarPlacement } from "../resources/enemyHpBarPref";
 
 const HP_FILL = 0xe03828;
+/** Match party HUD leader name ink (PvP foe is a player). */
+const NAME_PINK = 0xff40c8;
 /** xuetiao.gif inner track — fill draws ABOVE opaque black pixels. */
 const BAR_FILL = { x: 5, y: 4, w: 34, h: 3 } as const;
 /** Fallback bar size when xuetiao.gif is missing. */
 const BAR_W = 44;
 const BAR_H = 11;
-/** Gap between xuetiao right edge and HP digits. */
+/** Gap between xuetiao right edge and HP digits / PvP name. */
 const NUM_GAP = 2;
 /** Digit sheet height (ui_hpspnum.gif). */
 const NUM_H = 5;
 /** Fallback digit cell width (ui_hpspnum ≈ 4px). */
 const DIGIT_W = 4;
+/** Visual name size (UC3 scaled); same as BattlePartyHud. */
+const NAME_SIZE = 10;
 /** Keep the shared plate off the LCD left edge (corner mode). */
 const BAR_SHIFT_X = DIGIT_W;
 /** One enemy row: bar height (digits sit beside it). */
@@ -38,6 +47,16 @@ const PLATE_STROKE = 0x3a554e;
 const PLATE_ALPHA = 0.5;
 /** Max enemy slots painted (matches party cap / formation). */
 const ENEMY_MAX = 3;
+/** Cap like party HUD — LCD strip is narrow. */
+const NAME_CHARS = 4;
+
+function enemyDisplayName(row: BattleSide): string {
+  return (row.name || "")
+    .replace(/\0+$/g, "")
+    .replace(/#\d+$/, "")
+    .trim()
+    .slice(0, NAME_CHARS);
+}
 
 /**
  * Spar / arena foe uses human `h_*.actor` (or `hW_*`).
@@ -67,6 +86,8 @@ type SlotArt = {
   barHost: Container;
   hpFill: Graphics;
   hpNum: DigitStrip | null;
+  /** PvP foe name (hidden for PvE monsters). */
+  name: BitmapLabel;
   lastPlateW: number;
   lastPlateH: number;
 };
@@ -253,7 +274,10 @@ export class BattleEnemyHud extends Container {
       .roundRect(0, 0, plateW, plateH, 3)
       .fill({ color: PLATE_FILL, alpha: PLATE_ALPHA })
       .stroke({ width: 1, color: PLATE_STROKE, alpha: PLATE_ALPHA });
-    slot.barHost.position.set(Math.floor((plateW - bw) / 2), PLATE_PAD);
+    // Digits sit under the bar (anchor on bar width). Name/digits beside the
+    // bar widen contentW — center the whole barHost group.
+    const anchorW = numsBelow ? bw : Math.max(bw, contentW);
+    slot.barHost.position.set(Math.floor((plateW - anchorW) / 2), PLATE_PAD);
     slot.lastPlateW = plateW;
     slot.lastPlateH = plateH;
     // Plate bottom sits HEAD_GAP above the measured body top.
@@ -291,9 +315,9 @@ export class BattleEnemyHud extends Container {
   }
 
   /**
-   * Paint bar + digits.
-   * Corner: digits to the right of the bar.
-   * Follow: digits centered under the bar.
+   * Paint bar + digits (PvE) or player name (PvP).
+   * Corner: digits / name to the right of the bar.
+   * Follow: digits centered under the bar; PvP name still beside the bar.
    */
   private paintVitals(
     slot: SlotArt,
@@ -307,13 +331,32 @@ export class BattleEnemyHud extends Container {
       .rect(BAR_FILL.x, BAR_FILL.y, hpW, BAR_FILL.h)
       .fill({ color: HP_FILL });
     const bw = this.barWidth();
-    const showNums = !isPlayerEnemy(row);
-    if (!slot.hpNum) return { contentW: bw, numsBelow: false };
-    slot.hpNum.root.visible = showNums;
-    if (!showNums) return { contentW: bw, numsBelow: false };
+    const bh = this.barHeight();
+    const player = isPlayerEnemy(row);
+    const showNums = !player;
+    if (slot.hpNum) slot.hpNum.root.visible = showNums;
+    slot.name.visible = false;
+
+    if (player) {
+      const label = enemyDisplayName(row);
+      if (!label) return { contentW: bw, numsBelow: false };
+      slot.name.visible = true;
+      slot.name.scale.set(NAME_SIZE / UC3_CELL);
+      void slot.name.setText(label, NAME_PINK, {
+        smooth: false,
+        outline: false,
+      });
+      const tw = Math.ceil(
+        measureUiTextWidth(label, UC3_CELL) * (NAME_SIZE / UC3_CELL),
+      );
+      const ny = Math.max(0, Math.floor((bh - NAME_SIZE) / 2));
+      slot.name.position.set(bw + NUM_GAP, ny);
+      return { contentW: bw + NUM_GAP + tw, numsBelow: false };
+    }
+
+    if (!slot.hpNum || !showNums) return { contentW: bw, numsBelow: false };
     const text = `${hp}/${maxHp}`;
     slot.hpNum.setText(text);
-    const bh = this.barHeight();
     const cell = slot.hpNum.cellW || DIGIT_W;
     const tw = text.length * cell;
     if (this.followMode) {
@@ -352,6 +395,12 @@ export class BattleEnemyHud extends Container {
       hpNum.setText("0/0");
       barHost.addChild(hpNum.root);
     }
+
+    const name = new BitmapLabel();
+    name.scale.set(NAME_SIZE / UC3_CELL);
+    name.visible = false;
+    barHost.addChild(name);
+
     root.addChild(barHost);
 
     return {
@@ -360,6 +409,7 @@ export class BattleEnemyHud extends Container {
       barHost,
       hpFill: fill,
       hpNum,
+      name,
       lastPlateW: 0,
       lastPlateH: 0,
     };

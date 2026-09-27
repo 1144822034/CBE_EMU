@@ -8,7 +8,7 @@
  *   PIX_GATEWAY_HOST / PIX_GATEWAY_PORT — listen bind (default 0.0.0.0:19092)
  *   PIX_TCP_HOST / PIX_TCP_PORT — mock-server (default 127.0.0.1:19090)
  *   PIX_ADMIN_HOST / PIX_ADMIN_PORT — admin HTTP for /api/* proxy
- *     (monster-levels, npc-scenes, zones, recharge/create, register; default same host as TCP, port 19091)
+ *     (monster-levels, npc-scenes, zones, custom-catalog, recharge/create, register; default same host as TCP, port 19091)
  *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 30000; 0=off)
  *   PIX_GATEWAY_KEEPALIVE_IDLE_MS — silence before synth poll (default 2200)
  *   PIX_GATEWAY_MOCK_TCP_TIMEOUT_MS — mock TCP read budget per CBMS (default 60000)
@@ -513,6 +513,10 @@ const server = http.createServer((req, res) => {
     proxyAdminApi(req, res, "/api/zones", { methods: ["GET"] });
     return;
   }
+  if (path === "/api/custom-catalog") {
+    proxyAdminApi(req, res, "/api/custom-catalog", { methods: ["GET"] });
+    return;
+  }
   if (path === "/api/recharge/create") {
     proxyAdminApi(req, res, "/api/recharge/create", { methods: ["POST"] });
     return;
@@ -576,6 +580,9 @@ server.listen(listenPort, listenHost, () => {
   );
   console.log(
     `[ws-gateway] http /api/zones -> http://${adminHost}:${adminPort}/api/zones`,
+  );
+  console.log(
+    `[ws-gateway] http /api/custom-catalog -> http://${adminHost}:${adminPort}/api/custom-catalog`,
   );
   console.log(
     `[ws-gateway] http /api/recharge/create -> http://${adminHost}:${adminPort}/api/recharge/create`,

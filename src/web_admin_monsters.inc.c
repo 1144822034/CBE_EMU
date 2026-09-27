@@ -1,6 +1,63 @@
 /* Monster catalog editor included by web_admin_server.c after the shared
  * mock-server catalogs and HTML helpers are available. */
 
+static void vm_mock_admin_redirect_monster_global(vm_mock_service_socket client,
+                                                   const char *status,
+                                                   const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=monsters&status=%s&message=%s",
+             statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_render_monster_global_card(vm_mock_admin_text *page)
+{
+    const vm_net_mock_monster_global_config *cfg;
+
+    if (page == NULL)
+        return;
+    cfg = vm_net_mock_monster_global_config_get();
+    vm_mock_admin_text_appendf(
+        page,
+        "<section class=\"card global-card\"><form method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"save-monster-global-config\">"
+        "<h2 style=\"margin:0 0 8px;font-size:16px\">全服怪物百分比</h2>"
+        "<p class=\"hint\" style=\"margin-top:0\">作用于全部怪物的运行时倍率，不改各怪基数。"
+        "100%%=不变，90%%=降低，110%%=提高。血量/攻击/防御在等级与首领倍率之后再乘；"
+        "经验/铜钱在角色卡/心得等加成之前乘；掉落只放大投掷概率（上限 100%%，"
+        "不影响独立/抽奖行选择）。表：<code>server_monster_global_config</code>。</p>"
+        "<div class=\"fields\">"
+        "<label class=\"field\"><span>血量 %%（1–1000）</span>"
+        "<input type=\"number\" name=\"hp_percent\" min=\"1\" max=\"1000\" value=\"%u\" required></label>"
+        "<label class=\"field\"><span>攻击 %%（1–1000）</span>"
+        "<input type=\"number\" name=\"attack_percent\" min=\"1\" max=\"1000\" value=\"%u\" required></label>"
+        "<label class=\"field\"><span>防御 %%（0–1000）</span>"
+        "<input type=\"number\" name=\"defense_percent\" min=\"0\" max=\"1000\" value=\"%u\" required></label>"
+        "<label class=\"field\"><span>掉落概率 %%（0–1000）</span>"
+        "<input type=\"number\" name=\"drop_rate_percent\" min=\"0\" max=\"1000\" value=\"%u\" required></label>"
+        "<label class=\"field\"><span>经验 %%（0–1000）</span>"
+        "<input type=\"number\" name=\"reward_exp_percent\" min=\"0\" max=\"1000\" value=\"%u\" required></label>"
+        "<label class=\"field\"><span>金钱 %%（0–1000）</span>"
+        "<input type=\"number\" name=\"reward_money_percent\" min=\"0\" max=\"1000\" value=\"%u\" required></label>"
+        "</div>"
+        "<div class=\"actions\" style=\"justify-content:flex-start\">"
+        "<button type=\"submit\">保存全服百分比</button></div></form></section>",
+        cfg ? cfg->hpPercent : 100u, cfg ? cfg->attackPercent : 100u,
+        cfg ? cfg->defensePercent : 100u, cfg ? cfg->dropRatePercent : 100u,
+        cfg ? cfg->rewardExpPercent : 100u,
+        cfg ? cfg->rewardMoneyPercent : 100u);
+}
+
 static const char *vm_mock_admin_monster_family_name(u32 family)
 {
     static const char *names[] = {
@@ -137,9 +194,20 @@ static void vm_mock_admin_render_monster_page(char *response,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 怪物管理</title><style>"
-        "*{box-sizing:border-box}html,body{height:100%%;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1320px;height:100vh;margin:auto;padding:22px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.head h1{font-size:24px;margin:0}.sub{color:#667085;margin:4px 0 14px}.tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}.tab{padding:8px 13px;border:1px solid #e4e7ec;border-radius:7px;background:#fff;color:#475467;text-decoration:none}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:#fff;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:15px;box-shadow:0 1px 2px #1018280d}.catalog{display:flex;flex-direction:column;min-height:0}.search-row{display:flex;gap:8px;margin:10px 0;align-items:stretch}.search-row .search{flex:1;margin:0;min-width:0}.search-row button{flex:none}.list{overflow:auto;display:flex;flex-direction:column;gap:4px;margin-top:9px}.monster{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;border:1px solid transparent}.monster.is-filtered,.monster[hidden]{display:none!important}.monster:hover,.monster.on{background:#eef4ff;color:#175cd3}.monster small{display:block;color:#667085}.monster.override{border-color:#fdb022}.editor{overflow:auto}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.override{background:#fffaeb;color:#b54708}.badge.custom{background:#f4ebff;color:#6941c6}.notice{padding:10px 12px;border-radius:7px;margin-bottom:13px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.summary{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 16px}.chip{padding:3px 8px;border-radius:999px;background:#f2f4f7;color:#475467}.fields{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:10px}.field,.item-field{display:grid;gap:4px}.field span,.item-field>span{font-size:12px;color:#667085}.group{padding:13px;border:1px solid #e4e7ec;border-radius:8px;margin-top:13px}.group h2{font-size:16px;margin:0 0 10px}input,select{width:100%%;min-width:0;padding:8px 9px;border:1px solid #d0d5dd;border-radius:6px;background:#fff}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none;display:inline-block;text-align:center}.danger{background:#b42318}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:13px}.hint{color:#667085;font-size:12px;margin:8px 0 0}.check{display:flex;align-items:center;gap:8px;min-height:39px;font-size:13px;color:#344054}.check input{width:auto;min-width:0}.drop-list{display:grid;gap:9px}.drop-row{display:grid;grid-template-columns:72px minmax(220px,1fr) 135px auto;gap:9px;align-items:end;padding:10px;border:1px solid #e4e7ec;border-radius:8px}.drop-row>span{font-size:12px;color:#667085;padding-bottom:8px}.drop-add{margin-top:9px}.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.catalog{max-height:420px}.fields{grid-template-columns:1fr 1fr}.drop-row{grid-template-columns:1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js?v=19\" defer></script>"
+        "*{box-sizing:border-box}html,body{height:100%%;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1320px;height:100vh;margin:auto;padding:22px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.head h1{font-size:24px;margin:0}.sub{color:#667085;margin:4px 0 14px}.tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}.tab{padding:8px 13px;border:1px solid #e4e7ec;border-radius:7px;background:#fff;color:#475467;text-decoration:none}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:#fff;color:#667085;border:1px solid #d0d5dd}.global-card{flex:none;margin-bottom:16px;overflow:auto;max-height:42vh}.grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:15px;box-shadow:0 1px 2px #1018280d}.catalog{display:flex;flex-direction:column;min-height:0}.search-row{display:flex;gap:8px;margin:10px 0;align-items:stretch}.search-row .search{flex:1;margin:0;min-width:0}.search-row button{flex:none}.list{overflow:auto;display:flex;flex-direction:column;gap:4px;margin-top:9px}.monster{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;border:1px solid transparent}.monster.is-filtered,.monster[hidden]{display:none!important}.monster:hover,.monster.on{background:#eef4ff;color:#175cd3}.monster small{display:block;color:#667085}.monster.override{border-color:#fdb022}.editor{overflow:auto}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.override{background:#fffaeb;color:#b54708}.badge.custom{background:#f4ebff;color:#6941c6}.notice{padding:10px 12px;border-radius:7px;margin-bottom:13px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.summary{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 16px}.chip{padding:3px 8px;border-radius:999px;background:#f2f4f7;color:#475467}.fields{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:10px}.field,.item-field{display:grid;gap:4px}.field span,.item-field>span{font-size:12px;color:#667085}.group{padding:13px;border:1px solid #e4e7ec;border-radius:8px;margin-top:13px}.group h2{font-size:16px;margin:0 0 10px}input,select{width:100%%;min-width:0;padding:8px 9px;border:1px solid #d0d5dd;border-radius:6px;background:#fff}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none;display:inline-block;text-align:center}.danger{background:#b42318}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:13px}.hint{color:#667085;font-size:12px;margin:8px 0 0}.check{display:flex;align-items:center;gap:8px;min-height:39px;font-size:13px;color:#344054}.check input{width:auto;min-width:0}.drop-list{display:grid;gap:9px}.drop-row{display:grid;grid-template-columns:72px minmax(220px,1fr) 135px auto;gap:9px;align-items:end;padding:10px;border:1px solid #e4e7ec;border-radius:8px}.drop-row>span{font-size:12px;color:#667085;padding-bottom:8px}.drop-add{margin-top:9px}.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.catalog{max-height:420px}.fields{grid-template-columns:1fr 1fr}.drop-row{grid-template-columns:1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js?v=19\" defer></script>"
         "</head><body><main class=\"wrap\"><div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">怪物属性、战斗奖励与掉落覆盖</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>");
     vm_mock_admin_append_tabs(&page, "monsters");
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+        /* Avoid duplicating the same banner inside the editor card. */
+        status[0] = 0;
+        message[0] = 0;
+    }
+    vm_mock_admin_render_monster_global_card(&page);
     vm_mock_admin_text_appendf(
         &page,
         "<div class=\"grid\"><aside class=\"card catalog\"><a class=\"button\" href=\"/?tab=monsters&amp;new=1\">＋ 新增怪物</a>"
@@ -308,7 +376,8 @@ static void vm_mock_admin_render_monster_page(char *response,
         "<p class=\"hint\">Actor 写入怪物目录供配置与发布；开战 name 用显示名，立绘用 SCE field-16（若有）。不要期望把 .actor 直接写进开战包名字。</p></div>"
         "<div class=\"group\"><h2>战斗属性</h2><div class=\"fields\"><label class=\"field\"><span>HP（基数）</span><input type=\"number\" name=\"hp\" min=\"1\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>MP（基数）</span><input type=\"number\" name=\"mp\" min=\"1\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>攻击（基数）</span><input type=\"number\" name=\"attack\" min=\"1\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>防御（基数）</span><input type=\"number\" name=\"defense\" min=\"0\" max=\"2147483647\" value=\"%u\" required></label></div>"
         "<p class=\"hint\">此处为<strong>基数</strong>：保存到 MySQL 后，开战仍按等级倍率放大 "
-        "HP/MP/攻击/防御（≥20×3…≥40×5…；首领 HP 再×5）。经验/铜钱不乘倍率。"
+        "HP/MP/攻击/防御（≥20×3…≥40×5…；首领 HP 再×5），再乘上方「全服怪物百分比」。"
+        "经验/铜钱不乘等级倍率，但会乘全服经验/金钱百分比。"
         "未覆盖的目录怪用服务端公式基数，再走同一套倍率。</p></div>"
         "<div class=\"group\"><h2>结算奖励</h2><div class=\"fields\"><label class=\"field\"><span>经验奖励</span><input type=\"number\" name=\"exp\" min=\"0\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>铜钱奖励</span><input type=\"number\" name=\"gold\" min=\"0\" max=\"2147483647\" value=\"%u\" required></label></div></div>"
         "<div class=\"group\"><h2>物品掉落</h2>",

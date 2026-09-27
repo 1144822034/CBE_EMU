@@ -43,6 +43,7 @@ import {
   isDreamBadge,
   isEnhanceCrystal,
   isCrystalExtractStone,
+  isCrossQualityRecastStone,
   isReservoirFlaskItemId,
   maxFlaskBuyUnitsFromBag,
   type BagItem,
@@ -652,17 +653,67 @@ export class SystemPanel extends Container {
     const prevMax = this.stats?.maxGemLevel ?? 0;
     const prevCrystal =
       this.stats?.crystal16ExchangeEnabled ?? 0;
+    const prevSocket = this.stats?.gemSocketEnabled ?? 1;
+    const prevWash = this.stats?.washButtonEnabled ?? 1;
     this.stats = stats;
     if (this.visible && this.kind === "status") this.redraw();
     else if (
       this.visible &&
-      this.kind === "bag" &&
+      (this.kind === "bag" || this.kind === "enhance") &&
       this.mode === "list" &&
       ((stats.maxGemLevel || 0) !== prevMax ||
-        (stats.crystal16ExchangeEnabled ? 1 : 0) !== prevCrystal)
+        (stats.crystal16ExchangeEnabled ? 1 : 0) !== prevCrystal ||
+        (stats.washButtonEnabled ? 1 : 0) !== prevWash)
     ) {
       this.redraw();
+    } else if (
+      this.visible &&
+      (stats.gemSocketEnabled ? 1 : 0) !== prevSocket &&
+      (this.kind === "equip" || this.kind === "bag")
+    ) {
+      /* Rebuild +16「镶嵌」+ 详情宝石词条 when admin toggles socket_embed_enabled. */
+      if (
+        this.kind === "equip" &&
+        this.mode === "actions" &&
+        this.selected &&
+        isBag(this.selected)
+      ) {
+        const labels = ["替换"];
+        const sg = this.selected.socketGems;
+        const socketsFull = !!(sg && sg.reflect && sg.combo && sg.revive);
+        if (
+          (this.selected.enhance | 0) >= 16 &&
+          !socketsFull &&
+          (stats.gemSocketEnabled ?? 1) === 1
+        ) {
+          labels.push("镶嵌");
+        }
+        if (sg && (sg.reflect || sg.combo || sg.revive)) labels.push("拆宝石");
+        labels.push("卸载");
+        this.actionLabels = labels;
+        this.actionCursor = 0;
+      }
+      this.redraw();
+    } else if (
+      this.visible &&
+      (this.kind === "bag" || this.kind === "enhance") &&
+      this.mode === "actions" &&
+      (stats.washButtonEnabled ? 1 : 0) !== prevWash
+    ) {
+      this.actionLabels = this.buildActions();
+      this.actionCursor = 0;
+      this.redraw();
     }
+  }
+
+  /** Equip detail opts: hide gem lines when admin关「允许镶嵌」. */
+  private equipDetailOpts(
+    extra: { omitTypeJob?: boolean } = {},
+  ): { omitTypeJob?: boolean; showSocketGems: boolean } {
+    return {
+      ...extra,
+      showSocketGems: (this.stats?.gemSocketEnabled ?? 1) === 1,
+    };
   }
 
   setLines(lines: string[]): void {
@@ -725,7 +776,7 @@ export class SystemPanel extends Container {
       isBag(this.selected) &&
       this.selected.kind === "equip"
     ) {
-      const lines = buildEquipDetailLines(this.selected);
+      const lines = buildEquipDetailLines(this.selected, this.equipDetailOpts());
       // 与 drawBagEquipDetail 同一套可容纳行数：装得下则不分页
       // 底栏 4 操作时约 15 行（LCD 400 / rowH 16）
       const fitRows = 15;
@@ -977,7 +1028,7 @@ export class SystemPanel extends Container {
         this.actionLabels = ["替换"];
       } else {
         const labels = ["替换"];
-        // 强化上限 +16；三孔都满时不再显示镶嵌。
+        // 强化上限 +16；三孔都满或后台关镶嵌时不显示。
         const sg = this.selected.socketGems;
         const socketsFull = !!(
           sg &&
@@ -985,7 +1036,11 @@ export class SystemPanel extends Container {
           sg.combo &&
           sg.revive
         );
-        if ((this.selected.enhance | 0) >= 16 && !socketsFull) {
+        if (
+          (this.selected.enhance | 0) >= 16 &&
+          !socketsFull &&
+          (this.stats?.gemSocketEnabled ?? 1) === 1
+        ) {
           labels.push("镶嵌");
         }
         if (sg && (sg.reflect || sg.combo || sg.revive)) labels.push("拆宝石");
@@ -1250,7 +1305,12 @@ export class SystemPanel extends Container {
       if (it.kind === "equip") {
         acts.push("装备");
         acts.push("强化");
-        if (it.enhance >= 4) acts.push("洗练");
+        if (
+          it.enhance >= 4 &&
+          (this.stats?.washButtonEnabled ?? 1) === 1
+        ) {
+          acts.push("洗练");
+        }
         if (it.enhance > 0) acts.push("重铸");
         if (it.enhance > 0) acts.push("提炼");
         const sg = it.socketGems;
@@ -1281,6 +1341,8 @@ export class SystemPanel extends Container {
         if (canCombineDreamBadge(it.itemId, it.count)) acts.push("合成");
       } else if (isCrystalExtractStone(it.itemId)) {
         // 玄晶提炼石：从已强化装备详情点「提炼」，不走通用使用
+      } else if (isCrossQualityRecastStone(it.itemId)) {
+        // 跨品重铸石：重铸选目标时自动可用，不走通用使用
       } else {
         // 非装备一律提供使用（道具/任务/材料/杂物/秘宝）
         acts.push("使用");
@@ -1304,7 +1366,12 @@ export class SystemPanel extends Container {
     }
     if (this.kind === "enhance" && this.selected && isBag(this.selected)) {
       const acts = ["强化"];
-      if (this.selected.enhance >= 4) acts.push("洗练");
+      if (
+        this.selected.enhance >= 4 &&
+        (this.stats?.washButtonEnabled ?? 1) === 1
+      ) {
+        acts.push("洗练");
+      }
       if (this.selected.enhance > 0) acts.push("重铸");
       if (this.selected.enhance > 0) acts.push("提炼");
       acts.push("返回");
@@ -1618,7 +1685,10 @@ export class SystemPanel extends Container {
     } else {
       const qColor = qualityColor(focusWorn.quality);
       this.addAttrText(formatBagName(focusWorn), x + 14, detailTop + 2, qColor);
-      const lines = buildEquipDetailLines(focusWorn, { omitTypeJob: true });
+      const lines = buildEquipDetailLines(
+        focusWorn,
+        this.equipDetailOpts({ omitTypeJob: true }),
+      );
       const rowH = UC3_CELL;
       const maxRows = Math.max(1, Math.floor((detailBottom - detailTop - 18) / rowH));
       let ly = detailTop + 16;
@@ -1716,7 +1786,7 @@ export class SystemPanel extends Container {
         `${formatBagName(it)} X${it.count}`,
         x + 14 + EQUIP_ICON_SIZE + 4,
         ry + 1,
-        hi ? CBE.ink : qualityColor(it.quality),
+        hi ? CBE.ink : qualityColor(lookupItemSync(it.itemId)?.quality ?? it.quality),
       );
       const hitIdx = idx;
       this.rowHits.push(
@@ -1761,7 +1831,7 @@ export class SystemPanel extends Container {
 
     const sel = rows[this.cursorIndex] ?? null;
     if (sel) {
-      const lines = buildEquipDetailLines(sel);
+      const lines = buildEquipDetailLines(sel, this.equipDetailOpts());
       const rowH = UC3_CELL;
       const maxRows = Math.max(1, Math.floor((softY - 8 - splitY - 6) / rowH));
       let ly = splitY + 8;
@@ -1848,7 +1918,7 @@ export class SystemPanel extends Container {
       const it = rows[pageStart + i];
       if (!it) break;
       const hi = i === localCursor;
-      const col = qualityColor(it.quality);
+      const col = qualityColor(lookupItemSync(it.itemId)?.quality ?? it.quality);
       if (hi) {
         this.box.rect(listX, ry, listW, rowH - 1).fill({ color: BAG_SELECT });
       }
@@ -2086,7 +2156,12 @@ export class SystemPanel extends Container {
       .lineTo(x + w - 8, titleY + titleH)
       .stroke({ width: 1, color: CBE.borderDim });
     // 标题：原版偏薄荷绿（非品质色）
-    this.addLabelCentered(it.name, LCD_WIDTH / 2, titleY + titleH / 2, CBE.inkBody);
+    this.addLabelCentered(
+      formatBagName(it),
+      LCD_WIDTH / 2,
+      titleY + titleH / 2,
+      CBE.inkBody,
+    );
 
     const softY = y + h - PANEL_BOTTOM_PAD;
     const acts = this.actionLabels;
@@ -2309,7 +2384,9 @@ export class SystemPanel extends Container {
 
     paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
 
-    const qColor = qualityColor(it.quality);
+    const qColor = qualityColor(
+      lookupItemSync(it.itemId)?.quality ?? it.quality,
+    );
     const titleH = 28;
     const titleY = y + 6;
     // Name bar
@@ -2317,7 +2394,12 @@ export class SystemPanel extends Container {
       .roundRect(x + 8, titleY, w - 16, titleH, 4)
       .fill({ color: CBE.bgPanelDark })
       .stroke({ width: 1, color: CBE.borderBright });
-    this.addLabelCentered(it.name, LCD_WIDTH / 2, titleY + titleH / 2, qColor);
+    this.addLabelCentered(
+      formatBagName(it),
+      LCD_WIDTH / 2,
+      titleY + titleH / 2,
+      qColor,
+    );
 
     const softY = y + h - PANEL_BOTTOM_PAD;
     const btnH = 18;
@@ -2332,7 +2414,7 @@ export class SystemPanel extends Container {
     const bodyTop = titleY + titleH + 8;
     const bodyBottom = actionTop - 4;
     const rowH = UC3_CELL;
-    const lines = buildEquipDetailLines(it);
+    const lines = buildEquipDetailLines(it, this.equipDetailOpts());
     const slot = it.equipSlot >= 0 ? it.equipSlot : lookupItemSync(it.itemId)?.equipSlot ?? -1;
     const worn = slot >= 0 ? this.wornBySlot(slot) : null;
     const marks = worn ? buildEquipCompareMarks(it, worn) : null;
@@ -2824,11 +2906,14 @@ export class SystemPanel extends Container {
   private detailText(): string[] {
     if (this.selected && isBag(this.selected)) {
       const it = this.selected;
+      const cat = lookupItemSync(it.itemId);
       return [
-        it.name,
+        bagCatalogName(it),
         `数量 ${it.count}  seq ${it.seq}`,
-        it.kind === "equip" ? `强化 +${it.enhance}  品质 ${it.quality}` : `品质 ${it.quality}`,
-        it.desc ? it.desc : "",
+        it.kind === "equip"
+          ? `强化 +${it.enhance}  品质 ${cat?.quality ?? it.quality}`
+          : `品质 ${cat?.quality ?? it.quality}`,
+        (cat?.desc || it.desc) ? (cat?.desc || it.desc) : "",
         `id ${it.itemId}`,
       ].filter(Boolean);
     }
@@ -2942,9 +3027,13 @@ export class SystemPanel extends Container {
   }
 }
 
+function bagCatalogName(it: BagItem): string {
+  return lookupItemSync(it.itemId)?.name ?? it.name;
+}
+
 function cultivationBookDisplayName(it: BagItem): string {
   if (!isCultivationBookItem(it.itemId) || !(it.bookLevel && it.bookLevel > 0)) {
-    return it.name;
+    return bagCatalogName(it);
   }
   const base = lookupItemSync(it.itemId)?.name ?? "修炼天书";
   return formatCultivationBookName(base, it.bookLevel, it.bookFull);

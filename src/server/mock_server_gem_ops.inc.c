@@ -169,6 +169,7 @@ static u32 vm_net_mock_gem_ops_seed(vm_net_mock_role_state *role, u16 seq)
 /*
  * 29/17 镶嵌: { equipseq, gemseq }
  * result: 1=ok 2=bad 3=trade 4=slot occupied 5=consume fail
+ *         7=socket_embed_enabled=0
  */
 static u32 vm_net_mock_build_gem_embed_response(const u8 *request, u32 requestLen,
                                                 u8 *out, u32 outCap)
@@ -216,7 +217,13 @@ static u32 vm_net_mock_build_gem_embed_response(const u8 *request, u32 requestLe
     gemSeq = (u16)gemSeqValue;
 
     role = vm_net_mock_active_role();
-    if (role == NULL)
+    if (!vm_net_mock_gem_socket_embed_enabled())
+    {
+        result = 7;
+        reason = "embed-disabled";
+        message = "宝石镶嵌未开放";
+    }
+    else if (role == NULL)
     {
         result = 2;
         reason = "no-role";

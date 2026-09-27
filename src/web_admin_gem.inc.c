@@ -51,10 +51,9 @@ static void vm_mock_admin_render_gem_page(char *response, size_t responseCap,
         "code{background:#f2f4f7;padding:1px 4px;border-radius:4px}"
         "</style></head><body><h1>宝石配置</h1>"
         "<p class=\"hint\">反伤 / 连击 / 复活宝石共用同一最高等级。"
-        "允许 1–16，默认 3。十六级玄晶换宝石需单独开启；开启后按下方数量发放。"
-        "保存后立即写入 <code>server_gem_config</code>，"
-        "合成、镶嵌、十六级玄晶兑换和战斗百分比按新值结算。客户端背包「换宝石」"
-        "与人物面板 <code>crystal16ExchangeEnabled</code> 在下次拉面板后跟随。</p>");
+        "允许 1–16，默认 3。镶嵌与十六级玄晶换宝石可单独开关。"
+        "保存后立即写入 <code>server_gem_config</code>。"
+        "客户端装备栏「镶嵌」、背包「换宝石」与人物面板字段在下次拉面板后跟随。</p>");
     vm_mock_admin_append_tabs(&page, "gem");
 
     if (status[0] != 0 && message[0] != 0)
@@ -75,6 +74,12 @@ static void vm_mock_admin_render_gem_page(char *response, size_t responseCap,
         "<div style=\"margin-top:12px\"><label>每级加成%%（1–100）</label>"
         "<input name=\"gem_percent_per_level\" value=\"%u\"></div>"
         "<p class=\"hint\">同属性孔等级 × 此值，跨穿戴装备相加，单属性最高 100%%。默认每级 1%%。</p>"
+        "<div style=\"margin-top:12px\"><label>允许镶嵌（+16 装备）</label>"
+        "<select name=\"socket_embed_enabled\">"
+        "<option value=\"1\"%s>开</option><option value=\"0\"%s>关</option>"
+        "</select></div>"
+        "<p class=\"hint\">关闭时装备栏不显示「镶嵌」，29/17 返回未开放；"
+        "已镶嵌装备仍可「拆宝石」。默认开。</p>"
         "<div style=\"margin-top:12px\"><label>允许十六级玄晶兑换宝石</label>"
         "<select name=\"crystal16_exchange_enabled\">"
         "<option value=\"1\"%s>开</option><option value=\"0\"%s>关</option>"
@@ -88,6 +93,8 @@ static void vm_mock_admin_render_gem_page(char *response, size_t responseCap,
         "<button type=\"submit\">保存宝石配置</button></form></section></body></html>",
         cfg ? cfg->maxGemLevel : 3u,
         cfg ? cfg->gemPercentPerLevel : 1u,
+        cfg && cfg->socketEmbedEnabled ? " selected" : "",
+        cfg && !cfg->socketEmbedEnabled ? " selected" : "",
         cfg && cfg->crystal16ExchangeEnabled ? " selected" : "",
         cfg && !cfg->crystal16ExchangeEnabled ? " selected" : "",
         cfg ? cfg->crystal16GemCount : 5u);
@@ -106,6 +113,7 @@ static void vm_mock_admin_handle_gem_action(vm_mock_service_socket client,
     u32 percent = 0;
     u32 crystalGrant = 0;
     u32 crystalEnabled = 0;
+    u32 socketEmbed = 1;
 
     if (strcmp(action, "save-gem-config") != 0)
     {
@@ -119,17 +127,19 @@ static void vm_mock_admin_handle_gem_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "crystal16_gem_count", 20u, &crystalGrant) ||
         crystalGrant == 0 ||
         !vm_mock_admin_form_u32(body, "crystal16_exchange_enabled", 1u,
-                                &crystalEnabled))
+                                &crystalEnabled) ||
+        !vm_mock_admin_form_u32(body, "socket_embed_enabled", 1u, &socketEmbed))
     {
         vm_mock_admin_redirect_gem(client, "error",
                                    "最高等级须为 1–16，每级加成须为 1–100，"
                                    "十六级玄晶兑换宝石数须为 1–20，"
-                                   "兑换开关须为开或关");
+                                   "镶嵌/兑换开关须为开或关");
         return;
     }
     if (vm_net_mock_gem_config_admin_save((u8)maxLevel, (u8)percent,
                                           (u8)crystalGrant,
-                                          (u8)crystalEnabled))
+                                          (u8)crystalEnabled,
+                                          (u8)socketEmbed))
         vm_mock_admin_redirect_gem(client, "ok", "宝石配置已保存");
     else
         vm_mock_admin_redirect_gem(client, "error", "保存宝石配置失败");
