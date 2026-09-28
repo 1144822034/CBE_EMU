@@ -42,7 +42,7 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         "border:1px solid #e4e7ec}"
         ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}"
         ".ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
-        "select{padding:8px;width:160px;box-sizing:border-box}"
+        "select,input[type=number]{padding:8px;width:160px;box-sizing:border-box}"
         "label{font-size:12px;color:#667085;display:block;margin-bottom:4px}"
         "button{background:#175cd3;color:#fff;border:0;padding:10px 14px;"
         "border-radius:6px;margin-top:12px;cursor:pointer}"
@@ -51,9 +51,10 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         "gap:12px}"
         "code{background:#f2f4f7;padding:1px 4px;border-radius:4px}"
         "</style></head><body><h1>客户端UI</h1>"
-        "<p class=\"hint\">控制 Pixi 客户端是否显示装备「洗练」按钮，以及地图角"
-        "状态栏「翅」「骑」入口。保存后写入 <code>server_client_ui_config</code>；"
-        "玩家下次拉人物面板（<code>1/1/21</code>）后生效。"
+        "<p class=\"hint\">控制 Pixi 客户端是否显示装备「洗练」按钮、地图角"
+        "状态栏「翅」「骑」入口，以及本机同页账号多开槽位上限。保存后写入 "
+        "<code>server_client_ui_config</code>；玩家下次拉人物面板"
+        "（<code>1/1/21</code>）后生效。"
         "关闭洗练时服务端亦拒绝 29/7–9、29/14、29/13。</p>");
     vm_mock_admin_append_tabs(&page, "clientui");
 
@@ -79,17 +80,22 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         "<div><label>坐骑状态栏（骑）</label><select name=\"mount_status_enabled\">"
         "<option value=\"1\"%s>显示</option><option value=\"0\"%s>隐藏</option>"
         "</select></div>"
+        "<div><label>账号多开上限（1–8）</label>"
+        "<input type=\"number\" name=\"multi_open_limit\" min=\"1\" max=\"8\" "
+        "value=\"%u\"></div>"
         "</div>"
         "<p class=\"hint\">隐藏翅膀/坐骑状态栏只影响地图角入口，不影响已装备外观"
         "与管理端解锁。隐藏洗练按钮后背包/强化面板不再出现「洗练」。"
-        "默认均为显示。</p>"
+        "多开上限=1 时客户端菜单「账号多开」不可再开新槽；同页多会话切换，"
+        "其他账号长连接保持。默认均为显示，多开上限默认 1。</p>"
         "<button type=\"submit\">保存</button></form></section></body></html>",
         cfg && cfg->washButtonEnabled ? " selected" : "",
         cfg && !cfg->washButtonEnabled ? " selected" : "",
         cfg && cfg->wingStatusEnabled ? " selected" : "",
         cfg && !cfg->wingStatusEnabled ? " selected" : "",
         cfg && cfg->mountStatusEnabled ? " selected" : "",
-        cfg && !cfg->mountStatusEnabled ? " selected" : "");
+        cfg && !cfg->mountStatusEnabled ? " selected" : "",
+        (u32)(cfg ? cfg->multiOpenLimit : 1u));
     if (page.truncated)
     {
         snprintf(response, responseCap,
@@ -104,6 +110,7 @@ static void vm_mock_admin_handle_client_ui_action(vm_mock_service_socket client,
     u32 washButton = 1;
     u32 wingStatus = 1;
     u32 mountStatus = 1;
+    u32 multiOpenLimit = 1;
 
     if (strcmp(action, "save-client-ui-config") != 0)
     {
@@ -112,13 +119,16 @@ static void vm_mock_admin_handle_client_ui_action(vm_mock_service_socket client,
     }
     if (!vm_mock_admin_form_u32(body, "wash_button_enabled", 1u, &washButton) ||
         !vm_mock_admin_form_u32(body, "wing_status_enabled", 1u, &wingStatus) ||
-        !vm_mock_admin_form_u32(body, "mount_status_enabled", 1u, &mountStatus))
+        !vm_mock_admin_form_u32(body, "mount_status_enabled", 1u, &mountStatus) ||
+        !vm_mock_admin_form_u32(body, "multi_open_limit", 8u, &multiOpenLimit) ||
+        multiOpenLimit < 1u)
     {
-        vm_mock_admin_redirect_client_ui(client, "error", "表单开关无效");
+        vm_mock_admin_redirect_client_ui(client, "error", "表单参数无效");
         return;
     }
     if (vm_net_mock_client_ui_config_admin_save((u8)washButton, (u8)wingStatus,
-                                                 (u8)mountStatus))
+                                                 (u8)mountStatus,
+                                                 (u8)multiOpenLimit))
         vm_mock_admin_redirect_client_ui(client, "ok", "客户端UI配置已保存");
     else
         vm_mock_admin_redirect_client_ui(client, "error", "保存客户端UI配置失败");

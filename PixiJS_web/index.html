@@ -186,12 +186,11 @@
         border-color: rgba(255, 255, 255, 0.45);
       }
       /*
-       * Compact chrome (white-dot hide OR soft-keyboard ime-open):
+       * Compact chrome (white-dot hide only — manual):
        * hide D-pad arrows only; keep 左软 | OK | 右软 on one row.
-       * Login IME used to display:none the whole bar — softkeys vanished.
+       * Soft-keyboard ime-open no longer collapses the D-pad.
        */
-      html.touch-chrome-off #touch-bar,
-      html.ime-open #touch-bar {
+      html.touch-chrome-off #touch-bar {
         --compact-btn: 48px;
         --compact-ok: 72px;
         grid-template-columns: minmax(56px, 1fr) auto minmax(56px, 1fr);
@@ -208,8 +207,7 @@
         box-sizing: border-box;
         overflow: hidden;
       }
-      html.touch-chrome-off #sk-left,
-      html.ime-open #sk-left {
+      html.touch-chrome-off #sk-left {
         grid-column: 1;
         grid-row: 1;
         width: 100%;
@@ -219,8 +217,7 @@
         align-self: center;
         font-size: 0.9rem;
       }
-      html.touch-chrome-off #sk-right,
-      html.ime-open #sk-right {
+      html.touch-chrome-off #sk-right {
         grid-column: 3;
         grid-row: 1;
         width: 100%;
@@ -230,8 +227,7 @@
         align-self: center;
         font-size: 0.9rem;
       }
-      html.touch-chrome-off .dpad,
-      html.ime-open .dpad {
+      html.touch-chrome-off .dpad {
         grid-column: 2;
         grid-row: 1;
         grid-template-columns: var(--compact-ok);
@@ -243,15 +239,10 @@
       html.touch-chrome-off .dpad .up,
       html.touch-chrome-off .dpad .down,
       html.touch-chrome-off .dpad .left,
-      html.touch-chrome-off .dpad .right,
-      html.ime-open .dpad .up,
-      html.ime-open .dpad .down,
-      html.ime-open .dpad .left,
-      html.ime-open .dpad .right {
+      html.touch-chrome-off .dpad .right {
         display: none !important;
       }
-      html.touch-chrome-off .dpad .ok,
-      html.ime-open .dpad .ok {
+      html.touch-chrome-off .dpad .ok {
         grid-column: 1;
         grid-row: 1;
         width: var(--compact-ok);
@@ -260,9 +251,7 @@
         font-size: 1.05rem;
       }
       html.touch-chrome-off #sk-center,
-      html.touch-chrome-off #touch-status,
-      html.ime-open #sk-center,
-      html.ime-open #touch-status {
+      html.touch-chrome-off #touch-status {
         display: none !important;
       }
       /*

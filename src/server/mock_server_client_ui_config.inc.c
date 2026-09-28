@@ -1,15 +1,23 @@
 /* Pixi client UI visibility knobs (MySQL server_client_ui_config).
- * Defaults all ON so existing clients keep wash button + 翅/骑 status badges. */
+ * Defaults: wash/翅/骑 ON; multi_open_limit=1 (no extra windows). */
 
 typedef struct vm_net_mock_client_ui_config
 {
     u8 washButtonEnabled;
     u8 wingStatusEnabled;
     u8 mountStatusEnabled;
+    /** Max concurrent Pixi client windows on one device (1–8). */
+    u8 multiOpenLimit;
 } vm_net_mock_client_ui_config;
 
 static vm_net_mock_client_ui_config g_vm_net_mock_client_ui_config;
 static bool g_vm_net_mock_client_ui_config_loaded = false;
+
+enum
+{
+    VM_NET_MOCK_CLIENT_UI_MULTI_OPEN_MIN = 1,
+    VM_NET_MOCK_CLIENT_UI_MULTI_OPEN_MAX = 8
+};
 
 static void vm_net_mock_client_ui_config_set_defaults(
     vm_net_mock_client_ui_config *cfg)
@@ -19,6 +27,7 @@ static void vm_net_mock_client_ui_config_set_defaults(
     cfg->washButtonEnabled = 1;
     cfg->wingStatusEnabled = 1;
     cfg->mountStatusEnabled = 1;
+    cfg->multiOpenLimit = 1;
 }
 
 static void vm_net_mock_client_ui_config_sanitize(
@@ -29,6 +38,72 @@ static void vm_net_mock_client_ui_config_sanitize(
     cfg->washButtonEnabled = cfg->washButtonEnabled ? 1u : 0u;
     cfg->wingStatusEnabled = cfg->wingStatusEnabled ? 1u : 0u;
     cfg->mountStatusEnabled = cfg->mountStatusEnabled ? 1u : 0u;
+    if (cfg->multiOpenLimit < VM_NET_MOCK_CLIENT_UI_MULTI_OPEN_MIN)
+        cfg->multiOpenLimit = VM_NET_MOCK_CLIENT_UI_MULTI_OPEN_MIN;
+    if (cfg->multiOpenLimit > VM_NET_MOCK_CLIENT_UI_MULTI_OPEN_MAX)
+        cfg->multiOpenLimit = VM_NET_MOCK_CLIENT_UI_MULTI_OPEN_MAX;
+}
+
+typedef struct
+{
+    u32 count;
+    bool found;
+    bool invalid;
+} vm_net_mock_client_ui_column_ctx;
+
+static bool vm_net_mock_client_ui_column_count_row(void *contextValue,
+                                                  unsigned int columnCount,
+                                                  char **values,
+                                                  unsigned long *lengths)
+{
+    vm_net_mock_client_ui_column_ctx *ctx =
+        (vm_net_mock_client_ui_column_ctx *)contextValue;
+
+    (void)lengths;
+    if (ctx == NULL || columnCount < 1 || values == NULL || values[0] == NULL)
+    {
+        if (ctx != NULL)
+            ctx->invalid = true;
+        return true;
+    }
+    ctx->count = (u32)strtoul(values[0], NULL, 10);
+    ctx->found = true;
+    return true;
+}
+
+static bool vm_net_mock_client_ui_config_ensure_column(const char *columnName,
+                                                      const char *alterSql)
+{
+    vm_net_mock_client_ui_column_ctx ctx;
+    char probe[360];
+
+    if (columnName == NULL || alterSql == NULL)
+        return false;
+    memset(&ctx, 0, sizeof(ctx));
+    snprintf(probe, sizeof(probe),
+             "SELECT COUNT(*) FROM information_schema.COLUMNS "
+             "WHERE TABLE_SCHEMA=DATABASE() AND "
+             "TABLE_NAME='server_client_ui_config' AND COLUMN_NAME='%s'",
+             columnName);
+    if (!vm_mysql_query(probe, vm_net_mock_client_ui_column_count_row, &ctx) ||
+        ctx.invalid || !ctx.found)
+    {
+        printf("[error][mock-admin] client_ui_config column probe %s error=%s\n",
+               columnName, vm_mysql_last_error());
+        return false;
+    }
+    if (ctx.count == 0)
+    {
+        if (!vm_mysql_exec(alterSql))
+        {
+            printf("[error][mock-admin] client_ui_config add column %s error=%s\n",
+                   columnName, vm_mysql_last_error());
+            return false;
+        }
+        printf("[info][mock-admin] client_ui_config added column %s\n",
+               columnName);
+    }
+    return true;
 }
 
 static bool vm_net_mock_client_ui_config_row(void *contextValue,
@@ -53,6 +128,10 @@ static bool vm_net_mock_client_ui_config_row(void *contextValue,
     if (values[2] != NULL && values[2][0] != 0)
         tmp = (u32)strtoul(values[2], NULL, 10);
     cfg->mountStatusEnabled = tmp ? 1u : 0u;
+    tmp = 1;
+    if (columnCount >= 4 && values[3] != NULL && values[3][0] != 0)
+        tmp = (u32)strtoul(values[3], NULL, 10);
+    cfg->multiOpenLimit = (u8)tmp;
     return true;
 }
 
@@ -64,15 +143,23 @@ static bool vm_net_mock_client_ui_config_ensure_table(void)
             "wash_button_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "wing_status_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "mount_status_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "multi_open_limit TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(id)"
             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
         return false;
+    if (!vm_net_mock_client_ui_config_ensure_column(
+            "multi_open_limit",
+            "ALTER TABLE server_client_ui_config ADD COLUMN "
+            "multi_open_limit TINYINT UNSIGNED NOT NULL DEFAULT 1 "
+            "AFTER mount_status_enabled"))
+        return false;
     if (!vm_mysql_exec(
             "INSERT IGNORE INTO server_client_ui_config "
-            "(id,wash_button_enabled,wing_status_enabled,mount_status_enabled) "
-            "VALUES (1,1,1,1)"))
+            "(id,wash_button_enabled,wing_status_enabled,mount_status_enabled,"
+            "multi_open_limit) "
+            "VALUES (1,1,1,1,1)"))
         return false;
     return true;
 }
@@ -92,7 +179,7 @@ static void vm_net_mock_client_ui_config_load(bool force)
     }
     if (!vm_mysql_query(
             "SELECT wash_button_enabled,wing_status_enabled,"
-            "mount_status_enabled "
+            "mount_status_enabled,multi_open_limit "
             "FROM server_client_ui_config WHERE id=1 LIMIT 1",
             vm_net_mock_client_ui_config_row, &g_vm_net_mock_client_ui_config))
     {
@@ -104,36 +191,41 @@ static void vm_net_mock_client_ui_config_load(bool force)
     vm_net_mock_client_ui_config_sanitize(&g_vm_net_mock_client_ui_config);
     g_vm_net_mock_client_ui_config_loaded = true;
     printf("[info][mock-admin] client_ui_config_load wash_button=%u "
-           "wing_status=%u mount_status=%u\n",
+           "wing_status=%u mount_status=%u multi_open_limit=%u\n",
            (u32)g_vm_net_mock_client_ui_config.washButtonEnabled,
            (u32)g_vm_net_mock_client_ui_config.wingStatusEnabled,
-           (u32)g_vm_net_mock_client_ui_config.mountStatusEnabled);
+           (u32)g_vm_net_mock_client_ui_config.mountStatusEnabled,
+           (u32)g_vm_net_mock_client_ui_config.multiOpenLimit);
 }
 
 static bool vm_net_mock_client_ui_config_admin_save(u8 washButtonEnabled,
                                                     u8 wingStatusEnabled,
-                                                    u8 mountStatusEnabled)
+                                                    u8 mountStatusEnabled,
+                                                    u8 multiOpenLimit)
 {
     vm_net_mock_client_ui_config cfg;
-    char query[512];
+    char query[640];
 
     vm_net_mock_client_ui_config_set_defaults(&cfg);
     cfg.washButtonEnabled = washButtonEnabled ? 1u : 0u;
     cfg.wingStatusEnabled = wingStatusEnabled ? 1u : 0u;
     cfg.mountStatusEnabled = mountStatusEnabled ? 1u : 0u;
+    cfg.multiOpenLimit = multiOpenLimit;
     vm_net_mock_client_ui_config_sanitize(&cfg);
     if (!vm_net_mock_client_ui_config_ensure_table())
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_client_ui_config "
-             "(id,wash_button_enabled,wing_status_enabled,mount_status_enabled) "
-             "VALUES (1,%u,%u,%u) "
+             "(id,wash_button_enabled,wing_status_enabled,mount_status_enabled,"
+             "multi_open_limit) "
+             "VALUES (1,%u,%u,%u,%u) "
              "ON DUPLICATE KEY UPDATE "
              "wash_button_enabled=VALUES(wash_button_enabled),"
              "wing_status_enabled=VALUES(wing_status_enabled),"
-             "mount_status_enabled=VALUES(mount_status_enabled)",
+             "mount_status_enabled=VALUES(mount_status_enabled),"
+             "multi_open_limit=VALUES(multi_open_limit)",
              (u32)cfg.washButtonEnabled, (u32)cfg.wingStatusEnabled,
-             (u32)cfg.mountStatusEnabled);
+             (u32)cfg.mountStatusEnabled, (u32)cfg.multiOpenLimit);
     if (!vm_mysql_exec(query))
     {
         printf("[error][mock-admin] client_ui_config save failed error=%s\n",
@@ -164,4 +256,9 @@ static bool vm_net_mock_client_ui_wing_status_enabled(void)
 static bool vm_net_mock_client_ui_mount_status_enabled(void)
 {
     return vm_net_mock_client_ui_config_get()->mountStatusEnabled != 0;
+}
+
+static u8 vm_net_mock_client_ui_multi_open_limit(void)
+{
+    return vm_net_mock_client_ui_config_get()->multiOpenLimit;
 }

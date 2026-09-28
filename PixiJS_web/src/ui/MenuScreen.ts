@@ -44,6 +44,7 @@ export type MenuLeaf =
   | "rank"
   | "unstuck"
       | "leave_game"
+  | "multi_open"
   | "change_password"
   | "leave_team"
   | "quick_repair"
@@ -64,7 +65,8 @@ const ROOT: MenuNode[] = [
   {
     label: "系统设置",
     children: [
-      { label: "离开游戏", leaf: "leave_game" },      
+      { label: "离开游戏", leaf: "leave_game" },
+      { label: "账号多开", leaf: "multi_open" },
       { label: "脱离卡死", leaf: "unstuck" },
       { label: "修改密码", leaf: "change_password" },
       { label: "离开队伍", leaf: "leave_team" },

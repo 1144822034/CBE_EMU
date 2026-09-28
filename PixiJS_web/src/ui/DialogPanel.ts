@@ -235,7 +235,7 @@ export class DialogPanel extends Container {
       pages > 1 ? `${this.dialog.title} ${page + 1}/${pages}` : this.dialog.title;
     this.addDialogTitle(titleText, y + 6);
 
-    const bodyMax = tall ? 2 : 8;
+    const bodyMax = this.dialog.bodyMaxLines ?? (tall ? 2 : 8);
     const bodyLines = wrapChars(this.dialog.body).slice(0, bodyMax);
     bodyLines.forEach((line, i) => {
       const t = makePixelText(line, UC3_CELL, CBE.inkBody);

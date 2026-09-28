@@ -6,6 +6,8 @@
  * Industry: Pixi #11196 — real contextlost often needs hard restart.
  */
 
+import { readSlotCredentials } from "./multiOpen";
+
 export const GL_SESSION_RESUME_KEY = "pix_gl_session_resume";
 /** Soft-reload must resume within this window or fall back to splash. */
 export const GL_SESSION_RESUME_TTL_MS = 90_000;
@@ -24,22 +26,11 @@ export type GlSessionResumeSnapshot = {
   ts: number;
 };
 
-const LS_USER = "pixi.jh.account";
-const LS_PASS = "pixi.jh.password";
-
 export function readStoredLoginCredentials(): {
   user: string;
   password: string;
 } | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const user = String(window.localStorage.getItem(LS_USER) || "").trim();
-    const password = String(window.localStorage.getItem(LS_PASS) || "");
-    if (!user) return null;
-    return { user, password };
-  } catch {
-    return null;
-  }
+  return readSlotCredentials();
 }
 
 export function writeGlSessionResume(

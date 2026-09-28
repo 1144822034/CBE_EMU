@@ -1208,6 +1208,10 @@ export class SceneView {
     }
   }
 
+  getPaiBlink(): boolean {
+    return this.paiBlink;
+  }
+
   /**
    * 「拍」tile: hide when admin closes auction (42/1 enabled=0), unless
    * pending claims / blink still need an entry for claim/cancel.
@@ -1220,6 +1224,10 @@ export class SceneView {
       this.paiBlinkPhase = 0;
     }
     this.layoutStatusBadges();
+  }
+
+  getPaiVisible(): boolean {
+    return this.paiBadge.visible;
   }
 
   /** 「翅」tile: admin client-ui wing_status_enabled. */
@@ -1241,6 +1249,10 @@ export class SceneView {
       this.leiBadge.alpha = 1;
       this.leiBlinkPhase = 0;
     }
+  }
+
+  getLeiBlink(): boolean {
+    return this.leiBlink;
   }
 
   /** Hangup/auto 「斗」tile after 修/拍/擂. */

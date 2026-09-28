@@ -4326,8 +4326,11 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
                                      vm_net_mock_client_ui_mount_status_enabled()
                                          ? 1u
                                          : 0u) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "multiOpenLimit",
+                                     (u32)vm_net_mock_client_ui_multi_open_limit()) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseStrength",
                                      stats.baseStrength) ||
+
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseAgility",
                                      stats.baseAgility) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseWisdom",

@@ -10,6 +10,12 @@
    改代码应使用编辑器补丁工具（如 `ApplyPatch` / `StrReplace` / `Write`）；若必须脚本化，仅允许显式 `encoding='utf-8'` 的 Python（或同等可靠 UTF-8 工具），且改前仍须满足上条提交要求。  
    PowerShell 仍可用于只读检查、`git`、构建与进程管理，但**不得写源文件**。
 
+3. **禁止擅自用 git 恢复/覆盖工作区文件**  
+   未经用户**明确同意**，不得执行会丢弃或覆盖本地未提交改动的命令，包括但不限于：  
+   `git checkout -- <path>`、`git restore`、`git reset --hard`、`git clean -f`、`git checkout <commit> -- <path>`、`git stash drop` / `git stash pop`（会改工作区时）。  
+   需要还原某文件时：先说明意图与影响（会丢哪些未提交改动），**等用户同意后再执行**。  
+   纠偏请用编辑器补丁做最小改动；可用只读 `git show` / `git diff` 对照，不得静默 checkout。
+
 ## 故障处理必须根因优先
 
 本规范适用于客户端闪退、断言、解包错误、界面卡住、状态错乱，以及由模拟服务端响应、事件投递、资源更新或持久化逻辑引起的其他异常。

@@ -870,9 +870,14 @@ export class GameSession {
   private nativeKeepAliveInFlight = false;
   private pollFailStreak = 0;
 
-  constructor(private readonly cb: SessionCallbacks) {
-    // Legacy auto-resume snapshots must not re-arm hangup on launch.
-    clearHangupResumeStorage();
+  constructor(
+    private readonly cb: SessionCallbacks,
+    opts?: { clearHangupResume?: boolean },
+  ) {
+    // Multi-slot: only the first page session clears soft-reload hangup resume.
+    if (opts?.clearHangupResume !== false) {
+      clearHangupResumeStorage();
+    }
   }
 
   setCredentials(user: string, password: string): void {
@@ -3195,6 +3200,11 @@ export class GameSession {
   /** Cached 31/5 notices for map peers (kept across brief 2/6 remove/re-add). */
   peerCosmeticsSnapshot(): CosmeticsPeer[] {
     return [...this.scenePeerCosmeticsById.values()];
+  }
+
+  /** Live map peers for UI remount (account-switch / soft resync). */
+  mapPeersSnapshot(): PeerActor[] {
+    return [...this.scenePeerById.values()];
   }
 
   async fetchWagerBoard(): Promise<{

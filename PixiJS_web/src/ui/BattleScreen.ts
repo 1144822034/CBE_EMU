@@ -1,4 +1,4 @@
-import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
 import {
   ACTOR_DISPLAY_SCALE,
   actorSpriteScale,
@@ -10,6 +10,7 @@ import {
 } from "./constants";
 import { BitmapLabel, wrapChars } from "./BitmapLabel";
 import { preferSystemFont } from "../resources/systemFont";
+import type { HudAccountSwitchSlot } from "./WorldHud";
 import type { BattleState, BattleSide } from "../net/protocol";
 import {
   battleDisplayToWire,
@@ -88,12 +89,12 @@ const FX_MAX_H = 96;
  * around 100/160 — prefer 100 so cast/FX/death stay in one beat).
  */
 const UNIT_FRAME_MS = 100;
-/** Cast windup frames before eidolon overlaps (CBE AnimEffect starts mid-cast). */
-const CAST_WINDUP_FRAMES = 2;
 /** Brief hit tint — CBE flash, not a long pose lock that delays death. */
 const HIT_FLASH_MS = 200;
 /** Eidolon / f_death part step when duration is frame-derived. */
 const FX_FRAME_MS = 100;
+/** Skill eidolon drops from stage top onto the target before impact floats. */
+const SKILL_FX_FALL_MS = 280;
 /** After damage floats: hold before starting death pose. */
 const AFTER_DAMAGE_BEFORE_DEATH_MS = 200;
 /** Extra pause after the prior hit fully settles, before gem 连击 starts. */
@@ -123,6 +124,13 @@ const HEAL_GREEN = 0x50e080;
 const TOP_H = 36;
 /** Compact party vitals strip — flush to LCD bottom (HTML softkeys are outside). */
 const BOTTOM_H = BATTLE_PARTY_HUD_H;
+/** Same chip size as WorldHud soft-row account switch. */
+const SWITCH_BTN_W = 18;
+const SWITCH_BTN_GAP = 2;
+const SWITCH_SOFT_H = 22;
+/** Align with world soft-row hang button left edge. */
+const SWITCH_STRIP_X = 40;
+const SWITCH_STRIP_RIGHT = LCD_WIDTH - 8;
 /** Battle log sits above party HUD — right of portrait so face stays visible. */
 const BOTTOM_LOG_X = 36;
 const BOTTOM_LOG_MAX_W = LCD_WIDTH - BOTTOM_LOG_X - 8;
@@ -318,6 +326,11 @@ export class BattleScreen extends Container {
   /** In-flight + queued applyUpdate play jobs (menu/auto stay locked until 0). */
   private playbackDepth = 0;
   /**
+   * Multi-open切号: onBattle is async (skills/bag) before show(); flush may
+   * call applyUpdate while state is still null. Hold until show() drains.
+   */
+  private pendingUpdates: BattleActionUpdate[] = [];
+  /**
    * Shared round: local 4/2 already sent; waiting for 4/6 playback
    * (team merge or spar duel_round_defer). No menu / ops until applyUpdate.
    */
@@ -407,6 +420,18 @@ export class BattleScreen extends Container {
    * during actioninfo playback (not at 4/6 packet arrival).
    */
   onVitalsChanged: (() => void) | null = null;
+  /** Soft-row style chip — same multi-open switch as WorldHud. */
+  onAccountSwitch: ((slotId: string) => void) | null = null;
+
+  private switchHost = new Container();
+  private switchChips: {
+    id: string;
+    root: Container;
+    bg: Sprite | Graphics;
+    label: BitmapLabel;
+  }[] = [];
+  private switchSlots: HudAccountSwitchSlot[] = [];
+  private switchBgTex: Texture | null = null;
 
   constructor() {
     super();
@@ -433,6 +458,10 @@ export class BattleScreen extends Container {
     this.addChild(this.enemyHud);
     // Above stage/menu so the 关闭 hit target stays tappable.
     this.addChild(this.autoBannerHost);
+    // Above party strip so multi-open chips stay tappable in fight.
+    this.switchHost.eventMode = "static";
+    this.switchHost.y = STAGE_BOTTOM - SWITCH_SOFT_H - 2;
+    this.addChild(this.switchHost);
     this.buildChrome();
     preloadCbeFlowerCorners(() => {
       if (
@@ -443,6 +472,102 @@ export class BattleScreen extends Container {
         this.redrawMenu();
       }
     });
+  }
+
+  /**
+   * Spread nickname chips just above the party vitals strip (same look as
+   * WorldHud soft-row). Clicking a non-active chip switches accounts.
+   */
+  setAccountSwitchSlots(slots: HudAccountSwitchSlot[]): void {
+    this.switchSlots = slots.slice();
+    this.rebuildAccountSwitchChips();
+  }
+
+  private clearAccountSwitchChips(): void {
+    for (const chip of this.switchChips) {
+      try {
+        chip.root.removeAllListeners();
+        chip.root.destroy({ children: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    this.switchChips = [];
+    this.switchHost.removeChildren();
+  }
+
+  private rebuildAccountSwitchChips(): void {
+    this.clearAccountSwitchChips();
+    const slots = this.switchSlots;
+    if (!slots.length) {
+      this.switchHost.visible = false;
+      return;
+    }
+    this.switchHost.visible = true;
+    const avail = Math.max(0, SWITCH_STRIP_RIGHT - SWITCH_STRIP_X);
+    const n = slots.length;
+    const btnW = SWITCH_BTN_W;
+    let show = n;
+    while (show > 1 && show * btnW + SWITCH_BTN_GAP * (show - 1) > avail) {
+      show -= 1;
+    }
+    let visible = slots.slice(0, show);
+    if (show < n) {
+      const active = slots.find((s) => s.active);
+      if (active && !visible.some((s) => s.id === active.id)) {
+        visible = [...slots.slice(0, show - 1), active];
+      }
+    }
+
+    let x = SWITCH_STRIP_X;
+    for (const slot of visible) {
+      const root = new Container();
+      root.position.set(x, 0);
+      root.eventMode = "static";
+      root.cursor = slot.active ? "default" : "pointer";
+      root.hitArea = new Rectangle(0, 0, btnW, SWITCH_SOFT_H);
+
+      const active = !!slot.active;
+      let bg: Sprite | Graphics;
+      if (this.switchBgTex) {
+        const spr = uiSprite(this.switchBgTex, btnW, SWITCH_SOFT_H);
+        spr.eventMode = "none";
+        spr.tint = active ? 0xffffff : 0x9a9a9a;
+        spr.alpha = active ? 1 : 0.92;
+        bg = spr;
+      } else {
+        const g = new Graphics()
+          .rect(0, 0, btnW, SWITCH_SOFT_H)
+          .fill({ color: active ? 0x3a5a3a : 0x2a2a2a });
+        g.eventMode = "none";
+        bg = g;
+      }
+      root.addChild(bg);
+
+      const ink = active ? 0xc060ff : 0xffffff;
+      const label = new BitmapLabel();
+      label.eventMode = "none";
+      label.anchor.set(0.5, 0.5);
+      label.position.set(btnW / 2, SWITCH_SOFT_H / 2);
+      root.addChild(label);
+      void label.setText(slot.label || "？", ink, {
+        fontSize: 12,
+        outline: false,
+        smooth: false,
+        crisp: true,
+        uc3: true,
+      });
+
+      const id = slot.id;
+      root.on("pointertap", () => {
+        if (active) return;
+        this.onAccountSwitch?.(id);
+      });
+
+      this.switchHost.addChild(root);
+      this.switchChips.push({ id, root, bg, label });
+      x += btnW + SWITCH_BTN_GAP;
+    }
   }
 
   isAutoBattleActive(): boolean {
@@ -781,10 +906,19 @@ export class BattleScreen extends Container {
       this.hangupActive || this.autoActive ? CBE.inkTip : CBE.inkBody,
       { maxWidth: LCD_WIDTH - 16 },
     );
+    // Drain updates that arrived while show() was still pending (切号 flush).
+    const deferred = this.pendingUpdates.splice(0);
+    for (const up of deferred) this.applyUpdate(up);
   }
 
   applyUpdate(up: BattleActionUpdate): void {
-    if (!this.state) return;
+    if (!this.state) {
+      this.pendingUpdates.push(up);
+      if (this.pendingUpdates.length > 64) {
+        this.pendingUpdates = this.pendingUpdates.slice(-64);
+      }
+      return;
+    }
     // Shared 4/6 (or escape/settle) arrived — leave team wait-for-round lock.
     this.awaitingRound = false;
     this.menuMode = "root";
@@ -955,12 +1089,51 @@ export class BattleScreen extends Container {
     this.onAutoReady?.();
   }
 
+  /** Live fight layout for multi-open leave (mutated in place by applyUpdate). */
+  snapshotBattleState(): BattleState | null {
+    return this.state;
+  }
+
+  snapshotHangupTally(): { tally: HangupCombatinfo; armed: boolean } {
+    return { tally: { ...this.hangupTally }, armed: this.hangupTallyArmed };
+  }
+
+  restoreHangupTally(
+    snap: { tally: HangupCombatinfo; armed: boolean } | null,
+  ): void {
+    if (!snap) {
+      this.hangupTally = {
+        completed: 0,
+        maximum: 64,
+        totalExp: 0,
+        totalGold: 0,
+        totalHpRecovered: 0,
+        totalMpRecovered: 0,
+      };
+      this.hangupTallyArmed = false;
+      return;
+    }
+    this.hangupTally = { ...snap.tally };
+    this.hangupTallyArmed = snap.armed;
+  }
+
+  /** Leave multi-open slot: drop fight UI + hangup session totals for this screen. */
+  resetForAccountSwitch(): void {
+    this.hide();
+    this.restoreHangupTally(null);
+    this.autoActive = false;
+    this.hangupActive = false;
+    this.setSkills([]);
+    this.refreshAutoBannerVisibility();
+  }
+
   hide(): void {
     clearPanelTip(this.toast);
     // Flush last known seat vitals before tearing state (world HUD sync).
     if (this.state) this.notifyVitalsChanged();
     this.visible = false;
     this.state = null;
+    this.pendingUpdates = [];
     this.enemyHud.clear();
     this.arenaDuel = false;
     this.hangupActive = false;
@@ -1917,6 +2090,11 @@ export class BattleScreen extends Container {
     void this.enemyHud.mount();
     void this.mountFloatDigits();
     this.ensureAutoBanner();
+    void tryLoadUiTexture("UI7.gif").then((tex) => {
+      if (!tex) return;
+      this.switchBgTex = tex;
+      this.rebuildAccountSwitchChips();
+    });
   }
 
   private ensureAutoBanner(): void {
@@ -2206,6 +2384,8 @@ export class BattleScreen extends Container {
         .fill({ color: 0x000000, alpha: 0.35 }),
     );
 
+    // Restore mid-fight / 切号: hp already 0 must not spawn as idle "alive".
+    const alreadyDead = side.hp <= 0;
     const view: UnitView = {
       root,
       sprite: null,
@@ -2218,16 +2398,24 @@ export class BattleScreen extends Container {
       homeY: y,
       feetX: x,
       feetY: y,
-      pose: "idle",
+      pose: alreadyDead ? "death" : "idle",
       poseUntil: 0,
-      dead: false,
-      hidden: false,
+      dead: alreadyDead,
+      hidden: alreadyDead,
     };
     this.units.push(view);
+    if (alreadyDead) root.visible = false;
 
     try {
       const loaded = await loadActor(actorName);
       if (!this.state || !view.root.parent) return;
+      // 切号 restore: corpse already marked hidden — do not paint idle body.
+      if (view.hidden) {
+        if (facingRight) {
+          this.enemyHud.setEnemies(this.state.left, this.enemyHudAnchors());
+        }
+        return;
+      }
       view.loaded = loaded;
       const frame = composeBattlePose(loaded, facingRight, "idle", 0);
       if (!frame) return;
@@ -2536,14 +2724,13 @@ export class BattleScreen extends Container {
 
   /**
    * Opening motion. Cast/heal stay planted (鬼道 must not step back). Melee
-   * flashes beside the foe. `windupOnly` returns after CAST_WINDUP_FRAMES so
-   * eidolon/damage can overlap the remaining cast strip (CBE AnimEffect timing).
+   * flashes beside the foe. Skills wait out the full cast strip, then eidolon
+   * falls onto the target (see playSkillEffects).
    */
   private async playAttackMotion(
     actor: UnitView,
     target: UnitView | null,
     pose: "attack" | "cast",
-    opts?: { windupOnly?: boolean },
   ): Promise<void> {
     const midX = (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
     // Cast/heal: keep formation facing. Facing the heal target (often a left-side
@@ -2559,10 +2746,6 @@ export class BattleScreen extends Container {
       const cycleMs = this.attackStripParts(actor) * UNIT_FRAME_MS;
       const hold = cycleMs + 80;
       this.setUnitPose(actor, "cast", hold);
-      if (opts?.windupOnly) {
-        await sleep(CAST_WINDUP_FRAMES * UNIT_FRAME_MS);
-        return;
-      }
       await sleep(Math.max(280, cycleMs));
       if (actor.pose !== "death") {
         actor.pose = "idle";
@@ -3356,7 +3539,27 @@ export class BattleScreen extends Container {
       }
 
       let skillFx: Promise<void> | null = null;
+      let skillLanded: Promise<void> | null = null;
       const hitWaits: Promise<void>[] = [];
+
+      const startSkillFx = (
+        effectIndex: number,
+        wires: number[],
+        caster: UnitView | null,
+        fallbackToActor: boolean,
+      ) => {
+        let resolveLand: (() => void) | null = null;
+        skillLanded = new Promise<void>((r) => {
+          resolveLand = r;
+        });
+        skillFx = this.playSkillEffects(
+          effectIndex,
+          wires,
+          caster,
+          fallbackToActor,
+          () => resolveLand?.(),
+        );
+      };
 
       if (!reflectOnly && !reviveOnly && actor && !actor.dead) {
         const actorEnemy = this.isEnemyUnit(actor);
@@ -3377,42 +3580,21 @@ export class BattleScreen extends Container {
           );
         }
         if (isSkill) {
-          // Combo waits out the full cast + eidolon before the enemy turn.
-          // Primary hits still overlap eidolon after a short windup.
-          if (isComboAction) {
-            await this.playAttackMotion(
+          // Full cast first; eidolon then drops onto targets before floats.
+          await this.playAttackMotion(
+            actor,
+            firstTarget && !this.isUnitDefeated(firstTarget)
+              ? firstTarget
+              : null,
+            "cast",
+          );
+          if (effectIndex > 0) {
+            startSkillFx(
+              effectIndex,
+              fxWires,
               actor,
-              firstTarget && !this.isUnitDefeated(firstTarget)
-                ? firstTarget
-                : null,
-              "cast",
+              /* fallbackToActor */ !offensiveGroup,
             );
-            if (effectIndex > 0) {
-              skillFx = this.playSkillEffects(
-                effectIndex,
-                fxWires,
-                actor,
-                !offensiveGroup,
-              );
-            }
-          } else {
-            // Planted cast windup, then eidolon + damage on the same beat.
-            await this.playAttackMotion(
-              actor,
-              firstTarget && !this.isUnitDefeated(firstTarget)
-                ? firstTarget
-                : null,
-              "cast",
-              { windupOnly: true },
-            );
-            if (effectIndex > 0) {
-              skillFx = this.playSkillEffects(
-                effectIndex,
-                fxWires,
-                actor,
-                /* fallbackToActor */ !offensiveGroup,
-              );
-            }
           }
         } else {
           await this.playAttackMotion(
@@ -3424,15 +3606,13 @@ export class BattleScreen extends Container {
           );
         }
       } else if (!reflectOnly && !reviveOnly && effectIndex > 0) {
-        skillFx = this.playSkillEffects(
-          effectIndex,
-          fxWires,
-          actor,
-          !offensiveGroup,
-        );
+        startSkillFx(effectIndex, fxWires, actor, !offensiveGroup);
       }
 
-      // Damage floats land with FX start (same beat). Death waits until after.
+      // Floats wait until the falling eidolon actually reaches the target.
+      if (skillLanded) await skillLanded;
+
+      // Damage floats land with FX impact. Death waits until after.
       const deathTargets: UnitView[] = [];
       let comboTipOnActor = false;
       for (let i = 0; i < rec.children.length; i++) {
@@ -3569,16 +3749,27 @@ export class BattleScreen extends Container {
    * Play eidolon FX on every resolved wire.
    * Offensive group skills must not fall back onto the caster — hangup wire
    * desync used to paint 荒魂劫火/天火熔身/雷震八方 on 本方.
+   * Each strip starts above the stage and drops onto the target before playing.
+   * `onLanded` fires once all drops finish (damage floats should wait on it).
    */
   private async playSkillEffects(
     effectIndex: number,
     wires: number[],
     actor: UnitView | null,
     fallbackToActor = true,
+    onLanded?: () => void,
   ): Promise<void> {
+    const notifyLanded = () => {
+      try {
+        onLanded?.();
+      } catch {
+        /* ignore */
+      }
+    };
     const actorName = await eidolonActorForIndex(effectIndex);
     if (!actorName) {
       console.warn(`[battle] eidolon missing effectIndex=${effectIndex}`);
+      notifyLanded();
       await sleep(400);
       return;
     }
@@ -3599,9 +3790,17 @@ export class BattleScreen extends Container {
     if (!spots.length) {
       spots.push({ x: LCD_WIDTH / 2, y: UNIT_FEET_Y - 24 });
     }
+    let pendingLand = spots.length;
+    const markLanded = () => {
+      pendingLand -= 1;
+      if (pendingLand <= 0) notifyLanded();
+    };
     await Promise.all(
       spots.map((p) =>
-        this.playNamedActorFx(actorName, p.x, p.y, undefined, undefined, 0.85),
+        this.playNamedActorFx(actorName, p.x, p.y, undefined, undefined, 0.85, {
+          fallFromTop: true,
+          onLanded: markLanded,
+        }),
       ),
     );
   }
@@ -3612,10 +3811,31 @@ export class BattleScreen extends Container {
     }
   }
 
+  /** Ease-out tween for FX hosts (skill drop / similar). */
+  private async tweenHostTo(
+    host: Container,
+    x: number,
+    y: number,
+    ms: number,
+  ): Promise<void> {
+    const x0 = host.x;
+    const y0 = host.y;
+    const t0 = performance.now();
+    while (true) {
+      if (!host.parent) return;
+      const t = Math.min(1, (performance.now() - t0) / Math.max(1, ms));
+      const e = t * (2 - t);
+      host.position.set(x0 + (x - x0) * e, y0 + (y - y0) * e);
+      if (t >= 1) break;
+      await sleep(16);
+    }
+  }
+
   /**
    * Play a JHOnlineData `.actor` strip (eidolon FX / `f_death` splash).
    * `maxParts` caps frames when set (`f_death` has 5 splash parts).
    * Duration defaults to frameCount * FX_FRAME_MS (CBE part tick).
+   * `fallFromTop`: start near STAGE_TOP and drop onto (x,y) before the strip.
    */
   private async playNamedActorFx(
     actorName: string,
@@ -3624,11 +3844,22 @@ export class BattleScreen extends Container {
     maxParts?: number,
     durationMs?: number,
     anchorY = 1,
+    opts?: { fallFromTop?: boolean; onLanded?: () => void },
   ): Promise<void> {
+    const notifyLanded = () => {
+      try {
+        opts?.onLanded?.();
+      } catch {
+        /* ignore */
+      }
+    };
     try {
       const loaded = await loadActor(actorName);
       const host = new Container();
-      host.position.set(x, y);
+      const startY = opts?.fallFromTop
+        ? Math.min(y, STAGE_TOP + 12)
+        : y;
+      host.position.set(x, startY);
       this.fxHost.addChild(host);
       const partCount = Math.max(
         loaded.animations[0]?.parts.length ?? 0,
@@ -3640,15 +3871,15 @@ export class BattleScreen extends Container {
           : Math.max(1, partCount || 4);
       const totalMs = durationMs ?? frames * FX_FRAME_MS;
       const frameMs = Math.max(40, Math.floor(totalMs / frames));
-      let painted = 0;
-      for (let i = 0; i < frames; i++) {
-        if (!host.parent) break;
+
+      const paintFrame = (i: number): boolean => {
+        if (!host.parent) return false;
         const composed =
           composePartStacked(loaded, 0, i) ||
           composePartStacked(loaded, 1, i) ||
           composeMapActor(loaded, 3, false, i) ||
           composeMapActor(loaded, 2, false, i);
-        if (!composed) continue;
+        if (!composed) return false;
         host.removeChildren().forEach((c) =>
           c.destroy({ children: true, texture: true }),
         );
@@ -3663,7 +3894,20 @@ export class BattleScreen extends Container {
         );
         spr.scale.set(fit);
         host.addChild(spr);
-        painted += 1;
+        return true;
+      };
+
+      // Drop from stage top with first frame visible, then play the strip.
+      if (opts?.fallFromTop && startY < y) {
+        paintFrame(0);
+        await this.tweenHostTo(host, x, y, SKILL_FX_FALL_MS);
+      }
+      notifyLanded();
+
+      let painted = 0;
+      for (let i = 0; i < frames; i++) {
+        if (!host.parent) break;
+        if (paintFrame(i)) painted += 1;
         await sleep(frameMs);
       }
       if (!painted) {
@@ -3673,6 +3917,7 @@ export class BattleScreen extends Container {
       host.destroy({ children: true, texture: true });
     } catch (e) {
       console.warn("[battle] fx", actorName, e);
+      notifyLanded();
       await sleep(Math.min(600, durationMs ?? 600));
     }
   }

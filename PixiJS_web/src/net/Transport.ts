@@ -10,8 +10,8 @@ import {
 } from "./cbms";
 
 /** Live gateway on this machine's LAN IP (PixiJS web / APK). */
-export const FIXED_LIVE_GATEWAY = "ws://106.54.59.92:19093";
-//export const FIXED_LIVE_GATEWAY = "ws://192.1.1.1:19092";
+//export const FIXED_LIVE_GATEWAY = "ws://106.54.59.92:19093";
+export const FIXED_LIVE_GATEWAY = "ws://192.1.1.1:19092";
 
 export type TransportMode = "live";
 

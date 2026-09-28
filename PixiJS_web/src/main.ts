@@ -7,7 +7,7 @@ import { currentUc3FontId } from "./resources/uc3Font";
 import { UC3_FONT_OPTIONS, type Uc3FontId } from "./resources/uiFontPreference";
 import { applyUiFontId, bootUiFont } from "./resources/systemFont";
 import { Application, Graphics, Rectangle } from "pixi.js";
-import { loadSceneIndex, loadSceneMap } from "./resources/loader";
+import { loadSceneIndex, loadSceneMap, setResourceExchange } from "./resources/loader";
 import {
   defaultMonsterLevelsUrl,
   formatCombatSpawnNameplate,
@@ -32,6 +32,13 @@ import {
   takeGlSessionResume,
   writeGlSessionResume,
 } from "./net/glSessionResume";
+
+import {
+  allocMultiOpenSlotId,
+  clampMultiOpenLimit,
+  readSlotCredentials,
+  setActiveCredSlotId,
+} from "./net/multiOpen";
 import {
   createRechargeOrder,
   formatRechargeYuan,
@@ -59,7 +66,7 @@ import {
   stripBrokenTextureSprites,
   type ForensicClass,
 } from "./debug/glForensic";
-import { GameSession } from "./game/GameSession";
+import { GameSession, type SessionCallbacks } from "./game/GameSession";
 import { PhoneShell } from "./ui/PhoneShell";
 import { TitleScreen } from "./ui/TitleScreen";
 import { RoleScreen } from "./ui/RoleScreen";
@@ -126,7 +133,7 @@ import {
   QuestTrackerOverlay,
   buildQuestTrackerRows,
 } from "./ui/QuestTrackerOverlay";
-import { ChatPanel, findArenaKillStreakTitle } from "./ui/ChatPanel";
+import { ChatPanel, findArenaKillStreakTitle, type ChatEntry } from "./ui/ChatPanel";
 import { TradePanel } from "./ui/TradePanel";
 import { GuildPanel } from "./ui/GuildPanel";
 import { MiniMapOverlay } from "./ui/MiniMapOverlay";
@@ -186,8 +193,10 @@ import {
   parseGemItem,
   NpcServiceOpcode,
   npcServiceOpcode,
+  foldBattleActionHpIntoState,
+  decodeNpcLearnSkillId,
 } from "./net/protocolExtras";
-import { isMapHealSkill } from "./resources/skill";
+import { isMapHealSkill, loadSkillCatalog, lookupSkillSync } from "./resources/skill";
 import {
   jobAllowsWeaponCategory,
   lookupItemSync,
@@ -480,10 +489,9 @@ async function main(): Promise<void> {
    */
   const syncTouchChromeScale = () => {
     if (!touchBar) return;
+    // Only the manual white-dot toggle collapses D-pad; IME keeps full keys.
     const chromeOff =
-      document.documentElement.classList.contains("touch-chrome-off") ||
-      document.documentElement.classList.contains("ime-open") ||
-      imeShellIsActive();
+      document.documentElement.classList.contains("touch-chrome-off");
     const appEl = document.getElementById("app");
     const rawH = appEl?.clientHeight || window.innerHeight || 0;
     const rawW = appEl?.clientWidth || window.innerWidth || 0;
@@ -688,10 +696,10 @@ async function main(): Promise<void> {
   window.addEventListener("resize", fitPhoneWrap);
   window.addEventListener("orientationchange", () => setTimeout(fitPhoneWrap, 50));
   window.addEventListener("ime-shell", () => {
-    // Touch-bar hide expands stage — one fresh fit, then lock (never shrink).
+    // IME layout lock: one fresh fit, then lock (never shrink).
     if (imeShellIsActive()) {
       const floor = imeShellLockedSize();
-      // Suspend lock so fit can use the larger stage after #touch-bar hide.
+      // Suspend lock so fit can remeasure stage under the keyboard.
       imeShellClearLockSize();
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
@@ -840,7 +848,7 @@ async function main(): Promise<void> {
   const entertainWeb = new EntertainmentWebLayer();
   const wingPanel = new WingPanel();
   const mountPanel = new MountPanel();
-  let auctionCache: {
+  type AuctionCacheState = {
     rows: AuctionListing[];
     mine: AuctionListing[];
     claims: import("./net/protocolAuction").AuctionClaimRow[];
@@ -851,7 +859,8 @@ async function main(): Promise<void> {
     browseHasMore: boolean;
     mineHasMore: boolean;
     claimHasMore: boolean;
-  } = {
+  };
+  const emptyAuctionCache = (): AuctionCacheState => ({
     rows: [],
     mine: [],
     claims: [],
@@ -862,7 +871,20 @@ async function main(): Promise<void> {
     browseHasMore: false,
     mineHasMore: false,
     claimHasMore: false,
-  };
+  });
+  const cloneAuctionCache = (src: AuctionCacheState): AuctionCacheState => ({
+    rows: src.rows.slice(),
+    mine: src.mine.slice(),
+    claims: src.claims.slice(),
+    status: src.status ? { ...src.status } : null,
+    browsePage: src.browsePage,
+    minePage: src.minePage,
+    claimPage: src.claimPage,
+    browseHasMore: src.browseHasMore,
+    mineHasMore: src.mineHasMore,
+    claimHasMore: src.claimHasMore,
+  });
+  let auctionCache: AuctionCacheState = emptyAuctionCache();
   const taskUi = new TaskPanel();
   const questTracker = new QuestTrackerOverlay();
   const chatPanel = new ChatPanel();
@@ -2676,7 +2698,52 @@ async function main(): Promise<void> {
     dialog.show(shown, { keepCursor: true });
   };
 
-  const session = new GameSession({
+  type AccountSlot = {
+    id: string;
+    session: GameSession;
+    pendingBattle: Parameters<SessionCallbacks["onBattle"]>[0] | null;
+    /** 4/6+ updates that arrived while this slot was backgrounded. */
+    pendingBattleUpdates: import("./net/protocolExtras").BattleActionUpdate[];
+    /** Newest-first world/channel chat for this slot only. */
+    chatEntries: ChatEntry[];
+    sparMapVitalsLatch: boolean;
+    wagerMapHealLatch: boolean;
+    mapVitalsAtSparEnter: {
+      hp: number;
+      hpMax: number;
+      mp: number;
+      mpMax: number;
+    } | null;
+    auctionCache: AuctionCacheState;
+    cachedRingStatus: RingStatus | null;
+    leiBlink: boolean;
+    paiVisible: boolean;
+    paiBlink: boolean;
+    hangupTally: {
+      tally: import("./net/protocolExtras").HangupCombatinfo;
+      armed: boolean;
+    } | null;
+  };
+  const freshSlotFields = (): Omit<AccountSlot, "id" | "session"> => ({
+    pendingBattle: null,
+    pendingBattleUpdates: [],
+    chatEntries: [],
+    sparMapVitalsLatch: false,
+    wagerMapHealLatch: false,
+    mapVitalsAtSparEnter: null,
+    auctionCache: emptyAuctionCache(),
+    cachedRingStatus: null,
+    leiBlink: false,
+    paiVisible: false,
+    paiBlink: false,
+    hangupTally: null,
+  });
+  let activeSlotId = "main";
+  setActiveCredSlotId("main");
+  const accountSlots = new Map<string, AccountSlot>();
+  let multiAccountDialogSlotIds: string[] = [];
+
+  const uiCallbacks: SessionCallbacks = {
     onStatus: (s) => setChromeStatus(`[${s.mode}] ${s.phase}: ${s.detail}`),
     onServers: (servers) => {
       title.setServers(servers);
@@ -3863,12 +3930,598 @@ async function main(): Promise<void> {
         isRedNamePk(stats.pkPoints),
       );
       void view.setPlayerGuild(stats.guild || session.guildName || "");
+      syncAccountSwitchHud();
     },
     onHangup: (msg) => {
       hud.pushChat(`[挂] ${msg}`);
       showGameTip(msg);
     },
+  };
+
+  const classifyChatType = (text: string, type?: number): number => {
+    if (type != null) return type;
+    if (text.startsWith("[世]")) return 0;
+    if (text.startsWith("[队]")) return 2;
+    if (text.startsWith("[帮]")) return 3;
+    if (text.startsWith("[本]") || text.startsWith("[旁]")) return 4;
+    if (text.startsWith("[私]")) return 7;
+    return 5;
+  };
+
+  const appendSlotChatEntry = (
+    rec: AccountSlot,
+    line: {
+      type: number;
+      text: string;
+      senderRoleId?: number;
+      senderName?: string;
+    },
+  ): void => {
+    rec.chatEntries.unshift({
+      type: classifyChatType(line.text, line.type),
+      text: line.text,
+      senderRoleId: line.senderRoleId,
+      senderName: line.senderName,
+    });
+    rec.chatEntries = rec.chatEntries.slice(0, 80);
+  };
+
+  const swapHudChatToSlot = (leavingId: string, entering: AccountSlot) => {
+    const leaving = accountSlots.get(leavingId);
+    if (leaving) leaving.chatEntries = hud.snapshotChatNewestFirst();
+    hud.replaceChatNewestFirst(entering.chatEntries);
+    if (phase === "chat" && chatPanel.visible) {
+      chatPanel.setEntries(hud.getChatEntries());
+    }
+  };
+
+  const snapshotActiveSlotUi = (rec: AccountSlot) => {
+    rec.sparMapVitalsLatch = sparMapVitalsLatch;
+    rec.wagerMapHealLatch = wagerMapHealLatch;
+    rec.mapVitalsAtSparEnter = mapVitalsAtSparEnter
+      ? { ...mapVitalsAtSparEnter }
+      : null;
+    rec.auctionCache = cloneAuctionCache(auctionCache);
+    rec.cachedRingStatus = cachedRingStatus;
+    rec.leiBlink = view.getLeiBlink();
+    rec.paiVisible = view.getPaiVisible();
+    rec.paiBlink = view.getPaiBlink();
+    rec.hangupTally = battle.snapshotHangupTally();
+    if (battle.visible) {
+      const st = battle.snapshotBattleState();
+      if (st) rec.pendingBattle = st;
+    }
+  };
+
+  const restoreSlotUi = (rec: AccountSlot) => {
+    sparMapVitalsLatch = rec.sparMapVitalsLatch;
+    wagerMapHealLatch = rec.wagerMapHealLatch;
+    mapVitalsAtSparEnter = rec.mapVitalsAtSparEnter
+      ? { ...rec.mapVitalsAtSparEnter }
+      : null;
+    auctionCache = cloneAuctionCache(rec.auctionCache);
+    cachedRingStatus = rec.cachedRingStatus;
+    view.setLeiBlink(rec.leiBlink);
+    view.setPaiVisible(rec.paiVisible);
+    view.setPaiBlink(rec.paiBlink);
+    battle.restoreHangupTally(rec.hangupTally);
+    refreshQuestTracker();
+    syncWorldStatusBadges();
+  };
+
+  /** Drop confirm/pickers that belong to the leaving account's UI only. */
+  const clearTransientUiPending = () => {
+    if (autoArmTimer != null) {
+      window.clearTimeout(autoArmTimer);
+      autoArmTimer = null;
+    }
+    hangupStartAfterSkillPick = false;
+    skillForgetDialogOpen = false;
+    skillLearnConfirmOpen = false;
+    pendingSkillLearnWire = 0;
+    pendingSkillLearnList = null;
+    friendDeleteDialogOpen = false;
+    pendingFriendDelete = null;
+    pendingGuildKick = null;
+    expectGuildDisbandTip = false;
+    discardConfirmOpen = false;
+    pendingDiscard = null;
+    extractConfirmOpen = false;
+    pendingExtract = null;
+    dreamBadgeCombineOpen = false;
+    pendingDreamBadge = null;
+    starSkyStonePickEquipOpen = false;
+    starSkyStonePickTierOpen = false;
+    pendingStarSkyStone = null;
+    pendingStarSkyEquip = null;
+    gemPickOpen = false;
+    pendingGem = null;
+    pendingGemEquip = null;
+    gemPickMode = null;
+    pendingWarehouseDepositSeq = 0;
+  };
+
+  const gateUi = (slotId: string): SessionCallbacks => {
+    const when = <A extends unknown[], R>(
+      fn: ((...args: A) => R) | undefined,
+    ): ((...args: A) => R | undefined) | undefined => {
+      if (!fn) return undefined;
+      return (...args: A) => {
+        if (activeSlotId !== slotId) return undefined;
+        return fn(...args);
+      };
+    };
+    const whenAsync = <A extends unknown[]>(
+      fn: ((...args: A) => void | Promise<void>) | undefined,
+    ): ((...args: A) => Promise<void>) | undefined => {
+      if (!fn) return undefined;
+      return async (...args: A) => {
+        if (activeSlotId !== slotId) return;
+        await fn(...args);
+      };
+    };
+    return {
+      onStatus: when(uiCallbacks.onStatus)!,
+      onServers: when(uiCallbacks.onServers)!,
+      onRoles: when(uiCallbacks.onRoles)!,
+      onEnterScene: whenAsync(uiCallbacks.onEnterScene)!,
+      onSceneSoftResync: whenAsync(uiCallbacks.onSceneSoftResync),
+      onRoleSwitch: when(uiCallbacks.onRoleSwitch),
+      onPlayerPos: when(uiCallbacks.onPlayerPos),
+      onNpcs: when(uiCallbacks.onNpcs)!,
+      onPeers: when(uiCallbacks.onPeers)!,
+      onPeerMoves: when(uiCallbacks.onPeerMoves),
+      onNearbyPage: when(uiCallbacks.onNearbyPage),
+      onTeamUpdate: when(uiCallbacks.onTeamUpdate),
+      onFriends: when(uiCallbacks.onFriends),
+      onEnmity: when(uiCallbacks.onEnmity),
+      onSocialInvite: when(uiCallbacks.onSocialInvite),
+      onSocialNotice: when(uiCallbacks.onSocialNotice),
+      onTradeSession: when(uiCallbacks.onTradeSession),
+      onGuildManage: when(uiCallbacks.onGuildManage),
+      onPlayerInfo: when(uiCallbacks.onPlayerInfo),
+      onOtherEquip: when(uiCallbacks.onOtherEquip),
+      onDesignationUpdate: when(uiCallbacks.onDesignationUpdate),
+      onCosmeticsUpdate: when(uiCallbacks.onCosmeticsUpdate),
+      onArenaHud: when(uiCallbacks.onArenaHud),
+      onWagerEvent: (ev) => {
+        if (activeSlotId !== slotId) {
+          const rec = accountSlots.get(slotId);
+          if (!rec) return;
+          if (ev.eventKind === 2) {
+            rec.wagerMapHealLatch = true;
+            if (rec.session.inBattle) {
+              rec.sparMapVitalsLatch = true;
+              if (!rec.mapVitalsAtSparEnter) {
+                const s = rec.session;
+                rec.mapVitalsAtSparEnter = {
+                  hp: s.hp,
+                  hpMax: s.hpMax,
+                  mp: s.mp,
+                  mpMax: s.mpMax,
+                };
+              }
+            }
+          }
+          rec.leiBlink = true;
+          const kind =
+            ev.eventKind === 1
+              ? "有人应战，请确认"
+              : ev.eventKind === 2
+                ? "开战"
+                : ev.eventKind === 3
+                  ? ev.result === 1
+                    ? `结算胜+${ev.payout}`
+                    : ev.result === 2
+                      ? "结算负"
+                      : `结算退${ev.payout}`
+                  : ev.eventKind === 4
+                    ? "擂主拒绝"
+                    : ev.eventKind === 5
+                      ? "超时，已自动撤擂"
+                      : "通知";
+          appendSlotChatEntry(rec, {
+            type: 0,
+            text: `[赏]赏金#${ev.challengeId} ${kind}`,
+          });
+          return;
+        }
+        uiCallbacks.onWagerEvent?.(ev);
+      },
+      onAuctionEvent: (ev) => {
+        if (activeSlotId !== slotId) {
+          const rec = accountSlots.get(slotId);
+          if (!rec) return;
+          if (rec.auctionCache.status) {
+            rec.auctionCache.status = {
+              ...rec.auctionCache.status,
+              blink: !!ev.blink,
+            };
+          }
+          if (ev.blink) {
+            rec.paiVisible = true;
+            rec.paiBlink = true;
+          } else {
+            rec.paiBlink = false;
+          }
+          const kind =
+            ev.eventKind === 1
+              ? "可领取"
+              : ev.eventKind === 2
+                ? `被超价退${ev.amount}`
+                : ev.eventKind === 3
+                  ? `成交${ev.amount}`
+                  : ev.eventKind === 4
+                    ? "超时下架"
+                    : "拍卖通知";
+          appendSlotChatEntry(rec, {
+            type: 0,
+            text: ev.listingId
+              ? `[拍]拍卖#${ev.listingId} ${kind}`
+              : `[拍]拍卖 ${kind}`,
+          });
+          return;
+        }
+        uiCallbacks.onAuctionEvent?.(ev);
+      },
+      onPeerDesignation: when(uiCallbacks.onPeerDesignation),
+      onCosmeticsPeer: when(uiCallbacks.onCosmeticsPeer),
+      onBattle: (state) => {
+        if (activeSlotId !== slotId) {
+          const rec = accountSlots.get(slotId);
+          if (rec) {
+            rec.pendingBattle = state;
+            rec.pendingBattleUpdates = [];
+          }
+          return;
+        }
+        uiCallbacks.onBattle(state);
+      },
+      onEngageSceneMonster: when(uiCallbacks.onEngageSceneMonster),
+      onRestoreSceneMonster: when(uiCallbacks.onRestoreSceneMonster),
+      onBattleUpdate: (up) => {
+        if (activeSlotId !== slotId) {
+          const rec = accountSlots.get(slotId);
+          if (!rec) return;
+          if (rec.pendingBattle) {
+            foldBattleActionHpIntoState(rec.pendingBattle, up);
+          }
+          rec.pendingBattleUpdates.push(up);
+          if (rec.pendingBattleUpdates.length > 64) {
+            rec.pendingBattleUpdates = rec.pendingBattleUpdates.slice(-64);
+          }
+          return;
+        }
+        uiCallbacks.onBattleUpdate?.(up);
+      },
+      onSkills: when(uiCallbacks.onSkills),
+      onNpcDialog: when(uiCallbacks.onNpcDialog),
+      onTaskPrompt: when(uiCallbacks.onTaskPrompt),
+      onNpcTaskPrompts: when(uiCallbacks.onNpcTaskPrompts),
+      onChallengePrompt: when(uiCallbacks.onChallengePrompt),
+      onChat: (lines) => {
+        if (activeSlotId !== slotId) {
+          const rec = accountSlots.get(slotId);
+          if (!rec) return;
+          for (const line of lines) {
+            appendSlotChatEntry(rec, line);
+          }
+          return;
+        }
+        uiCallbacks.onChat?.(lines);
+      },
+      onAccountKicked: (reason) => {
+        const rec = accountSlots.get(slotId);
+        if (!rec) return;
+        try {
+          rec.session.logout();
+        } catch {
+          /* ignore */
+        }
+        accountSlots.delete(slotId);
+        if (activeSlotId !== slotId) {
+          // logout() nulls global setResourceExchange — rebind active slot.
+          bindActiveResourceExchange();
+          showGameTip(`后台账号被踢：${reason}`);
+          syncAccountSwitchHud();
+          return;
+        }
+        hud.pushChat(`[系]${reason}`);
+        setChromeStatus(reason, true);
+        void afterActiveSlotClosed(reason);
+      },
+      onHangupResumeStatus: when(uiCallbacks.onHangupResumeStatus),
+      onItemUseFeedback: when(uiCallbacks.onItemUseFeedback),
+      onBag: when(uiCallbacks.onBag),
+      onWorn: when(uiCallbacks.onWorn),
+      onMall: when(uiCallbacks.onMall),
+      onCharacterStats: when(uiCallbacks.onCharacterStats),
+      onVitals: when(uiCallbacks.onVitals),
+      onHangup: when(uiCallbacks.onHangup),
+    };
+  };
+
+  let session = new GameSession(gateUi("main"));
+  accountSlots.set("main", {
+    id: "main",
+    session,
+    ...freshSlotFields(),
   });
+
+  const closeOverlaysForAccountSwitch = () => {
+    mapUiMode = "off";
+    miniMap.hide();
+    worldMap.hide();
+    battle.resetForAccountSwitch();
+    dialog.hide();
+    system.hide();
+    system.setSkills([]);
+    system.setBag([]);
+    system.setWorn([]);
+    enhanceUi.hide();
+    washUi.close();
+    social.hide();
+    chatPanel.hide();
+    tradeUi.hide();
+    guildUi.hide();
+    createRole.close();
+    menu.visible = false;
+    approach.hide();
+    closeActivityPanels();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    auctionPanel.close();
+    arenaPanel.close();
+    wagerPanel.close();
+    ladderPanel.close();
+    guessPanel.close();
+    fruitPanel.close();
+    festivalPanel.close();
+    yanmenPanel.close();
+    ringQuestPanel.close();
+    arenaHud.apply(null);
+    questTracker.setArenaOffsetY(0);
+    hud.setParty([]);
+  };
+
+  const bindActiveResourceExchange = () => {
+    if (session.transport) {
+      setResourceExchange((flags, wt) => session.transport!.exchange(flags, wt));
+    } else {
+      setResourceExchange(null);
+    }
+  };
+
+  const nickLabel1 = (name: string): string => {
+    const chars = [...String(name || "").trim()];
+    return chars.length ? chars[0]! : "？";
+  };
+
+  const syncAccountSwitchHud = () => {
+    const rows = [...accountSlots.values()].map((rec) => {
+      const s = rec.session;
+      const name =
+        s.roleName ||
+        s.roles.find((r) => r.roleId === s.selectedRoleId)?.name ||
+        s.getCredentials().user ||
+        "";
+      return {
+        id: rec.id,
+        label: nickLabel1(name),
+        active: rec.id === activeSlotId,
+      };
+    });
+    hud.setAccountSwitchSlots(rows);
+    battle.setAccountSwitchSlots(rows);
+  };
+
+  const switchAccountSlot = async (
+    slotId: string,
+    opts?: { toLogin?: boolean },
+  ): Promise<void> => {
+    const rec = accountSlots.get(slotId);
+    if (!rec) {
+      showGameTip("账号槽不存在");
+      return;
+    }
+    if (slotId === activeSlotId && !opts?.toLogin) {
+      return;
+    }
+    const leavingId = activeSlotId;
+    const leaving = accountSlots.get(leavingId);
+    if (leaving) snapshotActiveSlotUi(leaving);
+    activeSlotId = slotId;
+    session = rec.session;
+    setActiveCredSlotId(slotId);
+    bindActiveResourceExchange();
+    swapHudChatToSlot(leavingId, rec);
+    closeOverlaysForAccountSwitch();
+    clearTransientUiPending();
+    restoreSlotUi(rec);
+    pendingRoles = session.roles.slice();
+    activeRole =
+      session.roles.find((r) => r.roleId === session.selectedRoleId) || null;
+    syncAccountSwitchHud();
+
+    if (opts?.toLogin || !session.transport) {
+      hud.pauseDreamTimer();
+      hud.setIdentity("", "", "");
+      view.invalidateMap();
+      view.actors.clear();
+      const creds = readSlotCredentials(slotId);
+      title.setCredentials(creds?.user || "", creds?.password || "");
+      title.setStatus(creds?.user ? "请登录（多开）" : "新开账号，请登录");
+      setChromeStatus("账号多开：登录新账号（其他号不断线）");
+      showPhase("login");
+      return;
+    }
+
+    const flushPendingBattle = () => {
+      const stashedLatch = {
+        spar: rec.sparMapVitalsLatch,
+        wager: rec.wagerMapHealLatch,
+        vitals: rec.mapVitalsAtSparEnter
+          ? { ...rec.mapVitalsAtSparEnter }
+          : null,
+      };
+      const st = rec.pendingBattle;
+      const ups = rec.pendingBattleUpdates.splice(0);
+      if (st) {
+        rec.pendingBattle = null;
+        uiCallbacks.onBattle(st);
+      }
+      // onBattle may re-arm latches from seat HP — keep leave-time map snapshot.
+      sparMapVitalsLatch = stashedLatch.spar;
+      wagerMapHealLatch = stashedLatch.wager;
+      mapVitalsAtSparEnter = stashedLatch.vitals;
+      for (const up of ups) uiCallbacks.onBattleUpdate?.(up);
+      battle.restoreHangupTally(rec.hangupTally);
+      battle.setHangupActive(session.hangupActive || session.hangupDesired);
+      battle.setAutoBattleActive(!!session.autoBattleActive);
+    };
+
+    if (session.inBattle && (rec.pendingBattle || rec.pendingBattleUpdates.length)) {
+      flushPendingBattle();
+      syncAccountSwitchHud();
+      if (session.pendingSocialInvite) {
+        uiCallbacks.onSocialInvite?.(session.pendingSocialInvite);
+      } else {
+        showGameTip("已切换账号（战斗中）");
+      }
+      return;
+    }
+
+    if (session.scene) {
+      try {
+        await uiCallbacks.onEnterScene(session.scene, session.x, session.y, {
+          hasPos: true,
+        });
+      } catch (e) {
+        console.warn("[multi] resync scene", e);
+        showPhase("world");
+      }
+      // Pull a fresh 2/7 so map peers match server after background time.
+      if (!isDreamInstanceScene(session.scene)) {
+        void session.openNearbyPlayers(0).catch((e) => {
+          console.warn("[multi] nearby refresh", e);
+        });
+      }
+      syncAccountSwitchHud();
+      // Invites arrived while muted — session kept pendingSocialInvite.
+      if (session.pendingSocialInvite) {
+        uiCallbacks.onSocialInvite?.(session.pendingSocialInvite);
+      } else if (session.inBattle) {
+        flushPendingBattle();
+        showGameTip("已切换账号（后台战斗中）");
+      } else {
+        showGameTip(
+          `已切换：${session.roleName || activeRole?.name || session.getCredentials().user || "账号"}`,
+        );
+      }
+      return;
+    }
+
+    if (session.roles.length) {
+      roles.setRoles(session.roles);
+      showPhase("role");
+      syncAccountSwitchHud();
+      showGameTip("已切换至选角");
+      return;
+    }
+
+    const creds = readSlotCredentials(slotId);
+    title.setCredentials(creds?.user || "", creds?.password || "");
+    showPhase("login");
+    syncAccountSwitchHud();
+  };
+
+  const createAccountSlot = async (): Promise<boolean> => {
+    let limit = 1;
+    try {
+      if (!session.characterStats) await session.openCharacterStats();
+      limit = clampMultiOpenLimit(session.characterStats?.multiOpenLimit ?? 1);
+    } catch {
+      limit = clampMultiOpenLimit(session.characterStats?.multiOpenLimit ?? 1);
+    }
+    if (limit <= 1) {
+      showGameTip("多开未开放（后台上限为1）");
+      return false;
+    }
+    if (accountSlots.size >= limit) {
+      showGameTip(`已达多开上限（${accountSlots.size}/${limit}）`);
+      return false;
+    }
+    const id = allocMultiOpenSlotId();
+    const fresh = new GameSession(gateUi(id), { clearHangupResume: false });
+    accountSlots.set(id, { id, session: fresh, ...freshSlotFields() });
+    await switchAccountSlot(id, { toLogin: true });
+    syncAccountSwitchHud();
+    return true;
+  };
+
+  const afterActiveSlotClosed = async (_reason?: string) => {
+    if (accountSlots.size === 0) {
+      activeSlotId = "main";
+      setActiveCredSlotId("main");
+      session = new GameSession(gateUi("main"), { clearHangupResume: false });
+      accountSlots.set("main", {
+        id: "main",
+        session,
+        ...freshSlotFields(),
+      });
+      bindActiveResourceExchange();
+      hud.replaceChatNewestFirst([]);
+      title.setStatus("请重新登录");
+      showPhase("login");
+      syncAccountSwitchHud();
+      return;
+    }
+    const nextId = accountSlots.keys().next().value as string;
+    await switchAccountSlot(nextId);
+  };
+
+  const openMultiAccountDialog = async () => {
+    let limit = 1;
+    try {
+      if (!session.characterStats) await session.openCharacterStats();
+      limit = clampMultiOpenLimit(session.characterStats?.multiOpenLimit ?? 1);
+    } catch {
+      limit = clampMultiOpenLimit(session.characterStats?.multiOpenLimit ?? 1);
+    }
+    const options: { label: string; action: number; value: number }[] = [];
+    let idx = 0;
+    const idByIndex: string[] = [];
+    for (const rec of accountSlots.values()) {
+      idByIndex.push(rec.id);
+      const s = rec.session;
+      const name =
+        s.roleName ||
+        s.roles.find((r) => r.roleId === s.selectedRoleId)?.name ||
+        s.getCredentials().user ||
+        `槽${idx + 1}`;
+      const mark = rec.id === activeSlotId ? "●" : "○";
+      const battleMark = s.inBattle ? "战" : s.scene ? "图" : "未进";
+      options.push({
+        label: `${mark}${name.slice(0, 8)}(${battleMark})`,
+        action: 920,
+        value: idx,
+      });
+      idx += 1;
+    }
+    multiAccountDialogSlotIds = idByIndex;
+    if (accountSlots.size < limit) {
+      options.push({ label: "新开账号", action: 921, value: 1 });
+    }
+    options.push({ label: "取消", action: 922, value: 0 });
+    dialog.show({
+      title: "账号多开",
+      body:
+        limit <= 1
+          ? "后台未开放多开（上限1）"
+          : `同页切换，其他号不断线\n上限 ${accountSlots.size}/${limit}`,
+      options,
+    });
+    showPhase("dialog");
+  };
 
   view.onMoveDir = (dir) => {
     session.x = view.playerX | 0;
@@ -4364,6 +5017,11 @@ async function main(): Promise<void> {
   let hangupStartAfterSkillPick = false;
   /** Skill-forget DialogPanel: cancel/close returns to skill list (or battle). */
   let skillForgetDialogOpen = false;
+  /** NPC 技能导师：学习确认弹窗；取消回到技能列表. */
+  let skillLearnConfirmOpen = false;
+  let pendingSkillLearnWire = 0;
+  let pendingSkillLearnList: import("./net/protocolExtras").NpcDialog | null =
+    null;
   /** Friend-delete DialogPanel: cancel/close returns to friend list. */
   let friendDeleteDialogOpen = false;
   let pendingFriendDelete: { id: number; name: string } | null = null;
@@ -4404,6 +5062,20 @@ async function main(): Promise<void> {
     showPhase("system");
     system.open("skill");
     system.setSkills(session.learnedSkills);
+  };
+
+  const returnFromSkillLearnConfirm = (): void => {
+    skillLearnConfirmOpen = false;
+    pendingSkillLearnWire = 0;
+    const list = pendingSkillLearnList;
+    pendingSkillLearnList = null;
+    if (list) {
+      dialog.show(list, { keepCursor: true });
+      showPhase("dialog");
+      shell.setSoftkeys({ left: "确定", right: "返回" });
+      return;
+    }
+    showPhase("world");
   };
 
   const returnFromFriendDeleteDialog = (): void => {
@@ -5233,23 +5905,9 @@ async function main(): Promise<void> {
   menu.onClose = () => showPhase("world");
   menu.onSelect = (leaf: MenuLeaf, label: string) => {
     if (leaf === "leave_game") {
+      const closingId = activeSlotId;
       mapUiMode = "off";
-      miniMap.hide();
-      worldMap.hide();
-      battle.hide();
-      battle.setSkills([]);
-      dialog.hide();
-      system.hide();
-      system.setSkills([]);
-      system.setBag([]);
-      system.setWorn([]);
-      enhanceUi.hide();
-      social.hide();
-      chatPanel.hide();
-      tradeUi.hide();
-      guildUi.hide();
-      createRole.close();
-      hud.setParty([]);
+      closeOverlaysForAccountSwitch();
       // Freeze dream leftover before wiping identity — logout closes WS without
       // onConnectionLost (Transport.close nulls the hook first).
       hud.pauseDreamTimer();
@@ -5259,11 +5917,32 @@ async function main(): Promise<void> {
       view.actors.clear();
       activeRole = null;
       pendingRoles = [];
-      // Full local wipe + disconnect — next login rebuilds from wire only.
+      // Disconnect only this slot — other multi-open sessions stay online.
       session.logout();
+      accountSlots.delete(closingId);
+      if (accountSlots.size > 0) {
+        setChromeStatus("已退出当前账号，切回其他多开");
+        void afterActiveSlotClosed("leave_game");
+        return;
+      }
+      activeSlotId = "main";
+      setActiveCredSlotId("main");
+      session = new GameSession(gateUi("main"), { clearHangupResume: false });
+      accountSlots.set("main", {
+        id: "main",
+        session,
+        ...freshSlotFields(),
+      });
+      bindActiveResourceExchange();
+      hud.replaceChatNewestFirst([]);
       title.setStatus("已退出登录，请重新登录");
       setChromeStatus("已退出登录");
+      syncAccountSwitchHud();
       showPhase("login");
+      return;
+    }
+    if (leaf === "multi_open") {
+      void openMultiAccountDialog();
       return;
     }
     if (leaf === "change_password") {
@@ -6721,6 +7400,10 @@ async function main(): Promise<void> {
       returnFromSkillForgetDialog();
       return;
     }
+    if (skillLearnConfirmOpen) {
+      returnFromSkillLearnConfirm();
+      return;
+    }
     if (friendDeleteDialogOpen) {
       returnFromFriendDeleteDialog();
       return;
@@ -6761,6 +7444,29 @@ async function main(): Promise<void> {
     return true;
   };
   dialog.onPick = (action, value, label) => {
+    if (action === 920) {
+      dialog.hide();
+      const id = multiAccountDialogSlotIds[value | 0];
+      if (!id) {
+        showGameTip("无效账号槽");
+        showPhase("world");
+        return;
+      }
+      void switchAccountSlot(id);
+      return;
+    }
+    if (action === 921) {
+      dialog.hide();
+      void createAccountSlot().then((ok) => {
+        if (!ok) showPhase("world");
+      });
+      return;
+    }
+    if (action === 922) {
+      dialog.hide();
+      showPhase("world");
+      return;
+    }
     setChromeStatus(`NPC ${label} a=${action} v=${value >>> 0}`);
     if (dialog.isMedicineBuyQty()) {
       const st = dialog.getMedicineBuyQty();
@@ -6817,6 +7523,71 @@ async function main(): Promise<void> {
         return;
       }
     }
+    /* NPC 技能导师：先确认弹窗展示说明，再发 LEARN_SKILL */
+    if (
+      action === 1 &&
+      npcServiceOpcode(value) === NpcServiceOpcode.LEARN_SKILL
+    ) {
+      const skillId = decodeNpcLearnSkillId(value);
+      const cur = dialog.getDialog();
+      const opt = cur?.options.find((o) => (o.value >>> 0) === (value >>> 0));
+      const nameFromLabel = /^学习(.+)$/.exec(label)?.[1]?.trim();
+      const descFromOpt = opt?.description || "";
+      const priceFromOpt = /(\d+)铜钱/.exec(descFromOpt);
+      pendingSkillLearnList = cur
+        ? {
+            title: cur.title,
+            body: cur.body,
+            options: cur.options.map((o) => ({ ...o })),
+            buttons: cur.buttons?.map((b) => ({ ...b })),
+            hidebtn: cur.hidebtn,
+            optionPageSize: cur.optionPageSize,
+            tallList: cur.tallList,
+            bodyMaxLines: cur.bodyMaxLines,
+          }
+        : null;
+      pendingSkillLearnWire = value >>> 0;
+      skillLearnConfirmOpen = true;
+      const openSkillLearnConfirm = (): void => {
+        const sk = lookupSkillSync(skillId);
+        const skillName = sk?.name || nameFromLabel || `技能#${skillId}`;
+        const learnPrice =
+          sk?.learnPrice || (priceFromOpt ? Number(priceFromOpt[1]) : 0);
+        const levelReq = sk?.level || 0;
+        const mpCost = sk?.mpCost ?? 0;
+        const desc =
+          (sk?.desc && sk.desc !== "-" ? sk.desc : "") || "（无技能介绍）";
+        const metaBits = [
+          learnPrice > 0 ? `费用 ${learnPrice}铜钱` : "",
+          levelReq > 0 ? `要求 Lv.${levelReq}` : "",
+          mpCost > 0 ? `耗蓝 ${mpCost}` : "",
+        ].filter(Boolean);
+        const bodyLines = [`确定学习「${skillName}」？`];
+        if (metaBits.length) bodyLines.push(metaBits.join("  "));
+        bodyLines.push("", "技能介绍：", desc);
+        dialog.show({
+          title: "学习技能",
+          body: bodyLines.join("\n"),
+          bodyMaxLines: 9,
+          options: [
+            { label: "确认学习", action: 285, value: pendingSkillLearnWire },
+            { label: "取消", action: 286, value: 0 },
+          ],
+        });
+        showPhase("dialog");
+        shell.setSoftkeys({ left: "确定", right: "返回" });
+      };
+      if (lookupSkillSync(skillId)) {
+        openSkillLearnConfirm();
+      } else {
+        const wire = pendingSkillLearnWire;
+        void loadSkillCatalog().then(() => {
+          if (!skillLearnConfirmOpen || pendingSkillLearnWire !== wire) return;
+          openSkillLearnConfirm();
+        });
+      }
+      return;
+    }
     // Synthetic confirm options from task/challenge prompts.
     if (action === 100) {
       dialog.hide();
@@ -6830,6 +7601,11 @@ async function main(): Promise<void> {
       if (skillForgetDialogOpen) {
         dialog.hide();
         returnFromSkillForgetDialog();
+        return;
+      }
+      if (skillLearnConfirmOpen) {
+        dialog.hide();
+        returnFromSkillLearnConfirm();
         return;
       }
       if (friendDeleteDialogOpen) {
@@ -7226,6 +8002,26 @@ async function main(): Promise<void> {
     if (action === 281) {
       dialog.hide();
       returnFromSkillForgetDialog();
+      return;
+    }
+    if (action === 285 && skillLearnConfirmOpen) {
+      const wire = (value >>> 0) || pendingSkillLearnWire;
+      skillLearnConfirmOpen = false;
+      pendingSkillLearnWire = 0;
+      pendingSkillLearnList = null;
+      dialog.hide();
+      void session.pickNpcOption(1, wire, "确认学习").then(() => {
+        if (session.inBattle) {
+          showPhase("battle");
+          return;
+        }
+        if (!dialog.visible) showPhase("world");
+      });
+      return;
+    }
+    if (action === 286 && skillLearnConfirmOpen) {
+      dialog.hide();
+      returnFromSkillLearnConfirm();
       return;
     }
     if (action === 282) {
@@ -7827,6 +8623,15 @@ async function main(): Promise<void> {
     // Idle: pick skill first, then startHangup on confirm (action 260).
     openHangupSkillDialog(true);
   };
+  hud.onAccountSwitch = (slotId) => {
+    if (phase !== "world" && phase !== "menu" && phase !== "battle") return;
+    void switchAccountSlot(slotId);
+  };
+  battle.onAccountSwitch = (slotId) => {
+    if (phase !== "battle") return;
+    void switchAccountSlot(slotId);
+  };
+  syncAccountSwitchHud();
   hud.onIcon = (action) => {
     if (action === "status") {
       openSystem("equip");

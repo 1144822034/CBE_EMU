@@ -23,12 +23,18 @@ import {
 import { TipBootLayer } from "./TipBootLayer";
 import { LoginIme } from "./LoginIme";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import {
+  readAccountHistory,
+  readSlotCredentials,
+  rememberAccount,
+  removeAccountFromHistory,
+  writeSlotCredentials,
+  type CachedAccount,
+} from "../net/multiOpen";
 
 type Mode = "splash" | "login" | "register" | "password" | "servers" | "zones";
 type LoginField = "user" | "pass" | "pass2";
 
-const LS_USER = "pixi.jh.account";
-const LS_PASS = "pixi.jh.password";
 const AUTH_FIELDS_LOGIN: LoginField[] = ["user", "pass"];
 const AUTH_FIELDS_REGISTER: LoginField[] = ["user", "pass", "pass2"];
 const AUTH_FIELDS_PASSWORD: LoginField[] = ["user", "pass", "pass2"];
@@ -79,6 +85,9 @@ export class TitleScreen extends Container {
   private pass2Value = "";
   /** Account name while in password-change mode (userValue holds old password). */
   private passwordAccount = "";
+  /** Cached-account dropdown open on the login form. */
+  private accountDropOpen = false;
+  private accountDropCursor = 0;
   private caretVisible = true;
   private caretTimer: number | null = null;
   private ime = new LoginIme();
@@ -141,8 +150,9 @@ export class TitleScreen extends Container {
     };
 
     try {
-      this.userValue = localStorage.getItem(LS_USER) ?? "";
-      this.passValue = localStorage.getItem(LS_PASS) ?? "";
+      const stored = readSlotCredentials();
+      this.userValue = stored?.user ?? "";
+      this.passValue = stored?.password ?? "";
     } catch {
       /* ignore */
     }
@@ -212,6 +222,7 @@ export class TitleScreen extends Container {
     if (mode === "zones") this.redrawZones();
     if (mode === "servers") this.redrawServers();
     if (mode === "login" || mode === "register" || mode === "password") {
+      if (mode !== "login") this.accountDropOpen = false;
       if (mode === "login" && this.loginField === "pass2") this.loginField = "user";
       if (mode === "register") this.pass2Value = "";
       if (mode === "password") {
@@ -230,6 +241,7 @@ export class TitleScreen extends Container {
       this.startCaret();
       this.redrawLogin();
     } else {
+      this.accountDropOpen = false;
       this.releaseIme();
     }
     if (mode === "splash") {
@@ -262,6 +274,7 @@ export class TitleScreen extends Container {
    * LoginIme.show() over the game after title.visible=false.
    */
   releaseIme(): void {
+    this.accountDropOpen = false;
     this.stopCaret();
     this.ime.hide();
   }
@@ -309,12 +322,8 @@ export class TitleScreen extends Container {
       this.userValue = user;
       this.passValue = password;
     }
-    try {
-      localStorage.setItem(LS_USER, user);
-      localStorage.setItem(LS_PASS, password);
-    } catch {
-      /* ignore */
-    }
+    writeSlotCredentials(user, password);
+    if (user.trim()) rememberAccount(user, password);
     if (this.mode === "login" || this.mode === "register") this.redrawLogin();
   }
 
@@ -337,6 +346,18 @@ export class TitleScreen extends Container {
         (this.menuCursor + delta + this.menuItems.length) % this.menuItems.length;
       this.redrawMenu();
     } else if (this.mode === "login" || this.mode === "register" || this.mode === "password") {
+      if (this.mode === "login" && this.accountDropOpen) {
+        const list = readAccountHistory();
+        if (!list.length) {
+          this.accountDropOpen = false;
+          this.redrawLogin();
+          return;
+        }
+        this.accountDropCursor =
+          (this.accountDropCursor + delta + list.length) % list.length;
+        this.redrawLogin();
+        return;
+      }
       this.cycleAuthField(delta);
     } else if (this.mode === "zones" && this.zones.length) {
       this.zoneCursor =
@@ -373,6 +394,10 @@ export class TitleScreen extends Container {
       return;
     }
     if (this.mode === "login" || this.mode === "register" || this.mode === "password") {
+      if (this.mode === "login" && this.accountDropOpen) {
+        this.applyCachedAccount(readAccountHistory()[this.accountDropCursor] ?? null);
+        return;
+      }
       if (this.mode === "password") {
         const currentPassword = this.userValue;
         const newPassword = this.passValue;
@@ -438,6 +463,11 @@ export class TitleScreen extends Container {
   }
 
   cancelLogin(): void {
+    if (this.mode === "login" && this.accountDropOpen) {
+      this.accountDropOpen = false;
+      this.redrawLogin();
+      return;
+    }
     if (this.mode === "register") {
       this.onBackToLogin?.();
       return;
@@ -452,6 +482,12 @@ export class TitleScreen extends Container {
   typeKey(key: string, ev?: KeyboardEvent): boolean {
     if (this.mode !== "login" && this.mode !== "register" && this.mode !== "password")
       return false;
+    if (this.mode === "login" && this.accountDropOpen) {
+      if (key === "tab" || key === "backspace" || (key.length === 1 && !ev?.ctrlKey)) {
+        this.accountDropOpen = false;
+        this.redrawLogin();
+      }
+    }
     if (key === "tab") {
       this.cycleAuthField(ev?.shiftKey ? -1 : 1);
       return true;
@@ -517,6 +553,7 @@ export class TitleScreen extends Container {
   }
 
   private focusLoginField(field: LoginField, openIme: boolean): void {
+    if (this.accountDropOpen) this.accountDropOpen = false;
     this.loginField = field;
     this.syncImeValues(false);
     if (openIme) {
@@ -600,24 +637,53 @@ export class TitleScreen extends Container {
 
   private persistCredentials(): void {
     if (this.mode === "password") return;
-    try {
-      localStorage.setItem(LS_USER, this.userValue);
-      localStorage.setItem(LS_PASS, this.passValue);
-    } catch {
-      /* ignore */
+    writeSlotCredentials(this.userValue, this.passValue);
+    rememberAccount(this.userValue, this.passValue);
+  }
+
+  private applyCachedAccount(row: CachedAccount | null): void {
+    this.accountDropOpen = false;
+    if (!row?.user) {
+      this.redrawLogin();
+      return;
     }
+    this.userValue = row.user;
+    this.passValue = row.password || "";
+    this.pass2Value = "";
+    this.loginField = "pass";
+    writeSlotCredentials(this.userValue, this.passValue);
+    rememberAccount(this.userValue, this.passValue);
+    this.setStatus(`已切换账号 ${row.user}`);
+    this.syncImeValues(true);
+    this.redrawLogin();
+    this.focusLoginField("pass", true);
+  }
+
+  private toggleAccountDropdown(): void {
+    if (this.mode !== "login") return;
+    const list = readAccountHistory();
+    if (!list.length) {
+      this.setStatus("暂无缓存账号");
+      this.accountDropOpen = false;
+      this.redrawLogin();
+      return;
+    }
+    this.accountDropOpen = !this.accountDropOpen;
+    if (this.accountDropOpen) {
+      const cur = this.userValue.trim().toLowerCase();
+      const idx = list.findIndex((r) => r.user.toLowerCase() === cur);
+      this.accountDropCursor = idx >= 0 ? idx : 0;
+      this.ime.blur();
+    }
+    this.redrawLogin();
   }
 
   private restoreCredentialsAfterPassword(): void {
     const account = this.passwordAccount;
     this.passwordAccount = "";
-    try {
-      this.userValue = account || localStorage.getItem(LS_USER) || "";
-      this.passValue = localStorage.getItem(LS_PASS) || "";
-    } catch {
-      this.userValue = account;
-      this.passValue = "";
-    }
+    const stored = readSlotCredentials();
+    this.userValue = account || stored?.user || "";
+    this.passValue = stored?.password || "";
     this.pass2Value = "";
     this.ime.setAuthKind("login");
   }
@@ -753,6 +819,9 @@ export class TitleScreen extends Container {
     const registering = this.mode === "register";
     const changingPw = this.mode === "password";
     const threeFields = registering || changingPw;
+    const history = !registering && !changingPw ? readAccountHistory() : [];
+    const showDrop = history.length > 0;
+    const dropBtnW = showDrop ? 26 : 0;
     const boxX = 14;
     const boxY = 48;
     const boxW = LCD_WIDTH - 24;
@@ -764,7 +833,9 @@ export class TitleScreen extends Container {
         ? "点输入框 · 确定修改"
         : registering
           ? "点输入框 · 确定注册"
-          : "点输入框 · 确定登录",
+          : showDrop
+            ? "点▼切换缓存账号"
+            : "点输入框 · 确定登录",
       11,
       CBE.inkMint,
     );
@@ -773,10 +844,11 @@ export class TitleScreen extends Container {
     this.loginLabels.push(hint);
 
     const fieldW = boxW - 24;
+    const userFieldW = fieldW - dropBtnW;
     const userY = boxY + 34;
     const passY = boxY + 90;
     const pass2Y = boxY + 146;
-    const userBox = { x: boxX + 12, y: userY + 20, w: fieldW, h: 26 };
+    const userBox = { x: boxX + 12, y: userY + 20, w: userFieldW, h: 26 };
     const passBox = { x: boxX + 12, y: passY + 20, w: fieldW, h: 26 };
     const pass2Box = { x: boxX + 12, y: pass2Y + 20, w: fieldW, h: 26 };
     if (changingPw) {
@@ -805,7 +877,28 @@ export class TitleScreen extends Container {
         fieldW,
       );
     } else {
-      this.drawField("账号", this.userValue, "user", boxX + 12, userY, fieldW);
+      this.drawField("账号", this.userValue, "user", boxX + 12, userY, userFieldW);
+      if (showDrop) {
+        const btnX = boxX + 12 + userFieldW;
+        const btnY = userY + 20;
+        const open = this.accountDropOpen;
+        this.loginGfx
+          .rect(btnX, btnY, dropBtnW, 26)
+          .fill({ color: open ? CBE.select : CBE.bgPanelDark });
+        this.loginGfx.rect(btnX, btnY, dropBtnW, 26).stroke({
+          width: 1,
+          color: open ? CBE.borderBright : CBE.borderDim,
+        });
+        const arrow = makePixelText(open ? "▲" : "▼", 12, CBE.inkTip);
+        arrow.position.set(btnX + 6, btnY + 5);
+        this.loginLayer.addChild(arrow);
+        this.loginLabels.push(arrow);
+        this.loginHits.push(
+          attachRowPointerHit(this.loginLayer, btnX, btnY, dropBtnW, 26, () => {
+            this.toggleAccountDropdown();
+          }),
+        );
+      }
       this.drawField(
         "密码",
         "*".repeat(this.passValue.length),
@@ -877,6 +970,11 @@ export class TitleScreen extends Container {
         }),
       );
     }
+
+    if (this.mode === "login" && this.accountDropOpen && history.length) {
+      this.drawAccountDropdown(boxX + 12, userY + 48, fieldW, history);
+    }
+
     this.syncImeValues(false);
     // HTML overlays sit on the boxes so phone taps open the soft keyboard.
     // Guard: caret can fire after title was only hidden (visible=false) while
@@ -885,7 +983,8 @@ export class TitleScreen extends Container {
       (this.mode === "login" ||
         this.mode === "register" ||
         this.mode === "password") &&
-      this.visible
+      this.visible &&
+      !(this.mode === "login" && this.accountDropOpen)
     ) {
       this.ime.show(
         threeFields
@@ -894,6 +993,92 @@ export class TitleScreen extends Container {
       );
     } else {
       this.ime.hide();
+    }
+  }
+
+  private drawAccountDropdown(
+    x: number,
+    y: number,
+    w: number,
+    history: CachedAccount[],
+  ): void {
+    const rowH = 22;
+    const maxVisible = Math.min(history.length, 6);
+    const panelH = 8 + maxVisible * rowH + 8;
+    const panelY = Math.min(y, LCD_HEIGHT - SOFTKEY_H - panelH - 4);
+
+    // Own Graphics on top of field labels — loginGfx sits under BitmapLabels,
+    // so painting the panel there left "密码" etc. showing through.
+    const dropGfx = new Graphics();
+    dropGfx
+      .rect(x, panelY, w, panelH)
+      .fill({ color: CBE.bgPanel, alpha: 1 });
+    dropGfx.rect(x, panelY, w, panelH).stroke({
+      width: 1,
+      color: CBE.borderBright,
+    });
+    this.loginLayer.addChild(dropGfx);
+    this.loginHits.push(dropGfx);
+
+    const start = Math.max(
+      0,
+      Math.min(
+        this.accountDropCursor - (maxVisible - 1),
+        history.length - maxVisible,
+      ),
+    );
+    for (let i = 0; i < maxVisible; i++) {
+      const idx = start + i;
+      const row = history[idx];
+      if (!row) continue;
+      const rowY = panelY + 6 + i * rowH;
+      const hi = idx === this.accountDropCursor;
+      if (hi) {
+        dropGfx
+          .rect(x + 2, rowY - 1, w - 4, rowH)
+          .fill({ color: CBE.select, alpha: 1 });
+      }
+      const label = makePixelText(row.user, 12, hi ? CBE.inkTip : CBE.ink);
+      label.position.set(x + 8, rowY + 2);
+      this.loginLayer.addChild(label);
+      this.loginLabels.push(label);
+
+      const delW = 22;
+      const del = makePixelText("×", 13, CBE.inkTip);
+      del.position.set(x + w - delW + 4, rowY + 1);
+      this.loginLayer.addChild(del);
+      this.loginLabels.push(del);
+
+      this.loginHits.push(
+        attachRowPointerHit(this.loginLayer, x + 2, rowY - 1, w - delW - 4, rowH, () => {
+          this.accountDropCursor = idx;
+          this.applyCachedAccount(row);
+        }),
+      );
+      this.loginHits.push(
+        attachRowPointerHit(
+          this.loginLayer,
+          x + w - delW,
+          rowY - 1,
+          delW,
+          rowH,
+          () => {
+            removeAccountFromHistory(row.user);
+            const next = readAccountHistory();
+            if (!next.length) {
+              this.accountDropOpen = false;
+              this.setStatus("已清空缓存账号");
+            } else {
+              this.accountDropCursor = Math.min(
+                this.accountDropCursor,
+                next.length - 1,
+              );
+              this.setStatus(`已移除 ${row.user}`);
+            }
+            this.redrawLogin();
+          },
+        ),
+      );
     }
   }
 

@@ -423,6 +423,7 @@ export function mergeCustomIntoSkillCatalog(
       effectIndex: row.effectIndex,
       level: row.level || 1,
       rawJob: row.rawJob,
+      learnPrice: row.learnPrice,
       mpCost: row.mpCost,
       targetKind: clampTargetKind(row.targetKind),
       useLimit: row.useLimit,

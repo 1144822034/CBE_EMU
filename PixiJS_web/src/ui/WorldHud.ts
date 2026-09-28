@@ -63,7 +63,7 @@ export type HudPartyMate = {
  *   y28–63  olive status: portrait + tiao + UIsh×5
  *   y64–71  uiexp + exp track
  *   y72+    map (SceneView)
- *   y342–363 soft: UIxia1 / UI7+挂机 / UIxia3
+ *   y342–363 soft: UIxia1 / UI7+挂机 / 动态昵称芯片… / UIxia3
  *   y364–399 chat
  */
 const ICON_FILES = ["UIsh1.gif", "UIsh2.gif", "UIsh3.gif", "UIsh4.gif", "UIsh6.gif"];
@@ -72,9 +72,31 @@ const ICON_ACTIONS: HudIconAction[] = ["status", "bag", "quest", "social", "mall
 /**
  * Hangup softkey sits left of center so the wide chat/home zone is not
  * mistaken for 挂机 (mis-taps were common with a centered 100px hit box).
+ * Account-switch chips spread to the right of 挂机 until the home softkey.
  */
-const HANG_BTN_X = 48;
+const HANG_BTN_X = 40;
 const HANG_BTN_W = 52;
+const SWITCH_STRIP_X = HANG_BTN_X + HANG_BTN_W + 2;
+/** Leave room for UIxia3 home softkey. */
+const SWITCH_STRIP_RIGHT = LCD_WIDTH - 30;
+/** One CJK glyph + slim pad (chip label is a single nickname char). */
+const SWITCH_BTN_W = 18;
+const SWITCH_BTN_GAP = 2;
+
+/** One soft-row chip for same-page multi-account switch. */
+export type HudAccountSwitchSlot = {
+  id: string;
+  /** Usually first character of role nickname. */
+  label: string;
+  active: boolean;
+};
+
+type SwitchChip = {
+  id: string;
+  root: Container;
+  bg: Sprite | Graphics;
+  label: BitmapLabel;
+};
 
 /** Status / chrome slots (absolute LCD y inside top band). */
 const STATUS_BG_Y = 28;
@@ -136,6 +158,8 @@ export class WorldHud extends Container {
   onMenu: (() => void) | null = null;
   onHome: (() => void) | null = null;
   onHangup: (() => void) | null = null;
+  /** Soft-row chip after 挂机 — direct switch to that account slot. */
+  onAccountSwitch: ((slotId: string) => void) | null = null;
   /** Tap bottom chat strip → open ChatPanel. */
   onChat: (() => void) | null = null;
   onIcon: ((action: HudIconAction) => void) | null = null;
@@ -165,6 +189,10 @@ export class WorldHud extends Container {
   private expFill: Sprite | null = null;
   private expDigits: DigitStrip | null = null;
   private hangLabel: BitmapLabel;
+  private switchHost = new Container();
+  private switchChips: SwitchChip[] = [];
+  private switchSlots: HudAccountSwitchSlot[] = [];
+  private switchBgTex: Texture | null = null;
   private chatLines: BitmapLabel[] = [];
   private chatStripHost = new Container();
   private chatLog: string[] = [];
@@ -283,6 +311,8 @@ export class WorldHud extends Container {
     this.hangLabel = makePixelText("挂机", 12, 0xffffff);
     this.hangLabel.anchor.set(0.5, 0.5);
     this.bottom.addChild(this.hangLabel);
+    this.switchHost.eventMode = "static";
+    this.bottom.addChild(this.switchHost);
 
     for (let i = 0; i < CHAT_VISIBLE_ROWS; i++) {
       const line = new BitmapLabel();
@@ -296,7 +326,12 @@ export class WorldHud extends Container {
     this.hangHit = hitArea(HANG_BTN_X, 0, HANG_BTN_W, SOFT_H);
     this.homeHit = hitArea(LCD_WIDTH - 28, 2, 26, 18);
     this.chatHit = hitArea(0, SOFT_H, LCD_WIDTH, WORLD_BOTTOM_H - SOFT_H);
-    this.bottom.addChild(this.chatHit, this.menuHit, this.hangHit, this.homeHit);
+    this.bottom.addChild(
+      this.chatHit,
+      this.menuHit,
+      this.hangHit,
+      this.homeHit,
+    );
     this.menuHit.on("pointertap", () => this.onMenu?.());
     this.hangHit.on("pointertap", () => this.onHangup?.());
     this.homeHit.on("pointertap", () => this.onHome?.());
@@ -435,6 +470,10 @@ export class WorldHud extends Container {
       crisp: true,
     });
 
+    this.switchBgTex = await tryLoadUiTexture("UI7.gif");
+    this.bottom.addChild(this.switchHost);
+    this.rebuildAccountSwitchChips();
+
     const home = await tryLoadUiTexture("UIxia3.gif");
     if (home) {
       const spr = uiSprite(home);
@@ -445,6 +484,7 @@ export class WorldHud extends Container {
     }
     // Art mounts after hit targets — re-raise so pointer reaches softkeys / chat.
     this.bottom.addChild(this.chatHit, this.menuHit, this.hangHit, this.homeHit);
+    this.bottom.addChild(this.switchHost);
 
     await this.mountDreamTimerArt();
     this.setLevel(this.lastLevel, this.lastExp01);
@@ -491,6 +531,106 @@ export class WorldHud extends Container {
     void title;
     this.locText.text = sceneDisplayName(scene);
     void this.syncDreamTimerForScene(scene);
+  }
+
+  /**
+   * Spread nickname chips after 挂机. Width shrinks to fit until the home key.
+   * Clicking a non-active chip switches directly (no dialog).
+   */
+  setAccountSwitchSlots(slots: HudAccountSwitchSlot[]): void {
+    this.switchSlots = slots.slice();
+    this.rebuildAccountSwitchChips();
+  }
+
+  private clearAccountSwitchChips(): void {
+    for (const chip of this.switchChips) {
+      try {
+        chip.root.removeAllListeners();
+        chip.root.destroy({ children: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    this.switchChips = [];
+    this.switchHost.removeChildren();
+  }
+
+  private rebuildAccountSwitchChips(): void {
+    this.clearAccountSwitchChips();
+    const slots = this.switchSlots;
+    if (!slots.length) {
+      this.switchHost.visible = false;
+      return;
+    }
+    this.switchHost.visible = true;
+    const avail = Math.max(0, SWITCH_STRIP_RIGHT - SWITCH_STRIP_X);
+    const n = slots.length;
+    const btnW = SWITCH_BTN_W;
+    let show = n;
+    while (show > 1 && show * btnW + SWITCH_BTN_GAP * (show - 1) > avail) {
+      show -= 1;
+    }
+    // Prefer keeping the active chip visible if we must truncate.
+    let visible = slots.slice(0, show);
+    if (show < n) {
+      const active = slots.find((s) => s.active);
+      if (active && !visible.some((s) => s.id === active.id)) {
+        visible = [...slots.slice(0, show - 1), active];
+      }
+    }
+
+    let x = SWITCH_STRIP_X;
+    for (const slot of visible) {
+      const root = new Container();
+      root.position.set(x, 0);
+      root.eventMode = "static";
+      root.cursor = slot.active ? "default" : "pointer";
+      root.hitArea = new Rectangle(0, 0, btnW, SOFT_H);
+
+      const active = !!slot.active;
+      let bg: Sprite | Graphics;
+      if (this.switchBgTex) {
+        const spr = uiSprite(this.switchBgTex, btnW, SOFT_H);
+        spr.eventMode = "none";
+        // Dim non-active chrome so purple ink only reads on the current chip.
+        spr.tint = active ? 0xffffff : 0x9a9a9a;
+        spr.alpha = active ? 1 : 0.92;
+        bg = spr;
+      } else {
+        const g = new Graphics()
+          .rect(0, 0, btnW, SOFT_H)
+          .fill({ color: active ? 0x3a5a3a : 0x2a2a2a });
+        g.eventMode = "none";
+        bg = g;
+      }
+      root.addChild(bg);
+
+      // One setText only — makePixelText+show raced and could leave wrong ink.
+      // Force UC3 bake so soft-row color is the canvas glyph (not Songti DOM).
+      const ink = active ? 0xc060ff : 0xffffff;
+      const label = new BitmapLabel();
+      label.eventMode = "none";
+      label.anchor.set(0.5, 0.5);
+      label.position.set(btnW / 2, SOFT_H / 2);
+      root.addChild(label);
+      void label.setText(slot.label || "？", ink, {
+        fontSize: 12,
+        outline: false,
+        smooth: false,
+        crisp: true,
+        uc3: true,
+      });
+
+      const id = slot.id;
+      root.on("pointertap", () => {
+        if (active) return;
+        this.onAccountSwitch?.(id);
+      });
+
+      this.switchHost.addChild(root);
+      this.switchChips.push({ id, root, bg, label });
+      x += btnW + SWITCH_BTN_GAP;
+    }
   }
 
   /**
@@ -1173,6 +1313,19 @@ export class WorldHud extends Container {
   /** Oldest→newest typed entries for ChatPanel tabs. */
   getChatEntries(): ChatEntry[] {
     return this.chatEntries.slice().reverse();
+  }
+
+  /** Newest-first snapshot for per-account multi-open buffers. */
+  snapshotChatNewestFirst(): ChatEntry[] {
+    return this.chatEntries.map((e) => ({ ...e }));
+  }
+
+  /** Restore a per-account chat buffer (newest-first). */
+  replaceChatNewestFirst(entries: ChatEntry[]): void {
+    this.chatEntries = entries.slice(0, 80).map((e) => ({ ...e }));
+    this.chatHistory = this.chatEntries.map((e) => e.text);
+    this.chatLog = this.chatHistory.slice(0, 2);
+    this.refreshChatStrip();
   }
 }
 

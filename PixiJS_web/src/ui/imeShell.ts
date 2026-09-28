@@ -6,7 +6,7 @@
  * - On activate, snapshot #phone-wrap CSS size and layout viewport height
  *   *before* the keyboard resizes the WebView / 100dvh.
  * - Never shrink an existing lock (keyboard race / adjustResize).
- * - `.ime-open` CSS collapses D-pad to 左软|OK|右软 and pins #app to --ime-layout-h.
+ * - `.ime-open` CSS pins #app to --ime-layout-h (D-pad stays; white-dot hides manually).
  * - `#phone-wrap` is flex-centered inside `#stage` (no absolute inset / -50%
  *   translate). Those two schemes left sticky compositor layers after GL
  *   restore (field: LCD pinned top-left). IME pan uses delta-only translate.
@@ -104,7 +104,7 @@ export function setImeShellActive(
   }
 }
 
-/** Apply lock after touch-bar hide + one full-stage fit. Never shrink. */
+/** Apply lock after one full-stage fit. Never shrink. */
 export function imeShellCaptureLockFromWrap(): void {
   const wrap = document.getElementById("phone-wrap");
   if (!wrap || activeCount <= 0) return;
@@ -114,8 +114,8 @@ export function imeShellCaptureLockFromWrap(): void {
 }
 
 /**
- * Clear size lock only (IME stays active) so one fitPhoneWrap can measure the
- * expanded stage after #touch-bar is hidden. Re-apply via capture / adopt.
+ * Clear size lock only (IME stays active) so one fitPhoneWrap can remeasure
+ * the stage under the keyboard. Re-apply via capture / adopt.
  */
 export function imeShellClearLockSize(): void {
   lockedCssW = 0;

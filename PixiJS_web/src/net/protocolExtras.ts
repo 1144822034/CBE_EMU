@@ -14,7 +14,11 @@ import {
   type WtPacket,
 } from "./wt";
 import { decodeGbk, encodeWireString } from "./gbk";
-import { ensureSceneFile } from "./protocol";
+import {
+  battleUnitForWire,
+  ensureSceneFile,
+  type BattleState,
+} from "./protocol";
 import { starterSkillIdForJob } from "../resources/skill";
 import { lookupItemSync, lookupItemByNameSync, qualityColor, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
 export {
@@ -430,6 +434,11 @@ export function encodeNpcBuyItem(itemId: number, count = 1): number {
 
 export function decodeNpcBuyItemId(value: number): number {
   return value & 0xffff;
+}
+
+/** NPC skill learn: 0xe5 | skillId24. */
+export function decodeNpcLearnSkillId(value: number): number {
+  return value & 0xffffff;
 }
 
 /**
@@ -2751,6 +2760,38 @@ export type BattleActionUpdate = {
   settlement?: BattleSettlement;
 };
 
+/**
+ * Fold a 4/6 HP snapshot into a stashed BattleState (multi-open background).
+ * Keeps pendingBattle current when updates are truncated or show() is deferred.
+ */
+export function foldBattleActionHpIntoState(
+  state: BattleState,
+  up: BattleActionUpdate,
+): void {
+  for (const d of up.hpDeltas ?? []) {
+    if (!d.delta) continue;
+    const unit = battleUnitForWire(state, d.wire);
+    if (!unit) continue;
+    unit.hp = Math.max(0, Math.min(unit.maxHp, unit.hp + d.delta));
+  }
+  for (const h of up.leftHp) {
+    const row = state.left.find((r) => r.id === h.id) || state.left[0];
+    if (row) row.hp = Math.max(0, h.hp);
+  }
+  for (const h of up.rightHp) {
+    const row = state.right.find((r) => r.id === h.id);
+    if (!row) continue;
+    if (h.mp != null) row.mp = h.mp;
+    // Same overlap rule as BattleScreen.applyUpdate: deltas own HP when present.
+    if (!(up.hpDeltas && up.hpDeltas.length) && h.hp != null) {
+      row.hp = Math.max(0, h.hp);
+    }
+  }
+  if (up.settlement) {
+    for (const row of state.left) row.hp = 0;
+  }
+}
+
 function fieldU32(obj: { fields: { name: string; raw: Uint8Array }[] }, name: string): number {
   const raw = findField(obj as never, name);
   if (!raw) return 0;
@@ -3132,6 +3173,8 @@ export type NpcDialog = {
   optionPageSize?: number;
   /** Pixi: taller panel for long warehouse item lists. */
   tallList?: boolean;
+  /** Pixi: body wrap line cap (default 8; skill-learn confirm needs more). */
+  bodyMaxLines?: number;
 };
 
 export function parseTaskDetail(packet: WtPacket): string | null {
@@ -3845,6 +3888,8 @@ export type CharacterStats = {
   wingStatusEnabled: number;
   /** Admin: map-corner「骑」status badge. 0 = hide. */
   mountStatusEnabled: number;
+  /** Admin: max concurrent client windows on one device (1–8). Default 1. */
+  multiOpenLimit: number;
   baseStrength: number;
   baseAgility: number;
   baseWisdom: number;
@@ -4558,6 +4603,10 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
       ? fieldU32(obj, "mountStatusEnabled")
         ? 1
         : 0
+      : 1,
+    /* Omitted packet → default 1 (no multi-open). */
+    multiOpenLimit: obj.fields.some((f) => f.name === "multiOpenLimit")
+      ? Math.max(1, Math.min(8, fieldU32(obj, "multiOpenLimit") || 1))
       : 1,
     baseStrength: fieldU32(obj, "baseStrength"),
     baseAgility: fieldU32(obj, "baseAgility"),

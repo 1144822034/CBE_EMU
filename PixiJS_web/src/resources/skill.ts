@@ -19,6 +19,8 @@ export type SkillCatalogItem = {
   level: number;
   /** raw job 0=天机 1=幻剑 2=鬼道 */
   rawJob: number;
+  /** skill.dsh 列 7「价值」——导师学习铜钱. */
+  learnPrice: number;
   mpCost: number;
   targetKind: SkillTargetKind;
   /** skill.dsh 使用限制：1=地图可施放（清风拂体）. */
@@ -80,6 +82,7 @@ export function parseSkillCatalogBytes(raw: Uint8Array): SkillCatalogItem[] {
     const effectIndex = parseDshInt(cells[2] ?? "");
     const level = parseDshInt(cells[4] ?? "");
     const rawJob = parseDshInt(cells[6] ?? "");
+    const learnPrice = parseDshInt(cells[7] ?? "");
     const targetKind = clampTargetKind(parseDshInt(cells[10] ?? "3", 3));
     const mpCost = parseDshInt(cells[12] ?? "");
     const useLimit = parseDshInt(cells[8] ?? "");
@@ -92,6 +95,7 @@ export function parseSkillCatalogBytes(raw: Uint8Array): SkillCatalogItem[] {
         effectIndex,
         level,
         rawJob,
+        learnPrice,
         mpCost,
         targetKind,
         useLimit,
@@ -128,6 +132,15 @@ export async function loadSkillCatalog(): Promise<SkillCatalogItem[]> {
     cached = dshBase;
   }
   return cached;
+}
+
+/** Sync lookup after warmItemCatalogs / loadSkillCatalog. */
+export function lookupSkillSync(skillId: number): SkillCatalogItem | null {
+  const id = skillId >>> 0;
+  if (!id) return null;
+  const cat = cached ?? dshBase;
+  if (!cat) return null;
+  return cat.find((row) => row.id === id) ?? null;
 }
 
 /** actorinfo jobIndex is already raw 0..2. */
