@@ -3,55 +3,58 @@
 ## Goal
 
 Server-owned level curve for title rows, scene actor info, login state, and
-battle settlement:
+battle settlement.
 
-- `1→2 = 200`
-- `49→50 = 2_000_000`
-- total EXP to reach level 70 = `120_000_000`
-- consecutive upgrade costs grow by at most ~22% (hard cap intent ≤50%)
-- no phase-boundary jumps between novice / growth / long-term bands
+**2026-09-28 recalibration** — decade upgrade anchors supplied by design:
+
+- `1→2 = 200` (novice open, retained)
+- `29→30 = 5_368`
+- `39→40 = 85_800`
+- `49→50 = 1_040_000`
+- `59→60 = 11_704_000`
+- `69→70 = 100_100_000`
+- total EXP to reach level 70 = `511_943_065`
+- between anchors: piecewise geometric (integer-rounded, ends exact)
+- max consecutive cost growth ≈ `+32%` (within historical ≤50% hard-cap intent)
 - `level` is still derived from persisted total EXP; `lastexp` / `curexp` /
   `persentexp` keep the existing wire contract
 
-## Why not three pure arithmetic stages
+## Why not the prior geom(1–49)+arith(50+) curve
 
-An arithmetic growth band that opens at `100_000` after a `~20_000` novice end
-creates a `~5×` jump at `30→31`, and `a=d=100_000` itself starts at `+100%`.
-Those violate the smooth-transition requirement.
-
-`69→70 ≈ 11_500_000` with stage-3 open at `2_100_000` also needs about
-`136_000_000` for stage 3 alone, which exceeds the `120_000_000` total budget.
+The previous lock (`49→50 = 2_000_000`, `69→70 ≈ 8_754_598`, total `120_000_000`)
+does not match the new decade anchors. High-band costs are now much steeper
+(`69→70 = 100_100_000`), so stage-3 arithmetic cannot fit.
 
 ## Final calibrated curve
 
-| Band | Upgrades | Shape | Growth | Band sum |
-|------|----------|-------|--------|----------|
-| 平滑抬升 | `1→2` .. `49→50` (49) | geometric table, `r ≈ 1.2115` | ~`+21%` / level | `11_454_020` |
-| 长线养成 | `50→51` .. `69→70` (20) | arithmetic `a=2_100_000`, `d=350_242` | open `+5%`, then `~+4–17%` falling | `108_545_980` |
+| Band | Upgrades | Shape | ~Growth / level | Notes |
+|------|----------|-------|-----------------|-------|
+| 新手抬升 | `1→2` .. `29→30` | geometric | `~+12.5%` | open `200` → `5_368` |
+| 30 段 | `30→31` .. `39→40` | geometric | `~+31.9%` | → `85_800` |
+| 40 段 | `40→41` .. `49→50` | geometric | `~+28.3%` | → `1_040_000` |
+| 50 段 | `50→51` .. `59→60` | geometric | `~+27.4%` | → `11_704_000` |
+| 60 段 | `60→61` .. `69→70` | geometric | `~+23.9%` | → `100_100_000` |
 
-Geometric terms are stored as an exact integer table (rounded then nudged) so
-the band sum and the `49→50` anchor stay bit-exact without depending on host
-`double` rounding.
+All 69 upgrade costs are stored as one exact integer table so host `double`
+rounding cannot drift the anchors or the total.
 
 ## Key nodes
 
 | Upgrade | Cost | Step vs previous |
 |---------|------|------------------|
 | `1→2` | 200 | — |
-| `2→3` | 240 | `+20.0%` |
-| `29→30` | 43_088 | `+21.2%` |
-| `30→31` | 52_202 | `+21.2%` |
-| `48→49` | 1_650_807 | `+21.2%` |
-| `49→50` | 2_000_000 | `+21.2%` |
-| `50→51` | 2_100_000 | `+5.0%` |
-| `69→70` | 8_754_598 | `+4.2%` |
-| total to 70 | 120_000_000 | `level_start_exp(70)` |
+| `29→30` | 5_368 | `~+12.5%` band |
+| `39→40` | 85_800 | — |
+| `49→50` | 1_040_000 | — |
+| `59→60` | 11_704_000 | — |
+| `69→70` | 100_100_000 | — |
+| total to 70 | 511_943_065 | `level_start_exp(70)` |
 
 ## Formula
 
 ```text
-level <= 49:  g_vm_net_mock_role_level_up_cost_geom[level - 1]
-level >= 50:  2100000 + (level - 50) * 350242
+level_up_cost(level) = g_vm_net_mock_role_level_up_cost_table[level - 1]
+  for level in 1..69
 ```
 
 `level_start_exp(level)` = sum of `level_up_cost(1..level-1)`.
@@ -65,15 +68,13 @@ Constants in `src/server/mock_server_core.c`:
 
 ```text
 VM_NET_MOCK_ROLE_MAX_LEVEL
-VM_NET_MOCK_ROLE_EXP_TOTAL_TO_MAX
-VM_NET_MOCK_ROLE_EXP_GEOM_LAST_LEVEL
-VM_NET_MOCK_ROLE_EXP_STAGE3_A / _D / _FIRST_LEVEL
+VM_NET_MOCK_ROLE_EXP_TOTAL_TO_MAX   /* 511943065 */
 ```
 
 Helpers / table in `src/server/mock_server_role.c`:
 
 ```text
-g_vm_net_mock_role_level_up_cost_geom[49]
+g_vm_net_mock_role_level_up_cost_table[69]
 vm_net_mock_role_level_up_cost()
 vm_net_mock_role_level_start_exp()
 vm_net_mock_role_level_from_exp()
@@ -82,7 +83,15 @@ vm_net_mock_role_next_level_start_exp()
 vm_net_mock_role_exp_percent()
 ```
 
+Client mirror: `PixiJS_web/src/game/roleLevelExp.ts`.
+
 Wire field semantics remain as in `docs/re/2026-06-27-role-level-scaling.md`.
+
+## Migration note
+
+Persisted total EXP is unchanged; `level` is re-derived on load/gain.
+Characters previously near the old 120M cap (~level 70) land around level 63
+on this curve until they earn more EXP.
 
 ## Validation
 
@@ -94,9 +103,10 @@ Numeric checks:
 
 ```text
 level_up_cost(1)  = 200
-level_up_cost(49) = 2000000
-level_up_cost(50) = 2100000
-level_up_cost(69) = 8754598
-level_start_exp(70) = 120000000
-max consecutive cost ratio over 1..69 ≈ 1.217
+level_up_cost(29) = 5368
+level_up_cost(39) = 85800
+level_up_cost(49) = 1040000
+level_up_cost(59) = 11704000
+level_up_cost(69) = 100100000
+level_start_exp(70) = 511943065
 ```

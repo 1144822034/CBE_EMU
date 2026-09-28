@@ -4815,14 +4815,11 @@ enum
     VM_NET_MOCK_DREAM_BADGE_ITEM_ID = 840,
     VM_NET_MOCK_DREAM_BADGE_COMBINE_COST = 300,
     /* Role level curve anchors (see docs/re/2026-07-25-role-level-exp-curve.md):
-     * 1->2 = 200, 49->50 = 2_000_000, total 1..70 = 120_000_000.
-     * Stages 1-2 are one geometric run (~+21%/level); stage 3 is arithmetic. */
+     * 1->2=200, 29->30=5368, 39->40=85800, 49->50=1040000,
+     * 59->60=11704000, 69->70=100100000; piecewise geometric between anchors.
+     * Total EXP to reach 70 = 511_943_065. */
     VM_NET_MOCK_ROLE_MAX_LEVEL = 70,
-    VM_NET_MOCK_ROLE_EXP_TOTAL_TO_MAX = 120000000,
-    VM_NET_MOCK_ROLE_EXP_GEOM_LAST_LEVEL = 49,
-    VM_NET_MOCK_ROLE_EXP_STAGE3_A = 2100000,
-    VM_NET_MOCK_ROLE_EXP_STAGE3_D = 350242,
-    VM_NET_MOCK_ROLE_EXP_STAGE3_FIRST_LEVEL = 50,
+    VM_NET_MOCK_ROLE_EXP_TOTAL_TO_MAX = 511943065,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
     /*
      * Login 7/7 type=2 iteminfo: tagged rowCount + per worn slot

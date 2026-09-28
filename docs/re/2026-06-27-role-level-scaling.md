@@ -7,9 +7,9 @@ state, and battle settlement:
 
 - new roles start at level 1 with 0 total EXP
 - total EXP remains the persisted source of truth; `level` is normalized from it
-- the numeric curve itself was replaced on 2026-07-25; see
-  `docs/re/2026-07-25-role-level-exp-curve.md` for the three-stage arithmetic
-  parameters (`1→2=200`, `49→50=2_000_000`, total to 70 = `120_000_000`)
+- the numeric curve itself lives in
+  `docs/re/2026-07-25-role-level-exp-curve.md` (2026-09-28 decade anchors:
+  `29→30=5368` … `69→70=100_100_000`, total to 70 = `511_943_065`)
 
 ## Formula
 

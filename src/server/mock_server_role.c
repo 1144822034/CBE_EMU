@@ -2902,46 +2902,33 @@ static bool vm_mock_service_account_issue_guest_credentials(u32 clientId,
     return false;
 }
 
-/* EXP to advance from level L -> L+1 for L=1..49.
- * Geometric progression: 200 * r^(L-1) with r?1.2115, nudged to keep
- * integer monotonic steps, max step growth ? ~22%, exact 49->50 = 2_000_000,
- * and sum(1..49) = 11_454_020 so stage 3 can lock total 1..70 at 120_000_000. */
-static const u32 g_vm_net_mock_role_level_up_cost_geom[] = {
-    200, 240, 292, 354, 429, 520, 630, 764,
-    926, 1123, 1361, 1649, 1998, 2421, 2934, 3555,
-    4307, 5218, 6323, 7660, 9282, 11246, 13625, 16507,
-    19999, 24230, 29355, 35565, 43088, 52202, 63245, 76623,
-    92831, 112467, 136257, 165080, 199999, 242305, 293559, 355655,
-    430886, 522030, 632455, 766236, 928317, 1124682, 1362583, 1650807,
-    2000000
+/* EXP to advance from level L -> L+1 for L=1..69.
+ * Piecewise geometric between decade anchors (exact integers):
+ *   1->2=200, 29->30=5368, 39->40=85800, 49->50=1_040_000,
+ *   59->60=11_704_000, 69->70=100_100_000.
+ * Band growth ~+12.5% (1..29), then ~+32% / +28% / +27% / +24% per level.
+ * sum(1..69) = VM_NET_MOCK_ROLE_EXP_TOTAL_TO_MAX (511_943_065). */
+static const u32 g_vm_net_mock_role_level_up_cost_table[] = {
+    200, 225, 253, 285, 320, 360, 405, 455,
+    512, 576, 648, 728, 819, 921, 1036, 1165,
+    1311, 1474, 1658, 1864, 2097, 2358, 2652, 2983,
+    3355, 3773, 4244, 4773, 5368, 7082, 9344, 12329,
+    16266, 21461, 28315, 37358, 49289, 65031, 85800, 110114,
+    141318, 181364, 232759, 298717, 383367, 492005, 631428, 810361,
+    1040000, 1324840, 1687693, 2149927, 2738758, 3488862, 4444408, 5661663,
+    7212306, 9187645, 11704000, 14505887, 17978534, 22282517, 27616855, 34228211,
+    42422296, 52578010, 65164959, 80765168, 100100000
 };
 
-/* EXP cost to advance from `level` to `level + 1`.
- *
- * Stages 1-2 (levels 1..49): smooth geometric table above.
- * Stage 3 (levels 50+): arithmetic a=2_100_000, d=350_242.
- * Anchors: 1->2=200, 49->50=2_000_000, sum(1->70)=120_000_000. */
+/* EXP cost to advance from `level` to `level + 1`. */
 static u32 vm_net_mock_role_level_up_cost(u32 level)
 {
-    unsigned long long cost;
-
     if (level < 1u)
         return 0;
-
-    if (level <= (u32)VM_NET_MOCK_ROLE_EXP_GEOM_LAST_LEVEL)
-    {
-        if (level > (u32)(sizeof(g_vm_net_mock_role_level_up_cost_geom) /
-                          sizeof(g_vm_net_mock_role_level_up_cost_geom[0])))
-            return 0xffffffffu;
-        return g_vm_net_mock_role_level_up_cost_geom[level - 1u];
-    }
-
-    cost = (unsigned long long)VM_NET_MOCK_ROLE_EXP_STAGE3_A +
-           (unsigned long long)(level - (u32)VM_NET_MOCK_ROLE_EXP_STAGE3_FIRST_LEVEL) *
-               (unsigned long long)VM_NET_MOCK_ROLE_EXP_STAGE3_D;
-    if (cost > 0xffffffffull)
+    if (level > (u32)(sizeof(g_vm_net_mock_role_level_up_cost_table) /
+                      sizeof(g_vm_net_mock_role_level_up_cost_table[0])))
         return 0xffffffffu;
-    return (u32)cost;
+    return g_vm_net_mock_role_level_up_cost_table[level - 1u];
 }
 
 static u32 vm_net_mock_role_level_start_exp(u32 level)

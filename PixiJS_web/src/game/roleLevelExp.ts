@@ -6,29 +6,28 @@
 
 export const ROLE_MAX_LEVEL = 70;
 
-/** EXP to advance L→L+1 for L=1..49 (exact server table). */
-const LEVEL_UP_COST_GEOM: readonly number[] = [
-  200, 240, 292, 354, 429, 520, 630, 764, 926, 1123, 1361, 1649, 1998, 2421,
-  2934, 3555, 4307, 5218, 6323, 7660, 9282, 11246, 13625, 16507, 19999, 24230,
-  29355, 35565, 43088, 52202, 63245, 76623, 92831, 112467, 136257, 165080,
-  199999, 242305, 293559, 355655, 430886, 522030, 632455, 766236, 928317,
-  1124682, 1362583, 1650807, 2000000,
+/**
+ * EXP to advance L→L+1 for L=1..69 (exact server table).
+ * Piecewise geometric between anchors:
+ * 1→2=200, 29→30=5368, 39→40=85800, 49→50=1040000,
+ * 59→60=11704000, 69→70=100100000.
+ */
+const LEVEL_UP_COST_TABLE: readonly number[] = [
+  200, 225, 253, 285, 320, 360, 405, 455, 512, 576, 648, 728, 819, 921,
+  1036, 1165, 1311, 1474, 1658, 1864, 2097, 2358, 2652, 2983, 3355, 3773,
+  4244, 4773, 5368, 7082, 9344, 12329, 16266, 21461, 28315, 37358, 49289,
+  65031, 85800, 110114, 141318, 181364, 232759, 298717, 383367, 492005,
+  631428, 810361, 1040000, 1324840, 1687693, 2149927, 2738758, 3488862,
+  4444408, 5661663, 7212306, 9187645, 11704000, 14505887, 17978534,
+  22282517, 27616855, 34228211, 42422296, 52578010, 65164959, 80765168,
+  100100000,
 ];
-
-const STAGE3_A = 2_100_000;
-const STAGE3_D = 350_242;
-const STAGE3_FIRST = 50;
-const GEOM_LAST = 49;
 
 /** Cost to advance from `level` to `level + 1`. */
 export function roleLevelUpCost(level: number): number {
   const lv = level >>> 0;
   if (lv < 1) return 0;
-  if (lv <= GEOM_LAST) {
-    return LEVEL_UP_COST_GEOM[lv - 1] ?? 0xffffffff;
-  }
-  const cost = STAGE3_A + (lv - STAGE3_FIRST) * STAGE3_D;
-  return cost > 0xffffffff ? 0xffffffff : cost >>> 0;
+  return LEVEL_UP_COST_TABLE[lv - 1] ?? 0xffffffff;
 }
 
 /** Cumulative EXP required to reach `level` (level 1 = 0). */
