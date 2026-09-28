@@ -52,6 +52,7 @@ import {
   type ShopGoods,
 } from "../net/protocolExtras";
 import { isMapHealSkill, type BattleSkillRow } from "../resources/skill";
+import { formatPanelLevelExp } from "../game/roleLevelExp";
 import {
   defaultCategoryForBodySlot,
   jobAllowsWeaponCategory,
@@ -2704,7 +2705,6 @@ export class SystemPanel extends Container {
     const s = this.stats;
     const jobName =
       s.job === 1 ? "天机" : s.job === 2 ? "幻剑" : s.job === 3 ? "鬼道" : "无";
-    const expNext = formatSignedU32(s.expNext);
     return [
       { label: "称号", value: s.title || "无" },
       { label: "等级", value: String(s.level) },
@@ -2714,14 +2714,16 @@ export class SystemPanel extends Container {
       { label: "魅力", value: String(s.charm) },
       { label: "生命", value: `${s.hp}/${s.hpMax}` },
       { label: "法力", value: `${s.mp}/${s.mpMax}` },
-      { label: "经验", value: `${s.exp}/${expNext}` },
+      // 服务端下发累计总经验；面板按曲线换算为本级当前/升级所需
+      { label: "经验", value: formatPanelLevelExp(s.exp, s.level) },
       { label: "力量", value: String(s.strength) },
       { label: "敏捷", value: String(s.agility) },
       { label: "智慧", value: String(s.wisdom) },
       { label: "物攻", value: String(s.attack) },
       { label: "护甲", value: String(s.armor) },
       { label: "躲闪", value: String(s.dodge) },
-      { label: "命中", value: String(s.hit) },
+      // 服务端 hit = 101(出生底) + 装备命中；面板只展示装备贡献
+      { label: "命中", value: String(Math.max(0, s.hit - 101)) },
       { label: "暴击", value: String(s.crit) },
       { label: "抗性", value: String(s.resist) },
       { label: "反伤", value: `${s.reflectPct ?? 0}%` },
@@ -3168,11 +3170,4 @@ function hintOf(k: SystemKind): string {
     default:
       return "";
   }
-}
-
-/** CBE 属性页经验次级：大阈值按有符号 i32 显示（与截图一致）. */
-function formatSignedU32(v: number): string {
-  const n = v >>> 0;
-  if (n >= 0x80000000) return String(n - 0x100000000);
-  return String(n);
 }

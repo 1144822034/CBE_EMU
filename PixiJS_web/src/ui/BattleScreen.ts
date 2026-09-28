@@ -2697,16 +2697,26 @@ export class BattleScreen extends Container {
     return !!this.state?.left.includes(u.side);
   }
 
-  private async playDeathMotion(u: UnitView): Promise<void> {
+  /**
+   * Enemy death: gray freeze then splash/fade. Splash must not gate settle /
+   * the next actor — awaiting the full f_death strip left hangup single-target
+   * kills idle ~0.6–1s on an empty stage before 4/7 popped.
+   */
+  private async playDeathMotion(
+    u: UnitView,
+    opts?: { briefHold?: boolean },
+  ): Promise<void> {
     if (u.hidden) return;
     u.dead = true;
     if (this.isEnemyUnit(u)) {
-      // Gray freeze → splash. Corpse fade runs in the background so the
-      // settle panel is not held ~1s after the kill already reads as dead.
       this.setUnitPose(u, "death", 1e9);
       if (u.sprite) u.sprite.tint = 0x909090;
-      await sleep(BEFORE_DEATH_SPLASH_MS);
-      const splash = this.playNamedActorFx(
+      const grayMs = opts?.briefHold
+        ? Math.min(120, BEFORE_DEATH_SPLASH_MS)
+        : BEFORE_DEATH_SPLASH_MS;
+      await sleep(grayMs);
+      // Fire-and-forget: settle / next seat must not wait out splash frames.
+      void this.playNamedActorFx(
         "f_death.actor",
         u.feetX,
         u.feetY - 8,
@@ -2716,7 +2726,6 @@ export class BattleScreen extends Container {
       );
       await sleep(DEATH_FADE_DELAY_MS);
       void this.fadeEnemyCorpse(u);
-      await splash;
       return;
     }
     // Player: hold death.gif pose on stage.
@@ -3463,6 +3472,11 @@ export class BattleScreen extends Container {
         ) {
           consumedDeathWires.add(wire);
           deathTargets.push(tgt);
+          // Still flash 受击 before death — AOE secondaries used to skip hit
+          // and jump gray/settle (hangup multi-kill looked like no hit turn).
+          if (offensiveHit) {
+            hitWaits.push(this.playHitMotion(tgt));
+          }
           continue;
         }
         if (tgt && offensiveHit) {
@@ -3478,15 +3492,33 @@ export class BattleScreen extends Container {
 
       const nextPlayable = this.nextNonDeathAction(actions, ai + 1);
       const nextIsCombo = this.actionIsCombo(nextPlayable);
+      // Only shorten death cue when this script truly wiped every living foe.
+      // Survivors still need their hit/counter records before any 4/7.
+      const survivors = this.units.filter(
+        (u) =>
+          this.isEnemyUnit(u) &&
+          !u.hidden &&
+          !deathTargets.includes(u) &&
+          !this.isUnitDefeated(u),
+      );
+      const wipeKill =
+        deathTargets.length > 0 && !nextPlayable && survivors.length === 0;
 
-      // Death after damage: pose → brief hold → splash (fade is async).
+      // Death after damage: pose → brief hold → splash (splash/fade async).
       if (deathTargets.length) {
-        await sleep(AFTER_DAMAGE_BEFORE_DEATH_MS);
-        await Promise.all(deathTargets.map((t) => this.playDeathMotion(t)));
+        const deathLead = wipeKill
+          ? Math.min(100, AFTER_DAMAGE_BEFORE_DEATH_MS)
+          : AFTER_DAMAGE_BEFORE_DEATH_MS;
+        await sleep(deathLead);
+        await Promise.all(
+          deathTargets.map((t) =>
+            this.playDeathMotion(t, { briefHold: wipeKill }),
+          ),
+        );
         if ((nextIsCombo || isComboAction) && skillFx) await skillFx;
       } else if (skillFx) {
-        // Killing blow already waited through splash; do not hold settle/next
-        // actor on leftover eidolon frames under an empty stage.
+        // Non-lethal / no inline death: finish eidolon before next actor.
+        // Lethal path above must not await leftover eidolon under an empty stage.
         await skillFx;
       }
 
@@ -3506,6 +3538,29 @@ export class BattleScreen extends Container {
         await this.waitUntilReadyForCombo(actor);
       } else if (next && next.type !== 3 && next.type !== 4 && !nextIsCombo) {
         await this.waitBattleVisualSettle(60);
+      }
+    }
+
+    /*
+     * Co-packet 4/7 may arrive after HP deltas zeroed several foes but only one
+     * type-3 was inlined. Play hit+death for any leftover 0-HP corpses so
+     * hangup multi-enemy wipes do not jump to settle while models still idle.
+     */
+    if (up.settlement && this.state) {
+      const pendingCorpses = this.units.filter(
+        (u) =>
+          this.isEnemyUnit(u) &&
+          !u.hidden &&
+          !u.dead &&
+          u.side.hp <= 0,
+      );
+      if (pendingCorpses.length) {
+        await Promise.all(pendingCorpses.map((u) => this.playHitMotion(u)));
+        await Promise.all(
+          pendingCorpses.map((u) =>
+            this.playDeathMotion(u, { briefHold: true }),
+          ),
+        );
       }
     }
   }

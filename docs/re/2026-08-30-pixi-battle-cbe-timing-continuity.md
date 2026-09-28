@@ -42,6 +42,8 @@
 
 特效与伤害同拍；伤害后约 200ms 进灰化冻结，再约 280ms 接水花。尸体淡出改异步（不挡 `4/7` 结算面板）。致死记录后不再 `await` 残留 eidolon，避免「已死仍空等一会儿才结算」。
 
+续（2026-09-28）：敌方 `f_death` 水花也改为 fire-and-forget；终局击杀再缩短 lead/灰化 hold。见 `2026-09-28-pixi-hangup-single-kill-settle-stall.md`。
+
 ## unresolved
 
 - IDA 未挂上 `DrawBattleCharacter` 精确帧定时与近战是插值还是瞬移。

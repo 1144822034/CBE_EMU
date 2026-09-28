@@ -22,7 +22,7 @@
 
 ## 清除范围（玩家相关）
 
-账号/角色及附属：`accounts`、`account_role_*`（含 `account_role_monster_reward_cooldowns`、`account_role_offline_exp`、`account_role_practise`、`account_role_battle_entry_state`、`account_role_rapid_battle_entry_audit`、`account_role_training_books` 等）、`account_cultivation_books`、`wcoin_recharge_orders`、`role_id_sequence`
+账号/角色及附属：`accounts`、`account_role_*`、`account_cultivation_books`、`wcoin_recharge_orders`、`role_id_sequence`
 
 社交与组织：`friendships`、`enmity_kills`、`guilds`、`guild_members`、`guild_applications`、`world_chat_messages`
 
