@@ -20,8 +20,9 @@ enum
      * timeout is why /admin-418yz6 often answered "请求不完整" after deploy
      * when the body arrived in a later TCP segment.  Keep the receive
      * deadline independent of game protocol-mutex wait time. */
-    /* Map editor POSTs cells_b64 for up to ~64x64 tile grids. */
-    VM_MOCK_ADMIN_REQUEST_MAX = 98304,
+    /* Map editor POSTs cells_b64; 藏宝阁收款码 upload needs ~512 KiB for
+     * URL-encoded JPEG base64 (gateway forwards the same body). */
+    VM_MOCK_ADMIN_REQUEST_MAX = 524288,
     /* Shared catalogs + 2 MiB headroom; avoid O(npc*catalog) HTML. */
     VM_MOCK_ADMIN_RESPONSE_MAX = 2097152,
     VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS = 15000,
@@ -254,6 +255,7 @@ static void vm_mock_admin_append_tabs(vm_mock_admin_text *page, const char *acti
         {"fruit", "水果机"},
         {"guess", "猜猜看"},
         {"auction", "拍卖行"},
+        {"zangbao", "藏宝阁"},
         {"activities", "节日/跑环"},
         {"updates", "游戏内容更新管理"},
         {"servers", "服务器列表"},
@@ -7095,6 +7097,16 @@ static void vm_mock_admin_render_auction_page(char *response, size_t responseCap
 static void vm_mock_admin_handle_auction_action(vm_mock_service_socket client,
                                                 const char *action,
                                                 const char *body);
+static void vm_mock_admin_render_zangbao_page(char *response, size_t responseCap,
+                                              const char *query);
+static void vm_mock_admin_handle_zangbao_action(vm_mock_service_socket client,
+                                                const char *action,
+                                                const char *body);
+static int vm_mock_zangbao_handle_http(vm_mock_service_socket client,
+                                       const char *method, const char *target,
+                                       const char *query, const char *body);
+static int vm_mock_admin_serve_kcoin_qr(vm_mock_service_socket client,
+                                        const char *query);
 
 static void vm_mock_admin_render_mapedit_page(char *response,
                                               size_t responseCap,
@@ -7211,6 +7223,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "auction") == 0)
     {
         vm_mock_admin_render_auction_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "zangbao") == 0)
+    {
+        vm_mock_admin_render_zangbao_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "activities") == 0)
@@ -8205,6 +8222,8 @@ static bool vm_mock_admin_form_u32_or_default(const char *body, const char *fiel
 #include "web_admin_fruit.inc.c"
 #include "web_admin_guess.inc.c"
 #include "web_admin_auction.inc.c"
+#include "web_zangbao.inc.c"
+#include "web_admin_zangbao.inc.c"
 #include "web_admin_activities.inc.c"
 #include "web_admin_gateways.inc.c"
 
@@ -10960,6 +10979,13 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_auction_action(client, action, body);
         return;
     }
+    if (strcmp(action, "save-zangbao-config") == 0 ||
+        strcmp(action, "zangbao-withdraw-approve") == 0 ||
+        strcmp(action, "zangbao-withdraw-reject") == 0)
+    {
+        vm_mock_admin_handle_zangbao_action(client, action, body);
+        return;
+    }
     if (strcmp(action, "save-festival-config") == 0 ||
         strcmp(action, "save-festival-exchange") == 0 ||
         strcmp(action, "save-yanmen-config") == 0 ||
@@ -12173,6 +12199,14 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         return 1;
     }
     /* Pixi mall recharge: authenticated create-order (reuse payment core). */
+    if (strncmp(target, "/api/zangbao/", 13) == 0 ||
+        strncmp(target, "/api/kcoin/", 11) == 0)
+    {
+        int handled = vm_mock_zangbao_handle_http(client, method, target,
+                                                   query, body);
+        if (handled)
+            return handled;
+    }
     if (strcmp(target, "/api/recharge/create") == 0)
     {
         char account[64];
@@ -12511,13 +12545,22 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             query, synchronous ? "return" : "notify", payId);
         if (!synchronous)
         {
+            const char *body = "success";
+            if (settleResult == VM_MOCK_PAYMENT_SETTLE_INVALID)
+            {
+                /* process_callback stashes a distinct token in payId on failure. */
+                if (strcmp(payId, "error_parse") == 0)
+                    body = "error_parse";
+                else if (strcmp(payId, "error_settle") == 0)
+                    body = "error_settle";
+                else
+                    body = "error_sign";
+            }
             vm_mock_admin_send_response(
                 client,
                 settleResult == VM_MOCK_PAYMENT_SETTLE_INVALID ?
                     "400 Bad Request" : "200 OK",
-                "text/plain; charset=utf-8", NULL,
-                settleResult == VM_MOCK_PAYMENT_SETTLE_INVALID ?
-                    "error_sign" : "success");
+                "text/plain; charset=utf-8", NULL, body);
             return settleResult != VM_MOCK_PAYMENT_SETTLE_INVALID;
         }
         response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
@@ -13043,6 +13086,16 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                     "application/javascript; charset=utf-8",
                                     NULL, g_vm_mock_admin_script);
         return 1;
+    }
+    /* 提现收款码：页面 rewrite 后为 /admin-…/kcoin-qr?id=（须登录）。 */
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/kcoin-qr") == 0)
+    {
+        if (vm_mock_admin_serve_kcoin_qr(client, query ? query : ""))
+            return 1;
+        vm_mock_admin_send_response(client, "404 Not Found", NULL, NULL,
+                                    "收款码不存在或无法读取。\n");
+        return 0;
     }
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/actor-preview.svg") == 0)

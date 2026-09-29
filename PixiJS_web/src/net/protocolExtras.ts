@@ -2715,6 +2715,11 @@ export type BattleSettlement = {
    */
   recoverHp: number;
   recoverMp: number;
+  /**
+   * Client-derived: settlement level rose vs local baseline. Server durable
+   * state refills HP/MP on level-up but does not encode that as 4/7 recover.
+   */
+  leveledUp?: boolean;
   fdata: string;
   result: number;
   /** Present when server (or CBE shim) appends 4/7.combatinfo during hangup. */

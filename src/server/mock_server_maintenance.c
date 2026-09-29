@@ -355,6 +355,11 @@ bool vm_mock_wipe_all_player_data_admin(char *msgOut, size_t msgCap)
 {
     static const char *const kRequiredTables[] = {
         "wcoin_recharge_orders",
+        "kcoin_market_orders",
+        "kcoin_withdraw_orders",
+        "server_zangbao_claims",
+        "server_zangbao_listings",
+        "account_role_kcoin_payee",
         "account_role_equipment",
         "account_role_equipment_durability",
         "account_role_backpack",

@@ -1732,7 +1732,12 @@ static void vm_net_mock_battle_apply_skill_to_enemy_ailment(
             (u32)(0 - skill->hpChange);
         ailment->dotRounds = skill->durationRounds > 0 ?
             (u8)(skill->durationRounds - 1) : 0;
-        ailment->dotEffectIndex = skill->effectIndex;
+        /*
+         * Tick FX is 见血.gif (eidolon f_blood1=0), not the skill cast sheet
+         * (毒入膏肓 技能图片=3 → f_curse1 / 施展魔法.gif). Cast FX stays on
+         * the apply hit; subsequent DoT records only show blood.
+         */
+        ailment->dotEffectIndex = 0;
         return;
     }
     if (vm_net_mock_battle_skill_applies_enemy_debuff(skill))

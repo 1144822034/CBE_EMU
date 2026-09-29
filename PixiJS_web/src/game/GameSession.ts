@@ -7612,39 +7612,68 @@ export class GameSession {
 
       const battleUp = parseBattleAction(packet);
       if (battleUp) {
-        if (battleUp.settlement) {
-          const s = battleUp.settlement;
-          // Wire exp/gold are post-reward totals (docs/re/2026-06-25-battle-server-flow.md).
-          const prevExp = this.exp >>> 0;
-          const prevGold = this.gold >>> 0;
-          const rawExp = (s.expTotal >>> 0) - prevExp;
-          const rawGold = (s.goldTotal >>> 0) - prevGold;
-          // Signed penalties only for known lose copy — not baseline desync.
-          const f = s.fdata || "";
-          const penalized =
-            f.includes("挑战失败") ||
-            f.includes("比武失败") ||
-            /金钱\s*-/.test(f) ||
-            /经验\s*-/.test(f);
-          s.expGain = penalized ? rawExp : Math.max(0, rawExp);
-          s.goldGain = penalized ? rawGold : Math.max(0, rawGold);
-          this.exp = s.expTotal >>> 0;
-          this.gold = s.goldTotal >>> 0;
-          if (s.level > 0) this.level = s.level;
-          if (this.characterStats) {
-            this.characterStats = {
-              ...this.characterStats,
-              money: this.gold,
-              exp: this.exp,
-              level: this.level,
-            };
-            this.cb.onCharacterStats?.(this.characterStats);
+        /*
+         * Server prepends prior-fight tear-down 4/8 into the next 4/1 start WT
+         * (mock_battle_release_settle_for_start prependExit). That exit is for
+         * the OLD settle shell — not the fight we just started. Applying it
+         * clears inBattle and makes Pixi leave the new scene immediately
+         * (docs/re/2026-09-28-pixi-encounter-instant-battle-exit.md).
+         */
+        const priorExitOnly =
+          !!battle &&
+          battleUp.finished &&
+          !battleUp.settlement &&
+          !(battleUp.actions?.length) &&
+          !battleUp.escaped;
+        if (priorExitOnly) {
+          /* Keep inBattle from the fresh start; skip UI exit. */
+        } else {
+          if (battleUp.settlement) {
+            const s = battleUp.settlement;
+            // Wire exp/gold are post-reward totals (docs/re/2026-06-25-battle-server-flow.md).
+            const prevExp = this.exp >>> 0;
+            const prevGold = this.gold >>> 0;
+            const prevLevel = this.level >>> 0;
+            const rawExp = (s.expTotal >>> 0) - prevExp;
+            const rawGold = (s.goldTotal >>> 0) - prevGold;
+            // Signed penalties only for known lose copy — not baseline desync.
+            const f = s.fdata || "";
+            const penalized =
+              f.includes("挑战失败") ||
+              f.includes("比武失败") ||
+              /金钱\s*-/.test(f) ||
+              /经验\s*-/.test(f);
+            s.expGain = penalized ? rawExp : Math.max(0, rawExp);
+            s.goldGain = penalized ? rawGold : Math.max(0, rawGold);
+            this.exp = s.expTotal >>> 0;
+            this.gold = s.goldTotal >>> 0;
+            const leveledUp = s.level > 0 && s.level > prevLevel;
+            s.leveledUp = leveledUp;
+            if (s.level > 0) this.level = s.level;
+            // Server refills durable HP/MP on level-up; 4/7 recover stays flask-only.
+            if (leveledUp && this.hp > 0) {
+              this.hp = this.hpMax;
+              this.mp = this.mpMax;
+              this.emitVitals();
+            }
+            if (this.characterStats) {
+              this.characterStats = {
+                ...this.characterStats,
+                money: this.gold,
+                exp: this.exp,
+                level: this.level,
+                ...(leveledUp && this.hp > 0
+                  ? { hp: this.hp, mp: this.mp }
+                  : {}),
+              };
+              this.cb.onCharacterStats?.(this.characterStats);
+            }
           }
+          if (battleUp.finished || (battleUp.escaped && battleUp.escapeOk)) {
+            this.inBattle = false;
+          }
+          this.cb.onBattleUpdate?.(battleUp);
         }
-        if (battleUp.finished || (battleUp.escaped && battleUp.escapeOk)) {
-          this.inBattle = false;
-        }
-        this.cb.onBattleUpdate?.(battleUp);
       }
 
       const dialog = parseNpcDialog(packet);

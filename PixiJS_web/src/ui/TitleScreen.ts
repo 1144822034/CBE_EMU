@@ -31,6 +31,11 @@ import {
   writeSlotCredentials,
   type CachedAccount,
 } from "../net/multiOpen";
+import {
+  clearLcdDomTipOccludeRect,
+  registerLcdDomPanelTip,
+  setLcdDomTipOccludeRect,
+} from "./lcdDomText";
 
 type Mode = "splash" | "login" | "register" | "password" | "servers" | "zones";
 type LoginField = "user" | "pass" | "pass2";
@@ -88,6 +93,11 @@ export class TitleScreen extends Container {
   /** Cached-account dropdown open on the login form. */
   private accountDropOpen = false;
   private accountDropCursor = 0;
+  /**
+   * Dropdown chrome + row labels. Registered as tip-band so Songti rows sit
+   * above {@link setLcdDomTipOccludeRect} (canvas alone cannot cover #lcd-dom-text).
+   */
+  private accountDropHost = new Container();
   private caretVisible = true;
   private caretTimer: number | null = null;
   private ime = new LoginIme();
@@ -275,6 +285,8 @@ export class TitleScreen extends Container {
    */
   releaseIme(): void {
     this.accountDropOpen = false;
+    clearLcdDomTipOccludeRect();
+    this.accountDropHost.visible = false;
     this.stopCaret();
     this.ime.hide();
   }
@@ -797,6 +809,9 @@ export class TitleScreen extends Container {
     this.loginLayer.addChild(this.loginGfx);
     this.loginTip.position.set(12, LCD_HEIGHT - SOFTKEY_H - 36);
     this.loginLayer.addChild(this.loginTip);
+    this.accountDropHost.visible = false;
+    registerLcdDomPanelTip(this.accountDropHost);
+    this.loginLayer.addChild(this.accountDropHost);
   }
 
   private refreshLoginBanner(): void {
@@ -810,10 +825,16 @@ export class TitleScreen extends Container {
   }
 
   private redrawLogin(): void {
+    clearLcdDomTipOccludeRect();
+    this.accountDropHost.visible = false;
     for (const t of this.loginLabels) t.destroy();
     for (const h of this.loginHits) h.destroy();
     this.loginLabels = [];
     this.loginHits = [];
+    for (const c of [...this.accountDropHost.children]) {
+      if (!c.destroyed) c.destroy({ children: true });
+    }
+    this.accountDropHost.removeChildren();
     this.loginGfx.clear();
 
     const registering = this.mode === "register";
@@ -1007,18 +1028,38 @@ export class TitleScreen extends Container {
     const panelH = 8 + maxVisible * rowH + 8;
     const panelY = Math.min(y, LCD_HEIGHT - SOFTKEY_H - panelH - 4);
 
-    // Own Graphics on top of field labels — loginGfx sits under BitmapLabels,
-    // so painting the panel there left "密码" etc. showing through.
+    // Field Songti lives in #lcd-dom-text above the canvas — hide overlap so
+    // "密码" etc. cannot float through the panel (UC3 sprites also suppressed).
+    for (const lab of this.loginLabels) {
+      const ly = lab.y;
+      const lh = Math.max(12, lab.height || 0);
+      if (ly + lh > panelY && ly < panelY + panelH) lab.visible = false;
+    }
+
+    // Host last in loginLayer → canvas fill covers UC3 field glyphs under it.
+    this.loginLayer.addChild(this.accountDropHost);
+    this.accountDropHost.position.set(x, panelY);
+    this.accountDropHost.visible = true;
+
     const dropGfx = new Graphics();
-    dropGfx
-      .rect(x, panelY, w, panelH)
-      .fill({ color: CBE.bgPanel, alpha: 1 });
-    dropGfx.rect(x, panelY, w, panelH).stroke({
+    dropGfx.rect(0, 0, w, panelH).fill({ color: CBE.bgPanel, alpha: 1 });
+    dropGfx.rect(0, 0, w, panelH).stroke({
       width: 1,
       color: CBE.borderBright,
     });
-    this.loginLayer.addChild(dropGfx);
-    this.loginHits.push(dropGfx);
+    this.accountDropHost.addChild(dropGfx);
+
+    // Songti: opaque DOM plate under tip-band row labels (same as panelTip).
+    if (preferSystemFont()) {
+      setLcdDomTipOccludeRect(
+        this.accountDropHost,
+        0,
+        0,
+        w,
+        panelH,
+        CBE.bgPanel,
+      );
+    }
 
     const start = Math.max(
       0,
@@ -1031,35 +1072,42 @@ export class TitleScreen extends Container {
       const idx = start + i;
       const row = history[idx];
       if (!row) continue;
-      const rowY = panelY + 6 + i * rowH;
+      const rowY = 6 + i * rowH;
       const hi = idx === this.accountDropCursor;
       if (hi) {
         dropGfx
-          .rect(x + 2, rowY - 1, w - 4, rowH)
+          .rect(2, rowY - 1, w - 4, rowH)
           .fill({ color: CBE.select, alpha: 1 });
       }
       const label = makePixelText(row.user, 12, hi ? CBE.inkTip : CBE.ink);
-      label.position.set(x + 8, rowY + 2);
-      this.loginLayer.addChild(label);
+      label.position.set(8, rowY + 2);
+      this.accountDropHost.addChild(label);
       this.loginLabels.push(label);
 
       const delW = 22;
       const del = makePixelText("×", 13, CBE.inkTip);
-      del.position.set(x + w - delW + 4, rowY + 1);
-      this.loginLayer.addChild(del);
+      del.position.set(w - delW + 4, rowY + 1);
+      this.accountDropHost.addChild(del);
       this.loginLabels.push(del);
 
       this.loginHits.push(
-        attachRowPointerHit(this.loginLayer, x + 2, rowY - 1, w - delW - 4, rowH, () => {
-          this.accountDropCursor = idx;
-          this.applyCachedAccount(row);
-        }),
+        attachRowPointerHit(
+          this.loginLayer,
+          x + 2,
+          panelY + rowY - 1,
+          w - delW - 4,
+          rowH,
+          () => {
+            this.accountDropCursor = idx;
+            this.applyCachedAccount(row);
+          },
+        ),
       );
       this.loginHits.push(
         attachRowPointerHit(
           this.loginLayer,
           x + w - delW,
-          rowY - 1,
+          panelY + rowY - 1,
           delW,
           rowH,
           () => {

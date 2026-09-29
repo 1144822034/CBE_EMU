@@ -1,0 +1,341 @@
+import { defaultLiveGatewayUrl } from "./Transport";
+
+export type ZangbaoListing = {
+  listingId: number;
+  sellerRoleId: number;
+  sellerName: string;
+  itemId: number;
+  itemCount: number;
+  enhanceLevel: number;
+  priceKcoin: number;
+  status: number;
+};
+
+export type ZangbaoBuyResult =
+  | {
+      ok: true;
+      payId: string;
+      payUrl: string;
+      priceCents: number;
+      reallyPriceCents: number;
+      priceKcoin: number;
+      timeoutMinutes: number;
+    }
+  | { ok: false; error: string };
+
+function gatewayHttpBase(gatewayWsUrl?: string): string {
+  if (typeof window !== "undefined") {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = params.get("admin") || params.get("recharge");
+    if (fromQuery) {
+      try {
+        const u = new URL(fromQuery, window.location.href);
+        return `${u.protocol}//${u.host}`;
+      } catch {
+        /* fall through */
+      }
+    }
+    try {
+      const stored = window.localStorage.getItem("pix_admin");
+      if (stored) {
+        const u = new URL(stored, window.location.href);
+        return `${u.protocol}//${u.host}`;
+      }
+    } catch {
+      /* private */
+    }
+  }
+  const ws = gatewayWsUrl || defaultLiveGatewayUrl();
+  try {
+    const u = new URL(ws);
+    const httpProto = u.protocol === "wss:" ? "https:" : "http:";
+    return `${httpProto}//${u.host}`;
+  } catch {
+    return "http://127.0.0.1:19092";
+  }
+}
+
+async function postForm(
+  path: string,
+  fields: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const body = new URLSearchParams(fields);
+  const ctrl =
+    typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer =
+    ctrl != null ? window.setTimeout(() => ctrl.abort(), 25000) : 0;
+  try {
+    const res = await fetch(`${gatewayHttpBase()}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      signal: ctrl?.signal,
+      cache: "no-store",
+    });
+    return (await res.json()) as Record<string, unknown>;
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
+}
+
+async function getJson(
+  path: string,
+  fields: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const q = new URLSearchParams(fields);
+  const ctrl =
+    typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer =
+    ctrl != null ? window.setTimeout(() => ctrl.abort(), 15000) : 0;
+  try {
+    const res = await fetch(`${gatewayHttpBase()}${path}?${q.toString()}`, {
+      method: "GET",
+      signal: ctrl?.signal,
+      cache: "no-store",
+    });
+    return (await res.json()) as Record<string, unknown>;
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
+}
+
+export async function zangbaoBrowse(
+  auth: { account: string; password: string; roleId: number },
+  page = 1,
+): Promise<ZangbaoListing[]> {
+  const data = await getJson("/api/zangbao/browse", {
+    account: auth.account,
+    password: auth.password,
+    role_id: String(auth.roleId),
+    page: String(page),
+  });
+  if (!data || data.ok !== true || !Array.isArray(data.items)) return [];
+  return (data.items as Record<string, unknown>[]).map((it) => ({
+    listingId: Number(it.listingId) || 0,
+    sellerRoleId: Number(it.sellerRoleId) || 0,
+    sellerName: String(it.sellerName || ""),
+    itemId: Number(it.itemId) || 0,
+    itemCount: Number(it.itemCount) || 0,
+    enhanceLevel: Number(it.enhanceLevel) || 0,
+    priceKcoin: Number(it.priceKcoin) || 0,
+    status: Number(it.status) || 0,
+  }));
+}
+
+export async function zangbaoMine(
+  auth: { account: string; password: string; roleId: number },
+  page = 1,
+): Promise<ZangbaoListing[]> {
+  const data = await getJson("/api/zangbao/mine", {
+    account: auth.account,
+    password: auth.password,
+    role_id: String(auth.roleId),
+    page: String(page),
+  });
+  if (!data || data.ok !== true || !Array.isArray(data.items)) return [];
+  return (data.items as Record<string, unknown>[]).map((it) => ({
+    listingId: Number(it.listingId) || 0,
+    sellerRoleId: Number(it.sellerRoleId) || 0,
+    sellerName: String(it.sellerName || ""),
+    itemId: Number(it.itemId) || 0,
+    itemCount: Number(it.itemCount) || 0,
+    enhanceLevel: Number(it.enhanceLevel) || 0,
+    priceKcoin: Number(it.priceKcoin) || 0,
+    status: Number(it.status) || 0,
+  }));
+}
+
+export async function zangbaoListItem(opts: {
+  account: string;
+  password: string;
+  roleId: number;
+  bagSeq: number;
+  priceKcoin: number;
+  count?: number;
+}): Promise<{ ok: true; listingId: number } | { ok: false; error: string }> {
+  const data = await postForm("/api/zangbao/list", {
+    account: opts.account,
+    password: opts.password,
+    role_id: String(opts.roleId),
+    bag_seq: String(opts.bagSeq),
+    price_kcoin: String(opts.priceKcoin),
+    count: String(opts.count || 0),
+  });
+  if (data.ok === true)
+    return { ok: true, listingId: Number(data.listingId) || 0 };
+  return { ok: false, error: String(data.error || "上架失败") };
+}
+
+export async function zangbaoCancel(opts: {
+  account: string;
+  password: string;
+  roleId: number;
+  listingId: number;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const data = await postForm("/api/zangbao/cancel", {
+    account: opts.account,
+    password: opts.password,
+    role_id: String(opts.roleId),
+    listing_id: String(opts.listingId),
+  });
+  if (data.ok === true) return { ok: true };
+  return { ok: false, error: String(data.error || "下架失败") };
+}
+
+export async function zangbaoBuy(opts: {
+  account: string;
+  password: string;
+  roleId: number;
+  listingId: number;
+  payType: 1 | 2;
+}): Promise<ZangbaoBuyResult> {
+  const data = await postForm("/api/zangbao/buy", {
+    account: opts.account,
+    password: opts.password,
+    role_id: String(opts.roleId),
+    listing_id: String(opts.listingId),
+    pay_type: String(opts.payType),
+  });
+  if (data.ok === true && typeof data.payUrl === "string" && data.payUrl) {
+    return {
+      ok: true,
+      payId: String(data.payId || ""),
+      payUrl: data.payUrl,
+      priceCents: Number(data.priceCents) || 0,
+      reallyPriceCents: Number(data.reallyPriceCents) || 0,
+      priceKcoin: Number(data.priceKcoin) || 0,
+      timeoutMinutes: Number(data.timeoutMinutes) || 5,
+    };
+  }
+  return { ok: false, error: String(data.error || "下单失败") };
+}
+
+export async function kcoinBalance(auth: {
+  account: string;
+  password: string;
+  roleId: number;
+}): Promise<{
+  kcoin: number;
+  kcoinPerYuan: number;
+  hasPayee: boolean;
+  payChannel: number;
+}> {
+  const data = await getJson("/api/kcoin/balance", {
+    account: auth.account,
+    password: auth.password,
+    role_id: String(auth.roleId),
+  });
+  return {
+    kcoin: Number(data.kcoin) || 0,
+    kcoinPerYuan: Number(data.kcoinPerYuan) || 1,
+    hasPayee: !!data.hasPayee,
+    payChannel: Number(data.payChannel) || 0,
+  };
+}
+
+/** Shrink phone photos so URL-encoded POST stays under admin/gateway body caps. */
+export async function compressPayeeImageDataUrl(
+  dataUrlOrFile: string | Blob,
+  maxEdge = 720,
+  quality = 0.72,
+): Promise<string> {
+  const blob =
+    typeof dataUrlOrFile === "string"
+      ? await (await fetch(dataUrlOrFile)).blob()
+      : dataUrlOrFile;
+  const bmp = await createImageBitmap(blob);
+  try {
+    const scale = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas");
+    ctx.drawImage(bmp, 0, 0, w, h);
+    let out = canvas.toDataURL("image/jpeg", quality);
+    // Keep form body under ~400 KiB after URLSearchParams encoding.
+    let q = quality;
+    while (out.length > 280000 && q > 0.4) {
+      q -= 0.08;
+      out = canvas.toDataURL("image/jpeg", q);
+    }
+    return out;
+  } finally {
+    bmp.close();
+  }
+}
+
+export async function kcoinUploadPayee(opts: {
+  account: string;
+  password: string;
+  roleId: number;
+  payChannel: 1 | 2;
+  imageB64: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  let imageB64 = opts.imageB64;
+  try {
+    if (imageB64.startsWith("data:") || imageB64.length > 120000) {
+      imageB64 = await compressPayeeImageDataUrl(imageB64);
+    }
+  } catch {
+    /* keep original; server may still accept small images */
+  }
+  try {
+    const data = await postForm("/api/kcoin/payee/upload", {
+      account: opts.account,
+      password: opts.password,
+      role_id: String(opts.roleId),
+      pay_channel: String(opts.payChannel),
+      image_b64: imageB64,
+    });
+    if (data.ok === true) return { ok: true };
+    return { ok: false, error: String(data.error || "上传失败") };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg || "上传失败" };
+  }
+}
+
+export async function kcoinWithdrawCreate(opts: {
+  account: string;
+  password: string;
+  roleId: number;
+  amount: number;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const data = await postForm("/api/kcoin/withdraw/create", {
+    account: opts.account,
+    password: opts.password,
+    role_id: String(opts.roleId),
+    amount: String(opts.amount),
+  });
+  if (data.ok === true) return { ok: true };
+  return { ok: false, error: String(data.error || "申请失败") };
+}
+
+export async function kcoinWithdrawList(auth: {
+  account: string;
+  password: string;
+  roleId: number;
+}): Promise<
+  {
+    withdrawId: number;
+    amount: number;
+    payChannel: number;
+    status: number;
+  }[]
+> {
+  const data = await getJson("/api/kcoin/withdraw/list", {
+    account: auth.account,
+    password: auth.password,
+    role_id: String(auth.roleId),
+  });
+  if (!data || data.ok !== true || !Array.isArray(data.items)) return [];
+  return (data.items as Record<string, unknown>[]).map((it) => ({
+    withdrawId: Number(it.withdrawId) || 0,
+    amount: Number(it.amount) || 0,
+    payChannel: Number(it.payChannel) || 0,
+    status: Number(it.status) || 0,
+  }));
+}

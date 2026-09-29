@@ -30,11 +30,17 @@ export type EntertainmentEntry = {
   /** Wider inset for music players (prev/next / lyrics hit targets). */
   panel?: "mall" | "wide";
   /** Open in-game panel instead of web overlay. */
-  nativePanel?: "guess" | "fruit";
+  nativePanel?: "guess" | "fruit" | "zangbao";
 };
 
 /** Same catalog as 银河西游 时辰.lua qipai / music / video entries. */
 export const ENTERTAINMENT_ENTRIES: EntertainmentEntry[] = [
+  {
+    id: "zangbao",
+    label: "藏宝阁",
+    url: "",
+    nativePanel: "zangbao",
+  },
   {
     id: "guess",
     label: "猜猜看",

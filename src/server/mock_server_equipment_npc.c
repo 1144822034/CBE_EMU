@@ -4055,6 +4055,27 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
         if (settleMp <= role->mpMax)
             role->mp = settleMp;
     }
+    /*
+     * Living level-up already filled role->hp/mp to the new maxima.  Mirror
+     * that into battle globals so the post-response publish_role_vitals path
+     * does not stomp durable full vitals with the pre-settle damaged snapshot
+     * (docs/re/2026-06-25-battle-server-flow.md level-up recovery).
+     */
+    if (leveledUp && role->hp != 0)
+    {
+        if (role->hpMax > g_mockBattleRoleHpMax)
+            g_mockBattleRoleHpMax = role->hpMax;
+        if (role->mpMax > g_mockBattleRoleMpMax)
+            g_mockBattleRoleMpMax = role->mpMax;
+        if (g_mockBattleRoleHpMax != 0)
+            g_mockBattleRoleHpCurrent = role->hp;
+        if (g_mockBattleRoleMpMax != 0)
+            g_mockBattleRoleMpCurrent = role->mp;
+        printf("[info][network] mock_battle_settle_levelup_refill role=%u "
+               "level=%u->%u hp=%u/%u mp=%u/%u\n",
+               role->roleId, levelBefore, role->level, role->hp, role->hpMax,
+               role->mp, role->mpMax);
+    }
     vm_net_mock_role_mark_inventory_dirty("battle-settle");
 
     if (lastExpOut)

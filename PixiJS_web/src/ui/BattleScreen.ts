@@ -17,7 +17,12 @@ import {
   battleTargetWire,
   battleUnitForWire,
 } from "../net/protocol";
-import type { BattleActionUpdate, BattleSettlement, HangupCombatinfo } from "../net/protocolExtras";
+import type {
+  BattleActionRecord,
+  BattleActionUpdate,
+  BattleSettlement,
+  HangupCombatinfo,
+} from "../net/protocolExtras";
 import {
   actorResourceForJobSex,
   battleFootAnchorX,
@@ -93,8 +98,10 @@ const UNIT_FRAME_MS = 100;
 const HIT_FLASH_MS = 200;
 /** Eidolon / f_death part step when duration is frame-derived. */
 const FX_FRAME_MS = 100;
-/** Skill eidolon drops from stage top onto the target before impact floats. */
-const SKILL_FX_FALL_MS = 280;
+/** Skill eidolon drops from mid-air onto the target before impact floats. */
+const SKILL_FX_FALL_MS = 140;
+/** Fall start = lerp(STAGE_TOP → impactY); 0.5 ≈ half-height / mid-air. */
+const SKILL_FX_FALL_START_T = 0.8;
 /** After damage floats: hold before starting death pose. */
 const AFTER_DAMAGE_BEFORE_DEATH_MS = 200;
 /** Extra pause after the prior hit fully settles, before gem 连击 starts. */
@@ -195,6 +202,49 @@ type MenuItem = (typeof MENU_ITEMS)[number];
 const TURN_SECONDS = 16;
 /** 比武：与服端 CBE_DUEL_ROUND_COMMIT_TIMEOUT_MS 默认 20s 对齐。 */
 const TURN_SECONDS_ARENA = 20;
+/**
+ * Persistent unit status icons — loop first 3 parts of eidolon actors
+ * (sheet GIFs 中毒/施展魔法/加强/统一技能), not one-shot cast FX.
+ *
+ * | 状态 | actor / GIF | actioninfo 启发式 |
+ * | 中毒 | f_curse2 / 中毒.gif | 技能图片=3 且 delta&lt;0 |
+ * | 沉默 | f_curse1 / 施展魔法.gif | 技能图片=3 且全 0 伤 |
+ * | 增益 | f_buff / 加强.gif；神臂等 f_mofa1 / 统一技能.gif | 零伤 timed buff |
+ *
+ * CBE mmBattle tip @ 0x06289.
+ */
+const SILENCE_EFFECT_INDEX = 3;
+/** eidolon f_blood1.actor → 见血.gif (DoT ticks; not skill cast sheet). */
+const BLOOD_HIT_EFFECT_INDEX = 0;
+const SILENCE_DURATION_ROUNDS = 2;
+const POISON_DURATION_ROUNDS = 4;
+const POISON_STATUS_ACTOR = "f_curse2.actor";
+const SILENCE_STATUS_ACTOR = "f_curse1.actor";
+/** Fallback / 加强.gif (sheet may be bad in some packs). */
+const BUFF_STATUS_ACTOR = "f_buff.actor";
+const BUFF_MOFA1_STATUS_ACTOR = "f_mofa1.actor"; // 统一技能.gif — 神臂担山
+const BUFF_MOFA2_STATUS_ACTOR = "f_mofa2.actor"; // 统一技能.gif — 混沌鬼气 / 妙慧通灵
+const BUFF_ROCK_STATUS_ACTOR = "f_feishi1.actor"; // 石头.gif — 灵岩护身
+const BUFF_FLASH_STATUS_ACTOR = "f_flash2.actor"; // kan.gif — 道统天地
+/** 形神离散 (id=131, 效果=2, 技能图片=4) — clears silence/poison/buff. */
+const DISPEL_EFFECT_INDEX = 4;
+const SILENCE_TIP = "沉默中不能使用技能攻击";
+/** Status icon strip length (actor parts 0..2). */
+const STATUS_LOOP_FRAMES = 3;
+/** Slightly slower than combat FX so the 3-frame loop reads clearly. */
+const STATUS_FRAME_MS = 140;
+/**
+ * Friendly timed buff by 技能图片 → rounds + status actor
+ * (matches eidolon.dsh; td=0 自增益含混沌鬼气 / 妙慧通灵 / 灵岩 / 道统).
+ */
+const BUFF_BY_EFFECT_INDEX: Readonly<
+  Record<number, { rounds: number; actor: string }>
+> = {
+  5: { rounds: 5, actor: BUFF_ROCK_STATUS_ACTOR }, // 灵岩护身
+  10: { rounds: 5, actor: BUFF_FLASH_STATUS_ACTOR }, // 道统天地
+  11: { rounds: 5, actor: BUFF_MOFA1_STATUS_ACTOR }, // 神臂担山 / 电闪神兵
+  12: { rounds: 5, actor: BUFF_MOFA2_STATUS_ACTOR }, // 混沌鬼气 / 妙慧通灵
+};
 
 export type BattleBagRow = {
   seq: number;
@@ -247,6 +297,18 @@ type UnitView = {
   poseUntil: number;
   dead: boolean;
   hidden: boolean;
+  /** Mirrored DoT rounds (毒入膏肓) → f_curse2 3-frame loop. */
+  poisonRounds: number;
+  /** Mirrored silence rounds (神堂静默) → f_curse1 3-frame loop. */
+  silenceRounds: number;
+  /** Mirrored friendly buff rounds → f_buff / f_mofa1 3-frame loop. */
+  buffRounds: number;
+  /** Buff icon actor (f_buff.actor or f_mofa1.actor). */
+  buffActor: string;
+  /** Host for stacked status icons above the unit. */
+  statusHost: Container | null;
+  /** Actor names parallel to statusHost.children (for frame paint). */
+  statusIconActors: string[];
 };
 
 /**
@@ -328,8 +390,17 @@ export class BattleScreen extends Container {
   /**
    * Multi-open切号: onBattle is async (skills/bag) before show(); flush may
    * call applyUpdate while state is still null. Hold until show() drains.
+   * Only armed between armPendingShow() and show() — otherwise late 4/8 after
+   * hide() would poison the next fight (instant onExitReady on drain).
    */
   private pendingUpdates: BattleActionUpdate[] = [];
+  /** True after armPendingShow() until show()/hide(); gates pendingUpdates. */
+  private pendingShowArmed = false;
+  /**
+   * True after this fight has seen actioninfo / settlement. Lone 4/8 before
+   * that is prior-fight tear-down (or late settlement_exit), not this exit.
+   */
+  private fightHadContent = false;
   /**
    * Shared round: local 4/2 already sent; waiting for 4/6 playback
    * (team merge or spar duel_round_defer). No menu / ops until applyUpdate.
@@ -379,6 +450,18 @@ export class BattleScreen extends Container {
   private targetMark = new Graphics();
   private items: BattleBagRow[] = [];
   private itemCursor = 0;
+  /**
+   * Local seat silence rounds left (神堂静默). Mirrored from actioninfo;
+   * aged once per resolved round with actions (fresh apply skips same round).
+   */
+  private silenceRounds = 0;
+  /** Loaded status actors (f_curse* / f_buff / f_mofa1). */
+  private statusActorCache = new Map<string, LoadedActor>();
+  private statusActorLoads = new Map<string, Promise<LoadedActor | null>>();
+  /** `${actorName}|${frame}` composed textures for the 3-frame loops. */
+  private statusFrameTexCache = new Map<string, Texture>();
+  private statusAnimPhase = 0;
+  private statusAnimAcc = 0;
   /** Menu / skill / item / target pointer hits; cleared each redrawMenu. */
   private rowHits: Container[] = [];
 
@@ -855,6 +938,40 @@ export class BattleScreen extends Container {
     }
   }
 
+  /**
+   * Call at the start of onBattle (before async skills/bag). Clears stale
+   * late-exit packets and accepts applyUpdate queue until show() drains.
+   */
+  armPendingShow(): void {
+    this.pendingUpdates = [];
+    this.pendingShowArmed = true;
+    this.fightHadContent = false;
+  }
+
+  /** Drop arm if show() never ran (skills/bag error). */
+  cancelPendingShow(): void {
+    this.pendingShowArmed = false;
+    this.pendingUpdates = [];
+  }
+
+  /** Lone 4/8 with no settle/actions — prior tear-down unless this fight progressed. */
+  private isStaleLoneExit(up: BattleActionUpdate): boolean {
+    if (!up.finished || up.settlement || (up.actions?.length ?? 0) > 0) {
+      return false;
+    }
+    if (up.escaped) return false;
+    if (this.awaitingExit || this.fightHadContent) return false;
+    // 切号 onto ended fight: HP already folded to 0 — allow leave.
+    if (
+      this.state &&
+      this.state.left.length > 0 &&
+      this.state.left.every((u) => u.hp <= 0)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   show(state: BattleState): void {
     preloadMenuScrollTexture(() => {
       if (this.menuOpen && !this.awaitingExit && !this.awaitingDeathPrompt) {
@@ -871,11 +988,14 @@ export class BattleScreen extends Container {
     });
     this.visible = true;
     this.state = state;
+    this.pendingShowArmed = false;
+    this.fightHadContent = false;
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
     this.deathPromptBusy = false;
     this.deathPromptHasStone = false;
     this.deathPromptCursor = 0;
+    this.silenceRounds = 0;
     this.playbackBusy = false;
     this.playbackDepth = 0;
     this.playbackChain = Promise.resolve();
@@ -913,11 +1033,21 @@ export class BattleScreen extends Container {
 
   applyUpdate(up: BattleActionUpdate): void {
     if (!this.state) {
+      // Drop when not entering a fight — late settlement_exit 4/8 after hide
+      // must not sit in pendingUpdates for the next show() drain.
+      if (!this.pendingShowArmed) return;
+      // Same-WT prepended prior 4/8 (or flush of lone exit) — never drain as
+      // this fight's exit after show().
+      if (this.isStaleLoneExit(up)) return;
       this.pendingUpdates.push(up);
       if (this.pendingUpdates.length > 64) {
         this.pendingUpdates = this.pendingUpdates.slice(-64);
       }
       return;
+    }
+    if (this.isStaleLoneExit(up)) return;
+    if ((up.actions?.length ?? 0) > 0 || up.settlement) {
+      this.fightHadContent = true;
     }
     // Shared 4/6 (or escape/settle) arrived — leave team wait-for-round lock.
     this.awaitingRound = false;
@@ -1074,6 +1204,10 @@ export class BattleScreen extends Container {
       this.beginDeathPrompt();
       return;
     }
+    /* Age/apply silence+poison per resolved script even if another 4/6 is queued. */
+    if ((up.actions?.length ?? 0) > 0) {
+      this.syncAilmentsFromActions(up.actions);
+    }
     // More 4/6 still queued — keep menu down and do not arm auto yet.
     if (!drained) return;
     this.menuMode = "root";
@@ -1133,6 +1267,8 @@ export class BattleScreen extends Container {
     if (this.state) this.notifyVitalsChanged();
     this.visible = false;
     this.state = null;
+    this.pendingShowArmed = false;
+    this.fightHadContent = false;
     this.pendingUpdates = [];
     this.enemyHud.clear();
     this.arenaDuel = false;
@@ -1140,6 +1276,12 @@ export class BattleScreen extends Container {
     /* Keep hangupTallyArmed so the next fight continues session 战斗场次. */
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
+    this.silenceRounds = 0;
+    this.statusActorCache.clear();
+    this.statusActorLoads.clear();
+    this.clearStatusFrameTextures();
+    this.statusAnimPhase = 0;
+    this.statusAnimAcc = 0;
     this.playbackBusy = false;
     this.playbackDepth = 0;
     this.playbackChain = Promise.resolve();
@@ -1284,6 +1426,7 @@ export class BattleScreen extends Container {
           }
           u.sprite = null;
         }
+        this.clearUnitStatusFx(u);
         this.paintUnitSprite(u);
         // CFA loses mutations inside paintUnitSprite after sprite=null.
         const body = u.sprite as Sprite | null;
@@ -1295,6 +1438,10 @@ export class BattleScreen extends Container {
         /* ignore per-unit */
       }
     }
+    this.statusActorCache.clear();
+    this.statusActorLoads.clear();
+    this.clearStatusFrameTextures();
+    this.refreshAllStatusFx();
 
     try {
       nudgeTextureSource(this.autoBannerWords?.texture);
@@ -1350,6 +1497,8 @@ export class BattleScreen extends Container {
   private resolveAutoOperateMp(operate: number): number {
     const op = operate | 0;
     if (op === 0) return 0;
+    /* Silenced seats may only normal-attack (server duel silenceRounds). */
+    if (this.silenceRounds > 0) return 0;
     const sk = this.skills.find((s) => s.id + 2 === op);
     const mpCost = sk?.mpCost;
     if (mpCost == null || mpCost <= 0) return op;
@@ -1358,13 +1507,318 @@ export class BattleScreen extends Container {
     return op;
   }
 
-  /** Manual skill path: tip + stay in menu when HUD MP < cost. */
-  private ensureSkillMp(operate: number): boolean {
+  private tipSilenced(): void {
+    void this.log.setText(SILENCE_TIP, CBE.inkTip);
+    this.showTip(SILENCE_TIP);
+  }
+
+  /** Manual skill path: tip + stay in menu when silenced or HUD MP < cost. */
+  private ensureSkillUsable(operate: number): boolean {
     const op = operate | 0;
     if (op === 0) return true;
+    if (this.silenceRounds > 0) {
+      this.tipSilenced();
+      return false;
+    }
     if (this.resolveAutoOperateMp(op) === op) return true;
     void this.log.setText("法力不足", CBE.inkTip);
+    this.showTip("法力不足");
     return false;
+  }
+
+  /**
+   * Mirror poison / silence / buff from the round script onto units.
+   * Fresh applies skip same-round age; dispel/death clear seats.
+   */
+  private syncAilmentsFromActions(actions: BattleActionRecord[]): void {
+    if (!actions.length) return;
+    const self = this.selfWire();
+    let localSilenceApplied = false;
+    let localSilenceDispelled = false;
+    const poisonApplied = new Set<UnitView>();
+    const silenceApplied = new Set<UnitView>();
+    const buffApplied = new Set<UnitView>();
+    const cleared = new Set<UnitView>();
+
+    const markCleared = (u: UnitView | null) => {
+      if (u) cleared.add(u);
+    };
+
+    for (const rec of actions) {
+      if (rec.type === 3 || rec.type === 4) {
+        markCleared(this.unitForWire(rec.actorWire));
+        continue;
+      }
+      if (rec.type !== 1) continue;
+      const eid = rec.effectIndex ?? 0;
+      if (eid === DISPEL_EFFECT_INDEX) {
+        for (const c of rec.children) {
+          markCleared(this.unitForWire(c.wire));
+          if (c.wire === self) localSilenceDispelled = true;
+        }
+        continue;
+      }
+
+      const zeroDmg =
+        rec.children.length > 0 &&
+        rec.children.every((c) => c.delta === 0);
+      const buffInfo = BUFF_BY_EFFECT_INDEX[eid];
+
+      if (eid === SILENCE_EFFECT_INDEX) {
+        if (zeroDmg) {
+          for (const c of rec.children) {
+            const u = this.unitForWire(c.wire);
+            if (!u || u.dead || u.hidden) continue;
+            u.silenceRounds = SILENCE_DURATION_ROUNDS;
+            silenceApplied.add(u);
+            if (c.wire === self) {
+              this.silenceRounds = SILENCE_DURATION_ROUNDS;
+              localSilenceApplied = true;
+            }
+          }
+        } else {
+          for (const c of rec.children) {
+            if (c.delta >= 0) continue;
+            const u = this.unitForWire(c.wire);
+            if (!u || u.dead || u.hidden) continue;
+            if (rec.actorWire === c.wire) {
+              if (u.poisonRounds <= 0) u.poisonRounds = 1;
+            } else {
+              u.poisonRounds = POISON_DURATION_ROUNDS;
+              poisonApplied.add(u);
+            }
+          }
+        }
+        continue;
+      }
+
+      /*
+       * Friendly timed buffs (神臂 / 混沌鬼气 / 灵岩 / 道统…): non-negative
+       * children only. Self buffs (td=0) land on the caster wire.
+       */
+      if (
+        buffInfo &&
+        rec.children.length > 0 &&
+        rec.children.every((c) => c.delta >= 0)
+      ) {
+        let landed = false;
+        for (const c of rec.children) {
+          const u = this.unitForWire(c.wire);
+          if (!u || u.dead || u.hidden) continue;
+          u.buffRounds = buffInfo.rounds;
+          u.buffActor = buffInfo.actor;
+          buffApplied.add(u);
+          landed = true;
+        }
+        /* td=0: if child wires missed, still mark the caster seat. */
+        if (!landed) {
+          const caster = this.unitForWire(rec.actorWire);
+          if (caster && !caster.dead && !caster.hidden) {
+            caster.buffRounds = buffInfo.rounds;
+            caster.buffActor = buffInfo.actor;
+            buffApplied.add(caster);
+          }
+        }
+      }
+    }
+
+    for (const u of cleared) {
+      u.poisonRounds = 0;
+      u.silenceRounds = 0;
+      u.buffRounds = 0;
+    }
+    for (const u of this.units) {
+      if (cleared.has(u)) continue;
+      if (!poisonApplied.has(u) && u.poisonRounds > 0) u.poisonRounds -= 1;
+      if (!silenceApplied.has(u) && u.silenceRounds > 0) u.silenceRounds -= 1;
+      if (!buffApplied.has(u) && u.buffRounds > 0) u.buffRounds -= 1;
+    }
+    /* Menu tip counter follows the local seat silence icon. */
+    if (localSilenceDispelled) this.silenceRounds = 0;
+    else {
+      const selfUnit = this.unitForWire(self);
+      if (selfUnit) this.silenceRounds = selfUnit.silenceRounds;
+      else if (!localSilenceApplied && this.silenceRounds > 0) {
+        this.silenceRounds -= 1;
+      }
+    }
+    this.refreshAllStatusFx();
+  }
+
+  private async ensureStatusActor(actorName: string): Promise<LoadedActor | null> {
+    const hit = this.statusActorCache.get(actorName);
+    if (hit) return hit;
+    let load = this.statusActorLoads.get(actorName);
+    if (!load) {
+      load = loadActor(actorName)
+        .then((a) => {
+          this.statusActorCache.set(actorName, a);
+          return a;
+        })
+        .catch((e) => {
+          console.warn("[battle] status actor", actorName, e);
+          return null;
+        });
+      this.statusActorLoads.set(actorName, load);
+    }
+    return load;
+  }
+
+  private statusFrameTexture(
+    actor: LoadedActor,
+    frame: number,
+  ): Texture | null {
+    const parts = actor.animations[0]?.parts.length ?? 0;
+    if (parts <= 0) return null;
+    const n = Math.min(STATUS_LOOP_FRAMES, parts);
+    const i = ((frame % n) + n) % n;
+    const key = `${actor.name}|${i}`;
+    const cached = this.statusFrameTexCache.get(key);
+    if (cached && !cached.destroyed) return cached;
+    const composed =
+      composePartStacked(actor, 0, i) ||
+      composePartStacked(actor, 1, i) ||
+      composeMapActor(actor, 3, false, i) ||
+      composeMapActor(actor, 2, false, i);
+    if (!composed) return null;
+    const tex = rgbaToTexture(composed.width, composed.height, composed.rgba);
+    this.statusFrameTexCache.set(key, tex);
+    return tex;
+  }
+
+  private clearStatusFrameTextures(): void {
+    for (const tex of this.statusFrameTexCache.values()) {
+      try {
+        tex.destroy(true);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.statusFrameTexCache.clear();
+  }
+
+  private clearUnitStatusFx(u: UnitView): void {
+    if (!u.statusHost) {
+      u.statusIconActors = [];
+      return;
+    }
+    try {
+      if (u.statusHost.parent) u.statusHost.parent.removeChild(u.statusHost);
+      u.statusHost.destroy({ children: true });
+    } catch {
+      /* ignore */
+    }
+    u.statusHost = null;
+    u.statusIconActors = [];
+  }
+
+  private unitStatusActors(u: UnitView): string[] {
+    const out: string[] = [];
+    if (u.poisonRounds > 0) out.push(POISON_STATUS_ACTOR);
+    if (u.silenceRounds > 0) out.push(SILENCE_STATUS_ACTOR);
+    if (u.buffRounds > 0) out.push(u.buffActor || BUFF_STATUS_ACTOR);
+    return out;
+  }
+
+  private layoutStatusHost(u: UnitView): void {
+    const host = u.statusHost;
+    if (!host || host.destroyed) return;
+    const bodyH =
+      u.sprite && !u.sprite.destroyed ? Math.abs(u.sprite.height) : 36;
+    const y = -Math.max(28, bodyH) - 2;
+    const gap = 2;
+    let totalW = 0;
+    for (const c of host.children) {
+      if (!(c instanceof Sprite)) continue;
+      totalW += Math.abs(c.width) + gap;
+    }
+    totalW = Math.max(0, totalW - gap);
+    let x = -totalW / 2;
+    for (const c of host.children) {
+      if (!(c instanceof Sprite)) continue;
+      c.anchor.set(0, 1);
+      c.position.set(x, y);
+      x += Math.abs(c.width) + gap;
+    }
+  }
+
+  private paintUnitStatusFrames(u: UnitView): void {
+    const host = u.statusHost;
+    if (!host || host.destroyed) return;
+    const actors = u.statusIconActors;
+    for (let i = 0; i < host.children.length; i++) {
+      const spr = host.children[i];
+      const actorName = actors[i];
+      if (!(spr instanceof Sprite) || !actorName) continue;
+      const actor = this.statusActorCache.get(actorName);
+      if (!actor) continue;
+      const tex = this.statusFrameTexture(actor, this.statusAnimPhase);
+      if (!tex) continue;
+      spr.texture = tex;
+      const fit = Math.min(
+        1.2,
+        22 / Math.max(1, tex.width),
+        28 / Math.max(1, tex.height),
+      );
+      spr.scale.set(fit);
+    }
+    this.layoutStatusHost(u);
+  }
+
+  private refreshUnitStatusFx(u: UnitView): void {
+    const wanted = this.unitStatusActors(u);
+    if (!wanted.length || u.dead || u.hidden) {
+      this.clearUnitStatusFx(u);
+      return;
+    }
+    void (async () => {
+      if (!this.visible || !u.root.parent || u.dead || u.hidden) {
+        this.clearUnitStatusFx(u);
+        return;
+      }
+      const actors = this.unitStatusActors(u);
+      if (!actors.length) {
+        this.clearUnitStatusFx(u);
+        return;
+      }
+      const loaded: string[] = [];
+      for (const name of actors) {
+        const a = await this.ensureStatusActor(name);
+        if (a) loaded.push(name);
+      }
+      if (!loaded.length || !u.root.parent || u.dead || u.hidden) {
+        this.clearUnitStatusFx(u);
+        return;
+      }
+      if (!u.statusHost || u.statusHost.destroyed) {
+        u.statusHost = new Container();
+        u.statusHost.eventMode = "none";
+        u.root.addChild(u.statusHost);
+      } else {
+        u.statusHost.removeChildren().forEach((c) => c.destroy());
+      }
+      u.statusIconActors = loaded;
+      for (const name of loaded) {
+        const actor = this.statusActorCache.get(name);
+        if (!actor) continue;
+        const tex = this.statusFrameTexture(actor, this.statusAnimPhase);
+        if (!tex) continue;
+        const spr = new Sprite(tex);
+        spr.eventMode = "none";
+        const fit = Math.min(
+          1.2,
+          22 / Math.max(1, tex.width),
+          28 / Math.max(1, tex.height),
+        );
+        spr.scale.set(fit);
+        u.statusHost.addChild(spr);
+      }
+      this.layoutStatusHost(u);
+    })();
+  }
+
+  private refreshAllStatusFx(): void {
+    for (const u of this.units) this.refreshUnitStatusFx(u);
   }
 
   submitAutoOperate(operate: number, tip: string): boolean {
@@ -1374,9 +1828,13 @@ export class BattleScreen extends Container {
       const wires = this.livingEnemyWires();
       this.selectedTargetWire =
         wires[0] ?? battleTargetWire(this.state);
-      this.noteOperateSubmitted(
-        op !== (operate | 0) ? "法力不足·普攻" : tip,
-      );
+      const fallbackTip =
+        op !== (operate | 0)
+          ? this.silenceRounds > 0
+            ? "沉默·普攻"
+            : "法力不足·普攻"
+          : tip;
+      this.noteOperateSubmitted(fallbackTip);
       // Prefer onSkill(0) so main.ts can tag the note as auto (does not
       // erase a remembered skill). Fall back to onAttack for older wires.
       if (this.onSkill) this.onSkill(0);
@@ -1429,7 +1887,7 @@ export class BattleScreen extends Container {
   submitManualSkill(operate: number, name: string): boolean {
     if (!this.canSubmitOperate()) return false;
     this.clearAutoForManualOp();
-    if (!this.ensureSkillMp(operate)) return false;
+    if (!this.ensureSkillUsable(operate)) return false;
     return this.submitAutoOperate(operate, `施展${name}…`);
   }
 
@@ -1523,7 +1981,7 @@ export class BattleScreen extends Container {
       const sk = this.skills[this.skillCursor]!;
       const kind = sk.targetKind ?? 3;
       const operate = sk.id + 2;
-      if (!this.ensureSkillMp(operate)) return;
+      if (!this.ensureSkillUsable(operate)) return;
       this.clearAutoForManualOp();
       if (skillNeedsTargetPick(kind)) {
         const wires =
@@ -1599,7 +2057,12 @@ export class BattleScreen extends Container {
         this.resolveAutoOperateMp(pendingOp) !== (pendingOp | 0)
       ) {
         // Timer already 0 — cannot stay on pick; fall through to 普攻.
-        void this.log.setText("超时·法力不足·普攻", CBE.inkTip);
+        void this.log.setText(
+          this.silenceRounds > 0
+            ? "超时·沉默·普攻"
+            : "超时·法力不足·普攻",
+          CBE.inkTip,
+        );
         this.pendingOperate = null;
         this.pendingSkillName = "";
         this.pendingItem = null;
@@ -1667,6 +2130,10 @@ export class BattleScreen extends Container {
       this.confirm();
       return;
     }
+    if (this.silenceRounds > 0) {
+      this.tipSilenced();
+      return;
+    }
     if (!this.skills.length) {
       void this.log.setText("未学会仙术（等 12/1）", CBE.inkTip);
       return;
@@ -1700,6 +2167,7 @@ export class BattleScreen extends Container {
     }
     if (!this.items.length) {
       void this.log.setText("没有可用药品/壶", CBE.inkTip);
+      this.showTip("没有可用药品/壶");
       return;
     }
     this.menuMode = "item";
@@ -1868,7 +2336,7 @@ export class BattleScreen extends Container {
     const operate = this.pendingOperate;
     const name = this.pendingSkillName;
     const item = this.pendingItem;
-    if (!item && operate != null && !this.ensureSkillMp(operate)) return;
+    if (!item && operate != null && !this.ensureSkillUsable(operate)) return;
     this.clearAutoForManualOp();
     this.selectedTargetWire = wire;
     this.pendingOperate = null;
@@ -1896,6 +2364,7 @@ export class BattleScreen extends Container {
   private commitItemPick(): void {
     if (!this.items.length) {
       void this.log.setText("没有可用药品/壶", CBE.inkTip);
+      this.showTip("没有可用药品/壶");
       this.menuMode = "root";
       this.redrawMenu();
       return;
@@ -1932,7 +2401,7 @@ export class BattleScreen extends Container {
   ): void {
     if (!this.state) return;
     this.clearAutoForManualOp();
-    if (!this.ensureSkillMp(operate)) return;
+    if (!this.ensureSkillUsable(operate)) return;
     if (kind === 0) {
       this.selectedTargetWire = this.selfWire();
     } else if (kind === 2) {
@@ -2062,6 +2531,21 @@ export class BattleScreen extends Container {
         if (u.pose !== "idle") continue;
         u.phase += 1;
         this.paintUnitSprite(u);
+      }
+    }
+    /* Advance 3-frame status icon strips (中毒 / 沉默 / 增益). */
+    this.statusAnimAcc += dtMs;
+    let stepped = false;
+    while (this.statusAnimAcc >= STATUS_FRAME_MS) {
+      this.statusAnimAcc -= STATUS_FRAME_MS;
+      this.statusAnimPhase += 1;
+      stepped = true;
+    }
+    if (stepped) {
+      for (const u of this.units) this.paintUnitStatusFrames(u);
+    } else {
+      for (const u of this.units) {
+        if (u.statusHost && !u.statusHost.destroyed) this.layoutStatusHost(u);
       }
     }
   }
@@ -2402,6 +2886,12 @@ export class BattleScreen extends Container {
       poseUntil: 0,
       dead: alreadyDead,
       hidden: alreadyDead,
+      poisonRounds: 0,
+      silenceRounds: 0,
+      buffRounds: 0,
+      buffActor: BUFF_STATUS_ACTOR,
+      statusHost: null,
+      statusIconActors: [],
     };
     this.units.push(view);
     if (alreadyDead) root.visible = false;
@@ -2437,6 +2927,7 @@ export class BattleScreen extends Container {
       );
       root.addChildAt(spr, 1);
       view.sprite = spr;
+      this.refreshUnitStatusFx(view);
       // Sprite size known — re-seat follow-mode bars to the real head.
       if (facingRight && this.state) {
         this.enemyHud.setEnemies(this.state.left, this.enemyHudAnchors());
@@ -2999,7 +3490,8 @@ export class BattleScreen extends Container {
     if (!this.state) return;
     const recoverHp = s.recoverHp | 0;
     const recoverMp = s.recoverMp | 0;
-    if (!recoverHp && !recoverMp) return;
+    const leveledUp = !!s.leveledUp;
+    if (!recoverHp && !recoverMp && !leveledUp) return;
     const selfId = (this.visuals.selfId ?? 0) >>> 0;
     const row =
       (selfId ? this.state.right.find((r) => r.id === selfId) : undefined) ||
@@ -3010,6 +3502,11 @@ export class BattleScreen extends Container {
     }
     if (recoverMp > 0) {
       row.mp = Math.max(0, Math.min(row.maxMp, row.mp + recoverMp));
+    }
+    // RPG level-up: refill full seat vitals (alive only; dead settle stays 0).
+    if (leveledUp && row.hp > 0) {
+      row.hp = row.maxHp;
+      row.mp = row.maxMp;
     }
   }
 
@@ -3509,10 +4006,22 @@ export class BattleScreen extends Container {
         : childWires.length
           ? childWires
           : [rec.actorWire];
-      const effectIndex =
-        isSkill && rec.effectIndex != null && rec.effectIndex > 0
-          ? rec.effectIndex
-          : 0;
+      /*
+       * Poison DoT ticks: actorWire is the damaged seat itself. Play 见血
+       * (f_blood1=0), never the skill cast sheet (f_curse1/施展魔法).
+       * Legacy packets still send effectIndex=3 on ticks — remap here.
+       */
+      const selfDotTick =
+        isSkill &&
+        offensiveChildren.some((c) => c.wire === rec.actorWire);
+      let effectIndex =
+        isSkill && rec.effectIndex != null ? rec.effectIndex : -1;
+      if (selfDotTick) {
+        if (effectIndex === SILENCE_EFFECT_INDEX || effectIndex < 0) {
+          effectIndex = BLOOD_HIT_EFFECT_INDEX;
+        }
+      }
+      const hasSkillFx = isSkill && effectIndex >= 0;
 
       // Team merge keeps later seats' baked hits on already-dead wires.
       // Skip dash/FX/floats for wholly defeated offensive records; still apply
@@ -3580,15 +4089,17 @@ export class BattleScreen extends Container {
           );
         }
         if (isSkill) {
-          // Full cast first; eidolon then drops onto targets before floats.
-          await this.playAttackMotion(
-            actor,
-            firstTarget && !this.isUnitDefeated(firstTarget)
-              ? firstTarget
-              : null,
-            "cast",
-          );
-          if (effectIndex > 0) {
+          // Cast strip only for real skill casts — DoT self-ticks skip it.
+          if (!selfDotTick) {
+            await this.playAttackMotion(
+              actor,
+              firstTarget && !this.isUnitDefeated(firstTarget)
+                ? firstTarget
+                : null,
+              "cast",
+            );
+          }
+          if (hasSkillFx) {
             startSkillFx(
               effectIndex,
               fxWires,
@@ -3605,7 +4116,7 @@ export class BattleScreen extends Container {
             "attack",
           );
         }
-      } else if (!reflectOnly && !reviveOnly && effectIndex > 0) {
+      } else if (!reflectOnly && !reviveOnly && hasSkillFx) {
         startSkillFx(effectIndex, fxWires, actor, !offensiveGroup);
       }
 
@@ -3749,7 +4260,7 @@ export class BattleScreen extends Container {
    * Play eidolon FX on every resolved wire.
    * Offensive group skills must not fall back onto the caster — hangup wire
    * desync used to paint 荒魂劫火/天火熔身/雷震八方 on 本方.
-   * Each strip starts above the stage and drops onto the target before playing.
+   * Each strip starts mid-air and drops onto the target before playing.
    * `onLanded` fires once all drops finish (damage floats should wait on it).
    */
   private async playSkillEffects(
@@ -3835,7 +4346,7 @@ export class BattleScreen extends Container {
    * Play a JHOnlineData `.actor` strip (eidolon FX / `f_death` splash).
    * `maxParts` caps frames when set (`f_death` has 5 splash parts).
    * Duration defaults to frameCount * FX_FRAME_MS (CBE part tick).
-   * `fallFromTop`: start near STAGE_TOP and drop onto (x,y) before the strip.
+   * `fallFromTop`: start mid-air above (x,y) and drop before the strip.
    */
   private async playNamedActorFx(
     actorName: string,
@@ -3856,8 +4367,9 @@ export class BattleScreen extends Container {
     try {
       const loaded = await loadActor(actorName);
       const host = new Container();
+      // Mid-air: halfway between stage top and impact (not the stage ceiling).
       const startY = opts?.fallFromTop
-        ? Math.min(y, STAGE_TOP + 12)
+        ? Math.min(y, Math.round(STAGE_TOP + (y - STAGE_TOP) * SKILL_FX_FALL_START_T))
         : y;
       host.position.set(x, startY);
       this.fxHost.addChild(host);
@@ -3897,7 +4409,7 @@ export class BattleScreen extends Container {
         return true;
       };
 
-      // Drop from stage top with first frame visible, then play the strip.
+      // Drop from mid-air with first frame visible, then play the strip.
       if (opts?.fallFromTop && startY < y) {
         paintFrame(0);
         await this.tweenHostTo(host, x, y, SKILL_FX_FALL_MS);

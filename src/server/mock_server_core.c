@@ -82,7 +82,7 @@ typedef struct
     u8 silenceRounds;
     u8 dotRounds;
     u32 dotDamagePerRound;
-    /* skill.dsh effectIndex for later DoT type-1 playback (毒入膏肓). */
+    /* DoT tick type-1 eidolon index (见血/f_blood*, not skill cast sheet). */
     u32 dotEffectIndex;
 } vm_net_mock_battle_enemy_ailment;
 
@@ -5334,6 +5334,8 @@ typedef struct
     u32 mpMax;
     u32 money;
     u32 wcoin;
+    /* 酷币：藏宝阁成交到账 / 提现出账；与酷宝(wcoin)独立。 */
+    u32 kcoin;
     /* Field PK score; ranking board23 type=2 and red-name (>=60). */
     u32 pkPoints;
     /* Wins toward next −1 pk_points while pkPoints>0 (mod 3). */

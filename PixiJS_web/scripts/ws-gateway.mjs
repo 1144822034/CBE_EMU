@@ -426,7 +426,9 @@ function proxyAdminApi(req, res, adminPath, { methods }) {
     let body = Buffer.alloc(0);
     if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
       try {
-        body = await readRequestBody(req);
+        const limit =
+          adminPath.includes("/api/kcoin/payee/upload") ? 512 * 1024 : 64 * 1024;
+        body = await readRequestBody(req, limit);
       } catch (err) {
         sendJson(res, 413, { ok: false, error: "body-too-large" });
         return;
@@ -519,6 +521,26 @@ const server = http.createServer((req, res) => {
   }
   if (path === "/api/recharge/create") {
     proxyAdminApi(req, res, "/api/recharge/create", { methods: ["POST"] });
+    return;
+  }
+  if (
+    path === "/api/zangbao/browse" ||
+    path === "/api/zangbao/mine" ||
+    path === "/api/zangbao/order" ||
+    path === "/api/kcoin/balance" ||
+    path === "/api/kcoin/withdraw/list"
+  ) {
+    proxyAdminApi(req, res, req.url || path, { methods: ["GET"] });
+    return;
+  }
+  if (
+    path === "/api/zangbao/list" ||
+    path === "/api/zangbao/cancel" ||
+    path === "/api/zangbao/buy" ||
+    path === "/api/kcoin/payee/upload" ||
+    path === "/api/kcoin/withdraw/create"
+  ) {
+    proxyAdminApi(req, res, path, { methods: ["POST"] });
     return;
   }
   if (path === "/api/register") {

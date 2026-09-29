@@ -81,7 +81,9 @@ typedef enum
 {
     VM_MOCK_PAYMENT_SETTLE_INVALID = 0,
     VM_MOCK_PAYMENT_SETTLE_PENDING = 1,
-    VM_MOCK_PAYMENT_SETTLE_CREDITED = 2
+    VM_MOCK_PAYMENT_SETTLE_CREDITED = 2,
+    /* 非藏宝阁市场单：回调应继续走酷宝充值结算。 */
+    VM_MOCK_PAYMENT_SETTLE_NOT_MARKET = 3
 } vm_mock_payment_settle_result;
 
 typedef struct
@@ -1298,6 +1300,10 @@ static void vm_mock_payment_sync_cached_wcoin(const char *accountId,
     }
 }
 
+/* Forward: market-order settle in web_zangbao.inc.c (same TU). */
+static vm_mock_payment_settle_result vm_mock_zangbao_try_settle_verified(
+    const vm_mock_payment_callback *callback);
+
 static vm_mock_payment_settle_result vm_mock_payment_settle_verified(
     const vm_mock_payment_callback *callback)
 {
@@ -1383,30 +1389,80 @@ static vm_mock_payment_settle_result vm_mock_payment_process_callback_query(
     char signInput[512];
     char expected[33];
     vm_mock_payment_settle_result result = VM_MOCK_PAYMENT_SETTLE_INVALID;
+    const char *failReason = "init";
 
     if (payIdOut)
         payIdOut[0] = 0;
     memset(&config, 0, sizeof(config));
     memset(&callback, 0, sizeof(callback));
     memset(signInput, 0, sizeof(signInput));
-    if (!vm_mock_payment_load_config(&config) ||
-        !vm_mock_payment_parse_callback(query, &callback))
+    if (!vm_mock_payment_load_config(&config))
+    {
+        failReason = "config";
         goto done;
+    }
+    if (!vm_mock_payment_parse_callback(query, &callback))
+    {
+        failReason = "parse";
+        printf("[warn][payment] callback_parse_failed source=%s query=%.240s\n",
+               source ? source : "-", query ? query : "-");
+        goto done;
+    }
     snprintf(signInput, sizeof(signInput), "%s%s%s%s%s%s",
              callback.payId, callback.param, callback.typeText,
              callback.priceText, callback.reallyPriceText, config.secretKey);
     vm_md5_hex(signInput, strlen(signInput), expected);
     if (!vm_mock_payment_constant_sign_equal(expected, callback.sign))
+    {
+        failReason = "sign";
+        printf("[warn][payment] callback_sign_mismatch source=%s pay_id=%s "
+               "price=%s really=%s type=%s expected=%s got=%s\n",
+               source ? source : "-",
+               callback.payId[0] ? callback.payId : "-",
+               callback.priceText, callback.reallyPriceText, callback.typeText,
+               expected, callback.sign);
         goto done;
+    }
+    /* 藏宝阁赞助单与酷宝充值共用 V免签回调；市场单存在时不回落到 W 币入账。 */
+    {
+        vm_mock_payment_settle_result zb =
+            vm_mock_zangbao_try_settle_verified(&callback);
+        if (zb != VM_MOCK_PAYMENT_SETTLE_NOT_MARKET)
+        {
+            result = zb;
+            if (result == VM_MOCK_PAYMENT_SETTLE_INVALID)
+                failReason = "zangbao-settle";
+            else
+                failReason = "ok";
+            if (payIdOut && result != VM_MOCK_PAYMENT_SETTLE_INVALID)
+                snprintf(payIdOut, 64, "%s", callback.payId);
+            goto done;
+        }
+    }
     result = vm_mock_payment_settle_verified(&callback);
+    if (result == VM_MOCK_PAYMENT_SETTLE_INVALID)
+        failReason = "wcoin-settle";
+    else
+        failReason = "ok";
     if (result != VM_MOCK_PAYMENT_SETTLE_INVALID && payIdOut)
         snprintf(payIdOut, 64, "%s", callback.payId);
 
 done:
-    printf("[%s][payment] callback source=%s pay_id=%s result=%u\n",
+    printf("[%s][payment] callback source=%s pay_id=%s result=%u reason=%s\n",
            result == VM_MOCK_PAYMENT_SETTLE_INVALID ? "warn" : "info",
            source ? source : "-", callback.payId[0] ? callback.payId : "-",
-           (u32)result);
+           (u32)result, failReason);
+    /* Surface distinct bodies so V免签补单/手工探测能区分验签与结算失败。 */
+    if (result == VM_MOCK_PAYMENT_SETTLE_INVALID && payIdOut)
+    {
+        if (strcmp(failReason, "sign") == 0)
+            snprintf(payIdOut, 64, "error_sign");
+        else if (strcmp(failReason, "parse") == 0 ||
+                 strcmp(failReason, "config") == 0)
+            snprintf(payIdOut, 64, "error_parse");
+        else
+            snprintf(payIdOut, 64, "error_settle");
+    }
     memset(config.secretKey, 0, sizeof(config.secretKey));
     memset(signInput, 0, sizeof(signInput));
     return result;

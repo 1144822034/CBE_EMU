@@ -105,6 +105,19 @@ import {
   type RingStatus,
 } from "./net/protocolActivities";
 import { AuctionPanel } from "./ui/AuctionPanel";
+import { ZangbaoPanel } from "./ui/ZangbaoPanel";
+import {
+  zangbaoBrowse,
+  zangbaoMine,
+  zangbaoListItem,
+  zangbaoCancel,
+  zangbaoBuy,
+  kcoinBalance,
+  kcoinUploadPayee,
+  kcoinWithdrawCreate,
+  kcoinWithdrawList,
+  compressPayeeImageDataUrl,
+} from "./net/zangbaoApi";
 import {
   ENTERTAINMENT_ENTRIES,
   EntertainmentPanel,
@@ -844,6 +857,7 @@ async function main(): Promise<void> {
   const yanmenPanel = new YanmenPanel();
   const ringQuestPanel = new RingQuestPanel();
   const auctionPanel = new AuctionPanel();
+  const zangbaoPanel = new ZangbaoPanel();
   const entertainPanel = new EntertainmentPanel();
   const entertainWeb = new EntertainmentWebLayer();
   const wingPanel = new WingPanel();
@@ -913,6 +927,7 @@ async function main(): Promise<void> {
   yanmenPanel.visible = false;
   ringQuestPanel.visible = false;
   auctionPanel.visible = false;
+  zangbaoPanel.visible = false;
   entertainPanel.visible = false;
   wingPanel.visible = false;
   mountPanel.visible = false;
@@ -999,6 +1014,7 @@ async function main(): Promise<void> {
     yanmenPanel,
     ringQuestPanel,
     auctionPanel,
+    zangbaoPanel,
     entertainPanel,
     wingPanel,
     mountPanel,
@@ -1025,6 +1041,7 @@ async function main(): Promise<void> {
   yanmenPanel.zIndex = 55;
   ringQuestPanel.zIndex = 55;
   auctionPanel.zIndex = 55;
+  zangbaoPanel.zIndex = 55;
   entertainPanel.zIndex = 56;
   wingPanel.zIndex = 56;
   mountPanel.zIndex = 56;
@@ -1052,6 +1069,7 @@ async function main(): Promise<void> {
     yanmenPanel,
     ringQuestPanel,
     auctionPanel,
+    zangbaoPanel,
     entertainPanel,
     wingPanel,
     mountPanel,
@@ -1151,6 +1169,7 @@ async function main(): Promise<void> {
   const syncWorldWalkInput = () => {
     const overlayOpen =
       auctionPanel.visible ||
+      zangbaoPanel.visible ||
       arenaPanel.visible ||
       wagerPanel.visible ||
       ladderPanel.visible ||
@@ -1664,6 +1683,204 @@ async function main(): Promise<void> {
     shell.setSoftkeys(fruitPanel.softkeys());
     setChromeStatus("水果机");
     if (!status) fruitPanel.showTip("状态获取失败");
+  };
+
+  const zangbaoAuth = () => {
+    const creds = session.getCredentials();
+    return {
+      account: (creds.user || "").trim(),
+      password: (creds.password || "").trim(),
+      roleId: session.selectedRoleId >>> 0,
+    };
+  };
+
+  const refreshZangbaoPanel = async () => {
+    const auth = zangbaoAuth();
+    if (!auth.account || !auth.roleId) return;
+    if (!session.bagItems.length) {
+      try {
+        await session.openBag();
+      } catch {
+        /* ignore */
+      }
+    }
+    const [browse, mine, bal, withdraws] = await Promise.all([
+      zangbaoBrowse(auth, 1),
+      zangbaoMine(auth, 1),
+      kcoinBalance(auth),
+      kcoinWithdrawList(auth),
+    ]);
+    zangbaoPanel.setData({
+      browse,
+      mine,
+      bag: session.bagItems.slice(),
+      kcoin: bal.kcoin,
+      hasPayee: bal.hasPayee,
+      withdraws,
+    });
+    if (zangbaoPanel.visible) shell.setSoftkeys(zangbaoPanel.softkeys());
+  };
+
+  const openZangbaoPanel = async () => {
+    dialog.hide();
+    closeApproach(false);
+    entertainPanel.close();
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (ladderPanel.visible) ladderPanel.close();
+    if (guessPanel.visible) guessPanel.close();
+    if (fruitPanel.visible) fruitPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    closeActivityPanels();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    const auth = zangbaoAuth();
+    if (!auth.account || !auth.roleId) {
+      showGameTip("请先登录");
+      return;
+    }
+    if (!session.bagItems.length) {
+      try {
+        await session.openBag();
+      } catch {
+        /* ignore */
+      }
+    }
+    const [browse, mine, bal, withdraws] = await Promise.all([
+      zangbaoBrowse(auth, 1),
+      zangbaoMine(auth, 1),
+      kcoinBalance(auth),
+      kcoinWithdrawList(auth),
+    ]);
+    zangbaoPanel.open({
+      browse,
+      mine,
+      bag: session.bagItems.slice(),
+      kcoin: bal.kcoin,
+      hasPayee: bal.hasPayee,
+      withdraws,
+    });
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(zangbaoPanel.softkeys());
+    setChromeStatus("藏宝阁");
+  };
+
+  zangbaoPanel.onSoftkeysChange = () => {
+    if (zangbaoPanel.visible) shell.setSoftkeys(zangbaoPanel.softkeys());
+  };
+
+  zangbaoPanel.onAction = (action, payload) => {
+    const auth = zangbaoAuth();
+    void (async () => {
+      if (action === "close") {
+        syncWorldWalkInput();
+        shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        setChromeStatus("");
+        return;
+      }
+      if (action === "refresh") {
+        await refreshZangbaoPanel();
+        return;
+      }
+      if (action === "list") {
+        const bagSeq = Number(payload?.bagSeq) || 0;
+        const priceKcoin = Number(payload?.priceKcoin) || 0;
+        const r = await zangbaoListItem({ ...auth, bagSeq, priceKcoin });
+        if (!r.ok) {
+          zangbaoPanel.showTip(r.error);
+          return;
+        }
+        zangbaoPanel.showTip(`已上架 #${r.listingId}`);
+        try {
+          await session.openBag();
+        } catch {
+          /* ignore */
+        }
+        await refreshZangbaoPanel();
+        return;
+      }
+      if (action === "cancel") {
+        const listingId = Number(payload?.listingId) || 0;
+        const r = await zangbaoCancel({ ...auth, listingId });
+        if (!r.ok) {
+          zangbaoPanel.showTip(r.error);
+          return;
+        }
+        zangbaoPanel.showTip("已下架");
+        try {
+          await session.openBag();
+        } catch {
+          /* ignore */
+        }
+        await refreshZangbaoPanel();
+        return;
+      }
+      if (action === "buy") {
+        const listingId = Number(payload?.listingId) || 0;
+        zangbaoPanel.showTip("创建赞助单…");
+        const r = await zangbaoBuy({ ...auth, listingId, payType: 1 });
+        if (!r.ok) {
+          zangbaoPanel.showTip(r.error);
+          return;
+        }
+        const amountText = formatRechargeYuan(r.reallyPriceCents);
+        const tip = `应付 ${amountText} · ${r.priceKcoin}酷币价`;
+        const pay = await openPayUrl(r.payUrl, {
+          amountText,
+          channel: "微信",
+        });
+        if (pay.showedQr || pay.opened) zangbaoPanel.showTip(`${tip} · 请完成支付`);
+        else zangbaoPanel.showTip(tip);
+        return;
+      }
+      if (action === "upload_payee") {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/*";
+        input.onchange = () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          void (async () => {
+            zangbaoPanel.showTip("压缩上传中…");
+            let imageB64 = "";
+            try {
+              imageB64 = await compressPayeeImageDataUrl(file);
+            } catch {
+              imageB64 = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || ""));
+                reader.onerror = () => reject(new Error("读图失败"));
+                reader.readAsDataURL(file);
+              });
+            }
+            const up = await kcoinUploadPayee({
+              ...auth,
+              payChannel: 1,
+              imageB64,
+            });
+            if (!up.ok) {
+              zangbaoPanel.showTip(up.error);
+              return;
+            }
+            zangbaoPanel.showTip("收款码已上传");
+            await refreshZangbaoPanel();
+          })();
+        };
+        input.click();
+        return;
+      }
+      if (action === "withdraw") {
+        const amount = Number(payload?.amount) || 0;
+        zangbaoPanel.showTip("提交提现…");
+        const r = await kcoinWithdrawCreate({ ...auth, amount });
+        if (!r.ok) {
+          zangbaoPanel.showTip(r.error);
+          return;
+        }
+        zangbaoPanel.showTip("提现已申请");
+        await refreshZangbaoPanel();
+      }
+    })();
   };
 
   const openFestivalPanel = async () => {
@@ -3346,6 +3563,9 @@ async function main(): Promise<void> {
       rollbackSceneMonsterIfNoBattle(false, actorId, x, y);
     },
     onBattle: (state) => {
+      // Arm before async skills/bag so mid-load 4/6 queues; also drops any
+      // late 4/8 that arrived after the previous hide() (instant-exit bug).
+      battle.armPendingShow();
       // Hangup / challenge 4/1 may skip onMonsterCollide — hide map SCE spawn now.
       // Temporary suppress only (wild ~8s respawn). World-boss permanent drop is
       // solely via [WBOSS:claim] → dropWorldBossFromMap; do not permanent-remove
@@ -3522,72 +3742,77 @@ async function main(): Promise<void> {
         selfId,
       });
       void (async () => {
-        const skills = await session.getBattleSkills();
-        battle.setSkills(skills);
         try {
-          await warmItemCatalogs();
-          const hasBattleItem = session.bagItems.some(isBattleMedicineOrFlask);
-          // Empty bag, or bag present but no usable medicine/flask seq (stale
-          // 17/1-only / wiped by a prior bad 7/7 replace): refresh 7/23.
-          if (!session.bagItems.length || !hasBattleItem) {
-            await session.openBag();
+          const skills = await session.getBattleSkills();
+          battle.setSkills(skills);
+          try {
+            await warmItemCatalogs();
+            const hasBattleItem = session.bagItems.some(isBattleMedicineOrFlask);
+            // Empty bag, or bag present but no usable medicine/flask seq (stale
+            // 17/1-only / wiped by a prior bad 7/7 replace): refresh 7/23.
+            if (!session.bagItems.length || !hasBattleItem) {
+              await session.openBag();
+            }
+          } catch {
+            /* bag optional for battle entry */
           }
-        } catch {
-          /* bag optional for battle entry */
-        }
-        battle.setBattleItems(session.bagItems);
-        const arenaDuel = session.isArenaScene();
-        battle.setArenaDuel(arenaDuel);
-        if (arenaDuel) {
-          /* Fair duel: no [自动]/hangup synth; force manual + 20s NA. */
-          if (session.autoBattleActive) {
-            void session.setBattleAutoPrefer(false);
+          battle.setBattleItems(session.bagItems);
+          const arenaDuel = session.isArenaScene();
+          battle.setArenaDuel(arenaDuel);
+          if (arenaDuel) {
+            /* Fair duel: no [自动]/hangup synth; force manual + 20s NA. */
+            if (session.autoBattleActive) {
+              void session.setBattleAutoPrefer(false);
+            }
+            if (session.hangupActive || session.hangupDesired) {
+              void session.stopHangup();
+            }
+            battle.setHangupActive(false);
+            battle.setAutoBattleActive(false);
+            if (autoArmTimer != null) {
+              window.clearTimeout(autoArmTimer);
+              autoArmTimer = null;
+            }
+          } else {
+            battle.setHangupActive(session.hangupActive);
+            battle.setAutoBattleActive(session.autoBattleActive);
+            if (session.hangupActive) {
+              const cap =
+                session.characterStats?.backpackCapacity ||
+                Math.max(64, session.bagItems.length);
+              battle.setHangupBagSlots(session.bagItems.length, cap);
+              battle.setBattleInsightRemainSec(
+                session.getBattleInsightRemainingSec(),
+              );
+            }
           }
-          if (session.hangupActive || session.hangupDesired) {
-            void session.stopHangup();
+          battle.show(state);
+          touch.releaseAll();
+          view.clearHeldKeys();
+          view.inputEnabled = false;
+          if (selfSlot) {
+            session.hp = selfSlot.hp;
+            session.hpMax = Math.max(selfSlot.maxHp, selfSlot.hp, 1);
+            session.mp = selfSlot.mp;
+            session.mpMax = Math.max(selfSlot.maxMp, selfSlot.mp, 1);
           }
-          battle.setHangupActive(false);
-          battle.setAutoBattleActive(false);
-          if (autoArmTimer != null) {
-            window.clearTimeout(autoArmTimer);
-            autoArmTimer = null;
+          // sparMapVitalsLatch / mapVitalsAtSparEnter already armed at onBattle entry.
+          showPhase("battle");
+          if (arenaDuel) {
+            shell.setSoftkeys({ left: "确定", right: "" });
+          } else if (session.hangupActive || session.autoBattleActive) {
+            shell.setSoftkeys({ left: "", right: "" });
           }
-        } else {
-          battle.setHangupActive(session.hangupActive);
-          battle.setAutoBattleActive(session.autoBattleActive);
-          if (session.hangupActive) {
-            const cap =
-              session.characterStats?.backpackCapacity ||
-              Math.max(64, session.bagItems.length);
-            battle.setHangupBagSlots(session.bagItems.length, cap);
-            battle.setBattleInsightRemainSec(
-              session.getBattleInsightRemainingSec(),
-            );
+          if (!arenaDuel && session.autoBattleActive) {
+            // Re-arm gateway prefer for this fight (poll synth; hangup=0).
+            void session.setBattleAutoPrefer(true);
           }
-        }
-        battle.show(state);
-        touch.releaseAll();
-        view.clearHeldKeys();
-        view.inputEnabled = false;
-        if (selfSlot) {
-          session.hp = selfSlot.hp;
-          session.hpMax = Math.max(selfSlot.maxHp, selfSlot.hp, 1);
-          session.mp = selfSlot.mp;
-          session.mpMax = Math.max(selfSlot.maxMp, selfSlot.mp, 1);
-        }
-        // sparMapVitalsLatch / mapVitalsAtSparEnter already armed at onBattle entry.
-        showPhase("battle");
-        if (arenaDuel) {
-          shell.setSoftkeys({ left: "确定", right: "" });
-        } else if (session.hangupActive || session.autoBattleActive) {
-          shell.setSoftkeys({ left: "", right: "" });
-        }
-        if (!arenaDuel && session.autoBattleActive) {
-          // Re-arm gateway prefer for this fight (poll synth; hangup=0).
-          void session.setBattleAutoPrefer(true);
-        }
-        if (!arenaDuel && session.shouldClientDriveInBattleAuto()) {
-          armInBattleAuto("挂机出手…");
+          if (!arenaDuel && session.shouldClientDriveInBattleAuto()) {
+            armInBattleAuto("挂机出手…");
+          }
+        } catch (e) {
+          battle.cancelPendingShow();
+          console.warn("[battle] show aborted", e);
         }
       })();
     },
@@ -4658,6 +4883,10 @@ async function main(): Promise<void> {
     }
     if (entry.nativePanel === "fruit") {
       void openFruitPanel();
+      return;
+    }
+    if (entry.nativePanel === "zangbao") {
+      void openZangbaoPanel();
       return;
     }
     openEntertainmentWeb(entry);
@@ -8594,7 +8823,7 @@ async function main(): Promise<void> {
   hud.onHome = () => cycleMapUi();
   hud.onChat = () => {
     if (phase !== "world" || session.inBattle) return;
-    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible || guessPanel.visible || fruitPanel.visible || festivalPanel.visible || yanmenPanel.visible || ringQuestPanel.visible) return;
+    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible || guessPanel.visible || fruitPanel.visible || zangbaoPanel.visible || festivalPanel.visible || yanmenPanel.visible || ringQuestPanel.visible) return;
     showPhase("chat");
     chatPanel.open(hud.getChatEntries());
     setChromeStatus("聊天 · 点输入框打字 · ←→切换频道");
@@ -8861,6 +9090,23 @@ async function main(): Promise<void> {
         }
         return;
       }
+      if (zangbaoPanel.visible) {
+        if (which === "left") {
+          zangbaoPanel.confirm();
+          shell.setSoftkeys(zangbaoPanel.softkeys());
+        }
+        if (which === "right") {
+          if (zangbaoPanel.cancelOrBack()) {
+            shell.setSoftkeys(zangbaoPanel.softkeys());
+            if (!zangbaoPanel.visible) {
+              syncWorldWalkInput();
+              shell.setSoftkeys({ left: "菜单", right: "菜单" });
+              setChromeStatus("");
+            }
+          }
+        }
+        return;
+      }
       if (festivalPanel.visible || yanmenPanel.visible) {
         if (which === "left") {
           if (festivalPanel.visible) festivalPanel.confirm();
@@ -9010,6 +9256,11 @@ async function main(): Promise<void> {
       if (fruitPanel.isAmountMode()) fruitPanel.confirm();
       else fruitPanel.addBet();
       shell.setSoftkeys(fruitPanel.softkeys());
+      return;
+    }
+    if (phase === "world" && zangbaoPanel.visible) {
+      zangbaoPanel.confirm();
+      shell.setSoftkeys(zangbaoPanel.softkeys());
       return;
     }
     if (phase === "world" && (festivalPanel.visible || yanmenPanel.visible)) {
@@ -9179,6 +9430,25 @@ async function main(): Promise<void> {
         shell.setSoftkeys(fruitPanel.softkeys());
       } else {
         fruitPanel.move(dir === "up" ? -1 : 1);
+      }
+      return;
+    }
+    if (phase === "world" && zangbaoPanel.visible) {
+      if (!down) return;
+      if (zangbaoPanel.isPriceMode()) {
+        // 定价态：←→微调酷币（与商城赞助一致）；上下忽略。
+        if (dir === "left" || dir === "right") {
+          zangbaoPanel.adjustPrice(dir === "left" ? -1 : 1);
+          shell.setSoftkeys(zangbaoPanel.softkeys());
+        }
+        return;
+      }
+      if (dir === "left" || dir === "right") {
+        zangbaoPanel.horizontal(dir === "left" ? -1 : 1);
+        shell.setSoftkeys(zangbaoPanel.softkeys());
+      } else {
+        zangbaoPanel.move(dir === "up" ? -1 : 1);
+        shell.setSoftkeys(zangbaoPanel.softkeys());
       }
       return;
     }
@@ -9473,6 +9743,53 @@ async function main(): Promise<void> {
       if (k === "arrowright" || k === "d") {
         auctionPanel.horizontal(1);
         shell.setSoftkeys(auctionPanel.softkeys());
+        e.preventDefault();
+      }
+      return;
+    }
+    if (zangbaoPanel.visible) {
+      if (zangbaoPanel.isPriceMode()) {
+        if (k === "arrowleft" || k === "a") {
+          zangbaoPanel.adjustPrice(-1);
+          shell.setSoftkeys(zangbaoPanel.softkeys());
+          e.preventDefault();
+          return;
+        }
+        if (k === "arrowright" || k === "d") {
+          zangbaoPanel.adjustPrice(1);
+          shell.setSoftkeys(zangbaoPanel.softkeys());
+          e.preventDefault();
+          return;
+        }
+        if (/^\d$/.test(e.key) || k === "backspace" || e.key === "Enter") {
+          if (e.key === "Enter") zangbaoPanel.appendPriceKey("确定");
+          else
+            zangbaoPanel.appendPriceKey(
+              k === "backspace" ? "删除" : e.key,
+            );
+          shell.setSoftkeys(zangbaoPanel.softkeys());
+          e.preventDefault();
+        }
+        return;
+      }
+      if (k === "arrowleft" || k === "a") {
+        zangbaoPanel.horizontal(-1);
+        shell.setSoftkeys(zangbaoPanel.softkeys());
+        e.preventDefault();
+      }
+      if (k === "arrowright" || k === "d") {
+        zangbaoPanel.horizontal(1);
+        shell.setSoftkeys(zangbaoPanel.softkeys());
+        e.preventDefault();
+      }
+      if (k === "arrowup" || k === "w") {
+        zangbaoPanel.move(-1);
+        shell.setSoftkeys(zangbaoPanel.softkeys());
+        e.preventDefault();
+      }
+      if (k === "arrowdown" || k === "s") {
+        zangbaoPanel.move(1);
+        shell.setSoftkeys(zangbaoPanel.softkeys());
         e.preventDefault();
       }
       return;

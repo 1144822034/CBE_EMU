@@ -29,4 +29,4 @@
 
 ## 仍标 unresolved
 
-- 毒跳 actor wire 取中毒怪自身（播 skill effect + 飘字）；若原生包用其它 actor/无特效，需对照真实包再收紧。
+- （已收）毒跳特效：type-1 `effectIndex` 现为 eidolon `f_blood1`（见血.gif），不再复用技能施放 sheet（f_curse1/施展魔法.gif）。Pixi 对 actor=受伤座位的自跳跳过 cast 条，并把旧包 effect=3  remap 为见血。

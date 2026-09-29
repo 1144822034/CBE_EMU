@@ -6983,6 +6983,7 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     role->mpMax = VM_NET_MOCK_ROLE_DEFAULT_MP;
     role->money = VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     role->wcoin = 0;
+    role->kcoin = 0;
     snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     role->x = VM_NET_MOCK_ROLE_INITIAL_X;
     role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
@@ -7104,6 +7105,7 @@ static void vm_net_mock_role_copy_from_v4(vm_net_mock_role_state *dst,
     dst->mpMax = src->mpMax;
     dst->money = src->money;
     dst->wcoin = 0;
+    dst->kcoin = 0;
     memcpy(dst->scene, src->scene, sizeof(dst->scene));
     dst->x = src->x;
     dst->y = src->y;
@@ -8329,6 +8331,28 @@ static bool vm_mock_mysql_role_cosmetics_row(void *context_value,
     return true;
 }
 
+static bool vm_mock_mysql_role_kcoin_row(void *context_value,
+                                         unsigned int column_count,
+                                         const char *const *values,
+                                         const size_t *lengths)
+{
+    vm_mock_mysql_role_load_context *context =
+        (vm_mock_mysql_role_load_context *)context_value;
+    u32 roleId = 0;
+    u32 kcoin = 0;
+    vm_net_mock_role_state *role = NULL;
+
+    if (context == NULL || context->database == NULL || column_count < 2)
+        return true;
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &roleId) || roleId == 0)
+        return true;
+    (void)vm_mock_mysql_parse_u32(values[1], lengths[1], &kcoin);
+    role = vm_mock_mysql_find_loaded_role(context->database, roleId);
+    if (role != NULL)
+        role->kcoin = kcoin;
+    return true;
+}
+
 static bool vm_mock_mysql_role_detail_row(void *context_value,
                                           unsigned int column_count,
                                           const char *const *values,
@@ -8831,10 +8855,20 @@ static bool vm_net_mock_role_ensure_pk_columns(void)
         return false;
     }
     if (!vm_net_mock_role_table_ensure_column(
+            "account_roles", "kcoin",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN kcoin INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER wcoin",
+            "role_kcoin_column"))
+    {
+        ok = false;
+        return false;
+    }
+    if (!vm_net_mock_role_table_ensure_column(
             "account_roles", "pk_points",
             "ALTER TABLE account_roles "
             "ADD COLUMN pk_points INT UNSIGNED NOT NULL DEFAULT 0 "
-            "AFTER wcoin",
+            "AFTER kcoin",
             "role_pk_points_column"))
     {
         ok = false;
@@ -9173,6 +9207,15 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
     if (!vm_mysql_query(query, vm_mock_mysql_role_detail_row, &context) || context.invalid ||
         context.roleRows != g_vm_net_mock_role_db.roleCount)
         return false;
+    {
+        /* Separate from the 25-col detail row so kcoin does not shift parsers. */
+        char kq[384];
+        snprintf(kq, sizeof(kq),
+                 "SELECT role_id,kcoin FROM account_roles "
+                 "WHERE account_id=CAST(X'%s' AS CHAR)",
+                 account_hex);
+        (void)vm_mysql_query(kq, vm_mock_mysql_role_kcoin_row, &context);
+    }
     {
         vm_mock_mysql_cosmetics_load_context cosCtx;
         memset(&cosCtx, 0, sizeof(cosCtx));
@@ -9592,12 +9635,13 @@ static bool vm_net_mock_role_db_save_relational_ex(
             snprintf(chest_miss_text, sizeof(chest_miss_text), "0,0,0,0,0");
         }
         snprintf(query, sizeof(query),
-                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,chest_crystal_miss,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,unlocked_chenghao_ids,unlocked_wing_ids,unlocked_mount_ids,equipped_chenghao_id,equipped_wing_id,equipped_mount_id) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,'%s',X'%s',%u,%u,%u,%u,%u,%u,%u,'%s','%s','%s',%u,%u,%u) "
+                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,kcoin,pk_points,pk_pve_streak,chest_crystal_miss,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,unlocked_chenghao_ids,unlocked_wing_ids,unlocked_mount_ids,equipped_chenghao_id,equipped_wing_id,equipped_mount_id) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,'%s',X'%s',%u,%u,%u,%u,%u,%u,%u,'%s','%s','%s',%u,%u,%u) "
                  "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
                  "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
                  "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
                  "mp=VALUES(mp),mp_max=VALUES(mp_max),money=VALUES(money),wcoin=VALUES(wcoin),"
+                 "kcoin=VALUES(kcoin),"
                  "pk_points=VALUES(pk_points),pk_pve_streak=VALUES(pk_pve_streak),"
                  "chest_crystal_miss=VALUES(chest_crystal_miss),"
                  "scene=VALUES(scene),pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
@@ -9613,7 +9657,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
                  "equipped_mount_id=VALUES(equipped_mount_id)",
                  account_hex, role->roleId, i, name_hex, role->job, role->sex,
                  role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
-                 role->mp, role->mpMax, role->money, role->wcoin, role->pkPoints,
+                 role->mp, role->mpMax, role->money, role->wcoin, role->kcoin, role->pkPoints,
                  (u32)role->pkPveDecayStreak, chest_miss_text, scene_hex,
                  role->x, role->y, role->backpackItemCount, role->designationId,
                  role->arenaDesignationMask, role->specialDesignationMask,
@@ -11899,6 +11943,34 @@ static u32 vm_net_mock_role_add_wcoin(vm_net_mock_role_state *role, u32 amount)
     total = (uint64_t)role->wcoin + (uint64_t)amount;
     role->wcoin = total > 0xffffffffull ? 0xffffffffu : (u32)total;
     return role->wcoin;
+}
+
+static u32 vm_net_mock_role_kcoin_balance(const vm_net_mock_role_state *role)
+{
+    return role ? role->kcoin : 0;
+}
+
+static u32 vm_net_mock_role_add_kcoin(vm_net_mock_role_state *role, u32 amount)
+{
+    uint64_t total = 0;
+
+    if (role == NULL || amount == 0)
+        return role ? role->kcoin : 0;
+    total = (uint64_t)role->kcoin + (uint64_t)amount;
+    role->kcoin = total > 0xffffffffull ? 0xffffffffu : (u32)total;
+    return role->kcoin;
+}
+
+static bool vm_net_mock_role_try_sub_kcoin(vm_net_mock_role_state *role, u32 amount)
+{
+    if (role == NULL)
+        return false;
+    if (amount == 0)
+        return true;
+    if (role->kcoin < amount)
+        return false;
+    role->kcoin -= amount;
+    return true;
 }
 
 static bool vm_net_mock_select_active_role(u32 roleId)
