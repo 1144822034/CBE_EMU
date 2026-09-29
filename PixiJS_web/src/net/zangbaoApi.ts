@@ -1,5 +1,13 @@
 import { defaultLiveGatewayUrl } from "./Transport";
 
+export type ZangbaoSealedRoleSummary = {
+  roleId: number;
+  name: string;
+  level: number;
+  job: number;
+  sex: number;
+};
+
 export type ZangbaoListing = {
   listingId: number;
   sellerRoleId: number;
@@ -7,9 +15,78 @@ export type ZangbaoListing = {
   itemId: number;
   itemCount: number;
   enhanceLevel: number;
+  itemInstanceId?: number;
+  /** Listing enhance_wash text (DB authority; panel resolves to attrs). */
+  enhanceWash?: string;
+  gemReflect?: number;
+  gemCombo?: number;
+  gemRevive?: number;
   priceKcoin: number;
   status: number;
+  sealedRole?: ZangbaoSealedRoleSummary;
 };
+
+export type ZangbaoSealDetail = {
+  ok: true;
+  listingId: number;
+  sealedRoleId: number;
+  role: {
+    name: string;
+    level: number;
+    job: number;
+    sex: number;
+    hp: number;
+    hpMax: number;
+    mp: number;
+    mpMax: number;
+    money: number;
+    exp: number;
+    scene: string;
+  };
+  equipment: { slot: number; itemId: number; enhanceLevel: number }[];
+  backpack: { itemId: number; count: number; enhanceLevel: number; seq?: number }[];
+  warehouse: { itemId: number; count: number; enhanceLevel: number }[];
+};
+
+function parseListing(it: Record<string, unknown>): ZangbaoListing {
+  const sealedRaw = it.sealedRole as Record<string, unknown> | undefined;
+  const sealedRole =
+    sealedRaw && typeof sealedRaw === "object"
+      ? {
+          roleId: Number(sealedRaw.roleId) || 0,
+          name: String(sealedRaw.name || ""),
+          level: Number(sealedRaw.level) || 0,
+          job: Number(sealedRaw.job) || 0,
+          sex: Number(sealedRaw.sex) || 0,
+        }
+      : undefined;
+  const itemId = Number(it.itemId) || 0;
+  const enhanceWash =
+    typeof it.enhanceWash === "string"
+      ? it.enhanceWash
+      : typeof it.enhance_wash === "string"
+        ? it.enhance_wash
+        : "";
+  const gemReflect = Number(it.gemReflect ?? it.gem_reflect) || 0;
+  const gemCombo = Number(it.gemCombo ?? it.gem_combo) || 0;
+  const gemRevive = Number(it.gemRevive ?? it.gem_revive) || 0;
+  return {
+    listingId: Number(it.listingId) || 0,
+    sellerRoleId: Number(it.sellerRoleId) || 0,
+    sellerName: String(it.sellerName || ""),
+    itemId,
+    itemCount: Number(it.itemCount) || 0,
+    enhanceLevel: Number(it.enhanceLevel) || 0,
+    itemInstanceId: Number(it.itemInstanceId) || 0,
+    ...(enhanceWash ? { enhanceWash } : {}),
+    ...(gemReflect || gemCombo || gemRevive
+      ? { gemReflect, gemCombo, gemRevive }
+      : {}),
+    priceKcoin: Number(it.priceKcoin) || 0,
+    status: Number(it.status) || 0,
+    ...(sealedRole && sealedRole.roleId ? { sealedRole } : {}),
+  };
+}
 
 export type ZangbaoBuyResult =
   | {
@@ -110,16 +187,7 @@ export async function zangbaoBrowse(
     page: String(page),
   });
   if (!data || data.ok !== true || !Array.isArray(data.items)) return [];
-  return (data.items as Record<string, unknown>[]).map((it) => ({
-    listingId: Number(it.listingId) || 0,
-    sellerRoleId: Number(it.sellerRoleId) || 0,
-    sellerName: String(it.sellerName || ""),
-    itemId: Number(it.itemId) || 0,
-    itemCount: Number(it.itemCount) || 0,
-    enhanceLevel: Number(it.enhanceLevel) || 0,
-    priceKcoin: Number(it.priceKcoin) || 0,
-    status: Number(it.status) || 0,
-  }));
+  return (data.items as Record<string, unknown>[]).map(parseListing);
 }
 
 export async function zangbaoMine(
@@ -133,16 +201,72 @@ export async function zangbaoMine(
     page: String(page),
   });
   if (!data || data.ok !== true || !Array.isArray(data.items)) return [];
-  return (data.items as Record<string, unknown>[]).map((it) => ({
-    listingId: Number(it.listingId) || 0,
-    sellerRoleId: Number(it.sellerRoleId) || 0,
-    sellerName: String(it.sellerName || ""),
-    itemId: Number(it.itemId) || 0,
-    itemCount: Number(it.itemCount) || 0,
-    enhanceLevel: Number(it.enhanceLevel) || 0,
-    priceKcoin: Number(it.priceKcoin) || 0,
-    status: Number(it.status) || 0,
-  }));
+  return (data.items as Record<string, unknown>[]).map(parseListing);
+}
+
+export async function zangbaoSealDetail(
+  listingId: number,
+  auth?: { account: string; password: string; roleId: number },
+): Promise<ZangbaoSealDetail | { ok: false; error: string }> {
+  const q: Record<string, string> = { listingId: String(listingId) };
+  if (auth) {
+    q.account = auth.account;
+    q.password = auth.password;
+    q.role_id = String(auth.roleId);
+  }
+  const data = await getJson("/api/zangbao/seal-detail", q);
+  if (!data || data.ok !== true) {
+    return { ok: false, error: String(data?.error || "无法查看封印角色") };
+  }
+  const roleRaw = (data.role as Record<string, unknown>) || {};
+  const mapRows = (key: string) => {
+    const arr = data[key];
+    if (!Array.isArray(arr)) return [];
+    return arr.map((raw) => {
+      const it = raw as Record<string, unknown>;
+      return {
+        slot: Number(it.slot ?? it.slot_index) || 0,
+        itemId: Number(it.itemId ?? it.item_id) || 0,
+        count: Number(it.count ?? it.item_count) || 0,
+        enhanceLevel: Number(it.enhanceLevel ?? it.enhance_level) || 0,
+        seq: Number(it.seq ?? it.item_seq) || 0,
+      };
+    });
+  };
+  return {
+    ok: true,
+    listingId: Number(data.listingId) || listingId,
+    sealedRoleId: Number(data.sealedRoleId) || 0,
+    role: {
+      name: String(roleRaw.name || ""),
+      level: Number(roleRaw.level) || 0,
+      job: Number(roleRaw.job) || 0,
+      sex: Number(roleRaw.sex) || 0,
+      hp: Number(roleRaw.hp) || 0,
+      hpMax: Number(roleRaw.hpMax ?? roleRaw.hp_max) || 0,
+      mp: Number(roleRaw.mp) || 0,
+      mpMax: Number(roleRaw.mpMax ?? roleRaw.mp_max) || 0,
+      money: Number(roleRaw.money) || 0,
+      exp: Number(roleRaw.exp) || 0,
+      scene: String(roleRaw.scene || ""),
+    },
+    equipment: mapRows("equipment").map((r) => ({
+      slot: r.slot,
+      itemId: r.itemId,
+      enhanceLevel: r.enhanceLevel,
+    })),
+    backpack: mapRows("backpack").map((r) => ({
+      itemId: r.itemId,
+      count: r.count,
+      enhanceLevel: r.enhanceLevel,
+      seq: r.seq,
+    })),
+    warehouse: mapRows("warehouse").map((r) => ({
+      itemId: r.itemId,
+      count: r.count,
+      enhanceLevel: r.enhanceLevel,
+    })),
+  };
 }
 
 export async function zangbaoListItem(opts: {

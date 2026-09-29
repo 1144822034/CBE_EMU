@@ -774,8 +774,22 @@ export function expCardSuccessMessage(itemId: number): string {
 /** 打金心得 853 — Pixi 自定义；走通用 1/7/1 时效，非 25/6. */
 export const GOLD_SCROLL_ITEM_ID = 853;
 
+/** 金币堆 856 — 使用兑 1 万金；仓库可金→堆兑换。 */
+export const GOLD_PILE_ITEM_ID = 856;
+
+/** 角色封印卷 857 — 空白卷 29/25 封印；绑定卷 29/26 解封。 */
+export const ROLE_SEAL_SCROLL_ITEM_ID = 857;
+
 export function isGoldScrollItem(itemId: number): boolean {
   return itemId === GOLD_SCROLL_ITEM_ID;
+}
+
+export function isGoldPileItem(itemId: number): boolean {
+  return (itemId | 0) === GOLD_PILE_ITEM_ID;
+}
+
+export function isRoleSealScroll(itemId: number): boolean {
+  return (itemId | 0) === ROLE_SEAL_SCROLL_ITEM_ID;
 }
 
 export function goldScrollSuccessMessage(): string {
@@ -2129,6 +2143,149 @@ export function buildRenameCardRequest(
     .u16("cardseq", cardSeq & 0xffff)
     .string("name", name);
   return b.finish();
+}
+
+/** Pixi 857 封印：1/29/25 { cardseq, targetrole }. */
+export type RoleSealResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  cardSeq: number;
+  remaining: number;
+  targetRoleId: number;
+  instanceId: number;
+};
+
+export function buildRoleSealRequest(
+  cardSeq: number,
+  targetRoleId: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 25)
+    .u16("cardseq", cardSeq & 0xffff)
+    .u32("targetrole", targetRoleId >>> 0);
+  return b.finish();
+}
+
+function roleSealFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "封印卷不足";
+    case 3:
+      return "目标角色无效";
+    case 4:
+      return "不能封印当前角色";
+    case 5:
+      return "目标角色在线";
+    case 6:
+      return "同账号角色不足";
+    case 7:
+      return "目标不在同账号";
+    case 8:
+      return "请先退帮或移交帮主";
+    case 9:
+      return "扣除/发放封印卷失败";
+    case 10:
+      return "角色过户失败";
+    case 11:
+      return "卷已绑定，请直接解封";
+    case 12:
+      return "封印实例分配失败";
+    case 13:
+      return "封印存档失败";
+    default:
+      return "封印失败";
+  }
+}
+
+export function parseRoleSealResult(packet: WtPacket): RoleSealResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 25);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const cardSeq = fieldU32(obj, "cardseq");
+  const remaining = fieldU32(obj, "remaining");
+  const targetRoleId = fieldU32(obj, "targetrole");
+  const instanceId = fieldU32(obj, "instanceid");
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: "封印成功",
+      cardSeq,
+      remaining,
+      targetRoleId,
+      instanceId,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: roleSealFailMessage(result),
+    cardSeq,
+    remaining,
+    targetRoleId,
+    instanceId,
+  };
+}
+
+/** Pixi 857 解封：1/29/26 { cardseq }. */
+export type RoleUnsealResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  cardSeq: number;
+  remaining: number;
+  roleId: number;
+};
+
+export function buildRoleUnsealRequest(cardSeq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 26).u16("cardseq", cardSeq & 0xffff);
+  return b.finish();
+}
+
+function roleUnsealFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "封印卷不足";
+    case 3:
+      return "空白卷请先封印角色";
+    case 4:
+      return "角色位已满";
+    case 5:
+      return "角色过户失败";
+    case 6:
+      return "扣除封印卷失败";
+    default:
+      return "解封失败";
+  }
+}
+
+export function parseRoleUnsealResult(packet: WtPacket): RoleUnsealResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 26);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const cardSeq = fieldU32(obj, "cardseq");
+  const remaining = fieldU32(obj, "remaining");
+  const roleId = fieldU32(obj, "roleid");
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: "解封成功，角色已加入本账号",
+      cardSeq,
+      remaining,
+      roleId,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: roleUnsealFailMessage(result),
+    cardSeq,
+    remaining,
+    roleId,
+  };
 }
 
 function renameCardFailMessage(result: number): string {

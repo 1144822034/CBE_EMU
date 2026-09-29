@@ -9,20 +9,20 @@ import { Container, Graphics } from "pixi.js";
 import { replaceGraphics } from "../render/gpuResume";
 import {
   CBE,
+  CBE_POPUP_W,
+  CBE_POPUP_X,
+  CBE_POPUP_Y,
   LCD_HEIGHT,
   LCD_WIDTH,
-  SOFTKEY_H,
-  paintCbePanel,
+  WORLD_BOTTOM_H,
   paintCbeTitledChrome,
-  cbePopupBounds,
-  drawCbeTitlePill,
   blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, wrapChars, measureUiTextWidth } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
 import type { BagItem } from "../net/protocolExtras";
 import { formatCultivationBookName, isCultivationBookItem } from "../net/protocolExtras";
-import type { TradeOfferItem, TradeOfferView } from "../net/protocolSocial";
+import type { TradeOfferItem, TradeOfferView, TradeSessionUpdate } from "../net/protocolSocial";
 import { COPPER_PER_GOLD } from "../net/protocolAuction";
 import { isTradeableItem, lookupItemSync, qualityColor } from "../resources/itemCatalog";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -46,8 +46,42 @@ export type TradeAction =
 type FlowStep = 1 | 2;
 type Mode = "list" | "money" | "peer_detail" | "pick_detail";
 
+/** Per-account trade stall snapshot for multi-open switch. */
+export type TradePanelSnap = {
+  peerName: string;
+  bag: BagItem[];
+  myMoney: number;
+  myItems: TradeOfferItem[];
+  peerOffer: TradeOfferView;
+  waitingPeer: boolean;
+  offerSubmitted: boolean;
+  peerSubmitted: boolean;
+  flowStep: FlowStep;
+  mode: Mode;
+  listCursor: number;
+  bagScroll: number;
+  pickQty: number;
+  moneyDraft: string;
+  moneyMax: number;
+};
+
 const BAG_PAGE_SIZE = 6;
 const PICK_ACTIONS = ["确认放入", "取消"] as const;
+
+/**
+ * Trade chrome stops above the world soft-row so multi-open chips stay
+ * visible/tappable (hud.zIndex is below tradeUi).
+ */
+function tradePanelBounds(): { x: number; y: number; w: number; h: number } {
+  const y = CBE_POPUP_Y;
+  const foot = LCD_HEIGHT - WORLD_BOTTOM_H;
+  return {
+    x: CBE_POPUP_X,
+    y,
+    w: CBE_POPUP_W,
+    h: Math.max(8, foot - y - 2),
+  };
+}
 
 type ConfigRow = { kind: "money" } | { kind: "bag"; index: number };
 
@@ -98,10 +132,11 @@ export class TradePanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    blockPanelPointerPassthrough(this);
+    // Leave soft-row + chat free so WorldHud multi-open chips stay tappable.
+    blockPanelPointerPassthrough(this, { reserveBottom: WORLD_BOTTOM_H });
     this.addChild(
       new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - WORLD_BOTTOM_H)
         .fill({ color: 0x000000, alpha: 0.4 }),
     );
     this.addChild(this.box);
@@ -191,6 +226,83 @@ export class TradePanel extends Container {
     this.pickQty = 1;
     this.moneyDraft = "";
     this.visible = true;
+    this.notifySoftkeys();
+    this.redraw();
+  }
+
+  /** Capture stall state before multi-open switch (IME dropped). */
+  snapshot(): TradePanelSnap {
+    this.releaseMoneyIme();
+    const mode =
+      this.mode === "money" ||
+      this.mode === "peer_detail" ||
+      this.mode === "pick_detail"
+        ? "list"
+        : this.mode;
+    return {
+      peerName: this.peerName,
+      bag: this.bag.map((b) => ({ ...b })),
+      myMoney: this.myMoney,
+      myItems: this.myItems.map((it) => ({
+        ...it,
+        ...(it.enhanceAttrs?.length
+          ? { enhanceAttrs: it.enhanceAttrs.map((a) => ({ ...a })) }
+          : {}),
+      })),
+      peerOffer: {
+        money: this.peerOffer.money,
+        items: this.peerOffer.items.map((it) => ({
+          ...it,
+          ...(it.enhanceAttrs?.length
+            ? { enhanceAttrs: it.enhanceAttrs.map((a) => ({ ...a })) }
+            : {}),
+        })),
+      },
+      waitingPeer: this.waitingPeer,
+      offerSubmitted: this.offerSubmitted,
+      peerSubmitted: this.peerSubmitted,
+      flowStep: this.flowStep,
+      mode,
+      listCursor: this.listCursor,
+      bagScroll: this.bagScroll,
+      pickQty: this.pickQty,
+      moneyDraft: this.moneyDraft,
+      moneyMax: this.moneyMax,
+    };
+  }
+
+  /** Restore a prior multi-open snapshot and show the stall. */
+  restore(snap: TradePanelSnap): void {
+    this.releaseMoneyIme();
+    this.peerName = snap.peerName || "对方";
+    this.bag = filterTradeBag(snap.bag);
+    this.myMoney = snap.myMoney >>> 0;
+    this.myItems = snap.myItems.map((it) => ({ ...it }));
+    this.peerOffer = {
+      money: snap.peerOffer.money >>> 0,
+      items: snap.peerOffer.items.map((it) => ({ ...it })),
+    };
+    this.waitingPeer = !!snap.waitingPeer;
+    this.offerSubmitted = !!snap.offerSubmitted;
+    this.peerSubmitted = !!snap.peerSubmitted;
+    this.peerDetailItem = null;
+    this.peerDetailPage = 0;
+    this.clearPickDetailState();
+    this.flowStep = snap.flowStep === 2 ? 2 : 1;
+    this.mode =
+      snap.mode === "money" ||
+      snap.mode === "peer_detail" ||
+      snap.mode === "pick_detail"
+        ? "list"
+        : snap.mode;
+    this.listCursor = Math.max(0, snap.listCursor | 0);
+    this.bagScroll = Math.max(0, snap.bagScroll | 0);
+    this.pickQty = Math.max(1, snap.pickQty | 0);
+    this.moneyDraft = snap.moneyDraft || "";
+    this.moneyMax = Math.max(0, snap.moneyMax | 0);
+    this.visible = true;
+    this.clampConfigCursor();
+    this.ensureBagVisible();
     this.notifySoftkeys();
     this.redraw();
   }
@@ -736,7 +848,7 @@ export class TradePanel extends Container {
   }
 
   private moneyInputRect(): { x: number; y: number; w: number; h: number } {
-    const { x, y, w, h } = cbePopupBounds();
+    const { x, y, w, h } = tradePanelBounds();
     const barY = y + h - 52;
     return { x: x + 14, y: barY + 4, w: w - 28, h: 22 };
   }
@@ -747,7 +859,7 @@ export class TradePanel extends Container {
     clearPointerHits(this.rowHits);
     this.box.clear();
     this.inputHit.clear();
-    const { x, y, w, h } = cbePopupBounds();
+    const { x, y, w, h } = tradePanelBounds();
     const title = `交易·${this.peerName}`;
     const chrome = paintCbeTitledChrome(this, this.box, x, y, w, h, CBE.bgPanel);
     this.addTitleCentered(title, chrome.titleCy, CBE.ink);
@@ -1231,6 +1343,96 @@ function filterTradeBag(bag: BagItem[]): BagItem[] {
       b.seq > 0 &&
       isTradeableItem(b.itemId, { enhance: b.enhance, kind: b.kind }),
   );
+}
+
+function cloneTradePanelSnap(snap: TradePanelSnap): TradePanelSnap {
+  return {
+    ...snap,
+    bag: snap.bag.map((b) => ({ ...b })),
+    myItems: snap.myItems.map((it) => ({
+      ...it,
+      ...(it.enhanceAttrs?.length
+        ? { enhanceAttrs: it.enhanceAttrs.map((a) => ({ ...a })) }
+        : {}),
+    })),
+    peerOffer: {
+      money: snap.peerOffer.money,
+      items: snap.peerOffer.items.map((it) => ({
+        ...it,
+        ...(it.enhanceAttrs?.length
+          ? { enhanceAttrs: it.enhanceAttrs.map((a) => ({ ...a })) }
+          : {}),
+      })),
+    },
+  };
+}
+
+/**
+ * Fold a background trade session update into a per-slot snap.
+ * Returns null when the stall should close (cancel / done).
+ */
+export function foldTradeSessionSnap(
+  snap: TradePanelSnap | null,
+  u: TradeSessionUpdate,
+  bag?: BagItem[],
+): TradePanelSnap | null {
+  if (u.kind === "open") {
+    return {
+      peerName: u.peerName || "对方",
+      bag: filterTradeBag(bag ?? []),
+      myMoney: 0,
+      myItems: [],
+      peerOffer: { money: 0, items: [] },
+      waitingPeer: false,
+      offerSubmitted: false,
+      peerSubmitted: false,
+      flowStep: 1,
+      mode: "list",
+      listCursor: 0,
+      bagScroll: 0,
+      pickQty: 1,
+      moneyDraft: "",
+      moneyMax: 0,
+    };
+  }
+  if (u.kind === "cancel" || u.kind === "done") return null;
+  if (!snap) return null;
+  const next = cloneTradePanelSnap(snap);
+  if (u.kind === "peer_offer") {
+    next.peerOffer = {
+      money: u.offer.money >>> 0,
+      items: u.offer.items.map((it) => ({ ...it })),
+    };
+    next.peerSubmitted = true;
+    next.waitingPeer = false;
+    if (next.offerSubmitted) next.flowStep = 2;
+    next.mode = "list";
+    next.listCursor = 0;
+    return next;
+  }
+  if (u.kind === "offer_ack") {
+    next.waitingPeer = false;
+    next.offerSubmitted = u.result === 1;
+    if (u.result === 1) {
+      next.flowStep = 2;
+      next.mode = "list";
+      next.listCursor = 0;
+    } else if (next.flowStep === 2) {
+      next.flowStep = 1;
+      next.mode = "list";
+      next.listCursor = 0;
+    }
+    return next;
+  }
+  if (u.kind === "waiting") {
+    next.waitingPeer = true;
+    next.offerSubmitted = true;
+    next.flowStep = 2;
+    next.mode = "list";
+    next.listCursor = 0;
+    return next;
+  }
+  return next;
 }
 
 /** Display gold from wire copper (1金=10000铜). */

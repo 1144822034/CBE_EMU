@@ -351,6 +351,44 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
       durabilityMax: 1,
     });
   }
+  if (!itemCache.has(856)) {
+    itemCache.set(856, {
+      id: 856,
+      name: "金币堆",
+      desc: "使用后获得1万金币。可在仓库用金币兑换。",
+      category: 10,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 0,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
+  if (!itemCache.has(857)) {
+    itemCache.set(857, {
+      id: 857,
+      name: "角色封印卷",
+      desc: "空白封印卷，使用后可封印同账号其它角色。已封印卷可上架藏宝阁。",
+      category: 14,
+      level: 1,
+      quality: 0,
+      stack: 99,
+      price: 0,
+      coolPrice: 0,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
 
   // Pixi gem sockets / fragment (922+/942+/962+/978).
   const gemDefs: { id: number; name: string; desc: string }[] = [

@@ -16,9 +16,12 @@ import {
   type BagItem,
 } from "../net/protocolExtras";
 import { lookupItemSync, qualityColor } from "../resources/itemCatalog";
-import type { ZangbaoListing } from "../net/zangbaoApi";
+import type { ZangbaoListing, ZangbaoSealDetail } from "../net/zangbaoApi";
+import { ROLE_SEAL_SCROLL_ITEM_ID } from "../net/protocolExtras";
 import {
   buildEquipDetailLines,
+  enhanceAttrsFromWashText,
+  equipHasWashedAttr,
   EQUIP_DETAIL_YELLOW,
   type EquipPaintLine,
 } from "./equipDetail";
@@ -64,10 +67,32 @@ const MIN_WITHDRAW_KCOIN = 50;
 
 type AmountKind = "list" | "withdraw";
 type DetailActionId = "buy" | "cancel" | "back";
+type SealTabId = "panel" | "equip" | "bag" | "wh";
+const SEAL_TABS: { id: SealTabId; label: string }[] = [
+  { id: "panel", label: "面板" },
+  { id: "equip", label: "装备" },
+  { id: "bag", label: "背包" },
+  { id: "wh", label: "仓库" },
+];
 
 function listingAsBagItem(r: ZangbaoListing): BagItem {
   const cat = lookupItemSync(r.itemId);
   const kind = cat?.kind === "equip" ? "equip" : "item";
+  const enhanceAttrs =
+    kind === "equip"
+      ? enhanceAttrsFromWashText(r.itemId, r.enhanceWash)
+      : undefined;
+  const gemReflect = r.gemReflect ?? 0;
+  const gemCombo = r.gemCombo ?? 0;
+  const gemRevive = r.gemRevive ?? 0;
+  const gems =
+    kind === "equip" && (gemReflect > 0 || gemCombo > 0 || gemRevive > 0)
+      ? {
+          reflect: gemReflect,
+          combo: gemCombo,
+          revive: gemRevive,
+        }
+      : undefined;
   return {
     itemId: r.itemId,
     seq: 0,
@@ -80,6 +105,8 @@ function listingAsBagItem(r: ZangbaoListing): BagItem {
     desc: cat?.desc ?? "",
     usable: false,
     equipSlot: cat?.equipSlot ?? -1,
+    ...(enhanceAttrs?.length ? { enhanceAttrs } : {}),
+    ...(gems ? { socketGems: gems } : {}),
   };
 }
 
@@ -106,6 +133,12 @@ export class ZangbaoPanel extends Container {
   private detailListing: ZangbaoListing | null = null;
   private detailActionCursor = 0;
   private detailPage = 0;
+  private sealDetail: ZangbaoSealDetail | null = null;
+  private sealLoading = false;
+  private sealTab: SealTabId = "panel";
+  private sealDetailLoader:
+    | ((listingId: number) => Promise<ZangbaoSealDetail | null>)
+    | null = null;
   onAction:
     | ((a: ZangbaoPanelAction, payload?: Record<string, number | string>) => void)
     | null = null;
@@ -397,18 +430,45 @@ export class ZangbaoPanel extends Container {
     return true;
   }
 
+  setSealDetailLoader(
+    loader: ((listingId: number) => Promise<ZangbaoSealDetail | null>) | null,
+  ): void {
+    this.sealDetailLoader = loader;
+  }
+
   private clearDetail(): void {
     this.detailListing = null;
     this.detailActionCursor = 0;
     this.detailPage = 0;
+    this.sealDetail = null;
+    this.sealLoading = false;
+    this.sealTab = "panel";
   }
 
   private openDetail(listing: ZangbaoListing): void {
     this.detailListing = listing;
     this.detailActionCursor = 0;
     this.detailPage = 0;
+    this.sealDetail = null;
+    this.sealLoading = false;
+    this.sealTab = "panel";
     this.redraw();
     this.notifySoftkeys();
+    const needSeal =
+      listing.itemId === ROLE_SEAL_SCROLL_ITEM_ID &&
+      !!listing.sealedRole &&
+      !!this.sealDetailLoader;
+    if (!needSeal || !this.sealDetailLoader) return;
+    const listingId = listing.listingId;
+    this.sealLoading = true;
+    this.redraw();
+    void this.sealDetailLoader(listingId).then((detail) => {
+      if (this.detailListing?.listingId !== listingId) return;
+      this.sealDetail = detail;
+      this.sealLoading = false;
+      this.redraw();
+      this.notifySoftkeys();
+    });
   }
 
   private detailActions(): { id: DetailActionId; label: string }[] {
@@ -546,6 +606,98 @@ export class ZangbaoPanel extends Container {
     return wrapChars(`${line.key}${line.value}`).length;
   }
 
+  private sealDetailLines(): EquipPaintLine[] {
+    const d = this.sealDetail;
+    const r = this.detailListing;
+    if (!d) {
+      if (this.sealLoading) {
+        return [{ kind: "text", text: "加载封印角色…", color: CBE.inkMint }];
+      }
+      if (r?.sealedRole) {
+        const s = r.sealedRole;
+        return [
+          {
+            kind: "text",
+            text: `${s.name} Lv${s.level}`,
+            color: CBE.ink,
+          },
+          {
+            kind: "text",
+            text: "详情加载失败",
+            color: CBE.inkWarn,
+          },
+        ];
+      }
+      return [{ kind: "text", text: "无封印角色", color: CBE.inkMint }];
+    }
+    const lines: EquipPaintLine[] = [];
+    if (this.sealTab === "panel") {
+      const role = d.role;
+      lines.push({
+        kind: "text",
+        text: `${role.name} Lv${role.level}`,
+        color: CBE.ink,
+      });
+      lines.push({
+        kind: "text",
+        text: `职业${role.job} ${role.sex ? "女" : "男"}`,
+        color: CBE.inkLabel,
+      });
+      lines.push({
+        kind: "text",
+        text: `HP ${role.hp}/${role.hpMax}`,
+        color: CBE.inkBody,
+      });
+      lines.push({
+        kind: "text",
+        text: `MP ${role.mp}/${role.mpMax}`,
+        color: CBE.inkBody,
+      });
+      lines.push({
+        kind: "text",
+        text: `金 ${Math.floor(role.money / 10000)} 经验 ${role.exp}`,
+        color: CBE.inkMint,
+      });
+      if (role.scene) {
+        lines.push({
+          kind: "text",
+          text: `场景 ${role.scene}`.slice(0, 28),
+          color: CBE.inkLabel,
+        });
+      }
+      return lines;
+    }
+    const rows =
+      this.sealTab === "equip"
+        ? d.equipment.map(
+            (e) =>
+              `[${e.slot}] ${lookupItemSync(e.itemId)?.name || "#" + e.itemId}${
+                e.enhanceLevel > 0 ? `+${e.enhanceLevel}` : ""
+              }`,
+          )
+        : this.sealTab === "bag"
+          ? d.backpack.map(
+              (e) =>
+                `${lookupItemSync(e.itemId)?.name || "#" + e.itemId}${
+                  e.enhanceLevel > 0 ? `+${e.enhanceLevel}` : ""
+                } x${e.count}`,
+            )
+          : d.warehouse.map(
+              (e) =>
+                `${lookupItemSync(e.itemId)?.name || "#" + e.itemId}${
+                  e.enhanceLevel > 0 ? `+${e.enhanceLevel}` : ""
+                } x${e.count}`,
+            );
+    if (!rows.length) {
+      lines.push({ kind: "text", text: "空", color: CBE.inkMint });
+      return lines;
+    }
+    for (const t of rows) {
+      lines.push({ kind: "text", text: t.slice(0, 28), color: CBE.inkBody });
+    }
+    return lines;
+  }
+
   /** 浏览/我的详情 — 物品信息 + 购买/下架（对齐物品竞拍）。 */
   private drawDetail(
     x: number,
@@ -562,12 +714,16 @@ export class ZangbaoPanel extends Container {
     const btnH = 18;
     const actionH = acts.length * (btnH + 2) + 8;
     const actionTop = tipY - actionH;
+    const isSeal =
+      r.itemId === ROLE_SEAL_SCROLL_ITEM_ID &&
+      (!!r.sealedRole || !!this.sealDetail);
 
     const titleH = 20;
     this.bg.rect(x + 6, bodyTop, w - 12, titleH).fill({ color: CBE.bgPanelDark });
     const en = r.enhanceLevel > 0 ? `+${r.enhanceLevel}` : "";
+    const sealName = r.sealedRole?.name ? `[印]${r.sealedRole.name}` : "";
     this.addLabelCentered(
-      `${item.name}${en}`,
+      `${sealName || item.name}${en}`.slice(0, 22),
       LCD_WIDTH / 2,
       bodyTop + titleH / 2,
       qColor,
@@ -587,11 +743,35 @@ export class ZangbaoPanel extends Container {
       CBE.inkMint,
     );
 
-    const bodyY = metaY + 30;
+    let bodyY = metaY + 30;
+    if (isSeal) {
+      for (let i = 0; i < SEAL_TABS.length; i++) {
+        const t = SEAL_TABS[i]!;
+        const on = t.id === this.sealTab;
+        this.addLabel(
+          t.label,
+          x + 8 + i * 36,
+          bodyY,
+          on ? CBE.ink : CBE.inkMint,
+        );
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 4 + i * 36, bodyY, 34, 14, () => {
+            if (this.sealTab === t.id) return;
+            this.sealTab = t.id;
+            this.detailPage = 0;
+            this.redraw();
+          }),
+        );
+      }
+      bodyY += 16;
+    }
+
     const rowH = 14;
     const fitRows = Math.max(1, Math.floor((actionTop - bodyY - 2) / rowH));
     let lines: EquipPaintLine[] = [];
-    if (item.kind === "equip") {
+    if (isSeal) {
+      lines = this.sealDetailLines();
+    } else if (item.kind === "equip") {
       lines = buildEquipDetailLines(item);
     } else {
       const desc =
@@ -869,9 +1049,13 @@ export class ZangbaoPanel extends Container {
         text = `${name} x${b.count} seq${b.seq}`;
       } else {
         const L = slice[i] as ZangbaoListing;
-        const name = lookupItemSync(L.itemId)?.name || `#${L.itemId}`;
+        const name =
+          L.itemId === ROLE_SEAL_SCROLL_ITEM_ID && L.sealedRole?.name
+            ? `[印]${L.sealedRole.name}`
+            : lookupItemSync(L.itemId)?.name || `#${L.itemId}`;
         const en = L.enhanceLevel > 0 ? `+${L.enhanceLevel}` : "";
-        text = `${name}${en}x${L.itemCount} ${L.priceKcoin}酷币`;
+        const wash = equipHasWashedAttr(listingAsBagItem(L)) ? "[洗]" : "";
+        text = `${name}${wash}${en}x${L.itemCount} ${L.priceKcoin}酷币`;
       }
       this.addLabel(
         `${on ? ">" : " "}${text}`,

@@ -69,6 +69,8 @@ import {
   buildGemTypeExchangeRequest,
   buildStarSkyStoneWashResetRequest,
   buildRenameCardRequest,
+  buildRoleSealRequest,
+  buildRoleUnsealRequest,
   buildTianxiaSignatureRequest,
   buildCrystalExtractRequest,
   parseEnhanceOpenResult,
@@ -88,7 +90,11 @@ import {
   parseGemOpResult,
   parseStarSkyStoneWashResetResult,
   parseRenameCardResult,
+  parseRoleSealResult,
+  parseRoleUnsealResult,
   parseTianxiaSignatureResult,
+  type RoleSealResult,
+  type RoleUnsealResult,
   parseCrystalExtractResult,
   buildSkillForgetRequest,
   parseSkillForgetResult,
@@ -6174,6 +6180,86 @@ export class GameSession {
       }
     }
     return fail("改名无响应");
+  }
+
+  /**
+   * PixiJS-only: 角色封印卷(857) 封印同账号其它离线角色。
+   * Server 29/25 is authoritative.
+   */
+  async sealRole(
+    cardSeq: number,
+    targetRoleId: number,
+  ): Promise<RoleSealResult> {
+    const fail = (message: string, result = 0): RoleSealResult => ({
+      result,
+      ok: false,
+      message,
+      cardSeq,
+      remaining: 0,
+      targetRoleId,
+      instanceId: 0,
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(cardSeq > 0) || !(targetRoleId > 0)) return fail("参数无效", 3);
+    if (targetRoleId === this.selectedRoleId) return fail("不能封印当前角色", 4);
+    if (!this.roles.some((r) => r.roleId === targetRoleId)) {
+      return fail("目标不在同账号", 7);
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildRoleSealRequest(cardSeq, targetRoleId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseRoleSealResult(packet);
+        if (parsed) {
+          if (parsed.ok) {
+            this.roles = this.roles.filter((r) => r.roleId !== targetRoleId);
+            this.cb.onRoles(this.roles);
+          }
+          return parsed;
+        }
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("封印无响应");
+  }
+
+  /**
+   * PixiJS-only: 角色封印卷(857) 解封绑定卷到本账号。
+   * Server 29/26 is authoritative. result=3 means blank scroll.
+   */
+  async unsealRole(cardSeq: number): Promise<RoleUnsealResult> {
+    const fail = (message: string, result = 0): RoleUnsealResult => ({
+      result,
+      ok: false,
+      message,
+      cardSeq,
+      remaining: 0,
+      roleId: 0,
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(cardSeq > 0)) return fail("参数无效", 2);
+    const bodies = await this.transport.exchange(
+      0,
+      buildRoleUnsealRequest(cardSeq),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseRoleUnsealResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("解封无响应");
   }
 
   /** PixiJS-only: 天下第一冠军江湖签名。空串清空（对话显示默认高冷文案）. */

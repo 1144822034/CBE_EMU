@@ -70,10 +70,16 @@ const panelPtrBlocked = new WeakSet<Container>();
 /**
  * Full-screen panel tap shield: softkey bar stays clickable; map / HUD under
  * the panel (挂机, status badges, quest tracker) must not receive taps.
+ * Pass `reserveBottom: WORLD_BOTTOM_H` to leave the world soft-row + chat
+ * band free (e.g. trade multi-open chips on WorldHud).
  */
-export function blockPanelPointerPassthrough(host: Container): void {
+export function blockPanelPointerPassthrough(
+  host: Container,
+  opts?: { reserveBottom?: number },
+): void {
+  const foot = Math.max(0, opts?.reserveBottom ?? SOFTKEY_H);
   host.eventMode = "static";
-  host.hitArea = new Rectangle(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
+  host.hitArea = new Rectangle(0, 0, LCD_WIDTH, LCD_HEIGHT - foot);
   if (panelPtrBlocked.has(host)) return;
   panelPtrBlocked.add(host);
   const stop = (e: { stopPropagation: () => void }) => {

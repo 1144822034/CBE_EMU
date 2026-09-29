@@ -112,6 +112,7 @@ import {
   zangbaoListItem,
   zangbaoCancel,
   zangbaoBuy,
+  zangbaoSealDetail,
   kcoinBalance,
   kcoinUploadPayee,
   kcoinWithdrawCreate,
@@ -147,7 +148,7 @@ import {
   buildQuestTrackerRows,
 } from "./ui/QuestTrackerOverlay";
 import { ChatPanel, findArenaKillStreakTitle, type ChatEntry } from "./ui/ChatPanel";
-import { TradePanel } from "./ui/TradePanel";
+import { TradePanel, foldTradeSessionSnap, type TradePanelSnap } from "./ui/TradePanel";
 import { GuildPanel } from "./ui/GuildPanel";
 import { MiniMapOverlay } from "./ui/MiniMapOverlay";
 import { WorldMapPanel } from "./ui/WorldMapPanel";
@@ -199,6 +200,7 @@ import {
   isDurableMallPassItemId,
   isStarSkyStone,
   isRenameCard,
+  isRoleSealScroll,
   isCrystalExtractStone,
   canFitCrystalExtractInBag,
   estimateCrystalExtractBagSpace,
@@ -1769,6 +1771,13 @@ async function main(): Promise<void> {
     if (zangbaoPanel.visible) shell.setSoftkeys(zangbaoPanel.softkeys());
   };
 
+  zangbaoPanel.setSealDetailLoader(async (listingId) => {
+    const auth = zangbaoAuth();
+    const d = await zangbaoSealDetail(listingId, auth);
+    if (!d || d.ok !== true) return null;
+    return d;
+  });
+
   zangbaoPanel.onAction = (action, payload) => {
     const auth = zangbaoAuth();
     void (async () => {
@@ -2940,6 +2949,8 @@ async function main(): Promise<void> {
       tally: import("./net/protocolExtras").HangupCombatinfo;
       armed: boolean;
     } | null;
+    /** Open trade stall UI for this slot (null = not trading / closed). */
+    tradeUiSnap: TradePanelSnap | null;
   };
   const freshSlotFields = (): Omit<AccountSlot, "id" | "session"> => ({
     pendingBattle: null,
@@ -2954,6 +2965,7 @@ async function main(): Promise<void> {
     paiVisible: false,
     paiBlink: false,
     hangupTally: null,
+    tradeUiSnap: null,
   });
   let activeSlotId = "main";
   setActiveCredSlotId("main");
@@ -3489,6 +3501,8 @@ async function main(): Promise<void> {
         showPhase("trade");
         void session.openBag().then(() => tradeUi.setBag(session.bagItems));
         hud.pushChat(`[交]与 ${u.peerName || "对方"} 交易`);
+        const rec = accountSlots.get(activeSlotId);
+        if (rec) rec.tradeUiSnap = tradeUi.snapshot();
         return;
       }
       if (u.kind === "peer_offer") {
@@ -3506,6 +3520,8 @@ async function main(): Promise<void> {
       if (u.kind === "cancel" || u.kind === "done") {
         hud.pushChat(`[交]${u.tip}`);
         tradeUi.hide();
+        const rec = accountSlots.get(activeSlotId);
+        if (rec) rec.tradeUiSnap = null;
         if (phase === "trade" || phase === "dialog") showPhase("world");
         if (u.tip) showGameTip(u.tip);
         if (u.kind === "done" && u.result === 1) void session.openBag();
@@ -4216,6 +4232,12 @@ async function main(): Promise<void> {
       const st = battle.snapshotBattleState();
       if (st) rec.pendingBattle = st;
     }
+    // Keep each slot's trade stall; do not cancel protocol session on switch.
+    if (phase === "trade" || tradeUi.visible || session.inTrade) {
+      rec.tradeUiSnap = tradeUi.snapshot();
+    } else {
+      rec.tradeUiSnap = null;
+    }
   };
 
   const restoreSlotUi = (rec: AccountSlot) => {
@@ -4232,6 +4254,29 @@ async function main(): Promise<void> {
     battle.restoreHangupTally(rec.hangupTally);
     refreshQuestTracker();
     syncWorldStatusBadges();
+  };
+
+  /** After map/battle paint: show this slot's trade stall if still in session. */
+  const applyTradeUiForActiveSlot = (rec: AccountSlot) => {
+    if (session.inBattle) {
+      tradeUi.hide();
+      return;
+    }
+    if (session.inTrade && rec.tradeUiSnap) {
+      tradeUi.restore(rec.tradeUiSnap);
+      tradeUi.setBag(session.bagItems);
+      showPhase("trade");
+      return;
+    }
+    if (session.inTrade) {
+      tradeUi.open(session.tradePeerName || "对方", session.bagItems);
+      showPhase("trade");
+      void session.openBag().then(() => tradeUi.setBag(session.bagItems));
+      rec.tradeUiSnap = tradeUi.snapshot();
+      return;
+    }
+    tradeUi.hide();
+    rec.tradeUiSnap = null;
   };
 
   /** Drop confirm/pickers that belong to the leaving account's UI only. */
@@ -4302,7 +4347,30 @@ async function main(): Promise<void> {
       onEnmity: when(uiCallbacks.onEnmity),
       onSocialInvite: when(uiCallbacks.onSocialInvite),
       onSocialNotice: when(uiCallbacks.onSocialNotice),
-      onTradeSession: when(uiCallbacks.onTradeSession),
+      onTradeSession: (u) => {
+        if (activeSlotId !== slotId) {
+          const rec = accountSlots.get(slotId);
+          if (!rec) return;
+          rec.tradeUiSnap = foldTradeSessionSnap(
+            rec.tradeUiSnap,
+            u,
+            rec.session.bagItems,
+          );
+          if (u.kind === "open") {
+            appendSlotChatEntry(rec, {
+              type: 0,
+              text: `[交]与 ${u.peerName || "对方"} 交易`,
+            });
+          } else if (u.kind === "cancel" || u.kind === "done") {
+            appendSlotChatEntry(rec, {
+              type: 0,
+              text: `[交]${u.tip}`,
+            });
+          }
+          return;
+        }
+        uiCallbacks.onTradeSession?.(u);
+      },
       onGuildManage: when(uiCallbacks.onGuildManage),
       onPlayerInfo: when(uiCallbacks.onPlayerInfo),
       onOtherEquip: when(uiCallbacks.onOtherEquip),
@@ -4487,7 +4555,7 @@ async function main(): Promise<void> {
     washUi.close();
     social.hide();
     chatPanel.hide();
-    tradeUi.hide();
+    // Trade stall is per-slot: snapshot/restore instead of hiding here.
     guildUi.hide();
     createRole.close();
     menu.visible = false;
@@ -4560,6 +4628,8 @@ async function main(): Promise<void> {
     bindActiveResourceExchange();
     swapHudChatToSlot(leavingId, rec);
     closeOverlaysForAccountSwitch();
+    // Hide shared TradePanel until applyTradeUiForActiveSlot restores this slot.
+    tradeUi.hide();
     clearTransientUiPending();
     restoreSlotUi(rec);
     pendingRoles = session.roles.slice();
@@ -4572,6 +4642,7 @@ async function main(): Promise<void> {
       hud.setIdentity("", "", "");
       view.invalidateMap();
       view.actors.clear();
+      tradeUi.hide();
       const creds = readSlotCredentials(slotId);
       title.setCredentials(creds?.user || "", creds?.password || "");
       title.setStatus(creds?.user ? "请登录（多开）" : "新开账号，请登录");
@@ -4607,6 +4678,7 @@ async function main(): Promise<void> {
     if (session.inBattle && (rec.pendingBattle || rec.pendingBattleUpdates.length)) {
       flushPendingBattle();
       syncAccountSwitchHud();
+      applyTradeUiForActiveSlot(rec);
       if (session.pendingSocialInvite) {
         uiCallbacks.onSocialInvite?.(session.pendingSocialInvite);
       } else {
@@ -4631,6 +4703,7 @@ async function main(): Promise<void> {
         });
       }
       syncAccountSwitchHud();
+      applyTradeUiForActiveSlot(rec);
       // Invites arrived while muted — session kept pendingSocialInvite.
       if (session.pendingSocialInvite) {
         uiCallbacks.onSocialInvite?.(session.pendingSocialInvite);
@@ -4649,6 +4722,7 @@ async function main(): Promise<void> {
       roles.setRoles(session.roles);
       showPhase("role");
       syncAccountSwitchHud();
+      tradeUi.hide();
       showGameTip("已切换至选角");
       return;
     }
@@ -4657,6 +4731,7 @@ async function main(): Promise<void> {
     title.setCredentials(creds?.user || "", creds?.password || "");
     showPhase("login");
     syncAccountSwitchHud();
+    tradeUi.hide();
   };
 
   const createAccountSlot = async (): Promise<boolean> => {
@@ -6137,6 +6212,7 @@ async function main(): Promise<void> {
       const closingId = activeSlotId;
       mapUiMode = "off";
       closeOverlaysForAccountSwitch();
+      tradeUi.hide();
       // Freeze dream leftover before wiping identity — logout closes WS without
       // onConnectionLost (Transport.close nulls the hook first).
       hud.pauseDreamTimer();
@@ -6816,6 +6892,72 @@ async function main(): Promise<void> {
               );
             }
             showGameTip(fb.message || (fb.ok ? "改名成功" : "改名失败"));
+            return;
+          }
+          /* 角色封印卷：先试解封(29/26)；空白卷(result=3)再选角封印(29/25). */
+          if (isRoleSealScroll(bag.itemId)) {
+            showGameTip("处理封印卷…");
+            const unseal = await session.unsealRole(bag.seq);
+            if (unseal.ok) {
+              await session.openBag();
+              system.setBag(session.bagItems);
+              showGameTip(unseal.message || "解封成功");
+              return;
+            }
+            if (unseal.result !== 3) {
+              showGameTip(unseal.message || "解封失败");
+              return;
+            }
+            const siblings = session.roles.filter(
+              (r) => r.roleId !== session.selectedRoleId,
+            );
+            if (!siblings.length) {
+              showGameTip("同账号角色不足");
+              return;
+            }
+            const lines = siblings.map(
+              (r, i) =>
+                `${i + 1}. ${r.name || "?"} Lv${r.level || 1} (#${r.roleId})`,
+            );
+            const pick = window.prompt(
+              `请选择要封印的角色（输入序号）\n${lines.join("\n")}`,
+              "1",
+            );
+            if (pick == null) return;
+            const idx = Math.floor(Number(pick.trim())) - 1;
+            const target = siblings[idx];
+            if (!target) {
+              showGameTip("序号无效");
+              return;
+            }
+            if (
+              !window.confirm(
+                `确认封印角色「${target.name}」？封印后不可操作，可用卷上架藏宝阁。`,
+              )
+            ) {
+              return;
+            }
+            showGameTip("封印中…");
+            const liveScroll =
+              session.bagItems.find(
+                (it) =>
+                  it.itemId === bag.itemId &&
+                  it.seq === bag.seq &&
+                  (it.count || 0) > 0,
+              ) ||
+              session.bagItems.find(
+                (it) => it.itemId === bag.itemId && (it.count || 0) > 0,
+              );
+            const sealSeq = liveScroll?.seq || bag.seq;
+            const fb = await session.sealRole(sealSeq, target.roleId);
+            if (fb.ok) {
+              await session.openBag();
+              system.setBag(session.bagItems);
+            }
+            showGameTip(
+              fb.message ||
+                (fb.ok ? "封印成功" : `封印失败(${fb.result || 0})`),
+            );
             return;
           }
           const opensPanel = isDurableMallPassItemId(bag.itemId);
@@ -7618,6 +7760,8 @@ async function main(): Promise<void> {
     if (action === "cancel") {
       void session.tradeCancel().then(() => {
         tradeUi.hide();
+        const rec = accountSlots.get(activeSlotId);
+        if (rec) rec.tradeUiSnap = null;
         showPhase("world");
       });
     }
@@ -8819,7 +8963,11 @@ async function main(): Promise<void> {
     }, 400);
   };
 
-  hud.onMenu = () => showPhase("menu");
+  hud.onMenu = () => {
+    // Soft-row stays exposed under trade; do not leave an open trade stall.
+    if (phase === "trade") return;
+    showPhase("menu");
+  };
   hud.onHome = () => cycleMapUi();
   hud.onChat = () => {
     if (phase !== "world" || session.inBattle) return;
@@ -8838,6 +8986,7 @@ async function main(): Promise<void> {
     openPlayerCard(mateId, mate?.name);
   };
   hud.onHangup = () => {
+    if (phase === "trade") return;
     // Active hangup, or armed resume intent: always stop locally.
     if (session.hangupActive || session.hangupDesired) {
       if (autoArmTimer != null) {
@@ -8853,7 +9002,14 @@ async function main(): Promise<void> {
     openHangupSkillDialog(true);
   };
   hud.onAccountSwitch = (slotId) => {
-    if (phase !== "world" && phase !== "menu" && phase !== "battle") return;
+    if (
+      phase !== "world" &&
+      phase !== "menu" &&
+      phase !== "battle" &&
+      phase !== "trade"
+    ) {
+      return;
+    }
     void switchAccountSlot(slotId);
   };
   battle.onAccountSwitch = (slotId) => {

@@ -482,6 +482,45 @@ export function equipHasWashedAttr(it: BagItem): boolean {
   return it.enhanceAttrs.some((a) => !!a.washed);
 }
 
+/**
+ * DB/HTTP `enhance_wash` text (`w,t,f,v,c;…` ×4) → bag-identical milestone attrs.
+ * Unwashed slots fall back to catalog defaults so detail shows full +4/+8/+12/+16.
+ */
+export function enhanceAttrsFromWashText(
+  itemId: number,
+  washText: string | undefined | null,
+): BagEnhanceAttr[] | undefined {
+  const cat = lookupItemSync(itemId);
+  if (!cat || cat.kind !== "equip") return undefined;
+  const slot = cat.equipSlot ?? -1;
+  if (slot < 0 || slot >= MILESTONES.length) return undefined;
+
+  const groups = String(washText || "")
+    .split(";")
+    .map((g) => g.trim())
+    .filter(Boolean);
+  const attrs: BagEnhanceAttr[] = [];
+  const defs = MILESTONES[slot]!;
+  for (let i = 0; i < defs.length; i++) {
+    const unlock = (i + 1) * 4;
+    const def = defs[i]!;
+    const defType = milestoneType(cat, i, def.type);
+    const defFlag = def.flag & 1;
+    const defValue = milestoneValue(cat, unlock, defType, defFlag);
+    const parts = (groups[i] || "").split(",").map((p) => Number(p.trim()) || 0);
+    const washed = parts[0] === 1;
+    const type = parts[1] | 0;
+    const flag = (parts[2] | 0) & 1;
+    const value = parts[3] | 0;
+    if (washed && type >= 1 && type <= 10) {
+      attrs.push({ unlock, type, flag, value, washed: true });
+    } else {
+      attrs.push({ unlock, type: defType, flag: defFlag, value: defValue });
+    }
+  }
+  return attrs.length ? attrs : undefined;
+}
+
 /** M(L) = base * (1 + (10L + 35*⌊L/4⌋)/100) */
 function bonusScale(base: number, enhanceLevel: number): number {
   if (base <= 0 || enhanceLevel <= 0) return base;
