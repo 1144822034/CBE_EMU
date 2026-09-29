@@ -580,6 +580,21 @@ static int vm_mock_zangbao_api_list_create(vm_mock_service_socket client,
         vm_mock_service_close_account_role_db_for_management(state, true);
         return vm_mock_zangbao_json_err(client, "400 Bad Request", "背包物品不存在");
     }
+    if (bag->itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID)
+    {
+        if (bag->enhanceInstanceId == 0)
+        {
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return vm_mock_zangbao_json_err(client, "400 Bad Request",
+                                            "空白卷不可上架");
+        }
+        if (!vm_net_mock_role_seal_instance_exists(bag->enhanceInstanceId))
+        {
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return vm_mock_zangbao_json_err(client, "400 Bad Request",
+                                            "封印数据缺失不可上架");
+        }
+    }
     if (count == 0 || count > bag->count)
         count = bag->count;
     {
@@ -731,10 +746,18 @@ static bool vm_mock_zangbao_browse_row(void *ctx, unsigned int cols,
 {
     vm_mock_zangbao_list_json_ctx *c = (vm_mock_zangbao_list_json_ctx *)ctx;
     u32 listingId = 0, sellerRoleId = 0, itemId = 0, itemCount = 0, enhance = 0;
-    u32 price = 0, status = 0;
+    u32 price = 0, status = 0, itemInstanceId = 0;
+    u32 gemReflect = 0, gemCombo = 0, gemRevive = 0;
+    u32 sealedRoleId = 0, sealedLevel = 0, sealedJob = 0, sealedSex = 0;
     char sellerName[64];
     char sellerEsc[128];
     char nameUtf8[96];
+    char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
+    char washEsc[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX * 2 + 8];
+    char sealedName[32];
+    char sealedNameUtf8[96];
+    char sealedEsc[128];
+    char sealedJson[256];
     size_t nlen = 0;
     int n;
 
@@ -758,12 +781,63 @@ static bool vm_mock_zangbao_browse_row(void *ctx, unsigned int cols,
     (void)vm_mock_mysql_parse_u32(vals[5], lens[5], &enhance);
     (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &price);
     (void)vm_mock_mysql_parse_u32(vals[7], lens[7], &status);
+    sealedJson[0] = 0;
+    memset(washText, 0, sizeof(washText));
+    snprintf(washText, sizeof(washText),
+             "0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0");
+    if (cols >= 9)
+        (void)vm_mock_mysql_parse_u32(vals[8], lens[8], &itemInstanceId);
+    /* Listing wash/gems: authority for equip detail (same as auction common-extra). */
+    if (cols >= 10 && vals[9] != NULL && lens[9] > 0)
+    {
+        size_t copy = lens[9] < sizeof(washText) - 1 ? lens[9] : sizeof(washText) - 1;
+        memcpy(washText, vals[9], copy);
+        washText[copy] = 0;
+    }
+    if (cols >= 13)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[10], lens[10], &gemReflect);
+        (void)vm_mock_mysql_parse_u32(vals[11], lens[11], &gemCombo);
+        (void)vm_mock_mysql_parse_u32(vals[12], lens[12], &gemRevive);
+    }
+    if (itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID && cols >= 18 &&
+        vals[13] != NULL && lens[13] > 0)
+    {
+        nlen = 0;
+        memset(sealedName, 0, sizeof(sealedName));
+        (void)vm_mock_mysql_parse_u32(vals[13], lens[13], &sealedRoleId);
+        if (vals[14])
+            (void)vm_mysql_hex_decode(vals[14], lens[14], sealedName,
+                                      sizeof(sealedName) - 1, &nlen);
+        sealedName[nlen] = 0;
+        (void)vm_mock_mysql_parse_u32(vals[15], lens[15], &sealedLevel);
+        (void)vm_mock_mysql_parse_u32(vals[16], lens[16], &sealedJob);
+        (void)vm_mock_mysql_parse_u32(vals[17], lens[17], &sealedSex);
+        memset(sealedNameUtf8, 0, sizeof(sealedNameUtf8));
+        gbk_to_utf8((u8 *)sealedName, (u8 *)sealedNameUtf8,
+                    sizeof(sealedNameUtf8));
+        if (sealedNameUtf8[0] == 0)
+            snprintf(sealedNameUtf8, sizeof(sealedNameUtf8), "%s", sealedName);
+        if (!vm_mock_admin_json_escape(sealedNameUtf8, sealedEsc,
+                                        sizeof(sealedEsc)))
+            snprintf(sealedEsc, sizeof(sealedEsc), "-");
+        snprintf(sealedJson, sizeof(sealedJson),
+                 ",\"sealedRole\":{\"roleId\":%u,\"name\":\"%s\",\"level\":%u,"
+                 "\"job\":%u,\"sex\":%u}",
+                 sealedRoleId, sealedEsc, sealedLevel, sealedJob, sealedSex);
+    }
+    if (!vm_mock_admin_json_escape(washText, washEsc, sizeof(washEsc)))
+        snprintf(washEsc, sizeof(washEsc),
+                 "0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0");
     n = snprintf(c->json + c->len, c->cap > c->len ? c->cap - c->len : 0,
                  "%s{\"listingId\":%u,\"sellerRoleId\":%u,\"sellerName\":\"%s\","
                  "\"itemId\":%u,\"itemCount\":%u,\"enhanceLevel\":%u,"
-                 "\"priceKcoin\":%u,\"status\":%u}",
+                 "\"itemInstanceId\":%u,\"enhanceWash\":\"%s\","
+                 "\"gemReflect\":%u,\"gemCombo\":%u,\"gemRevive\":%u,"
+                 "\"priceKcoin\":%u,\"status\":%u%s}",
                  c->first ? "" : ",", listingId, sellerRoleId, sellerEsc, itemId,
-                 itemCount, enhance, price, status);
+                 itemCount, enhance, itemInstanceId, washEsc, gemReflect,
+                 gemCombo, gemRevive, price, status, sealedJson);
     if (n < 0 || (size_t)n >= (c->cap > c->len ? c->cap - c->len : 0))
     {
         c->invalid = true;
@@ -784,7 +858,7 @@ static int vm_mock_zangbao_api_browse(vm_mock_service_socket client, const char 
     u32 roleId = 0;
     u32 page = 1;
     u32 offset = 0;
-    char sql[640];
+    char sql[960];
     char *json = NULL;
     vm_mock_zangbao_list_json_ctx ctx;
     char accountHex[160];
@@ -831,21 +905,37 @@ static int vm_mock_zangbao_api_browse(vm_mock_service_socket client, const char 
             free(json);
             return vm_mock_zangbao_json_err(client, "400 Bad Request", "账号无效");
         }
+        (void)vm_net_mock_role_seal_ensure_schema();
         snprintf(sql, sizeof(sql),
-                 "SELECT listing_id,seller_role_id,HEX(seller_name),item_id,item_count,"
-                 "enhance_level,price_kcoin,status FROM server_zangbao_listings "
-                 "WHERE seller_role_id=%u AND seller_account_id=CAST(X'%s' AS CHAR) "
-                 "AND status IN (%u,%u) ORDER BY listing_id DESC LIMIT %u OFFSET %u",
-                 roleId, accountHex, VM_MOCK_ZANGBAO_ST_ACTIVE,
-                 VM_MOCK_ZANGBAO_ST_RESERVED, VM_MOCK_ZANGBAO_PAGE_SIZE, offset);
+                 "SELECT z.listing_id,z.seller_role_id,HEX(z.seller_name),z.item_id,"
+                 "z.item_count,z.enhance_level,z.price_kcoin,z.status,"
+                 "z.item_instance_id,z.enhance_wash,z.gem_reflect,z.gem_combo,"
+                 "z.gem_revive,sr.sealed_role_id,HEX(sr.preview_name),"
+                 "sr.preview_level,sr.preview_job,sr.preview_sex "
+                 "FROM server_zangbao_listings z "
+                 "LEFT JOIN server_sealed_roles sr "
+                 "ON z.item_id=%u AND z.item_instance_id=sr.item_instance_id "
+                 "WHERE z.seller_role_id=%u AND z.seller_account_id=CAST(X'%s' AS CHAR) "
+                 "AND z.status IN (%u,%u) ORDER BY z.listing_id DESC LIMIT %u OFFSET %u",
+                 VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID, roleId, accountHex,
+                 VM_MOCK_ZANGBAO_ST_ACTIVE, VM_MOCK_ZANGBAO_ST_RESERVED,
+                 VM_MOCK_ZANGBAO_PAGE_SIZE, offset);
     }
     else
     {
+        (void)vm_net_mock_role_seal_ensure_schema();
         snprintf(sql, sizeof(sql),
-                 "SELECT listing_id,seller_role_id,HEX(seller_name),item_id,item_count,"
-                 "enhance_level,price_kcoin,status FROM server_zangbao_listings "
-                 "WHERE status=%u ORDER BY listing_id DESC LIMIT %u OFFSET %u",
-                 VM_MOCK_ZANGBAO_ST_ACTIVE, VM_MOCK_ZANGBAO_PAGE_SIZE, offset);
+                 "SELECT z.listing_id,z.seller_role_id,HEX(z.seller_name),z.item_id,"
+                 "z.item_count,z.enhance_level,z.price_kcoin,z.status,"
+                 "z.item_instance_id,z.enhance_wash,z.gem_reflect,z.gem_combo,"
+                 "z.gem_revive,sr.sealed_role_id,HEX(sr.preview_name),"
+                 "sr.preview_level,sr.preview_job,sr.preview_sex "
+                 "FROM server_zangbao_listings z "
+                 "LEFT JOIN server_sealed_roles sr "
+                 "ON z.item_id=%u AND z.item_instance_id=sr.item_instance_id "
+                 "WHERE z.status=%u ORDER BY z.listing_id DESC LIMIT %u OFFSET %u",
+                 VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID, VM_MOCK_ZANGBAO_ST_ACTIVE,
+                 VM_MOCK_ZANGBAO_PAGE_SIZE, offset);
     }
     (void)vm_mysql_query(sql, vm_mock_zangbao_browse_row, &ctx);
     if (ctx.invalid || ctx.len + 8 >= ctx.cap)
@@ -1848,6 +1938,293 @@ static int vm_mock_zangbao_api_withdraw_list(vm_mock_service_socket client,
     }
 }
 
+/* ---- seal-detail (bound 857 listing → escrow role snapshot) -------------- */
+
+typedef struct
+{
+    char *json;
+    size_t cap;
+    size_t len;
+    bool first;
+    bool invalid;
+    bool found;
+} vm_mock_zangbao_seal_json_ctx;
+
+static bool vm_mock_zangbao_seal_json_append(vm_mock_zangbao_seal_json_ctx *c,
+                                             const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    if (c == NULL || c->json == NULL || c->invalid)
+        return false;
+    va_start(ap, fmt);
+    n = vsnprintf(c->json + c->len, c->cap > c->len ? c->cap - c->len : 0, fmt,
+                  ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= (c->cap > c->len ? c->cap - c->len : 0))
+    {
+        c->invalid = true;
+        return false;
+    }
+    c->len += (size_t)n;
+    return true;
+}
+
+static bool vm_mock_zangbao_seal_role_row(void *ctx, unsigned int cols,
+                                          const char *const *vals,
+                                          const size_t *lens)
+{
+    vm_mock_zangbao_seal_json_ctx *c = (vm_mock_zangbao_seal_json_ctx *)ctx;
+    char nameGbk[32];
+    char sceneGbk[64];
+    char nameUtf8[96];
+    char sceneUtf8[128];
+    char nameEsc[192];
+    char sceneEsc[256];
+    size_t nlen = 0;
+    u32 level = 0, job = 0, sex = 0, hp = 0, hpMax = 0, mp = 0, mpMax = 0;
+    u32 money = 0, exp = 0;
+
+    if (c == NULL || cols < 11)
+    {
+        if (c != NULL)
+            c->invalid = true;
+        return true;
+    }
+    memset(nameGbk, 0, sizeof(nameGbk));
+    memset(sceneGbk, 0, sizeof(sceneGbk));
+    if (vals[0])
+        (void)vm_mysql_hex_decode(vals[0], lens[0], nameGbk, sizeof(nameGbk) - 1,
+                                  &nlen);
+    nameGbk[nlen] = 0;
+    (void)vm_mock_mysql_parse_u32(vals[1], lens[1], &level);
+    (void)vm_mock_mysql_parse_u32(vals[2], lens[2], &job);
+    (void)vm_mock_mysql_parse_u32(vals[3], lens[3], &sex);
+    (void)vm_mock_mysql_parse_u32(vals[4], lens[4], &hp);
+    (void)vm_mock_mysql_parse_u32(vals[5], lens[5], &hpMax);
+    (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &mp);
+    (void)vm_mock_mysql_parse_u32(vals[7], lens[7], &mpMax);
+    (void)vm_mock_mysql_parse_u32(vals[8], lens[8], &money);
+    (void)vm_mock_mysql_parse_u32(vals[9], lens[9], &exp);
+    nlen = 0;
+    if (vals[10])
+        (void)vm_mysql_hex_decode(vals[10], lens[10], sceneGbk,
+                                  sizeof(sceneGbk) - 1, &nlen);
+    sceneGbk[nlen] = 0;
+    memset(nameUtf8, 0, sizeof(nameUtf8));
+    memset(sceneUtf8, 0, sizeof(sceneUtf8));
+    gbk_to_utf8((u8 *)nameGbk, (u8 *)nameUtf8, sizeof(nameUtf8));
+    gbk_to_utf8((u8 *)sceneGbk, (u8 *)sceneUtf8, sizeof(sceneUtf8));
+    if (nameUtf8[0] == 0)
+        snprintf(nameUtf8, sizeof(nameUtf8), "%s", nameGbk);
+    if (sceneUtf8[0] == 0)
+        snprintf(sceneUtf8, sizeof(sceneUtf8), "%s", sceneGbk);
+    if (!vm_mock_admin_json_escape(nameUtf8, nameEsc, sizeof(nameEsc)))
+        snprintf(nameEsc, sizeof(nameEsc), "-");
+    if (!vm_mock_admin_json_escape(sceneUtf8, sceneEsc, sizeof(sceneEsc)))
+        snprintf(sceneEsc, sizeof(sceneEsc), "");
+    if (!vm_mock_zangbao_seal_json_append(
+            c,
+            "\"role\":{\"name\":\"%s\",\"level\":%u,\"job\":%u,\"sex\":%u,"
+            "\"hp\":%u,\"hpMax\":%u,\"mp\":%u,\"mpMax\":%u,\"money\":%u,"
+            "\"exp\":%u,\"scene\":\"%s\"}",
+            nameEsc, level, job, sex, hp, hpMax, mp, mpMax, money, exp,
+            sceneEsc))
+        return false;
+    c->found = true;
+    return true;
+}
+
+static bool vm_mock_zangbao_seal_equip_row(void *ctx, unsigned int cols,
+                                           const char *const *vals,
+                                           const size_t *lens)
+{
+    vm_mock_zangbao_seal_json_ctx *c = (vm_mock_zangbao_seal_json_ctx *)ctx;
+    u32 slot = 0, itemId = 0, enhance = 0, instanceId = 0;
+
+    if (c == NULL || cols < 4)
+        return true;
+    (void)vm_mock_mysql_parse_u32(vals[0], lens[0], &slot);
+    (void)vm_mock_mysql_parse_u32(vals[1], lens[1], &itemId);
+    (void)vm_mock_mysql_parse_u32(vals[2], lens[2], &enhance);
+    (void)vm_mock_mysql_parse_u32(vals[3], lens[3], &instanceId);
+    if (itemId == 0)
+        return true;
+    if (!vm_mock_zangbao_seal_json_append(
+            c, "%s{\"slot\":%u,\"itemId\":%u,\"enhanceLevel\":%u,\"instanceId\":%u}",
+            c->first ? "" : ",", slot, itemId, enhance, instanceId))
+        return false;
+    c->first = false;
+    return true;
+}
+
+static bool vm_mock_zangbao_seal_bag_row(void *ctx, unsigned int cols,
+                                         const char *const *vals,
+                                         const size_t *lens)
+{
+    vm_mock_zangbao_seal_json_ctx *c = (vm_mock_zangbao_seal_json_ctx *)ctx;
+    u32 itemId = 0, count = 0, enhance = 0, seq = 0;
+
+    if (c == NULL || cols < 4)
+        return true;
+    (void)vm_mock_mysql_parse_u32(vals[0], lens[0], &itemId);
+    (void)vm_mock_mysql_parse_u32(vals[1], lens[1], &count);
+    (void)vm_mock_mysql_parse_u32(vals[2], lens[2], &enhance);
+    (void)vm_mock_mysql_parse_u32(vals[3], lens[3], &seq);
+    if (itemId == 0 || count == 0)
+        return true;
+    if (!vm_mock_zangbao_seal_json_append(
+            c,
+            "%s{\"itemId\":%u,\"count\":%u,\"enhanceLevel\":%u,\"seq\":%u}",
+            c->first ? "" : ",", itemId, count, enhance, seq))
+        return false;
+    c->first = false;
+    return true;
+}
+
+static bool vm_mock_zangbao_seal_wh_row(void *ctx, unsigned int cols,
+                                        const char *const *vals,
+                                        const size_t *lens)
+{
+    vm_mock_zangbao_seal_json_ctx *c = (vm_mock_zangbao_seal_json_ctx *)ctx;
+    u32 itemId = 0, count = 0, enhance = 0;
+
+    if (c == NULL || cols < 3)
+        return true;
+    (void)vm_mock_mysql_parse_u32(vals[0], lens[0], &itemId);
+    (void)vm_mock_mysql_parse_u32(vals[1], lens[1], &count);
+    (void)vm_mock_mysql_parse_u32(vals[2], lens[2], &enhance);
+    if (itemId == 0 || count == 0)
+        return true;
+    if (!vm_mock_zangbao_seal_json_append(
+            c, "%s{\"itemId\":%u,\"count\":%u,\"enhanceLevel\":%u}",
+            c->first ? "" : ",", itemId, count, enhance))
+        return false;
+    c->first = false;
+    return true;
+}
+
+static int vm_mock_zangbao_api_seal_detail(vm_mock_service_socket client,
+                                           const char *query)
+{
+    char listingText[24];
+    char account[64];
+    const char *err = NULL;
+    u32 roleId = 0;
+    u32 listingId = 0;
+    vm_mock_zangbao_listing listing;
+    vm_net_mock_role_seal_row_ctx sealed;
+    char escrowHex[160];
+    char sql[512];
+    char *json = NULL;
+    vm_mock_zangbao_seal_json_ctx ctx;
+
+    if (!vm_mock_zangbao_ensure_schema() || !vm_net_mock_role_seal_ensure_schema())
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "服务不可用");
+    account[0] = 0;
+    (void)vm_mock_zangbao_auth_query(query ? query : "", account, sizeof(account),
+                                      &roleId, &err);
+    memset(listingText, 0, sizeof(listingText));
+    if (!vm_mock_admin_form_value(query ? query : "", "listingId", listingText,
+                                   sizeof(listingText)) ||
+        !vm_net_mock_parse_u32_strict(listingText, &listingId) || listingId == 0)
+        return vm_mock_zangbao_json_err(client, "400 Bad Request", "缺少 listingId");
+    if (!vm_mock_zangbao_load_listing(listingId, &listing) || !listing.found)
+        return vm_mock_zangbao_json_err(client, "404 Not Found", "商品不存在");
+    if (listing.itemId != VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID ||
+        listing.itemInstanceId == 0)
+        return vm_mock_zangbao_json_err(client, "400 Bad Request", "非封印卷商品");
+    memset(&sealed, 0, sizeof(sealed));
+    if (!vm_net_mock_role_seal_load_by_instance(listing.itemInstanceId, &sealed))
+        return vm_mock_zangbao_json_err(client, "404 Not Found", "封印角色不存在");
+    if (vm_mysql_hex_encode(VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT,
+                            strlen(VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT),
+                            escrowHex, sizeof(escrowHex)) == 0)
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "编码失败");
+
+    json = (char *)malloc(196608);
+    if (json == NULL)
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "内存不足");
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.json = json;
+    ctx.cap = 196608;
+    if (!vm_mock_zangbao_seal_json_append(
+            &ctx, "{\"ok\":true,\"listingId\":%u,\"sealedRoleId\":%u,", listingId,
+            sealed.sealedRoleId))
+    {
+        free(json);
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "输出失败");
+    }
+
+    snprintf(sql, sizeof(sql),
+             "SELECT HEX(role_name),level,job,sex,hp,hp_max,mp,mp_max,money,exp,"
+             "HEX(scene) FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u LIMIT 1",
+             escrowHex, sealed.sealedRoleId);
+    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_role_row, &ctx);
+    if (ctx.invalid || !ctx.found)
+    {
+        free(json);
+        return vm_mock_zangbao_json_err(client, "404 Not Found", "托管角色缺失");
+    }
+
+    if (!vm_mock_zangbao_seal_json_append(&ctx, ",\"equipment\":["))
+    {
+        free(json);
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "输出失败");
+    }
+    ctx.first = true;
+    snprintf(sql, sizeof(sql),
+             "SELECT slot_index,item_id,enhance_level,item_instance_id "
+             "FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u AND item_id<>0 ORDER BY slot_index",
+             escrowHex, sealed.sealedRoleId);
+    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_equip_row, &ctx);
+    if (ctx.invalid || !vm_mock_zangbao_seal_json_append(&ctx, "],\"backpack\":["))
+    {
+        free(json);
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "输出失败");
+    }
+    ctx.first = true;
+    snprintf(sql, sizeof(sql),
+             "SELECT item_id,item_count,enhance_level,item_seq "
+             "FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u AND item_id<>0 ORDER BY slot_index",
+             escrowHex, sealed.sealedRoleId);
+    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_bag_row, &ctx);
+    if (ctx.invalid || !vm_mock_zangbao_seal_json_append(&ctx, "],\"warehouse\":["))
+    {
+        free(json);
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "输出失败");
+    }
+    ctx.first = true;
+    snprintf(sql, sizeof(sql),
+             "SELECT item_id,item_count,enhance_level "
+             "FROM account_role_warehouse WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u AND item_id<>0 ORDER BY slot_index",
+             escrowHex, sealed.sealedRoleId);
+    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_wh_row, &ctx);
+    if (ctx.invalid || !vm_mock_zangbao_seal_json_append(&ctx, "]}\n"))
+    {
+        free(json);
+        return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                        "输出失败");
+    }
+    {
+        int rc = vm_mock_zangbao_json_ok(client, json);
+        free(json);
+        return rc;
+    }
+}
+
 static int vm_mock_zangbao_handle_http(vm_mock_service_socket client,
                                        const char *method, const char *target,
                                        const char *query, const char *body)
@@ -1872,6 +2249,8 @@ static int vm_mock_zangbao_handle_http(vm_mock_service_socket client,
         return vm_mock_zangbao_api_browse(client, query ? query : "", false);
     if (strcmp(target, "/api/zangbao/mine") == 0)
         return vm_mock_zangbao_api_browse(client, query ? query : "", true);
+    if (strcmp(target, "/api/zangbao/seal-detail") == 0)
+        return vm_mock_zangbao_api_seal_detail(client, query ? query : "");
     if (strcmp(target, "/api/zangbao/list") == 0 && strcmp(method, "POST") == 0)
         return vm_mock_zangbao_api_list_create(client, body ? body : "");
     if (strcmp(target, "/api/zangbao/cancel") == 0 && strcmp(method, "POST") == 0)

@@ -4923,6 +4923,8 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_MENU 0xee040000u
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE  0xee050000u /* | gold; 0xffff=all */
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_BASE 0xee060000u /* | gold; 0xffff=all */
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_GOLD_PILE_MENU      0xee070000u
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_GOLD_PILE_BASE      0xee080000u /* | piles; 0xffff=all */
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE   0xef000000u /* | slot */
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE    0xf0000000u /* | backpack seq */
 /* UI unit is 金; wire/storage is copper.  Transfers only move whole 金. */
@@ -5012,6 +5014,16 @@ enum
 #define VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID 855u
 #define VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_DURABILITY 1u
 #define VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_SHOP_PRICE 100u
+/* Pixi 自定义：金币堆 — 使用获得 1 万金；仓库可兑堆；可堆叠。 */
+#define VM_NET_MOCK_GOLD_PILE_ITEM_ID              856u
+#define VM_NET_MOCK_GOLD_PILE_DURABILITY           1u
+#define VM_NET_MOCK_GOLD_PILE_GOLD_AMOUNT          10000u /* 1 万金 / 堆 */
+#define VM_NET_MOCK_GOLD_PILE_SHOP_PRICE           0u
+/* Pixi 自定义：角色封印卷 — 空白可堆叠；封印后绑定 instance 不可堆叠。 */
+#define VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID       857u
+#define VM_NET_MOCK_ROLE_SEAL_SCROLL_DURABILITY    1u
+#define VM_NET_MOCK_ROLE_SEAL_SCROLL_SHOP_PRICE    0u
+#define VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT       "__seal_escrow__"
 /* Initiator cooldown after a successful nearby force-PK start (or doll block). */
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_SEC    (VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS / 1000u)

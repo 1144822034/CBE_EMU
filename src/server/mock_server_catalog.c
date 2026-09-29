@@ -264,6 +264,8 @@ static void vm_net_mock_ensure_rename_card_catalog_item(void);
 static void vm_net_mock_ensure_gold_scroll_catalog_item(void);
 static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void);
 static void vm_net_mock_ensure_cross_quality_recast_stone_catalog_item(void);
+static void vm_net_mock_ensure_gold_pile_catalog_item(void);
+static void vm_net_mock_ensure_role_seal_scroll_catalog_item(void);
 static void vm_net_mock_ensure_gem_catalog_items(void);
 static void vm_net_mock_ensure_gold_scroll_item_effect(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
@@ -1683,6 +1685,8 @@ static u32 vm_net_mock_load_shop_catalog(void)
     vm_net_mock_ensure_gold_scroll_catalog_item();
     vm_net_mock_ensure_crystal_extract_stone_catalog_item();
     vm_net_mock_ensure_cross_quality_recast_stone_catalog_item();
+    vm_net_mock_ensure_gold_pile_catalog_item();
+    vm_net_mock_ensure_role_seal_scroll_catalog_item();
     vm_net_mock_ensure_gem_catalog_items();
     vm_net_mock_catalog_extra_apply_to_shop_catalog();
 
@@ -2782,6 +2786,107 @@ static void vm_net_mock_ensure_cross_quality_recast_stone_catalog_item(void)
     }
 }
 
+/* Pixi 自定义 856 金币堆：1 堆 = 1 万金；可堆叠消耗。不默认商城上架。 */
+static void vm_net_mock_ensure_gold_pile_catalog_item(void)
+{
+    static const u8 nameGbk[] = "\xbd\xf0\xb1\xd2\xb6\xd1"; /* 金币堆 */
+    static const u8 descGbk[] =
+        "\xca\xb9\xd3\xc3\xba\xf3\xbb\xf1\xb5\xc3\x31\xcd\xf2\xbd\xf0\xb1\xd2"
+        "\xa1\xa3\xbf\xc9\xd4\xda\xb2\xd6\xbf\xe2\xd3\xc3\xbd\xf0\xb1\xd2\xb6"
+        "\xd2\xbb\xbb\xa1\xa3";
+        /* 使用后获得1万金币。可在仓库用金币兑换。 */
+    vm_net_mock_shop_catalog_item *item = NULL;
+    u32 i = 0;
+
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId == VM_NET_MOCK_GOLD_PILE_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_GOLD_PILE_ITEM_ID, nameGbk, sizeof(nameGbk) - 1,
+                descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_GOLD_PILE_SHOP_PRICE,
+                99, 1, 1, false, 10))
+        {
+            printf("[warn][network] mock_gold_pile_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        printf("[info][network] mock_gold_pile_catalog_added item=%u\n",
+               VM_NET_MOCK_GOLD_PILE_ITEM_ID);
+        return;
+    }
+    {
+        u32 copyLen = vm_net_mock_shop_safe_name_len(
+            nameGbk, sizeof(nameGbk) - 1, VM_NET_MOCK_SHOP_NAME_BYTES);
+        memcpy(item->name, nameGbk, copyLen);
+        item->name[copyLen] = 0;
+        copyLen = vm_net_mock_shop_safe_name_len(
+            descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_SHOP_DESC_BYTES);
+        memcpy(item->description, descGbk, copyLen);
+        item->description[copyLen] = 0;
+        item->category = 10;
+        item->stack = 99;
+    }
+}
+
+/* Pixi 自定义 857 角色封印卷：空白可堆叠；封印绑定 instance。不默认商城上架。 */
+static void vm_net_mock_ensure_role_seal_scroll_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xbd\xc7\xc9\xab\xb7\xe2\xd3\xa1\xbe\xed"; /* 角色封印卷 */
+    static const u8 descGbk[] =
+        "\xbf\xd5\xb0\xd7\xb7\xe2\xd3\xa1\xbe\xed\xa3\xac\xca\xb9\xd3\xc3\xba"
+        "\xf3\xbf\xc9\xb7\xe2\xd3\xa1\xcd\xac\xd5\xcb\xba\xc5\xc6\xe4\xcb\xfc"
+        "\xbd\xc7\xc9\xab\xa1\xa3\xd2\xd1\xb7\xe2\xd3\xa1\xbe\xed\xbf\xc9\xc9"
+        "\xcf\xbc\xdc\xb2\xd8\xb1\xa6\xb8\xf1\xa1\xa3";
+        /* 空白封印卷，使用后可封印同账号其它角色。已封印卷可上架藏宝阁。 */
+    vm_net_mock_shop_catalog_item *item = NULL;
+    u32 i = 0;
+
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId ==
+            VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID, nameGbk,
+                sizeof(nameGbk) - 1, descGbk, sizeof(descGbk) - 1,
+                VM_NET_MOCK_ROLE_SEAL_SCROLL_SHOP_PRICE, 99, 1, 1, false, 14))
+        {
+            printf("[warn][network] mock_role_seal_scroll_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        printf("[info][network] mock_role_seal_scroll_catalog_added item=%u\n",
+               VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID);
+        return;
+    }
+    {
+        u32 copyLen = vm_net_mock_shop_safe_name_len(
+            nameGbk, sizeof(nameGbk) - 1, VM_NET_MOCK_SHOP_NAME_BYTES);
+        memcpy(item->name, nameGbk, copyLen);
+        item->name[copyLen] = 0;
+        copyLen = vm_net_mock_shop_safe_name_len(
+            descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_SHOP_DESC_BYTES);
+        memcpy(item->description, descGbk, copyLen);
+        item->description[copyLen] = 0;
+        item->category = 14;
+        item->stack = 99;
+    }
+}
+
 /*
  * Pixi 宝石孔道具（不在 item.dsh）：注入商店目录，供后台给予/掉落/宝箱选择。
  * IDs 对齐 docs/re/2026-09-19-pixi-gem-sockets.md 与 mock_server_gem_config：
@@ -2976,6 +3081,8 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 853: /* 打金心得：走自定义 7/1 时效，禁止当普通药 */
     case 854: /* 玄晶提炼石：走 29/16 装备提炼，禁止通用 7/1 */
     case 855: /* 跨品重铸石：29/5|6 跨品质时消耗，禁止通用 7/1 */
+    case 856: /* 金币堆：自定义 7/1 兑金，禁止当普通药 */
+    case 857: /* 角色封印卷：29/25 封印 / 29/26 解封，禁止通用 7/1 */
     case 813: /* chest keys must not fall into generic 7/1 category-10 consume */
     case 814:
     case 815:
@@ -9495,6 +9602,117 @@ static u32 vm_net_mock_build_gold_scroll_use_via_generic_7_1(
     return pos;
 }
 
+/*
+ * Custom 856 金币堆: Pixi sends generic 1/7/1.
+ * Consume 1 pile → credit GOLD_PILE_GOLD_AMOUNT 金 (copper), clamp overflow.
+ */
+static u32 vm_net_mock_build_gold_pile_use_via_generic_7_1(
+    vm_net_mock_role_state *role, u32 itemId, u16 seq, u16 enhanceLevel,
+    u8 itemUseType, u8 *out, u32 outCap)
+{
+    u32 remaining = 0;
+    u32 copperGain = 0;
+    u32 moneyBefore = 0;
+    u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_SCRATCH];
+    u32 itemInfoLen = 0;
+    u8 countInfo[32];
+    u32 countInfoLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+    static const char tipGbk[] =
+        "\xbb\xf1\xb5\xc3\x31\xcd\xf2\xbd\xf0\xb1\xd2"; /* 获得1万金币 */
+
+    if (role == NULL || out == NULL || outCap < pos ||
+        itemId != VM_NET_MOCK_GOLD_PILE_ITEM_ID || seq == 0)
+    {
+        return 0;
+    }
+
+    if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1,
+                                                &remaining))
+    {
+        printf("[warn][network] mock_gold_pile_generic_7_1_failed item=%u "
+               "seq=%u evidence=runtime:wt7/1-gold-pile\n",
+               itemId, seq);
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap,
+            "\xb8\xc3\xb5\xc0\xbe\xdf\xb2\xbb\xbf\xc9\xd3\xc3\xa1\xa3"); /* 该道具不可用。 */
+    }
+
+    copperGain =
+        VM_NET_MOCK_GOLD_PILE_GOLD_AMOUNT * VM_NET_MOCK_COPPER_PER_GOLD;
+    moneyBefore = role->money;
+    if (role->money > 0xffffffffu - copperGain)
+        role->money = 0xffffffffu;
+    else
+        role->money += copperGain;
+    vm_net_mock_role_mark_inventory_dirty("gold-pile-use-7-1");
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type",
+                                   itemUseType ? itemUseType : 1) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "id", (u16)itemId))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    objectCount = 1;
+
+    if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo), seq,
+                                                  itemId, remaining, enhanceLevel,
+                                                  &itemInfoLen) ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
+
+    if (!vm_net_mock_build_item_use_count_info_blob(countInfo, sizeof(countInfo),
+                                                    seq, remaining,
+                                                    &countInfoLen) ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11, &objectStart) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "info", countInfo,
+                                    (u16)countInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
+
+    if (vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0a, 0x1a,
+                                     &objectStart) &&
+        vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) &&
+        vm_net_mock_put_object_u8(out, outCap, &pos, "type", 1) &&
+        vm_net_mock_put_object_u8(out, outCap, &pos, "npcnum", 0) &&
+        vm_net_mock_put_object_string(out, outCap, &pos, "name",
+                                      "\xce\xde") && /* 无 */
+        vm_net_mock_put_object_u32(out, outCap, &pos, "money", role->money))
+    {
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        ++objectCount;
+    }
+
+    if (!vm_net_mock_append_item_use_hint_object(out, outCap, &pos, &objectCount,
+                                                 tipGbk))
+        return 0;
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_gold_pile_generic_7_1 item=%u seq=%u "
+           "remaining=%u money=%u->%u copper_gain=%u resp=%u "
+           "evidence=custom:gold-pile\n",
+           itemId, seq, remaining, moneyBefore, role->money, copperGain, pos);
+    vm_autotest_note("mock_gold_pile_generic_7_1 item=%u seq=%u remaining=%u "
+                     "response=7/1+7/7+7/11+10/26 evidence=custom:gold-pile\n",
+                     itemId, seq, remaining);
+    return pos;
+}
+
 static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen,
                                                u8 *out, u32 outCap)
 {
@@ -9579,6 +9797,12 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
                 role, itemId, seq, enhanceLevel,
                 parsed.type ? parsed.type : 1, out, outCap);
         }
+        if (itemId == VM_NET_MOCK_GOLD_PILE_ITEM_ID)
+        {
+            return vm_net_mock_build_gold_pile_use_via_generic_7_1(
+                role, itemId, seq, enhanceLevel,
+                parsed.type ? parsed.type : 1, out, outCap);
+        }
         if (itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID)
         {
             /* Pixi opens enmity picker; generic 7/1 must clear wait without consume. */
@@ -9594,6 +9818,14 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
                 "\xc7\xeb\xca\xe4\xc8\xeb\xd0\xc2\xc3\xfb\xb3\xc6\xca\xb9\xd3\xc3"; /* 请输入新名称使用 */
             return vm_net_mock_build_item_use_reject_with_hint_response(
                 out, outCap, itemId, parsed.type ? parsed.type : 1, renameTipGbk);
+        }
+        if (itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID)
+        {
+            /* Pixi opens role picker; generic 7/1 must clear wait without consume. */
+            static const char sealTipGbk[] =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb7\xe2\xd3\xa1\xb5\xc4\xbd\xc7\xc9\xab"; /* 请选择要封印的角色 */
+            return vm_net_mock_build_item_use_reject_with_hint_response(
+                out, outCap, itemId, parsed.type ? parsed.type : 1, sealTipGbk);
         }
         return 0;
     }

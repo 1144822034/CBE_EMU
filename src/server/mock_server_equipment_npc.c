@@ -7237,6 +7237,8 @@ static u32 vm_net_mock_build_rename_card_response(const u8 *request,
     return pos;
 }
 
+#include "mock_server_role_seal.inc.c"
+
 /*
  * PixiJS-only 玄晶提炼: 1/29/16 { equipseq }.
  * Consume 1× item 854, return crystals spent on this equipment instance

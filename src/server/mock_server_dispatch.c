@@ -1414,6 +1414,24 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_role_seal_response(request, requestLen, out,
+                                                     outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-role-seal", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_role_unseal_response(request, requestLen, out,
+                                                       outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-role-unseal", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_tianxia_signature_response(
         request, requestLen, out, outCap);
     if (hookedLen)
@@ -2016,3 +2034,4 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
 #endif
 }
 
+ 

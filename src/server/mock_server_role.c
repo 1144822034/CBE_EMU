@@ -8389,56 +8389,70 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[22], lengths[22], &number[20]) ||
         !vm_mock_mysql_parse_u32(values[23], lengths[23], &number[21]) ||
         !vm_mock_mysql_parse_u32(values[24], lengths[24], &number[22]) ||
-        number[0] >= context->database->roleCount || number[0] >= VM_NET_MOCK_ROLE_DB_MAX_ROLES ||
         number[1] == 0 || number[2] > 255 || number[3] > 255 ||
         number[4] > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT ||
         number[13] > 65535 || number[14] > 65535 ||
         number[15] > VM_NET_MOCK_BACKPACK_MAX_ITEMS ||
         number[16] > 255 || number[19] > 65535 || number[21] > 255 ||
-        (context->seenRoleMask & (1u << number[0])) != 0)
+        context->roleRows >= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
         if (context != NULL)
             context->invalid = true;
         return true;
     }
-    vm_net_mock_role_state *role = &context->database->roles[number[0]];
-    memset(role, 0, sizeof(*role));
-    if (!vm_mysql_hex_decode(values[2], lengths[2], role->name,
-                             sizeof(role->name) - 1, &name_len) ||
-        !vm_mysql_hex_decode(values[14], lengths[14], role->scene,
-                             sizeof(role->scene) - 1, &scene_len))
+    /* Pack densely by load order (ORDER BY role_index). Do not use MySQL
+     * role_index as the array slot — after seal, role_count shrinks while
+     * surviving rows may still hold high indices; slot>=roleCount used to
+     * invalidate the whole account load (empty character list). */
     {
-        context->invalid = true;
+        u32 slot = context->roleRows;
+        u32 existing;
+        for (existing = 0; existing < context->roleRows; ++existing)
+        {
+            if (context->database->roles[existing].roleId == number[1])
+            {
+                context->invalid = true;
+                return true;
+            }
+        }
+        vm_net_mock_role_state *role = &context->database->roles[slot];
         memset(role, 0, sizeof(*role));
+        if (!vm_mysql_hex_decode(values[2], lengths[2], role->name,
+                                 sizeof(role->name) - 1, &name_len) ||
+            !vm_mysql_hex_decode(values[14], lengths[14], role->scene,
+                                 sizeof(role->scene) - 1, &scene_len))
+        {
+            context->invalid = true;
+            memset(role, 0, sizeof(*role));
+            return true;
+        }
+        role->name[name_len] = 0;
+        role->scene[scene_len] = 0;
+        role->roleId = number[1];
+        role->job = (u8)number[2];
+        role->sex = (u8)number[3];
+        role->backpackCapacity = (u16)number[4];
+        role->level = number[5];
+        role->exp = number[6];
+        role->hp = number[7];
+        role->hpMax = number[8];
+        role->mp = number[9];
+        role->mpMax = number[10];
+        role->money = number[11];
+        role->wcoin = number[12];
+        role->x = (u16)number[13];
+        role->y = (u16)number[14];
+        role->backpackItemCount = (u16)number[15];
+        role->designationId = (u8)number[16];
+        role->arenaDesignationMask = number[17];
+        role->specialDesignationMask = number[18];
+        role->nextBackpackSeq = (u16)number[19];
+        role->pkPoints = number[20];
+        role->pkPveDecayStreak = (u8)number[21];
+        role->createdAtUnix = number[22];
+        ++context->roleRows;
         return true;
     }
-    role->name[name_len] = 0;
-    role->scene[scene_len] = 0;
-    role->roleId = number[1];
-    role->job = (u8)number[2];
-    role->sex = (u8)number[3];
-    role->backpackCapacity = (u16)number[4];
-    role->level = number[5];
-    role->exp = number[6];
-    role->hp = number[7];
-    role->hpMax = number[8];
-    role->mp = number[9];
-    role->mpMax = number[10];
-    role->money = number[11];
-    role->wcoin = number[12];
-    role->x = (u16)number[13];
-    role->y = (u16)number[14];
-    role->backpackItemCount = (u16)number[15];
-    role->designationId = (u8)number[16];
-    role->arenaDesignationMask = number[17];
-    role->specialDesignationMask = number[18];
-    role->nextBackpackSeq = (u16)number[19];
-    role->pkPoints = number[20];
-    role->pkPveDecayStreak = (u8)number[21];
-    role->createdAtUnix = number[22];
-    context->seenRoleMask |= (u8)(1u << number[0]);
-    ++context->roleRows;
-    return true;
 }
 
 static vm_net_mock_role_state *vm_mock_mysql_find_loaded_role(vm_net_mock_role_db_file *database,
@@ -9204,9 +9218,61 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
              "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,pk_points,pk_pve_streak,UNIX_TIMESTAMP(created_at) "
              "FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_index",
              account_hex);
-    if (!vm_mysql_query(query, vm_mock_mysql_role_detail_row, &context) || context.invalid ||
-        context.roleRows != g_vm_net_mock_role_db.roleCount)
+    if (!vm_mysql_query(query, vm_mock_mysql_role_detail_row, &context) || context.invalid)
         return false;
+    if (context.roleRows != g_vm_net_mock_role_db.roleCount)
+    {
+        printf("[warn][network] mock_role_db_mysql_role_count_mismatch account=%s "
+               "meta=%u rows=%u — trusting rows and repairing meta/index\n",
+               g_vm_mock_service_active_account_id
+                   ? g_vm_mock_service_active_account_id
+                   : "-",
+               g_vm_net_mock_role_db.roleCount, (u32)context.roleRows);
+        g_vm_net_mock_role_db.roleCount = context.roleRows;
+        if (g_vm_net_mock_role_db.roleCount == 0)
+            g_vm_net_mock_role_db.activeRoleId = 0;
+        else
+        {
+            u32 ai = 0;
+            bool activeOk = false;
+            for (ai = 0; ai < g_vm_net_mock_role_db.roleCount; ++ai)
+            {
+                if (g_vm_net_mock_role_db.roles[ai].roleId ==
+                    g_vm_net_mock_role_db.activeRoleId)
+                {
+                    activeOk = true;
+                    break;
+                }
+            }
+            if (!activeOk)
+                g_vm_net_mock_role_db.activeRoleId =
+                    g_vm_net_mock_role_db.roles[0].roleId;
+        }
+        /* Densify role_index 0..n-1 and sync account_role_state.role_count. */
+        {
+            char fixQ[384];
+            u32 i;
+            snprintf(fixQ, sizeof(fixQ),
+                     "UPDATE account_roles SET role_index=role_index+128 "
+                     "WHERE account_id=CAST(X'%s' AS CHAR)",
+                     account_hex);
+            (void)vm_mysql_exec(fixQ);
+            for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+            {
+                snprintf(fixQ, sizeof(fixQ),
+                         "UPDATE account_roles SET role_index=%u "
+                         "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                         i, account_hex, g_vm_net_mock_role_db.roles[i].roleId);
+                (void)vm_mysql_exec(fixQ);
+            }
+            snprintf(fixQ, sizeof(fixQ),
+                     "UPDATE account_role_state SET role_count=%u,active_role_id=%u "
+                     "WHERE account_id=CAST(X'%s' AS CHAR)",
+                     g_vm_net_mock_role_db.roleCount,
+                     g_vm_net_mock_role_db.activeRoleId, account_hex);
+            (void)vm_mysql_exec(fixQ);
+        }
+    }
     {
         /* Separate from the 25-col detail row so kcoin does not shift parsers. */
         char kq[384];
@@ -9634,39 +9700,73 @@ static bool vm_net_mock_role_db_save_relational_ex(
         {
             snprintf(chest_miss_text, sizeof(chest_miss_text), "0,0,0,0,0");
         }
-        snprintf(query, sizeof(query),
-                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,kcoin,pk_points,pk_pve_streak,chest_crystal_miss,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,unlocked_chenghao_ids,unlocked_wing_ids,unlocked_mount_ids,equipped_chenghao_id,equipped_wing_id,equipped_mount_id) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,'%s',X'%s',%u,%u,%u,%u,%u,%u,%u,'%s','%s','%s',%u,%u,%u) "
-                 "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
-                 "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
-                 "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
-                 "mp=VALUES(mp),mp_max=VALUES(mp_max),money=VALUES(money),wcoin=VALUES(wcoin),"
-                 "kcoin=VALUES(kcoin),"
-                 "pk_points=VALUES(pk_points),pk_pve_streak=VALUES(pk_pve_streak),"
-                 "chest_crystal_miss=VALUES(chest_crystal_miss),"
-                 "scene=VALUES(scene),pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
-                 "backpack_item_count=VALUES(backpack_item_count),designation_id=VALUES(designation_id),"
-                 "arena_designation_mask=VALUES(arena_designation_mask),"
-                 "special_designation_mask=VALUES(special_designation_mask),"
-                 "next_backpack_seq=VALUES(next_backpack_seq),"
-                 "unlocked_chenghao_ids=VALUES(unlocked_chenghao_ids),"
-                 "unlocked_wing_ids=VALUES(unlocked_wing_ids),"
-                 "unlocked_mount_ids=VALUES(unlocked_mount_ids),"
-                 "equipped_chenghao_id=VALUES(equipped_chenghao_id),"
-                 "equipped_wing_id=VALUES(equipped_wing_id),"
-                 "equipped_mount_id=VALUES(equipped_mount_id)",
-                 account_hex, role->roleId, i, name_hex, role->job, role->sex,
-                 role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
-                 role->mp, role->mpMax, role->money, role->wcoin, role->kcoin, role->pkPoints,
-                 (u32)role->pkPveDecayStreak, chest_miss_text, scene_hex,
-                 role->x, role->y, role->backpackItemCount, role->designationId,
-                 role->arenaDesignationMask, role->specialDesignationMask,
-                 role->nextBackpackSeq,
-                 role->unlockedChenghaoIds[0] ? role->unlockedChenghaoIds : "",
-                 role->unlockedWingIds[0] ? role->unlockedWingIds : "",
-                 role->unlockedMountIds[0] ? role->unlockedMountIds : "",
-                 role->equippedChenghaoId, role->equippedWingId,
-                 role->equippedMountId);
+        if (!full_snapshot)
+        {
+            /* Scoped path: UPDATE only. INSERT..ON DUPLICATE with a compacted
+             * memory index can match uk_account_roles_index on a sibling row. */
+            snprintf(query, sizeof(query),
+                     "UPDATE account_roles SET "
+                     "role_name=X'%s',job=%u,sex=%u,backpack_capacity=%u,"
+                     "level=%u,exp=%u,hp=%u,hp_max=%u,mp=%u,mp_max=%u,"
+                     "money=%u,wcoin=%u,kcoin=%u,pk_points=%u,pk_pve_streak=%u,"
+                     "chest_crystal_miss='%s',scene=X'%s',pos_x=%u,pos_y=%u,"
+                     "backpack_item_count=%u,designation_id=%u,"
+                     "arena_designation_mask=%u,special_designation_mask=%u,"
+                     "next_backpack_seq=%u,"
+                     "unlocked_chenghao_ids='%s',unlocked_wing_ids='%s',"
+                     "unlocked_mount_ids='%s',equipped_chenghao_id=%u,"
+                     "equipped_wing_id=%u,equipped_mount_id=%u "
+                     "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                     name_hex, role->job, role->sex, role->backpackCapacity,
+                     role->level, role->exp, role->hp, role->hpMax, role->mp,
+                     role->mpMax, role->money, role->wcoin, role->kcoin,
+                     role->pkPoints, (u32)role->pkPveDecayStreak, chest_miss_text,
+                     scene_hex, role->x, role->y, role->backpackItemCount,
+                     role->designationId, role->arenaDesignationMask,
+                     role->specialDesignationMask, role->nextBackpackSeq,
+                     role->unlockedChenghaoIds[0] ? role->unlockedChenghaoIds : "",
+                     role->unlockedWingIds[0] ? role->unlockedWingIds : "",
+                     role->unlockedMountIds[0] ? role->unlockedMountIds : "",
+                     role->equippedChenghaoId, role->equippedWingId,
+                     role->equippedMountId, account_hex, role->roleId);
+        }
+        else
+        {
+            snprintf(query, sizeof(query),
+                     "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,kcoin,pk_points,pk_pve_streak,chest_crystal_miss,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,unlocked_chenghao_ids,unlocked_wing_ids,unlocked_mount_ids,equipped_chenghao_id,equipped_wing_id,equipped_mount_id) "
+                     "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,'%s',X'%s',%u,%u,%u,%u,%u,%u,%u,'%s','%s','%s',%u,%u,%u) "
+                     "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
+                     "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
+                     "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
+                     "mp=VALUES(mp),mp_max=VALUES(mp_max),money=VALUES(money),wcoin=VALUES(wcoin),"
+                     "kcoin=VALUES(kcoin),"
+                     "pk_points=VALUES(pk_points),pk_pve_streak=VALUES(pk_pve_streak),"
+                     "chest_crystal_miss=VALUES(chest_crystal_miss),"
+                     "scene=VALUES(scene),pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
+                     "backpack_item_count=VALUES(backpack_item_count),designation_id=VALUES(designation_id),"
+                     "arena_designation_mask=VALUES(arena_designation_mask),"
+                     "special_designation_mask=VALUES(special_designation_mask),"
+                     "next_backpack_seq=VALUES(next_backpack_seq),"
+                     "unlocked_chenghao_ids=VALUES(unlocked_chenghao_ids),"
+                     "unlocked_wing_ids=VALUES(unlocked_wing_ids),"
+                     "unlocked_mount_ids=VALUES(unlocked_mount_ids),"
+                     "equipped_chenghao_id=VALUES(equipped_chenghao_id),"
+                     "equipped_wing_id=VALUES(equipped_wing_id),"
+                     "equipped_mount_id=VALUES(equipped_mount_id)",
+                     account_hex, role->roleId, i, name_hex, role->job, role->sex,
+                     role->backpackCapacity, role->level, role->exp, role->hp,
+                     role->hpMax, role->mp, role->mpMax, role->money, role->wcoin,
+                     role->kcoin, role->pkPoints, (u32)role->pkPveDecayStreak,
+                     chest_miss_text, scene_hex, role->x, role->y,
+                     role->backpackItemCount, role->designationId,
+                     role->arenaDesignationMask, role->specialDesignationMask,
+                     role->nextBackpackSeq,
+                     role->unlockedChenghaoIds[0] ? role->unlockedChenghaoIds : "",
+                     role->unlockedWingIds[0] ? role->unlockedWingIds : "",
+                     role->unlockedMountIds[0] ? role->unlockedMountIds : "",
+                     role->equippedChenghaoId, role->equippedWingId,
+                     role->equippedMountId);
+        }
         if (!vm_mysql_exec(query))
         {
             snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
@@ -12926,6 +13026,78 @@ static bool vm_net_mock_warehouse_money_transfer(vm_net_mock_role_state *role,
     return true;
 }
 
+/*
+ * Warehouse UI: convert bag 金 into stackable 856 金币堆 (1 pile = 1 万金).
+ * Deduct copper first; restore on backpack grant failure.
+ */
+static bool vm_net_mock_warehouse_gold_pile_exchange(vm_net_mock_role_state *role,
+                                                     u32 pileCount,
+                                                     bool allPiles,
+                                                     const char **reasonOut)
+{
+    u32 copperPerPile =
+        VM_NET_MOCK_GOLD_PILE_GOLD_AMOUNT * VM_NET_MOCK_COPPER_PER_GOLD;
+    u32 affordable = 0;
+    u32 piles = 0;
+    u32 copper = 0;
+    u32 beforeMoney = 0;
+    u16 seq = 0;
+
+    if (reasonOut)
+        *reasonOut = "ok";
+    if (role == NULL || copperPerPile == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "bad-args";
+        return false;
+    }
+
+    beforeMoney = role->money;
+    affordable = role->money / copperPerPile;
+    if (allPiles)
+        piles = affordable;
+    else
+        piles = pileCount;
+
+    if (piles == 0)
+    {
+        if (reasonOut)
+            *reasonOut =
+                affordable == 0 ? "money-insufficient" : "bad-amount";
+        return false;
+    }
+    if (piles > 0xffffffffu / copperPerPile)
+    {
+        if (reasonOut)
+            *reasonOut = "overflow";
+        return false;
+    }
+    copper = piles * copperPerPile;
+    if (role->money < copper)
+    {
+        if (reasonOut)
+            *reasonOut = "money-insufficient";
+        return false;
+    }
+
+    role->money -= copper;
+    if (!vm_net_mock_role_add_backpack_item_to_role(
+            role, VM_NET_MOCK_GOLD_PILE_ITEM_ID, piles, 0, &seq,
+            "warehouse-gold-pile-exchange", NULL, 0))
+    {
+        role->money = beforeMoney;
+        if (reasonOut)
+            *reasonOut = "backpack-full";
+        return false;
+    }
+
+    printf("[info][network] mock_warehouse_gold_pile_exchange role=%u "
+           "piles=%u copper=%u money=%u->%u seq=%u all=%u\n",
+           role->roleId, piles, copper, beforeMoney, role->money, seq,
+           allPiles ? 1u : 0u);
+    return true;
+}
+
 static bool vm_net_mock_warehouse_item_is_depositable(u32 itemId)
 {
     if (itemId == 0 || itemId == VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID ||
@@ -13548,8 +13720,10 @@ static void vm_net_mock_role_finalize_loaded_enhance_instances(
         if (item->itemId == 0 || item->count == 0)
             continue;
         /* 921 的 enhanceInstanceId = cultivation book_id，不是装备实例。
-         * ensure_equipment_instance_id 对非装备会返回 0，会冲掉书本关联。 */
-        if (item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID)
+         * 857 角色封印卷的 enhanceInstanceId = server_sealed_roles 绑定。
+         * ensure_equipment_instance_id 对非装备会返回 0，会冲掉绑定。 */
+        if (item->itemId == VM_NET_MOCK_CULTIVATION_BOOK_ITEM_ID ||
+            item->itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID)
             continue;
         item->enhanceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
             role, item->enhanceInstanceId, item->itemId);
@@ -13609,6 +13783,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
         itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
         itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
+        itemId == VM_NET_MOCK_GOLD_PILE_ITEM_ID ||
+        itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID ||
         itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID ||
         itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID)
     {
@@ -13625,6 +13801,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                            itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
                            itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
                            itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
+                           itemId == VM_NET_MOCK_GOLD_PILE_ITEM_ID ||
+                           itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID ||
                            itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID ||
                            itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID
                        ? VM_NET_MOCK_GOLD_SCROLL_DURABILITY
@@ -13644,19 +13822,25 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                    ? "backpack-add-rename-card"
                                                    : (itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID
                                                           ? "backpack-add-gold-scroll"
-                                                          : (itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID
-                                                                 ? "backpack-add-crystal-extract-stone"
-                                                                 : (itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID
-                                                                        ? "backpack-add-cross-quality-recast-stone"
-                                                                        : "backpack-add-warehouse-pass"))))))));
+                                                          : (itemId == VM_NET_MOCK_GOLD_PILE_ITEM_ID
+                                                                 ? "backpack-add-gold-pile"
+                                                                 : (itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID
+                                                                        ? "backpack-add-role-seal-scroll"
+                                                                        : (itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID
+                                                                               ? "backpack-add-crystal-extract-stone"
+                                                                               : (itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID
+                                                                                      ? "backpack-add-cross-quality-recast-stone"
+                                                                                      : "backpack-add-warehouse-pass"))))))))));
 
-        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得 / 玄晶提炼石 / 跨品重铸石：耐久1，叠加入已有堆或新行。 */
+        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得 / 金币堆 / 角色封印卷 / 玄晶提炼石 / 跨品重铸石：耐久1，叠加入已有堆或新行。 */
         if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
             itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
             itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
             itemId == VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID ||
             itemId == VM_NET_MOCK_RENAME_CARD_ITEM_ID ||
             itemId == VM_NET_MOCK_GOLD_SCROLL_ITEM_ID ||
+            itemId == VM_NET_MOCK_GOLD_PILE_ITEM_ID ||
+            itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID ||
             itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID ||
             itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID)
         {
