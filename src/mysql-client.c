@@ -796,7 +796,16 @@ static bool vm_mysql_run_query(const char *sql, vm_mysql_row_callback callback, 
         goto connection_failed;
     g_vm_mysql_transport_retry_ok = 0;
     if (vm_mysql_is_error(packet, packet_len))
-        goto query_failed;
+    {
+        /*
+         * ERR is a complete COM_QUERY response: error text is already in
+         * g_vm_mysql_error and the socket is still synchronized. Closing here
+         * would abort any open transaction (seen: seal reassign UPDATE then
+         * optional child 1054 → reconnect → verify still on escrow).
+         */
+        free(packet);
+        return false;
+    }
     if (packet_len > 0 && packet[0] == 0x00)
     {
         free(packet);

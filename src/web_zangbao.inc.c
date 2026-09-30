@@ -11,6 +11,8 @@ enum
     VM_MOCK_ZANGBAO_RESERVE_SEC = 360,
     VM_MOCK_KCOIN_WITHDRAW_MIN = 50,
     VM_MOCK_ZANGBAO_PAGE_SIZE = 20,
+    /* Default per-role concurrent listings (active+reserved); admin-overridable. */
+    VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE = 10,
     VM_MOCK_ZANGBAO_WD_PENDING = 0,
     VM_MOCK_ZANGBAO_WD_APPROVED = 1,
     VM_MOCK_ZANGBAO_WD_REJECTED = 2
@@ -21,6 +23,7 @@ typedef struct
     bool found;
     bool enabled;
     u32 kcoinPerYuan;
+    u32 maxActiveListings;
 } vm_mock_kcoin_config;
 
 typedef struct
@@ -113,12 +116,20 @@ static bool vm_mock_zangbao_ensure_schema(void)
             "config_id TINYINT UNSIGNED NOT NULL,"
             "kcoin_per_yuan INT UNSIGNED NOT NULL DEFAULT 1,"
             "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "max_active_listings INT UNSIGNED NOT NULL DEFAULT 10,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(config_id)) ENGINE=InnoDB"))
         goto fail;
+    if (!vm_net_mock_role_table_ensure_column(
+            "server_kcoin_config", "max_active_listings",
+            "ALTER TABLE server_kcoin_config ADD COLUMN max_active_listings "
+            "INT UNSIGNED NOT NULL DEFAULT 10 AFTER enabled",
+            "kcoin_max_active_listings"))
+        goto fail;
     (void)vm_mysql_exec(
-        "INSERT IGNORE INTO server_kcoin_config(config_id,kcoin_per_yuan,enabled) "
-        "VALUES(1,1,1)");
+        "INSERT IGNORE INTO server_kcoin_config("
+        "config_id,kcoin_per_yuan,enabled,max_active_listings) "
+        "VALUES(1,1,1,10)");
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_zangbao_listings ("
             "listing_id INT UNSIGNED NOT NULL AUTO_INCREMENT,"
@@ -246,15 +257,21 @@ static bool vm_mock_kcoin_config_row(void *ctx, unsigned int cols,
     vm_mock_kcoin_config *cfg = (vm_mock_kcoin_config *)ctx;
     u32 rate = 1;
     u32 en = 1;
+    u32 maxActive = VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE;
 
     (void)lens;
     if (cfg == NULL || cols < 2)
         return true;
     (void)vm_mock_mysql_parse_u32(vals[0], vals[0] ? strlen(vals[0]) : 0, &rate);
     (void)vm_mock_mysql_parse_u32(vals[1], vals[1] ? strlen(vals[1]) : 0, &en);
+    if (cols >= 3)
+        (void)vm_mock_mysql_parse_u32(vals[2], vals[2] ? strlen(vals[2]) : 0,
+                                      &maxActive);
     cfg->found = true;
     cfg->kcoinPerYuan = rate ? rate : 1;
     cfg->enabled = en != 0;
+    cfg->maxActiveListings =
+        maxActive ? maxActive : (u32)VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE;
     return true;
 }
 
@@ -265,18 +282,22 @@ static bool vm_mock_kcoin_load_config(vm_mock_kcoin_config *out)
     memset(out, 0, sizeof(*out));
     out->kcoinPerYuan = 1;
     out->enabled = true;
+    out->maxActiveListings = VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE;
     if (!vm_mock_zangbao_ensure_schema())
         return false;
     (void)vm_mysql_query(
-        "SELECT kcoin_per_yuan,enabled FROM server_kcoin_config WHERE config_id=1 "
-        "LIMIT 1",
+        "SELECT kcoin_per_yuan,enabled,max_active_listings "
+        "FROM server_kcoin_config WHERE config_id=1 LIMIT 1",
         vm_mock_kcoin_config_row, out);
     if (!out->found)
     {
         out->found = true;
         out->kcoinPerYuan = 1;
         out->enabled = true;
+        out->maxActiveListings = VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE;
     }
+    else if (out->maxActiveListings == 0)
+        out->maxActiveListings = VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE;
     return true;
 }
 
@@ -597,6 +618,25 @@ static int vm_mock_zangbao_api_list_create(vm_mock_service_socket client,
     }
     if (count == 0 || count > bag->count)
         count = bag->count;
+    {
+        u32 activeCount = 0;
+        char limitMsg[64];
+
+        /* Occupied slots: on-sale + payment-reserved (not yet sold/cancelled). */
+        snprintf(query, sizeof(query),
+                 "SELECT COUNT(*) FROM server_zangbao_listings "
+                 "WHERE seller_role_id=%u AND status IN (%u,%u)",
+                 role->roleId, VM_MOCK_ZANGBAO_ST_ACTIVE,
+                 VM_MOCK_ZANGBAO_ST_RESERVED);
+        (void)vm_mysql_query(query, vm_mock_zangbao_u32_row, &activeCount);
+        if (activeCount >= cfg.maxActiveListings)
+        {
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            snprintf(limitMsg, sizeof(limitMsg), "每人最多同时上架%u件",
+                     cfg.maxActiveListings);
+            return vm_mock_zangbao_json_err(client, "400 Bad Request", limitMsg);
+        }
+    }
     {
         vm_net_mock_backpack_item_state snapCopy = *bag;
         before = *role;
@@ -1951,6 +1991,13 @@ typedef struct
 } vm_mock_zangbao_seal_json_ctx;
 
 static bool vm_mock_zangbao_seal_json_append(vm_mock_zangbao_seal_json_ctx *c,
+                                             const char *fmt, ...);
+static void vm_mock_zangbao_seal_fill_guild_by_role(u32 roleId, char *nameOut,
+                                                    size_t nameOutSize);
+static bool vm_mock_zangbao_seal_copy_wash(const char *val, size_t len,
+                                           char *washOut, size_t washCap);
+
+static bool vm_mock_zangbao_seal_json_append(vm_mock_zangbao_seal_json_ctx *c,
                                              const char *fmt, ...)
 {
     va_list ap;
@@ -1971,6 +2018,301 @@ static bool vm_mock_zangbao_seal_json_append(vm_mock_zangbao_seal_json_ctx *c,
     return true;
 }
 
+static bool vm_mock_zangbao_seal_gbk_json_esc(const char *gbk, char *esc,
+                                              size_t escCap)
+{
+    char utf8[128];
+
+    memset(utf8, 0, sizeof(utf8));
+    if (gbk != NULL && gbk[0] != 0)
+        gbk_to_utf8((u8 *)gbk, (u8 *)utf8, sizeof(utf8));
+    if (utf8[0] == 0 && gbk != NULL && gbk[0] != 0)
+        snprintf(utf8, sizeof(utf8), "%s", gbk);
+    if (utf8[0] == 0)
+        snprintf(utf8, sizeof(utf8), "-");
+    if (!vm_mock_admin_json_escape(utf8, esc, escCap))
+        snprintf(esc, escCap, "-");
+    return true;
+}
+
+/* Mirror Pixi 1/1/21 panel fields so seal buyers see the same attr rows. */
+static bool vm_mock_zangbao_seal_append_role_panel(
+    vm_mock_zangbao_seal_json_ctx *c, vm_net_mock_role_state *role)
+{
+    vm_net_mock_player_stats stats;
+    u32 hp = 0, hpMax = 0, mp = 0, mpMax = 0;
+    u32 vitality = 0, vitalityMax = 0;
+    const char *title = "";
+    const char *spouse = "";
+    char guildName[VM_NET_MOCK_GUILD_NAME_SIZE];
+    char nameEsc[192];
+    char titleEsc[192];
+    char spouseEsc[192];
+    char guildEsc[192];
+    char sceneEsc[256];
+
+    if (c == NULL || role == NULL)
+        return false;
+    memset(&stats, 0, sizeof(stats));
+    vm_net_mock_role_sync_derived_vitals(role);
+    vm_net_mock_role_build_player_stats(role, &stats);
+    vm_net_mock_role_default_vitals(role, &hp, &hpMax, &mp, &mpMax);
+    vitality = 0;
+    vitalityMax = 0;
+    vm_mock_activities_vitality_wire(role, &vitality, &vitalityMax);
+    title = vm_net_mock_role_title(role);
+    if (title == NULL || title[0] == 0)
+        title = "\xce\xde"; /* GBK: 无 */
+    spouse = vm_net_mock_role_spouse_name(role);
+    if (spouse == NULL || spouse[0] == 0)
+        spouse = "\xce\xde"; /* GBK: 无 */
+    memset(guildName, 0, sizeof(guildName));
+    vm_mock_zangbao_seal_fill_guild_by_role(role->roleId, guildName,
+                                             sizeof(guildName));
+    if (guildName[0] == 0)
+        (void)vm_net_mock_role_guild_info(role, guildName, sizeof(guildName));
+    (void)vm_mock_zangbao_seal_gbk_json_esc(role->name, nameEsc, sizeof(nameEsc));
+    (void)vm_mock_zangbao_seal_gbk_json_esc(title, titleEsc, sizeof(titleEsc));
+    (void)vm_mock_zangbao_seal_gbk_json_esc(spouse, spouseEsc, sizeof(spouseEsc));
+    (void)vm_mock_zangbao_seal_gbk_json_esc(
+        guildName[0] ? guildName : "\xce\xde\xb0\xef\xc5\xc9", /* 无帮派 */
+        guildEsc, sizeof(guildEsc));
+    if (role->scene[0] != 0)
+        (void)vm_mock_zangbao_seal_gbk_json_esc(role->scene, sceneEsc,
+                                                 sizeof(sceneEsc));
+    else
+        snprintf(sceneEsc, sizeof(sceneEsc), "");
+    if (!vm_mock_zangbao_seal_json_append(
+            c,
+            "\"role\":{\"name\":\"%s\",\"level\":%u,\"job\":%u,\"sex\":%u,"
+            "\"title\":\"%s\",\"spouse\":\"%s\",\"guild\":\"%s\","
+            "\"hp\":%u,\"hpMax\":%u,\"mp\":%u,\"mpMax\":%u,"
+            "\"charm\":%u,\"strength\":%u,\"agility\":%u,\"wisdom\":%u,"
+            "\"attack\":%u,\"armor\":%u,\"dodge\":%u,\"hit\":%u,"
+            "\"crit\":%u,\"resist\":%u,\"reflectPct\":%u,\"comboPct\":%u,"
+            "\"revivePct\":%u,\"vitality\":%u,\"vitalityMax\":%u,"
+            "\"money\":%u,\"exp\":%u,\"wcoin\":%u,\"kcoin\":%u,"
+            "\"scene\":\"%s\"}",
+            nameEsc, stats.level, stats.job, (u32)role->sex, titleEsc,
+            spouseEsc, guildEsc, hp, stats.maxHp ? stats.maxHp : hpMax, mp,
+            stats.maxMp ? stats.maxMp : mpMax, stats.charm, stats.strength,
+            stats.agility, stats.wisdom, stats.attack, stats.defense,
+            stats.dodge, stats.hit, stats.crit, stats.resist, stats.reflectPct,
+            stats.comboPct, stats.revivePct, vitality, vitalityMax, role->money,
+            role->exp, role->wcoin, role->kcoin, sceneEsc))
+        return false;
+    c->found = true;
+    return true;
+}
+
+typedef struct
+{
+    vm_net_mock_role_state *role;
+    bool found;
+    bool invalid;
+} vm_mock_zangbao_seal_scratch_ctx;
+
+static bool vm_mock_zangbao_seal_scratch_role_row(void *ctx, unsigned int cols,
+                                                  const char *const *vals,
+                                                  const size_t *lens)
+{
+    vm_mock_zangbao_seal_scratch_ctx *c =
+        (vm_mock_zangbao_seal_scratch_ctx *)ctx;
+    vm_net_mock_role_state *role;
+    size_t nlen = 0;
+    u32 tmp = 0;
+
+    if (c == NULL || c->role == NULL || cols < 13)
+    {
+        if (c != NULL)
+            c->invalid = true;
+        return true;
+    }
+    role = c->role;
+    if (vals[0])
+        (void)vm_mysql_hex_decode(vals[0], lens[0], role->name,
+                                  sizeof(role->name) - 1, &nlen);
+    role->name[nlen] = 0;
+    (void)vm_mock_mysql_parse_u32(vals[1], lens[1], &role->level);
+    (void)vm_mock_mysql_parse_u32(vals[2], lens[2], &tmp);
+    role->job = (u8)tmp;
+    (void)vm_mock_mysql_parse_u32(vals[3], lens[3], &tmp);
+    role->sex = (u8)tmp;
+    (void)vm_mock_mysql_parse_u32(vals[4], lens[4], &role->hp);
+    (void)vm_mock_mysql_parse_u32(vals[5], lens[5], &role->hpMax);
+    (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &role->mp);
+    (void)vm_mock_mysql_parse_u32(vals[7], lens[7], &role->mpMax);
+    (void)vm_mock_mysql_parse_u32(vals[8], lens[8], &role->money);
+    (void)vm_mock_mysql_parse_u32(vals[9], lens[9], &role->exp);
+    (void)vm_mock_mysql_parse_u32(vals[10], lens[10], &role->wcoin);
+    (void)vm_mock_mysql_parse_u32(vals[11], lens[11], &role->kcoin);
+    nlen = 0;
+    if (vals[12])
+        (void)vm_mysql_hex_decode(vals[12], lens[12], role->scene,
+                                  sizeof(role->scene) - 1, &nlen);
+    role->scene[nlen] = 0;
+    if (cols >= 15)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[13], lens[13], &role->spouseRoleId);
+        nlen = 0;
+        if (vals[14])
+            (void)vm_mysql_hex_decode(vals[14], lens[14], role->spouseName,
+                                      sizeof(role->spouseName) - 1, &nlen);
+        role->spouseName[nlen] = 0;
+    }
+    if (cols >= 16)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[15], lens[15], &tmp);
+        role->designationId = (u8)tmp;
+    }
+    if (cols >= 18)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[16], lens[16],
+                                      &role->arenaDesignationMask);
+        (void)vm_mock_mysql_parse_u32(vals[17], lens[17],
+                                      &role->specialDesignationMask);
+    }
+    if (role->level == 0 && role->exp > 0)
+        role->level = vm_net_mock_role_level_from_exp(role->exp);
+    if (role->level == 0)
+        role->level = 1;
+    if (role->job == 0 || role->job > 3)
+        role->job = 1;
+    c->found = true;
+    return true;
+}
+
+static bool vm_mock_zangbao_seal_scratch_equip_row(void *ctx, unsigned int cols,
+                                                   const char *const *vals,
+                                                   const size_t *lens)
+{
+    vm_mock_zangbao_seal_scratch_ctx *c =
+        (vm_mock_zangbao_seal_scratch_ctx *)ctx;
+    vm_net_mock_role_state *role;
+    u32 slot = 0, itemId = 0, enhance = 0;
+    u32 gemReflect = 0, gemCombo = 0, gemRevive = 0;
+    char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
+
+    if (c == NULL || c->role == NULL || cols < 3)
+        return true;
+    role = c->role;
+    (void)vm_mock_mysql_parse_u32(vals[0], lens[0], &slot);
+    (void)vm_mock_mysql_parse_u32(vals[1], lens[1], &itemId);
+    (void)vm_mock_mysql_parse_u32(vals[2], lens[2], &enhance);
+    if (itemId == 0 || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+        return true;
+    if (enhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
+        enhance = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
+    role->equippedItemIds[slot] = itemId;
+    role->equippedEnhanceLevels[slot] = (u16)enhance;
+    vm_net_mock_enhance_wash_clear(&role->equippedEnhanceWash[slot]);
+    (void)vm_mock_zangbao_seal_copy_wash(cols >= 4 ? vals[3] : NULL,
+                                          cols >= 4 ? lens[3] : 0, washText,
+                                          sizeof(washText));
+    (void)vm_net_mock_enhance_wash_decode(washText, strlen(washText),
+                                          &role->equippedEnhanceWash[slot]);
+    if (cols >= 7)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[4], lens[4], &gemReflect);
+        (void)vm_mock_mysql_parse_u32(vals[5], lens[5], &gemCombo);
+        (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &gemRevive);
+    }
+    role->equippedGemReflect[slot] = (u8)gemReflect;
+    role->equippedGemCombo[slot] = (u8)gemCombo;
+    role->equippedGemRevive[slot] = (u8)gemRevive;
+    return true;
+}
+
+/* Escrow account is not in login accounts — cannot open_account_role_db.
+ * Build a scratch role from MySQL (role row + worn gear) for panel stats. */
+static vm_net_mock_role_state *vm_mock_zangbao_seal_load_scratch(
+    const char *escrowHex, u32 sealedRoleId)
+{
+    vm_net_mock_role_state *role = NULL;
+    vm_mock_zangbao_seal_scratch_ctx ctx;
+    char sql[640];
+
+    if (escrowHex == NULL || escrowHex[0] == 0 || sealedRoleId == 0)
+        return NULL;
+    role = (vm_net_mock_role_state *)calloc(1, sizeof(*role));
+    if (role == NULL)
+        return NULL;
+    role->roleId = sealedRoleId;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.role = role;
+    snprintf(sql, sizeof(sql),
+             "SELECT HEX(role_name),level,job,sex,hp,hp_max,mp,mp_max,money,exp,"
+             "wcoin,kcoin,HEX(scene),spouse_role_id,HEX(IFNULL(spouse_name,'')),"
+             "designation_id,arena_designation_mask,special_designation_mask "
+             "FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u LIMIT 1",
+             escrowHex, sealedRoleId);
+    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_scratch_role_row, &ctx);
+    if (ctx.invalid || !ctx.found)
+    {
+        free(role);
+        return NULL;
+    }
+    snprintf(sql, sizeof(sql),
+             "SELECT slot_index,item_id,enhance_level,enhance_wash,"
+             "gem_reflect,gem_combo,gem_revive "
+             "FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u AND item_id<>0 ORDER BY slot_index",
+             escrowHex, sealedRoleId);
+    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_scratch_equip_row, &ctx);
+    if (ctx.invalid)
+    {
+        free(role);
+        return NULL;
+    }
+    return role;
+}
+
+typedef struct
+{
+    char name[VM_NET_MOCK_GUILD_NAME_SIZE];
+    bool found;
+} vm_mock_zangbao_seal_guild_ctx;
+
+static bool vm_mock_zangbao_seal_guild_row(void *ctx, unsigned int cols,
+                                           const char *const *vals,
+                                           const size_t *lens)
+{
+    vm_mock_zangbao_seal_guild_ctx *c = (vm_mock_zangbao_seal_guild_ctx *)ctx;
+    size_t nlen = 0;
+
+    if (c == NULL || cols < 1 || vals[0] == NULL)
+        return true;
+    memset(c->name, 0, sizeof(c->name));
+    (void)vm_mysql_hex_decode(vals[0], lens[0], c->name, sizeof(c->name) - 1,
+                              &nlen);
+    c->name[nlen] = 0;
+    c->found = c->name[0] != 0;
+    return true;
+}
+
+static void vm_mock_zangbao_seal_fill_guild_by_role(u32 roleId, char *nameOut,
+                                                    size_t nameOutSize)
+{
+    char sql[320];
+    vm_mock_zangbao_seal_guild_ctx gctx;
+
+    if (nameOut == NULL || nameOutSize == 0)
+        return;
+    nameOut[0] = 0;
+    if (roleId == 0)
+        return;
+    memset(&gctx, 0, sizeof(gctx));
+    snprintf(sql, sizeof(sql),
+             "SELECT HEX(g.guild_name) FROM guild_members gm "
+             "JOIN guilds g ON g.guild_id=gm.guild_id "
+             "WHERE gm.role_id=%u LIMIT 1",
+             roleId);
+    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_guild_row, &gctx);
+    if (gctx.found)
+        snprintf(nameOut, nameOutSize, "%s", gctx.name);
+}
+
 static bool vm_mock_zangbao_seal_role_row(void *ctx, unsigned int cols,
                                           const char *const *vals,
                                           const size_t *lens)
@@ -1984,9 +2326,9 @@ static bool vm_mock_zangbao_seal_role_row(void *ctx, unsigned int cols,
     char sceneEsc[256];
     size_t nlen = 0;
     u32 level = 0, job = 0, sex = 0, hp = 0, hpMax = 0, mp = 0, mpMax = 0;
-    u32 money = 0, exp = 0;
+    u32 money = 0, exp = 0, wcoin = 0, kcoin = 0;
 
-    if (c == NULL || cols < 11)
+    if (c == NULL || cols < 13)
     {
         if (c != NULL)
             c->invalid = true;
@@ -2007,9 +2349,11 @@ static bool vm_mock_zangbao_seal_role_row(void *ctx, unsigned int cols,
     (void)vm_mock_mysql_parse_u32(vals[7], lens[7], &mpMax);
     (void)vm_mock_mysql_parse_u32(vals[8], lens[8], &money);
     (void)vm_mock_mysql_parse_u32(vals[9], lens[9], &exp);
+    (void)vm_mock_mysql_parse_u32(vals[10], lens[10], &wcoin);
+    (void)vm_mock_mysql_parse_u32(vals[11], lens[11], &kcoin);
     nlen = 0;
-    if (vals[10])
-        (void)vm_mysql_hex_decode(vals[10], lens[10], sceneGbk,
+    if (vals[12])
+        (void)vm_mysql_hex_decode(vals[12], lens[12], sceneGbk,
                                   sizeof(sceneGbk) - 1, &nlen);
     sceneGbk[nlen] = 0;
     memset(nameUtf8, 0, sizeof(nameUtf8));
@@ -2027,12 +2371,34 @@ static bool vm_mock_zangbao_seal_role_row(void *ctx, unsigned int cols,
     if (!vm_mock_zangbao_seal_json_append(
             c,
             "\"role\":{\"name\":\"%s\",\"level\":%u,\"job\":%u,\"sex\":%u,"
-            "\"hp\":%u,\"hpMax\":%u,\"mp\":%u,\"mpMax\":%u,\"money\":%u,"
-            "\"exp\":%u,\"scene\":\"%s\"}",
-            nameEsc, level, job, sex, hp, hpMax, mp, mpMax, money, exp,
-            sceneEsc))
+            "\"title\":\"\",\"spouse\":\"无\",\"guild\":\"无帮派\","
+            "\"hp\":%u,\"hpMax\":%u,\"mp\":%u,\"mpMax\":%u,"
+            "\"charm\":0,\"strength\":0,\"agility\":0,\"wisdom\":0,"
+            "\"attack\":0,\"armor\":0,\"dodge\":0,\"hit\":0,"
+            "\"crit\":0,\"resist\":0,\"reflectPct\":0,\"comboPct\":0,"
+            "\"revivePct\":0,\"vitality\":0,\"vitalityMax\":0,"
+            "\"money\":%u,\"exp\":%u,\"wcoin\":%u,\"kcoin\":%u,"
+            "\"scene\":\"%s\"}",
+            nameEsc, level, job, sex, hp, hpMax, mp, mpMax, money, exp, wcoin,
+            kcoin, sceneEsc))
         return false;
     c->found = true;
+    return true;
+}
+
+static bool vm_mock_zangbao_seal_copy_wash(const char *val, size_t len,
+                                           char *washOut, size_t washCap)
+{
+    size_t copy;
+
+    if (washOut == NULL || washCap == 0)
+        return false;
+    snprintf(washOut, washCap, "0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0");
+    if (val == NULL || len == 0)
+        return true;
+    copy = len < washCap - 1 ? len : washCap - 1;
+    memcpy(washOut, val, copy);
+    washOut[copy] = 0;
     return true;
 }
 
@@ -2042,6 +2408,9 @@ static bool vm_mock_zangbao_seal_equip_row(void *ctx, unsigned int cols,
 {
     vm_mock_zangbao_seal_json_ctx *c = (vm_mock_zangbao_seal_json_ctx *)ctx;
     u32 slot = 0, itemId = 0, enhance = 0, instanceId = 0;
+    u32 gemReflect = 0, gemCombo = 0, gemRevive = 0;
+    char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
+    char washEsc[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX * 2 + 8];
 
     if (c == NULL || cols < 4)
         return true;
@@ -2051,9 +2420,25 @@ static bool vm_mock_zangbao_seal_equip_row(void *ctx, unsigned int cols,
     (void)vm_mock_mysql_parse_u32(vals[3], lens[3], &instanceId);
     if (itemId == 0)
         return true;
+    (void)vm_mock_zangbao_seal_copy_wash(cols >= 5 ? vals[4] : NULL,
+                                          cols >= 5 ? lens[4] : 0, washText,
+                                          sizeof(washText));
+    if (cols >= 8)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[5], lens[5], &gemReflect);
+        (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &gemCombo);
+        (void)vm_mock_mysql_parse_u32(vals[7], lens[7], &gemRevive);
+    }
+    if (!vm_mock_admin_json_escape(washText, washEsc, sizeof(washEsc)))
+        snprintf(washEsc, sizeof(washEsc),
+                 "0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0");
     if (!vm_mock_zangbao_seal_json_append(
-            c, "%s{\"slot\":%u,\"itemId\":%u,\"enhanceLevel\":%u,\"instanceId\":%u}",
-            c->first ? "" : ",", slot, itemId, enhance, instanceId))
+            c,
+            "%s{\"slot\":%u,\"itemId\":%u,\"enhanceLevel\":%u,\"instanceId\":%u,"
+            "\"enhanceWash\":\"%s\",\"gemReflect\":%u,\"gemCombo\":%u,"
+            "\"gemRevive\":%u}",
+            c->first ? "" : ",", slot, itemId, enhance, instanceId, washEsc,
+            gemReflect, gemCombo, gemRevive))
         return false;
     c->first = false;
     return true;
@@ -2065,6 +2450,9 @@ static bool vm_mock_zangbao_seal_bag_row(void *ctx, unsigned int cols,
 {
     vm_mock_zangbao_seal_json_ctx *c = (vm_mock_zangbao_seal_json_ctx *)ctx;
     u32 itemId = 0, count = 0, enhance = 0, seq = 0;
+    u32 gemReflect = 0, gemCombo = 0, gemRevive = 0;
+    char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
+    char washEsc[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX * 2 + 8];
 
     if (c == NULL || cols < 4)
         return true;
@@ -2074,10 +2462,25 @@ static bool vm_mock_zangbao_seal_bag_row(void *ctx, unsigned int cols,
     (void)vm_mock_mysql_parse_u32(vals[3], lens[3], &seq);
     if (itemId == 0 || count == 0)
         return true;
+    (void)vm_mock_zangbao_seal_copy_wash(cols >= 5 ? vals[4] : NULL,
+                                          cols >= 5 ? lens[4] : 0, washText,
+                                          sizeof(washText));
+    if (cols >= 8)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[5], lens[5], &gemReflect);
+        (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &gemCombo);
+        (void)vm_mock_mysql_parse_u32(vals[7], lens[7], &gemRevive);
+    }
+    if (!vm_mock_admin_json_escape(washText, washEsc, sizeof(washEsc)))
+        snprintf(washEsc, sizeof(washEsc),
+                 "0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0");
     if (!vm_mock_zangbao_seal_json_append(
             c,
-            "%s{\"itemId\":%u,\"count\":%u,\"enhanceLevel\":%u,\"seq\":%u}",
-            c->first ? "" : ",", itemId, count, enhance, seq))
+            "%s{\"itemId\":%u,\"count\":%u,\"enhanceLevel\":%u,\"seq\":%u,"
+            "\"enhanceWash\":\"%s\",\"gemReflect\":%u,\"gemCombo\":%u,"
+            "\"gemRevive\":%u}",
+            c->first ? "" : ",", itemId, count, enhance, seq, washEsc,
+            gemReflect, gemCombo, gemRevive))
         return false;
     c->first = false;
     return true;
@@ -2089,6 +2492,9 @@ static bool vm_mock_zangbao_seal_wh_row(void *ctx, unsigned int cols,
 {
     vm_mock_zangbao_seal_json_ctx *c = (vm_mock_zangbao_seal_json_ctx *)ctx;
     u32 itemId = 0, count = 0, enhance = 0;
+    u32 gemReflect = 0, gemCombo = 0, gemRevive = 0;
+    char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
+    char washEsc[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX * 2 + 8];
 
     if (c == NULL || cols < 3)
         return true;
@@ -2097,9 +2503,25 @@ static bool vm_mock_zangbao_seal_wh_row(void *ctx, unsigned int cols,
     (void)vm_mock_mysql_parse_u32(vals[2], lens[2], &enhance);
     if (itemId == 0 || count == 0)
         return true;
+    (void)vm_mock_zangbao_seal_copy_wash(cols >= 4 ? vals[3] : NULL,
+                                          cols >= 4 ? lens[3] : 0, washText,
+                                          sizeof(washText));
+    if (cols >= 7)
+    {
+        (void)vm_mock_mysql_parse_u32(vals[4], lens[4], &gemReflect);
+        (void)vm_mock_mysql_parse_u32(vals[5], lens[5], &gemCombo);
+        (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &gemRevive);
+    }
+    if (!vm_mock_admin_json_escape(washText, washEsc, sizeof(washEsc)))
+        snprintf(washEsc, sizeof(washEsc),
+                 "0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0");
     if (!vm_mock_zangbao_seal_json_append(
-            c, "%s{\"itemId\":%u,\"count\":%u,\"enhanceLevel\":%u}",
-            c->first ? "" : ",", itemId, count, enhance))
+            c,
+            "%s{\"itemId\":%u,\"count\":%u,\"enhanceLevel\":%u,"
+            "\"enhanceWash\":\"%s\",\"gemReflect\":%u,\"gemCombo\":%u,"
+            "\"gemRevive\":%u}",
+            c->first ? "" : ",", itemId, count, enhance, washEsc, gemReflect,
+            gemCombo, gemRevive))
         return false;
     c->first = false;
     return true;
@@ -2109,35 +2531,106 @@ static int vm_mock_zangbao_api_seal_detail(vm_mock_service_socket client,
                                            const char *query)
 {
     char listingText[24];
+    char bagSeqText[24];
     char account[64];
     const char *err = NULL;
     u32 roleId = 0;
     u32 listingId = 0;
+    u32 bagSeq = 0;
+    u32 instanceId = 0;
     vm_mock_zangbao_listing listing;
     vm_net_mock_role_seal_row_ctx sealed;
     char escrowHex[160];
     char sql[512];
     char *json = NULL;
     vm_mock_zangbao_seal_json_ctx ctx;
+    vm_mock_service_account_state *state = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *bag = NULL;
+    char roleSel[24];
+    bool blankScroll = false;
 
     if (!vm_mock_zangbao_ensure_schema() || !vm_net_mock_role_seal_ensure_schema())
         return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
                                         "服务不可用");
     account[0] = 0;
-    (void)vm_mock_zangbao_auth_query(query ? query : "", account, sizeof(account),
-                                      &roleId, &err);
     memset(listingText, 0, sizeof(listingText));
-    if (!vm_mock_admin_form_value(query ? query : "", "listingId", listingText,
-                                   sizeof(listingText)) ||
-        !vm_net_mock_parse_u32_strict(listingText, &listingId) || listingId == 0)
-        return vm_mock_zangbao_json_err(client, "400 Bad Request", "缺少 listingId");
-    if (!vm_mock_zangbao_load_listing(listingId, &listing) || !listing.found)
-        return vm_mock_zangbao_json_err(client, "404 Not Found", "商品不存在");
-    if (listing.itemId != VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID ||
-        listing.itemInstanceId == 0)
-        return vm_mock_zangbao_json_err(client, "400 Bad Request", "非封印卷商品");
+    memset(bagSeqText, 0, sizeof(bagSeqText));
+    if (vm_mock_admin_form_value(query ? query : "", "listingId", listingText,
+                                  sizeof(listingText)) &&
+        vm_net_mock_parse_u32_strict(listingText, &listingId) && listingId != 0)
+    {
+        (void)vm_mock_zangbao_auth_query(query ? query : "", account,
+                                          sizeof(account), &roleId, &err);
+        if (!vm_mock_zangbao_load_listing(listingId, &listing) || !listing.found)
+            return vm_mock_zangbao_json_err(client, "404 Not Found", "商品不存在");
+        if (listing.itemId != VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID ||
+            listing.itemInstanceId == 0)
+            return vm_mock_zangbao_json_err(client, "400 Bad Request",
+                                            "非封印卷商品");
+        instanceId = listing.itemInstanceId;
+    }
+    else if (vm_mock_admin_form_value(query ? query : "", "bagSeq", bagSeqText,
+                                       sizeof(bagSeqText)) &&
+             vm_net_mock_parse_u32_strict(bagSeqText, &bagSeq) && bagSeq != 0)
+    {
+        /* Bag detail: auth required; resolve bound instance from backpack. */
+        if (!vm_mock_zangbao_auth_query(query ? query : "", account,
+                                         sizeof(account), &roleId, &err))
+            return vm_mock_zangbao_json_err(client, "401 Unauthorized",
+                                            err ? err : "未登录");
+        state = vm_mock_service_open_account_role_db_for_management(account, &err);
+        if (state == NULL)
+            return vm_mock_zangbao_json_err(client, "400 Bad Request",
+                                            err ? err : "角色加载失败");
+        snprintf(roleSel, sizeof(roleSel), "%u", roleId);
+        role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSel);
+        if (role == NULL)
+        {
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return vm_mock_zangbao_json_err(client, "400 Bad Request", "角色不存在");
+        }
+        bag = vm_net_mock_role_find_backpack_item(role, 0, (u16)bagSeq);
+        if (bag == NULL || bag->itemId != VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID ||
+            bag->count == 0)
+        {
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return vm_mock_zangbao_json_err(client, "404 Not Found", "封印卷不存在");
+        }
+        if (bag->enhanceInstanceId == 0)
+        {
+            blankScroll = true;
+            instanceId = 0;
+        }
+        else
+        {
+            instanceId = bag->enhanceInstanceId;
+        }
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        state = NULL;
+    }
+    else
+    {
+        return vm_mock_zangbao_json_err(client, "400 Bad Request",
+                                        "缺少 listingId 或 bagSeq");
+    }
+
+    if (blankScroll)
+    {
+        char blankJson[384];
+
+        snprintf(blankJson, sizeof(blankJson),
+                 "{\"ok\":true,\"listingId\":0,\"bagSeq\":%u,\"blank\":true,"
+                 "\"sealedRoleId\":0,\"role\":{\"name\":\"\",\"level\":0,\"job\":0,"
+                 "\"sex\":0,\"hp\":0,\"hpMax\":0,\"mp\":0,\"mpMax\":0,\"money\":0,"
+                 "\"exp\":0,\"wcoin\":0,\"kcoin\":0,\"scene\":\"\"},"
+                 "\"equipment\":[],\"backpack\":[],\"warehouse\":[]}\n",
+                 bagSeq);
+        return vm_mock_zangbao_json_ok(client, blankJson);
+    }
+
     memset(&sealed, 0, sizeof(sealed));
-    if (!vm_net_mock_role_seal_load_by_instance(listing.itemInstanceId, &sealed))
+    if (!vm_net_mock_role_seal_load_by_instance(instanceId, &sealed))
         return vm_mock_zangbao_json_err(client, "404 Not Found", "封印角色不存在");
     if (vm_mysql_hex_encode(VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT,
                             strlen(VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT),
@@ -2153,24 +2646,77 @@ static int vm_mock_zangbao_api_seal_detail(vm_mock_service_socket client,
     ctx.json = json;
     ctx.cap = 196608;
     if (!vm_mock_zangbao_seal_json_append(
-            &ctx, "{\"ok\":true,\"listingId\":%u,\"sealedRoleId\":%u,", listingId,
-            sealed.sealedRoleId))
+            &ctx,
+            "{\"ok\":true,\"listingId\":%u,\"bagSeq\":%u,\"blank\":false,"
+            "\"sealedRoleId\":%u,",
+            listingId, bagSeq, sealed.sealedRoleId))
     {
         free(json);
         return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
                                         "输出失败");
     }
 
-    snprintf(sql, sizeof(sql),
-             "SELECT HEX(role_name),level,job,sex,hp,hp_max,mp,mp_max,money,exp,"
-             "HEX(scene) FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) "
-             "AND role_id=%u LIMIT 1",
-             escrowHex, sealed.sealedRoleId);
-    (void)vm_mysql_query(sql, vm_mock_zangbao_seal_role_row, &ctx);
-    if (ctx.invalid || !ctx.found)
+    /* Escrow is not a login account — load scratch role + worn gear from MySQL. */
     {
-        free(json);
-        return vm_mock_zangbao_json_err(client, "404 Not Found", "托管角色缺失");
+        vm_net_mock_role_state *scratch =
+            vm_mock_zangbao_seal_load_scratch(escrowHex, sealed.sealedRoleId);
+        if (scratch != NULL)
+        {
+            if (!vm_mock_zangbao_seal_append_role_panel(&ctx, scratch))
+            {
+                free(scratch);
+                free(json);
+                return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                                "输出失败");
+            }
+            free(scratch);
+        }
+    }
+    if (!ctx.found)
+    {
+        snprintf(sql, sizeof(sql),
+                 "SELECT HEX(role_name),level,job,sex,hp,hp_max,mp,mp_max,money,exp,"
+                 "wcoin,kcoin,HEX(scene) FROM account_roles "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u LIMIT 1",
+                 escrowHex, sealed.sealedRoleId);
+        (void)vm_mysql_query(sql, vm_mock_zangbao_seal_role_row, &ctx);
+        if (ctx.invalid)
+        {
+            free(json);
+            return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                            "角色查询失败");
+        }
+    }
+    if (!ctx.found)
+    {
+        /* Escrow row missing: still show preview so bag/listing detail is not blank. */
+        char nameUtf8[96];
+        char nameEsc[192];
+
+        memset(nameUtf8, 0, sizeof(nameUtf8));
+        gbk_to_utf8((u8 *)sealed.previewName, (u8 *)nameUtf8, sizeof(nameUtf8));
+        if (nameUtf8[0] == 0)
+            snprintf(nameUtf8, sizeof(nameUtf8), "%s", sealed.previewName);
+        if (!vm_mock_admin_json_escape(nameUtf8, nameEsc, sizeof(nameEsc)))
+            snprintf(nameEsc, sizeof(nameEsc), "-");
+        if (!vm_mock_zangbao_seal_json_append(
+                &ctx,
+                "\"role\":{\"name\":\"%s\",\"level\":%u,\"job\":%u,\"sex\":%u,"
+                "\"title\":\"\",\"spouse\":\"无\",\"guild\":\"无帮派\","
+                "\"hp\":0,\"hpMax\":0,\"mp\":0,\"mpMax\":0,"
+                "\"charm\":0,\"strength\":0,\"agility\":0,\"wisdom\":0,"
+                "\"attack\":0,\"armor\":0,\"dodge\":0,\"hit\":0,"
+                "\"crit\":0,\"resist\":0,\"reflectPct\":0,\"comboPct\":0,"
+                "\"revivePct\":0,\"vitality\":0,\"vitalityMax\":0,"
+                "\"money\":0,\"exp\":0,\"wcoin\":0,\"kcoin\":0,\"scene\":\"\"}",
+                nameEsc, sealed.previewLevel, (u32)sealed.previewJob,
+                (u32)sealed.previewSex))
+        {
+            free(json);
+            return vm_mock_zangbao_json_err(client, "500 Internal Server Error",
+                                            "输出失败");
+        }
+        ctx.found = true;
     }
 
     if (!vm_mock_zangbao_seal_json_append(&ctx, ",\"equipment\":["))
@@ -2181,7 +2727,8 @@ static int vm_mock_zangbao_api_seal_detail(vm_mock_service_socket client,
     }
     ctx.first = true;
     snprintf(sql, sizeof(sql),
-             "SELECT slot_index,item_id,enhance_level,item_instance_id "
+             "SELECT slot_index,item_id,enhance_level,item_instance_id,"
+             "enhance_wash,gem_reflect,gem_combo,gem_revive "
              "FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR) "
              "AND role_id=%u AND item_id<>0 ORDER BY slot_index",
              escrowHex, sealed.sealedRoleId);
@@ -2194,7 +2741,8 @@ static int vm_mock_zangbao_api_seal_detail(vm_mock_service_socket client,
     }
     ctx.first = true;
     snprintf(sql, sizeof(sql),
-             "SELECT item_id,item_count,enhance_level,item_seq "
+             "SELECT item_id,item_count,enhance_level,item_seq,enhance_wash,"
+             "gem_reflect,gem_combo,gem_revive "
              "FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) "
              "AND role_id=%u AND item_id<>0 ORDER BY slot_index",
              escrowHex, sealed.sealedRoleId);
@@ -2207,7 +2755,8 @@ static int vm_mock_zangbao_api_seal_detail(vm_mock_service_socket client,
     }
     ctx.first = true;
     snprintf(sql, sizeof(sql),
-             "SELECT item_id,item_count,enhance_level "
+             "SELECT item_id,item_count,enhance_level,enhance_wash,"
+             "gem_reflect,gem_combo,gem_revive "
              "FROM account_role_warehouse WHERE account_id=CAST(X'%s' AS CHAR) "
              "AND role_id=%u AND item_id<>0 ORDER BY slot_index",
              escrowHex, sealed.sealedRoleId);

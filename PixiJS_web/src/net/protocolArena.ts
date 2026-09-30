@@ -29,7 +29,7 @@ export type ArenaStatus = {
   enabled: boolean;
   status: number;
   canEnter: boolean;
-  /** Today's open bracket: 0=rest, 10/50/70, 77=70 FFA. */
+  /** Today's open bracket: 0=rest, 10/30/40/50/60/70, 77=70 FFA. */
   activeBracket: number;
   dayYmd: number;
   minute: number;
@@ -405,12 +405,14 @@ export function parseWagerList(packet: WtPacket): {
   result: number;
   rows: WagerListRow[];
   message: string;
+  vitalityCost: number;
 } | null {
   const obj = packet.objects.find(
     (o) => o.kind === ARENA_WT_KIND && o.subtype === 10,
   );
   if (!obj) return null;
   const count = fieldU32(obj, "count");
+  const vitalityCost = fieldU32(obj, "vitalityCost");
   const raw = findField(obj, "rows");
   const rows: WagerListRow[] = [];
   const msgField = findField(obj, "message");
@@ -476,7 +478,7 @@ export function parseWagerList(packet: WtPacket): {
       }
     }
   }
-  return { result: fieldU32(obj, "result"), rows, message };
+  return { result: fieldU32(obj, "result"), rows, message, vitalityCost };
 }
 
 export function parseWagerMine(packet: WtPacket): WagerMine | null {
@@ -528,7 +530,10 @@ export const ARENA_NPC_WAGER = 0xf6000004;
 
 export function bracketForLevel(level: number): number {
   if (level >= 70) return 70;
+  if (level >= 60) return 60;
   if (level >= 50) return 50;
+  if (level >= 40) return 40;
+  if (level >= 30) return 30;
   if (level >= 10) return 10;
   return 0;
 }
@@ -536,7 +541,10 @@ export function bracketForLevel(level: number): number {
 export function bracketLabel(bracket: number): string {
   if (bracket === 77) return "70大乱斗";
   if (bracket === 70) return "70级";
-  if (bracket === 50) return "50-69";
-  if (bracket === 10) return "10-49";
+  if (bracket === 60) return "60-69";
+  if (bracket === 50) return "50-59";
+  if (bracket === 40) return "40-49";
+  if (bracket === 30) return "30-39";
+  if (bracket === 10) return "10-29";
   return String(bracket);
 }

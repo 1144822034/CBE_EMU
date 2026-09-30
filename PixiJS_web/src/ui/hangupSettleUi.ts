@@ -7,7 +7,10 @@ import { Container, Graphics, Texture } from "pixi.js";
 import { CBE, LCD_WIDTH, paintCbePanel } from "./constants";
 import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
 import { preferSystemFont } from "../resources/systemFont";
-import { formatBattleInsightRemainMmSs } from "../net/protocolExtras";
+import {
+  formatBattleInsightRemainMmSs,
+  HANGUP_BATTLES_WITHOUT_INSIGHT,
+} from "../net/protocolExtras";
 import { loadUiCrop, tryLoadUiTexture, uiSprite } from "./UiAssets";
 
 const PICKUP_CELL = 12;
@@ -236,14 +239,17 @@ export async function paintHangupPanel(
   const insX = panelX + 8;
   const insW = panelW - 16;
   const remainSec = Math.max(0, opts.insightRemainSec ?? 0);
-  const insightActive = remainSec > 0 || tally.maximum >= 200;
-  const insightBonus = insightActive
-    ? {
-        time: formatBattleInsightRemainMmSs(remainSec),
-        exp: "+20%",
-        battles: "不限次",
-      }
-    : { time: "00:00", exp: "+0%", battles: "0" };
+  /* Insight bonus (exp/+time) vs hangup battle cap are independent. */
+  const insightActive = remainSec > 0;
+  const unlimitedBattles =
+    insightActive || tally.maximum > HANGUP_BATTLES_WITHOUT_INSIGHT;
+  const insightBonus = {
+    time: insightActive
+      ? formatBattleInsightRemainMmSs(remainSec)
+      : "00:00",
+    exp: insightActive ? "+20%" : "+0%",
+    battles: unlimitedBattles ? "不限次" : "64",
+  };
 
   if (tex.effect && !preferSystemFont()) {
     const eff = uiSprite(tex.effect);

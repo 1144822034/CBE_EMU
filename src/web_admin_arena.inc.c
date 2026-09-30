@@ -84,7 +84,7 @@ static u32 vm_mock_admin_arena_form_hm(const char *body, const char *nameHour,
     return hour * 60u + minute;
 }
 
-/* Per-day bracket: 0=rest, 10/50/70, 77=70大乱斗. Builds mask from non-rest days. */
+/* Per-day bracket: 0=rest, 10/30/40/50/60/70, 77=70大乱斗. Builds mask from non-rest days. */
 static void vm_mock_admin_arena_form_weekday_brackets(const char *body,
                                                       u16 outBrackets[7],
                                                       u32 *maskOut)
@@ -109,7 +109,8 @@ static void vm_mock_admin_arena_form_weekday_brackets(const char *body,
         snprintf(key, sizeof(key), "bracket_wd_%u", i);
         value = 0;
         (void)vm_mock_admin_form_u32(body, key, 77u, &value);
-        if (value != 10u && value != 50u && value != 70u && value != 77u)
+        if (value != 10u && value != 30u && value != 40u && value != 50u &&
+            value != 60u && value != 70u && value != 77u)
             value = 0;
         outBrackets[i] = (u16)value;
         if (value != 0)
@@ -125,13 +126,17 @@ static void vm_mock_admin_arena_append_bracket_options(vm_mock_admin_text *page,
     vm_mock_admin_text_appendf(
         page,
         "<option value=\"0\"%s>休息</option>"
-        "<option value=\"10\"%s>10-49级</option>"
-        "<option value=\"50\"%s>50-69级</option>"
+        "<option value=\"10\"%s>10-29级</option>"
+        "<option value=\"30\"%s>30-39级</option>"
+        "<option value=\"40\"%s>40-49级</option>"
+        "<option value=\"50\"%s>50-59级</option>"
+        "<option value=\"60\"%s>60-69级</option>"
         "<option value=\"70\"%s>70级+(分职业)</option>"
         "<option value=\"77\"%s>70大乱斗(三职业同场)</option>",
         selected == 0 ? " selected" : "", selected == 10 ? " selected" : "",
-        selected == 50 ? " selected" : "", selected == 70 ? " selected" : "",
-        selected == 77 ? " selected" : "");
+        selected == 30 ? " selected" : "", selected == 40 ? " selected" : "",
+        selected == 50 ? " selected" : "", selected == 60 ? " selected" : "",
+        selected == 70 ? " selected" : "", selected == 77 ? " selected" : "");
 }
 
 static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
@@ -141,8 +146,12 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
     char status[16];
     char message[256];
     const vm_mock_arena_config *cfg;
+    const vm_mock_arena_reward *editReward = NULL;
     u32 rewardCount;
     u32 i;
+    u32 editJob = 0;
+    u32 editBracket = 0;
+    u32 editRank = 0;
     char sceneUtf8[128];
     char kwUtf8[64];
 
@@ -151,8 +160,24 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
     memset(message, 0, sizeof(message));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    (void)vm_mock_admin_form_u32(query, "edit_job", 3u, &editJob);
+    (void)vm_mock_admin_form_u32(query, "edit_bracket", 77u, &editBracket);
+    (void)vm_mock_admin_form_u32(query, "edit_rank", 5u, &editRank);
     cfg = vm_net_mock_arena_config_get();
     rewardCount = vm_net_mock_arena_reward_admin_count();
+    if (editRank != 0)
+    {
+        for (i = 0; i < rewardCount; ++i)
+        {
+            const vm_mock_arena_reward *rw = vm_net_mock_arena_reward_admin_at(i);
+            if (rw != NULL && (u32)rw->job == editJob &&
+                (u32)rw->bracket == editBracket && (u32)rw->rankPos == editRank)
+            {
+                editReward = rw;
+                break;
+            }
+        }
+    }
     memset(sceneUtf8, 0, sizeof(sceneUtf8));
     memset(kwUtf8, 0, sizeof(kwUtf8));
     if (cfg)
@@ -185,6 +210,9 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "background:#175cd3;color:#fff;cursor:pointer;margin-top:12px}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;"
         "padding:8px;border-bottom:1px solid #eaecf0}"
+        "a.btn-edit{display:inline-block;padding:6px 10px;border-radius:6px;background:#175cd3;color:#fff;"
+        "text-decoration:none;font-size:12px}a.btn-edit:hover{background:#0f4a9c}"
+        "a.btn-cancel{margin-left:10px;color:#667085;font-size:13px;text-decoration:none}"
         ".muted{color:#98a2b3}</style></head><body><main class=\"wrap\">"
         "<header><h1>比武管理</h1>"
         "<p class=\"sub\">配置比武擂台日程、计分与排行奖励；赏金擂台（押金对决）已接入；下方可开关。</p></header>");
@@ -208,7 +236,8 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
             "<section class=\"card\"><h2>运行状态</h2>"
             "<p>session=%u status=%u 参与者=%u 今日段位=%u</p>"
             "<p class=\"muted\">status: 0空闲 1进场 2比赛 3已结算；段位 0=休息 / "
-            "10=10-49 / 50=50-69 / 70=70分职业 / 77=70大乱斗</p></section>",
+            "10=10-29 / 30=30-39 / 40=40-49 / 50=50-59 / 60=60-69 / "
+            "70=70分职业 / 77=70大乱斗</p></section>",
             vm_net_mock_arena_runtime_session_id(),
             (u32)vm_net_mock_arena_runtime_status(),
             vm_net_mock_arena_runtime_participant_count(), (u32)todayBracket);
@@ -237,7 +266,7 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
     {
         static const char *const weekdayNames[7] = {
             "周日", "周一", "周二", "周三", "周四", "周五", "周六"};
-        static const u16 defaultBrackets[7] = {77, 70, 50, 10, 70, 50, 77};
+        static const u16 defaultBrackets[7] = {77, 70, 60, 50, 40, 30, 77};
         u32 wd;
         vm_mock_admin_text_appendf(
             &page,
@@ -295,8 +324,9 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<p class=\"muted\">每天只开一个日程键；普通日场地按职业分流：天机→基准图，"
         "幻剑→基准50，鬼道→基准70。<b>77=周末大乱斗</b>：仅70级+，三人职业同进"
         "基准70图、互见互打，机制同70级比武（含连杀播报），奖励用职业0×段位77单独配。"
-        "默认周一70/周二50-69/周三10-49/周四70/周五50-69/周六日大乱斗；"
-        "进场 20:20–20:29，比赛 20:30–21:00。"
+        "默认周一70/周二60-69/周三50-59/周四40-49/周五30-39/周六日大乱斗；"
+        "10-29 可在后台单独排日。"
+        " 进场 20:20–20:29，比赛 20:30–21:00。"
         "战斗规则默认：伤害加深开、禁回血、允许闪躲、神力丸不生效；"
         "开启回血后每方每场可各用一次回血/复活、增益、封魔、驱散；"
         "药品和壶仍固定禁用。"
@@ -320,25 +350,11 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
     vm_mock_admin_text_appendf(
         &page,
         "<section class=\"card\"><h2>排行奖励</h2>"
-        "<p class=\"muted\">普通：职业1-3 × 段位10/50/70 × 名次1-5。"
+        "<p class=\"muted\">普通：职业1-3 × 段位10/30/40/50/60/70 × 名次1-5。"
         "大乱斗：职业填 <b>0</b>、段位填 <b>77</b>、名次1-5（全职业共用）。</p>"
-        "<form method=\"post\" action=\"/action\" class=\"grid2\">"
-        "<input type=\"hidden\" name=\"action\" value=\"save-arena-reward\">"
-        "<div><label>职业(1天机2幻剑3鬼道；大乱斗填0)</label>"
-        "<input name=\"job\" value=\"1\"></div>"
-        "<div><label>段位(10/50/70；大乱斗77)</label>"
-        "<input name=\"bracket\" value=\"10\"></div>"
-        "<div><label>名次(1-5)</label><input name=\"rank_pos\" value=\"1\"></div>"
-        "<div><label>经验</label><input name=\"reward_exp\" value=\"0\"></div>"
-        "<div><label>铜币</label><input name=\"reward_money\" value=\"0\"></div>"
-        "<div><label>酷宝</label><input name=\"reward_wcoin\" value=\"0\"></div>"
-        "<div><label>物品ID</label><input name=\"item_id\" value=\"0\"></div>"
-        "<div><label>物品数量</label><input name=\"item_count\" value=\"0\"></div>"
-        "<div><label>装备ID</label><input name=\"equip_id\" value=\"0\"></div>"
-        "<div><button type=\"submit\">保存奖励行</button></div></form>"
         "<table><thead><tr><th>职业</th><th>段位</th><th>名次</th>"
-        "<th>经验</th><th>铜币</th><th>酷宝</th><th>物品</th><th>装备</th>"
-        "</tr></thead><tbody>");
+        "<th>经验</th><th>铜币</th><th>活力</th><th>物品</th><th>装备</th>"
+        "<th></th></tr></thead><tbody>");
 
     for (i = 0; i < rewardCount; ++i)
     {
@@ -378,33 +394,91 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         vm_mock_admin_text_appendf(
             &page,
             "<tr><td>%u</td><td>%u</td><td>%u</td><td>%u</td><td>%u</td>"
-            "<td>%u</td><td>%s</td><td>%s</td></tr>",
+            "<td>%u</td><td>%s</td><td>%s</td>"
+            "<td><a class=\"btn-edit\" href=\"" VM_MOCK_ADMIN_ROOT_PATH
+            "?tab=arena&amp;edit_job=%u&amp;edit_bracket=%u&amp;edit_rank=%u"
+            "#arena-reward-form\">编辑</a></td></tr>",
             r->job, r->bracket, r->rankPos, r->rewardExp, r->rewardMoney,
-            r->rewardWcoin, itemCell, equipCell);
+            r->rewardVitality, itemCell, equipCell, (u32)r->job,
+            (u32)r->bracket, (u32)r->rankPos);
     }
     if (rewardCount == 0)
-        vm_mock_admin_text_appendf(&page,
-                                    "<tr><td colspan=\"8\" class=\"muted\">暂无奖励配置</td></tr>");
+        vm_mock_admin_text_appendf(
+            &page,
+            "<tr><td colspan=\"9\" class=\"muted\">暂无奖励配置</td></tr>");
 
     vm_mock_admin_text_appendf(
         &page,
-        "</tbody></table></section>"
+        "</tbody></table>"
+        "<form method=\"post\" action=\"/action\" class=\"grid2\" "
+        "style=\"margin-top:12px\" id=\"arena-reward-form\">"
+        "<input type=\"hidden\" name=\"action\" value=\"save-arena-reward\">");
+    if (editReward != NULL)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<div><label>职业(1天机2幻剑3鬼道；大乱斗填0)</label>"
+            "<input name=\"job\" value=\"%u\" readonly></div>"
+            "<div><label>段位(10/30/40/50/60/70；大乱斗77)</label>"
+            "<input name=\"bracket\" value=\"%u\" readonly></div>"
+            "<div><label>名次(1-5)</label>"
+            "<input name=\"rank_pos\" value=\"%u\" readonly></div>"
+            "<div><label>经验</label><input name=\"reward_exp\" value=\"%u\"></div>"
+            "<div><label>铜币</label><input name=\"reward_money\" value=\"%u\"></div>"
+            "<div><label>活力</label><input name=\"reward_vitality\" value=\"%u\"></div>"
+            "<div><label>物品ID</label><input name=\"item_id\" value=\"%u\"></div>"
+            "<div><label>物品数量</label><input name=\"item_count\" value=\"%u\"></div>"
+            "<div><label>装备ID</label><input name=\"equip_id\" value=\"%u\"></div>"
+            "<div><button type=\"submit\">保存奖励</button>"
+            "<a class=\"btn-cancel\" href=\"" VM_MOCK_ADMIN_ROOT_PATH
+            "?tab=arena#arena-reward-form\">取消编辑</a></div>",
+            (u32)editReward->job, (u32)editReward->bracket,
+            (u32)editReward->rankPos, editReward->rewardExp,
+            editReward->rewardMoney, editReward->rewardVitality,
+            editReward->itemId, editReward->itemCount, editReward->equipId);
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<div><label>职业(1天机2幻剑3鬼道；大乱斗填0)</label>"
+            "<input name=\"job\" value=\"1\"></div>"
+            "<div><label>段位(10/30/40/50/60/70；大乱斗77)</label>"
+            "<input name=\"bracket\" value=\"10\"></div>"
+            "<div><label>名次(1-5)</label><input name=\"rank_pos\" value=\"1\"></div>"
+            "<div><label>经验</label><input name=\"reward_exp\" value=\"0\"></div>"
+            "<div><label>铜币</label><input name=\"reward_money\" value=\"0\"></div>"
+            "<div><label>活力</label><input name=\"reward_vitality\" value=\"0\"></div>"
+            "<div><label>物品ID</label><input name=\"item_id\" value=\"0\"></div>"
+            "<div><label>物品数量</label><input name=\"item_count\" value=\"0\"></div>"
+            "<div><label>装备ID</label><input name=\"equip_id\" value=\"0\"></div>"
+            "<div><button type=\"submit\">添加/更新奖励</button></div>");
+    }
+
+    vm_mock_admin_text_appendf(
+        &page,
+        "</form></section>"
         "<section class=\"card\"><h2>赏金擂台</h2>"
         "<form method=\"post\" action=\"/action\">"
         "<input type=\"hidden\" name=\"action\" value=\"save-arena-wager\">"
         "<div class=\"grid2\">"
         "<div><label>启用押金擂台</label><select name=\"wager_enabled\">"
         "<option value=\"0\"%s>关闭</option>"
-        "<option value=\"1\"%s>开启(尚未接战斗)</option></select></div>"
-        "<div><label>系统抽成%%</label>"
+        "<option value=\"1\"%s>开启</option></select></div>"
+        "<div><label>摆擂消耗活力</label>"
+        "<input name=\"wager_vitality\" value=\"%u\"></div>"
+        "<div><label>系统抽成%%（胜方结算）</label>"
         "<input name=\"wager_fee\" value=\"%u\"></div>"
         "<div><label>货币(0铜币)</label>"
         "<input name=\"wager_currency\" value=\"%u\"></div></div>"
         "<button type=\"submit\">保存赏金配置</button></form>"
-        "<p class=\"muted\">玩家在含关键字NPC打开赏金擂台：摆擂扣全队押金；等人数挑战队压同额后，擂主方全员确认开战。1v1直接决斗；2v2/3v3按座位逐对决斗、胜场多者获胜；胜方均分奖池（扣系统抽成）；平局全额退押。</p>"
+        "<p class=\"muted\">入口挂在显示名含「擂台宗主」的 NPC；仅可在该 NPC 所在地图摆擂。"
+        "摆擂扣押金并消耗活力（后台可配，撤擂只退押金不退活力）；等人数挑战队压同额后，擂主方全员确认开战。"
+        "1v1直接决斗；2v2/3v3按座位逐对决斗、胜场多者获胜；胜方均分奖池（扣系统抽成）；平局全额退押。</p>"
         "</section>",
         cfg && !cfg->wagerEnabled ? " selected" : "",
         cfg && cfg->wagerEnabled ? " selected" : "",
+        cfg ? cfg->wagerVitalityCost : 50,
         cfg ? cfg->wagerFeePercent : 10,
         cfg ? cfg->wagerCurrency : 0);
 
@@ -504,6 +578,7 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
     u32 wagerEnabled = 0;
     u32 wagerFee = 10;
     u32 wagerCurrency = 0;
+    u32 wagerVitality = 50;
     u32 damageScaleEnabled = 1;
     u32 allowHeal = 0;
     u32 allowDodge = 1;
@@ -580,7 +655,8 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
                 (u16)matchStart, (u16)matchEnd, roundSec, battleTimeout,
                 scoreWin, scoreBye, scoreDraw, kwGbk,
                 cfg ? cfg->wagerEnabled : 0, cfg ? cfg->wagerFeePercent : 10,
-                cfg ? cfg->wagerCurrency : 0, (u8)damageScaleEnabled,
+                cfg ? cfg->wagerCurrency : 0,
+                cfg ? cfg->wagerVitalityCost : 50u, (u8)damageScaleEnabled,
                 (u8)allowHeal, (u8)allowDodge, (u8)allowCombatPill))
             vm_mock_admin_redirect_arena(client, "ok", "比武配置已保存");
         else
@@ -595,7 +671,7 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         u32 rankPos = 1;
         u32 exp = 0;
         u32 money = 0;
-        u32 wcoin = 0;
+        u32 vitality = 0;
         u32 itemId = 0;
         u32 itemCount = 0;
         u32 equipId = 0;
@@ -604,12 +680,15 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         (void)vm_mock_admin_form_u32(body, "rank_pos", 5u, &rankPos);
         (void)vm_mock_admin_form_u32(body, "reward_exp", 0xffffffffu, &exp);
         (void)vm_mock_admin_form_u32(body, "reward_money", 0xffffffffu, &money);
-        (void)vm_mock_admin_form_u32(body, "reward_wcoin", 0xffffffffu, &wcoin);
+        if (!vm_mock_admin_form_u32(body, "reward_vitality", 0xffffffffu,
+                                    &vitality))
+            (void)vm_mock_admin_form_u32(body, "reward_wcoin", 0xffffffffu,
+                                         &vitality);
         (void)vm_mock_admin_form_u32(body, "item_id", 0xffffffffu, &itemId);
         (void)vm_mock_admin_form_u32(body, "item_count", 255u, &itemCount);
         (void)vm_mock_admin_form_u32(body, "equip_id", 0xffffffffu, &equipId);
         if (vm_net_mock_arena_admin_save_reward((u8)job, (u16)bracket, (u8)rankPos,
-                                                exp, money, wcoin, itemId,
+                                                exp, money, vitality, itemId,
                                                 itemCount, equipId))
             vm_mock_admin_redirect_arena(client, "ok", "奖励已保存");
         else
@@ -628,13 +707,15 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         (void)vm_mock_admin_form_u32(body, "wager_enabled", 1u, &wagerEnabled);
         (void)vm_mock_admin_form_u32(body, "wager_fee", 100u, &wagerFee);
         (void)vm_mock_admin_form_u32(body, "wager_currency", 10u, &wagerCurrency);
+        (void)vm_mock_admin_form_u32(body, "wager_vitality", 100000u,
+                                     &wagerVitality);
         if (vm_net_mock_arena_admin_save_config(
                 cfg->enabled, cfg->scene, cfg->spawnX, cfg->spawnY,
                 cfg->weekdayMask, cfg->weekdayBrackets, cfg->entryStartMinute,
                 cfg->entryEndMinute, cfg->matchStartMinute, cfg->matchEndMinute,
                 cfg->roundSeconds, cfg->battleTimeoutSeconds, cfg->scoreWin,
                 cfg->scoreBye, cfg->scoreDraw, cfg->npcNameKeyword,
-                (u8)wagerEnabled, (u8)wagerFee, (u8)wagerCurrency,
+                (u8)wagerEnabled, (u8)wagerFee, (u8)wagerCurrency, wagerVitality,
                 cfg->damageScaleEnabled, cfg->allowHeal, cfg->allowDodge,
                 cfg->allowCombatPill))
             vm_mock_admin_redirect_arena(client, "ok", "赏金擂台配置已保存");

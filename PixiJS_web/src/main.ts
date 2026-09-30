@@ -113,6 +113,7 @@ import {
   zangbaoCancel,
   zangbaoBuy,
   zangbaoSealDetail,
+  zangbaoSealBagDetail,
   kcoinBalance,
   kcoinUploadPayee,
   kcoinWithdrawCreate,
@@ -127,6 +128,7 @@ import {
 import { EntertainmentWebLayer } from "./ui/EntertainmentWebLayer";
 import { WingPanel } from "./ui/WingPanel";
 import { MountPanel } from "./ui/MountPanel";
+import { PractisePanel } from "./ui/PractisePanel";
 import {
   ARENA_NPC_ENTER,
   ARENA_NPC_LEAVE,
@@ -178,7 +180,7 @@ import {
 } from "./ui/imeShell";
 import { dismissOverlayIme } from "./ui/dismissOverlayIme";
 import type { RoleRow } from "./net/protocol";
-import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
+import { battleTargetWire, isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
 import {
   augmentEquipSellDialog,
   augmentWarehouseDialog,
@@ -201,6 +203,7 @@ import {
   isStarSkyStone,
   isRenameCard,
   isRoleSealScroll,
+  formatRoleSealScrollDes,
   isCrystalExtractStone,
   canFitCrystalExtractInBag,
   estimateCrystalExtractBagSpace,
@@ -210,6 +213,8 @@ import {
   npcServiceOpcode,
   foldBattleActionHpIntoState,
   decodeNpcLearnSkillId,
+  hangupBattlesQuotaExhausted,
+  HANGUP_BATTLES_WITHOUT_INSIGHT,
 } from "./net/protocolExtras";
 import { isMapHealSkill, loadSkillCatalog, lookupSkillSync } from "./resources/skill";
 import {
@@ -398,6 +403,8 @@ function wagerMsgTip(code: string | undefined, okText: string): string {
     "member-role": "队员角色无效",
     "no-role": "角色无效",
     money: "铜币不足",
+    vitality: "活力不足",
+    "npc-map": "须在擂台宗主所在地图摆擂",
     full: "擂台数量已满",
     db: "保存失败",
     "bad-id": "擂台编号无效",
@@ -864,6 +871,7 @@ async function main(): Promise<void> {
   const entertainWeb = new EntertainmentWebLayer();
   const wingPanel = new WingPanel();
   const mountPanel = new MountPanel();
+  const practisePanel = new PractisePanel();
   type AuctionCacheState = {
     rows: AuctionListing[];
     mine: AuctionListing[];
@@ -933,6 +941,7 @@ async function main(): Promise<void> {
   entertainPanel.visible = false;
   wingPanel.visible = false;
   mountPanel.visible = false;
+  practisePanel.visible = false;
   taskUi.visible = false;
   chatPanel.visible = false;
   tradeUi.visible = false;
@@ -1020,6 +1029,7 @@ async function main(): Promise<void> {
     entertainPanel,
     wingPanel,
     mountPanel,
+    practisePanel,
     taskUi,
     chatPanel,
     tradeUi,
@@ -1047,6 +1057,7 @@ async function main(): Promise<void> {
   entertainPanel.zIndex = 56;
   wingPanel.zIndex = 56;
   mountPanel.zIndex = 56;
+  practisePanel.zIndex = 56;
   // Songti DOM overlay: only allowlisted popups cover world nameplates.
   setLcdDomStackRoot(shell.content);
   setLcdDomWorldTextRoot(view.nameplates);
@@ -1075,6 +1086,7 @@ async function main(): Promise<void> {
     entertainPanel,
     wingPanel,
     mountPanel,
+    practisePanel,
     taskUi,
     chatPanel,
     tradeUi,
@@ -1183,6 +1195,7 @@ async function main(): Promise<void> {
       entertainPanel.visible ||
       wingPanel.visible ||
       mountPanel.visible ||
+      practisePanel.visible ||
       entertainWeb.isExpanded();
     if (phase === "world" && !overlayOpen) {
       view.inputEnabled = true;
@@ -1199,7 +1212,9 @@ async function main(): Promise<void> {
     dialog.hide();
     closeApproach(false);
     view.setLeiBlink(false);
-    wagerPanel.open(board.rows, board.mine, session.selectedRoleId);
+    wagerPanel.open(board.rows, board.mine, session.selectedRoleId, {
+      vitalityCost: board.vitalityCost,
+    });
     showPhase("world");
     syncWorldWalkInput();
     shell.setSoftkeys(wagerPanel.softkeys());
@@ -1794,7 +1809,13 @@ async function main(): Promise<void> {
       if (action === "list") {
         const bagSeq = Number(payload?.bagSeq) || 0;
         const priceKcoin = Number(payload?.priceKcoin) || 0;
-        const r = await zangbaoListItem({ ...auth, bagSeq, priceKcoin });
+        const count = Number(payload?.count) || 0;
+        const r = await zangbaoListItem({
+          ...auth,
+          bagSeq,
+          priceKcoin,
+          ...(count > 0 ? { count } : {}),
+        });
         if (!r.ok) {
           zangbaoPanel.showTip(r.error);
           return;
@@ -2356,6 +2377,7 @@ async function main(): Promise<void> {
       if (entertainPanel.visible) entertainPanel.close();
       if (wingPanel.visible) wingPanel.close();
       if (mountPanel.visible) mountPanel.close();
+      if (practisePanel.visible) practisePanel.close();
       // Video/music HTML overlay stays up across battle / hangup / auto so
       // players can keep watching. Tear down only on auth / character screens.
       if (
@@ -2949,6 +2971,9 @@ async function main(): Promise<void> {
       tally: import("./net/protocolExtras").HangupCombatinfo;
       armed: boolean;
     } | null;
+    /** Background hangup 4/2 poke (inactive multi-open slot). */
+    hangupBgOpTimer: number | null;
+    hangupBgOpInFlight: boolean;
     /** Open trade stall UI for this slot (null = not trading / closed). */
     tradeUiSnap: TradePanelSnap | null;
   };
@@ -2965,6 +2990,8 @@ async function main(): Promise<void> {
     paiVisible: false,
     paiBlink: false,
     hangupTally: null,
+    hangupBgOpTimer: null,
+    hangupBgOpInFlight: false,
     tradeUiSnap: null,
   });
   let activeSlotId = "main";
@@ -4311,6 +4338,118 @@ async function main(): Promise<void> {
     pendingWarehouseDepositSeq = 0;
   };
 
+  const clearSlotHangupBgOpTimer = (rec: AccountSlot) => {
+    if (rec.hangupBgOpTimer != null) {
+      window.clearTimeout(rec.hangupBgOpTimer);
+      rec.hangupBgOpTimer = null;
+    }
+  };
+
+  const noteBackgroundHangupSettlement = (
+    rec: AccountSlot,
+    settlement: import("./net/protocolExtras").BattleSettlement,
+  ) => {
+    if (!rec.session.hangupDesired && !rec.session.hangupActive) return;
+    if (!rec.hangupTally) {
+      rec.hangupTally = {
+        armed: true,
+        tally: {
+          completed: 0,
+          maximum: HANGUP_BATTLES_WITHOUT_INSIGHT,
+          totalExp: 0,
+          totalGold: 0,
+          totalHpRecovered: 0,
+          totalMpRecovered: 0,
+        },
+      };
+    }
+    const t = rec.hangupTally.tally;
+    rec.hangupTally.armed = true;
+    t.completed = Math.min(0xffff, t.completed + 1);
+    t.totalExp = (t.totalExp + Math.max(0, settlement.expGain | 0)) >>> 0;
+    t.totalGold = (t.totalGold + Math.max(0, settlement.goldGain | 0)) >>> 0;
+    t.totalHpRecovered =
+      (t.totalHpRecovered + Math.max(0, settlement.recoverHp | 0)) >>> 0;
+    t.totalMpRecovered =
+      (t.totalMpRecovered + Math.max(0, settlement.recoverMp | 0)) >>> 0;
+  };
+
+  /** After background fight end / switch-back to world: keep hangup collide loop. */
+  const rearmHangupForSlot = (rec: AccountSlot) => {
+    const s = rec.session;
+    if (!s.hangupDesired || s.inBattle) return;
+    const hangSnap = rec.hangupTally;
+    const insightActive = s.getBattleInsightRemainingSec() > 0;
+    const hangupQuotaOn =
+      (s.characterStats?.hangupQuotaWithoutInsight ?? 1) === 1;
+    if (
+      hangSnap?.armed &&
+      hangupBattlesQuotaExhausted(
+        hangSnap.tally.completed,
+        insightActive,
+        hangupQuotaOn,
+      )
+    ) {
+      void s.stopHangup();
+      appendSlotChatEntry(rec, {
+        type: 5,
+        text: "[挂]挂机场次已用完（无战斗心得最多64场）",
+      });
+      if (rec.id === activeSlotId) {
+        hud.pushChat("[挂]挂机场次已用完（无战斗心得最多64场）");
+        showGameTip("挂机场次已用完");
+        syncWorldStatusBadges();
+      }
+      return;
+    }
+    s.ensureHangupLoopArmed();
+    if (rec.id === activeSlotId) syncWorldStatusBadges();
+  };
+
+  const fireInactiveHangupOperate = async (
+    rec: AccountSlot,
+  ): Promise<boolean> => {
+    const s = rec.session;
+    if (activeSlotId === rec.id) return false;
+    if (!s.shouldClientDriveInBattleAuto() || !s.inBattle || !s.transport) {
+      return false;
+    }
+    if (rec.hangupBgOpInFlight) return false;
+    const st = rec.pendingBattle;
+    if (!st || !st.left.some((e) => e.hp > 0)) return false;
+    const wire = battleTargetWire(st);
+    rec.hangupBgOpInFlight = true;
+    try {
+      const op = s.inBattleAutoOperate();
+      await s.battleOperate(wire, op, { hangup: true });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      rec.hangupBgOpInFlight = false;
+    }
+  };
+
+  /** Background multi-open hangup: poke 4/2 without BattleScreen. */
+  const scheduleInactiveHangupOperate = (rec: AccountSlot, delayMs = 280) => {
+    const s = rec.session;
+    if (activeSlotId === rec.id) return;
+    if (!s.shouldClientDriveInBattleAuto() || !s.inBattle) return;
+    if (rec.hangupBgOpTimer != null) return;
+    rec.hangupBgOpTimer = window.setTimeout(() => {
+      rec.hangupBgOpTimer = null;
+      void fireInactiveHangupOperate(rec).then((fired) => {
+        if (
+          activeSlotId !== rec.id &&
+          rec.session.inBattle &&
+          rec.session.shouldClientDriveInBattleAuto()
+        ) {
+          scheduleInactiveHangupOperate(rec, fired ? 900 : 450);
+        }
+      });
+    }, Math.max(120, delayMs | 0));
+  };
+
   const gateUi = (slotId: string): SessionCallbacks => {
     const when = <A extends unknown[], R>(
       fn: ((...args: A) => R) | undefined,
@@ -4465,6 +4604,11 @@ async function main(): Promise<void> {
           if (rec) {
             rec.pendingBattle = state;
             rec.pendingBattleUpdates = [];
+            // Keep hangup-alone fights progressing without BattleScreen 4/2.
+            if (rec.session.hangupDesired) {
+              rec.session.hangupActive = true;
+              scheduleInactiveHangupOperate(rec, 350);
+            }
           }
           return;
         }
@@ -4479,9 +4623,30 @@ async function main(): Promise<void> {
           if (rec.pendingBattle) {
             foldBattleActionHpIntoState(rec.pendingBattle, up);
           }
+          if (
+            up.settlement &&
+            (rec.session.hangupDesired || rec.session.hangupActive)
+          ) {
+            noteBackgroundHangupSettlement(rec, up.settlement);
+          }
           rec.pendingBattleUpdates.push(up);
           if (rec.pendingBattleUpdates.length > 64) {
             rec.pendingBattleUpdates = rec.pendingBattleUpdates.slice(-64);
+          }
+          // Active path: endBattleToWorld → onLeftBattleForHangup.
+          // Background: GameSession clears inBattle but never re-arms the loop.
+          const ended =
+            (up.escaped && up.escapeOk) || !!up.finished;
+          if (ended) {
+            clearSlotHangupBgOpTimer(rec);
+            rec.pendingBattle = null;
+            rec.pendingBattleUpdates = [];
+            rearmHangupForSlot(rec);
+            return;
+          }
+          if (rec.session.hangupDesired) {
+            rec.session.hangupActive = true;
+            scheduleInactiveHangupOperate(rec);
           }
           return;
         }
@@ -4637,6 +4802,16 @@ async function main(): Promise<void> {
       session.roles.find((r) => r.roleId === session.selectedRoleId) || null;
     syncAccountSwitchHud();
 
+    // Leaving slot was mid hangup fight: BattleScreen 4/2 is gone — drive headless.
+    if (
+      leaving &&
+      leaving.id !== slotId &&
+      leaving.session.inBattle &&
+      leaving.session.hangupDesired
+    ) {
+      leaving.session.hangupActive = true;
+      scheduleInactiveHangupOperate(leaving, 350);
+    }
     if (opts?.toLogin || !session.transport) {
       hud.pauseDreamTimer();
       hud.setIdentity("", "", "");
@@ -4659,6 +4834,7 @@ async function main(): Promise<void> {
           ? { ...rec.mapVitalsAtSparEnter }
           : null,
       };
+      clearSlotHangupBgOpTimer(rec);
       const st = rec.pendingBattle;
       const ups = rec.pendingBattleUpdates.splice(0);
       if (st) {
@@ -4671,23 +4847,26 @@ async function main(): Promise<void> {
       mapVitalsAtSparEnter = stashedLatch.vitals;
       for (const up of ups) uiCallbacks.onBattleUpdate?.(up);
       battle.restoreHangupTally(rec.hangupTally);
+      // Hangup intent may survive with hangupActive cleared — restore drive flag.
+      if (session.hangupDesired) session.hangupActive = true;
       battle.setHangupActive(session.hangupActive || session.hangupDesired);
       battle.setAutoBattleActive(!!session.autoBattleActive);
     };
 
-    if (session.inBattle && (rec.pendingBattle || rec.pendingBattleUpdates.length)) {
-      flushPendingBattle();
-      syncAccountSwitchHud();
-      applyTradeUiForActiveSlot(rec);
-      if (session.pendingSocialInvite) {
-        uiCallbacks.onSocialInvite?.(session.pendingSocialInvite);
-      } else {
-        showGameTip("已切换账号（战斗中）");
-      }
-      return;
+    // Fight already ended while backgrounded: drop dead stash, re-arm hangup.
+    if (
+      !session.inBattle &&
+      (rec.pendingBattle || rec.pendingBattleUpdates.length)
+    ) {
+      clearSlotHangupBgOpTimer(rec);
+      rec.pendingBattle = null;
+      rec.pendingBattleUpdates = [];
     }
 
     if (session.scene) {
+      // Always remount this slot's world map first. Mid-battle early-return used
+      // to skip this — after leave_game invalidateMap the shared map was gone,
+      // so battle looked fine but post-battle world stayed black.
       try {
         await uiCallbacks.onEnterScene(session.scene, session.x, session.y, {
           hasPos: true,
@@ -4709,8 +4888,17 @@ async function main(): Promise<void> {
         uiCallbacks.onSocialInvite?.(session.pendingSocialInvite);
       } else if (session.inBattle) {
         flushPendingBattle();
-        showGameTip("已切换账号（后台战斗中）");
+        if (!session.inBattle && session.hangupDesired) {
+          rearmHangupForSlot(rec);
+          showGameTip(
+            `已切换：${session.roleName || activeRole?.name || session.getCredentials().user || "账号"}`,
+          );
+        } else {
+          showGameTip("已切换账号（战斗中）");
+        }
       } else {
+        // World restore: hangupDesired survives switch but encounter timer may be dead.
+        rearmHangupForSlot(rec);
         showGameTip(
           `已切换：${session.roleName || activeRole?.name || session.getCredentials().user || "账号"}`,
         );
@@ -4853,10 +5041,42 @@ async function main(): Promise<void> {
 
   view.onXiuTap = () => {
     if (phase !== "world" || session.inBattle) return;
-    void session.requestBuffStatus().then((info) => {
-      hud.showTip(info);
-      setChromeStatus(info.replace(/\s*\n\s*/g, "；").slice(0, 48));
-    });
+    if (practisePanel.visible) {
+      practisePanel.cancel();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    void (async () => {
+      dialog.hide();
+      closeApproach(false);
+      if (auctionPanel.visible) auctionPanel.close();
+      if (wagerPanel.visible) wagerPanel.close();
+      if (ladderPanel.visible) ladderPanel.close();
+      if (guessPanel.visible) guessPanel.close();
+      if (fruitPanel.visible) fruitPanel.close();
+      if (arenaPanel.visible) arenaPanel.close();
+      if (entertainPanel.visible) entertainPanel.close();
+      if (wingPanel.visible) wingPanel.close();
+      if (mountPanel.visible) mountPanel.close();
+      closeActivityPanels();
+      const data = await session.fetchPractiseRemainPanel();
+      practisePanel.open({
+        buffTip: data.buffTip,
+        pillHour: data.practise?.allLastHour ?? 0,
+        pillMin: data.practise?.allLastMin ?? 0,
+      });
+      showPhase("world");
+      syncWorldWalkInput();
+      shell.setSoftkeys(practisePanel.softkeys());
+      setChromeStatus("状态信息");
+    })();
+  };
+
+  practisePanel.onClose = () => {
+    syncWorldWalkInput();
+    shell.setSoftkeys({ left: "菜单", right: "菜单" });
+    setChromeStatus("");
   };
 
   questTracker.onOpenTasks = () => {
@@ -4900,6 +5120,7 @@ async function main(): Promise<void> {
       if (fruitPanel.visible) fruitPanel.close();
       closeActivityPanels();
       if (arenaPanel.visible) arenaPanel.close();
+      if (practisePanel.visible) practisePanel.close();
       if (entertainWeb.isExpanded()) entertainWeb.minimize();
       let entries = ENTERTAINMENT_ENTRIES.slice();
       const [guessStatus, fruitStatus] = await Promise.all([
@@ -5054,6 +5275,7 @@ async function main(): Promise<void> {
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
     if (mountPanel.visible) mountPanel.close();
+    if (practisePanel.visible) practisePanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     showPhase("social");
     social.openTitles([]);
@@ -5100,6 +5322,7 @@ async function main(): Promise<void> {
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (mountPanel.visible) mountPanel.close();
+    if (practisePanel.visible) practisePanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     void (async () => {
       await session.syncCosmetics();
@@ -5155,6 +5378,7 @@ async function main(): Promise<void> {
     if (arenaPanel.visible) arenaPanel.close();
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
+    if (practisePanel.visible) practisePanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
     void (async () => {
       await session.syncCosmetics();
@@ -5784,6 +6008,8 @@ async function main(): Promise<void> {
   const endBattleToWorld = (log: string) => {
     // Resolve post-battle map vitals BEFORE hide(). hide() flushes seat HP via
     // onVitalsChanged — for spar losers that seat is 0 and would stomp the restore.
+    const hangSnap = battle.snapshotHangupTally();
+    const insightActive = session.getBattleInsightRemainingSec() > 0;
     const vitals = battle.allyVitals();
     const panel = session.characterStats;
     let hp = session.hp;
@@ -5834,10 +6060,41 @@ async function main(): Promise<void> {
       session.sceneMonsters = view.actors.liveSceneMonsters();
     });
     view.armCollideCooldown(2000);
-    showPhase("world");
+    // Multi-open leave_game used to wipe the shared map while this slot was
+    // mid-fight; remount if the world shell is missing before showing it.
+    const sceneKey = session.scene;
+    if (sceneKey && !view.showsSceneFile(sceneKey)) {
+      void Promise.resolve(
+        uiCallbacks.onEnterScene(sceneKey, session.x, session.y, {
+          hasPos: true,
+        }),
+      ).catch((e: unknown) => {
+        console.warn("[battle] remount world map", e);
+        showPhase("world");
+      });
+    } else {
+      showPhase("world");
+    }
     hud.setVitals(hp, hpMax, mp, mpMax);
     setChromeStatus(`[${session.transport?.mode}] ${log}`);
-    session.onLeftBattleForHangup();
+    /* No 战斗心得 + admin quota on: stop after 64; else unlimited. */
+    const hangupQuotaOn =
+      (session.characterStats?.hangupQuotaWithoutInsight ?? 1) === 1;
+    if (
+      session.hangupDesired &&
+      hangSnap.armed &&
+      hangupBattlesQuotaExhausted(
+        hangSnap.tally.completed,
+        insightActive,
+        hangupQuotaOn,
+      )
+    ) {
+      void session.stopHangup();
+      hud.pushChat("[挂]挂机场次已用完（无战斗心得最多64场）");
+      showGameTip("挂机场次已用完");
+    } else {
+      session.onLeftBattleForHangup();
+    }
     syncWorldStatusBadges();
     void syncRingQuestTracker();
   };
@@ -6210,16 +6467,22 @@ async function main(): Promise<void> {
   menu.onSelect = (leaf: MenuLeaf, label: string) => {
     if (leaf === "leave_game") {
       const closingId = activeSlotId;
+      const otherSlotsRemain = accountSlots.size > 1;
       mapUiMode = "off";
       closeOverlaysForAccountSwitch();
       tradeUi.hide();
       // Freeze dream leftover before wiping identity — logout closes WS without
       // onConnectionLost (Transport.close nulls the hook first).
       hud.pauseDreamTimer();
-      hud.setIdentity("", "", "");
-      hud.setVitals(500, 500, 200, 200);
-      view.invalidateMap();
-      view.actors.clear();
+      // Multi-open: do NOT wipe the shared SceneView map here. switchAccountSlot
+      // remounts the next slot's scene. invalidateMap + mid-battle early skip
+      // left A with a working fight UI and a permanently black world.
+      if (!otherSlotsRemain) {
+        hud.setIdentity("", "", "");
+        hud.setVitals(500, 500, 200, 200);
+        view.invalidateMap();
+        view.actors.clear();
+      }
       activeRole = null;
       pendingRoles = [];
       // Disconnect only this slot — other multi-open sessions stay online.
@@ -6630,7 +6893,14 @@ async function main(): Promise<void> {
       return;
     }
     await session.openBag();
-    enhanceUi.openTransfer(bag, session.bagItems);
+    enhanceUi.openTransfer(bag, session.bagItems, {
+      crossQualityStoneRequired:
+        (session.characterStats?.crossQualityStoneRequired ?? 1) === 1,
+      transferCrystalEnabled:
+        (session.characterStats?.transferCrystalEnabled ?? 1) === 1,
+      transferMoneyEnabled:
+        (session.characterStats?.transferMoneyEnabled ?? 0) === 1,
+    });
     showPhase("enhance");
   };
 
@@ -6824,10 +7094,26 @@ async function main(): Promise<void> {
     showPhase("world");
   };
   system.onEnrichBagDetail = async (it) => {
-    if (!isCultivationBookItem(it.itemId) || it.seq <= 0) return null;
-    const des = await session.readCultivationBookDes(it.seq);
-    if (des) session.applyCultivationBookMetaFromDes(it.seq, des, { notify: true });
-    return des || null;
+    if (isCultivationBookItem(it.itemId) && it.seq > 0) {
+      const des = await session.readCultivationBookDes(it.seq);
+      if (des) session.applyCultivationBookMetaFromDes(it.seq, des, { notify: true });
+      return des || null;
+    }
+    if (isRoleSealScroll(it.itemId) && it.seq > 0) {
+      const auth = zangbaoAuth();
+      if (!auth.account || !auth.roleId) return null;
+      const d = await zangbaoSealBagDetail(it.seq, auth);
+      if (!d || d.ok !== true) return null;
+      session.applyRoleSealMetaFromDetail(it.seq, d, { notify: true });
+      if (d.blank || !d.role?.name) return null;
+      return formatRoleSealScrollDes({
+        name: d.role.name,
+        level: d.role.level,
+        job: d.role.job,
+        sex: d.role.sex,
+      });
+    }
+    return null;
   };
   system.onAction = (kind, action, item) => {
     if (action === "refresh") return;
@@ -6899,8 +7185,14 @@ async function main(): Promise<void> {
             showGameTip("处理封印卷…");
             const unseal = await session.unsealRole(bag.seq);
             if (unseal.ok) {
-              await session.openBag();
               system.setBag(session.bagItems);
+              const cap =
+                session.characterStats?.backpackCapacity ||
+                Math.max(20, session.bagItems.length);
+              system.setBagMeta(
+                session.characterStats?.money ?? session.gold,
+                cap,
+              );
               showGameTip(unseal.message || "解封成功");
               return;
             }
@@ -6952,6 +7244,32 @@ async function main(): Promise<void> {
             const fb = await session.sealRole(sealSeq, target.roleId);
             if (fb.ok) {
               await session.openBag();
+              /* Stamp sealed target immediately so detail is not blank while HTTP enrich runs. */
+              const bound =
+                session.bagItems.find(
+                  (it) =>
+                    isRoleSealScroll(it.itemId) &&
+                    it.seq === (fb.cardSeq || sealSeq),
+                ) ||
+                session.bagItems.find(
+                  (it) =>
+                    isRoleSealScroll(it.itemId) &&
+                    (it.count || 0) > 0 &&
+                    !it.sealedRole?.name,
+                );
+              if (bound) {
+                session.applyRoleSealMetaLocal(
+                  bound.seq,
+                  {
+                    roleId: target.roleId,
+                    name: target.name || "?",
+                    level: target.level || 1,
+                    job: (target.jobIndex | 0) + 1,
+                    sex: target.sex,
+                  },
+                  { notify: true },
+                );
+              }
               system.setBag(session.bagItems);
             }
             showGameTip(
@@ -8927,6 +9245,8 @@ async function main(): Promise<void> {
   battle.onHangupInsightRefresh = async () => {
     return session.ensureBattleInsightRemainSec();
   };
+  battle.getHangupQuotaWithoutInsight = () =>
+    (session.characterStats?.hangupQuotaWithoutInsight ?? 1) === 1;
   battle.onHangupAddTime = async () => {
     const fb = await session.useBattleInsightFromBag();
     if (fb.ok) {
@@ -8971,7 +9291,7 @@ async function main(): Promise<void> {
   hud.onHome = () => cycleMapUi();
   hud.onChat = () => {
     if (phase !== "world" || session.inBattle) return;
-    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible || guessPanel.visible || fruitPanel.visible || zangbaoPanel.visible || festivalPanel.visible || yanmenPanel.visible || ringQuestPanel.visible) return;
+    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible || ladderPanel.visible || guessPanel.visible || fruitPanel.visible || zangbaoPanel.visible || festivalPanel.visible || yanmenPanel.visible || ringQuestPanel.visible || practisePanel.visible) return;
     showPhase("chat");
     chatPanel.open(hud.getChatEntries());
     setChromeStatus("聊天 · 点输入框打字 · ←→切换频道");
@@ -9092,6 +9412,14 @@ async function main(): Promise<void> {
     }
     if (phase === "world") {
       // Overlays on world (auction/arena/wager/entertain/wing) must win over 菜单 softkeys.
+      if (practisePanel.visible) {
+        if (which === "right") {
+          practisePanel.cancel();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
       if (mountPanel.visible) {
         if (which === "left" || which === "center") {
           mountPanel.confirm();
@@ -10088,7 +10416,8 @@ async function main(): Promise<void> {
           ringQuestPanel.visible ||
           entertainPanel.visible ||
           wingPanel.visible ||
-          mountPanel.visible)
+          mountPanel.visible ||
+          practisePanel.visible)
       ) {
         handleSoftkey("left");
       } else if (phase === "world" && approach.open) approach.confirm();
@@ -10122,7 +10451,8 @@ async function main(): Promise<void> {
           ringQuestPanel.visible ||
           entertainPanel.visible ||
           wingPanel.visible ||
-          mountPanel.visible)
+          mountPanel.visible ||
+          practisePanel.visible)
       ) {
         handleSoftkey("right");
       } else if (phase === "world" && approach.open) {
@@ -10533,6 +10863,7 @@ async function main(): Promise<void> {
     tryNudge("entertainPanel", () => entertainPanel.nudgeAfterGpuResume());
     tryNudge("wingPanel", () => wingPanel.nudgeAfterGpuResume());
     tryNudge("mountPanel", () => mountPanel.nudgeAfterGpuResume());
+    tryNudge("practisePanel", () => practisePanel.nudgeAfterGpuResume());
     tryNudge("taskUi", () => taskUi.nudgeAfterGpuResume());
     tryNudge("tradeUi", () => tradeUi.nudgeAfterGpuResume());
     tryNudge("guildUi", () => guildUi.nudgeAfterGpuResume());
@@ -10777,6 +11108,7 @@ async function main(): Promise<void> {
         syncWorldWalkInput();
         if (approach.open) shell.setSoftkeys({ left: "确定", right: "取消" });
         else if (entertainPanel.visible) shell.setSoftkeys(entertainPanel.softkeys());
+        else if (practisePanel.visible) shell.setSoftkeys(practisePanel.softkeys());
         else if (wingPanel.visible) shell.setSoftkeys(wingPanel.softkeys());
         else if (mountPanel.visible) shell.setSoftkeys(mountPanel.softkeys());
         else if (auctionPanel.visible) shell.setSoftkeys(auctionPanel.softkeys());

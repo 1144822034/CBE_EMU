@@ -456,7 +456,7 @@ export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
     itemCache.set(855, {
       id: 855,
       name: "跨品重铸石",
-      desc: "强化转移时可跨装备品质。跨品质确认消耗1个，同品质不消耗；仍需同类部位并扣重铸金钱。",
+      desc: "强化转移时可跨装备品质。跨品质确认消耗1个，同品质不消耗；仍需同类部位；+N重铸另耗1个(N-1)级玄晶。",
       category: 14,
       level: 1,
       quality: 0,

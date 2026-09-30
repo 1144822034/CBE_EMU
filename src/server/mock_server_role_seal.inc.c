@@ -32,6 +32,9 @@ typedef struct
     u32 previewLevel;
     u8 previewJob;
     u8 previewSex;
+    char previewScene[64];
+    u16 previewX;
+    u16 previewY;
     bool found;
     bool invalid;
 } vm_net_mock_role_seal_row_ctx;
@@ -42,6 +45,9 @@ typedef struct
     bool found;
     bool invalid;
 } vm_net_mock_role_seal_account_ctx;
+
+static void vm_net_mock_role_seal_splice_memory(u32 roleId);
+static bool vm_net_mock_role_find_free_escrow_index(u8 *indexOut);
 
 static bool vm_net_mock_role_seal_u32_row(void *ctx, unsigned int cols,
                                           const char *const *vals,
@@ -107,6 +113,7 @@ static bool vm_net_mock_role_seal_row_cb(void *ctx, unsigned int cols,
 {
     vm_net_mock_role_seal_row_ctx *c = (vm_net_mock_role_seal_row_ctx *)ctx;
     size_t nlen = 0;
+    size_t slen = 0;
     u32 tmp = 0;
 
     if (c == NULL || cols < 5)
@@ -130,6 +137,17 @@ static bool vm_net_mock_role_seal_row_cb(void *ctx, unsigned int cols,
     c->previewJob = (u8)tmp;
     (void)vm_mock_mysql_parse_u32(vals[4], lens[4], &tmp);
     c->previewSex = (u8)tmp;
+    if (cols >= 8)
+    {
+        if (vals[5])
+            (void)vm_mysql_hex_decode(vals[5], lens[5], c->previewScene,
+                                      sizeof(c->previewScene) - 1, &slen);
+        c->previewScene[slen] = 0;
+        (void)vm_mock_mysql_parse_u32(vals[6], lens[6], &tmp);
+        c->previewX = (u16)tmp;
+        (void)vm_mock_mysql_parse_u32(vals[7], lens[7], &tmp);
+        c->previewY = (u16)tmp;
+    }
     c->found = true;
     return true;
 }
@@ -220,6 +238,9 @@ static bool vm_net_mock_role_seal_ensure_schema(void)
             "preview_level INT UNSIGNED NOT NULL DEFAULT 1,"
             "preview_job TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "preview_sex TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "preview_scene VARBINARY(64) NOT NULL DEFAULT '',"
+            "preview_pos_x SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "preview_pos_y SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "sealed_at INT UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "PRIMARY KEY(item_instance_id),"
@@ -231,6 +252,16 @@ static bool vm_net_mock_role_seal_ensure_schema(void)
                vm_mysql_last_error());
         return false;
     }
+    /* Older DBs: add scene/pos columns used by orphan recreate. */
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_sealed_roles "
+        "ADD COLUMN preview_scene VARBINARY(64) NOT NULL DEFAULT ''");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_sealed_roles "
+        "ADD COLUMN preview_pos_x SMALLINT UNSIGNED NOT NULL DEFAULT 0");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_sealed_roles "
+        "ADD COLUMN preview_pos_y SMALLINT UNSIGNED NOT NULL DEFAULT 0");
     ok = true;
     return true;
 }
@@ -254,6 +285,163 @@ static bool vm_net_mock_role_seal_lookup_owner(u32 roleId, char *out,
         ctx.invalid || !ctx.found || ctx.accountId[0] == 0)
         return false;
     snprintf(out, outCap, "%s", ctx.accountId);
+    return true;
+}
+
+/* True when role_id is bound in server_sealed_roles (must not live in seller memory). */
+static bool vm_net_mock_role_seal_is_bound_role(u32 roleId)
+{
+    char query[192];
+    vm_net_mock_role_seal_u32_ctx ctx;
+
+    if (roleId == 0 || !vm_net_mock_role_seal_ensure_schema())
+        return false;
+    memset(&ctx, 0, sizeof(ctx));
+    snprintf(query, sizeof(query),
+             "SELECT item_instance_id FROM server_sealed_roles "
+             "WHERE sealed_role_id=%u LIMIT 1",
+             roleId);
+    if (!vm_mysql_query(query, vm_net_mock_role_seal_u32_row, &ctx) ||
+        ctx.invalid || !ctx.found)
+        return false;
+    return ctx.value != 0;
+}
+
+/* Drop any bound sealed roles that sticky restore leaked back into memory. */
+static void vm_net_mock_role_seal_purge_bound_from_memory(void)
+{
+    u32 i = 0;
+
+    if (!g_vm_net_mock_role_db_valid || g_vm_net_mock_role_db.roleCount == 0)
+        return;
+    if (!vm_net_mock_role_seal_ensure_schema())
+        return;
+    /* Walk backwards so splice indices stay valid. */
+    for (i = g_vm_net_mock_role_db.roleCount; i > 0; --i)
+    {
+        u32 roleId = g_vm_net_mock_role_db.roles[i - 1u].roleId;
+        if (roleId != 0 && vm_net_mock_role_seal_is_bound_role(roleId))
+        {
+            printf("[warn][network] mock_role_seal_purge_sticky role=%u "
+                   "evidence=bound-role-must-not-be-in-account-memory\n",
+                   roleId);
+            vm_net_mock_role_seal_splice_memory(roleId);
+        }
+    }
+}
+
+/*
+ * Recreate a missing account_roles row for an orphaned sealed binding.
+ * Sticky save / CASCADE can leave server_sealed_roles pointing at a deleted
+ * role_id; rebuild a minimal escrow row from preview and reattach orphans.
+ */
+static bool vm_net_mock_role_seal_recreate_missing_role(
+    const vm_net_mock_role_seal_row_ctx *sealed)
+{
+    char escrowHex[160];
+    char nameHex[96];
+    char sceneHex[160];
+    char query[1280];
+    u8 escrowIndex = 0;
+    static const char *const childTables[] = {
+        "account_role_equipment",
+        "account_role_equipment_durability",
+        "account_role_skills",
+        "account_role_backpack",
+        "account_role_warehouse",
+        "account_role_warehouse_bank",
+        "account_role_item_effects",
+        "account_role_offline_practise",
+        "account_role_tasks",
+        "account_role_npc_task_daily",
+        "account_role_vitality",
+        "account_role_ring_daily",
+        "guild_members"};
+    u32 i = 0;
+    u32 level = 1;
+    u32 job = 1;
+    u32 sex = 0;
+    u32 hp = 100;
+    u16 posX = VM_NET_MOCK_ROLE_INITIAL_X;
+    u16 posY = VM_NET_MOCK_ROLE_INITIAL_Y;
+    const char *scene = NULL;
+
+    if (sealed == NULL || sealed->sealedRoleId == 0)
+        return false;
+    if (!vm_net_mock_role_seal_ensure_schema())
+        return false;
+    if (vm_mysql_hex_encode(VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT,
+                            strlen(VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT),
+                            escrowHex, sizeof(escrowHex)) == 0)
+        return false;
+    if (sealed->previewName[0] != 0)
+    {
+        if (vm_mysql_hex_encode(sealed->previewName, strlen(sealed->previewName),
+                                nameHex, sizeof(nameHex)) == 0)
+            return false;
+    }
+    else
+    {
+        /* 「封印角色」 GBK */
+        snprintf(nameHex, sizeof(nameHex), "B7E2D3A1BDC7C9AB");
+    }
+    /*
+     * Never use ASCII placeholders like "xinshoucun" — client map enter needs
+     * the real GBK .sce name (same as role-create / default Penglai).
+     */
+    scene = sealed->previewScene;
+    if (scene == NULL || scene[0] == 0 || strchr(scene, '.') == NULL)
+        scene = vm_net_mock_role_initial_scene_name();
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+        return false;
+    level = sealed->previewLevel ? sealed->previewLevel : 1;
+    job = sealed->previewJob;
+    if (job == 0 || job > 3)
+        job = 1;
+    sex = sealed->previewSex ? 1u : 0u;
+    hp = 50u + level * 10u;
+    if (sealed->previewX != 0 && sealed->previewY != 0)
+    {
+        posX = sealed->previewX;
+        posY = sealed->previewY;
+    }
+    if (!vm_net_mock_role_find_free_escrow_index(&escrowIndex))
+        escrowIndex = 0;
+
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_roles("
+             "account_id,role_id,role_index,role_name,job,sex,backpack_capacity,"
+             "level,exp,hp,hp_max,mp,mp_max,money,wcoin,kcoin,pk_points,"
+             "pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,"
+             "arena_designation_mask,next_backpack_seq) VALUES("
+             "CAST(X'%s' AS CHAR),%u,%u,UNHEX('%s'),%u,%u,30,"
+             "%u,0,%u,%u,%u,%u,0,0,0,0,"
+             "0,UNHEX('%s'),%u,%u,0,0,"
+             "0,1)",
+             escrowHex, sealed->sealedRoleId, (u32)escrowIndex, nameHex, job, sex,
+             level, hp, hp, hp / 2u, hp / 2u, sceneHex, (u32)posX, (u32)posY);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][network] mock_role_seal_recreate_fail role=%u error=%s\n",
+               sealed->sealedRoleId, vm_mysql_last_error());
+        return false;
+    }
+
+    /* Reattach any orphan child rows (sticky may have written them under the
+     * seller account while account_roles stayed on escrow / got deleted). */
+    for (i = 0; i < sizeof(childTables) / sizeof(childTables[0]); ++i)
+    {
+        if (!vm_net_mock_role_seal_table_exists(childTables[i]))
+            continue;
+        snprintf(query, sizeof(query),
+                 "UPDATE `%s` SET account_id=CAST(X'%s' AS CHAR) "
+                 "WHERE role_id=%u",
+                 childTables[i], escrowHex, sealed->sealedRoleId);
+        (void)vm_mysql_exec(query);
+    }
+    printf("[warn][network] mock_role_seal_recreate_ok role=%u level=%u "
+           "scene=%s evidence=orphaned-sealed-binding\n",
+           sealed->sealedRoleId, level, scene);
     return true;
 }
 
@@ -304,7 +492,8 @@ static bool vm_net_mock_role_seal_load_by_instance(
     memset(out, 0, sizeof(*out));
     snprintf(query, sizeof(query),
              "SELECT sealed_role_id,HEX(preview_name),preview_level,preview_job,"
-             "preview_sex FROM server_sealed_roles "
+             "preview_sex,HEX(preview_scene),preview_pos_x,preview_pos_y "
+             "FROM server_sealed_roles "
              "WHERE item_instance_id=%u LIMIT 1",
              instanceId);
     (void)vm_mysql_query(query, vm_net_mock_role_seal_row_cb, out);
@@ -406,8 +595,10 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
     char fromHex[160];
     char toHex[160];
     char query[768];
+    char ownerAfter[64];
     /* guild_applications uses applicant_account_id/applicant_role_id — not
-     * account_id/role_id. Clearing it is handled separately below. */
+     * account_id/role_id. Clearing it is handled separately below.
+     * account_role_tianxia_worship_daily is role_id-only (no account_id). */
     static const char *const childTables[] = {
         "account_role_equipment",
         "account_role_equipment_durability",
@@ -421,7 +612,6 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
         "account_role_npc_task_daily",
         "account_role_vitality",
         "account_role_ring_daily",
-        "account_role_tianxia_worship_daily",
         "guild_members"};
     u32 i = 0;
     vm_net_mock_role_seal_u32_ctx affected;
@@ -445,6 +635,26 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
             *reasonOut = "hex-encode";
         return false;
     }
+    /* Destination must have role_state — escrow is created in ensure_schema,
+     * but buyers/sellers can still miss a row on older DBs. */
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO account_role_state"
+             "(account_id,format_version,active_role_id,role_count) "
+             "VALUES(CAST(X'%s' AS CHAR),1,0,0)",
+             toHex);
+    if (!vm_mysql_exec(query))
+    {
+        if (reasonOut)
+            *reasonOut = "ensure-to-state";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO account_role_state"
+             "(account_id,format_version,active_role_id,role_count) "
+             "VALUES(CAST(X'%s' AS CHAR),1,0,0)",
+             fromHex);
+    (void)vm_mysql_exec(query);
+
     if (!vm_mysql_exec("START TRANSACTION") ||
         !vm_mysql_exec("SET FOREIGN_KEY_CHECKS=0"))
     {
@@ -462,6 +672,10 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
     {
         if (reasonOut)
             *reasonOut = "update-account-roles";
+        printf("[error][network] mock_role_reassign_update_roles role=%u "
+               "from=%s to=%s idx=%u error=%s\n",
+               roleId, fromAccount, toAccount, (u32)newRoleIndex,
+               vm_mysql_last_error());
         goto fail;
     }
     memset(&affected, 0, sizeof(affected));
@@ -469,18 +683,15 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
                         &affected) ||
         affected.invalid || !affected.found)
     {
-        if (reasonOut)
-            *reasonOut = "account-roles-miss";
-        goto fail;
+        /* Fall through to ownership verify — ROW_COUNT can be flaky. */
+        affected.value = 0;
     }
     if (affected.value != 1u)
     {
-        /* Idempotent: already on toAccount (e.g. prior half-seal left escrow). */
-        char owner[64];
-
-        owner[0] = 0;
-        if (vm_net_mock_role_seal_lookup_owner(roleId, owner, sizeof(owner)) &&
-            strcmp(owner, toAccount) == 0)
+        ownerAfter[0] = 0;
+        if (vm_net_mock_role_seal_lookup_owner(roleId, ownerAfter,
+                                               sizeof(ownerAfter)) &&
+            strcmp(ownerAfter, toAccount) == 0)
         {
             snprintf(query, sizeof(query),
                      "UPDATE account_roles SET role_index=%u WHERE role_id=%u",
@@ -495,42 +706,33 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
             if (reasonOut)
                 *reasonOut = "account-roles-miss";
             printf("[error][network] mock_role_reassign_miss role=%u from=%s "
-                   "to=%s owner=%s error=%s\n",
+                   "to=%s owner=%s row_count=%u error=%s\n",
                    roleId, fromAccount, toAccount,
-                   owner[0] ? owner : "-", vm_mysql_last_error());
+                   ownerAfter[0] ? ownerAfter : "-", affected.value,
+                   vm_mysql_last_error());
             goto fail;
         }
     }
 
     for (i = 0; i < sizeof(childTables) / sizeof(childTables[0]); ++i)
     {
+        if (!vm_net_mock_role_seal_table_exists(childTables[i]))
+        {
+            printf("[warn][network] mock_role_reassign_skip_missing table=%s\n",
+                   childTables[i]);
+            continue;
+        }
         snprintf(query, sizeof(query),
                  "UPDATE `%s` SET account_id=CAST(X'%s' AS CHAR) "
                  "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
                  childTables[i], toHex, fromHex, roleId);
         if (!vm_mysql_exec(query))
         {
-            /* Optional tables may be absent on older DBs. */
-            if (strcmp(childTables[i], "account_role_tianxia_worship_daily") ==
-                    0 ||
-                strcmp(childTables[i], "account_role_vitality") == 0 ||
-                strcmp(childTables[i], "account_role_ring_daily") == 0 ||
-                strcmp(childTables[i], "account_role_offline_practise") == 0 ||
-                strcmp(childTables[i], "account_role_npc_task_daily") == 0 ||
-                strcmp(childTables[i], "account_role_warehouse_bank") == 0 ||
-                strcmp(childTables[i], "guild_members") == 0)
-            {
-                printf("[warn][network] mock_role_reassign_skip_child table=%s "
-                       "error=%s\n",
-                       childTables[i], vm_mysql_last_error());
-                continue;
-            }
-            if (reasonOut)
-                *reasonOut = "update-child";
-            printf("[error][network] mock_role_reassign_child_fail table=%s "
+            /* Optional / legacy tables: never abort the whole transfer. */
+            printf("[warn][network] mock_role_reassign_skip_child table=%s "
                    "role=%u error=%s\n",
                    childTables[i], roleId, vm_mysql_last_error());
-            goto fail;
+            continue;
         }
     }
     if (vm_net_mock_role_seal_table_exists("account_role_kcoin_payee"))
@@ -549,42 +751,55 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
                  roleId);
         if (!vm_mysql_exec(query))
         {
-            if (reasonOut)
-                *reasonOut = "clear-applications";
-            goto fail;
+            printf("[warn][network] mock_role_reassign_skip_apps role=%u "
+                   "error=%s\n",
+                   roleId, vm_mysql_last_error());
         }
     }
 
-    snprintf(query, sizeof(query),
-             "UPDATE friendships SET owner_account_id=CAST(X'%s' AS CHAR) "
-             "WHERE owner_role_id=%u",
-             toHex, roleId);
-    if (!vm_mysql_exec(query))
+    if (vm_net_mock_role_seal_table_exists("friendships"))
     {
-        if (reasonOut)
-            *reasonOut = "friendships-owner";
-        goto fail;
-    }
-    snprintf(query, sizeof(query),
-             "UPDATE friendships SET target_account_id=CAST(X'%s' AS CHAR) "
-             "WHERE target_role_id=%u",
-             toHex, roleId);
-    if (!vm_mysql_exec(query))
-    {
-        if (reasonOut)
-            *reasonOut = "friendships-target";
-        goto fail;
+        snprintf(query, sizeof(query),
+                 "UPDATE friendships SET owner_account_id=CAST(X'%s' AS CHAR) "
+                 "WHERE owner_role_id=%u",
+                 toHex, roleId);
+        if (!vm_mysql_exec(query))
+        {
+            printf("[warn][network] mock_role_reassign_skip_friends_owner "
+                   "role=%u error=%s\n",
+                   roleId, vm_mysql_last_error());
+        }
+        snprintf(query, sizeof(query),
+                 "UPDATE friendships SET target_account_id=CAST(X'%s' AS CHAR) "
+                 "WHERE target_role_id=%u",
+                 toHex, roleId);
+        if (!vm_mysql_exec(query))
+        {
+            printf("[warn][network] mock_role_reassign_skip_friends_target "
+                   "role=%u error=%s\n",
+                   roleId, vm_mysql_last_error());
+        }
     }
 
+    /* Clear spouse links either side of this role (columns may be empty). */
     snprintf(query, sizeof(query),
              "UPDATE account_roles SET spouse_account_id='',spouse_role_id=0,"
              "spouse_name='' WHERE role_id=%u OR spouse_role_id=%u",
              roleId, roleId);
     if (!vm_mysql_exec(query))
     {
-        if (reasonOut)
-            *reasonOut = "clear-spouse";
-        goto fail;
+        printf("[warn][network] mock_role_reassign_skip_spouse role=%u error=%s\n",
+               roleId, vm_mysql_last_error());
+    }
+
+    /* Patch guild leader FK if this role still leads a guild. */
+    if (vm_net_mock_role_seal_table_exists("guilds"))
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE guilds SET leader_account_id=CAST(X'%s' AS CHAR) "
+                 "WHERE leader_role_id=%u",
+                 toHex, roleId);
+        (void)vm_mysql_exec(query);
     }
 
     snprintf(query, sizeof(query),
@@ -607,6 +822,20 @@ static bool vm_net_mock_role_db_reassign_account(u32 roleId,
     {
         if (reasonOut)
             *reasonOut = "count-to";
+        goto fail;
+    }
+
+    /* Final verify — do not trust ROW_COUNT alone. */
+    ownerAfter[0] = 0;
+    if (!vm_net_mock_role_seal_lookup_owner(roleId, ownerAfter,
+                                            sizeof(ownerAfter)) ||
+        strcmp(ownerAfter, toAccount) != 0)
+    {
+        if (reasonOut)
+            *reasonOut = "verify-owner";
+        printf("[error][network] mock_role_reassign_verify_fail role=%u "
+               "want=%s got=%s\n",
+               roleId, toAccount, ownerAfter[0] ? ownerAfter : "-");
         goto fail;
     }
 
@@ -870,7 +1099,8 @@ static u32 vm_net_mock_build_role_seal_response(const u8 *request, u32 requestLe
     char nameHex[96];
     char accountHex[160];
     char escrowHex[160];
-    char query[768];
+    char sceneHex[160];
+    char query[960];
     u32 i = 0;
     u32 sealedAt = 0;
     bool didReassign = false;
@@ -1076,15 +1306,29 @@ static u32 vm_net_mock_build_role_seal_response(const u8 *request, u32 requestLe
 
             if (result == 1 && existingInstance == 0)
             {
+                const char *sealScene = target->scene;
+                if (sealScene == NULL || sealScene[0] == 0 ||
+                    strchr(sealScene, '.') == NULL)
+                    sealScene = vm_net_mock_role_initial_scene_name();
+                if (vm_mysql_hex_encode(sealScene, strlen(sealScene), sceneHex,
+                                        sizeof(sceneHex)) == 0)
+                {
+                    result = 10;
+                    reason = "hex-scene";
+                }
+                else
+                {
                 snprintf(query, sizeof(query),
                          "INSERT INTO server_sealed_roles("
                          "item_instance_id,sealed_role_id,origin_account_id,"
                          "preview_name,preview_level,preview_job,preview_sex,"
+                         "preview_scene,preview_pos_x,preview_pos_y,"
                          "sealed_at) VALUES(%u,%u,CAST(X'%s' AS CHAR),UNHEX('%s'),"
-                         "%u,%u,%u,%u)",
+                         "%u,%u,%u,UNHEX('%s'),%u,%u,%u)",
                          instanceId, target->roleId, accountHex, nameHex,
                          target->level, (u32)target->job, (u32)target->sex,
-                         sealedAt);
+                         sceneHex,
+                         (u32)target->x, (u32)target->y, sealedAt);
                 if (!vm_mysql_exec(query))
                 {
                     result = 10;
@@ -1096,6 +1340,7 @@ static u32 vm_net_mock_build_role_seal_response(const u8 *request, u32 requestLe
                 else
                 {
                     didInsertSealed = true;
+                }
                 }
             }
         }
@@ -1333,25 +1578,71 @@ static u32 vm_net_mock_build_role_unseal_response(const u8 *request,
 
     if (result == 1)
     {
-        if (!vm_net_mock_role_find_free_index(accountId, &freeIndex))
-        {
-            result = 4;
-            reason = "slots-full";
-        }
-        else if (vm_net_mock_role_is_online(sealedRoleId))
+        char ownerAccount[64];
+
+        ownerAccount[0] = 0;
+        if (vm_net_mock_role_is_online(sealedRoleId))
         {
             /* Escrow roles should never be online; treat as reassign fail. */
             result = 5;
             reason = "sealed-online";
         }
-        else if (!vm_net_mock_role_db_reassign_account(
-                     sealedRoleId, VM_NET_MOCK_ROLE_SEAL_ESCROW_ACCOUNT,
-                     accountId, freeIndex, &reassignReason))
+        else if (!vm_net_mock_role_seal_lookup_owner(sealedRoleId, ownerAccount,
+                                                     sizeof(ownerAccount)))
+        {
+            /* Sticky/CASCADE can leave server_sealed_roles with no account_roles
+             * row. Rebuild a minimal escrow role from preview so unseal can
+             * still reassign to the buyer. */
+            if (!vm_net_mock_role_seal_recreate_missing_role(&sealed) ||
+                !vm_net_mock_role_seal_lookup_owner(sealedRoleId, ownerAccount,
+                                                   sizeof(ownerAccount)))
+            {
+                result = 5;
+                reason = "role-missing-db";
+            }
+            else
+            {
+                printf("[warn][network] mock_role_unseal_recreated role=%u "
+                       "owner=%s instance=%u evidence=orphaned-sealed-binding\n",
+                       sealedRoleId, ownerAccount, instanceId);
+            }
+        }
+
+        if (result == 1 && strcmp(ownerAccount, accountId) == 0)
+        {
+            /* Already on this account (half-unseal / sticky restore). Keep
+             * current role_index — do not require a free slot. */
+            printf("[info][network] mock_role_unseal_already_owned role=%u "
+                   "account=%s\n",
+                   sealedRoleId, accountId);
+            reason = "already-owned";
+            snprintf(query, sizeof(query),
+                     "DELETE FROM server_sealed_roles WHERE item_instance_id=%u",
+                     instanceId);
+            if (!vm_mysql_exec(query))
+            {
+                result = 5;
+                reason = "delete-sealed";
+            }
+        }
+        else if (result == 1 &&
+                 !vm_net_mock_role_find_free_index(accountId, &freeIndex))
+        {
+            result = 4;
+            reason = "slots-full";
+        }
+        else if (result == 1 &&
+                 !vm_net_mock_role_db_reassign_account(
+                     sealedRoleId, ownerAccount, accountId, freeIndex,
+                     &reassignReason))
         {
             result = 5;
             reason = reassignReason;
+            printf("[error][network] mock_role_unseal_reassign_fail role=%u "
+                   "from=%s to=%s reason=%s\n",
+                   sealedRoleId, ownerAccount, accountId, reassignReason);
         }
-        else
+        else if (result == 1)
         {
             snprintf(query, sizeof(query),
                      "DELETE FROM server_sealed_roles WHERE item_instance_id=%u",
@@ -1378,9 +1669,10 @@ static u32 vm_net_mock_build_role_unseal_response(const u8 *request,
         {
             u8 escrowIndex = 0;
             const char *undo = "ok";
-            char restoreQ[320];
+            char restoreQ[640];
             char accountHex[160];
             char nameHex[96];
+            char sceneHex[160];
 
             if (vm_net_mock_role_find_free_escrow_index(&escrowIndex))
                 (void)vm_net_mock_role_db_reassign_account(
@@ -1392,15 +1684,23 @@ static u32 vm_net_mock_build_role_unseal_response(const u8 *request,
                                     strlen(sealed.previewName), nameHex,
                                     sizeof(nameHex)) != 0)
             {
+                if (sealed.previewScene[0] == 0 ||
+                    vm_mysql_hex_encode(sealed.previewScene,
+                                        strlen(sealed.previewScene), sceneHex,
+                                        sizeof(sceneHex)) == 0)
+                    sceneHex[0] = 0;
                 snprintf(restoreQ, sizeof(restoreQ),
                          "INSERT IGNORE INTO server_sealed_roles("
                          "item_instance_id,sealed_role_id,origin_account_id,"
                          "preview_name,preview_level,preview_job,preview_sex,"
+                         "preview_scene,preview_pos_x,preview_pos_y,"
                          "sealed_at) VALUES(%u,%u,CAST(X'%s' AS CHAR),UNHEX('%s'),"
-                         "%u,%u,%u,%u)",
+                         "%u,%u,%u,UNHEX('%s'),%u,%u,%u)",
                          instanceId, sealedRoleId, accountHex, nameHex,
                          sealed.previewLevel, (u32)sealed.previewJob,
-                         (u32)sealed.previewSex, (u32)time(NULL));
+                         (u32)sealed.previewSex, sceneHex[0] ? sceneHex : "",
+                         (u32)sealed.previewX, (u32)sealed.previewY,
+                         (u32)time(NULL));
                 (void)vm_mysql_exec(restoreQ);
             }
             result = 6;
@@ -1431,6 +1731,27 @@ static u32 vm_net_mock_build_role_unseal_response(const u8 *request,
             vm_net_mock_role_db_load();
             if (account != NULL && g_vm_net_mock_role_db_valid)
             {
+                u32 hi = 0;
+                /* Heal orphan-recreate placeholders (ASCII scene without .sce). */
+                for (hi = 0; hi < g_vm_net_mock_role_db.roleCount; ++hi)
+                {
+                    vm_net_mock_role_state *r =
+                        &g_vm_net_mock_role_db.roles[hi];
+                    if (r->roleId != sealedRoleId)
+                        continue;
+                    if (r->scene[0] == 0 || strchr(r->scene, '.') == NULL)
+                    {
+                        snprintf(r->scene, sizeof(r->scene), "%s",
+                                 vm_net_mock_role_initial_scene_name());
+                        r->x = VM_NET_MOCK_ROLE_INITIAL_X;
+                        r->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+                        printf("[warn][network] mock_role_unseal_heal_scene "
+                               "role=%u evidence=invalid-orphan-scene\n",
+                               sealedRoleId);
+                        (void)vm_net_mock_role_db_save("unseal-heal-scene");
+                    }
+                    break;
+                }
                 account->roleDb = g_vm_net_mock_role_db;
                 account->roleDbLoaded = true;
                 account->roleDbValid = true;

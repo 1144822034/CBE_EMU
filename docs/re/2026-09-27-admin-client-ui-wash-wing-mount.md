@@ -32,6 +32,7 @@
 | `wingStatusEnabled` | 1=显示翅 |
 | `mountStatusEnabled` | 1=显示骑 |
 | `multiOpenLimit` | 本机多开窗口上限（1–8；见 `2026-09-28-client-multi-open-windows.md`） |
+| `hangupQuotaWithoutInsight` | 无战斗心得时是否限制挂机 64 场（1=限制，0=不限；见 `2026-09-29-hangup-battles-quota-insight.md`） |
 
 旧包缺字段时客户端默认按开（与库默认一致）。
 

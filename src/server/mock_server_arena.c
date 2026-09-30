@@ -41,7 +41,7 @@ typedef struct
     u16 spawnX;
     u16 spawnY;
     u32 weekdayMask; /* derived from weekdayBrackets[i]!=0 */
-    /* Sun..Sat: 0=rest, 10/50/70, 77=70大乱斗(三职业同场). One key per day. */
+    /* Sun..Sat: 0=rest, 10/30/40/50/60/70, 77=70大乱斗(三职业同场). One key/day. */
     u16 weekdayBrackets[7];
     u16 entryStartMinute;
     u16 entryEndMinute;
@@ -56,6 +56,8 @@ typedef struct
     u8 wagerEnabled;
     u8 wagerFeePercent;
     u8 wagerCurrency;
+    /* 摆擂消耗活力（撤擂不退）；0=不扣. */
+    u32 wagerVitalityCost;
     /* Timed-arena duel rules (admin). Defaults preserve historical contract. */
     u8 damageScaleEnabled; /* round damage/hit 2^n */
     u8 allowHeal;          /* 1: each seat, one heal/buff/silence/dispel; items stay banned */
@@ -70,7 +72,8 @@ typedef struct
     u8 rankPos;
     u32 rewardExp;
     u32 rewardMoney;
-    u32 rewardWcoin;
+    /* 排行领奖发放活力（原 reward_wcoin / 酷宝字段，已改为活力） */
+    u32 rewardVitality;
     u32 itemId;
     u32 itemCount;
     u32 equipId;
@@ -173,21 +176,34 @@ static void vm_mock_arena_on_wager_duel_finished(vm_mock_service_duel *duel);
 static vm_mock_arena_participant *vm_mock_arena_ensure_participant(
     vm_mock_service_client_session *session, vm_net_mock_role_state *role);
 
-/* 等级段：10–49 → 10；50–69 → 50；70+ → 70。匹配仍要求同职业。 */
+/* 等级段：10–29→10；30–39→30；40–49→40；50–59→50；60–69→60；70+→70。
+ * 匹配仍要求同职业（77 大乱斗除外）。 */
 static u16 vm_mock_arena_bracket_for_level(u32 level)
 {
     if (level >= 70)
         return 70;
+    if (level >= 60)
+        return 60;
     if (level >= 50)
         return 50;
+    if (level >= 40)
+        return 40;
+    if (level >= 30)
+        return 30;
     if (level >= 10)
         return 10;
     return 0;
 }
 
+static bool vm_mock_arena_is_regular_bracket_key(u32 value)
+{
+    return value == 10u || value == 30u || value == 40u || value == 50u ||
+           value == 60u || value == 70u;
+}
+
 static u16 vm_mock_arena_normalize_bracket_key(u32 value)
 {
-    if (value == 10u || value == 50u || value == 70u ||
+    if (vm_mock_arena_is_regular_bracket_key(value) ||
         value == (u32)VM_MOCK_ARENA_BRACKET_FFA70)
         return (u16)value;
     return 0;
@@ -196,6 +212,30 @@ static u16 vm_mock_arena_normalize_bracket_key(u32 value)
 static bool vm_mock_arena_is_ffa_bracket(u16 bracket)
 {
     return bracket == (u16)VM_MOCK_ARENA_BRACKET_FFA70;
+}
+
+/* ASCII range for tips / kill-streak stage (not GBK). */
+static const char *vm_mock_arena_bracket_range_label(u16 bracket)
+{
+    if (vm_mock_arena_is_ffa_bracket(bracket))
+        return "70";
+    switch (bracket)
+    {
+    case 70:
+        return "70";
+    case 60:
+        return "60-69";
+    case 50:
+        return "50-59";
+    case 40:
+        return "40-49";
+    case 30:
+        return "30-39";
+    case 10:
+        return "10-29";
+    default:
+        return NULL;
+    }
 }
 
 /* Kill-streak announce / 文字称号: normal 70 and weekend FFA. */
@@ -310,7 +350,7 @@ static u16 vm_mock_arena_active_bracket_today(void)
     return g_vm_mock_arena_config.weekdayBrackets[(u32)tmNow->tm_wday % 7u];
 }
 
-/* Store schedule key on participant (77 on FFA days, else 10/50/70). */
+/* Store schedule key on participant (77 on FFA days, else 10/30/40/50/60/70). */
 static u16 vm_mock_arena_enrollment_bracket(u32 level)
 {
     u16 active = vm_mock_arena_active_bracket_today();
@@ -343,6 +383,8 @@ static void vm_mock_arena_set_enter_refuse_tip_closed(void)
 
 static void vm_mock_arena_set_enter_refuse_tip_bracket(u16 activeBracket)
 {
+    const char *range;
+
     if (activeBracket == 0)
     {
         /* 今日比武休息。 */
@@ -351,33 +393,14 @@ static void vm_mock_arena_set_enter_refuse_tip_bracket(u16 activeBracket)
                  "\xbd\xf1\xc8\xd5\xb1\xc8\xce\xe4\xd0\xdd\xcf\xa2\xa1\xa3");
         return;
     }
-    if (vm_mock_arena_is_ffa_bracket(activeBracket) || activeBracket >= 70)
-    {
-        /* 今日开放70级段，你的等级不符。 (FFA uses same tip) */
-        snprintf(g_vm_mock_arena_enter_refuse_tip,
-                 sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
-                 "\xbd\xf1\xc8\xd5\xbf\xaa\xb7\xc5"
-                 "70"
-                 "\xbc\xb6\xb6\xce\xa3\xac\xc4\xe3\xb5\xc4\xb5\xc8\xbc\xb6\xb2"
-                 "\xbb\xb7\xfb\xa1\xa3");
-        return;
-    }
-    if (activeBracket >= 50)
-    {
-        /* 今日开放50-69级段，你的等级不符。 */
-        snprintf(g_vm_mock_arena_enter_refuse_tip,
-                 sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
-                 "\xbd\xf1\xc8\xd5\xbf\xaa\xb7\xc5"
-                 "50-69"
-                 "\xbc\xb6\xb6\xce\xa3\xac\xc4\xe3\xb5\xc4\xb5\xc8\xbc\xb6\xb2"
-                 "\xbb\xb7\xfb\xa1\xa3");
-        return;
-    }
-    /* 今日开放10-49级段，你的等级不符。 */
+    range = vm_mock_arena_bracket_range_label(activeBracket);
+    if (range == NULL)
+        range = "?";
+    /* 今日开放{range}级段，你的等级不符。 */
     snprintf(g_vm_mock_arena_enter_refuse_tip,
-             sizeof(g_vm_mock_arena_enter_refuse_tip), "%s",
-             "\xbd\xf1\xc8\xd5\xbf\xaa\xb7\xc5"
-             "10-49"
+             sizeof(g_vm_mock_arena_enter_refuse_tip),
+             "%s%s%s",
+             "\xbd\xf1\xc8\xd5\xbf\xaa\xb7\xc5", range,
              "\xbc\xb6\xb6\xce\xa3\xac\xc4\xe3\xb5\xc4\xb5\xc8\xbc\xb6\xb2"
              "\xbb\xb7\xfb\xa1\xa3");
 }
@@ -489,13 +512,14 @@ static void vm_mock_arena_config_set_defaults(vm_mock_arena_config *cfg)
     snprintf(cfg->scene, sizeof(cfg->scene), "%s", VM_MOCK_ARENA_DEFAULT_SCENE);
     cfg->spawnX = 120;
     cfg->spawnY = 120;
-    /* Mon70 Tue50 Wed10 Thu70 Fri50 SatFFA SunFFA — weekend 70 大乱斗. */
+    /* Mon70 Tue60 Wed50 Thu40 Fri30 SatFFA SunFFA — weekend 70 大乱斗.
+     * 10-29 可在后台单独排日。 */
     cfg->weekdayBrackets[0] = (u16)VM_MOCK_ARENA_BRACKET_FFA70;
     cfg->weekdayBrackets[1] = 70;
-    cfg->weekdayBrackets[2] = 50;
-    cfg->weekdayBrackets[3] = 10;
-    cfg->weekdayBrackets[4] = 70;
-    cfg->weekdayBrackets[5] = 50;
+    cfg->weekdayBrackets[2] = 60;
+    cfg->weekdayBrackets[3] = 50;
+    cfg->weekdayBrackets[4] = 40;
+    cfg->weekdayBrackets[5] = 30;
     cfg->weekdayBrackets[6] = (u16)VM_MOCK_ARENA_BRACKET_FFA70;
     vm_mock_arena_sync_weekday_mask(cfg);
     cfg->entryStartMinute = 20 * 60 + 20;
@@ -512,6 +536,7 @@ static void vm_mock_arena_config_set_defaults(vm_mock_arena_config *cfg)
     cfg->wagerEnabled = 0;
     cfg->wagerFeePercent = 10;
     cfg->wagerCurrency = 0;
+    cfg->wagerVitalityCost = 50;
     cfg->damageScaleEnabled = 1;
     cfg->allowHeal = 0;
     cfg->allowDodge = 1;
@@ -531,7 +556,7 @@ static bool vm_mock_arena_ensure_tables(void)
             "spawn_x SMALLINT UNSIGNED NOT NULL DEFAULT 120,"
             "spawn_y SMALLINT UNSIGNED NOT NULL DEFAULT 120,"
             "weekday_mask INT UNSIGNED NOT NULL DEFAULT 127,"
-            "weekday_brackets VARCHAR(32) NOT NULL DEFAULT '77,70,50,10,70,50,77',"
+            "weekday_brackets VARCHAR(32) NOT NULL DEFAULT '77,70,60,50,40,30,77',"
             "entry_start_minute SMALLINT UNSIGNED NOT NULL DEFAULT 1220,"
             "entry_end_minute SMALLINT UNSIGNED NOT NULL DEFAULT 1229,"
             "match_start_minute SMALLINT UNSIGNED NOT NULL DEFAULT 1230,"
@@ -545,6 +570,7 @@ static bool vm_mock_arena_ensure_tables(void)
             "wager_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "wager_fee_percent TINYINT UNSIGNED NOT NULL DEFAULT 10,"
             "wager_currency TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "wager_vitality_cost INT UNSIGNED NOT NULL DEFAULT 50,"
             "damage_scale_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "allow_heal TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "allow_dodge TINYINT UNSIGNED NOT NULL DEFAULT 1,"
@@ -558,7 +584,7 @@ static bool vm_mock_arena_ensure_tables(void)
             "rank_pos TINYINT UNSIGNED NOT NULL,"
             "reward_exp INT UNSIGNED NOT NULL DEFAULT 0,"
             "reward_money INT UNSIGNED NOT NULL DEFAULT 0,"
-            "reward_wcoin INT UNSIGNED NOT NULL DEFAULT 0,"
+            "reward_vitality INT UNSIGNED NOT NULL DEFAULT 0,"
             "item_id INT UNSIGNED NOT NULL DEFAULT 0,"
             "item_count INT UNSIGNED NOT NULL DEFAULT 0,"
             "equip_id INT UNSIGNED NOT NULL DEFAULT 0,"
@@ -645,6 +671,13 @@ static bool vm_mock_arena_ensure_tables(void)
     (void)vm_mysql_exec(
         "ALTER TABLE server_arena_config ADD COLUMN allow_combat_pill "
         "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER allow_dodge");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_config ADD COLUMN wager_vitality_cost "
+        "INT UNSIGNED NOT NULL DEFAULT 50 AFTER wager_currency");
+    /* 排行奖励：历史 reward_wcoin（酷宝）改名为 reward_vitality（活力） */
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_rewards CHANGE COLUMN reward_wcoin "
+        "reward_vitality INT UNSIGNED NOT NULL DEFAULT 0");
     if (!vm_mock_wager_ensure_member_table())
         return false;
     ready = true;
@@ -707,14 +740,16 @@ static bool vm_mock_arena_config_row(void *contextValue, unsigned int columnCoun
         cfg->wagerFeePercent = (u8)tmp;
     if (values[18] && vm_mock_mysql_parse_u32(values[18], lengths[18], &tmp))
         cfg->wagerCurrency = (u8)tmp;
-    if (values[19] && lengths[19])
-        cfg->damageScaleEnabled = (u8)(values[19][0] == '0' ? 0 : 1);
+    if (values[19] && vm_mock_mysql_parse_u32(values[19], lengths[19], &tmp))
+        cfg->wagerVitalityCost = tmp;
     if (values[20] && lengths[20])
-        cfg->allowHeal = (u8)(values[20][0] == '0' ? 0 : 1);
+        cfg->damageScaleEnabled = (u8)(values[20][0] == '0' ? 0 : 1);
     if (values[21] && lengths[21])
-        cfg->allowDodge = (u8)(values[21][0] == '0' ? 0 : 1);
+        cfg->allowHeal = (u8)(values[21][0] == '0' ? 0 : 1);
     if (values[22] && lengths[22])
-        cfg->allowCombatPill = (u8)(values[22][0] == '0' ? 0 : 1);
+        cfg->allowDodge = (u8)(values[22][0] == '0' ? 0 : 1);
+    if (values[23] && lengths[23])
+        cfg->allowCombatPill = (u8)(values[23][0] == '0' ? 0 : 1);
     return true;
 }
 
@@ -745,7 +780,7 @@ static bool vm_mock_arena_reward_row(void *contextValue, unsigned int columnCoun
     if (values[4] && vm_mock_mysql_parse_u32(values[4], lengths[4], &tmp))
         row->rewardMoney = tmp;
     if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
-        row->rewardWcoin = tmp;
+        row->rewardVitality = tmp;
     if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
         row->itemId = tmp;
     if (values[7] && vm_mock_mysql_parse_u32(values[7], lengths[7], &tmp))
@@ -774,7 +809,8 @@ static bool vm_mock_arena_load_config(bool force)
             "entry_start_minute,entry_end_minute,match_start_minute,match_end_minute,"
             "round_seconds,battle_timeout_seconds,score_win,score_bye,score_draw,"
             "npc_name_keyword,wager_enabled,wager_fee_percent,wager_currency,"
-            "damage_scale_enabled,allow_heal,allow_dodge,allow_combat_pill "
+            "wager_vitality_cost,damage_scale_enabled,allow_heal,allow_dodge,"
+            "allow_combat_pill "
             "FROM server_arena_config WHERE id=1 LIMIT 1",
             vm_mock_arena_config_row, &g_vm_mock_arena_config))
     {
@@ -800,10 +836,11 @@ static bool vm_mock_arena_load_config(bool force)
                      "match_end_minute,round_seconds,battle_timeout_seconds,"
                      "score_win,score_bye,score_draw,npc_name_keyword,"
                      "wager_enabled,wager_fee_percent,wager_currency,"
-                     "damage_scale_enabled,allow_heal,allow_dodge,allow_combat_pill) "
+                     "wager_vitality_cost,damage_scale_enabled,allow_heal,"
+                     "allow_dodge,allow_combat_pill) "
                      "VALUES ("
                      "1,1,UNHEX('%s'),%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-                     "UNHEX('%s'),0,10,0,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE id=id",
+                     "UNHEX('%s'),0,10,0,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE id=id",
                      sceneHex, g_vm_mock_arena_config.spawnX,
                      g_vm_mock_arena_config.spawnY,
                      g_vm_mock_arena_config.weekdayMask, bracketsText,
@@ -816,6 +853,7 @@ static bool vm_mock_arena_load_config(bool force)
                      g_vm_mock_arena_config.scoreWin,
                      g_vm_mock_arena_config.scoreBye,
                      g_vm_mock_arena_config.scoreDraw, kwHex,
+                     g_vm_mock_arena_config.wagerVitalityCost,
                      (u32)g_vm_mock_arena_config.damageScaleEnabled,
                      (u32)g_vm_mock_arena_config.allowHeal,
                      (u32)g_vm_mock_arena_config.allowDodge,
@@ -825,7 +863,7 @@ static bool vm_mock_arena_load_config(bool force)
     }
     g_vm_mock_arena_reward_count = 0;
     (void)vm_mysql_query(
-        "SELECT job,bracket,rank_pos,reward_exp,reward_money,reward_wcoin,"
+        "SELECT job,bracket,rank_pos,reward_exp,reward_money,reward_vitality,"
         "item_id,item_count,equip_id FROM server_arena_rewards "
         "ORDER BY job,bracket,rank_pos",
         vm_mock_arena_reward_row, &g_vm_mock_arena_reward_count);
@@ -878,15 +916,15 @@ static bool vm_mock_arena_npc_offers_rank(const char *npcName)
 
 static bool vm_mock_arena_wager_npc_offers(const char *npcName)
 {
-    size_t kwLen;
-
     (void)vm_mock_arena_load_config(false);
     if (!g_vm_mock_arena_config.wagerEnabled || npcName == NULL || npcName[0] == 0)
         return false;
-    kwLen = strlen(g_vm_mock_arena_config.npcNameKeyword);
-    if (kwLen == 0)
-        return false;
-    return strstr(npcName, g_vm_mock_arena_config.npcNameKeyword) != NULL;
+    /* 擂台宗主 (GBK) — 赏金入口与定时比武关键字解耦. */
+    if (strstr(npcName, "\xc0\xde\xcc\xa8\xd7\xda\xd6\xf7") != NULL)
+        return true;
+    /* UTF-8 擂台宗主 */
+    return strstr(npcName, "\xe6\x93\x82\xe5\x8f\xb0\xe5\xae\x97\xe4\xb8\xbb") !=
+           NULL;
 }
 
 static void vm_mock_arena_wall_clock(u32 *dayYmdOut, u32 *minuteOfDayOut,
@@ -1342,20 +1380,22 @@ static void vm_mock_arena_announce_kill_streak(const vm_mock_arena_participant *
     name = p->roleName[0] ? p->roleName : NULL;
     if (name == NULL)
         return;
-    /* 阶段=段位：10-49 / 50-69 / 70级 / 大乱斗 */
+    /* 阶段=段位：10-29 / 30-39 / … / 70级 / 大乱斗 */
     if (vm_mock_arena_is_ffa_bracket(p->bracket))
         snprintf(stage, sizeof(stage),
                  "\xb4\xf3\xc2\xd2\xb6\xb7"); /* 大乱斗 */
     else if (p->bracket == 70)
         snprintf(stage, sizeof(stage), "70\xbc\xb6"); /* 70级 */
-    else if (p->bracket == 50)
-        snprintf(stage, sizeof(stage), "50-69");
-    else if (p->bracket == 10)
-        snprintf(stage, sizeof(stage), "10-49");
-    else if (p->bracket != 0)
-        snprintf(stage, sizeof(stage), "%u", (u32)p->bracket);
     else
-        snprintf(stage, sizeof(stage), "?");
+    {
+        const char *range = vm_mock_arena_bracket_range_label(p->bracket);
+        if (range != NULL)
+            snprintf(stage, sizeof(stage), "%s", range);
+        else if (p->bracket != 0)
+            snprintf(stage, sizeof(stage), "%u", (u32)p->bracket);
+        else
+            snprintf(stage, sizeof(stage), "?");
+    }
     /* {玩家} 比武 {阶段} 连胜N人,已经{称号} ! */
     memset(message, 0, sizeof(message));
     wrote = snprintf(
@@ -1561,7 +1601,7 @@ static void vm_mock_arena_apply_kill_streak(vm_mock_arena_participant *winner,
         return;
     if (winner->killStreak < 0xffffffffu)
         winner->killStreak += 1;
-    /* 10/50 段位不播报/不发称号；70 与周末大乱斗播报. */
+    /* 10/30/40/50/60 段位不播报/不发称号；70 与周末大乱斗播报. */
     if (!vm_mock_arena_is_kill_streak_bracket(winner->bracket))
         return;
     /* 仅被世界播报的首个达成者解锁文字称号。 */
@@ -3900,7 +3940,7 @@ static const vm_mock_arena_reward *vm_mock_arena_find_reward(u8 job, u16 bracket
 static void vm_mock_arena_reward_primary_item(const vm_mock_arena_reward *reward,
                                               char *nameOut, u32 nameCap,
                                               u32 *countOut);
-/* Rank UI line: 经验/铜币/酷宝/物品/装备汇总（无领奖前缀）。 */
+/* Rank UI line: 经验/铜币/活力/物品/装备汇总（无领奖前缀）。 */
 static void vm_mock_arena_format_reward_summary(const vm_mock_arena_reward *reward,
                                                 char *out, u32 outCap);
 static bool vm_mock_arena_claim_tip_append(char *out, u32 outCap, u32 *used,
@@ -4134,11 +4174,12 @@ static void vm_mock_arena_format_reward_summary(const vm_mock_arena_reward *rewa
         if (vm_mock_arena_claim_tip_append(out, outCap, &used, part))
             ++parts;
     }
-    if (reward->rewardWcoin)
+    if (reward->rewardVitality)
     {
         if (parts && !vm_mock_arena_claim_tip_append(out, outCap, &used, sepGbk))
             return;
-        snprintf(part, sizeof(part), "\xbf\xe1\xb1\xa6%u", reward->rewardWcoin);
+        /* 活力 */
+        snprintf(part, sizeof(part), "\xbb\xee\xc1\xa6%u", reward->rewardVitality);
         if (vm_mock_arena_claim_tip_append(out, outCap, &used, part))
             ++parts;
     }
@@ -4178,7 +4219,7 @@ static void vm_mock_arena_format_reward_summary(const vm_mock_arena_reward *rewa
     }
 }
 
-/* GBK chat/wire tip ≤81 bytes: 比武领奖成功：经验N、金钱N、酷宝N、物品… */
+/* GBK chat/wire tip ≤81 bytes: 比武领奖成功：经验N、金钱N、活力N、物品… */
 static bool vm_mock_arena_claim_tip_append(char *out, u32 outCap, u32 *used,
                                            const char *frag)
 {
@@ -4230,11 +4271,12 @@ static void vm_mock_arena_format_claim_tip(const vm_mock_arena_reward *reward,
         if (vm_mock_arena_claim_tip_append(out, outCap, &used, part))
             ++parts;
     }
-    if (reward->rewardWcoin)
+    if (reward->rewardVitality)
     {
         if (parts && !vm_mock_arena_claim_tip_append(out, outCap, &used, sepGbk))
             return;
-        snprintf(part, sizeof(part), "\xbf\xe1\xb1\xa6%u", reward->rewardWcoin);
+        /* 活力 */
+        snprintf(part, sizeof(part), "\xbb\xee\xc1\xa6%u", reward->rewardVitality);
         if (vm_mock_arena_claim_tip_append(out, outCap, &used, part))
             ++parts;
     }
@@ -4354,7 +4396,7 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
 
             /*
              * Grant bag rows first. If item/equip cannot enter, refuse the
-             * whole claim (no exp/money/wcoin, claimed stays 0) so a full
+             * whole claim (no exp/money/vitality, claimed stays 0) so a full
              * backpack cannot burn the reward.
              */
             if ((reward->itemId && reward->itemCount) || reward->equipId)
@@ -4398,8 +4440,9 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
                         role->money, reward->rewardMoney);
                     vm_net_mock_role_mark_inventory_dirty("arena-claim-money");
                 }
-                if (reward->rewardWcoin)
-                    (void)vm_net_mock_role_add_wcoin(role, reward->rewardWcoin);
+                if (reward->rewardVitality)
+                    (void)vm_mock_activities_vitality_add(role,
+                                                          reward->rewardVitality);
                 p->claimed = 1;
                 (void)vm_mock_arena_persist_score(p);
                 result = 1;
@@ -4409,10 +4452,10 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
                     (void)vm_mock_service_session_enqueue_system_message(
                         session, tipGbk);
                     printf("[info][mock-service] arena_claim_tip role=%u "
-                           "rank=%u exp=%u money=%u wcoin=%u item=%u x%u "
+                           "rank=%u exp=%u money=%u vitality=%u item=%u x%u "
                            "equip=%u tip=%s\n",
                            role->roleId, (u32)p->rankPos, reward->rewardExp,
-                           reward->rewardMoney, reward->rewardWcoin,
+                           reward->rewardMoney, reward->rewardVitality,
                            reward->itemId, reward->itemCount, reward->equipId,
                            tipGbk);
                 }
@@ -4473,13 +4516,13 @@ static bool vm_net_mock_arena_admin_save_config(
     const u16 weekdayBrackets[7], u16 entryStart, u16 entryEnd, u16 matchStart,
     u16 matchEnd, u32 roundSec, u32 battleTimeout, u32 scoreWin, u32 scoreBye,
     u32 scoreDraw, const char *npcKeyword, u8 wagerEnabled, u8 wagerFee,
-    u8 wagerCurrency, u8 damageScaleEnabled, u8 allowHeal, u8 allowDodge,
-    u8 allowCombatPill)
+    u8 wagerCurrency, u32 wagerVitalityCost, u8 damageScaleEnabled, u8 allowHeal,
+    u8 allowDodge, u8 allowCombatPill)
 {
     char sceneHex[192];
     char kwHex[96];
     char bracketsText[48];
-    char query[2600];
+    char query[2800];
     int written;
     vm_mock_arena_config tmpCfg;
     u32 i;
@@ -4511,10 +4554,10 @@ static bool vm_net_mock_arena_admin_save_config(
         "weekday_mask,weekday_brackets,entry_start_minute,entry_end_minute,"
         "match_start_minute,match_end_minute,round_seconds,battle_timeout_seconds,"
         "score_win,score_bye,score_draw,npc_name_keyword,wager_enabled,"
-        "wager_fee_percent,wager_currency,damage_scale_enabled,allow_heal,"
-        "allow_dodge,allow_combat_pill) VALUES (1,%u,UNHEX('%s'),%u,%u,%u,"
-        "'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u) "
-        "ON DUPLICATE KEY UPDATE "
+        "wager_fee_percent,wager_currency,wager_vitality_cost,"
+        "damage_scale_enabled,allow_heal,allow_dodge,allow_combat_pill) VALUES "
+        "(1,%u,UNHEX('%s'),%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,UNHEX('%s'),"
+        "%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
         "enabled=VALUES(enabled),scene=VALUES(scene),spawn_x=VALUES(spawn_x),"
         "spawn_y=VALUES(spawn_y),weekday_mask=VALUES(weekday_mask),"
         "weekday_brackets=VALUES(weekday_brackets),"
@@ -4529,6 +4572,7 @@ static bool vm_net_mock_arena_admin_save_config(
         "wager_enabled=VALUES(wager_enabled),"
         "wager_fee_percent=VALUES(wager_fee_percent),"
         "wager_currency=VALUES(wager_currency),"
+        "wager_vitality_cost=VALUES(wager_vitality_cost),"
         "damage_scale_enabled=VALUES(damage_scale_enabled),"
         "allow_heal=VALUES(allow_heal),allow_dodge=VALUES(allow_dodge),"
         "allow_combat_pill=VALUES(allow_combat_pill)",
@@ -4536,8 +4580,9 @@ static bool vm_net_mock_arena_admin_save_config(
         bracketsText, (u32)entryStart, (u32)entryEnd, (u32)matchStart,
         (u32)matchEnd, roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw,
         kwHex, (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency,
-        (u32)(damageScaleEnabled ? 1u : 0u), (u32)(allowHeal ? 1u : 0u),
-        (u32)(allowDodge ? 1u : 0u), (u32)(allowCombatPill ? 1u : 0u));
+        wagerVitalityCost, (u32)(damageScaleEnabled ? 1u : 0u),
+        (u32)(allowHeal ? 1u : 0u), (u32)(allowDodge ? 1u : 0u),
+        (u32)(allowCombatPill ? 1u : 0u));
     if (written < 0 || (size_t)written >= sizeof(query))
     {
         printf("[error][mock-service] arena_admin_save_config query truncated "
@@ -4561,7 +4606,7 @@ static bool vm_net_mock_arena_admin_save_config(
 }
 
 static bool vm_net_mock_arena_admin_save_reward(u8 job, u16 bracket, u8 rankPos,
-                                                u32 exp, u32 money, u32 wcoin,
+                                                u32 exp, u32 money, u32 vitality,
                                                 u32 itemId, u32 itemCount,
                                                 u32 equipId)
 {
@@ -4569,18 +4614,19 @@ static bool vm_net_mock_arena_admin_save_reward(u8 job, u16 bracket, u8 rankPos,
     if (!vm_mock_arena_ensure_tables() ||
         (job == 0 && !vm_mock_arena_is_ffa_bracket(bracket)) ||
         (job != 0 && job > 3) ||
-        (bracket != 10 && bracket != 50 && bracket != 70 &&
+        (bracket != 10 && bracket != 30 && bracket != 40 && bracket != 50 &&
+         bracket != 60 && bracket != 70 &&
          !vm_mock_arena_is_ffa_bracket(bracket)) ||
         rankPos == 0 || rankPos > 5)
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_arena_rewards (job,bracket,rank_pos,reward_exp,"
-             "reward_money,reward_wcoin,item_id,item_count,equip_id) VALUES "
+             "reward_money,reward_vitality,item_id,item_count,equip_id) VALUES "
              "(%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
              "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),"
-             "reward_wcoin=VALUES(reward_wcoin),item_id=VALUES(item_id),"
+             "reward_vitality=VALUES(reward_vitality),item_id=VALUES(item_id),"
              "item_count=VALUES(item_count),equip_id=VALUES(equip_id)",
-             (u32)job, (u32)bracket, (u32)rankPos, exp, money, wcoin, itemId,
+             (u32)job, (u32)bracket, (u32)rankPos, exp, money, vitality, itemId,
              itemCount, equipId);
     if (!vm_mysql_exec(query))
         return false;

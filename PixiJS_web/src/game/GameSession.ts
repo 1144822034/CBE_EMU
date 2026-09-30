@@ -143,11 +143,16 @@ import {
   buildExpCardUseRequest,
   buildExpCardStatusRequest,
   buildCombatPillUseRequest,
+  buildPractisePillFollowupRequest,
+  buildPractisePillUseRequest,
+  buildPractiseInfoRequest,
+  parsePractiseInfo,
   parseExpCardStatusInfo,
   parseExpCardStatusInfoFromPacket,
   parseBattleInsightRemainSecFromStatus,
   parseBattleInsightIteminfoFromPacket,
   isCombatPillItem,
+  isPractisePillItem,
   buildCultivationBookBindRequest,
   buildCultivationBookReadRequest,
   buildCultivationBookUseRequest,
@@ -156,8 +161,11 @@ import {
   parseCultivationBookUseResult,
   parseCultivationBookMetaFromDes,
   formatCultivationBookName,
+  formatRoleSealScrollDes,
+  formatRoleSealScrollName,
   isCultivationBookBlankItem,
   isCultivationBookItem,
+  isRoleSealScroll,
   buildEquipSwapRequest,
   buildItemDiscardRequest,
   buildItemEquipRequest,
@@ -412,6 +420,7 @@ import {
   type YanmenExchangeRow,
 } from "../net/protocolActivities";
 import { decodeWtPacket, type WtPacket } from "../net/wt";
+import { zangbaoSealBagDetail } from "../net/zangbaoApi";
 import {
   type BagItem,
   type BagEnhanceAttr,
@@ -421,6 +430,7 @@ import {
   type ItemUseFeedback,
   type MallState,
   type NpcDialog,
+  type PractiseInfo,
   type RankingPage,
   type TaskCandidateRow,
   type TaskListRow,
@@ -833,6 +843,8 @@ export class GameSession {
   wornItems: BagItem[] = [];
   /** Bumps to cancel in-flight 7/38 list-name enrichment. */
   private cultivationBookEnrichGen = 0;
+  /** Bumps to cancel in-flight 857 seal-detail list/detail enrichment. */
+  private roleSealEnrichGen = 0;
   /**
    * Unequip/swap: CBE moves the item object and keeps item+0x110. Pixi bag
    * open rebuilds from 30/21 (count=stack only), so stash current durability
@@ -2333,6 +2345,24 @@ export class GameSession {
     this.scheduleNextHangupEncounter(HANGUP_ENCOUNTER_INTERVAL_MS);
   }
 
+  /**
+   * Multi-open: after switching back (or background fight end), keep the
+   * hangup collide loop alive without resetting an already-armed timer.
+   */
+  ensureHangupLoopArmed(): void {
+    if (!this.hangupDesired || this.inBattle) return;
+    this.hangupActive = true;
+    if (this.hangupEncounterTimer != null || this.hangupEncounterInFlight) {
+      return;
+    }
+    const now = Date.now();
+    if (this.hangupEncounterDueAt > now) {
+      this.scheduleNextHangupEncounter(this.hangupEncounterDueAt - now);
+      return;
+    }
+    this.onLeftBattleForHangup();
+  }
+
   private async tickHangupEncounter(reason: string): Promise<void> {
     if (!this.hangupDesired || this.inBattle || !this.transport) return;
     if (this.hangupEncounterInFlight) return;
@@ -3218,9 +3248,16 @@ export class GameSession {
     mine: WagerMine | null;
     listResult: number;
     listMessage: string;
+    vitalityCost: number;
   }> {
     if (!this.transport) {
-      return { rows: [], mine: null, listResult: 0, listMessage: "no-transport" };
+      return {
+        rows: [],
+        mine: null,
+        listResult: 0,
+        listMessage: "no-transport",
+        vitalityCost: 0,
+      };
     }
     const listBodies = await this.transport.exchange(0, buildWagerListRequest());
     this.handleBodies(listBodies);
@@ -3230,6 +3267,7 @@ export class GameSession {
     let mine: WagerMine | null = null;
     let listResult = 0;
     let listMessage = "";
+    let vitalityCost = 0;
     for (const body of listBodies) {
       try {
         const list = parseWagerList(decodeWtPacket(body));
@@ -3237,6 +3275,7 @@ export class GameSession {
           rows = list.rows;
           listResult = list.result;
           listMessage = list.message || "";
+          vitalityCost = list.vitalityCost >>> 0;
         }
       } catch {
         /* ignore */
@@ -3250,7 +3289,7 @@ export class GameSession {
         /* ignore */
       }
     }
-    return { rows, mine, listResult, listMessage };
+    return { rows, mine, listResult, listMessage, vitalityCost };
   }
 
   async wagerCreate(stake: number): Promise<WagerResult | null> {
@@ -4250,6 +4289,7 @@ export class GameSession {
    * Use bag item via server.
    * - Chests → 1/7/15 (+ key)
    * - Official exp cards 809/810/811 → 1/7/30
+   * - 修炼丹 827 → 1/7/16 (+ follow-up 1/7/17)
    * - 战斗心得 828 → 1/25/6 (+ follow-up 1/25/7)
    * - 大力丸/神力丸 829/830 → 1/22/3
    * - Other consumables (incl. custom 845 / 打金心得 853) → 1/7/1
@@ -4295,6 +4335,10 @@ export class GameSession {
       }
       this.emitItemUseFeedback(fb);
       return fb;
+    }
+
+    if (isPractisePillItem(itemId)) {
+      return this.usePractisePill(seq);
     }
 
     if (isBattleInsightItem(itemId)) {
@@ -4364,6 +4408,30 @@ export class GameSession {
       this.battleInsightExpireAtMs = 0;
     }
     return info || "当前没有生效的增益物品";
+  }
+
+  /**
+   * Map「修」panel: remaining buff tip (7/31) + 修炼丹 bank (7/18 alllast*).
+   */
+  async fetchPractiseRemainPanel(): Promise<{
+    buffTip: string;
+    practise: PractiseInfo | null;
+  }> {
+    const buffTip = await this.requestBuffStatus();
+    let practise: PractiseInfo | null = null;
+    if (this.transport) {
+      try {
+        const bodies = await this.transport.exchange(
+          0,
+          buildPractiseInfoRequest(),
+        );
+        this.handleBodies(bodies);
+        practise = parsePractiseInfo(bodies);
+      } catch (e) {
+        console.warn("[session] practise info 7/18", e);
+      }
+    }
+    return { buffTip, practise };
   }
 
   /**
@@ -4509,6 +4577,48 @@ export class GameSession {
   }
 
   /**
+   * 827 修炼丹: WT 1/7/16 → 7/16 {result,maxnum,iteminfo}, then 1/7/17 wait-clear.
+   * Server banks +60min; response has no 7/7 — mirror CBE local deduct on result=1.
+   */
+  private async usePractisePill(seq: number): Promise<ItemUseFeedback> {
+    if (!this.transport) {
+      return { ok: false, message: "未连接服务器" };
+    }
+    if (!(seq > 0)) {
+      const fb: ItemUseFeedback = {
+        ok: false,
+        message: "背包序号无效，请重新打开背包",
+      };
+      this.emitItemUseFeedback(fb);
+      return fb;
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildPractisePillUseRequest(seq),
+    );
+    let fb = this.feedbackFromBodies(bodies) ?? {
+      ok: false,
+      message: "使用无响应",
+    };
+    if (fb.ok) {
+      this.handleBodies(bodies);
+      this.consumeBagSeqLocally(seq);
+      const follow = await this.transport.exchange(
+        0,
+        buildPractisePillFollowupRequest(seq),
+      );
+      this.handleBodies(follow);
+      if (!fb.message || fb.message === "使用成功") {
+        fb = { ...fb, message: "获得1小时修炼时间，离线后自动开始修炼。" };
+      }
+    } else if (!fb.message) {
+      fb = { ...fb, message: "使用失败" };
+    }
+    this.emitItemUseFeedback(fb);
+    return fb;
+  }
+
+  /**
    * 829/830: WT 1/22/3 → 22/3 {result,info,ruffianflag}.
    * Server consumes the row; response has no 7/7 — mirror CBE local deduct.
    */
@@ -4581,6 +4691,32 @@ export class GameSession {
       );
     } else {
       this.bagItems = this.bagItems.filter((_, i) => i !== idx);
+    }
+    this.cb.onBag?.(this.bagItems);
+  }
+
+  /**
+   * Force bag row to `remaining` after server ops where sticky reopen can lag
+   * (seal unseal 29/26). remaining<=0 removes the row.
+   */
+  applyBagSeqRemaining(seq: number, remaining: number): void {
+    const want = seq & 0xffffff;
+    if (!want) return;
+    const idx = this.bagItems.findIndex(
+      (it) => (it.seq & 0xffffff) === want || (it.seq & 0xffff) === (want & 0xffff),
+    );
+    if (idx < 0) {
+      if (remaining <= 0) this.cb.onBag?.(this.bagItems);
+      return;
+    }
+    if (remaining <= 0) {
+      this.pendingBagEquipDurability.delete(this.bagItems[idx]!.seq & 0xffffff);
+      this.pendingBagEquipEnhance.delete(this.bagItems[idx]!.seq & 0xffffff);
+      this.bagItems = this.bagItems.filter((_, i) => i !== idx);
+    } else {
+      this.bagItems = this.bagItems.map((it, i) =>
+        i === idx ? { ...it, count: remaining >>> 0 } : it,
+      );
     }
     this.cb.onBag?.(this.bagItems);
   }
@@ -4701,6 +4837,142 @@ export class GameSession {
         if (this.applyCultivationBookMetaFromDes(it.seq, des)) changed = true;
       }
       if (changed && gen === this.cultivationBookEnrichGen) {
+        this.cb.onBag?.(this.bagItems);
+      }
+    })();
+  }
+
+  /**
+   * 857 bag detail: GET /api/zangbao/seal-detail?bagSeq= → sealed role text.
+   * Blank scrolls return null (keep catalog「空白封印卷」desc).
+   */
+  async readRoleSealScrollDes(seq: number): Promise<string | null> {
+    if (!(seq > 0)) return null;
+    const creds = this.getCredentials();
+    const account = (creds.user || "").trim();
+    const password = (creds.password || "").trim();
+    const roleId = this.selectedRoleId >>> 0;
+    if (!account || !roleId) return null;
+    const d = await zangbaoSealBagDetail(seq, { account, password, roleId });
+    if (!d || d.ok !== true) return null;
+    if (d.blank || !d.role?.name) return null;
+    return formatRoleSealScrollDes({
+      name: d.role.name,
+      level: d.role.level,
+      job: d.role.job,
+      sex: d.role.sex,
+    });
+  }
+
+  /**
+   * Apply seal-detail → bag row name「[印]角色」+ desc.
+   * Pass `notify: true` to push bag UI immediately.
+   */
+  applyRoleSealMetaFromDetail(
+    seq: number,
+    detail: {
+      blank?: boolean;
+      sealedRoleId: number;
+      role: { name: string; level: number; job: number; sex: number };
+    },
+    opts?: { notify?: boolean },
+  ): boolean {
+    const idx = this.bagItems.findIndex((it) => it.seq === seq && seq > 0);
+    if (idx < 0) return false;
+    const cur = this.bagItems[idx]!;
+    if (!isRoleSealScroll(cur.itemId)) return false;
+    const base = lookupItemSync(cur.itemId)?.name ?? "角色封印卷";
+    if (detail.blank || !detail.role?.name) {
+      if (!cur.sealedRole && cur.name === base) return false;
+      this.bagItems = this.bagItems.map((it, i) =>
+        i === idx
+          ? {
+              ...it,
+              sealedRole: undefined,
+              name: base,
+              desc: lookupItemSync(it.itemId)?.desc ?? it.desc,
+            }
+          : it,
+      );
+      if (opts?.notify) this.cb.onBag?.(this.bagItems);
+      return true;
+    }
+    const sealedRole = {
+      roleId: detail.sealedRoleId || 0,
+      name: detail.role.name,
+      level: detail.role.level || 1,
+      job: detail.role.job || 0,
+      sex: detail.role.sex || 0,
+    };
+    const name = formatRoleSealScrollName(base, sealedRole);
+    const desc = formatRoleSealScrollDes(sealedRole);
+    if (
+      cur.sealedRole?.roleId === sealedRole.roleId &&
+      cur.sealedRole?.name === sealedRole.name &&
+      cur.sealedRole?.level === sealedRole.level &&
+      cur.name === name &&
+      cur.desc === desc
+    ) {
+      return false;
+    }
+    this.bagItems = this.bagItems.map((it, i) =>
+      i === idx ? { ...it, sealedRole, name, desc } : it,
+    );
+    if (opts?.notify) this.cb.onBag?.(this.bagItems);
+    return true;
+  }
+
+  /** After seal success: stamp known target onto bound scroll before HTTP enrich. */
+  applyRoleSealMetaLocal(
+    seq: number,
+    target: { roleId: number; name: string; level: number; job?: number; sex?: number },
+    opts?: { notify?: boolean },
+  ): boolean {
+    return this.applyRoleSealMetaFromDetail(
+      seq,
+      {
+        sealedRoleId: target.roleId,
+        role: {
+          name: target.name,
+          level: target.level,
+          job: target.job || 0,
+          sex: target.sex || 0,
+        },
+      },
+      opts,
+    );
+  }
+
+  /** After bag refresh: async seal-detail for each 857 so list shows [印]名. */
+  private scheduleEnrichRoleSealScrollNames(opts?: { force?: boolean }): void {
+    const force = !!opts?.force;
+    const targets = this.bagItems.filter(
+      (it) =>
+        isRoleSealScroll(it.itemId) &&
+        it.seq > 0 &&
+        (force || !it.sealedRole?.name),
+    );
+    if (!targets.length) return;
+    const creds = this.getCredentials();
+    const account = (creds.user || "").trim();
+    const password = (creds.password || "").trim();
+    const roleId = this.selectedRoleId >>> 0;
+    if (!account || !roleId) return;
+    const gen = ++this.roleSealEnrichGen;
+    void (async () => {
+      let changed = false;
+      for (const it of targets) {
+        if (gen !== this.roleSealEnrichGen) return;
+        const d = await zangbaoSealBagDetail(it.seq, {
+          account,
+          password,
+          roleId,
+        });
+        if (gen !== this.roleSealEnrichGen) return;
+        if (!d || d.ok !== true) continue;
+        if (this.applyRoleSealMetaFromDetail(it.seq, d)) changed = true;
+      }
+      if (changed && gen === this.roleSealEnrichGen) {
         this.cb.onBag?.(this.bagItems);
       }
     })();
@@ -5307,6 +5579,7 @@ export class GameSession {
         sourceLevel: 0,
         destSeq: 0,
         destLevel: 0,
+        washTransferred: false,
       };
     }
     const bodies = await this.transport.exchange(
@@ -5338,6 +5611,7 @@ export class GameSession {
       sourceLevel: 0,
       destSeq: 0,
       destLevel: 0,
+      washTransferred: false,
     };
   }
 
@@ -5350,7 +5624,9 @@ export class GameSession {
       (it) => it.seq === parsed.sourceSeq && it.seq > 0,
     );
     const movedAttrs =
-      src?.kind === "equip" && src.enhanceAttrs?.length
+      parsed.washTransferred &&
+      src?.kind === "equip" &&
+      src.enhanceAttrs?.length
         ? src.enhanceAttrs.map((a) => ({ ...a }))
         : undefined;
     // Drop unequip-race pending for both seats — stale pending would resurrect
@@ -5365,8 +5641,7 @@ export class GameSession {
       }
       if (it.seq === parsed.destSeq && it.seq > 0) {
         changed = true;
-        // Server copies enhance_wash source→dest; mirror locally so dest does
-        // not keep pre-transfer wash until the next 7/7/openBag.
+        // Server copies enhance_wash source→dest when washxfer=1; mirror locally.
         if (movedAttrs?.length) {
           return {
             ...it,
@@ -5374,8 +5649,12 @@ export class GameSession {
             enhanceAttrs: movedAttrs,
           };
         }
-        const { enhanceAttrs: _dropDest, ...rest } = it;
-        return { ...rest, enhance: parsed.destLevel >>> 0 };
+        if (parsed.washTransferred) {
+          const { enhanceAttrs: _dropDest, ...rest } = it;
+          return { ...rest, enhance: parsed.destLevel >>> 0 };
+        }
+        // washxfer=0: keep dest wash attrs; only update enhance level.
+        return { ...it, enhance: parsed.destLevel >>> 0 };
       }
       return it;
     });
@@ -6254,7 +6533,21 @@ export class GameSession {
         const packet = ingestPacket(body);
         if (!packet) continue;
         const parsed = parseRoleUnsealResult(packet);
-        if (parsed) return parsed;
+        if (parsed) {
+          if (parsed.ok) {
+            /* Reopen then force-remove: sticky restore can still paint the scroll. */
+            try {
+              await this.openBag();
+            } catch {
+              /* keep local consume below */
+            }
+            this.applyBagSeqRemaining(
+              parsed.cardSeq || cardSeq,
+              parsed.remaining,
+            );
+          }
+          return parsed;
+        }
       } catch {
         /* skip */
       }
@@ -7858,6 +8151,7 @@ export class GameSession {
         });
         this.cb.onBag?.(this.bagItems);
         this.scheduleEnrichCultivationBookNames({ force: true });
+        this.scheduleEnrichRoleSealScrollNames({ force: true });
       } else {
         const updates = parseBagItemUpdates(packet);
         if (updates.length) {
@@ -7875,6 +8169,7 @@ export class GameSession {
           });
           this.cb.onBag?.(this.bagItems);
           this.scheduleEnrichCultivationBookNames();
+          this.scheduleEnrichRoleSealScrollNames();
         }
       }
       const flaskRes = parseFlaskReservoirUpdates(packet);

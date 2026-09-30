@@ -4473,6 +4473,17 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 serviceOptionValues[serviceOptionCount] =
                     VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL;
                 serviceOptionCount += 1;
+                /* Same 26/1 equip-sell menus as mall pass 839; payout = discard. */
+                if (serviceOptionCount + usedSlots < dialogCap)
+                {
+                    serviceOptionNames[serviceOptionCount] =
+                        "\xd7\xb0\xb1\xb8\xb3\xf6\xca\xdb"; /* 装备出售 */
+                    serviceOptionDescriptions[serviceOptionCount] =
+                        "\xd6\xaa\xc6\xfa\xbc\xdb\xb8\xf1"; /* 丢弃价格 */
+                    serviceOptionValues[serviceOptionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIP_SELL;
+                    serviceOptionCount += 1;
+                }
                 break;
             case VM_NET_MOCK_NPC_KIND_SKILL_TRAINER:
                 serviceOptionNames[serviceOptionCount] =
@@ -4910,7 +4921,7 @@ static u32 vm_net_mock_npc_shop_selector_for_item(
     if (item == NULL)
         return 0;
     if (!item->isEquip)
-        return vm_net_mock_item_is_npc_medicine(item->itemId)
+        return item->npcEnabled != 0
                    ? VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR
                    : 0;
     slot = vm_net_mock_equipment_slot_for_category(item->category);
@@ -4928,10 +4939,8 @@ static bool vm_net_mock_npc_shop_item_matches_selector(
         return false;
     if (selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR)
     {
-        /* Category-10 shelf split: 下架且为 HP/MP 药品的条目留在药商；
-         * 上架 rows 进 mall 秘宝；经验卡/喇叭等类别 10 非药品不进药商。 */
-        return !item->enabled && !item->isEquip &&
-               vm_net_mock_item_is_npc_medicine(item->itemId);
+        /* 药品商人货架：任意非装备且 npc_enabled（不再限类别 10 / HP·MP）. */
+        return item->npcEnabled != 0 && !item->isEquip;
     }
     if (!(selector >= 1u && selector <= 10u) || !item->isEquip ||
         item->category != selector - 1u ||
@@ -5022,7 +5031,8 @@ static void vm_net_mock_npc_shop_append_stat_line(
 
 static bool vm_net_mock_npc_shop_format_equipment_detail(
     char *out, size_t outCap, const vm_net_mock_shop_catalog_item *item,
-    const vm_net_mock_equipment_catalog_item *equipment, u16 enhanceLevel)
+    const vm_net_mock_equipment_catalog_item *equipment, u16 enhanceLevel,
+    u32 displayPrice)
 {
     size_t pos = 0;
     int wrote = 0;
@@ -5039,7 +5049,7 @@ static bool vm_net_mock_npc_shop_format_equipment_detail(
                      "\xb5\xc8\xbc\xb6", /* 等级 */
                      equipment->levelRequired,
                      "\xca\xdb\xbc\xdb", /* 售价 */
-                     item->price,
+                     displayPrice,
                      "\xcd\xad"); /* 铜 */
     if (wrote <= 0)
         return false;
@@ -9478,6 +9488,19 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         const vm_net_mock_shop_catalog_item *viewCatalog = NULL;
         const vm_net_mock_equipment_catalog_item *viewEquipment = NULL;
 
+        /*
+         * Repair NPC 「装备出售」and mall pass 839 share OPEN_EQUIP_SELL.
+         * Arm here so NPC entry does not require consuming a pass first.
+         */
+        if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIP_SELL &&
+            session != NULL)
+        {
+            session->equipSellSessionArmed = true;
+            printf("[info][mock-service] equip_sell_session_arm client=%08x "
+                   "via=OPEN_EQUIP_SELL evidence=repair-npc-or-pass-root\n",
+                   session->clientId);
+        }
+
         if (session == NULL || !session->equipSellSessionArmed)
         {
             vm_net_mock_backpack_item_state *passItem =
@@ -9533,7 +9556,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 viewEquipment != NULL &&
                 vm_net_mock_npc_shop_format_equipment_detail(
                     dialogTextStorage, sizeof(dialogTextStorage), viewCatalog,
-                    viewEquipment, viewBagItem->enhanceLevel))
+                    viewEquipment, viewBagItem->enhanceLevel,
+                    vm_net_mock_equip_discard_refund_unit_price(viewCatalog)))
             {
                 dialogText = dialogTextStorage;
                 showSellDetail = true;
@@ -9572,7 +9596,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     session->backpackResyncRemoveItemId = soldItemId;
                 }
                 printf("[info][network] mock_equip_sell_dialog role=%u seq=%u "
-                       "item=%u price=%u money=%u evidence=full-价值-copper\n",
+                       "item=%u price=%u money=%u evidence=discard-floor-价值/10\n",
                        role->roleId, value, soldItemId, soldPrice, role->money);
             }
             else if (failReason != NULL && strcmp(failReason, "socketed") == 0)
@@ -9611,7 +9635,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             snprintf(optionDescriptionStorage[optionCount],
                      sizeof(optionDescriptionStorage[optionCount]),
                      "%u%s",
-                     viewCatalog != NULL ? viewCatalog->price : 0u,
+                     vm_net_mock_equip_discard_refund_unit_price(viewCatalog),
                      "\xcd\xad"); /* ...铜 */
             optionDescriptions[optionCount] =
                 optionDescriptionStorage[optionCount];
@@ -9722,7 +9746,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     snprintf(optionDescriptionStorage[optionCount],
                              sizeof(optionDescriptionStorage[optionCount]),
                              "%u%s %s",
-                             catalog != NULL ? catalog->price : 0u,
+                             vm_net_mock_equip_discard_refund_unit_price(catalog),
                              "\xcd\xad", /* 铜 */
                              "\xb2\xe9\xbf\xb4\xca\xf4\xd0\xd4"); /* 查看属性 */
                     optionDescriptions[optionCount] =
@@ -9860,7 +9884,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 viewEquipment != NULL &&
                 vm_net_mock_npc_shop_format_equipment_detail(
                     dialogTextStorage, sizeof(dialogTextStorage), buyItem,
-                    viewEquipment, 0))
+                    viewEquipment, 0, buyItem->price))
             {
                 dialogText = dialogTextStorage;
                 showDetail = true;
@@ -10198,7 +10222,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                                                selector) &&
                     vm_net_mock_npc_shop_format_equipment_detail(
                         dialogTextStorage, sizeof(dialogTextStorage), buyItem,
-                        viewEquipment, 0);
+                        viewEquipment, 0,
+                        vm_net_mock_shop_npc_unit_price(buyItem));
                 if (showItemDetail)
                     dialogText = dialogTextStorage;
                 else
@@ -10216,24 +10241,34 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
 
         if (buyRequest)
         {
+            bool payWcoin =
+                session != NULL && session->coolmallSessionArmed;
+            u32 unitPrice = 0;
+
+            if (buyItem != NULL)
+            {
+                unitPrice =
+                    payWcoin
+                        ? vm_net_mock_shop_effective_unit_price(buyItem->itemId,
+                                                               buyItem->price)
+                        : vm_net_mock_shop_npc_unit_price(buyItem);
+            }
             if (buyItem == NULL ||
                 !vm_net_mock_npc_shop_item_matches_selector(buyItem, selector))
             {
                 dialogText =
                     "\xb8\xc3\xc9\xcc\xc6\xb7\xd2\xd1\xcf\xc2\xbc\xdc\xa1\xa3"; /* 该商品已下架。 */
             }
-            else if (buyItem->price != 0 &&
-                     buyCount > 0xffffffffu / buyItem->price)
+            else if (unitPrice != 0 && buyCount > 0xffffffffu / unitPrice)
             {
                 dialogText =
                     "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
             }
-            else if ((session != NULL && session->coolmallSessionArmed)
-                         ? (role->wcoin < buyItem->price * buyCount)
-                         : (role->money < buyItem->price * buyCount))
+            else if (payWcoin ? (role->wcoin < unitPrice * buyCount)
+                              : (role->money < unitPrice * buyCount))
             {
                 dialogText =
-                    (session != NULL && session->coolmallSessionArmed)
+                    payWcoin
                         ? "\xbf\xe1\xb1\xa6\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3" /* 酷宝不足，无法购买。 */
                         : "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3"; /* 铜钱不足，无法购买。 */
             }
@@ -10245,9 +10280,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                  * rolled back with a sync save instead of refunding only money
                  * in RAM after a partial grant. */
                 vm_net_mock_role_state purchaseBefore = *role;
-                bool payWcoin =
-                    session != NULL && session->coolmallSessionArmed;
-                u32 totalCost = buyItem->price * buyCount;
+                u32 totalCost = unitPrice * buyCount;
 
                 if (payWcoin)
                     role->wcoin -= totalCost;
@@ -10351,7 +10384,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 "\xb9\xba\xc2\xf2\xb8\xc3\xd7\xb0\xb1\xb8"; /* 购买该装备 */
             snprintf(optionDescriptionStorage[optionCount],
                      sizeof(optionDescriptionStorage[optionCount]),
-                     "%u%s", buyItem->price, currencyUnit);
+                     "%u%s", vm_net_mock_shop_npc_unit_price(buyItem),
+                     currencyUnit);
             optionDescriptions[optionCount] =
                 optionDescriptionStorage[optionCount];
             optionValues[optionCount] =
@@ -10445,7 +10479,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 /* Mall-like: select row → view attrs → buy on detail page. */
                 snprintf(optionNameStorage[optionCount],
                          sizeof(optionNameStorage[optionCount]), "%s %u%s",
-                         item->name, item->price, currencyUnit);
+                         item->name, vm_net_mock_shop_npc_unit_price(item),
+                         currencyUnit);
                 snprintf(optionDescriptionStorage[optionCount],
                          sizeof(optionDescriptionStorage[optionCount]),
                          "Lv.%u %s", levelRequired,
@@ -10460,8 +10495,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             {
                 snprintf(optionNameStorage[optionCount],
                          sizeof(optionNameStorage[optionCount]), "%s%s %u%s",
-                         "\xb9\xba\xc2\xf2", item->name, item->price,
-                         currencyUnit);
+                         "\xb9\xba\xc2\xf2", item->name,
+                         vm_net_mock_shop_npc_unit_price(item), currencyUnit);
                 snprintf(optionDescriptionStorage[optionCount],
                          sizeof(optionDescriptionStorage[optionCount]),
                          "%s Lv.%u", item->name, levelRequired);

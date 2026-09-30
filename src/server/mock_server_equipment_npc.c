@@ -1421,11 +1421,10 @@ static u32 vm_net_mock_build_equipment_enhance_response(
 }
 
 /*
- * Transfer fee (product):
- *   29/5 wire money fixed at 7 → UI「2.金钱」≈48金65银
- *     (calibrated: display铜 ≈ 27664 + money*65536).
- *   29/6 charges the same 48金65银 (copper). No name `(N金)` suffix.
- *   level=0 keeps materials+target UI (level==1 drops both).
+ * Pixi 强化转移费用（后台可独立开关）：
+ *   玄晶：+1 免费；+N(N>=2) 扣 1×(N-1)级玄晶（item 900+N-1）。
+ *   金币：固定 48金65银（486500 铜）；29/5 money wire=7 驱动费用显示。
+ * Cross-quality: requires 跨品重铸石(855); consumed only on successful 29/6.
  */
 #define VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_MONEY_WIRE 7u
 #define VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_FEE_GOLD 48u
@@ -1440,6 +1439,27 @@ static u32 vm_net_mock_equipment_enhance_transfer_money_cost(void)
                VM_NET_MOCK_MONEY_COPPER_PER_SILVER;
 }
 
+/* +1 免费；+N 消耗 1 颗 (N-1) 级玄晶。返回数量（0 或 1）。 */
+static u32 vm_net_mock_equipment_enhance_transfer_crystal_cost(u8 sourceLevel)
+{
+    return sourceLevel <= 1u ? 0u : 1u;
+}
+
+/* Crystal item for +N transfer: tier=(N-1) → 901..(900+N-1). +1 → 0. */
+static u32 vm_net_mock_equipment_enhance_transfer_crystal_item_id(u8 sourceLevel)
+{
+    u32 tier;
+
+    if (sourceLevel <= 1u)
+        return 0;
+    tier = (u32)sourceLevel - 1u;
+    if (tier > (u32)(VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST -
+                     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST + 1))
+        tier = (u32)(VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST -
+                     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST + 1);
+    return (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST + tier - 1u;
+}
+
 /* Always 0: materials UI (level!=1); do not inflate halfword fee path. */
 static u8 vm_net_mock_equipment_enhance_transfer_wire_level(u8 sourceLevel)
 {
@@ -1448,12 +1468,56 @@ static u8 vm_net_mock_equipment_enhance_transfer_wire_level(u8 sourceLevel)
 }
 
 /*
+ * Apply wash side-effects for a successful 29/6 transfer.
+ * transferWash=1: copy source→dest then clear source (legacy).
+ * transferWash=0: discard source wash; leave dest wash untouched.
+ */
+static void vm_net_mock_equipment_enhance_transfer_apply_wash(
+    vm_net_mock_role_state *role,
+    vm_net_mock_backpack_item_state *source,
+    vm_net_mock_backpack_item_state *dest,
+    u32 sourceInstanceId,
+    u32 destInstanceId,
+    u8 destLevelAfter,
+    bool transferWash)
+{
+    if (role == NULL || source == NULL || dest == NULL)
+        return;
+
+    if (transferWash)
+    {
+        vm_net_mock_enhance_wash_copy(&dest->enhanceWash, &source->enhanceWash);
+        vm_net_mock_enhance_wash_clear(&source->enhanceWash);
+        (void)vm_net_mock_enhance_wash_record_delete(
+            role->roleId, sourceInstanceId, source->seq);
+        if (!vm_net_mock_enhance_wash_is_empty(&dest->enhanceWash))
+        {
+            (void)vm_net_mock_enhance_wash_record_upsert(
+                role->roleId, destInstanceId, dest->seq, dest->itemId,
+                destLevelAfter, &dest->enhanceWash, 0);
+        }
+        else
+        {
+            (void)vm_net_mock_enhance_wash_record_delete(
+                role->roleId, destInstanceId, dest->seq);
+        }
+    }
+    else
+    {
+        vm_net_mock_enhance_wash_clear(&source->enhanceWash);
+        (void)vm_net_mock_enhance_wash_record_delete(
+            role->roleId, sourceInstanceId, source->seq);
+    }
+}
+
+/*
  * 强化转移 / 重铸 (WT 29/5 select/preview, 29/6 confirm).
  *
  * Request: 1/29/{5|6} { seqd, seqs } — seqs=source (当前), seqd=dest (目标).
- * 29/5: result=1 + flag/id/seq/name/money=7/level=0 opens fee UI; no charge.
- * 29/6: source=0, dest=sourceLevel, charge 48金65银; result=4 金钱不足.
+ * 29/5: result=1 + flag/id/seq/name/money/level opens confirm UI; no charge.
+ * 29/6: source=0, dest=sourceLevel; fees gated by transfer_crystal/money_enabled.
  * Cross-quality: requires 跨品重铸石(855); consumed only on successful 29/6.
+ * Wash move gated by server_enhance_wash_settings.transfer_wash_enabled.
  * Parser: HandleItemUseAndEquip 0x010294AA (29/5) / 0x01029690 (29/6).
  */
 static u32 vm_net_mock_build_equipment_enhance_transfer_response(
@@ -1467,6 +1531,7 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
     vm_net_mock_backpack_item_state *source = NULL;
     vm_net_mock_backpack_item_state *dest = NULL;
     vm_net_mock_backpack_item_state *crossStone = NULL;
+    vm_net_mock_backpack_item_state *crystalItem = NULL;
     const vm_net_mock_equipment_catalog_item *sourceCatalog = NULL;
     const vm_net_mock_equipment_catalog_item *destCatalog = NULL;
     const vm_net_mock_shop_catalog_item *destShop = NULL;
@@ -1479,14 +1544,23 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
     u8 destLevelBefore = 0;
     u8 destLevelAfter = 0;
     u8 sourceLevelAfter = 0;
+    u32 crystalCost = 0;
+    u32 crystalItemId = 0;
+    u32 crystalRemaining = 0;
+    u16 crystalSeq = 0;
+    bool crystalConsumed = false;
+    u32 feeCopper = 0;
     u32 moneyCost = 0;
-    u32 feeCopper = vm_net_mock_equipment_enhance_transfer_money_cost();
+    bool chargeCrystal = true;
+    bool chargeMoney = false;
     u8 wireLevel = 0;
     bool transferred = false;
     bool alreadyDone = false;
     bool inventorySynced = false;
     bool qualityDiffers = false;
     bool stoneConsumed = false;
+    bool transferWash = true;
+    bool crossStoneRequired = true;
     u16 crossStoneSeq = 0;
     u32 crossStoneRemaining = 0;
     const char *reason = "ok";
@@ -1510,6 +1584,13 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
     if (dest != NULL)
         destCatalog = vm_net_mock_find_equipment_catalog_item(dest->itemId);
 
+    crossStoneRequired =
+        vm_net_mock_enhance_cross_quality_stone_required() != 0;
+    chargeCrystal = vm_net_mock_enhance_transfer_crystal_enabled() != 0;
+    chargeMoney = vm_net_mock_enhance_transfer_money_enabled() != 0;
+    feeCopper = chargeMoney ? vm_net_mock_equipment_enhance_transfer_money_cost()
+                            : 0u;
+
     if (source == NULL || dest == NULL ||
         sourceCatalog == NULL || destCatalog == NULL)
     {
@@ -1525,7 +1606,7 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
     else
     {
         qualityDiffers = sourceCatalog->quality != destCatalog->quality;
-        if (qualityDiffers)
+        if (qualityDiffers && crossStoneRequired)
         {
             crossStone = vm_net_mock_role_find_backpack_item(
                 role, VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID, 0);
@@ -1548,6 +1629,15 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
         destLevelAfter = destLevelBefore;
         wireLevel =
             vm_net_mock_equipment_enhance_transfer_wire_level(sourceLevel);
+        if (chargeCrystal)
+        {
+            crystalCost =
+                vm_net_mock_equipment_enhance_transfer_crystal_cost(sourceLevel);
+            crystalItemId =
+                vm_net_mock_equipment_enhance_transfer_crystal_item_id(
+                    sourceLevel);
+        }
+        transferWash = vm_net_mock_enhance_wash_transfer_enabled() != 0;
 
         if (sourceLevel == 0)
         {
@@ -1571,41 +1661,96 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
         else if (parsed.subtype == 5)
         {
             /*
-             * Select/preview only: open fee confirm UI.  Client shows 扣金币
-             * after this ACK; charge happens on 29/6. Cross-quality stone is
-             * checked above but not consumed until confirm.
+             * Select/preview only: open confirm UI. Charge happens on 29/6.
+             * Cross-quality stone is checked above but not consumed until confirm.
              */
             destLevelAfter = sourceLevel; /* expected after confirm */
             sourceLevelAfter = 0;
             reason = qualityDiffers ? "preview-ok-cross-quality" : "preview-ok";
         }
-        else if (role->money < feeCopper)
+        else if (crystalCost > 0 && crystalItemId != 0)
         {
-            result = 4; /* 29/6 native「金钱不足」 */
+            crystalItem = vm_net_mock_role_find_backpack_item(
+                role, crystalItemId, 0);
+            if (crystalItem == NULL || crystalItem->count < crystalCost)
+            {
+                result = 3; /* Pixi tip「没有对应玄晶」/「玄晶不足」 */
+                reason = "crystal-insufficient";
+            }
+        }
+        else if (feeCopper > 0 && role->money < feeCopper)
+        {
+            result = 4; /* 29/6「金钱不足」 */
             reason = "money-insufficient";
         }
-        else if (qualityDiffers)
+
+        if (result == 1 && parsed.subtype == 6 && !alreadyDone)
         {
             u32 sourceInstanceId = 0;
             u32 destInstanceId = 0;
 
-            if (crossStone == NULL || crossStone->count == 0)
+            /* Re-check money after crystal pre-check path when both enabled. */
+            if (feeCopper > 0 && role->money < feeCopper)
             {
-                result = 5;
-                reason = "quality-mismatch";
+                result = 4;
+                reason = "money-insufficient";
             }
-            else if (!vm_net_mock_role_consume_backpack_item(
-                         role, VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID,
-                         crossStone->seq, 1u, &crossStoneRemaining))
+
+            /* Consume crystal before stone so a stone failure needs no rollback. */
+            if (result == 1 && crystalCost > 0 && crystalItemId != 0)
             {
-                result = 5;
-                reason = "cross-quality-stone-consume-failed";
+                if (crystalItem == NULL)
+                {
+                    crystalItem = vm_net_mock_role_find_backpack_item(
+                        role, crystalItemId, 0);
+                }
+                if (crystalItem == NULL ||
+                    !vm_net_mock_role_consume_backpack_item(
+                        role, crystalItemId, crystalItem->seq, crystalCost,
+                        &crystalRemaining))
+                {
+                    result = 3;
+                    reason = "crystal-consume-failed";
+                }
+                else
+                {
+                    crystalConsumed = true;
+                    crystalSeq = crystalItem->seq;
+                }
             }
-            else
+
+            if (result == 1 && qualityDiffers && crossStoneRequired)
             {
-                stoneConsumed = true;
-                crossStoneSeq = crossStone->seq;
-                moneyCost = feeCopper;
+                if (crossStone == NULL || crossStone->count == 0)
+                {
+                    result = 5;
+                    reason = "quality-mismatch";
+                }
+                else if (!vm_net_mock_role_consume_backpack_item(
+                             role, VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID,
+                             crossStone->seq, 1u, &crossStoneRemaining))
+                {
+                    result = 5;
+                    reason = "cross-quality-stone-consume-failed";
+                }
+                else
+                {
+                    stoneConsumed = true;
+                    crossStoneSeq = crossStone->seq;
+                }
+            }
+
+            /* If stone failed after crystal take, refund the crystal. */
+            if (result != 1 && crystalConsumed)
+            {
+                (void)vm_net_mock_role_add_backpack_item_to_role(
+                    role, crystalItemId, crystalCost, 0, NULL,
+                    "enhance-transfer-crystal-rollback", NULL, 0);
+                crystalConsumed = false;
+            }
+
+            if (result == 1)
+            {
                 destLevelAfter = sourceLevel; /* no level loss */
                 sourceLevelAfter = 0;
                 sourceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
@@ -1616,75 +1761,28 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
                 dest->enhanceInstanceId = destInstanceId;
                 source->enhanceLevel = sourceLevelAfter;
                 dest->enhanceLevel = destLevelAfter;
-                vm_net_mock_enhance_wash_copy(&dest->enhanceWash,
-                                             &source->enhanceWash);
-                vm_net_mock_enhance_wash_clear(&source->enhanceWash);
-                (void)vm_net_mock_enhance_wash_record_delete(
-                    role->roleId, sourceInstanceId, source->seq);
-                if (!vm_net_mock_enhance_wash_is_empty(&dest->enhanceWash))
+                vm_net_mock_equipment_enhance_transfer_apply_wash(
+                    role, source, dest, sourceInstanceId, destInstanceId,
+                    destLevelAfter, transferWash);
+                if (feeCopper > 0)
                 {
-                    (void)vm_net_mock_enhance_wash_record_upsert(
-                        role->roleId, destInstanceId, dest->seq, dest->itemId,
-                        destLevelAfter, &dest->enhanceWash, 0);
+                    moneyCost = feeCopper;
+                    role->money -= moneyCost;
                 }
-                else
-                {
-                    (void)vm_net_mock_enhance_wash_record_delete(
-                        role->roleId, destInstanceId, dest->seq);
-                }
-                role->money -= moneyCost;
                 transferred = true;
                 (void)vm_net_mock_enhance_crystal_spent_move(
                     role->roleId, sourceInstanceId, destInstanceId);
-                if (!vm_net_mock_role_db_save("equipment-enhance-transfer-cross"))
+                if (!vm_net_mock_role_db_save(
+                        qualityDiffers ? "equipment-enhance-transfer-cross"
+                                       : "equipment-enhance-transfer"))
+                {
                     vm_net_mock_role_mark_inventory_dirty(
-                        "equipment-enhance-transfer-cross");
-                reason = "transferred-cross-quality";
+                        qualityDiffers ? "equipment-enhance-transfer-cross"
+                                       : "equipment-enhance-transfer");
+                }
+                reason = qualityDiffers ? "transferred-cross-quality"
+                                        : "transferred";
             }
-        }
-        else
-        {
-            u32 sourceInstanceId = 0;
-            u32 destInstanceId = 0;
-
-            moneyCost = feeCopper;
-            destLevelAfter = sourceLevel; /* no level loss */
-            sourceLevelAfter = 0;
-            /*
-             * Wash must move with enhance from source column only. Rewrite
-             * audit wash_record so the log follows dest and source is cleared.
-             */
-            sourceInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
-                role, source->enhanceInstanceId, source->itemId);
-            destInstanceId = vm_net_mock_role_ensure_equipment_instance_id(
-                role, dest->enhanceInstanceId, dest->itemId);
-            source->enhanceInstanceId = sourceInstanceId;
-            dest->enhanceInstanceId = destInstanceId;
-            source->enhanceLevel = sourceLevelAfter;
-            dest->enhanceLevel = destLevelAfter;
-            vm_net_mock_enhance_wash_copy(&dest->enhanceWash, &source->enhanceWash);
-            vm_net_mock_enhance_wash_clear(&source->enhanceWash);
-            (void)vm_net_mock_enhance_wash_record_delete(
-                role->roleId, sourceInstanceId, source->seq);
-            if (!vm_net_mock_enhance_wash_is_empty(&dest->enhanceWash))
-            {
-                (void)vm_net_mock_enhance_wash_record_upsert(
-                    role->roleId, destInstanceId, dest->seq, dest->itemId,
-                    destLevelAfter, &dest->enhanceWash, 0);
-            }
-            else
-            {
-                (void)vm_net_mock_enhance_wash_record_delete(
-                    role->roleId, destInstanceId, dest->seq);
-            }
-            role->money -= moneyCost;
-            transferred = true;
-            (void)vm_net_mock_enhance_crystal_spent_move(
-                role->roleId, sourceInstanceId, destInstanceId);
-            /* Sync save: wash columns + records must survive before deferred flush. */
-            if (!vm_net_mock_role_db_save("equipment-enhance-transfer"))
-                vm_net_mock_role_mark_inventory_dirty("equipment-enhance-transfer");
-            reason = "transferred";
         }
     }
 
@@ -1704,7 +1802,9 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
 
     if (parsed.subtype == 5)
     {
-        u16 moneyWire = (u16)VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_MONEY_WIRE;
+        u16 moneyWire =
+            chargeMoney ? (u16)VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_MONEY_WIRE
+                        : 0u;
 
         if (result == 1 &&
             (!vm_net_mock_put_object_u8(out, outCap, &pos, "flag", 1) ||
@@ -1733,14 +1833,17 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
             !vm_net_mock_put_object_u16(out, outCap, &pos, "seqd",
                                          parsed.destSeq) ||
             !vm_net_mock_put_object_u8(out, outCap, &pos, "curleveld",
-                                       destLevelAfter))
+                                       destLevelAfter) ||
+            /* Pixi-only: 1=wash moved with enhance, 0=source wash discarded. */
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "washxfer",
+                                       transferWash ? 1u : 0u))
         {
             return 0;
         }
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
 
-    /* Inventory/money sync only after confirm mutation (not 29/5 preview). */
+    /* Inventory sync only after confirm mutation (not 29/5 preview). */
     if (result == 1 && role != NULL && (transferred || alreadyDone) &&
         parsed.subtype == 6 && source != NULL && dest != NULL)
     {
@@ -1755,10 +1858,17 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
         memset(syncRemainings, 0, sizeof(syncRemainings));
         if (stoneConsumed)
         {
-            syncIds[0] = VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID;
-            syncSeqs[0] = crossStoneSeq;
-            syncRemainings[0] = crossStoneRemaining;
-            syncRows = 1;
+            syncIds[syncRows] = VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID;
+            syncSeqs[syncRows] = crossStoneSeq;
+            syncRemainings[syncRows] = crossStoneRemaining;
+            syncRows = (u8)(syncRows + 1u);
+        }
+        if (crystalConsumed && crystalItemId != 0)
+        {
+            syncIds[syncRows] = crystalItemId;
+            syncSeqs[syncRows] = crystalSeq;
+            syncRemainings[syncRows] = crystalRemaining;
+            syncRows = (u8)(syncRows + 1u);
         }
 
         /*
@@ -1798,24 +1908,29 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     printf("[info][network] mock_equipment_enhance_transfer phase=%u "
            "source_seq=%u dest_seq=%u source_item=%u dest_item=%u "
-           "source_level=%u->%u dest_before=%u dest_after=%u money_cost=%u "
-           "money_after=%u quality_diff=%u stone=%u result=%u transferred=%u "
-           "inv_sync=%u reason=%s resp=29/%u evidence=JianghuOL.CBE:0x0101DB3A+"
-           "0x010294AA+0x01029690+0x010287C0+0x010289E2\n",
+           "source_level=%u->%u dest_before=%u dest_after=%u crystal_id=%u "
+           "crystal_cost=%u money_cost=%u "
+           "crystal_consumed=%u wash_xfer=%u quality_diff=%u stone=%u "
+           "result=%u transferred=%u inv_sync=%u reason=%s resp=29/%u "
+           "evidence=JianghuOL.CBE:0x0101DB3A+0x010294AA+0x01029690+"
+           "0x010287C0+0x010289E2\n",
            parsed.subtype, parsed.sourceSeq, parsed.destSeq,
            source ? source->itemId : 0, dest ? dest->itemId : 0,
            sourceLevel, sourceLevelAfter, destLevelBefore, destLevelAfter,
-           moneyCost, role ? role->money : 0, qualityDiffers ? 1 : 0,
-           stoneConsumed ? 1 : 0, result, transferred ? 1 : 0,
-           inventorySynced ? 1 : 0, reason, parsed.subtype);
+           crystalItemId, crystalCost, moneyCost, crystalConsumed ? 1 : 0,
+           transferWash ? 1 : 0, qualityDiffers ? 1 : 0, stoneConsumed ? 1 : 0,
+           result, transferred ? 1 : 0, inventorySynced ? 1 : 0, reason,
+           parsed.subtype);
     vm_autotest_note("mock_equipment_enhance_transfer phase=%u source_seq=%u "
                      "dest_seq=%u source_level=%u->%u dest_after=%u "
-                     "money_cost=%u quality_diff=%u stone=%u result=%u "
-                     "reason=%s response=29/%u\n",
+                     "crystal_id=%u crystal_cost=%u money_cost=%u wash_xfer=%u "
+                     "quality_diff=%u stone=%u result=%u reason=%s "
+                     "response=29/%u\n",
                      parsed.subtype, parsed.sourceSeq, parsed.destSeq,
-                     sourceLevel, sourceLevelAfter, destLevelAfter, moneyCost,
-                     qualityDiffers ? 1 : 0, stoneConsumed ? 1 : 0, result,
-                     reason, parsed.subtype);
+                     sourceLevel, sourceLevelAfter, destLevelAfter,
+                     crystalItemId, crystalCost, moneyCost,
+                     transferWash ? 1 : 0, qualityDiffers ? 1 : 0,
+                     stoneConsumed ? 1 : 0, result, reason, parsed.subtype);
     return pos;
 }
 
@@ -3507,6 +3622,17 @@ static bool vm_net_mock_battle_roll_percent(u32 percent)
     return (vm_net_mock_battle_reward_rand() % 100u) < percent;
 }
 
+/* Monster drop rates are percent×10 (1=0.1%, 1000=100%). */
+static bool vm_net_mock_battle_roll_drop_rate_x10(u32 rateX10)
+{
+    if (rateX10 == 0)
+        return false;
+    if (rateX10 >= VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX)
+        return true;
+    return (vm_net_mock_battle_reward_rand() %
+            VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX) < rateX10;
+}
+
 /* Commit a successful drop roll into the battle result cache / backpack.
  * Equipment units are one backpack row each; stackables share one row.
  * When battle insight is active and the bag cannot accept a unit, auto-sell
@@ -3822,13 +3948,27 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         {
             overrideDrop.itemId = vm_net_mock_env_u32_if_set(
                 "CBE_BATTLE_CHANGMING_SAN_ITEM_ID", overrideDrop.itemId);
-            overrideDrop.ratePercent = (u8)vm_net_mock_env_u32_if_set(
-                "CBE_BATTLE_CHANGMING_SAN_DROP_RATE", overrideDrop.ratePercent);
+            /* Env values stay whole percent (1=1%); convert to ×10 storage. */
+            if (getenv("CBE_BATTLE_CHANGMING_SAN_DROP_RATE") != NULL &&
+                getenv("CBE_BATTLE_CHANGMING_SAN_DROP_RATE")[0] != 0)
+            {
+                u32 wholePercent = vm_net_mock_env_u32(
+                    "CBE_BATTLE_CHANGMING_SAN_DROP_RATE", 0);
+                if (wholePercent > 100u)
+                    wholePercent = 100u;
+                overrideDrop.ratePercent = (u16)(wholePercent * 10u);
+            }
         }
         overrideDrop.itemId = vm_net_mock_env_u32_if_set(
             "CBE_BATTLE_DROP_ITEM_ID", overrideDrop.itemId);
-        overrideDrop.ratePercent = (u8)vm_net_mock_env_u32_if_set(
-            "CBE_BATTLE_DROP_RATE", overrideDrop.ratePercent);
+        if (getenv("CBE_BATTLE_DROP_RATE") != NULL &&
+            getenv("CBE_BATTLE_DROP_RATE")[0] != 0)
+        {
+            u32 wholePercent = vm_net_mock_env_u32("CBE_BATTLE_DROP_RATE", 0);
+            if (wholePercent > 100u)
+                wholePercent = 100u;
+            overrideDrop.ratePercent = (u16)(wholePercent * 10u);
+        }
         configuredDrops[0] = overrideDrop;
         configuredDropCount = overrideDrop.itemId != 0 &&
                               overrideDrop.ratePercent != 0 ? 1 : 0;
@@ -3866,7 +4006,8 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
             vm_net_mock_battle_drop_gate *gate = &gates[dropIndex];
 
             if (configured->itemId != 0 && configured->ratePercent != 0 &&
-                configured->ratePercent <= 100u && role != NULL)
+                configured->ratePercent <= VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX &&
+                role != NULL)
             {
                 gate->policyOk = vm_net_mock_task_material_drop_policy(
                     role->roleId, configured->itemId, &gate->isTaskMaterial,
@@ -3878,7 +4019,8 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
              * progress is not starved by competing rare loot rows.  100% rows
              * are guaranteed when eligible and likewise stay independent. */
             gate->multiRow =
-                gate->isTaskMaterial || configured->ratePercent >= 100u;
+                gate->isTaskMaterial ||
+                configured->ratePercent >= VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX;
             if (gate->eligible && !gate->multiRow &&
                 lotteryCount < VM_NET_MOCK_MONSTER_DROP_MAX)
             {
@@ -3936,8 +4078,8 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                 {
                     /* Keep lottery/multiRow mode on configured rate; scale only
                      * the roll so 100% rows stay independent while 90%/110%
-                     * global knobs still lower/raise chance (clamped to 100). */
-                    if (vm_net_mock_battle_roll_percent(effectiveRate))
+                     * global knobs still lower/raise chance (clamped to 100%). */
+                    if (vm_net_mock_battle_roll_drop_rate_x10(effectiveRate))
                         grantedCount = 1;
                     rolledDropCount = grantedCount;
                     if (gate->isTaskMaterial && grantedCount > gate->remaining)
@@ -5266,6 +5408,9 @@ typedef struct vm_mock_service_client_session
     u16 onlineX;
     u16 onlineY;
     u32 onlineTick;
+    /* 在线活力：距下次整小时奖励的累计秒 / 上次结算 unix（0=未跟踪） */
+    u32 vitalityOnlineAccrueSec;
+    u32 vitalityOnlineLastUnix;
     bool sceneVisibleReady;
     bool sceneVisiblePending;
     char sceneVisibleScene[64];
@@ -6563,6 +6708,11 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_role_db_valid = state->roleDbValid;
     g_vm_net_mock_role_position_dirty = state->rolePositionDirty;
     g_vm_net_mock_role_inventory_dirty = state->roleInventoryDirty;
+    /* Sticky snapshots taken before seal can leak bound roles back into
+     * account memory; drop them before any subsequent full save. */
+    vm_net_mock_role_seal_purge_bound_from_memory();
+    if (g_vm_net_mock_role_db_valid)
+        state->roleDb = g_vm_net_mock_role_db;
     g_vm_net_mock_warehouse = state->warehouse;
 
     g_vm_net_mock_battle_rewarded_serial = state->battleRewardedSerial;
@@ -9724,8 +9874,10 @@ static u32 vm_net_mock_build_equipment_repair_confirm_response(
 static bool vm_mock_service_session_presence_is_recent(
     const vm_mock_service_client_session *session);
 
-/* Live world-channel fanout (type 0 / [世]).  Not persisted into
- * world_chat_messages; loot spam must not rewrite login history. */
+/* Live system-channel fanout (type 5 / [系]) for server announces
+ * (enhance/chest/arena/ladder/boss/…).  Not persisted into
+ * world_chat_messages; loot spam must not rewrite login history.
+ * Name kept as broadcast_world_chat_live for call-site stability. */
 static u32 vm_mock_service_broadcast_world_chat_live(
     const char *sourceName,
     const char *message)
@@ -9740,7 +9892,7 @@ static u32 vm_mock_service_broadcast_world_chat_live(
         if (target->roleOnline && target->onlinePresenceValid &&
             vm_mock_service_session_presence_is_recent(target) &&
             vm_mock_service_session_enqueue_chat_notice(
-                target, VM_MOCK_CHAT_TYPE_WORLD, NULL, sourceName, message))
+                target, VM_MOCK_CHAT_TYPE_SYSTEM, NULL, sourceName, message))
         {
             ++recipients;
         }
@@ -9750,7 +9902,7 @@ static u32 vm_mock_service_broadcast_world_chat_live(
 }
 
 /*
- * World congratulate when enhance reaches +8 or higher (live [世] only;
+ * Congratulate when enhance reaches +8 or higher (live [系] only;
  * same fanout as gold-chest rare loot, not persisted to login history).
  */
 static void vm_net_mock_equipment_enhance_maybe_world_announce(u32 itemId,
@@ -9811,7 +9963,7 @@ static void vm_net_mock_equipment_enhance_maybe_world_announce(u32 itemId,
 
     recipients = vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
     printf("[info][network] mock_enhance_world_announce item=%u level=%u "
-           "player=%s recipients=%u evidence=1/3/3-type0-world enhance>=8\n",
+           "player=%s recipients=%u evidence=1/3/3-type5-system enhance>=8\n",
            itemId, (u32)newLevel, playerName, recipients);
 }
 
@@ -9999,7 +10151,7 @@ static void vm_net_mock_chest_announce_flush_pending(
 
     recipients = vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
     printf("[info][network] mock_chest_open_world_announce item=%u count=%u "
-           "chest=%u player=%s recipients=%u evidence=1/3/3-type0-world "
+           "chest=%u player=%s recipients=%u evidence=1/3/3-type5-system "
            "coalesce-ten-pull-tip-match\n",
            rewardItemId, count, chestItemId, playerName, recipients);
 }
@@ -11427,6 +11579,7 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
         {
             session->systemWelcomeQueued = true;
         }
+        vm_mock_activities_vitality_online_session_begin(session);
         {
             const char *practiseInfo =
                 vm_net_mock_role_offline_practise_login_info();
@@ -11835,6 +11988,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     vm_mock_arena_on_session_offline(session);
     if (wasOnline)
     {
+        vm_mock_activities_vitality_online_session_end(session);
         if (session->accountId[0] != '\0' && session->onlineRoleId != 0)
         {
             (void)vm_net_mock_role_offline_practise_mark_logout(

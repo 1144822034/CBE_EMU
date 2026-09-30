@@ -124,6 +124,16 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_regis
 脚本新增 `server_registration_config`（默认每日 3 个名额）。服务启动时也会
 自动建表。后台「账号管理」页可调整；后台手动创建账号不受此限额。
 
+已有数据库增加修炼丹经验系数配置时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_offline_practise_config.sql
+```
+
+脚本新增 `server_offline_practise_config`（默认系数 8，公式
+`exp = 结算分钟 × 等级² × 系数`）。服务启动时也会自动建表。后台「账号管理」
+页可调整。
+
 已有数据库升级到商品管理功能时执行：
 
 ```powershell
@@ -132,6 +142,12 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_shop_
 
 脚本只新增商品价格和上下架覆盖表，不会修改 `item.dsh`、`equip.dsh`
 或角色背包数据。服务启动时也会自动执行同等的 `CREATE TABLE IF NOT EXISTS`。
+
+已有库若需把商城价与 NPC 价拆开，可执行（服务启动也会自动 ALTER + backfill）：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_shop_npc_price.sql
+```
 
 已有数据库升级到怪物管理功能时执行：
 
@@ -236,7 +252,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。
 - `guild_applications`：待处理、已同意或已拒绝的入帮申请。
-- `server_shop_items`：后台覆盖的商品价格和上下架状态；没有记录的物品继续使用 DSH 默认价格并默认上架。
+- `server_shop_items`：后台覆盖的商城价（`price` / 酷宝）、NPC 价（`npc_price` / 铜币）、商城上架（`enabled`）与 NPC 药商上架（`npc_enabled`）；没有记录的物品继续使用 DSH 默认价格（两通道同源）并默认上架商城、不上架 NPC。
 - `server_monsters`：后台保存的怪物等级、类型、战斗属性、显示名称、奖励和掉落覆盖；没有记录的怪物继续使用服务端目录默认公式与 SCE 名称。
 - `account_role_state_payload_backup`：旧二进制快照的只读迁移备份，不参与正常保存。
 

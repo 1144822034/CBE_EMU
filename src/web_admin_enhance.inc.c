@@ -142,13 +142,17 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         u8 qualityScaleOn =
             vm_net_mock_enhance_wash_quality_scale_enabled();
         u8 firstSeedPercent = vm_net_mock_enhance_wash_first_seed_percent();
+        u8 transferWashOn = vm_net_mock_enhance_wash_transfer_enabled();
+        u8 crossStoneOn = vm_net_mock_enhance_cross_quality_stone_required();
+        u8 transferCrystalOn = vm_net_mock_enhance_transfer_crystal_enabled();
+        u8 transferMoneyOn = vm_net_mock_enhance_transfer_money_enabled();
         vm_mock_admin_text_appendf(
             &page,
             "<section class=\"card\">"
             "<form method=\"post\" action=\"/action\">"
             "<input type=\"hidden\" name=\"action\" "
             "value=\"enhance-wash-settings-save\">"
-            "<div class=\"toolbar\"><h2 style=\"margin:0\">洗练规则</h2>"
+            "<div class=\"toolbar\"><h2 style=\"margin:0\">洗练 / 重铸规则</h2>"
             "<button type=\"submit\">保存</button></div>"
             "<div class=\"grid\">"
             "<label class=\"field\"><span>按装备品质缩放洗练上限</span>"
@@ -160,16 +164,47 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
             "<input name=\"first_seed_percent\" type=\"number\" min=\"0\" "
             "max=\"100\" value=\"%u\" style=\"max-width:none;width:100%%;"
             "margin-top:4px\"></label>"
+            "<label class=\"field\"><span>重铸是否转移洗练属性</span>"
+            "<select name=\"transfer_wash_enabled\">"
+            "<option value=\"1\"%s>开（源洗练随强化转到目标，源清空）</option>"
+            "<option value=\"0\"%s>关（源洗练丢弃，目标保留原洗练）</option>"
+            "</select></label>"
+            "<label class=\"field\"><span>跨品质重铸是否需要跨品重铸石</span>"
+            "<select name=\"cross_quality_stone_required\">"
+            "<option value=\"1\"%s>需要（无石不可跨品质，确认时扣1个）</option>"
+            "<option value=\"0\"%s>不需要（同部位即可跨品质，不扣石）</option>"
+            "</select></label>"
+            "<label class=\"field\"><span>重铸是否消耗玄晶</span>"
+            "<select name=\"transfer_crystal_enabled\">"
+            "<option value=\"1\"%s>开（+N 扣1个(N-1)级玄晶；+1免费）</option>"
+            "<option value=\"0\"%s>关（不扣玄晶）</option>"
+            "</select></label>"
+            "<label class=\"field\"><span>重铸是否消耗金币</span>"
+            "<select name=\"transfer_money_enabled\">"
+            "<option value=\"1\"%s>开（固定 48金65银）</option>"
+            "<option value=\"0\"%s>关（不扣金币）</option>"
+            "</select></label>"
             "</div>"
             "<p class=\"muted\" style=\"margin:12px 0 0\">"
             "质量分档开启时：首获 seed / 玩家洗练 / 29/7 pool 上限为 "
             "<code>value_max × (品质+1) / 5</code>。"
             "首获概率仅作用于新掉落/商店等首次入包（不重随交易穿脱）。"
-            "0=永不随机，100=必定随机四档（wash_count 仍为 0）。表："
-            "<code>server_enhance_wash_settings</code>。"
+            "0=永不随机，100=必定随机四档（wash_count 仍为 0）。"
+            "重铸转移洗练：影响 29/6；关时源装备洗练随强化归零丢弃。"
+            "跨品重铸石：影响 29/5|6 不同品质；关时仍限同部位，但不检查/不消耗 855。"
+            "玄晶/金币消耗可独立开关，可同时开启。"
+            "表：<code>server_enhance_wash_settings</code>。"
             "</p></form></section>",
             qualityScaleOn ? " selected" : "",
-            qualityScaleOn ? "" : " selected", (u32)firstSeedPercent);
+            qualityScaleOn ? "" : " selected", (u32)firstSeedPercent,
+            transferWashOn ? " selected" : "",
+            transferWashOn ? "" : " selected",
+            crossStoneOn ? " selected" : "",
+            crossStoneOn ? "" : " selected",
+            transferCrystalOn ? " selected" : "",
+            transferCrystalOn ? "" : " selected",
+            transferMoneyOn ? " selected" : "",
+            transferMoneyOn ? "" : " selected");
     }
 
     vm_mock_admin_text_appendf(
@@ -351,7 +386,11 @@ static void vm_mock_admin_handle_enhance_action(vm_mock_service_socket client,
     {
         u32 qualityScale = 1;
         u32 firstSeedPercent = 20;
-        char okMsg[128];
+        u32 transferWash = 1;
+        u32 crossStone = 1;
+        u32 transferCrystal = 1;
+        u32 transferMoney = 0;
+        char okMsg[220];
 
         if (!vm_mock_admin_form_u32(body, "quality_scale_enabled", 1u,
                                     &qualityScale))
@@ -366,16 +405,40 @@ static void vm_mock_admin_handle_enhance_action(vm_mock_service_socket client,
             /* Older form without the field: keep current runtime value. */
             firstSeedPercent = vm_net_mock_enhance_wash_first_seed_percent();
         }
+        if (!vm_mock_admin_form_u32(body, "transfer_wash_enabled", 1u,
+                                    &transferWash))
+        {
+            transferWash = vm_net_mock_enhance_wash_transfer_enabled();
+        }
+        if (!vm_mock_admin_form_u32(body, "cross_quality_stone_required", 1u,
+                                    &crossStone))
+        {
+            crossStone = vm_net_mock_enhance_cross_quality_stone_required();
+        }
+        if (!vm_mock_admin_form_u32(body, "transfer_crystal_enabled", 1u,
+                                    &transferCrystal))
+        {
+            transferCrystal = vm_net_mock_enhance_transfer_crystal_enabled();
+        }
+        if (!vm_mock_admin_form_u32(body, "transfer_money_enabled", 1u,
+                                    &transferMoney))
+        {
+            transferMoney = vm_net_mock_enhance_transfer_money_enabled();
+        }
         if (!vm_net_mock_enhance_wash_settings_admin_save(
-                (u8)qualityScale, (u8)firstSeedPercent))
+                (u8)qualityScale, (u8)firstSeedPercent, (u8)transferWash,
+                (u8)crossStone, (u8)transferCrystal, (u8)transferMoney))
         {
             vm_mock_admin_redirect_enhance(client, "milestones", "error",
                                            "保存洗练规则失败");
             return;
         }
         snprintf(okMsg, sizeof(okMsg),
-                 "洗练规则已保存（质量分档%s，首获随机 %u%%）",
-                 qualityScale ? "开" : "关", firstSeedPercent);
+                 "规则已保存（质量分档%s，首获 %u%%，转移洗练%s，跨品需石%s，"
+                 "扣玄晶%s，扣金币%s）",
+                 qualityScale ? "开" : "关", firstSeedPercent,
+                 transferWash ? "开" : "关", crossStone ? "是" : "否",
+                 transferCrystal ? "开" : "关", transferMoney ? "开" : "关");
         vm_mock_admin_redirect_enhance(client, "milestones", "ok", okMsg);
         return;
     }

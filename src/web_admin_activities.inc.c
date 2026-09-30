@@ -172,12 +172,33 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
         "h2{font-size:17px;margin:0 0 12px}"
         "</style></head><body><h1>节日使者 / 雁门关 / 跑环</h1>"
         "<p>比武每回合+20活力；跑环每完成一环+5活力；天梯挑战成功+5活力；"
+        "在线每满1小时可加活力（下方可配）；"
         "节日使者在场景内对话选「活力兑换」；雁门关打怪掉木料石材；跑环使接随机环任务。</p>");
     vm_mock_admin_append_tabs(&page, "activities");
 
     if (status[0] && message[0])
         vm_mock_admin_text_appendf(&page, "<p><strong>%s</strong>: %s</p>", status,
                                    message);
+
+    {
+        u32 onlinePerHour = vm_mock_vitality_online_per_hour_get();
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\"><h2>在线活力</h2>"
+            "<form method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" value=\"save-vitality-online\">"
+            "<div class=\"grid\">"
+            "<div><label>每在线1小时获得活力（0=关闭）</label>"
+            "<input name=\"online_per_hour\" type=\"number\" min=\"0\" "
+            "max=\"100000\" value=\"%u\"></div>"
+            "</div>"
+            "<button type=\"submit\" style=\"margin-top:10px\">保存在线活力</button>"
+            "</form>"
+            "<p class=\"muted\" style=\"margin-top:10px\">累计在线满3600秒发放一次；"
+            "不足1小时的进度下线会保存，下次上线继续累计。</p>"
+            "</section>",
+            onlinePerHour);
+    }
 
     vm_mock_admin_text_appendf(
         &page,
@@ -451,6 +472,23 @@ static void vm_mock_admin_handle_activities_action(vm_mock_service_socket client
                                                    const char *action,
                                                    const char *body)
 {
+    if (strcmp(action, "save-vitality-online") == 0)
+    {
+        u32 perHour = 10;
+
+        if (!vm_mock_admin_form_u32(body, "online_per_hour", 100000u, &perHour))
+        {
+            vm_mock_admin_redirect_activities(client, "error",
+                                              "每小时活力无效（0-100000）");
+            return;
+        }
+        if (vm_mock_vitality_admin_save_online_per_hour(perHour))
+            vm_mock_admin_redirect_activities(client, "ok", "在线活力配置已保存");
+        else
+            vm_mock_admin_redirect_activities_mysql_fail(client,
+                                                        "在线活力配置保存失败");
+        return;
+    }
     if (strcmp(action, "save-festival-config") == 0)
     {
         char kwUtf8[64];

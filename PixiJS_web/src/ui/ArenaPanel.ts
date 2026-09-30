@@ -30,8 +30,8 @@ import {
 } from "./listPanelShell";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
-/** 10/50/70 = 分职业段位；77 = 周末70大乱斗（全职业一榜）. */
-const BRACKETS = [10, 50, 70, 77];
+/** 10/30/40/50/60/70 = 分职业段位；77 = 周末70大乱斗（全职业一榜）. */
+const BRACKETS = [10, 30, 40, 50, 60, 70, 77];
 const TAB_BG = 0x375946;
 /** Single-line rank rows. */
 const LIST_PAGE = 8;
@@ -381,7 +381,7 @@ export class ArenaPanel extends Container {
 
     const brY = jobY + tabH + 4;
     const brLabels = BRACKETS.map((b) =>
-      b === 77 ? "乱斗" : b === 70 ? "70" : bracketLabel(b),
+      b === 77 ? "乱" : String(b),
     );
     this.drawTabs(
       tabX,

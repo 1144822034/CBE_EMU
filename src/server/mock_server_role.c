@@ -4328,6 +4328,18 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
                                          : 0u) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "multiOpenLimit",
                                      (u32)vm_net_mock_client_ui_multi_open_limit()) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "hangupQuotaWithoutInsight",
+            vm_net_mock_client_ui_hangup_quota_without_insight() ? 1u : 0u) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "crossQualityStoneRequired",
+            vm_net_mock_enhance_cross_quality_stone_required() ? 1u : 0u) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "transferCrystalEnabled",
+            vm_net_mock_enhance_transfer_crystal_enabled() ? 1u : 0u) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "transferMoneyEnabled",
+            vm_net_mock_enhance_transfer_money_enabled() ? 1u : 0u) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseStrength",
                                      stats.baseStrength) ||
 
@@ -4388,19 +4400,22 @@ typedef enum
 #define VM_NET_MOCK_MONSTER_CATALOG_MAX 192u
 #define VM_NET_MOCK_MONSTER_CUSTOM_MAX 64u
 
+/* Drop rates are stored as percent×10 (1=0.1%, 10=1%, 1000=100%). */
+#define VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX 1000u
+
 typedef struct
 {
     u16 enemyId;
     u8 level;
     u8 family;
     u32 dropItemId;
-    u8 dropRatePercent;
+    u16 dropRatePercent; /* percent×10 */
 } vm_net_mock_monster_entry;
 
 typedef struct
 {
     u32 itemId;
-    u8 ratePercent;
+    u16 ratePercent; /* percent×10 */
 } vm_net_mock_monster_drop;
 
 typedef struct
@@ -5066,6 +5081,80 @@ static bool vm_net_mock_monster_ensure_display_name_column(void)
     return true;
 }
 
+/*
+ * Drop rates used to be whole percent in TINYINT (1=1%).  Widen to SMALLINT and
+ * scale existing rows ×10 once (1=0.1%, 1000=100%).  Detect TINYINT so restarts
+ * do not multiply again.
+ */
+static bool vm_net_mock_monster_ensure_drop_rate_x10(void)
+{
+    vm_net_mock_monster_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_monster_drops' "
+            "AND COLUMN_NAME='drop_rate_percent' AND DATA_TYPE='tinyint'",
+            vm_net_mock_monster_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        printf("[error][mock-admin] monster_drop_rate_x10 drops probe error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    if (context.count != 0)
+    {
+        if (!vm_mysql_exec(
+                "ALTER TABLE server_monster_drops "
+                "MODIFY COLUMN drop_rate_percent SMALLINT UNSIGNED NOT NULL") ||
+            !vm_mysql_exec(
+                "UPDATE server_monster_drops "
+                "SET drop_rate_percent=drop_rate_percent*10"))
+        {
+            printf("[error][mock-admin] monster_drop_rate_x10 drops migrate "
+                   "error=%s\n",
+                   vm_mysql_last_error());
+            return false;
+        }
+        printf("[info][mock-admin] monster_drop_rate_x10 widened "
+               "table=server_monster_drops evidence=0.1-percent-drops\n");
+    }
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_monsters' "
+            "AND COLUMN_NAME='drop_rate_percent' AND DATA_TYPE='tinyint'",
+            vm_net_mock_monster_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        printf("[error][mock-admin] monster_drop_rate_x10 legacy probe "
+               "error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    if (context.count != 0)
+    {
+        if (!vm_mysql_exec(
+                "ALTER TABLE server_monsters "
+                "MODIFY COLUMN drop_rate_percent SMALLINT UNSIGNED NOT NULL "
+                "DEFAULT 0") ||
+            !vm_mysql_exec(
+                "UPDATE server_monsters "
+                "SET drop_rate_percent=drop_rate_percent*10 "
+                "WHERE drop_rate_percent<>0"))
+        {
+            printf("[error][mock-admin] monster_drop_rate_x10 legacy migrate "
+                   "error=%s\n",
+                   vm_mysql_last_error());
+            return false;
+        }
+        printf("[info][mock-admin] monster_drop_rate_x10 widened "
+               "table=server_monsters evidence=0.1-percent-drops\n");
+    }
+    return true;
+}
+
 static bool vm_net_mock_monster_db_row(void *contextValue,
                                        unsigned int columnCount,
                                        const char *const *values,
@@ -5185,7 +5274,7 @@ static bool vm_net_mock_monster_db_drop_row(void *contextValue,
     index = vm_net_mock_monster_catalog_index(number[0]);
     if (index < 0 || number[1] == 0 ||
         number[1] > VM_NET_MOCK_MONSTER_DROP_MAX || number[2] == 0 ||
-        number[3] == 0 || number[3] > 100u ||
+        number[3] == 0 || number[3] > VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX ||
         !vm_net_mock_shop_catalog_has_loaded_item(number[2]))
     {
         ++context->dropsSkipped;
@@ -5199,7 +5288,7 @@ static bool vm_net_mock_monster_db_drop_row(void *contextValue,
         return true;
     }
     override->drops[override->dropCount].itemId = number[2];
-    override->drops[override->dropCount].ratePercent = (u8)number[3];
+    override->drops[override->dropCount].ratePercent = (u16)number[3];
     ++override->dropCount;
     ++context->dropsLoaded;
     return true;
@@ -5334,7 +5423,7 @@ static bool vm_net_mock_monster_db_load_unlocked(void)
             "mp INT UNSIGNED NOT NULL,attack_value INT UNSIGNED NOT NULL,"
             "defense_value INT UNSIGNED NOT NULL,reward_exp INT UNSIGNED NOT NULL,"
             "reward_money INT UNSIGNED NOT NULL,drop_item_id INT UNSIGNED NOT NULL DEFAULT 0,"
-            "drop_rate_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "drop_rate_percent SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(monster_id)) ENGINE=InnoDB") ||
@@ -5346,11 +5435,12 @@ static bool vm_net_mock_monster_db_load_unlocked(void)
             "monster_id SMALLINT UNSIGNED NOT NULL,"
             "drop_slot TINYINT UNSIGNED NOT NULL,"
             "item_id INT UNSIGNED NOT NULL,"
-            "drop_rate_percent TINYINT UNSIGNED NOT NULL,"
+            "drop_rate_percent SMALLINT UNSIGNED NOT NULL,"
             "PRIMARY KEY(monster_id,drop_slot),"
             "CONSTRAINT fk_server_monster_drops_monster "
             "FOREIGN KEY(monster_id) REFERENCES server_monsters(monster_id) "
             "ON DELETE CASCADE) ENGINE=InnoDB") ||
+        !vm_net_mock_monster_ensure_drop_rate_x10() ||
         /* Old single-drop rows are a one-way compatibility source.  New
          * saves clear those legacy columns, so a later zero-drop edit cannot
          * be silently recreated on the next service restart. */
@@ -5543,7 +5633,7 @@ static bool vm_net_mock_monster_admin_save(
     for (u8 i = 0; i < row->dropCount; ++i)
     {
         if (row->drops[i].itemId == 0 || row->drops[i].ratePercent == 0 ||
-            row->drops[i].ratePercent > 100u ||
+            row->drops[i].ratePercent > VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX ||
             vm_net_mock_find_shop_catalog_item(row->drops[i].itemId) == NULL)
         {
             if (errorOut)
@@ -5825,7 +5915,7 @@ static bool vm_net_mock_monster_admin_create(
     for (u8 i = 0; i < row->dropCount; ++i)
     {
         if (row->drops[i].itemId == 0 || row->drops[i].ratePercent == 0 ||
-            row->drops[i].ratePercent > 100u ||
+            row->drops[i].ratePercent > VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX ||
             vm_net_mock_find_shop_catalog_item(row->drops[i].itemId) == NULL)
         {
             if (errorOut)
@@ -9679,6 +9769,16 @@ static bool vm_net_mock_role_db_save_relational_ex(
         const vm_net_mock_role_state *role = &db->roles[i];
         if (!full_snapshot && role->roleId != scoped_role_id)
             continue;
+        /* Bound sealed roles belong to escrow; never upsert under the seller. */
+        if (role->roleId != 0 && vm_net_mock_role_seal_is_bound_role(role->roleId))
+        {
+            printf("[warn][mock-service] role_db_save_skip_bound role=%u "
+                   "account=%s reason=%s evidence=server-sealed-roles\n",
+                   role->roleId,
+                   account_id && account_id[0] ? account_id : "-",
+                   reason ? reason : "-");
+            continue;
+        }
         char name_hex[sizeof(role->name) * 2 + 1];
         char scene_hex[sizeof(role->scene) * 2 + 1];
         char chest_miss_text[64];
@@ -9813,6 +9913,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
         const vm_net_mock_role_state *role = &db->roles[i];
         if (!full_snapshot && role->roleId != scoped_role_id)
             continue;
+        if (role->roleId != 0 && vm_net_mock_role_seal_is_bound_role(role->roleId))
+            continue;
         for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
         {
             char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
@@ -9856,6 +9958,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
     {
         const vm_net_mock_role_state *role = &db->roles[i];
         if (!full_snapshot && role->roleId != scoped_role_id)
+            continue;
+        if (role->roleId != 0 && vm_net_mock_role_seal_is_bound_role(role->roleId))
             continue;
         for (u32 slot = 0; slot < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++slot)
         {
@@ -10725,6 +10829,111 @@ static bool g_vm_net_mock_offline_practise_schema_prepared = false;
 static u8 g_vm_net_mock_offline_practise_login_flag = 0;
 static char g_vm_net_mock_offline_practise_login_info[160];
 
+typedef struct
+{
+    u32 expLevelMinuteMult;
+} vm_net_mock_offline_practise_config;
+
+static vm_net_mock_offline_practise_config g_vm_net_mock_offline_practise_config;
+static bool g_vm_net_mock_offline_practise_config_loaded = false;
+
+static void vm_net_mock_offline_practise_config_set_defaults(
+    vm_net_mock_offline_practise_config *cfg)
+{
+    if (cfg == NULL)
+        return;
+    cfg->expLevelMinuteMult =
+        VM_NET_MOCK_PRACTISE_EXP_LEVEL_MINUTE_MULT_DEFAULT;
+}
+
+static bool vm_net_mock_offline_practise_config_row(void *contextValue,
+                                                    unsigned int columnCount,
+                                                    const char *const *values,
+                                                    const size_t *lengths)
+{
+    vm_net_mock_offline_practise_config *cfg =
+        (vm_net_mock_offline_practise_config *)contextValue;
+    u32 mult = VM_NET_MOCK_PRACTISE_EXP_LEVEL_MINUTE_MULT_DEFAULT;
+
+    (void)columnCount;
+    if (cfg == NULL || values == NULL || lengths == NULL || values[0] == NULL)
+        return false;
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &mult))
+        return false;
+    if (mult > VM_NET_MOCK_PRACTISE_EXP_LEVEL_MINUTE_MULT_MAX)
+        mult = VM_NET_MOCK_PRACTISE_EXP_LEVEL_MINUTE_MULT_MAX;
+    cfg->expLevelMinuteMult = mult;
+    return true;
+}
+
+static bool vm_net_mock_offline_practise_config_ensure_table(void)
+{
+    static bool ready = false;
+    char seed[192];
+
+    if (ready)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_offline_practise_config ("
+            "id TINYINT UNSIGNED NOT NULL,"
+            "exp_level_minute_mult INT UNSIGNED NOT NULL DEFAULT 8,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(id)) ENGINE=InnoDB"))
+        return false;
+    snprintf(seed, sizeof(seed),
+             "INSERT IGNORE INTO server_offline_practise_config "
+             "(id,exp_level_minute_mult) VALUES (1,%u)",
+             (u32)VM_NET_MOCK_PRACTISE_EXP_LEVEL_MINUTE_MULT_DEFAULT);
+    if (!vm_mysql_exec(seed))
+        return false;
+    ready = true;
+    return true;
+}
+
+static bool vm_net_mock_offline_practise_config_load(bool force)
+{
+    if (g_vm_net_mock_offline_practise_config_loaded && !force)
+        return true;
+    vm_net_mock_offline_practise_config_set_defaults(
+        &g_vm_net_mock_offline_practise_config);
+    if (!vm_net_mock_offline_practise_config_ensure_table())
+        return false;
+    (void)vm_mysql_query(
+        "SELECT exp_level_minute_mult FROM server_offline_practise_config "
+        "WHERE id=1 LIMIT 1",
+        vm_net_mock_offline_practise_config_row,
+        &g_vm_net_mock_offline_practise_config);
+    g_vm_net_mock_offline_practise_config_loaded = true;
+    return true;
+}
+
+u32 vm_net_mock_practise_exp_level_minute_mult(void)
+{
+    (void)vm_net_mock_offline_practise_config_load(false);
+    return g_vm_net_mock_offline_practise_config.expLevelMinuteMult;
+}
+
+bool vm_net_mock_practise_exp_mult_admin_save(u32 mult)
+{
+    char query[256];
+
+    if (mult > VM_NET_MOCK_PRACTISE_EXP_LEVEL_MINUTE_MULT_MAX)
+        return false;
+    if (!vm_net_mock_offline_practise_config_ensure_table())
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_offline_practise_config "
+             "(id,exp_level_minute_mult) VALUES (1,%u) "
+             "ON DUPLICATE KEY UPDATE "
+             "exp_level_minute_mult=VALUES(exp_level_minute_mult)",
+             mult);
+    if (!vm_mysql_exec(query))
+        return false;
+    g_vm_net_mock_offline_practise_config_loaded = false;
+    return vm_net_mock_offline_practise_config_load(true);
+}
+
 static u32 vm_net_mock_practise_today_ymd(void)
 {
     time_t now = time(NULL);
@@ -11012,38 +11221,45 @@ static bool vm_net_mock_role_offline_practise_settle_on_login(
     if (settleMinutes > dailyLeft)
         settleMinutes = dailyLeft;
     level = role->level ? role->level : 1;
-    if (settleMinutes > 0)
     {
-        exp64 = (uint64_t)settleMinutes * (uint64_t)level * 8ull;
-        settleExp = exp64 > 0xffffffffull ? 0xffffffffu : (u32)exp64;
-        practise.bankMinutes -= settleMinutes;
-        practise.todayUsedMinutes += settleMinutes;
-        practise.lastSettleMinutes = settleMinutes;
-        practise.lastSettleExp = settleExp;
-        (void)vm_net_mock_role_add_exp(role, settleExp);
-        if (!vm_net_mock_role_db_save("offline-practise-settle"))
+        u32 expMult = vm_net_mock_practise_exp_level_minute_mult();
+
+        if (settleMinutes > 0)
+        {
+            /* exp = minutes * level^2 * mult */
+            exp64 = (uint64_t)settleMinutes * (uint64_t)level * (uint64_t)level *
+                    (uint64_t)expMult;
+            settleExp = exp64 > 0xffffffffull ? 0xffffffffu : (u32)exp64;
+            practise.bankMinutes -= settleMinutes;
+            practise.todayUsedMinutes += settleMinutes;
+            practise.lastSettleMinutes = settleMinutes;
+            practise.lastSettleExp = settleExp;
+            (void)vm_net_mock_role_add_exp(role, settleExp);
+            if (!vm_net_mock_role_db_save("offline-practise-settle"))
+                return false;
+            snprintf(g_vm_net_mock_offline_practise_login_info,
+                     sizeof(g_vm_net_mock_offline_practise_login_info),
+                     "\xC0\xEB\xCF\xDF\xD0\xDE\xC1\xB6%u\xB7\xD6\xD6\xD3\xA3\xAC"
+                     "\xBB\xF1\xB5\xC3%u\xBE\xAD\xD1\xE9\xA1\xA3",
+                     settleMinutes, settleExp);
+            g_vm_net_mock_offline_practise_login_flag = 1;
+        }
+        practise.lastLogoutUnix = 0;
+        if (!vm_net_mock_role_offline_practise_save_for(accountId, role->roleId,
+                                                        &practise))
+        {
             return false;
-        snprintf(g_vm_net_mock_offline_practise_login_info,
-                 sizeof(g_vm_net_mock_offline_practise_login_info),
-                 "\xC0\xEB\xCF\xDF\xD0\xDE\xC1\xB6%u\xB7\xD6\xD6\xD3\xA3\xAC"
-                 "\xBB\xF1\xB5\xC3%u\xBE\xAD\xD1\xE9\xA1\xA3",
-                 settleMinutes, settleExp);
-        g_vm_net_mock_offline_practise_login_flag = 1;
+        }
+        if (settleMinutesOut)
+            *settleMinutesOut = settleMinutes;
+        if (settleExpOut)
+            *settleExpOut = settleExp;
+        printf("[info][mock-service] practise_settle account=%s role=%u offline_min=%u bank_left=%u settle_min=%u level=%u mult=%u exp=%u daily_used=%u\n",
+               accountId, role->roleId, offlineMinutes, practise.bankMinutes,
+               settleMinutes, level, expMult, settleExp,
+               practise.todayUsedMinutes);
+        return true;
     }
-    practise.lastLogoutUnix = 0;
-    if (!vm_net_mock_role_offline_practise_save_for(accountId, role->roleId,
-                                                    &practise))
-    {
-        return false;
-    }
-    if (settleMinutesOut)
-        *settleMinutesOut = settleMinutes;
-    if (settleExpOut)
-        *settleExpOut = settleExp;
-    printf("[info][mock-service] practise_settle account=%s role=%u offline_min=%u bank_left=%u settle_min=%u level=%u exp=%u daily_used=%u\n",
-           accountId, role->roleId, offlineMinutes, practise.bankMinutes,
-           settleMinutes, level, settleExp, practise.todayUsedMinutes);
-    return true;
 }
 
 static void vm_net_mock_role_offline_practise_panel_values(
@@ -13118,8 +13334,20 @@ static bool vm_net_mock_equip_sell_item_is_sellable(u32 itemId)
 }
 
 /*
- * Permanent sell: remove one backpack equipment row and credit full shop/equip
- * catalog ?? (not discard's floor(price/10)).
+ * Same copper as equipment discard / battle-insight auto-sell:
+ * floor(equip.dsh 价值 / 10). Catalog missing => unresolved.
+ */
+static u32 vm_net_mock_equip_discard_refund_unit_price(
+    const vm_net_mock_shop_catalog_item *catalog)
+{
+    if (catalog == NULL || catalog->price < 10u)
+        return 0;
+    return catalog->price / 10u;
+}
+
+/*
+ * Permanent sell: remove one backpack equipment row and credit discard refund
+ * floor(catalog 价值 / 10) copper (same as 7/4 equipment discard).
  */
 static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
                                                 u16 backpackSeq,
@@ -13170,7 +13398,7 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
             *reasonOut = "price-unresolved";
         return false;
     }
-    price = catalog->price;
+    price = vm_net_mock_equip_discard_refund_unit_price(catalog);
     beforeRole = *role;
     {
         u32 soldInstanceId = bagItem->enhanceInstanceId;
@@ -13185,7 +13413,8 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
             (void)vm_net_mock_equipment_instance_retire(role->roleId, soldInstanceId,
                                                         backpackSeq);
     }
-    role->money = vm_net_mock_add_capped_u32(role->money, price);
+    if (price != 0)
+        role->money = vm_net_mock_add_capped_u32(role->money, price);
     (void)beforeRole;
     vm_net_mock_role_persist_inventory_now("equip-sell");
     if (soldPriceOut)
@@ -13193,8 +13422,8 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
     if (soldItemIdOut)
         *soldItemIdOut = itemId;
     printf("[info][network] mock_equip_sell role=%u bag_seq=%u item=%u "
-           "price=%u money=%u bag_rows=%u evidence=full-catalog-value-not-discard-1/10\n",
-           role->roleId, backpackSeq, itemId, price, role->money,
+           "price=%u catalog=%u money=%u bag_rows=%u evidence=discard-floor-价值/10\n",
+           role->roleId, backpackSeq, itemId, price, catalog->price, role->money,
            role->backpackItemCount);
     return true;
 }
@@ -13211,9 +13440,7 @@ static u32 vm_net_mock_battle_insight_drop_auto_sell_unit_price(u32 itemId)
     if (itemId == 0)
         return 0;
     catalog = vm_net_mock_find_shop_catalog_item(itemId);
-    if (catalog == NULL)
-        return 0;
-    return catalog->price / 10u;
+    return vm_net_mock_equip_discard_refund_unit_price(catalog);
 }
 
 static bool vm_net_mock_battle_insight_try_auto_sell_drop(
@@ -13832,7 +14059,40 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                                                       ? "backpack-add-cross-quality-recast-stone"
                                                                                       : "backpack-add-warehouse-pass"))))))))));
 
-        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得 / 金币堆 / 角色封印卷 / 玄晶提炼石 / 跨品重铸石：耐久1，叠加入已有堆或新行。 */
+        /*
+         * Bound 857: enhanceInstanceId ↔ server_sealed_roles.  Must not enter
+         * the blank-stack path — 藏宝阁 cancel/buy used to memset a new row
+         * (or merge onto a blank 857) and drop the binding →「空白封印卷」.
+         */
+        if (itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID &&
+            enhanceInstanceId != 0)
+        {
+            if (freeSlots < 1 || itemCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+                return false;
+            {
+                vm_net_mock_backpack_item_state *item =
+                    &role->backpackItems[itemCount];
+                memset(item, 0, sizeof(*item));
+                item->itemId = itemId;
+                item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+                item->count = VM_NET_MOCK_ROLE_SEAL_SCROLL_DURABILITY;
+                item->enhanceInstanceId = enhanceInstanceId;
+                firstSeq = item->seq;
+                role->nextBackpackSeq = (u16)(item->seq + 1);
+                if (role->nextBackpackSeq == 0)
+                    role->nextBackpackSeq = 1;
+                role->backpackItemCount = (u16)(itemCount + 1);
+            }
+            if (seqOut)
+                *seqOut = firstSeq;
+            vm_net_mock_role_normalize_backpack(role);
+            (void)before;
+            vm_net_mock_role_mark_inventory_dirty(
+                "backpack-add-role-seal-bound");
+            return true;
+        }
+
+        /* 替身人偶 / 追杀令 / 强制PK证明 / 星空石 / 改名卡 / 打金心得 / 金币堆 / 空白角色封印卷 / 玄晶提炼石 / 跨品重铸石：耐久1，叠加入已有堆或新行。 */
         if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
             itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID ||
             itemId == VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID ||
@@ -13844,12 +14104,31 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             itemId == VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID ||
             itemId == VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID)
         {
-            vm_net_mock_backpack_item_state *existing =
-                vm_net_mock_role_find_backpack_item(role, itemId, 0);
+            vm_net_mock_backpack_item_state *existing = NULL;
             u32 grant = count * passDurability;
 
             if (grant == 0)
                 return false;
+            /* Blank 857 only stacks onto other blanks — never onto a bound row. */
+            if (itemId == VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID)
+            {
+                for (u32 si = 0; si < itemCount; ++si)
+                {
+                    vm_net_mock_backpack_item_state *cand =
+                        &role->backpackItems[si];
+                    if (cand->itemId == itemId &&
+                        cand->enhanceInstanceId == 0)
+                    {
+                        existing = cand;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                existing =
+                    vm_net_mock_role_find_backpack_item(role, itemId, 0);
+            }
             if (existing != NULL)
             {
                 existing->count += grant;

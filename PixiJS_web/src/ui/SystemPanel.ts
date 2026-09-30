@@ -37,6 +37,7 @@ import {
   isGemFragment,
   parseGemItem,
   formatCultivationBookName,
+  formatRoleSealScrollName,
   isChestBoxItem,
   isCrystalFragment,
   isCultivationBookItem,
@@ -45,6 +46,7 @@ import {
   isCrystalExtractStone,
   isCrossQualityRecastStone,
   isReservoirFlaskItemId,
+  isRoleSealScroll,
   maxFlaskBuyUnitsFromBag,
   type BagItem,
   type CharacterStats,
@@ -553,11 +555,23 @@ export class SystemPanel extends Container {
   setBag(items: BagItem[]): void {
     this.bagItems = items;
     // Keep detail/actions on the live bag row (enhanceAttrs / wash markers).
+    // If the selected row was consumed (unseal / use), drop back to the list.
     if (this.selected && isBag(this.selected)) {
       const sel = this.selected;
       if (sel.seq > 0) {
         const fresh = items.find((it) => it.seq === sel.seq);
-        if (fresh) this.selected = fresh;
+        if (fresh) {
+          this.selected = fresh;
+        } else if (
+          this.kind === "bag" &&
+          (this.mode === "detail" || this.mode === "actions")
+        ) {
+          this.mode = "list";
+          this.selected = null;
+          this.actionLabels = [];
+        } else {
+          this.selected = null;
+        }
       }
     }
     if (this.visible && (this.kind === "bag" || this.kind === "enhance")) {
@@ -1186,7 +1200,7 @@ export class SystemPanel extends Container {
 
   private filteredBag(): BagItem[] {
     const tab = BAG_TABS[this.categoryIndex] ?? BAG_TABS[0]!;
-    return this.bagItems.filter((it) => tab.match(it));
+    return sortBagByName(this.bagItems.filter((it) => tab.match(it)));
   }
 
   private filteredMall(): ShopGoods[] {
@@ -1264,7 +1278,6 @@ export class SystemPanel extends Container {
     }
   }
 
-  /** Fetch dynamic desc (921 bookdes) and redraw if still on same item. */
   private async enrichSelectedBagDetail(it: BagItem): Promise<void> {
     if (!this.onEnrichBagDetail) return;
     const seq = it.seq;
@@ -1275,17 +1288,25 @@ export class SystemPanel extends Container {
     } catch {
       return;
     }
-    if (!text || !text.trim()) return;
     if (!this.visible) return;
     if (!this.selected || !isBag(this.selected)) return;
     if (this.selected.seq !== seq || this.selected.itemId !== itemId) return;
-    this.selected = { ...this.selected, desc: text.trim() };
-    // Keep bag row in sync so reopening detail stays filled.
-    this.bagItems = this.bagItems.map((row) =>
-      row.seq === seq && row.itemId === itemId
-        ? { ...row, desc: text!.trim() }
-        : row,
-    );
+    /* Prefer live bag row (sealedRole / book meta may have been stamped by enrich). */
+    const live =
+      seq > 0
+        ? this.bagItems.find((row) => row.seq === seq && row.itemId === itemId)
+        : undefined;
+    if (text && text.trim()) {
+      const desc = text.trim();
+      this.selected = { ...(live || this.selected), desc };
+      this.bagItems = this.bagItems.map((row) =>
+        row.seq === seq && row.itemId === itemId ? { ...row, desc } : row,
+      );
+    } else if (live) {
+      this.selected = live;
+    } else {
+      return;
+    }
     if (this.mode === "actions" || this.mode === "detail") this.redraw();
   }
 
@@ -1409,8 +1430,11 @@ export class SystemPanel extends Container {
   /** Drop weapons whose equip.dsh category does not match the role job. */
   private filterJobCompatibleEquips(items: BagItem[]): BagItem[] {
     const job = this.stats?.job ?? 0;
-    if (job < 1 || job > 3) return items;
-    return items.filter((it) => jobAllowsWeaponCategory(job, it.category));
+    const filtered =
+      job < 1 || job > 3
+        ? items
+        : items.filter((it) => jobAllowsWeaponCategory(job, it.category));
+    return sortBagByName(filtered);
   }
 
   private paintBrokenGlowOverlay(): void {
@@ -3033,6 +3057,13 @@ function bagCatalogName(it: BagItem): string {
   return lookupItemSync(it.itemId)?.name ?? it.name;
 }
 
+/** UI list order: Chinese collation on the name the player sees. */
+function sortBagByName(items: BagItem[]): BagItem[] {
+  return items
+    .slice()
+    .sort((a, b) => bagItemDisplayName(a).localeCompare(bagItemDisplayName(b), "zh"));
+}
+
 function cultivationBookDisplayName(it: BagItem): string {
   if (!isCultivationBookItem(it.itemId) || !(it.bookLevel && it.bookLevel > 0)) {
     return bagCatalogName(it);
@@ -3041,16 +3072,23 @@ function cultivationBookDisplayName(it: BagItem): string {
   return formatCultivationBookName(base, it.bookLevel, it.bookFull);
 }
 
+function bagItemDisplayName(it: BagItem): string {
+  if (isRoleSealScroll(it.itemId) && it.sealedRole?.name) {
+    return formatRoleSealScrollName(bagCatalogName(it), it.sealedRole);
+  }
+  return cultivationBookDisplayName(it);
+}
+
 function formatBagLine(it: BagItem): string {
   const wash = equipHasWashedAttr(it) ? "[洗]" : "";
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
-  return `${cultivationBookDisplayName(it)}${wash}${plus} ×${it.count}`;
+  return `${bagItemDisplayName(it)}${wash}${plus} ×${it.count}`;
 }
 
 function formatBagName(it: BagItem): string {
   const wash = equipHasWashedAttr(it) ? "[洗]" : "";
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
-  return `${cultivationBookDisplayName(it)}${wash}${plus}`;
+  return `${bagItemDisplayName(it)}${wash}${plus}`;
 }
 
 /** Wrap description wells at {@link UI_WRAP_CHARS} per line. */

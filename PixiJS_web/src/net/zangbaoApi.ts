@@ -26,27 +26,148 @@ export type ZangbaoListing = {
   sealedRole?: ZangbaoSealedRoleSummary;
 };
 
+export type ZangbaoSealItemRow = {
+  slot?: number;
+  itemId: number;
+  count: number;
+  enhanceLevel: number;
+  seq?: number;
+  instanceId?: number;
+  enhanceWash?: string;
+  gemReflect?: number;
+  gemCombo?: number;
+  gemRevive?: number;
+};
+
 export type ZangbaoSealDetail = {
   ok: true;
   listingId: number;
+  bagSeq?: number;
+  /** True when bagSeq points at an unbound blank 857. */
+  blank?: boolean;
   sealedRoleId: number;
   role: {
     name: string;
     level: number;
     job: number;
     sex: number;
+    title: string;
+    spouse: string;
+    guild: string;
     hp: number;
     hpMax: number;
     mp: number;
     mpMax: number;
+    charm: number;
+    strength: number;
+    agility: number;
+    wisdom: number;
+    attack: number;
+    armor: number;
+    dodge: number;
+    hit: number;
+    crit: number;
+    resist: number;
+    reflectPct: number;
+    comboPct: number;
+    revivePct: number;
+    vitality: number;
+    vitalityMax: number;
     money: number;
     exp: number;
+    /** 酷宝（role.wcoin）。 */
+    wcoin: number;
+    /** 酷币（role.kcoin）。 */
+    kcoin: number;
     scene: string;
   };
-  equipment: { slot: number; itemId: number; enhanceLevel: number }[];
-  backpack: { itemId: number; count: number; enhanceLevel: number; seq?: number }[];
-  warehouse: { itemId: number; count: number; enhanceLevel: number }[];
+  equipment: ZangbaoSealItemRow[];
+  backpack: ZangbaoSealItemRow[];
+  warehouse: ZangbaoSealItemRow[];
 };
+
+function parseSealDetailPayload(
+  data: Record<string, unknown>,
+  fallbackListingId = 0,
+): ZangbaoSealDetail {
+  const roleRaw = (data.role as Record<string, unknown>) || {};
+  const mapRows = (key: string): ZangbaoSealItemRow[] => {
+    const arr = data[key];
+    if (!Array.isArray(arr)) return [];
+    return arr.map((raw) => {
+      const it = raw as Record<string, unknown>;
+      const enhanceWash =
+        typeof it.enhanceWash === "string"
+          ? it.enhanceWash
+          : typeof it.enhance_wash === "string"
+            ? it.enhance_wash
+            : "";
+      const gemReflect = Number(it.gemReflect ?? it.gem_reflect) || 0;
+      const gemCombo = Number(it.gemCombo ?? it.gem_combo) || 0;
+      const gemRevive = Number(it.gemRevive ?? it.gem_revive) || 0;
+      const slot = Number(it.slot ?? it.slot_index);
+      const seq = Number(it.seq ?? it.item_seq) || 0;
+      const instanceId = Number(it.instanceId ?? it.item_instance_id) || 0;
+      const count = Number(it.count ?? it.item_count) || 0;
+      return {
+        ...(Number.isFinite(slot) ? { slot: slot || 0 } : {}),
+        itemId: Number(it.itemId ?? it.item_id) || 0,
+        count,
+        enhanceLevel: Number(it.enhanceLevel ?? it.enhance_level) || 0,
+        ...(seq ? { seq } : {}),
+        ...(instanceId ? { instanceId } : {}),
+        ...(enhanceWash ? { enhanceWash } : {}),
+        ...(gemReflect || gemCombo || gemRevive
+          ? { gemReflect, gemCombo, gemRevive }
+          : {}),
+      };
+    });
+  };
+  const bagSeq = Number(data.bagSeq) || 0;
+  return {
+    ok: true,
+    listingId: Number(data.listingId) || fallbackListingId,
+    ...(bagSeq ? { bagSeq } : {}),
+    blank: data.blank === true,
+    sealedRoleId: Number(data.sealedRoleId) || 0,
+    role: {
+      name: String(roleRaw.name || ""),
+      level: Number(roleRaw.level) || 0,
+      job: Number(roleRaw.job) || 0,
+      sex: Number(roleRaw.sex) || 0,
+      title: String(roleRaw.title || ""),
+      spouse: String(roleRaw.spouse || ""),
+      guild: String(roleRaw.guild || ""),
+      hp: Number(roleRaw.hp) || 0,
+      hpMax: Number(roleRaw.hpMax ?? roleRaw.hp_max) || 0,
+      mp: Number(roleRaw.mp) || 0,
+      mpMax: Number(roleRaw.mpMax ?? roleRaw.mp_max) || 0,
+      charm: Number(roleRaw.charm) || 0,
+      strength: Number(roleRaw.strength) || 0,
+      agility: Number(roleRaw.agility) || 0,
+      wisdom: Number(roleRaw.wisdom) || 0,
+      attack: Number(roleRaw.attack) || 0,
+      armor: Number(roleRaw.armor ?? roleRaw.defense) || 0,
+      dodge: Number(roleRaw.dodge) || 0,
+      hit: Number(roleRaw.hit) || 0,
+      crit: Number(roleRaw.crit) || 0,
+      resist: Number(roleRaw.resist) || 0,
+      reflectPct: Number(roleRaw.reflectPct ?? roleRaw.reflect_pct) || 0,
+      comboPct: Number(roleRaw.comboPct ?? roleRaw.combo_pct) || 0,
+      revivePct: Number(roleRaw.revivePct ?? roleRaw.revive_pct) || 0,
+      vitality: Number(roleRaw.vitality) || 0,
+      vitalityMax: Number(roleRaw.vitalityMax ?? roleRaw.vitality_max) || 0,
+      money: Number(roleRaw.money) || 0,
+      exp: Number(roleRaw.exp) || 0,
+      wcoin: Number(roleRaw.wcoin ?? roleRaw.coolmoney) || 0,
+      kcoin: Number(roleRaw.kcoin) || 0,
+      scene: String(roleRaw.scene || ""),
+    },
+    equipment: mapRows("equipment"),
+    backpack: mapRows("backpack"),
+    warehouse: mapRows("warehouse"),
+  };
+}
 
 function parseListing(it: Record<string, unknown>): ZangbaoListing {
   const sealedRaw = it.sealedRole as Record<string, unknown> | undefined;
@@ -218,55 +339,24 @@ export async function zangbaoSealDetail(
   if (!data || data.ok !== true) {
     return { ok: false, error: String(data?.error || "无法查看封印角色") };
   }
-  const roleRaw = (data.role as Record<string, unknown>) || {};
-  const mapRows = (key: string) => {
-    const arr = data[key];
-    if (!Array.isArray(arr)) return [];
-    return arr.map((raw) => {
-      const it = raw as Record<string, unknown>;
-      return {
-        slot: Number(it.slot ?? it.slot_index) || 0,
-        itemId: Number(it.itemId ?? it.item_id) || 0,
-        count: Number(it.count ?? it.item_count) || 0,
-        enhanceLevel: Number(it.enhanceLevel ?? it.enhance_level) || 0,
-        seq: Number(it.seq ?? it.item_seq) || 0,
-      };
-    });
-  };
-  return {
-    ok: true,
-    listingId: Number(data.listingId) || listingId,
-    sealedRoleId: Number(data.sealedRoleId) || 0,
-    role: {
-      name: String(roleRaw.name || ""),
-      level: Number(roleRaw.level) || 0,
-      job: Number(roleRaw.job) || 0,
-      sex: Number(roleRaw.sex) || 0,
-      hp: Number(roleRaw.hp) || 0,
-      hpMax: Number(roleRaw.hpMax ?? roleRaw.hp_max) || 0,
-      mp: Number(roleRaw.mp) || 0,
-      mpMax: Number(roleRaw.mpMax ?? roleRaw.mp_max) || 0,
-      money: Number(roleRaw.money) || 0,
-      exp: Number(roleRaw.exp) || 0,
-      scene: String(roleRaw.scene || ""),
-    },
-    equipment: mapRows("equipment").map((r) => ({
-      slot: r.slot,
-      itemId: r.itemId,
-      enhanceLevel: r.enhanceLevel,
-    })),
-    backpack: mapRows("backpack").map((r) => ({
-      itemId: r.itemId,
-      count: r.count,
-      enhanceLevel: r.enhanceLevel,
-      seq: r.seq,
-    })),
-    warehouse: mapRows("warehouse").map((r) => ({
-      itemId: r.itemId,
-      count: r.count,
-      enhanceLevel: r.enhanceLevel,
-    })),
-  };
+  return parseSealDetailPayload(data, listingId);
+}
+
+/** Bag-bound 857 detail: resolve sealed role via backpack seq. */
+export async function zangbaoSealBagDetail(
+  bagSeq: number,
+  auth: { account: string; password: string; roleId: number },
+): Promise<ZangbaoSealDetail | { ok: false; error: string }> {
+  const data = await getJson("/api/zangbao/seal-detail", {
+    bagSeq: String(bagSeq),
+    account: auth.account,
+    password: auth.password,
+    role_id: String(auth.roleId),
+  });
+  if (!data || data.ok !== true) {
+    return { ok: false, error: String(data?.error || "无法查看封印角色") };
+  }
+  return parseSealDetailPayload(data);
 }
 
 export async function zangbaoListItem(opts: {

@@ -23,6 +23,7 @@
 | 菜单「账号多开」 | 对话框：切换已有槽 / 新开账号 / 取消 |
 
 - 非活跃槽继续 poll / 挂机；切号时快照/恢复槽内 UI 状态。
+- 挂机续环：后台战结束与切回世界均 `ensureHangupLoopArmed`；后台挂机-alone 无 UI 时客户端补 4/2（见 `2026-09-30-multi-open-hangup-rearm.md`）。
 - `setResourceExchange` 随活跃槽重绑。
 - 「离开游戏」只注销当前槽；有其他槽则切过去。
 - 同账号被踢只拆该槽；后台槽被踢仅 tip。
@@ -38,6 +39,7 @@
 | 赏金「擂」闪 | `leiBlink`；后台 `onWagerEvent` 写槽并入聊天 |
 | 环任务 tracker | `cachedRingStatus` |
 | 挂机结算累计 | `hangupTally`（`BattleScreen` 切号 reset/restore） |
+| 交易摊位 | `tradeUiSnap`：切号不取消协议交易；后台 `onTradeSession` fold 进槽，切回 restore |
 | 洗炼/确认框/自动臂 | 切号 `washUi.close` + `clearTransientUiPending`（丢弃/宝石/好友删等 pending） |
 
 仍共享（单 Pixi 壳）：`SceneView`/`BattleScreen` 实例本身；切号时关 overlay 再按目标槽重建展示。

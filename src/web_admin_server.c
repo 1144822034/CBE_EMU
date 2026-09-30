@@ -875,8 +875,19 @@ static const char g_vm_mock_admin_script[] =
     "await refreshRoleDetails(target);"
     "const row=form.closest('tr');"
     "const enabled=form.querySelector('select[name=enabled]');"
+    "const npcEnabled=form.querySelector('select[name=npc_enabled]');"
     "if(row&&enabled){const cells=row.querySelectorAll('td');"
-    "if(cells.length>=4)cells[cells.length-2].textContent=enabled.value==='1'?'\u542f\u7528':'\u7981\u7528';}"
+    "if(cells.length>=4){"
+    "if(npcEnabled){"
+    "cells[cells.length-2].innerHTML="
+    "'<span class=\"state\">"
+    "<span class=\"'+(enabled.value==='1'?'on':'off')+'\">\\u5546\\u57ce'+"
+    "(enabled.value==='1'?'\\u5df2\\u4e0a\\u67b6':'\\u672a\\u4e0a\\u67b6')+'</span>"
+    "<span class=\"'+(npcEnabled.value==='1'?'on':'off')+'\">NPC'+"
+    "(npcEnabled.value==='1'?'\\u5df2\\u4e0a\\u67b6':'\\u672a\\u4e0a\\u67b6')+'</span></span>';"
+    "}else{"
+    "cells[cells.length-2].textContent=enabled.value==='1'?'\\u542f\\u7528':'\\u7981\\u7528';}}"
+    "}"
     "if(action==='chest-delete'&&row)row.remove();"
     "restoreScroll(snap);return;}"
     "restoreScroll(snap);location.assign(target);"
@@ -5715,7 +5726,7 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
-        "<p class=\"foot\">服务选项可多选：对话中每个勾选的服务各增加一个入口。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人只出售 item.dsh 类别 10 中 HP/MP 恢复类药品（不含经验卡、喇叭等消耗品）。副本向导在对话中拆成「传送」与「挑战」两项：配置目标场景才显示传送（可设前置任务，ID=0 直接显示）；配置挑战怪物 ID 才显示挑战；并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。可接取任务最多 8 个绑定，每行可单独设重复接取与每天次数（0=不限）。任务与服务合计最多 7 个对话选项。SCE 内置 NPC 可编辑：保存写入 MySQL 覆盖，不改写 .sce；「恢复内置默认」可撤销覆盖。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
+        "<p class=\"foot\">服务选项可多选：对话中每个勾选的服务各增加一个入口。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人出售后台「商品管理」中已「上架NPC」的非装备商品。副本向导在对话中拆成「传送」与「挑战」两项：配置目标场景才显示传送（可设前置任务，ID=0 直接显示）；配置挑战怪物 ID 才显示挑战；并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。可接取任务最多 8 个绑定，每行可单独设重复接取与每天次数（0=不限）。任务与服务合计最多 7 个对话选项。SCE 内置 NPC 可编辑：保存写入 MySQL 覆盖，不改写 .sce；「恢复内置默认」可撤销覆盖。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div></div></section></div></main></body></html>");
 
     if (page.truncated)
@@ -6358,6 +6369,7 @@ static bool vm_mock_admin_shop_item_matches(
     const vm_net_mock_shop_catalog_item *item,
     bool filterCategory, bool filterEquipment, u8 category,
     bool filterSecretTreasure, bool filterDivineArms,
+    int filterMall, int filterNpc,
     const char *search)
 {
     char itemNameUtf8[128];
@@ -6377,6 +6389,14 @@ static bool vm_mock_admin_shop_item_matches(
     }
     if (filterDivineArms && !vm_mock_admin_shop_is_divine_arms(item))
         return false;
+    if (filterMall == 1 && !item->enabled)
+        return false;
+    if (filterMall == 0 && item->enabled)
+        return false;
+    if (filterNpc == 1 && !item->npcEnabled)
+        return false;
+    if (filterNpc == 0 && item->npcEnabled)
+        return false;
     if (search == NULL || search[0] == 0)
         return true;
     memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
@@ -6385,6 +6405,31 @@ static bool vm_mock_admin_shop_item_matches(
     snprintf(itemIdText, sizeof(itemIdText), "%u", item->itemId);
     return strstr(itemNameUtf8, search) != NULL ||
            strstr(itemIdText, search) != NULL;
+}
+
+/* Query mall=/npc=: all|-1 omitted, 1=已上架, 0=未上架. */
+static int vm_mock_admin_shop_shelf_filter_value(const char *text)
+{
+    if (text == NULL || text[0] == 0 || strcmp(text, "all") == 0)
+        return -1;
+    if (strcmp(text, "1") == 0)
+        return 1;
+    if (strcmp(text, "0") == 0)
+        return 0;
+    return -1;
+}
+
+static void vm_mock_admin_shop_shelf_filter_text(int value, char *out,
+                                                 size_t outCap)
+{
+    if (out == NULL || outCap == 0)
+        return;
+    if (value == 1)
+        snprintf(out, outCap, "1");
+    else if (value == 0)
+        snprintf(out, outCap, "0");
+    else
+        snprintf(out, outCap, "all");
 }
 
 static void vm_mock_admin_render_shop_page(char *response,
@@ -6396,20 +6441,27 @@ static void vm_mock_admin_render_shop_page(char *response,
     bool itemCategories[256];
     char categoryFilter[16];
     char search[128];
+    char mallFilterText[8];
+    char npcFilterText[8];
     char pageText[32];
     char status[16];
     char message[256];
     char categoryEncoded[64];
     char searchEncoded[384];
+    char mallEncoded[16];
+    char npcEncoded[16];
     bool filterCategory = false;
     bool filterEquipment = false;
     bool filterSecretTreasure = false;
     bool filterDivineArms = false;
+    int filterMall = -1;
+    int filterNpc = -1;
     u8 filterCategoryValue = 0;
     u32 itemCount = vm_net_mock_load_shop_catalog();
     u32 matchedCount = 0;
     u32 enabledCount = 0;
     u32 disabledCount = 0;
+    u32 npcEnabledCount = 0;
     u32 secretTreasureCount = 0;
     u32 secretTreasureEnabledCount = 0;
     u32 divineArmsCount = 0;
@@ -6425,15 +6477,27 @@ static void vm_mock_admin_render_shop_page(char *response,
     memset(itemCategories, 0, sizeof(itemCategories));
     memset(categoryFilter, 0, sizeof(categoryFilter));
     memset(search, 0, sizeof(search));
+    memset(mallFilterText, 0, sizeof(mallFilterText));
+    memset(npcFilterText, 0, sizeof(npcFilterText));
     memset(pageText, 0, sizeof(pageText));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
     (void)vm_mock_admin_form_value(query, "category", categoryFilter,
                                    sizeof(categoryFilter));
     (void)vm_mock_admin_form_value(query, "q", search, sizeof(search));
+    (void)vm_mock_admin_form_value(query, "mall", mallFilterText,
+                                   sizeof(mallFilterText));
+    (void)vm_mock_admin_form_value(query, "npc", npcFilterText,
+                                   sizeof(npcFilterText));
     (void)vm_mock_admin_form_value(query, "page", pageText, sizeof(pageText));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    filterMall = vm_mock_admin_shop_shelf_filter_value(mallFilterText);
+    filterNpc = vm_mock_admin_shop_shelf_filter_value(npcFilterText);
+    vm_mock_admin_shop_shelf_filter_text(filterMall, mallFilterText,
+                                         sizeof(mallFilterText));
+    vm_mock_admin_shop_shelf_filter_text(filterNpc, npcFilterText,
+                                         sizeof(npcFilterText));
     if (strcmp(categoryFilter, "secret") == 0)
         filterSecretTreasure = true;
     else if (strcmp(categoryFilter, "arsenal") == 0)
@@ -6461,6 +6525,8 @@ static void vm_mock_admin_render_shop_page(char *response,
             ++enabledCount;
         else
             ++disabledCount;
+        if (item->npcEnabled)
+            ++npcEnabledCount;
         if (vm_mock_admin_shop_is_secret_treasure(item))
         {
             ++secretTreasureCount;
@@ -6475,7 +6541,7 @@ static void vm_mock_admin_render_shop_page(char *response,
         }
         if (vm_mock_admin_shop_item_matches(
                 item, filterCategory, filterEquipment, filterCategoryValue,
-                filterSecretTreasure, filterDivineArms,
+                filterSecretTreasure, filterDivineArms, filterMall, filterNpc,
                 search))
         {
             ++matchedCount;
@@ -6493,6 +6559,8 @@ static void vm_mock_admin_render_shop_page(char *response,
     vm_mock_admin_url_encode(categoryFilter, categoryEncoded,
                              sizeof(categoryEncoded));
     vm_mock_admin_url_encode(search, searchEncoded, sizeof(searchEncoded));
+    vm_mock_admin_url_encode(mallFilterText, mallEncoded, sizeof(mallEncoded));
+    vm_mock_admin_url_encode(npcFilterText, npcEncoded, sizeof(npcEncoded));
 
     vm_mock_admin_text_appendf(&page,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
@@ -6500,10 +6568,10 @@ static void vm_mock_admin_render_shop_page(char *response,
         "<title>江湖OL 商品管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
         ".wrap{max-width:1240px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 14px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
-        ".card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.shop-card{display:flex;flex-direction:column;min-height:0;flex:1}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.secret{background:#fff4e5;color:#b54708}.badge.arms{background:#f4f3ff;color:#5925dc}.badge.off{background:#fef3f2;color:#b42318}.filters{display:grid;grid-template-columns:minmax(190px,.7fr) minmax(220px,1.2fr) auto;gap:9px;align-items:end;margin-bottom:12px}.filters label{display:grid;gap:4px}.filters span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.shop-list{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid #eaecf0;border-radius:8px}table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:middle}th{position:sticky;top:0;background:#f9fafb;color:#667085;z-index:1}.name{min-width:200px}.section{display:inline-block;padding:2px 7px;border-radius:999px;background:#f2f4f7;color:#475467;font-size:12px;white-space:nowrap}.section.secret{background:#fff4e5;color:#b54708}.section.arms{background:#f4f3ff;color:#5925dc}.row-form{display:grid;grid-template-columns:150px 100px auto;gap:7px;align-items:center}.state{font-size:12px;font-weight:600}.state.on{color:#027a48}.state.off{color:#b42318}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}.notice{padding:10px 12px;border-radius:7px;margin-bottom:12px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.foot{font-size:12px;color:#667085;margin:10px 0 0}"
+        ".card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.shop-card{display:flex;flex-direction:column;min-height:0;flex:1}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.secret{background:#fff4e5;color:#b54708}.badge.arms{background:#f4f3ff;color:#5925dc}.badge.off{background:#fef3f2;color:#b42318}.badge.npc{background:#ecfdf3;color:#027a48}.filters{display:grid;grid-template-columns:minmax(160px,.9fr) minmax(120px,.45fr) minmax(120px,.45fr) minmax(180px,1fr) auto;gap:9px;align-items:end;margin-bottom:12px}.filters label{display:grid;gap:4px}.filters span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.shop-list{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid #eaecf0;border-radius:8px}table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:middle}th{position:sticky;top:0;background:#f9fafb;color:#667085;z-index:1}.name{min-width:200px}.section{display:inline-block;padding:2px 7px;border-radius:999px;background:#f2f4f7;color:#475467;font-size:12px;white-space:nowrap}.section.secret{background:#fff4e5;color:#b54708}.section.arms{background:#f4f3ff;color:#5925dc}.row-form{display:grid;grid-template-columns:90px 90px 100px 100px auto;gap:7px;align-items:center}.state{font-size:12px;font-weight:600;display:flex;flex-direction:column;gap:2px}.state .on{color:#027a48}.state .off{color:#b42318}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}.notice{padding:10px 12px;border-radius:7px;margin-bottom:12px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.foot{font-size:12px;color:#667085;margin:10px 0 0}"
         "@media(max-width:760px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:16px 9px;overflow:visible}.shop-card{min-height:700px}.filters,.row-form{grid-template-columns:1fr}.shop-list{min-height:520px}.tabs{overflow:auto}.name{min-width:150px}}"
-        "</style><script src=\"/admin.js?v=7\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
-        "<p class=\"sub\">商品价格与上下架状态 · 保存后立即生效</p></div>"
+        "</style><script src=\"/admin.js?v=8\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "<p class=\"sub\">商品价格与商城/NPC 上架 · 保存后立即生效</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
     vm_mock_admin_append_tabs(&page, "shop");
     vm_mock_admin_text_appendf(
@@ -6518,12 +6586,16 @@ static void vm_mock_admin_render_shop_page(char *response,
     }
     vm_mock_admin_text_appendf(
         &page,
-        "<div class=\"summary\"><span class=\"badge\">目录 %u</span><span class=\"badge\">已上架 %u</span><span class=\"badge off\">已下架 %u</span>"
-        "<span class=\"badge secret\">秘宝道具 %u（上架 %u）</span><span class=\"badge arms\">神兵利器 %u（上架 %u）</span></div>"
+        "<div class=\"summary\"><span class=\"badge\">目录 %u</span>"
+        "<span class=\"badge\">商城上架 %u</span>"
+        "<span class=\"badge off\">商城下架 %u</span>"
+        "<span class=\"badge npc\">NPC上架 %u</span>"
+        "<span class=\"badge secret\">秘宝道具 %u（商城 %u）</span>"
+        "<span class=\"badge arms\">神兵利器 %u（商城 %u）</span></div>"
         "<form class=\"filters\" method=\"get\" action=\"/\"><input type=\"hidden\" name=\"tab\" value=\"shop\">"
         "<label><span>商城分区 / 物品分类</span><select name=\"category\"><option value=\"all\"%s>全部商品</option>"
         "<option value=\"secret\"%s>商城 · 秘宝道具</option><option value=\"arsenal\"%s>商城 · 神兵利器</option>",
-        itemCount, enabledCount, disabledCount,
+        itemCount, enabledCount, disabledCount, npcEnabledCount,
         secretTreasureCount, secretTreasureEnabledCount,
         divineArmsCount, divineArmsEnabledCount,
         filterCategory || filterSecretTreasure || filterDivineArms ? "" : " selected",
@@ -6555,11 +6627,26 @@ static void vm_mock_admin_render_shop_page(char *response,
         vm_mock_admin_text_appendf(&page, "（%u）</option>", category);
     }
     vm_mock_admin_text_appendf(&page,
-        "</select></label><label><span>名称或物品 ID</span><input type=\"search\" name=\"q\" value=\"");
+        "</select></label>"
+        "<label><span>上架商城</span><select name=\"mall\">"
+        "<option value=\"all\"%s>全部</option>"
+        "<option value=\"1\"%s>已上架商城</option>"
+        "<option value=\"0\"%s>未上架商城</option></select></label>"
+        "<label><span>上架 NPC</span><select name=\"npc\">"
+        "<option value=\"all\"%s>全部</option>"
+        "<option value=\"1\"%s>已上架 NPC</option>"
+        "<option value=\"0\"%s>未上架 NPC</option></select></label>"
+        "<label><span>名称或物品 ID</span><input type=\"search\" name=\"q\" value=\"",
+        filterMall < 0 ? " selected" : "",
+        filterMall == 1 ? " selected" : "",
+        filterMall == 0 ? " selected" : "",
+        filterNpc < 0 ? " selected" : "",
+        filterNpc == 1 ? " selected" : "",
+        filterNpc == 0 ? " selected" : "");
     vm_mock_admin_text_append_html(&page, search);
     vm_mock_admin_text_appendf(&page,
         "\" placeholder=\"输入名称或 ID\"></label><button type=\"submit\">筛选</button></form>"
-        "<div class=\"shop-list\"><table><thead><tr><th>ID / 名称</th><th>商城分区</th><th>DSH 分类</th><th>当前状态</th><th>价格与操作</th></tr></thead><tbody>");
+        "<div class=\"shop-list\"><table><thead><tr><th>ID / 名称</th><th>商城分区</th><th>DSH 分类</th><th>当前状态</th><th>商城价 / NPC价 / 上架</th></tr></thead><tbody>");
 
     for (u32 i = 0; i < itemCount; ++i)
     {
@@ -6569,7 +6656,7 @@ static void vm_mock_admin_render_shop_page(char *response,
 
         if (!vm_mock_admin_shop_item_matches(
                 item, filterCategory, filterEquipment, filterCategoryValue,
-                filterSecretTreasure, filterDivineArms,
+                filterSecretTreasure, filterDivineArms, filterMall, filterNpc,
                 search))
         {
             continue;
@@ -6596,23 +6683,41 @@ static void vm_mock_admin_render_shop_page(char *response,
             &page, vm_mock_admin_item_category_name(item->isEquip != 0,
                                                     item->category));
         vm_mock_admin_text_appendf(
-            &page, "（%u）</td><td><span class=\"state %s\">%s</span></td><td>"
+            &page, "（%u）</td><td><span class=\"state\">"
+            "<span class=\"%s\">商城%s</span>"
+            "<span class=\"%s\">NPC%s</span></span></td><td>"
             "<form class=\"row-form\" method=\"post\" action=\"/action\">"
             "<input type=\"hidden\" name=\"action\" value=\"save-shop-item\">"
             "<input type=\"hidden\" name=\"item\" value=\"%u\">"
             "<input type=\"hidden\" name=\"category\" value=\"",
-            item->category, item->enabled ? "on" : "off",
-            item->enabled ? "已上架" : "已下架", item->itemId);
+            item->category,
+            item->enabled ? "on" : "off",
+            item->enabled ? "已上架" : "未上架",
+            item->npcEnabled ? "on" : "off",
+            item->npcEnabled ? "已上架" : "未上架",
+            item->itemId);
         vm_mock_admin_text_append_html(&page, categoryFilter);
         vm_mock_admin_text_appendf(&page, "\"><input type=\"hidden\" name=\"q\" value=\"");
         vm_mock_admin_text_append_html(&page, search);
         vm_mock_admin_text_appendf(
-            &page, "\"><input type=\"hidden\" name=\"page\" value=\"%u\">"
-            "<input aria-label=\"商品价格\" type=\"number\" name=\"price\" min=\"1\" max=\"4294967295\" value=\"%u\" required>"
-            "<select aria-label=\"上下架状态\" name=\"enabled\"><option value=\"1\"%s>上架</option><option value=\"0\"%s>下架</option></select>"
+            &page, "\"><input type=\"hidden\" name=\"mall\" value=\"%s\">"
+            "<input type=\"hidden\" name=\"npc\" value=\"%s\">"
+            "<input type=\"hidden\" name=\"page\" value=\"%u\">"
+            "<input aria-label=\"商城价格(酷宝)\" title=\"商城酷宝价\" type=\"number\" name=\"price\" min=\"1\" max=\"4294967295\" value=\"%u\" required>"
+            "<input aria-label=\"NPC价格(铜币)\" title=\"NPC铜币价\" type=\"number\" name=\"npc_price\" min=\"1\" max=\"4294967295\" value=\"%u\" required>"
+            "<select aria-label=\"上架到商城\" name=\"enabled\">"
+            "<option value=\"1\"%s>上架商城</option>"
+            "<option value=\"0\"%s>不上架商城</option></select>"
+            "<select aria-label=\"上架到NPC\" name=\"npc_enabled\">"
+            "<option value=\"1\"%s>上架NPC</option>"
+            "<option value=\"0\"%s>不上架NPC</option></select>"
             "<button type=\"submit\">保存</button></form>%s</td></tr>",
-            pageNumber, item->price, item->enabled ? " selected" : "",
+            mallFilterText, npcFilterText, pageNumber, item->price,
+            item->npcPrice ? item->npcPrice : item->price,
+            item->enabled ? " selected" : "",
             item->enabled ? "" : " selected",
+            item->npcEnabled ? " selected" : "",
+            item->npcEnabled ? "" : " selected",
             item->itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID
                 ? "<div class=\"foot\">背包扩容的实际价格由客户端容量档位决定。</div>"
                 : "");
@@ -6625,15 +6730,25 @@ static void vm_mock_admin_render_shop_page(char *response,
         pageNumber, pageCount, matchedCount);
     if (pageNumber > 1)
         vm_mock_admin_text_appendf(
-            &page, "<a href=\"/?tab=shop&amp;category=%s&amp;q=%s&amp;page=%u\">上一页</a>",
-            categoryEncoded, searchEncoded, pageNumber - 1);
+            &page,
+            "<a href=\"/?tab=shop&amp;category=%s&amp;mall=%s&amp;npc=%s&amp;q=%s&amp;page=%u\">上一页</a>",
+            categoryEncoded, mallEncoded, npcEncoded, searchEncoded,
+            pageNumber - 1);
     if (pageNumber < pageCount)
         vm_mock_admin_text_appendf(
-            &page, "<a href=\"/?tab=shop&amp;category=%s&amp;q=%s&amp;page=%u\">下一页</a>",
-            categoryEncoded, searchEncoded, pageNumber + 1);
+            &page,
+            "<a href=\"/?tab=shop&amp;category=%s&amp;mall=%s&amp;npc=%s&amp;q=%s&amp;page=%u\">下一页</a>",
+            categoryEncoded, mallEncoded, npcEncoded, searchEncoded,
+            pageNumber + 1);
     vm_mock_admin_text_appendf(
         &page,
-        "</div></div><p class=\"foot\">价格和上下架状态保存在 MySQL server_shop_items 表。<strong>enabled=1</strong> 的非装备会出现在商城「秘宝道具」并可酷宝购买；装备按部位进「神兵利器」。上下架只作用于商城货架；武器/防具 NPC 仍按白装目录出售（价格可用本表覆盖）。药品商人仍只卖已下架的 HP/MP 恢复类药品。17/1 NPC 商店显示价仍可由客户端本地 DSH 决定。下架不会删除角色已有物品，也不会影响后台赠送物品。</p></section></main></body></html>");
+        "</div></div><p class=\"foot\">价格与货架保存在 MySQL <code>server_shop_items</code>。"
+        "<strong>商城价</strong>（price / 酷宝）与<strong>NPC价</strong>（npc_price / 铜币）相互独立。"
+        "<strong>上架商城</strong>（enabled）的非装备出现在商城「秘宝道具」并可酷宝购买；"
+        "<strong>上架NPC</strong>（npc_enabled）的非装备出现在药品商人（铜币）。"
+        "两开关相互独立，可同时开、只开其一或全关。"
+        "武器/防具 NPC 仍按白装目录出售，不受本页 NPC 开关影响（NPC 价仍可用本表覆盖）。"
+        "下架不会删除角色已有物品，也不影响后台赠送。</p></section></main></body></html>");
     if (page.truncated)
     {
         snprintf(response, responseCap,
@@ -7289,6 +7404,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     {
         u32 regLimit = vm_mock_service_register_daily_limit();
         u32 regUsed = vm_mock_service_register_daily_used_today();
+        u32 practiseMult = vm_net_mock_practise_exp_level_minute_mult();
 
         vm_mock_admin_text_appendf(
             &page,
@@ -7307,6 +7423,24 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             "</label>"
             "<button type=\"submit\">保存</button></form></section>",
             regUsed, regLimit, regLimit);
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\" style=\"margin-bottom:16px;flex:none\">"
+            "<h2>修炼丹经验系数</h2>"
+            "<p class=\"sub\" style=\"margin-top:0\">上线结算："
+            "<code>经验 = 结算分钟 × 角色等级² × 系数</code>。"
+            "结算分钟取 min(离线分钟, 银行剩余, 当日剩余额度)。"
+            "默认 8；设为 0 则结算仍扣时间但不给经验。</p>"
+            "<form method=\"post\" action=\"/action\" "
+            "style=\"display:flex;flex-wrap:wrap;gap:10px;align-items:end;max-width:420px\">"
+            "<input type=\"hidden\" name=\"action\" value=\"save-practise-exp-mult\">"
+            "<label style=\"display:grid;gap:4px;flex:1;min-width:140px\">"
+            "<span style=\"font-size:12px;color:#667085\">等级²×分钟系数</span>"
+            "<input type=\"number\" name=\"exp_level_minute_mult\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" required>"
+            "</label>"
+            "<button type=\"submit\">保存</button></form></section>",
+            practiseMult);
     }
     vm_mock_admin_text_appendf(
         &page,
@@ -8083,28 +8217,37 @@ static void vm_mock_admin_redirect_updates(vm_mock_service_socket client,
 static void vm_mock_admin_redirect_shop(vm_mock_service_socket client,
                                         const char *category,
                                         const char *search,
+                                        const char *mall,
+                                        const char *npc,
                                         u32 page,
                                         const char *status,
                                         const char *message)
 {
     char categoryEncoded[64];
     char searchEncoded[384];
+    char mallEncoded[16];
+    char npcEncoded[16];
     char statusEncoded[64];
     char messageEncoded[768];
-    char location[1500];
+    char location[1600];
 
     vm_mock_admin_url_encode(category && category[0] ? category : "all",
                              categoryEncoded, sizeof(categoryEncoded));
     vm_mock_admin_url_encode(search ? search : "", searchEncoded,
                              sizeof(searchEncoded));
+    vm_mock_admin_url_encode(mall && mall[0] ? mall : "all", mallEncoded,
+                             sizeof(mallEncoded));
+    vm_mock_admin_url_encode(npc && npc[0] ? npc : "all", npcEncoded,
+                             sizeof(npcEncoded));
     vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
                              sizeof(statusEncoded));
     vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
                              sizeof(messageEncoded));
     snprintf(location, sizeof(location),
-             VM_MOCK_ADMIN_ROOT_PATH "?tab=shop&category=%s&q=%s&page=%u&status=%s&message=%s",
-             categoryEncoded, searchEncoded, page ? page : 1, statusEncoded,
-             messageEncoded);
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=shop&category=%s&mall=%s&npc=%s&q=%s&page=%u&status=%s&message=%s",
+             categoryEncoded, mallEncoded, npcEncoded, searchEncoded,
+             page ? page : 1, statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
 
@@ -8180,6 +8323,67 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
     }
     if (valueOut)
         *valueOut = parsed;
+    return true;
+}
+
+/*
+ * Parse a drop-rate percent field (e.g. "0.1", "1", "1.5", "100") into
+ * percent×10 storage (1=0.1%, 1000=100%).  At most one decimal digit.
+ */
+static bool vm_mock_admin_parse_drop_rate_percent_x10(const char *text,
+                                                      u32 *x10Out)
+{
+    const char *cursor = text;
+    unsigned long whole = 0;
+    unsigned long tenths = 0;
+    bool hasDot = false;
+
+    if (x10Out)
+        *x10Out = 0;
+    if (text == NULL || text[0] == 0)
+        return false;
+    while (*cursor >= '0' && *cursor <= '9')
+    {
+        whole = whole * 10ul + (unsigned long)(*cursor - '0');
+        if (whole > 100ul)
+            return false;
+        ++cursor;
+    }
+    if (*cursor == '.')
+    {
+        hasDot = true;
+        ++cursor;
+        if (*cursor < '0' || *cursor > '9')
+            return false;
+        tenths = (unsigned long)(*cursor - '0');
+        ++cursor;
+        if (*cursor >= '0' && *cursor <= '9')
+            return false;
+    }
+    if (*cursor != 0)
+        return false;
+    if (whole > 100ul || (whole == 100ul && (hasDot && tenths != 0)))
+        return false;
+    if (x10Out)
+        *x10Out = (u32)(whole * 10ul + tenths);
+    return true;
+}
+
+static bool vm_mock_admin_form_drop_rate_x10(const char *body, const char *field,
+                                             u32 *x10Out)
+{
+    char textValue[32];
+    u32 parsed = 0;
+
+    memset(textValue, 0, sizeof(textValue));
+    if (!vm_mock_admin_form_value(body, field, textValue, sizeof(textValue)) ||
+        !vm_mock_admin_parse_drop_rate_percent_x10(textValue, &parsed) ||
+        parsed > VM_NET_MOCK_MONSTER_DROP_RATE_X10_MAX)
+    {
+        return false;
+    }
+    if (x10Out)
+        *x10Out = parsed;
     return true;
 }
 
@@ -8587,7 +8791,7 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
         snprintf(itemField, sizeof(itemField), "drop_item_id_%u", (u32)slot);
         snprintf(rateField, sizeof(rateField), "drop_rate_%u", (u32)slot);
         if (!vm_mock_admin_form_u32(body, itemField, 0xffffffffu, &itemId) ||
-            !vm_mock_admin_form_u32(body, rateField, 100u, &rate))
+            !vm_mock_admin_form_drop_rate_x10(body, rateField, &rate))
         {
             vm_mock_admin_redirect_monster(client, row.enemyId, "error",
                                            "掉落表单字段不完整或数值越界");
@@ -8603,7 +8807,7 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
             return;
         }
         row.drops[row.dropCount].itemId = itemId;
-        row.drops[row.dropCount].ratePercent = (u8)rate;
+        row.drops[row.dropCount].ratePercent = (u16)rate;
         ++row.dropCount;
     }
     if (creating)
@@ -10343,22 +10547,41 @@ static void vm_mock_admin_handle_shop_action(vm_mock_service_socket client,
 {
     char category[16];
     char search[128];
+    char mallFilter[8];
+    char npcFilter[8];
     char pageText[32];
     char enabledText[8];
+    char npcEnabledText[8];
     const char *error = NULL;
     u32 itemId = 0;
     u32 price = 0;
+    u32 npcPrice = 0;
     u32 page = 1;
     bool enabled = false;
+    bool npcEnabled = false;
+    char okMessage[96];
 
     memset(category, 0, sizeof(category));
     memset(search, 0, sizeof(search));
+    memset(mallFilter, 0, sizeof(mallFilter));
+    memset(npcFilter, 0, sizeof(npcFilter));
     memset(pageText, 0, sizeof(pageText));
     memset(enabledText, 0, sizeof(enabledText));
+    memset(npcEnabledText, 0, sizeof(npcEnabledText));
+    memset(okMessage, 0, sizeof(okMessage));
     (void)vm_mock_admin_form_value(body, "category", category,
                                    sizeof(category));
     (void)vm_mock_admin_form_value(body, "q", search, sizeof(search));
+    (void)vm_mock_admin_form_value(body, "mall", mallFilter,
+                                   sizeof(mallFilter));
+    (void)vm_mock_admin_form_value(body, "npc", npcFilter, sizeof(npcFilter));
     (void)vm_mock_admin_form_value(body, "page", pageText, sizeof(pageText));
+    vm_mock_admin_shop_shelf_filter_text(
+        vm_mock_admin_shop_shelf_filter_value(mallFilter), mallFilter,
+        sizeof(mallFilter));
+    vm_mock_admin_shop_shelf_filter_text(
+        vm_mock_admin_shop_shelf_filter_value(npcFilter), npcFilter,
+        sizeof(npcFilter));
     if (pageText[0] != 0 &&
         (!vm_net_mock_parse_u32_strict(pageText, &page) || page == 0))
     {
@@ -10368,25 +10591,37 @@ static void vm_mock_admin_handle_shop_action(vm_mock_service_socket client,
         itemId == 0 ||
         !vm_mock_admin_form_u32(body, "price", 0xffffffffu, &price) ||
         price == 0 ||
+        !vm_mock_admin_form_u32(body, "npc_price", 0xffffffffu, &npcPrice) ||
+        npcPrice == 0 ||
         !vm_mock_admin_form_value(body, "enabled", enabledText,
                                   sizeof(enabledText)) ||
-        (strcmp(enabledText, "0") != 0 && strcmp(enabledText, "1") != 0))
+        (strcmp(enabledText, "0") != 0 && strcmp(enabledText, "1") != 0) ||
+        !vm_mock_admin_form_value(body, "npc_enabled", npcEnabledText,
+                                  sizeof(npcEnabledText)) ||
+        (strcmp(npcEnabledText, "0") != 0 &&
+         strcmp(npcEnabledText, "1") != 0))
     {
-        vm_mock_admin_redirect_shop(client, category, search, page, "error",
-                                    "商品、价格或上下架状态无效");
+        vm_mock_admin_redirect_shop(client, category, search, mallFilter,
+                                    npcFilter, page, "error",
+                                    "商品、商城价、NPC价或上架状态无效");
         return;
     }
     enabled = strcmp(enabledText, "1") == 0;
-    if (!vm_net_mock_shop_admin_save(itemId, price, enabled, &error))
+    npcEnabled = strcmp(npcEnabledText, "1") == 0;
+    if (!vm_net_mock_shop_admin_save(itemId, price, npcPrice, enabled,
+                                     npcEnabled, &error))
     {
         vm_mock_admin_redirect_shop(
-            client, category, search, page, "error",
+            client, category, search, mallFilter, npcFilter, page, "error",
             error ? error : "商品保存失败");
         return;
     }
-    vm_mock_admin_redirect_shop(
-        client, category, search, page, "ok",
-        enabled ? "商品价格已保存并上架" : "商品价格已保存并下架");
+    snprintf(okMessage, sizeof(okMessage),
+             "已保存 · 商城%s · NPC%s",
+             enabled ? "上架" : "未上架",
+             npcEnabled ? "上架" : "未上架");
+    vm_mock_admin_redirect_shop(client, category, search, mallFilter,
+                                npcFilter, page, "ok", okMessage);
 }
 
 static void vm_mock_admin_handle_login_server_action(
@@ -10990,7 +11225,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "save-festival-exchange") == 0 ||
         strcmp(action, "save-yanmen-config") == 0 ||
         strcmp(action, "save-yanmen-exchange") == 0 ||
-        strcmp(action, "save-ring-config") == 0)
+        strcmp(action, "save-ring-config") == 0 ||
+        strcmp(action, "save-vitality-online") == 0)
     {
         vm_mock_admin_handle_activities_action(client, action, body);
         return;
@@ -11040,6 +11276,41 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         {
             char okMsg[96];
             snprintf(okMsg, sizeof(okMsg), "每日注册上限已设为 %u", dailyLimit);
+            vm_mock_admin_redirect(client, keepAccount, "ok", okMsg);
+        }
+        return;
+    }
+    if (strcmp(action, "save-practise-exp-mult") == 0)
+    {
+        u32 mult = 0;
+        char keepAccount[64];
+
+        memset(keepAccount, 0, sizeof(keepAccount));
+        (void)vm_mock_admin_form_value(body, "account", keepAccount,
+                                       sizeof(keepAccount));
+        if (!vm_mock_admin_form_u32(body, "exp_level_minute_mult", 1000u, &mult))
+        {
+            vm_mock_admin_redirect(client, keepAccount, "error",
+                                   "修炼丹经验系数无效（0-1000）");
+            return;
+        }
+        if (!vm_net_mock_practise_exp_mult_admin_save(mult))
+        {
+            const char *mysqlErr = vm_mysql_last_error();
+            char errMsg[384];
+
+            memset(errMsg, 0, sizeof(errMsg));
+            if (mysqlErr != NULL && mysqlErr[0] != 0 &&
+                strcmp(mysqlErr, "no MySQL error detail") != 0)
+                snprintf(errMsg, sizeof(errMsg), "保存失败：%s", mysqlErr);
+            else
+                snprintf(errMsg, sizeof(errMsg), "%s", "保存失败");
+            vm_mock_admin_redirect(client, keepAccount, "error", errMsg);
+            return;
+        }
+        {
+            char okMsg[96];
+            snprintf(okMsg, sizeof(okMsg), "修炼丹经验系数已设为 %u", mult);
             vm_mock_admin_redirect(client, keepAccount, "ok", okMsg);
         }
         return;

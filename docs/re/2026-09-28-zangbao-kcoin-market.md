@@ -11,6 +11,10 @@
 `server_kcoin_config.kcoin_per_yuan`（默认 1：1 元 = 1 酷币）。
 赞助金额：`yuan = ceil(price_kcoin / kcoin_per_yuan)`，且受支付配置 `minimum_yuan`/`maximum_yuan` 约束。
 
+## 同时上架上限
+
+`server_kcoin_config.max_active_listings`（默认 **10**）：每个角色同时占用的寄售槽位数（`status` 为在售 0 或付款锁定 1）。超出时 `POST /api/zangbao/list` 返回「每人最多同时上架N件」。管理后台 Tab「藏宝阁」可改（1–999）。
+
 ## 表
 
 - `account_roles.kcoin`
@@ -39,11 +43,13 @@
 
 ## Admin
 
-Tab「藏宝阁」：汇率/开关；提现列表；管理前缀下 `/kcoin-qr?id=` 看收款码（页面 rewrite 后为 `/admin-…/kcoin-qr`）；同意 / 拒绝（退币）。
+Tab「藏宝阁」：汇率/开关/每人同时上架上限；提现列表；管理前缀下 `/kcoin-qr?id=` 看收款码（页面 rewrite 后为 `/admin-…/kcoin-qr`）；同意 / 拒绝（退币）。
 
 ## 客户端
 
 娱乐菜单「藏宝阁」→ `ZangbaoPanel`（浏览/我的/上架/酷币）。购买走微信赞助 `openPayUrl`。
+
+浏览/我的 JSON 含 `enhanceWash` + 宝石孔，详情与背包洗练一致（见 `2026-09-29-zangbao-listing-wash-display.md`）。
 
 ## 关键文件
 

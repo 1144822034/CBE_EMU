@@ -21,7 +21,7 @@ import {
   ENHANCE_CRYSTAL_LAST,
   ENHANCE_MAX_LEVEL,
   ENHANCE_MAX_SLOTS,
-  ENHANCE_TRANSFER_FEE_TEXT,
+  enhanceTransferFeeText,
   bagHasCrossQualityRecastStone,
   enhanceCrystalName,
   enhanceCrystalUnitRate,
@@ -87,6 +87,10 @@ export class EnhancePanel extends Container {
   private listCursor = 0;
   private listScroll = 0;
   private destCandidates: BagItem[] = [];
+  /** From admin: when false, same-slot cross-quality transfer needs no 855. */
+  private crossQualityStoneRequired = true;
+  private transferCrystalEnabled = true;
+  private transferMoneyEnabled = false;
   private destPick: BagItem | null = null;
   private busy = false;
 
@@ -129,9 +133,20 @@ export class EnhancePanel extends Container {
     this.redraw();
   }
 
-  openTransfer(source: BagItem, bag: BagItem[]): void {
+  openTransfer(
+    source: BagItem,
+    bag: BagItem[],
+    opts?: {
+      crossQualityStoneRequired?: boolean;
+      transferCrystalEnabled?: boolean;
+      transferMoneyEnabled?: boolean;
+    },
+  ): void {
     this.equip = source;
     this.bag = bag;
+    this.crossQualityStoneRequired = opts?.crossQualityStoneRequired ?? true;
+    this.transferCrystalEnabled = opts?.transferCrystalEnabled ?? true;
+    this.transferMoneyEnabled = opts?.transferMoneyEnabled ?? false;
     this.openInfo = null;
     this.slots = [];
     this.rate = 0;
@@ -163,11 +178,16 @@ export class EnhancePanel extends Container {
     if (this.visible) this.redraw();
   }
 
-  /** Same slot + unenhanced (+0); same quality unless bag has 跨品重铸石. */
+  /** Same slot + unenhanced (+0); same quality unless cross-quality allowed. */
+  private allowCrossQualityTransfer(bag: BagItem[]): boolean {
+    if (!this.crossQualityStoneRequired) return true;
+    return bagHasCrossQualityRecastStone(bag);
+  }
+
   private buildTransferCandidates(source: BagItem, bag: BagItem[]): BagItem[] {
     const slot = source.equipSlot;
     const quality = source.quality | 0;
-    const allowCross = bagHasCrossQualityRecastStone(bag);
+    const allowCross = this.allowCrossQualityTransfer(bag);
     return bag.filter(
       (it) =>
         it.kind === "equip" &&
@@ -666,7 +686,10 @@ export class EnhancePanel extends Container {
         EQUIP_DETAIL_YELLOW,
       );
       this.addAttr(
-        `消耗金钱: ${ENHANCE_TRANSFER_FEE_TEXT}`,
+        `消耗: ${enhanceTransferFeeText(src.enhance, {
+          crystal: this.transferCrystalEnabled,
+          money: this.transferMoneyEnabled,
+        })}`,
         x + 14,
         bodyTop + 54,
         INK_GREEN,
@@ -680,8 +703,10 @@ export class EnhancePanel extends Container {
           CBE.inkWarn,
         );
         warnY += 18;
-        this.addAttr("将消耗1个跨品重铸石", x + 14, warnY, CBE.inkWarn);
-        warnY += 18;
+        if (this.crossQualityStoneRequired) {
+          this.addAttr("将消耗1个跨品重铸石", x + 14, warnY, CBE.inkWarn);
+          warnY += 18;
+        }
       }
       this.addAttr("源装备强化将归零", x + 14, warnY, CBE.inkWarn);
 
@@ -714,11 +739,13 @@ export class EnhancePanel extends Container {
       return;
     }
 
-    const allowCross = bagHasCrossQualityRecastStone(this.bag);
+    const allowCross = this.allowCrossQualityTransfer(this.bag);
     // wrap instruction at full UC3 size; break by glyph width so lines fit panel
-    const instruct = allowCross
-      ? "已持有跨品重铸石，可转移到同部位不同品质装备；跨品质确认时消耗1个："
-      : "使用强化转移功能可将强化效果100%转移到另一件同类装备上，请选择要转移到的目标装备：";
+    const instruct = !this.crossQualityStoneRequired
+      ? "可将强化效果100%转移到同部位另一件装备（含不同品质，无需跨品重铸石），请选择目标："
+      : allowCross
+        ? "已持有跨品重铸石，可转移到同部位不同品质装备；跨品质确认时消耗1个："
+        : "使用强化转移功能可将强化效果100%转移到另一件同类装备上，请选择要转移到的目标装备：";
     const instructBottom = this.wrapText(
       instruct,
       x + 12,
@@ -736,7 +763,9 @@ export class EnhancePanel extends Container {
 
     if (!this.destCandidates.length) {
       this.addAttr(
-        allowCross ? "(无同类可转移装备)" : "(无同品质同类可转移装备)",
+        allowCross
+          ? "(无同类可转移装备)"
+          : "(无同品质同类可转移装备)",
         x + 14,
         listTop + 4,
         CBE.inkMint,

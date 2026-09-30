@@ -100,8 +100,14 @@ static void vm_mock_admin_render_monster_drop_rows(
         char pickerId[48];
         char fieldName[48];
         u32 itemId = slot < monster->dropCount ? monster->drops[slot].itemId : 0;
-        u32 rate = slot < monster->dropCount ? monster->drops[slot].ratePercent : 0;
+        u32 rateX10 = slot < monster->dropCount ? monster->drops[slot].ratePercent : 0;
+        char rateText[16];
 
+        if (rateX10 % 10u == 0)
+            snprintf(rateText, sizeof(rateText), "%u", rateX10 / 10u);
+        else
+            snprintf(rateText, sizeof(rateText), "%u.%u", rateX10 / 10u,
+                     rateX10 % 10u);
         snprintf(pickerId, sizeof(pickerId), "monster-drop-item-%u", (u32)slot);
         snprintf(fieldName, sizeof(fieldName), "drop_item_id_%u", (u32)slot);
         vm_mock_admin_text_appendf(
@@ -111,14 +117,17 @@ static void vm_mock_admin_render_monster_drop_rows(
                                                "物品", itemId, false);
         vm_mock_admin_text_appendf(
             page,
-            "<label class=\"field\"><span>概率（%%）</span><input data-drop-rate type=\"number\" name=\"drop_rate_%u\" min=\"0\" max=\"100\" value=\"%u\" required></label>"
+            "<label class=\"field\"><span>概率（%%，步进 0.1）</span>"
+            "<input data-drop-rate type=\"number\" name=\"drop_rate_%u\" "
+            "min=\"0\" max=\"100\" step=\"0.1\" value=\"%s\" required></label>"
             "<button class=\"danger\" type=\"button\" data-drop-remove>移除</button></div>",
-            (u32)slot, rate);
+            (u32)slot, rateText);
     }
     vm_mock_admin_text_appendf(
         page,
         "</div><button class=\"drop-add\" id=\"monster-drop-add\" type=\"button\">＋ 新增掉落</button>"
-        "<p class=\"hint\">任务材料与 100%% 掉落各自独立投掷；其余普通掉落每场只随机抽一条再按该条概率投掷。"
+        "<p class=\"hint\">概率支持 0.1%% 精度（如 0.1 / 1 / 1.5）。"
+        "任务材料与 100%% 掉落各自独立投掷；其余普通掉落每场只随机抽一条再按该条概率投掷。"
         "同一物品不能重复配置。留空行会被忽略，移除后保存即删除该掉落。</p>");
 }
 

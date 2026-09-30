@@ -125,6 +125,7 @@ export class WagerPanel extends Container {
   private livePage = 0;
   private listCursor = 0;
   private stakeInput = WAGER_MIN_STAKE_COPPER;
+  private vitalityCost = 0;
   private toast: PanelTipState = createPanelTipState();
   onAction: ((action: WagerPanelAction, challengeId?: number) => void) | null =
     null;
@@ -148,11 +149,13 @@ export class WagerPanel extends Container {
     rows: WagerListRow[],
     mine: WagerMine | null,
     selfRoleId = 0,
+    opts?: { vitalityCost?: number },
   ): void {
     const wasVisible = this.visible;
     this.rows = rows;
     this.mine = mine;
     this.selfRoleId = selfRoleId >>> 0;
+    if (opts?.vitalityCost != null) this.vitalityCost = opts.vitalityCost >>> 0;
     if (!wasVisible) {
       this.tab = "host";
       this.challengePage = 0;
@@ -171,10 +174,12 @@ export class WagerPanel extends Container {
     rows: WagerListRow[],
     mine: WagerMine | null,
     selfRoleId?: number,
+    opts?: { vitalityCost?: number },
   ): void {
     this.rows = rows;
     this.mine = mine;
     if (selfRoleId != null) this.selfRoleId = selfRoleId >>> 0;
+    if (opts?.vitalityCost != null) this.vitalityCost = opts.vitalityCost >>> 0;
     this.clampPage();
     const n = this.actions().length;
     if (n > 0 && this.listCursor >= n) this.listCursor = Math.max(0, n - 1);
@@ -628,7 +633,9 @@ export class WagerPanel extends Container {
     this.addLabel("←→", this.panelInnerRight() - 20, y + 20, CBE.inkTip);
     y += 48;
     this.addLabel(
-      `最低${WAGER_MIN_STAKE_GOLD}金  ←→每次±100金  中键确认`,
+      this.vitalityCost > 0
+        ? `最低${WAGER_MIN_STAKE_GOLD}金 耗活力${this.vitalityCost} 中键确认`
+        : `最低${WAGER_MIN_STAKE_GOLD}金  ←→每次±100金  中键确认`,
       lx,
       y,
       CBE.inkLabel,

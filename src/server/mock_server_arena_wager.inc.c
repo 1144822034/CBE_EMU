@@ -328,6 +328,38 @@ static const char *vm_mock_wager_viewer_scene(
     return "";
 }
 
+/* 摆擂仅限「擂台宗主」所在地图（与 NPC 入口关键字一致）. */
+static bool vm_mock_wager_npc_name_is_host(const char *npcName)
+{
+    if (npcName == NULL || npcName[0] == 0)
+        return false;
+    if (strstr(npcName, "\xc0\xde\xcc\xa8\xd7\xda\xd6\xf7") != NULL)
+        return true;
+    return strstr(npcName, "\xe6\x93\x82\xe5\x8f\xb0\xe5\xae\x97\xe4\xb8\xbb") !=
+           NULL;
+}
+
+static bool vm_mock_wager_scene_has_host_npc(const char *scene)
+{
+    vm_net_mock_scene_npcinfo_seed seeds[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
+    u32 count;
+    u32 i;
+    const char *name;
+
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    count = vm_net_mock_collect_scene_npcinfo_seeds(
+        scene, seeds, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX, NULL, NULL);
+    for (i = 0; i < count; ++i)
+    {
+        name = seeds[i].displayName[0] ? seeds[i].displayName
+                                       : seeds[i].scriptName;
+        if (vm_mock_wager_npc_name_is_host(name))
+            return true;
+    }
+    return false;
+}
+
 static u32 vm_mock_wager_client_id_for_role(u32 roleId)
 {
     vm_mock_service_client_session *s = g_vm_mock_service_client_sessions;
@@ -1200,7 +1232,7 @@ static u32 vm_net_mock_build_wager_list_response(const u8 *request, u32 requestL
                                              VM_MOCK_ARENA_WT_WAGER_LIST, 0, 0,
                                              "disabled");
     viewerScene = vm_mock_wager_viewer_scene(session, role);
-    /* List is global (any 比武 NPC); challenge still enforces same-scene. */
+    /* List is global; challenge/create still enforce 擂台宗主 map. */
     for (i = 0; i < g_vm_mock_wager_count && count < 32; ++i)
     {
         vm_mock_wager_challenge *ch = &g_vm_mock_wagers[i];
@@ -1267,6 +1299,8 @@ static u32 vm_net_mock_build_wager_list_response(const u8 *request, u32 requestL
                                      VM_MOCK_ARENA_WT_WAGER_LIST, &objectStart) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "result", 1) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "count", count) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "vitalityCost",
+                                    g_vm_mock_arena_config.wagerVitalityCost) ||
         /* entry not blob: Pixi SeqReader expects naked seq (same as auction/rank). */
         !vm_net_mock_put_object_entry(out, outCap, &pos, "rows", rows,
                                       (u16)rowsPos))
@@ -1321,56 +1355,75 @@ static u32 vm_net_mock_build_wager_create_response(const u8 *request,
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
                                              "busy");
+    {
+        const char *viewerScene = vm_mock_wager_viewer_scene(session, role);
+        if (!vm_mock_wager_scene_has_host_npc(viewerScene))
+            return vm_net_mock_build_wager_result(
+                out, outCap, VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0, "npc-map");
+    }
     count = vm_mock_wager_collect_party(session, members, VM_MOCK_WAGER_MEMBER_MAX,
                                        &err);
     if (count == 0)
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
                                              err ? err : "party");
-    if (!vm_mock_wager_charge_members(members, count, stake))
-        return vm_net_mock_build_wager_result(out, outCap,
-                                             VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
-                                             "money");
-    if (g_vm_mock_wager_count >= VM_MOCK_WAGER_CHALLENGE_MAX)
     {
-        vm_mock_wager_refund_members(members, count, stake);
+        u32 vitalityCost = g_vm_mock_arena_config.wagerVitalityCost;
+        if (vitalityCost > 0 &&
+            !vm_mock_activities_vitality_spend(role, vitalityCost))
+            return vm_net_mock_build_wager_result(
+                out, outCap, VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0, "vitality");
+        if (!vm_mock_wager_charge_members(members, count, stake))
+        {
+            if (vitalityCost > 0)
+                (void)vm_mock_activities_vitality_add(role, vitalityCost);
+            return vm_net_mock_build_wager_result(
+                out, outCap, VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0, "money");
+        }
+        if (g_vm_mock_wager_count >= VM_MOCK_WAGER_CHALLENGE_MAX)
+        {
+            vm_mock_wager_refund_members(members, count, stake);
+            if (vitalityCost > 0)
+                (void)vm_mock_activities_vitality_add(role, vitalityCost);
+            return vm_net_mock_build_wager_result(
+                out, outCap, VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0, "full");
+        }
+        ch = &g_vm_mock_wagers[g_vm_mock_wager_count++];
+        memset(ch, 0, sizeof(*ch));
+        ch->active = 1;
+        ch->status = VM_MOCK_WAGER_ST_OPEN;
+        ch->stake = stake;
+        ch->feePercent = g_vm_mock_arena_config.wagerFeePercent
+                             ? g_vm_mock_arena_config.wagerFeePercent
+                             : 10;
+        snprintf(ch->scene, sizeof(ch->scene), "%s",
+                 vm_mock_wager_viewer_scene(session, role));
+        ch->hostLeaderRoleId = role->roleId;
+        ch->hostCount = count;
+        for (i = 0; i < count; ++i)
+        {
+            ch->host[i] = members[i];
+            ch->host[i].accepted = 1; /* host posting = consent to fight */
+        }
+        if (!vm_mock_wager_persist_new(ch))
+        {
+            vm_mock_wager_refund_members(ch->host, ch->hostCount, stake);
+            if (vitalityCost > 0)
+                (void)vm_mock_activities_vitality_add(role, vitalityCost);
+            ch->active = 0;
+            g_vm_mock_wager_count -= 1;
+            return vm_net_mock_build_wager_result(
+                out, outCap, VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0, "db");
+        }
+        vm_mock_wager_touch_idle(ch);
+        printf("[info][mock-service] wager_create id=%u host=%u n=%u stake=%u "
+               "vitality=%u scene=%s\n",
+               ch->challengeId, ch->hostLeaderRoleId, (u32)ch->hostCount, stake,
+               vitalityCost, ch->scene);
         return vm_net_mock_build_wager_result(out, outCap,
-                                             VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
-                                             "full");
+                                             VM_MOCK_ARENA_WT_WAGER_CREATE, 1,
+                                             ch->challengeId, "ok");
     }
-    ch = &g_vm_mock_wagers[g_vm_mock_wager_count++];
-    memset(ch, 0, sizeof(*ch));
-    ch->active = 1;
-    ch->status = VM_MOCK_WAGER_ST_OPEN;
-    ch->stake = stake;
-    ch->feePercent = g_vm_mock_arena_config.wagerFeePercent
-                         ? g_vm_mock_arena_config.wagerFeePercent
-                         : 10;
-    snprintf(ch->scene, sizeof(ch->scene), "%s",
-             vm_mock_wager_viewer_scene(session, role));
-    ch->hostLeaderRoleId = role->roleId;
-    ch->hostCount = count;
-    for (i = 0; i < count; ++i)
-    {
-        ch->host[i] = members[i];
-        ch->host[i].accepted = 1; /* host posting = consent to fight */
-    }
-    if (!vm_mock_wager_persist_new(ch))
-    {
-        vm_mock_wager_refund_members(ch->host, ch->hostCount, stake);
-        ch->active = 0;
-        g_vm_mock_wager_count -= 1;
-        return vm_net_mock_build_wager_result(out, outCap,
-                                             VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
-                                             "db");
-    }
-    vm_mock_wager_touch_idle(ch);
-    printf("[info][mock-service] wager_create id=%u host=%u n=%u stake=%u scene=%s\n",
-           ch->challengeId, ch->hostLeaderRoleId, (u32)ch->hostCount, stake,
-           ch->scene);
-    return vm_net_mock_build_wager_result(out, outCap,
-                                         VM_MOCK_ARENA_WT_WAGER_CREATE, 1,
-                                         ch->challengeId, "ok");
 }
 
 static u32 vm_net_mock_build_wager_cancel_response(const u8 *request,
@@ -1401,6 +1454,7 @@ static u32 vm_net_mock_build_wager_cancel_response(const u8 *request,
                                              VM_MOCK_ARENA_WT_WAGER_CANCEL, 0,
                                              challengeId, "denied");
     vm_mock_wager_refund_members(ch->host, ch->hostCount, ch->stake);
+    /* 撤擂只退押金，摆擂已扣活力不退. */
     ch->status = VM_MOCK_WAGER_ST_CANCEL;
     vm_mock_wager_persist_status(ch);
     vm_mock_wager_notify_side(ch, VM_MOCK_WAGER_SIDE_HOST,

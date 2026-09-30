@@ -689,15 +689,28 @@ static u32 vm_net_mock_catalog_extra_shop_price(
     return VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
 }
 
+/* 自定义道具铜币价：优先「铜价格」字段，否则与商城价同源. */
+static u32 vm_net_mock_catalog_extra_npc_price(
+    const vm_net_mock_item_catalog_extra_row *row, u32 mallPrice)
+{
+    if (row != NULL && row->price != 0)
+        return row->price;
+    if (mallPrice != 0)
+        return mallPrice;
+    return VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+}
+
 static void vm_net_mock_catalog_extra_apply_item_to_shop(
     const vm_net_mock_item_catalog_extra_row *row)
 {
     vm_net_mock_shop_catalog_item *shop = NULL;
     u32 price = 0;
+    u32 npcPrice = 0;
 
     if (row == NULL || row->itemId == 0)
         return;
     price = vm_net_mock_catalog_extra_shop_price(row);
+    npcPrice = vm_net_mock_catalog_extra_npc_price(row, price);
     shop = vm_net_mock_find_shop_catalog_item_mut(row->itemId);
     if (shop != NULL)
     {
@@ -720,10 +733,12 @@ static void vm_net_mock_catalog_extra_apply_item_to_shop(
     if (shop != NULL)
     {
         shop->enabled = row->shopEnabled ? 1u : 0u;
+        shop->npcPrice = npcPrice;
         if (row->shopEnabled)
         {
             const char *err = NULL;
-            (void)vm_net_mock_shop_admin_save(row->itemId, price, true, &err);
+            (void)vm_net_mock_shop_admin_save(row->itemId, price, npcPrice, true,
+                                              shop->npcEnabled != 0, &err);
         }
     }
 }
@@ -778,10 +793,12 @@ static void vm_net_mock_catalog_extra_apply_equip_to_shop(
     if (shop != NULL)
     {
         shop->enabled = row->shopEnabled ? 1u : 0u;
+        shop->npcPrice = price;
         if (row->shopEnabled)
         {
             const char *err = NULL;
-            (void)vm_net_mock_shop_admin_save(row->itemId, price, true, &err);
+            (void)vm_net_mock_shop_admin_save(row->itemId, price, price, true,
+                                              shop->npcEnabled != 0, &err);
         }
     }
 }
@@ -1050,7 +1067,7 @@ static void vm_net_mock_catalog_extra_remove_skill_item(u32 skillId)
 
 static bool vm_net_mock_catalog_extra_update_shop_row(
     u32 itemId, const char *name, const char *description, u32 price,
-    u8 stack, u8 visual, bool equip, u8 category, bool enabled)
+    u32 npcPrice, u8 stack, u8 visual, bool equip, u8 category, bool enabled)
 {
     vm_net_mock_shop_catalog_item *shop =
         vm_net_mock_find_shop_catalog_item_mut(itemId);
@@ -1072,6 +1089,7 @@ static bool vm_net_mock_catalog_extra_update_shop_row(
         memcpy(shop->description, description, copyLen);
     }
     shop->price = price ? price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    shop->npcPrice = npcPrice ? npcPrice : shop->price;
     shop->stack = stack ? stack : 1;
     shop->stock = equip ? 1 : (stack ? stack : 99);
     shop->visual = visual ? visual : 1;
@@ -1215,28 +1233,34 @@ static bool vm_net_mock_item_catalog_extra_save(
     }
     g_vm_net_mock_item_catalog_extra[index] = *row;
     price = vm_net_mock_catalog_extra_shop_price(row);
-    (void)vm_net_mock_catalog_extra_update_shop_row(
-        row->itemId, row->name, row->description, price,
-        row->stack ? row->stack : 99, row->visual ? row->visual : 1, false,
-        row->category, row->shopEnabled != 0);
-    effect = vm_net_mock_find_item_effect_catalog_item_mut(row->itemId);
-    if (effect != NULL)
     {
-        effect->category = row->category;
-        effect->levelRequired = row->levelRequired;
-        effect->stack = row->stack ? row->stack : 1;
-        effect->consumeMode = row->consumeMode;
-        effect->durationMinutes = row->durationMinutes;
-        effect->hp = row->hp;
-        effect->mp = row->mp;
-        effect->exp = row->exp;
-        effect->questLink = row->questLink;
-        effect->bindAttr = row->bindAttr;
-    }
-    {
-        const char *err = NULL;
-        (void)vm_net_mock_shop_admin_save(row->itemId, price,
-                                          row->shopEnabled != 0, &err);
+        u32 npcPrice = vm_net_mock_catalog_extra_npc_price(row, price);
+        (void)vm_net_mock_catalog_extra_update_shop_row(
+            row->itemId, row->name, row->description, price, npcPrice,
+            row->stack ? row->stack : 99, row->visual ? row->visual : 1, false,
+            row->category, row->shopEnabled != 0);
+        effect = vm_net_mock_find_item_effect_catalog_item_mut(row->itemId);
+        if (effect != NULL)
+        {
+            effect->category = row->category;
+            effect->levelRequired = row->levelRequired;
+            effect->stack = row->stack ? row->stack : 1;
+            effect->consumeMode = row->consumeMode;
+            effect->durationMinutes = row->durationMinutes;
+            effect->hp = row->hp;
+            effect->mp = row->mp;
+            effect->exp = row->exp;
+            effect->questLink = row->questLink;
+            effect->bindAttr = row->bindAttr;
+        }
+        {
+            const char *err = NULL;
+            const vm_net_mock_shop_catalog_item *shop =
+                vm_net_mock_find_shop_catalog_item(row->itemId);
+            (void)vm_net_mock_shop_admin_save(
+                row->itemId, price, npcPrice, row->shopEnabled != 0,
+                shop != NULL && shop->npcEnabled != 0, &err);
+        }
     }
     vm_net_mock_catalog_extra_bump_rev();
     if (errorOut)
@@ -1448,7 +1472,7 @@ static bool vm_net_mock_equip_catalog_extra_save(
     g_vm_net_mock_equip_catalog_extra[index] = *row;
     price = row->price ? row->price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
     (void)vm_net_mock_catalog_extra_update_shop_row(
-        row->itemId, row->name, row->description, price, 1, 1, true,
+        row->itemId, row->name, row->description, price, price, 1, 1, true,
         row->category, row->shopEnabled != 0);
     equip = vm_net_mock_find_equipment_catalog_item_mut(row->itemId);
     if (equip != NULL)
@@ -1462,8 +1486,11 @@ static bool vm_net_mock_equip_catalog_extra_save(
     }
     {
         const char *err = NULL;
-        (void)vm_net_mock_shop_admin_save(row->itemId, price,
-                                          row->shopEnabled != 0, &err);
+        const vm_net_mock_shop_catalog_item *shop =
+            vm_net_mock_find_shop_catalog_item(row->itemId);
+        (void)vm_net_mock_shop_admin_save(
+            row->itemId, price, price, row->shopEnabled != 0,
+            shop != NULL && shop->npcEnabled != 0, &err);
     }
     vm_net_mock_catalog_extra_bump_rev();
     if (errorOut)

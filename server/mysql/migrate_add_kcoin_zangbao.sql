@@ -8,12 +8,16 @@ CREATE TABLE IF NOT EXISTS `server_kcoin_config` (
   `config_id` TINYINT UNSIGNED NOT NULL,
   `kcoin_per_yuan` INT UNSIGNED NOT NULL DEFAULT 1,
   `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 10,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`config_id`)
 ) ENGINE=InnoDB;
 
-INSERT IGNORE INTO `server_kcoin_config` (`config_id`, `kcoin_per_yuan`, `enabled`)
-VALUES (1, 1, 1);
+-- Existing installs: ADD COLUMN is also applied at runtime by ensure_schema.
+-- ALTER TABLE `server_kcoin_config` ADD COLUMN `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 10 AFTER `enabled`;
+
+INSERT IGNORE INTO `server_kcoin_config` (`config_id`, `kcoin_per_yuan`, `enabled`, `max_active_listings`)
+VALUES (1, 1, 1, 10);
 
 CREATE TABLE IF NOT EXISTS `server_zangbao_listings` (
   `listing_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,

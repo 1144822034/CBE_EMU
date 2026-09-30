@@ -24,6 +24,10 @@ import type {
   HangupCombatinfo,
 } from "../net/protocolExtras";
 import {
+  HANGUP_BATTLES_WITHOUT_INSIGHT,
+  hangupBattlesMaximum,
+} from "../net/protocolExtras";
+import {
   actorResourceForJobSex,
   battleFootAnchorX,
   composeBattlePose,
@@ -349,7 +353,7 @@ export class BattleScreen extends Container {
   /** Client-owned hangup settle tally when wire has no combatinfo. */
   private hangupTally: HangupCombatinfo = {
     completed: 0,
-    maximum: 64,
+    maximum: HANGUP_BATTLES_WITHOUT_INSIGHT,
     totalExp: 0,
     totalGold: 0,
     totalHpRecovered: 0,
@@ -491,6 +495,11 @@ export class BattleScreen extends Container {
   onHangupAddTime: (() => void | Promise<void>) | null = null;
   /** Fetch 修/7/31 remain before hangup settle paints 有效时间. */
   onHangupInsightRefresh: (() => Promise<number>) | null = null;
+  /**
+   * Admin hangupQuotaWithoutInsight from 1/1/21.
+   * Default true when unset (cap 64 without insight).
+   */
+  getHangupQuotaWithoutInsight: (() => boolean) | null = null;
   /** Fired when a round finishes playback and [自动] is still armed. */
   onAutoReady: (() => void) | null = null;
   /**
@@ -1238,7 +1247,7 @@ export class BattleScreen extends Container {
     if (!snap) {
       this.hangupTally = {
         completed: 0,
-        maximum: 64,
+        maximum: HANGUP_BATTLES_WITHOUT_INSIGHT,
         totalExp: 0,
         totalGold: 0,
         totalHpRecovered: 0,
@@ -4602,7 +4611,17 @@ export class BattleScreen extends Container {
     void this.paintSettlement(s);
   }
 
-  private resetHangupTally(maximum = 64): void {
+  /** Sync combatinfo.maximum from 战斗心得 remain + admin quota. */
+  private hangupQuotaEnabled(): boolean {
+    return this.getHangupQuotaWithoutInsight?.() ?? true;
+  }
+
+  private resetHangupTally(
+    maximum = hangupBattlesMaximum(
+      this.insightRemainSec > 0,
+      this.hangupQuotaEnabled(),
+    ),
+  ): void {
     this.hangupTally = {
       completed: 0,
       maximum: maximum >>> 0,
@@ -4614,16 +4633,25 @@ export class BattleScreen extends Container {
     this.hangupTallyArmed = true;
   }
 
+  /** Sync combatinfo.maximum from 战斗心得 remain (64 vs unlimited). */
+  private syncHangupTallyMaximum(): void {
+    if (!this.hangupTallyArmed) return;
+    this.hangupTally.maximum = hangupBattlesMaximum(
+      this.insightRemainSec > 0,
+      this.hangupQuotaEnabled(),
+    );
+  }
+
   /**
    * Session totals for hangup settle — always accumulate client-side.
    * Wire combatinfo often resets completed per fight (1/64…); ignore it for
    * the running 战斗场次 / exp / gold / recover counters.
+   * Quota: admin on + no insight → max 64; insight or admin off → unlimited.
    */
   private hangupSnapshot(s: BattleSettlement): HangupCombatinfo {
     if (!this.hangupTallyArmed) this.resetHangupTally();
     const t = this.hangupTally;
-    const wire = s.hangupCombatinfo;
-    if (wire && wire.maximum >= 200) t.maximum = wire.maximum >>> 0;
+    this.syncHangupTallyMaximum();
     t.completed = Math.min(0xffff, t.completed + 1);
     t.totalExp = (t.totalExp + Math.max(0, s.expGain | 0)) >>> 0;
     t.totalGold = (t.totalGold + Math.max(0, s.goldGain | 0)) >>> 0;
@@ -4680,11 +4708,8 @@ export class BattleScreen extends Container {
    */
   private async paintHangupSettlement(s: BattleSettlement): Promise<void> {
     const gen = ++this.settlePaintGen;
-    const tally = this.hangupSnapshot(s);
-    const bagUsed = this.hangupBagUsed;
-    const bagCap = this.hangupBagCap > 0 ? this.hangupBagCap : 64;
 
-    /* Auto-refresh 战斗心得 remain — do not require map「修」tap first. */
+    /* Auto-refresh 战斗心得 remain before tally max (64 vs unlimited). */
     if (this.onHangupInsightRefresh) {
       try {
         const sec = await this.onHangupInsightRefresh();
@@ -4694,6 +4719,10 @@ export class BattleScreen extends Container {
         /* keep prior insightRemainSec */
       }
     }
+
+    const tally = this.hangupSnapshot(s);
+    const bagUsed = this.hangupBagUsed;
+    const bagCap = this.hangupBagCap > 0 ? this.hangupBagCap : 64;
 
     const ok = await paintHangupPanel(this.settleHost, {
       tally,
@@ -4742,6 +4771,8 @@ export class BattleScreen extends Container {
     if (gen !== this.settlePaintGen) return;
     const nextBagUsed = this.hangupBagUsed;
     const nextBagCap = this.hangupBagCap > 0 ? this.hangupBagCap : bagCap;
+    this.syncHangupTallyMaximum();
+    tally.maximum = this.hangupTally.maximum;
     const ok = await paintHangupPanel(this.settleHost, {
       tally,
       bagUsed: nextBagUsed,
@@ -4821,6 +4852,7 @@ export class BattleScreen extends Container {
 
   setBattleInsightRemainSec(sec: number): void {
     this.insightRemainSec = Math.max(0, sec | 0);
+    this.syncHangupTallyMaximum();
   }
 
   /**

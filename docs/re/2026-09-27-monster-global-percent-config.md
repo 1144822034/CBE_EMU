@@ -28,7 +28,8 @@
 
 2. **掉落概率**  
    结算投掷前 `vm_net_mock_monster_global_effective_drop_rate()`：  
-   `min(100, configured_rate * drop_rate_percent / 100)`。  
+   `min(1000, configured_rate_x10 * drop_rate_percent / 100)`  
+   （`configured_rate_x10`：1=0.1%，1000=100%）。  
    独立行 / 抽奖行的选择仍按配置表原始概率（含 100% 独立），只缩放最终投掷。
 
 3. **角色侧加成**  

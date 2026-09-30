@@ -40,15 +40,19 @@ static u32 g_vm_net_mock_enhance_attr_pool_count = 0;
 static bool g_vm_net_mock_enhance_attr_pool_db_loaded = false;
 static bool g_vm_net_mock_enhance_attr_pool_db_valid = false;
 
-/* Wash runtime knobs (MySQL server_enhance_wash_settings). */
+/* Wash / recast runtime knobs (MySQL server_enhance_wash_settings). */
 typedef struct
 {
     u8 qualityScaleEnabled; /* valueMax × (Q+1)/5 when 1 */
     u8 firstSeedPercent;    /* first-obtain pool roll chance 0..100 */
+    u8 transferWashEnabled; /* 29/6 enhance transfer also moves wash attrs */
+    u8 crossQualityStoneRequired; /* 29/5|6 cross-quality needs 跨品重铸石 */
+    u8 transferCrystalEnabled; /* 29/6 consume (level-1) 玄晶 */
+    u8 transferMoneyEnabled;   /* 29/6 consume legacy 48金65银 */
 } vm_net_mock_enhance_wash_settings;
 
 static vm_net_mock_enhance_wash_settings g_vm_net_mock_enhance_wash_settings = {
-    1, 20};
+    1, 20, 1, 1, 1, 0};
 static bool g_vm_net_mock_enhance_wash_settings_loaded = false;
 
 /* Built-in defaults matching legacy static slot tables. */
@@ -404,6 +408,10 @@ static bool vm_net_mock_enhance_wash_settings_row(void *contextValue,
         (vm_net_mock_enhance_wash_settings *)contextValue;
     u32 scale = 1;
     u32 percent = 20;
+    u32 transferWash = 1;
+    u32 crossStone = 1;
+    u32 transferCrystal = 1;
+    u32 transferMoney = 0;
 
     (void)columnCount;
     if (cfg == NULL || values == NULL || lengths == NULL || values[0] == NULL)
@@ -415,37 +423,63 @@ static bool vm_net_mock_enhance_wash_settings_row(void *contextValue,
         if (!vm_mock_mysql_parse_u32(values[1], lengths[1], &percent))
             return false;
     }
+    if (columnCount >= 3 && values[2] != NULL)
+    {
+        if (!vm_mock_mysql_parse_u32(values[2], lengths[2], &transferWash))
+            return false;
+    }
+    if (columnCount >= 4 && values[3] != NULL)
+    {
+        if (!vm_mock_mysql_parse_u32(values[3], lengths[3], &crossStone))
+            return false;
+    }
+    if (columnCount >= 5 && values[4] != NULL)
+    {
+        if (!vm_mock_mysql_parse_u32(values[4], lengths[4], &transferCrystal))
+            return false;
+    }
+    if (columnCount >= 6 && values[5] != NULL)
+    {
+        if (!vm_mock_mysql_parse_u32(values[5], lengths[5], &transferMoney))
+            return false;
+    }
     cfg->qualityScaleEnabled = scale ? 1u : 0u;
     if (percent > 100u)
         percent = 100u;
     cfg->firstSeedPercent = (u8)percent;
+    cfg->transferWashEnabled = transferWash ? 1u : 0u;
+    cfg->crossQualityStoneRequired = crossStone ? 1u : 0u;
+    cfg->transferCrystalEnabled = transferCrystal ? 1u : 0u;
+    cfg->transferMoneyEnabled = transferMoney ? 1u : 0u;
     return true;
 }
 
-static bool vm_net_mock_enhance_wash_settings_ensure_first_seed_column(void)
+static bool vm_net_mock_enhance_wash_settings_ensure_column(const char *columnName,
+                                                            const char *alterSql)
 {
     u32 count = 0;
+    char probe[256];
 
-    if (!vm_mysql_query(
-            "SELECT COUNT(*) FROM information_schema.COLUMNS "
-            "WHERE TABLE_SCHEMA=DATABASE() AND "
-            "TABLE_NAME='server_enhance_wash_settings' AND "
-            "COLUMN_NAME='first_seed_percent'",
-            vm_net_mock_enhance_milestone_column_count_row, &count))
+    if (columnName == NULL || alterSql == NULL)
+        return false;
+    snprintf(probe, sizeof(probe),
+             "SELECT COUNT(*) FROM information_schema.COLUMNS "
+             "WHERE TABLE_SCHEMA=DATABASE() AND "
+             "TABLE_NAME='server_enhance_wash_settings' AND "
+             "COLUMN_NAME='%s'",
+             columnName);
+    if (!vm_mysql_query(probe, vm_net_mock_enhance_milestone_column_count_row,
+                        &count))
         return false;
     if (count != 0)
         return true;
-    if (!vm_mysql_exec(
-            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
-            "first_seed_percent TINYINT UNSIGNED NOT NULL DEFAULT 20 "
-            "AFTER quality_scale_enabled"))
+    if (!vm_mysql_exec(alterSql))
     {
-        printf("[error][mock-admin] enhance wash first_seed_percent add "
-               "error=%s\n",
+        printf("[error][mock-admin] enhance wash %s add error=%s\n", columnName,
                vm_mysql_last_error());
         return false;
     }
-    printf("[info][mock-admin] enhance wash added column first_seed_percent\n");
+    printf("[info][mock-admin] enhance wash added column %s\n", columnName);
     return true;
 }
 
@@ -456,16 +490,51 @@ static bool vm_net_mock_enhance_wash_settings_ensure_table(void)
             "id TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "quality_scale_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "first_seed_percent TINYINT UNSIGNED NOT NULL DEFAULT 20,"
+            "transfer_wash_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "cross_quality_stone_required TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "transfer_crystal_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "transfer_money_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(id)"
             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"))
         return false;
-    if (!vm_net_mock_enhance_wash_settings_ensure_first_seed_column())
+    if (!vm_net_mock_enhance_wash_settings_ensure_column(
+            "first_seed_percent",
+            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
+            "first_seed_percent TINYINT UNSIGNED NOT NULL DEFAULT 20 "
+            "AFTER quality_scale_enabled"))
+        return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_column(
+            "transfer_wash_enabled",
+            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
+            "transfer_wash_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1 "
+            "AFTER first_seed_percent"))
+        return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_column(
+            "cross_quality_stone_required",
+            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
+            "cross_quality_stone_required TINYINT UNSIGNED NOT NULL DEFAULT 1 "
+            "AFTER transfer_wash_enabled"))
+        return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_column(
+            "transfer_crystal_enabled",
+            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
+            "transfer_crystal_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1 "
+            "AFTER cross_quality_stone_required"))
+        return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_column(
+            "transfer_money_enabled",
+            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
+            "transfer_money_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER transfer_crystal_enabled"))
         return false;
     if (!vm_mysql_exec(
             "INSERT IGNORE INTO server_enhance_wash_settings "
-            "(id,quality_scale_enabled,first_seed_percent) VALUES (1,1,20)"))
+            "(id,quality_scale_enabled,first_seed_percent,transfer_wash_enabled,"
+            "cross_quality_stone_required,transfer_crystal_enabled,"
+            "transfer_money_enabled) "
+            "VALUES (1,1,20,1,1,1,0)"))
         return false;
     return true;
 }
@@ -477,6 +546,10 @@ static void vm_net_mock_enhance_wash_settings_set_defaults(
         return;
     cfg->qualityScaleEnabled = 1;
     cfg->firstSeedPercent = 20;
+    cfg->transferWashEnabled = 1;
+    cfg->crossQualityStoneRequired = 1;
+    cfg->transferCrystalEnabled = 1;
+    cfg->transferMoneyEnabled = 0;
 }
 
 static void vm_net_mock_enhance_wash_settings_load(bool force)
@@ -491,7 +564,9 @@ static void vm_net_mock_enhance_wash_settings_load(bool force)
         return;
     }
     (void)vm_mysql_query(
-        "SELECT quality_scale_enabled,first_seed_percent "
+        "SELECT quality_scale_enabled,first_seed_percent,transfer_wash_enabled,"
+        "cross_quality_stone_required,transfer_crystal_enabled,"
+        "transfer_money_enabled "
         "FROM server_enhance_wash_settings WHERE id=1 LIMIT 1",
         vm_net_mock_enhance_wash_settings_row,
         &g_vm_net_mock_enhance_wash_settings);
@@ -510,10 +585,36 @@ static u8 vm_net_mock_enhance_wash_first_seed_percent(void)
     return g_vm_net_mock_enhance_wash_settings.firstSeedPercent;
 }
 
-static bool vm_net_mock_enhance_wash_settings_admin_save(u8 qualityScaleEnabled,
-                                                         u8 firstSeedPercent)
+static u8 vm_net_mock_enhance_wash_transfer_enabled(void)
 {
-    char query[320];
+    vm_net_mock_enhance_wash_settings_load(false);
+    return g_vm_net_mock_enhance_wash_settings.transferWashEnabled;
+}
+
+static u8 vm_net_mock_enhance_cross_quality_stone_required(void)
+{
+    vm_net_mock_enhance_wash_settings_load(false);
+    return g_vm_net_mock_enhance_wash_settings.crossQualityStoneRequired;
+}
+
+static u8 vm_net_mock_enhance_transfer_crystal_enabled(void)
+{
+    vm_net_mock_enhance_wash_settings_load(false);
+    return g_vm_net_mock_enhance_wash_settings.transferCrystalEnabled;
+}
+
+static u8 vm_net_mock_enhance_transfer_money_enabled(void)
+{
+    vm_net_mock_enhance_wash_settings_load(false);
+    return g_vm_net_mock_enhance_wash_settings.transferMoneyEnabled;
+}
+
+static bool vm_net_mock_enhance_wash_settings_admin_save(
+    u8 qualityScaleEnabled, u8 firstSeedPercent, u8 transferWashEnabled,
+    u8 crossQualityStoneRequired, u8 transferCrystalEnabled,
+    u8 transferMoneyEnabled)
+{
+    char query[640];
 
     if (firstSeedPercent > 100u)
         return false;
@@ -521,11 +622,22 @@ static bool vm_net_mock_enhance_wash_settings_admin_save(u8 qualityScaleEnabled,
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_enhance_wash_settings "
-             "(id,quality_scale_enabled,first_seed_percent) VALUES (1,%u,%u) "
+             "(id,quality_scale_enabled,first_seed_percent,transfer_wash_enabled,"
+             "cross_quality_stone_required,transfer_crystal_enabled,"
+             "transfer_money_enabled) "
+             "VALUES (1,%u,%u,%u,%u,%u,%u) "
              "ON DUPLICATE KEY UPDATE "
              "quality_scale_enabled=VALUES(quality_scale_enabled),"
-             "first_seed_percent=VALUES(first_seed_percent)",
-             qualityScaleEnabled ? 1u : 0u, (u32)firstSeedPercent);
+             "first_seed_percent=VALUES(first_seed_percent),"
+             "transfer_wash_enabled=VALUES(transfer_wash_enabled),"
+             "cross_quality_stone_required=VALUES(cross_quality_stone_required),"
+             "transfer_crystal_enabled=VALUES(transfer_crystal_enabled),"
+             "transfer_money_enabled=VALUES(transfer_money_enabled)",
+             qualityScaleEnabled ? 1u : 0u, (u32)firstSeedPercent,
+             transferWashEnabled ? 1u : 0u,
+             crossQualityStoneRequired ? 1u : 0u,
+             transferCrystalEnabled ? 1u : 0u,
+             transferMoneyEnabled ? 1u : 0u);
     if (!vm_mysql_exec(query))
         return false;
     g_vm_net_mock_enhance_wash_settings_loaded = false;
@@ -620,11 +732,16 @@ static bool vm_net_mock_enhance_config_db_load(void)
     g_vm_net_mock_enhance_milestone_db_valid = true;
     g_vm_net_mock_enhance_attr_pool_db_valid = true;
     printf("[info][mock-admin] enhance_config_db_load milestones=%u pool=%u "
-           "quality_scale=%u first_seed=%u%%\n",
+           "quality_scale=%u first_seed=%u%% transfer_wash=%u "
+           "cross_quality_stone=%u transfer_crystal=%u transfer_money=%u\n",
            g_vm_net_mock_enhance_milestone_count,
            g_vm_net_mock_enhance_attr_pool_count,
            (u32)g_vm_net_mock_enhance_wash_settings.qualityScaleEnabled,
-           (u32)g_vm_net_mock_enhance_wash_settings.firstSeedPercent);
+           (u32)g_vm_net_mock_enhance_wash_settings.firstSeedPercent,
+           (u32)g_vm_net_mock_enhance_wash_settings.transferWashEnabled,
+           (u32)g_vm_net_mock_enhance_wash_settings.crossQualityStoneRequired,
+           (u32)g_vm_net_mock_enhance_wash_settings.transferCrystalEnabled,
+           (u32)g_vm_net_mock_enhance_wash_settings.transferMoneyEnabled);
     return true;
 }
 

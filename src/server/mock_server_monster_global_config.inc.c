@@ -294,6 +294,8 @@ vm_net_mock_monster_global_config_get(void)
 
 static u32 vm_net_mock_monster_global_effective_drop_rate(u32 configuredRate)
 {
+    /* configuredRate is percent×10 (1=0.1%, 1000=100%). */
+    const u32 rateX10Max = 1000u;
     const vm_net_mock_monster_global_config *cfg =
         vm_net_mock_monster_global_config_get();
     u32 percent;
@@ -303,9 +305,9 @@ static u32 vm_net_mock_monster_global_effective_drop_rate(u32 configuredRate)
         return 0;
     percent = cfg != NULL ? cfg->dropRatePercent : 100u;
     if (percent == 100u)
-        return configuredRate > 100u ? 100u : configuredRate;
+        return configuredRate > rateX10Max ? rateX10Max : configuredRate;
     scaled = vm_net_mock_scale_u32_by_percent(configuredRate, percent);
-    if (scaled > 100u)
-        scaled = 100u;
+    if (scaled > rateX10Max)
+        scaled = rateX10Max;
     return scaled;
 }

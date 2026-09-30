@@ -382,7 +382,8 @@ CREATE TABLE IF NOT EXISTS `account_role_item_effects` (
 ) ENGINE=InnoDB;
 
 -- Offline practise bank for 修炼丹 (827). Wall-clock logout stamp + bank
--- minutes survive disconnect; login settles exp = minutes * level * 8.
+-- minutes survive disconnect; login settles
+-- exp = minutes * level^2 * exp_level_minute_mult (admin; default 8).
 CREATE TABLE IF NOT EXISTS `account_role_offline_practise` (
   `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `role_id` INT UNSIGNED NOT NULL,
@@ -401,6 +402,17 @@ CREATE TABLE IF NOT EXISTS `account_role_offline_practise` (
     REFERENCES `account_roles` (`account_id`, `role_id`)
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_offline_practise_config` (
+  `id` TINYINT UNSIGNED NOT NULL,
+  `exp_level_minute_mult` INT UNSIGNED NOT NULL DEFAULT 8
+    COMMENT 'exp = settle_minutes * level^2 * mult',
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+
+INSERT IGNORE INTO `server_offline_practise_config` (`id`, `exp_level_minute_mult`)
+VALUES (1, 8);
 
 CREATE TABLE IF NOT EXISTS `account_role_tasks` (
   `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -544,7 +556,7 @@ CREATE TABLE IF NOT EXISTS `server_monsters` (
   `reward_exp` INT UNSIGNED NOT NULL,
   `reward_money` INT UNSIGNED NOT NULL,
   `drop_item_id` INT UNSIGNED NOT NULL DEFAULT 0,
-  `drop_rate_percent` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `drop_rate_percent` SMALLINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'legacy percent×10; new writes clear to 0',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`monster_id`)
@@ -580,7 +592,7 @@ CREATE TABLE IF NOT EXISTS `server_monster_drops` (
   `monster_id` SMALLINT UNSIGNED NOT NULL,
   `drop_slot` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
-  `drop_rate_percent` TINYINT UNSIGNED NOT NULL,
+  `drop_rate_percent` SMALLINT UNSIGNED NOT NULL COMMENT 'percent×10: 1=0.1%, 1000=100%',
   PRIMARY KEY (`monster_id`, `drop_slot`),
   CONSTRAINT `fk_server_monster_drops_monster`
     FOREIGN KEY (`monster_id`) REFERENCES `server_monsters` (`monster_id`)
@@ -590,7 +602,9 @@ CREATE TABLE IF NOT EXISTS `server_monster_drops` (
 CREATE TABLE IF NOT EXISTS `server_shop_items` (
   `item_id` INT UNSIGNED NOT NULL,
   `price` INT UNSIGNED NOT NULL,
+  `npc_price` INT UNSIGNED NOT NULL DEFAULT 0,
   `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `npc_enabled` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`item_id`)
@@ -687,7 +701,7 @@ CREATE TABLE IF NOT EXISTS `server_arena_config` (
   `spawn_x` SMALLINT UNSIGNED NOT NULL DEFAULT 120,
   `spawn_y` SMALLINT UNSIGNED NOT NULL DEFAULT 120,
   `weekday_mask` INT UNSIGNED NOT NULL DEFAULT 126 COMMENT 'bit0=Sun..bit6=Sat; derived from weekday_brackets',
-  `weekday_brackets` VARCHAR(32) NOT NULL DEFAULT '0,70,50,10,70,50,10' COMMENT 'Sun..Sat: 0=rest,10/50/70 one bracket per day',
+  `weekday_brackets` VARCHAR(32) NOT NULL DEFAULT '77,70,60,50,40,30,77' COMMENT 'Sun..Sat: 0=rest,10/30/40/50/60/70/77 one bracket per day',
   `entry_start_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1220,
   `entry_end_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1229,
   `match_start_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1230,
@@ -701,6 +715,7 @@ CREATE TABLE IF NOT EXISTS `server_arena_config` (
   `wager_enabled` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   `wager_fee_percent` TINYINT UNSIGNED NOT NULL DEFAULT 10,
   `wager_currency` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=铜币',
+  `wager_vitality_cost` INT UNSIGNED NOT NULL DEFAULT 50 COMMENT '摆擂消耗活力；撤擂不退',
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB;

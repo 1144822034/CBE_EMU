@@ -81,6 +81,11 @@ static bool vm_net_mock_equipment_instance_transfer_owner(u32 fromRoleId,
                                                           u16 newBagSeq);
 static bool vm_net_mock_equipment_instance_retire_role(u32 roleId);
 
+/* Defined in mock_server_role_seal.inc.c (via equipment_npc). Save must skip
+ * roles still bound in server_sealed_roles so sticky cannot resurrect them. */
+static bool vm_net_mock_role_seal_is_bound_role(u32 roleId);
+static void vm_net_mock_role_seal_purge_bound_from_memory(void);
+
 #include "mock_server_role.c"
 
 /* Death recovery owns the role mutation in mock_server_equipment_npc.c, while
@@ -112,6 +117,13 @@ static void vm_mock_arena_on_session_offline(
     struct vm_mock_service_client_session *session);
 static void vm_mock_arena_restore_venue_scene_if_needed(
     vm_net_mock_role_state *role);
+
+/* 在线活力累计（定义在 mock_server_activities.c；scene_ready / offline 挂钩）. */
+static void vm_mock_activities_vitality_online_tick(void);
+static void vm_mock_activities_vitality_online_session_begin(
+    struct vm_mock_service_client_session *session);
+static void vm_mock_activities_vitality_online_session_end(
+    struct vm_mock_service_client_session *session);
 
 /* Implemented in mock_server_battle.c; team_remove_member runs earlier. */
 static void vm_mock_service_team_battle_note_roster_disconnect(

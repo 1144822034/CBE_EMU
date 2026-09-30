@@ -24,9 +24,10 @@
 在 `vm_net_mock_battle_grant_reward_once`（`mock_server_equipment_npc.c`）：
 
 1. 对每行先做任务材料资格判定（既有 `vm_net_mock_task_material_drop_policy`）。
-2. **独立投掷（multi）**：任务材料行，或 `ratePercent >= 100`。
+2. **独立投掷（multi）**：任务材料行，或 `ratePercent >= 1000`（percent×10 的 100%）。
 3. **奖池单抽（lottery）**：其余合格行放入池子；每场用
-   `vm_net_mock_battle_reward_rand()` 均匀抽一条，再按该条配置概率投掷一次。
+   `vm_net_mock_battle_reward_rand()` 均匀抽一条，再按该条配置概率投掷一次
+   （`rand % 1000 < rateX10`，支持 0.1%）。
 4. 未抽中的奖池行记 `mode=lottery_skip`，不投掷、不发放。
 
 日志：

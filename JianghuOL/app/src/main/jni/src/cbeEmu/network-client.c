@@ -2646,7 +2646,8 @@ static bool vm_client_strip_cbe_unsupported_objects(u8 **packet, u32 *packetLen)
 enum
 {
     VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX = 64u,
-    VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX = 200u
+    /* Insight active → unlimited hangup battles (u16 max sentinel). */
+    VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX = 0xffffu
 };
 
 typedef struct
@@ -2926,8 +2927,9 @@ static void vm_client_hangup_settle_note_downlink(const u8 *packet, u32 packetLe
         if (object.major == 1 && object.kind == 25 && object.subtype == 6)
         {
             u32 insightMax = 0;
+            /* Live wire: maxnum≥200 marks insight hangup quota → unlimited. */
             if (vm_client_decode_object_u32(&object, "maxnum", &insightMax) &&
-                insightMax >= VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX)
+                insightMax >= 200u)
             {
                 g_vmClientHangupSettleUi.maxBattles =
                     (u16)VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX;

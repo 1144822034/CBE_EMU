@@ -442,7 +442,7 @@ export function decodeNpcLearnSkillId(value: number): number {
 }
 
 /**
- * Equip-sell pass (839) 26/1 service values — mirror mock_server_core.c.
+ * Equip-sell pass (839) / repair-NPC sell 26/1 service values — mirror mock_server_core.c.
  * Client may batch-call SELL_BASE without a new server opcode.
  */
 export const EquipSellService = {
@@ -452,14 +452,23 @@ export const EquipSellService = {
   VIEW_BASE: 0xf3000000,
 } as const;
 
-/** True when this 26/1 is the equip-sell voucher UI (root / list / detail). */
+/**
+ * True when this 26/1 is already inside the equip-sell UI (root / list / detail).
+ * Do not treat NPC root dialogs that merely offer OPEN_EQUIP_SELL (e.g. repair NPC
+ * 「装备出售」alongside「修理全部装备」) as sell UI.
+ */
 export function isEquipSellDialog(dialog: NpcDialog): boolean {
-  if (/请选择要出售的装备|出售该装备/.test(dialog.body)) return true;
+  if (
+    /请选择要出售的装备|请选择装备查看属性|出售该装备|出售成功|没有可出售|已无可售/.test(
+      dialog.body,
+    )
+  ) {
+    return true;
+  }
   return dialog.options.some((o) => {
     const v = o.value >>> 0;
     const hi = v & 0xffff0000;
     return (
-      v === EquipSellService.OPEN ||
       hi === EquipSellService.MENU ||
       hi === EquipSellService.SELL_BASE ||
       hi === EquipSellService.VIEW_BASE ||
@@ -507,9 +516,14 @@ export function matchEquipSellQuality(
   return (itemQuality | 0) === (selected | 0);
 }
 
-/** Inject client-only batch/quality sell options into equip-sell dialogs. */
+/**
+ * Inject client-only batch/quality sell options only on the equip-sell root
+ * (same level as 「出售装备」). Bag list / detail / repair NPC outer: no inject.
+ */
 export function augmentEquipSellDialog(dialog: NpcDialog): NpcDialog {
-  if (!isEquipSellDialog(dialog)) return dialog;
+  /* Root only — list「返回」后仍回此页，批量项只在这一层出现一次语义位置。 */
+  if (!/请选择要出售的装备/.test(dialog.body)) return dialog;
+  if (!dialog.options.some((o) => o.label === "出售装备")) return dialog;
   const options = [...dialog.options];
   let changed = false;
   if (
@@ -792,6 +806,44 @@ export function isRoleSealScroll(itemId: number): boolean {
   return (itemId | 0) === ROLE_SEAL_SCROLL_ITEM_ID;
 }
 
+/** Bound 857 list/title name: `[印]角色名`. */
+export function formatRoleSealScrollName(
+  baseName: string,
+  sealed?: { name?: string } | null,
+): string {
+  const base = (baseName || "角色封印卷").trim() || "角色封印卷";
+  const sealName = (sealed?.name || "").trim();
+  if (!sealName) return base;
+  return `[印]${sealName}`;
+}
+
+/**
+ * Job label for seal/role UI.
+ * Accepts wire/DB job 1..3 or client jobIndex 0..2.
+ */
+export function roleJobDisplayName(job: number): string {
+  const j = job | 0;
+  if (j >= 1 && j <= 3) return (["天机", "幻剑", "鬼道"] as const)[j - 1]!;
+  if (j >= 0 && j <= 2) return (["天机", "幻剑", "鬼道"] as const)[j]!;
+  return "无";
+}
+
+/** Bound 857 bag detail text. */
+export function formatRoleSealScrollDes(sealed: {
+  name: string;
+  level: number;
+  job: number;
+  sex: number;
+}): string {
+  const name = (sealed.name || "?").trim() || "?";
+  const sex = sealed.sex ? "女" : "男";
+  return [
+    `已封印：${name} Lv${sealed.level || 1}`,
+    `职业 ${roleJobDisplayName(sealed.job)} ${sex}`,
+    "使用可解封到本账号；可上架藏宝阁。",
+  ].join("\n");
+}
+
 export function goldScrollSuccessMessage(): string {
   return "打金心得效果已生效，钱币增加20%，经验为0。";
 }
@@ -906,6 +958,82 @@ export function parseBattleInsightIteminfoFromPacket(packet: WtPacket): string {
     if (text.includes("战斗心得")) return text;
   }
   return "";
+}
+
+/**
+ * 修炼丹 827 — JianghuOL.CBE → 1/7/16 {itemseq:u16}.
+ * Evidence: docs/re/2026-07-23-special-item-use-contract.md,
+ * docs/re/2026-07-27-offline-practise-pill.md
+ */
+export const PRACTISE_PILL_ITEM_ID = 827;
+
+export function isPractisePillItem(itemId: number): boolean {
+  return itemId === PRACTISE_PILL_ITEM_ID;
+}
+
+export function buildPractisePillUseRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 16).u16("itemseq", seq & 0xffff);
+  return b.finish();
+}
+
+/** Follow-up wait-clear only (not a second consume): 1/7/17 {num:u8=1,itemseq:u16}. */
+export function buildPractisePillFollowupRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 17).u8("num", 1).u16("itemseq", seq & 0xffff);
+  return b.finish();
+}
+
+/**
+ * 修炼信息面板：WT 1/7/18 → 7/18
+ * {todaypasthour,todaypastmin,getexp,todaylasthour,todaylastmin,alllasthour,alllastmin,isgold}
+ * Evidence: docs/re/2026-07-25-practise-gold-7-21.md
+ */
+export type PractiseInfo = {
+  todayPastHour: number;
+  todayPastMin: number;
+  getExp: number;
+  todayLastHour: number;
+  todayLastMin: number;
+  /** 修炼丹银行剩余（累计离线修炼时间）. */
+  allLastHour: number;
+  allLastMin: number;
+  isGold: boolean;
+};
+
+export function buildPractiseInfoRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 18);
+  return b.finish();
+}
+
+export function formatPractiseHm(hour: number, min: number): string {
+  return `${hour | 0} 小时 ${min | 0} 分钟`;
+}
+
+export function parsePractiseInfo(bodies: Uint8Array[]): PractiseInfo | null {
+  for (const body of bodies) {
+    let packet: WtPacket;
+    try {
+      packet = decodeWtPacket(body);
+    } catch {
+      continue;
+    }
+    for (const obj of packet.objects) {
+      if (obj.kind !== 7 || obj.subtype !== 18) continue;
+      return {
+        todayPastHour: fieldU32(obj, "todaypasthour"),
+        todayPastMin: fieldU32(obj, "todaypastmin"),
+        getExp: fieldU32(obj, "getexp"),
+        todayLastHour: fieldU32(obj, "todaylasthour"),
+        todayLastMin: fieldU32(obj, "todaylastmin"),
+        allLastHour: fieldU32(obj, "alllasthour"),
+        allLastMin: fieldU32(obj, "alllastmin"),
+        isGold: fieldU32(obj, "isgold") !== 0,
+      };
+    }
+  }
+  return null;
 }
 
 /** 战斗心得 828 — JianghuOL.CBE:0x0102DC40 → 1/25/6 {seq:u16}. */
@@ -1112,7 +1240,8 @@ export function parseChestOpenBatchResult(
 }
 
 /**
- * Special timed-item responses: 7/30 exp card / 22/3 combat pill / 25/6 insight.
+ * Special timed-item responses: 7/30 exp card / 7/16 practise pill /
+ * 22/3 combat pill / 25/6 insight.
  * Success/fail text lives in string field `iteminfo` (not a binary blob).
  */
 export function parseSpecialTimedItemUseResult(
@@ -1121,6 +1250,7 @@ export function parseSpecialTimedItemUseResult(
   for (const obj of packet.objects) {
     const special =
       (obj.kind === 7 && obj.subtype === 30) ||
+      (obj.kind === 7 && obj.subtype === 16) ||
       (obj.kind === 22 && obj.subtype === 3) ||
       (obj.kind === 25 && obj.subtype === 6);
     if (!special) continue;
@@ -1350,6 +1480,8 @@ export type EnhanceTransferConfirmResult = {
   sourceLevel: number;
   destSeq: number;
   destLevel: number;
+  /** Server washxfer: true=源洗练随强化转到目标；false=源洗练丢弃. Missing → true. */
+  washTransferred: boolean;
 };
 
 function parseTaggedU32Stream(raw: Uint8Array | null): number[] {
@@ -1517,6 +1649,8 @@ export function parseEnhanceTransferConfirm(
   if (!obj) return null;
   const result = fieldU32(obj, "result");
   if (result === 1) {
+    const washField = findField(obj, "washxfer");
+    const washTransferred = washField ? fieldU32(obj, "washxfer") !== 0 : true;
     return {
       result,
       ok: true,
@@ -1525,10 +1659,11 @@ export function parseEnhanceTransferConfirm(
       sourceLevel: fieldU32(obj, "curlevels"),
       destSeq: fieldU32(obj, "seqd"),
       destLevel: fieldU32(obj, "curleveld"),
+      washTransferred,
     };
   }
   let message = "转移失败";
-  if (result === 3) message = "没有对应玄晶";
+  if (result === 3) message = "玄晶不足";
   else if (result === 4) message = "金钱不足";
   else if (result === 5) message = "不可转移";
   return {
@@ -1539,10 +1674,11 @@ export function parseEnhanceTransferConfirm(
     sourceLevel: 0,
     destSeq: 0,
     destLevel: 0,
+    washTransferred: false,
   };
 }
 
-/** Transfer fee display (product): 48金65银. */
+/** Recast cost display: +N uses 1×(N-1)级玄晶; +1 free. */
 
 /** PixiJS-only enhance wash (29/7..9 + 29/14 replace confirm). */
 export type EnhanceWashTier = {
@@ -2517,7 +2653,35 @@ export function parseCrystalExtractResult(
   };
 }
 
-export const ENHANCE_TRANSFER_FEE_TEXT = "48金65银";
+export const ENHANCE_TRANSFER_MONEY_FEE_TEXT = "48金65银";
+export const ENHANCE_TRANSFER_FEE_TEXT = "1个一级玄晶";
+/** Fee line for recast confirm; crystal/money toggles from admin. */
+export function enhanceTransferFeeText(
+  sourceEnhanceLevel: number,
+  opts?: { crystal?: boolean; money?: boolean },
+): string {
+  const crystalOn = opts?.crystal ?? true;
+  const moneyOn = opts?.money ?? false;
+  const parts: string[] = [];
+  if (crystalOn) {
+    const lv = sourceEnhanceLevel | 0;
+    if (lv <= 1) {
+      /* +1 free for crystal path */
+    } else {
+      const tier = Math.min(16, Math.max(1, lv - 1));
+      const itemId = ENHANCE_CRYSTAL_FIRST + tier - 1;
+      parts.push(`1个${enhanceCrystalName(itemId)}`);
+    }
+  }
+  if (moneyOn) parts.push(ENHANCE_TRANSFER_MONEY_FEE_TEXT);
+  if (!parts.length) {
+    if (crystalOn && (sourceEnhanceLevel | 0) <= 1) return "无（+1装备免费）";
+    return "无";
+  }
+  if (crystalOn && (sourceEnhanceLevel | 0) <= 1 && moneyOn)
+    return parts.join(" + ");
+  return parts.join(" + ");
+}
 
 /** Mall balance: 1/14/4 → coolmoney(=role.wcoin) + ticket. */
 export function buildMallBalanceRequest(): Uint8Array {
@@ -2843,6 +3007,32 @@ export function parseMmGameUnstuckLanding(
   const y = r.i16();
   if (x === 0 && y === 0) return null;
   return { scene, x, y };
+}
+
+/**
+ * Hangup battle quota without 战斗心得 (828).
+ * With insight active — or admin hangupQuotaWithoutInsight=0 — max is unlimited.
+ */
+export const HANGUP_BATTLES_WITHOUT_INSIGHT = 64;
+/** Sentinel combatinfo.maximum while 战斗心得 is active — UI shows「不限次」. */
+export const HANGUP_BATTLES_WITH_INSIGHT = 0xffff;
+
+export function hangupBattlesMaximum(
+  insightActive: boolean,
+  quotaWithoutInsight = true,
+): number {
+  if (insightActive || !quotaWithoutInsight) return HANGUP_BATTLES_WITH_INSIGHT;
+  return HANGUP_BATTLES_WITHOUT_INSIGHT;
+}
+
+/** True when hangup must stop: quota on, no insight, completed ≥ 64. */
+export function hangupBattlesQuotaExhausted(
+  completed: number,
+  insightActive: boolean,
+  quotaWithoutInsight = true,
+): boolean {
+  if (insightActive || !quotaWithoutInsight) return false;
+  return (completed | 0) >= HANGUP_BATTLES_WITHOUT_INSIGHT;
 }
 
 /** mmBattle:sub_7794 — 4/7.combatinfo hangup session snapshot (8×u32 + u8). */
@@ -3633,8 +3823,8 @@ export function parseChatNotices(packet: WtPacket): ChatLine[] {
         const name = r.string().replace(/\0+$/g, "");
         const senderRoleId = r.u32(); // tagged; 0 = server system broadcast
         const msg = r.string().replace(/\0+$/g, "");
-        // World [世]: drop player nick "系统" (nonzero roleId). Keep official
-        // enhance/chest world announces (name=系统, roleId=0) and type-5 tips.
+        // World [世]: drop player nick "系统" (nonzero roleId). Official
+        // enhance/chest/arena announces now arrive as type-5 [系] (roleId=0).
         if (type === 0 && name.trim() === "系统" && senderRoleId !== 0) {
           continue;
         }
@@ -3714,6 +3904,14 @@ export type BagItem = {
   bookLevel?: number;
   /** 921 修炼天书：是否已注满. */
   bookFull?: boolean;
+  /** 857 角色封印卷：已绑定封印角色摘要（详情/列表名）. */
+  sealedRole?: {
+    roleId: number;
+    name: string;
+    level: number;
+    job: number;
+    sex: number;
+  };
   /** Pixi gem sockets on equip (levels; 0 = empty). */
   socketGems?: { reflect: number; combo: number; revive: number };
 };
@@ -4052,6 +4250,20 @@ export type CharacterStats = {
   mountStatusEnabled: number;
   /** Admin: max concurrent client windows on one device (1–8). Default 1. */
   multiOpenLimit: number;
+  /**
+   * Admin: without 战斗心得, hangup capped at 64.
+   * 1 = limit (default); 0 = unlimited even without insight.
+   */
+  hangupQuotaWithoutInsight: number;
+  /**
+   * Admin: cross-quality enhance transfer requires 跨品重铸石(855).
+   * 1 = need stone (default); 0 = same slot may cross quality free.
+   */
+  crossQualityStoneRequired: number;
+  /** Admin: 29/6 consume (level-1) 玄晶. 1=on (default). */
+  transferCrystalEnabled: number;
+  /** Admin: 29/6 consume legacy 48金65银. 1=on; default 0. */
+  transferMoneyEnabled: number;
   baseStrength: number;
   baseAgility: number;
   baseWisdom: number;
@@ -4179,12 +4391,22 @@ export function overlayBagItemFromCatalog(it: BagItem): BagItem {
       cat.consumable)
   );
   const nextEquipSlot = cat.equipSlot ?? it.equipSlot;
+  const sealName =
+    isRoleSealScroll(it.itemId) && it.sealedRole?.name
+      ? formatRoleSealScrollName(cat.name, it.sealedRole)
+      : null;
+  const sealDesc =
+    isRoleSealScroll(it.itemId) && it.sealedRole?.name
+      ? formatRoleSealScrollDes(it.sealedRole)
+      : null;
+  const nextName = sealName || cat.name;
+  const nextDesc = sealDesc || cat.desc;
   if (
-    it.name === cat.name &&
+    it.name === nextName &&
     it.quality === cat.quality &&
     it.kind === cat.kind &&
     it.category === cat.category &&
-    it.desc === cat.desc &&
+    it.desc === nextDesc &&
     it.usable === (cat.kind === "item" ? usable : false) &&
     it.equipSlot === nextEquipSlot
   ) {
@@ -4192,11 +4414,11 @@ export function overlayBagItemFromCatalog(it: BagItem): BagItem {
   }
   return {
     ...it,
-    name: cat.name,
+    name: nextName,
     quality: cat.quality,
     kind: cat.kind,
     category: cat.category,
-    desc: cat.desc,
+    desc: nextDesc,
     usable: cat.kind === "item" ? usable : false,
     equipSlot: nextEquipSlot,
   };
@@ -4304,6 +4526,24 @@ export function preserveFlaskReservoirAcrossBagRefresh(
         prev.bookLevel,
         prev.bookFull,
       ),
+    };
+  }
+  /* 857：刷新背包时暂留已绑定封印角色摘要，随后异步 seal-detail 再校正. */
+  if (
+    isRoleSealScroll(row.itemId) &&
+    prev &&
+    prev.itemId === row.itemId &&
+    prev.seq === row.seq &&
+    prev.sealedRole?.name
+  ) {
+    row = {
+      ...row,
+      sealedRole: prev.sealedRole,
+      name: formatRoleSealScrollName(
+        lookupItemSync(row.itemId)?.name ?? row.name,
+        prev.sealedRole,
+      ),
+      desc: formatRoleSealScrollDes(prev.sealedRole),
     };
   }
   return row;
@@ -4770,6 +5010,38 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
     multiOpenLimit: obj.fields.some((f) => f.name === "multiOpenLimit")
       ? Math.max(1, Math.min(8, fieldU32(obj, "multiOpenLimit") || 1))
       : 1,
+    /* Omitted → default ON (cap hangup at 64 without insight). */
+    hangupQuotaWithoutInsight: obj.fields.some(
+      (f) => f.name === "hangupQuotaWithoutInsight",
+    )
+      ? fieldU32(obj, "hangupQuotaWithoutInsight")
+        ? 1
+        : 0
+      : 1,
+    /* Omitted → default ON (require 跨品重铸石). */
+    crossQualityStoneRequired: obj.fields.some(
+      (f) => f.name === "crossQualityStoneRequired",
+    )
+      ? fieldU32(obj, "crossQualityStoneRequired")
+        ? 1
+        : 0
+      : 1,
+    /* Omitted → default ON (consume 玄晶). */
+    transferCrystalEnabled: obj.fields.some(
+      (f) => f.name === "transferCrystalEnabled",
+    )
+      ? fieldU32(obj, "transferCrystalEnabled")
+        ? 1
+        : 0
+      : 1,
+    /* Omitted → default OFF (no gold fee). */
+    transferMoneyEnabled: obj.fields.some(
+      (f) => f.name === "transferMoneyEnabled",
+    )
+      ? fieldU32(obj, "transferMoneyEnabled")
+        ? 1
+        : 0
+      : 0,
     baseStrength: fieldU32(obj, "baseStrength"),
     baseAgility: fieldU32(obj, "baseAgility"),
     baseWisdom: fieldU32(obj, "baseWisdom"),

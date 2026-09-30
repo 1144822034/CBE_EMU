@@ -7243,6 +7243,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     vm_mock_arena_tick();
     vm_mock_world_boss_tick();
     vm_mock_service_maintenance_tick();
+    vm_mock_activities_vitality_online_tick();
     vm_mock_arena_catchup_phase_tip_session(observer);
     vm_mock_auction_tick();
     vm_mock_guess_tick();

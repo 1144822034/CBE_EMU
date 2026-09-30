@@ -162,9 +162,14 @@ static void vm_mock_admin_render_zangbao_page(char *response, size_t responseCap
         "</select></label> "
         "<label>酷币/元 <input name=\"kcoin_per_yuan\" type=\"number\" min=\"1\" "
         "value=\"%u\" style=\"width:100px\"></label> "
+        "<label>每人同时上架上限 <input name=\"max_active_listings\" type=\"number\" "
+        "min=\"1\" max=\"999\" value=\"%u\" style=\"width:80px\"></label> "
+        "<span class=\"hint\">含在售与付款锁定中的寄售</span> "
         "<button type=\"submit\">保存</button></form></section>",
         cfg.enabled ? " selected" : "", cfg.enabled ? "" : " selected",
-        cfg.kcoinPerYuan ? cfg.kcoinPerYuan : 1u);
+        cfg.kcoinPerYuan ? cfg.kcoinPerYuan : 1u,
+        cfg.maxActiveListings ? cfg.maxActiveListings
+                              : (u32)VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE);
 
     vm_mock_admin_text_appendf(
         &page,
@@ -192,24 +197,36 @@ static void vm_mock_admin_handle_zangbao_action(vm_mock_service_socket client,
     {
         char enText[16];
         char rateText[32];
+        char maxText[32];
         u32 enabled = 1;
         u32 rate = 1;
-        char query[256];
+        u32 maxActive = VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE;
+        char query[320];
 
         memset(enText, 0, sizeof(enText));
         memset(rateText, 0, sizeof(rateText));
+        memset(maxText, 0, sizeof(maxText));
         (void)vm_mock_zangbao_ensure_schema();
         (void)vm_mock_admin_form_value(body, "enabled", enText, sizeof(enText));
         (void)vm_mock_admin_form_value(body, "kcoin_per_yuan", rateText,
                                         sizeof(rateText));
+        (void)vm_mock_admin_form_value(body, "max_active_listings", maxText,
+                                        sizeof(maxText));
         (void)vm_net_mock_parse_u32_strict(enText, &enabled);
         if (!vm_net_mock_parse_u32_strict(rateText, &rate) || rate == 0)
             rate = 1;
+        if (!vm_net_mock_parse_u32_strict(maxText, &maxActive) || maxActive == 0)
+            maxActive = VM_MOCK_ZANGBAO_DEFAULT_MAX_ACTIVE;
+        if (maxActive > 999u)
+            maxActive = 999u;
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_kcoin_config(config_id,kcoin_per_yuan,enabled) "
-                 "VALUES(1,%u,%u) ON DUPLICATE KEY UPDATE "
-                 "kcoin_per_yuan=VALUES(kcoin_per_yuan),enabled=VALUES(enabled)",
-                 rate, enabled ? 1u : 0u);
+                 "INSERT INTO server_kcoin_config("
+                 "config_id,kcoin_per_yuan,enabled,max_active_listings) "
+                 "VALUES(1,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "kcoin_per_yuan=VALUES(kcoin_per_yuan),"
+                 "enabled=VALUES(enabled),"
+                 "max_active_listings=VALUES(max_active_listings)",
+                 rate, enabled ? 1u : 0u, maxActive);
         if (!vm_mysql_exec(query))
             vm_mock_admin_redirect_zangbao(client, "error", "保存失败");
         else

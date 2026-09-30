@@ -52,7 +52,8 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         "code{background:#f2f4f7;padding:1px 4px;border-radius:4px}"
         "</style></head><body><h1>客户端UI</h1>"
         "<p class=\"hint\">控制 Pixi 客户端是否显示装备「洗练」按钮、地图角"
-        "状态栏「翅」「骑」入口，以及本机同页账号多开槽位上限。保存后写入 "
+        "状态栏「翅」「骑」入口、本机同页账号多开槽位上限，以及无战斗心得时"
+        "是否限制挂机 64 场。保存后写入 "
         "<code>server_client_ui_config</code>；玩家下次拉人物面板"
         "（<code>1/1/21</code>）后生效。"
         "关闭洗练时服务端亦拒绝 29/7–9、29/14、29/13。</p>");
@@ -83,11 +84,18 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         "<div><label>账号多开上限（1–8）</label>"
         "<input type=\"number\" name=\"multi_open_limit\" min=\"1\" max=\"8\" "
         "value=\"%u\"></div>"
+        "<div><label>无战斗心得挂机限额</label>"
+        "<select name=\"hangup_quota_without_insight\">"
+        "<option value=\"1\"%s>限制64场</option>"
+        "<option value=\"0\"%s>不限制</option>"
+        "</select></div>"
         "</div>"
         "<p class=\"hint\">隐藏翅膀/坐骑状态栏只影响地图角入口，不影响已装备外观"
         "与管理端解锁。隐藏洗练按钮后背包/强化面板不再出现「洗练」。"
         "多开上限=1 时客户端菜单「账号多开」不可再开新槽；同页多会话切换，"
-        "其他账号长连接保持。默认均为显示，多开上限默认 1。</p>"
+        "其他账号长连接保持。默认均为显示，多开上限默认 1。"
+        "「无战斗心得挂机限额」默认限制 64 场；选「不限制」后无心得也可无限挂机"
+        "（有战斗心得时始终不限次）。</p>"
         "<button type=\"submit\">保存</button></form></section></body></html>",
         cfg && cfg->washButtonEnabled ? " selected" : "",
         cfg && !cfg->washButtonEnabled ? " selected" : "",
@@ -95,7 +103,9 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         cfg && !cfg->wingStatusEnabled ? " selected" : "",
         cfg && cfg->mountStatusEnabled ? " selected" : "",
         cfg && !cfg->mountStatusEnabled ? " selected" : "",
-        (u32)(cfg ? cfg->multiOpenLimit : 1u));
+        (u32)(cfg ? cfg->multiOpenLimit : 1u),
+        cfg && cfg->hangupQuotaWithoutInsight ? " selected" : "",
+        cfg && !cfg->hangupQuotaWithoutInsight ? " selected" : "");
     if (page.truncated)
     {
         snprintf(response, responseCap,
@@ -111,6 +121,7 @@ static void vm_mock_admin_handle_client_ui_action(vm_mock_service_socket client,
     u32 wingStatus = 1;
     u32 mountStatus = 1;
     u32 multiOpenLimit = 1;
+    u32 hangupQuota = 1;
 
     if (strcmp(action, "save-client-ui-config") != 0)
     {
@@ -121,14 +132,16 @@ static void vm_mock_admin_handle_client_ui_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "wing_status_enabled", 1u, &wingStatus) ||
         !vm_mock_admin_form_u32(body, "mount_status_enabled", 1u, &mountStatus) ||
         !vm_mock_admin_form_u32(body, "multi_open_limit", 8u, &multiOpenLimit) ||
-        multiOpenLimit < 1u)
+        multiOpenLimit < 1u ||
+        !vm_mock_admin_form_u32(body, "hangup_quota_without_insight", 1u,
+                                &hangupQuota))
     {
         vm_mock_admin_redirect_client_ui(client, "error", "表单参数无效");
         return;
     }
-    if (vm_net_mock_client_ui_config_admin_save((u8)washButton, (u8)wingStatus,
-                                                 (u8)mountStatus,
-                                                 (u8)multiOpenLimit))
+    if (vm_net_mock_client_ui_config_admin_save(
+            (u8)washButton, (u8)wingStatus, (u8)mountStatus, (u8)multiOpenLimit,
+            (u8)hangupQuota))
         vm_mock_admin_redirect_client_ui(client, "ok", "客户端UI配置已保存");
     else
         vm_mock_admin_redirect_client_ui(client, "error", "保存客户端UI配置失败");

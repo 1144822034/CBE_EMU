@@ -11,13 +11,20 @@ import {
   blockPanelPointerPassthrough,
 } from "./constants";
 import {
+  bagVisibleStackCount,
   isDurableMallPassItemId,
   isReservoirFlaskItemId,
+  ROLE_SEAL_SCROLL_ITEM_ID,
+  roleJobDisplayName,
   type BagItem,
 } from "../net/protocolExtras";
-import { lookupItemSync, qualityColor } from "../resources/itemCatalog";
-import type { ZangbaoListing, ZangbaoSealDetail } from "../net/zangbaoApi";
-import { ROLE_SEAL_SCROLL_ITEM_ID } from "../net/protocolExtras";
+import { lookupItemSync, qualityColor, WORN_SLOT_NAMES } from "../resources/itemCatalog";
+import type {
+  ZangbaoListing,
+  ZangbaoSealDetail,
+  ZangbaoSealItemRow,
+} from "../net/zangbaoApi";
+import { formatPanelLevelExp } from "../game/roleLevelExp";
 import {
   buildEquipDetailLines,
   enhanceAttrsFromWashText,
@@ -129,6 +136,10 @@ export class ZangbaoPanel extends Container {
   private priceDigits = "";
   private priceMode = false;
   private amountKind: AmountKind = "list";
+  /** 上架数量选择态（可堆叠道具：选物→数量→定价）。 */
+  private countMode = false;
+  /** 本次上架数量（装备/壶/凭证/封印卷固定整行）。 */
+  private listCount = 1;
   /** 浏览/我的：拍品详情（对齐物品竞拍）。 */
   private detailListing: ZangbaoListing | null = null;
   private detailActionCursor = 0;
@@ -136,6 +147,10 @@ export class ZangbaoPanel extends Container {
   private sealDetail: ZangbaoSealDetail | null = null;
   private sealLoading = false;
   private sealTab: SealTabId = "panel";
+  /** 装备/背包/仓库列表光标（与底栏操作共用上下键）。 */
+  private sealListCursor = 0;
+  /** 是否正在查看列表中某一件的详情。 */
+  private sealItemOpen = false;
   private sealDetailLoader:
     | ((listingId: number) => Promise<ZangbaoSealDetail | null>)
     | null = null;
@@ -171,6 +186,8 @@ export class ZangbaoPanel extends Container {
     this.rowIndex = 0;
     this.page = 0;
     this.priceMode = false;
+    this.countMode = false;
+    this.listCount = 1;
     this.amountKind = "list";
     this.priceDigits = "";
     this.clearDetail();
@@ -223,7 +240,16 @@ export class ZangbaoPanel extends Container {
         right: "返回",
       };
     }
+    if (this.countMode) {
+      return { left: "定价", right: "返回" };
+    }
     if (this.detailListing) {
+      if (this.sealItemOpen) return { left: "", right: "返回" };
+      if (this.isSealListTab()) {
+        const rows = this.sealListRows();
+        const onItem = rows.length > 0 && this.sealListCursor < rows.length;
+        return { left: onItem ? "查看" : "确认", right: "返回" };
+      }
       return { left: "确认", right: "返回" };
     }
     if (this.tab === "browse") {
@@ -240,7 +266,7 @@ export class ZangbaoPanel extends Container {
     }
     if (this.tab === "list") {
       return {
-        left: this.bag[this.rowIndex] ? "定价" : "",
+        left: this.bag[this.rowIndex] ? "上架" : "",
         right: "关闭",
       };
     }
@@ -266,6 +292,10 @@ export class ZangbaoPanel extends Container {
     return this.priceMode;
   }
 
+  isCountMode(): boolean {
+    return this.countMode;
+  }
+
   isDetailMode(): boolean {
     return !!this.detailListing;
   }
@@ -276,7 +306,7 @@ export class ZangbaoPanel extends Container {
   }
 
   switchTab(dir: -1 | 1): void {
-    if (this.priceMode || this.detailListing) return;
+    if (this.priceMode || this.countMode || this.detailListing) return;
     const i = TABS.findIndex((t) => t.id === this.tab);
     const n = (i + dir + TABS.length) % TABS.length;
     this.tab = TABS[n].id;
@@ -287,11 +317,15 @@ export class ZangbaoPanel extends Container {
   }
 
   /**
-   * 左右方向键：详情翻页；否则切顶栏标签。
+   * 左右方向键：数量态调上架数；详情翻页；否则切顶栏标签。
    * @returns true 已处理。
    */
   horizontal(dir: -1 | 1): boolean {
     if (!this.visible || this.priceMode) return false;
+    if (this.countMode) {
+      this.adjustListCount(dir);
+      return true;
+    }
     if (this.detailListing) {
       this.detailPage = Math.max(0, this.detailPage + dir);
       this.redraw();
@@ -302,8 +336,31 @@ export class ZangbaoPanel extends Container {
   }
 
   move(dir: -1 | 1): void {
-    if (this.priceMode) return;
+    if (this.priceMode || this.countMode) return;
     if (this.detailListing) {
+      if (this.sealItemOpen) return;
+      if (this.isSealListTab()) {
+        const rows = this.sealListRows();
+        const acts = this.detailActions();
+        const total = rows.length + acts.length;
+        if (!total) return;
+        const cur =
+          this.sealListCursor < rows.length
+            ? this.sealListCursor
+            : rows.length + this.detailActionCursor;
+        const next = (cur + dir + total) % total;
+        if (next < rows.length) {
+          this.sealListCursor = next;
+          this.detailActionCursor = 0;
+        } else {
+          this.sealListCursor = rows.length;
+          this.detailActionCursor = next - rows.length;
+        }
+        this.ensureSealListPageVisible(rows.length);
+        this.redraw();
+        this.notifySoftkeys();
+        return;
+      }
       const acts = this.detailActions();
       if (!acts.length) return;
       this.detailActionCursor =
@@ -379,6 +436,11 @@ export class ZangbaoPanel extends Container {
       this.commitPrice();
       return;
     }
+    if (this.countMode) {
+      this.countMode = false;
+      this.enterAmountMode("list", String(MIN_PRICE_KCOIN));
+      return;
+    }
     if (this.detailListing) {
       this.confirmDetail();
       return;
@@ -394,11 +456,7 @@ export class ZangbaoPanel extends Container {
       return;
     }
     if (this.tab === "list") {
-      if (!this.bag.length) {
-        this.showTip("背包为空");
-        return;
-      }
-      this.enterAmountMode("list", String(MIN_PRICE_KCOIN));
+      this.beginListFromBag();
       return;
     }
     if (this.tab === "kcoin") {
@@ -416,11 +474,34 @@ export class ZangbaoPanel extends Container {
     if (this.priceMode) {
       this.priceMode = false;
       this.amountKind = "list";
+      // 上架定价返回：可堆叠则回到数量态，否则回列表。
+      const row = this.bag[this.rowIndex];
+      if (row && this.canAdjustListCount(row)) {
+        this.countMode = true;
+        this.clampListCount();
+        this.redraw();
+        this.notifySoftkeys();
+        return true;
+      }
+      this.countMode = false;
+      this.redraw();
+      this.notifySoftkeys();
+      return true;
+    }
+    if (this.countMode) {
+      this.countMode = false;
       this.redraw();
       this.notifySoftkeys();
       return true;
     }
     if (this.detailListing) {
+      if (this.sealItemOpen) {
+        this.sealItemOpen = false;
+        this.detailPage = 0;
+        this.redraw();
+        this.notifySoftkeys();
+        return true;
+      }
       this.clearDetail();
       this.redraw();
       this.notifySoftkeys();
@@ -443,6 +524,8 @@ export class ZangbaoPanel extends Container {
     this.sealDetail = null;
     this.sealLoading = false;
     this.sealTab = "panel";
+    this.sealListCursor = 0;
+    this.sealItemOpen = false;
   }
 
   private openDetail(listing: ZangbaoListing): void {
@@ -452,11 +535,13 @@ export class ZangbaoPanel extends Container {
     this.sealDetail = null;
     this.sealLoading = false;
     this.sealTab = "panel";
+    this.sealListCursor = 0;
+    this.sealItemOpen = false;
     this.redraw();
     this.notifySoftkeys();
     const needSeal =
       listing.itemId === ROLE_SEAL_SCROLL_ITEM_ID &&
-      !!listing.sealedRole &&
+      (!!listing.sealedRole || (listing.itemInstanceId ?? 0) > 0) &&
       !!this.sealDetailLoader;
     if (!needSeal || !this.sealDetailLoader) return;
     const listingId = listing.listingId;
@@ -466,6 +551,19 @@ export class ZangbaoPanel extends Container {
       if (this.detailListing?.listingId !== listingId) return;
       this.sealDetail = detail;
       this.sealLoading = false;
+      /* Fill sealedRole summary from detail when browse JOIN missed preview. */
+      if (detail?.role?.name && this.detailListing) {
+        this.detailListing = {
+          ...this.detailListing,
+          sealedRole: {
+            roleId: detail.sealedRoleId || this.detailListing.sealedRole?.roleId || 0,
+            name: detail.role.name,
+            level: detail.role.level,
+            job: detail.role.job,
+            sex: detail.role.sex,
+          },
+        };
+      }
       this.redraw();
       this.notifySoftkeys();
     });
@@ -489,6 +587,20 @@ export class ZangbaoPanel extends Container {
   private confirmDetail(): void {
     const r = this.detailListing;
     if (!r) return;
+    if (this.sealItemOpen) {
+      this.sealItemOpen = false;
+      this.detailPage = 0;
+      this.redraw();
+      this.notifySoftkeys();
+      return;
+    }
+    if (this.isSealListTab()) {
+      const rows = this.sealListRows();
+      if (rows.length > 0 && this.sealListCursor < rows.length) {
+        this.openSealItemDetail(this.sealListCursor);
+        return;
+      }
+    }
     const acts = this.detailActions();
     const act = acts[this.detailActionCursor];
     if (!act) return;
@@ -505,6 +617,123 @@ export class ZangbaoPanel extends Container {
     }
   }
 
+  private isSealListTab(): boolean {
+    return (
+      !!this.detailListing &&
+      this.detailListing.itemId === ROLE_SEAL_SCROLL_ITEM_ID &&
+      (this.sealTab === "equip" ||
+        this.sealTab === "bag" ||
+        this.sealTab === "wh")
+    );
+  }
+
+  private sealListRows(): ZangbaoSealItemRow[] {
+    const d = this.sealDetail;
+    if (!d) return [];
+    if (this.sealTab === "equip") return d.equipment;
+    if (this.sealTab === "bag") return d.backpack;
+    if (this.sealTab === "wh") return d.warehouse;
+    return [];
+  }
+
+  private ensureSealListPageVisible(rowCount: number): void {
+    if (rowCount <= 0) return;
+    if (this.sealListCursor >= rowCount) return;
+    /* detailPage indexes list pages; fitRows decided at draw time — keep page
+     * aligned so selected row stays on-screen when possible (fitRows≈5~7). */
+    const approxFit = 5;
+    const page = Math.floor(this.sealListCursor / approxFit);
+    if (this.detailPage !== page) this.detailPage = page;
+  }
+
+  private openSealItemDetail(index: number): void {
+    const rows = this.sealListRows();
+    if (index < 0 || index >= rows.length) return;
+    this.sealListCursor = index;
+    this.sealItemOpen = true;
+    this.detailPage = 0;
+    this.redraw();
+    this.notifySoftkeys();
+  }
+
+  private sealRowAsBagItem(row: ZangbaoSealItemRow): BagItem {
+    const cat = lookupItemSync(row.itemId);
+    const kind = cat?.kind === "equip" ? "equip" : "item";
+    const enhanceAttrs =
+      kind === "equip"
+        ? enhanceAttrsFromWashText(row.itemId, row.enhanceWash)
+        : undefined;
+    const gemReflect = row.gemReflect ?? 0;
+    const gemCombo = row.gemCombo ?? 0;
+    const gemRevive = row.gemRevive ?? 0;
+    const gems =
+      kind === "equip" && (gemReflect > 0 || gemCombo > 0 || gemRevive > 0)
+        ? { reflect: gemReflect, combo: gemCombo, revive: gemRevive }
+        : undefined;
+    return {
+      itemId: row.itemId,
+      seq: row.seq ?? 0,
+      count: row.count || 1,
+      name: cat?.name || `物品${row.itemId}`,
+      quality: cat?.quality ?? 0,
+      enhance: row.enhanceLevel,
+      kind,
+      category: cat?.category ?? 0,
+      desc: cat?.desc ?? "",
+      usable: false,
+      equipSlot: cat?.equipSlot ?? -1,
+      ...(enhanceAttrs?.length ? { enhanceAttrs } : {}),
+      ...(gems ? { socketGems: gems } : {}),
+    };
+  }
+
+  private sealRowLabel(row: ZangbaoSealItemRow): string {
+    const cat = lookupItemSync(row.itemId);
+    const name = cat?.name || `#${row.itemId}`;
+    const en = row.enhanceLevel > 0 ? `+${row.enhanceLevel}` : "";
+    if (this.sealTab === "equip") {
+      const slot = row.slot ?? 0;
+      const slotName =
+        slot >= 0 && slot < WORN_SLOT_NAMES.length
+          ? WORN_SLOT_NAMES[slot]
+          : `[${slot}]`;
+      return `${slotName} ${name}${en}`.slice(0, 28);
+    }
+    const count = row.count > 1 ? ` x${row.count}` : "";
+    return `${name}${en}${count}`.slice(0, 28);
+  }
+
+  private sealItemDetailLines(row: ZangbaoSealItemRow): EquipPaintLine[] {
+    const item = this.sealRowAsBagItem(row);
+    if (item.kind === "equip") return buildEquipDetailLines(item);
+    const lines: EquipPaintLine[] = [];
+    lines.push({
+      kind: "text",
+      text: item.name.slice(0, 28),
+      color: qualityColor(item.quality),
+    });
+    const desc =
+      (item.desc && item.desc !== "-" ? item.desc : "") ||
+      (isReservoirFlaskItemId(item.itemId)
+        ? `储量 ${item.count}`
+        : isDurableMallPassItemId(item.itemId)
+          ? `耐久 ${item.count}`
+          : `数量 ${item.count}`);
+    for (const line of wrapChars(desc)) {
+      lines.push({ kind: "text", text: line, color: CBE.ink });
+    }
+    lines.push({
+      kind: "text",
+      text: isReservoirFlaskItemId(item.itemId)
+        ? `储量 ${item.count}`
+        : isDurableMallPassItemId(item.itemId)
+          ? `耐久 ${item.count}`
+          : `数量 ${item.count}`,
+      color: CBE.inkLabel,
+    });
+    return lines;
+  }
+
   private beginWithdrawAmount(): void {
     if (!this.hasPayee) {
       this.showTip("请先上传收款码");
@@ -515,15 +744,83 @@ export class ZangbaoPanel extends Container {
       return;
     }
     const maxOk = Math.floor(this.kcoin / 10) * 10;
+    this.countMode = false;
     this.enterAmountMode(
       "withdraw",
       String(Math.max(MIN_WITHDRAW_KCOIN, maxOk)),
     );
   }
 
+  /** 装备 / 壶 / 凭证 / 封印卷：整行上架，不可拆数量。 */
+  private listQtyFixed(item: BagItem | null): boolean {
+    if (!item) return true;
+    return (
+      item.kind === "equip" ||
+      isReservoirFlaskItemId(item.itemId) ||
+      isDurableMallPassItemId(item.itemId) ||
+      item.itemId === ROLE_SEAL_SCROLL_ITEM_ID
+    );
+  }
+
+  private canAdjustListCount(item: BagItem | null): boolean {
+    if (!item || this.listQtyFixed(item)) return false;
+    return bagVisibleStackCount(item) > 1;
+  }
+
+  private maxListCount(item: BagItem | null): number {
+    if (!item) return 1;
+    if (this.listQtyFixed(item)) return Math.max(1, item.count || 1);
+    return Math.max(1, bagVisibleStackCount(item));
+  }
+
+  private defaultListCount(item: BagItem): number {
+    if (this.listQtyFixed(item)) return Math.max(1, item.count || 1);
+    return Math.max(1, bagVisibleStackCount(item));
+  }
+
+  private clampListCount(): void {
+    const row = this.bag[this.rowIndex];
+    const max = this.maxListCount(row ?? null);
+    this.listCount = Math.max(1, Math.min(this.listCount || 1, max));
+  }
+
+  private adjustListCount(dir: -1 | 1): void {
+    const row = this.bag[this.rowIndex];
+    if (!row || !this.canAdjustListCount(row)) {
+      this.showTip("该物品不可拆分数量");
+      return;
+    }
+    const max = this.maxListCount(row);
+    this.listCount = ((this.listCount - 1 + dir + max) % max) + 1;
+    this.redraw();
+  }
+
+  /** 上架页：可堆叠先选数量，其余直接定价。 */
+  private beginListFromBag(): void {
+    if (!this.bag.length) {
+      this.showTip("背包为空");
+      return;
+    }
+    const row = this.bag[this.rowIndex];
+    if (!row) {
+      this.showTip("请选择物品");
+      return;
+    }
+    this.listCount = this.defaultListCount(row);
+    if (this.canAdjustListCount(row)) {
+      this.countMode = true;
+      this.redraw();
+      this.notifySoftkeys();
+      return;
+    }
+    this.countMode = false;
+    this.enterAmountMode("list", String(MIN_PRICE_KCOIN));
+  }
+
   private enterAmountMode(kind: AmountKind, digits: string): void {
     this.amountKind = kind;
     this.priceMode = true;
+    this.countMode = false;
     this.priceDigits = digits;
     this.redraw();
     this.notifySoftkeys();
@@ -555,10 +852,19 @@ export class ZangbaoPanel extends Container {
       this.showTip(`价格至少${MIN_PRICE_KCOIN}酷币`);
       return;
     }
+    this.clampListCount();
+    const count = this.listQtyFixed(row)
+      ? Math.max(1, row.count || 1)
+      : this.listCount;
     this.priceMode = false;
+    this.countMode = false;
     this.amountKind = "list";
     this.notifySoftkeys();
-    this.onAction?.("list", { bagSeq: row.seq, priceKcoin: amount });
+    this.onAction?.("list", {
+      bagSeq: row.seq,
+      priceKcoin: amount,
+      count,
+    });
   }
 
   private currentRows(): unknown[] {
@@ -633,67 +939,101 @@ export class ZangbaoPanel extends Container {
     const lines: EquipPaintLine[] = [];
     if (this.sealTab === "panel") {
       const role = d.role;
-      lines.push({
-        kind: "text",
-        text: `${role.name} Lv${role.level}`,
-        color: CBE.ink,
-      });
-      lines.push({
-        kind: "text",
-        text: `职业${role.job} ${role.sex ? "女" : "男"}`,
-        color: CBE.inkLabel,
-      });
-      lines.push({
-        kind: "text",
-        text: `HP ${role.hp}/${role.hpMax}`,
-        color: CBE.inkBody,
-      });
-      lines.push({
-        kind: "text",
-        text: `MP ${role.mp}/${role.mpMax}`,
-        color: CBE.inkBody,
-      });
-      lines.push({
-        kind: "text",
-        text: `金 ${Math.floor(role.money / 10000)} 经验 ${role.exp}`,
-        color: CBE.inkMint,
-      });
+      const jobName = roleJobDisplayName(role.job);
+      const panelRows: { label: string; value: string }[] = [
+        { label: "名称", value: role.name || "-" },
+        { label: "称号", value: role.title || "无" },
+        { label: "等级", value: String(role.level) },
+        {
+          label: "职业",
+          value: `${jobName} ${role.sex ? "女" : "男"}`,
+        },
+        { label: "配偶", value: role.spouse || "无" },
+        { label: "帮派", value: role.guild || "无帮派" },
+        { label: "魅力", value: String(role.charm ?? 0) },
+        {
+          label: "生命",
+          value: `${role.hp}/${role.hpMax}`,
+        },
+        {
+          label: "法力",
+          value: `${role.mp}/${role.mpMax}`,
+        },
+        {
+          label: "经验",
+          value: formatPanelLevelExp(role.exp, role.level),
+        },
+        { label: "力量", value: String(role.strength ?? 0) },
+        { label: "敏捷", value: String(role.agility ?? 0) },
+        { label: "智慧", value: String(role.wisdom ?? 0) },
+        { label: "物攻", value: String(role.attack ?? 0) },
+        { label: "护甲", value: String(role.armor ?? 0) },
+        { label: "躲闪", value: String(role.dodge ?? 0) },
+        {
+          label: "命中",
+          value: String(Math.max(0, (role.hit ?? 0) - 101)),
+        },
+        { label: "暴击", value: String(role.crit ?? 0) },
+        { label: "抗性", value: String(role.resist ?? 0) },
+        {
+          label: "反伤",
+          value: `${role.reflectPct ?? 0}%`,
+        },
+        {
+          label: "连击",
+          value: `${role.comboPct ?? 0}%`,
+        },
+        {
+          label: "复活",
+          value: `${role.revivePct ?? 0}%`,
+        },
+        {
+          label: "活力",
+          value: `${role.vitality ?? 0}/${role.vitalityMax ?? 0}`,
+        },
+        {
+          label: "金钱",
+          value: `${Math.floor((role.money ?? 0) / 10000)}金`,
+        },
+        { label: "酷宝", value: String(role.wcoin ?? 0) },
+        { label: "酷币", value: String(role.kcoin ?? 0) },
+      ];
       if (role.scene) {
+        panelRows.push({
+          label: "场景",
+          value: role.scene.slice(0, 20),
+        });
+      }
+      for (const row of panelRows) {
         lines.push({
-          kind: "text",
-          text: `场景 ${role.scene}`.slice(0, 28),
-          color: CBE.inkLabel,
+          kind: "kv",
+          key: `${row.label} `,
+          value: row.value,
+          keyColor: CBE.inkLabel,
+          valueColor: CBE.ink,
         });
       }
       return lines;
     }
-    const rows =
-      this.sealTab === "equip"
-        ? d.equipment.map(
-            (e) =>
-              `[${e.slot}] ${lookupItemSync(e.itemId)?.name || "#" + e.itemId}${
-                e.enhanceLevel > 0 ? `+${e.enhanceLevel}` : ""
-              }`,
-          )
-        : this.sealTab === "bag"
-          ? d.backpack.map(
-              (e) =>
-                `${lookupItemSync(e.itemId)?.name || "#" + e.itemId}${
-                  e.enhanceLevel > 0 ? `+${e.enhanceLevel}` : ""
-                } x${e.count}`,
-            )
-          : d.warehouse.map(
-              (e) =>
-                `${lookupItemSync(e.itemId)?.name || "#" + e.itemId}${
-                  e.enhanceLevel > 0 ? `+${e.enhanceLevel}` : ""
-                } x${e.count}`,
-            );
+    if (this.sealItemOpen) {
+      const rows = this.sealListRows();
+      const row = rows[this.sealListCursor];
+      if (!row) {
+        return [{ kind: "text", text: "无物品", color: CBE.inkMint }];
+      }
+      return this.sealItemDetailLines(row);
+    }
+    const rows = this.sealListRows();
     if (!rows.length) {
       lines.push({ kind: "text", text: "空", color: CBE.inkMint });
       return lines;
     }
-    for (const t of rows) {
-      lines.push({ kind: "text", text: t.slice(0, 28), color: CBE.inkBody });
+    for (const row of rows) {
+      lines.push({
+        kind: "text",
+        text: this.sealRowLabel(row),
+        color: CBE.inkBody,
+      });
     }
     return lines;
   }
@@ -712,39 +1052,78 @@ export class ZangbaoPanel extends Container {
     const tipY = panelSafeFootY(bodyTop + bodyH - 16);
     const acts = this.detailActions();
     const btnH = 18;
-    const actionH = acts.length * (btnH + 2) + 8;
-    const actionTop = tipY - actionH;
+    const hideActions = this.sealItemOpen;
+    const actionH = hideActions ? 0 : acts.length * (btnH + 2) + 8;
+    const actionTop = tipY - Math.max(actionH, 8);
     const isSeal =
       r.itemId === ROLE_SEAL_SCROLL_ITEM_ID &&
-      (!!r.sealedRole || !!this.sealDetail);
+      (!!r.sealedRole ||
+        !!this.sealDetail ||
+        this.sealLoading ||
+        (r.itemInstanceId ?? 0) > 0);
 
     const titleH = 20;
     this.bg.rect(x + 6, bodyTop, w - 12, titleH).fill({ color: CBE.bgPanelDark });
     const en = r.enhanceLevel > 0 ? `+${r.enhanceLevel}` : "";
-    const sealName = r.sealedRole?.name ? `[印]${r.sealedRole.name}` : "";
+    const sealName =
+      r.sealedRole?.name
+        ? `[印]${r.sealedRole.name}`
+        : this.sealDetail?.role?.name
+          ? `[印]${this.sealDetail.role.name}`
+          : "";
+    let titleText = `${sealName || item.name}${en}`.slice(0, 22);
+    if (this.sealItemOpen) {
+      const row = this.sealListRows()[this.sealListCursor];
+      if (row) {
+        const it = this.sealRowAsBagItem(row);
+        titleText = `${it.name}${it.enhance > 0 ? `+${it.enhance}` : ""}`.slice(
+          0,
+          22,
+        );
+      }
+    }
     this.addLabelCentered(
-      `${sealName || item.name}${en}`.slice(0, 22),
+      titleText,
       LCD_WIDTH / 2,
       bodyTop + titleH / 2,
-      qColor,
+      this.sealItemOpen
+        ? qualityColor(
+            this.sealListRows()[this.sealListCursor]
+              ? this.sealRowAsBagItem(
+                  this.sealListRows()[this.sealListCursor]!,
+                ).quality
+              : item.quality,
+          )
+        : qColor,
     );
 
     const metaY = bodyTop + titleH + 4;
-    this.addLabel(
-      `卖家 ${r.sellerName || "#"}`.slice(0, 26),
-      x + 10,
-      metaY,
-      CBE.inkLabel,
-    );
-    this.addLabel(
-      `售价 ${r.priceKcoin}酷币 x${r.itemCount}`,
-      x + 10,
-      metaY + 14,
-      CBE.inkMint,
-    );
+    if (!this.sealItemOpen) {
+      this.addLabel(
+        `卖家 ${r.sellerName || "#"}`.slice(0, 26),
+        x + 10,
+        metaY,
+        CBE.inkLabel,
+      );
+      this.addLabel(
+        `售价 ${r.priceKcoin}酷币 x${r.itemCount}`,
+        x + 10,
+        metaY + 14,
+        CBE.inkMint,
+      );
+    } else {
+      const tabLabel =
+        this.sealTab === "equip"
+          ? "装备详情"
+          : this.sealTab === "bag"
+            ? "背包详情"
+            : "仓库详情";
+      this.addLabel(tabLabel, x + 10, metaY, CBE.inkLabel);
+      this.addLabel("右键返回列表", x + 10, metaY + 14, CBE.inkMint);
+    }
 
     let bodyY = metaY + 30;
-    if (isSeal) {
+    if (isSeal && !this.sealItemOpen) {
       for (let i = 0; i < SEAL_TABS.length; i++) {
         const t = SEAL_TABS[i]!;
         const on = t.id === this.sealTab;
@@ -759,7 +1138,11 @@ export class ZangbaoPanel extends Container {
             if (this.sealTab === t.id) return;
             this.sealTab = t.id;
             this.detailPage = 0;
+            this.sealListCursor = 0;
+            this.sealItemOpen = false;
+            this.detailActionCursor = 0;
             this.redraw();
+            this.notifySoftkeys();
           }),
         );
       }
@@ -794,14 +1177,53 @@ export class ZangbaoPanel extends Container {
         color: CBE.inkLabel,
       });
     }
+
+    const listSelectMode =
+      isSeal && this.isSealListTab() && !this.sealItemOpen && !!this.sealDetail;
+    const listCount = listSelectMode ? this.sealListRows().length : 0;
     const pageCount = Math.max(1, Math.ceil(lines.length / fitRows));
-    const page = Math.min(Math.max(0, this.detailPage), pageCount - 1);
+    let page = Math.min(Math.max(0, this.detailPage), pageCount - 1);
+    if (listSelectMode && listCount > 0 && this.sealListCursor < listCount) {
+      page = Math.min(
+        pageCount - 1,
+        Math.floor(this.sealListCursor / fitRows),
+      );
+    }
     this.detailPage = page;
     const start = page * fitRows;
     const pageLines = lines.slice(start, start + fitRows);
     let ly = bodyY;
-    for (const line of pageLines) {
-      const rows = this.paintEquipLine(line, x + 10, ly);
+    for (let i = 0; i < pageLines.length; i++) {
+      const line = pageLines[i]!;
+      const absIdx = start + i;
+      const selected =
+        listSelectMode &&
+        absIdx < listCount &&
+        absIdx === this.sealListCursor &&
+        this.sealListCursor < listCount;
+      if (selected) {
+        this.bg.rect(x + 6, ly - 1, w - 12, rowH).fill({ color: BAG_SELECT });
+      }
+      const paintColor =
+        selected && line.kind === "text"
+          ? { ...line, color: EQUIP_DETAIL_YELLOW }
+          : line;
+      const rows = this.paintEquipLine(paintColor, x + 10, ly);
+      if (listSelectMode && absIdx < listCount) {
+        const hitIdx = absIdx;
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, ly - 1, w - 12, rowH, () => {
+            if (this.sealListCursor === hitIdx && !this.sealItemOpen) {
+              this.openSealItemDetail(hitIdx);
+              return;
+            }
+            this.sealListCursor = hitIdx;
+            this.detailActionCursor = 0;
+            this.redraw();
+            this.notifySoftkeys();
+          }),
+        );
+      }
       ly += rowH * Math.max(1, rows);
     }
     if (pageCount > 1) {
@@ -813,27 +1235,38 @@ export class ZangbaoPanel extends Container {
       );
     }
 
-    this.bg.rect(x + 4, actionTop, w - 8, actionH).fill({ color: CBE.bgPanel });
-    acts.forEach((act, i) => {
-      const hi = i === this.detailActionCursor;
-      const by = actionTop + 4 + i * (btnH + 2);
-      if (hi) this.bg.rect(x + 8, by, w - 16, btnH).fill({ color: BAG_SELECT });
-      this.addLabel(
-        act.label,
-        x + 14,
-        by + 2,
-        hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
-      );
-      const idx = i;
-      this.rowHits.push(
-        attachRowPointerHit(this, x + 8, by, w - 16, btnH, () => {
-          this.detailActionCursor = idx;
-          this.redraw();
-          this.confirm();
-        }),
-      );
-    });
-    this.addLabel("上下选操作 ←→翻页", x + 10, tipY, CBE.inkMint);
+    if (!hideActions) {
+      this.bg.rect(x + 4, actionTop, w - 8, actionH).fill({ color: CBE.bgPanel });
+      const listLen = listSelectMode ? listCount : 0;
+      acts.forEach((act, i) => {
+        const hi =
+          i === this.detailActionCursor &&
+          (!listSelectMode || this.sealListCursor >= listLen);
+        const by = actionTop + 4 + i * (btnH + 2);
+        if (hi) this.bg.rect(x + 8, by, w - 16, btnH).fill({ color: BAG_SELECT });
+        this.addLabel(
+          act.label,
+          x + 14,
+          by + 2,
+          hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
+        );
+        const idx = i;
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 8, by, w - 16, btnH, () => {
+            this.detailActionCursor = idx;
+            if (listSelectMode) this.sealListCursor = listLen;
+            this.redraw();
+            this.confirm();
+          }),
+        );
+      });
+    }
+    const tip = this.sealItemOpen
+      ? "←→翻页 右键返回"
+      : listSelectMode
+        ? "上下选 · 确认查看 · ←→翻页"
+        : "上下选操作 ←→翻页";
+    this.addLabel(tip, x + 10, tipY, CBE.inkMint);
   }
 
   /**
@@ -858,9 +1291,11 @@ export class ZangbaoPanel extends Container {
       const itemName = bag
         ? lookupItemSync(bag.itemId)?.name || `#${bag.itemId}`
         : "";
+      this.clampListCount();
+      const qty = this.listCount;
       if (itemName) {
         this.addLabel(
-          `${itemName} x${bag?.count ?? 0}`,
+          `${itemName} x${qty}`,
           x + 10,
           y,
           CBE.inkMint,
@@ -918,6 +1353,64 @@ export class ZangbaoPanel extends Container {
     }
   }
 
+  /** 上架数量选择 — ←→ 调数量，确认进定价。 */
+  private drawCountPicker(x: number, y: number, w: number): void {
+    const bag = this.bag[this.rowIndex];
+    if (!bag) {
+      this.addLabel("请选择物品", x + 10, y, CBE.inkWarn);
+      return;
+    }
+    this.clampListCount();
+    const max = this.maxListCount(bag);
+    const name =
+      bag.itemId === ROLE_SEAL_SCROLL_ITEM_ID && bag.sealedRole?.name
+        ? `[印]${bag.sealedRole.name}`
+        : lookupItemSync(bag.itemId)?.name || `#${bag.itemId}`;
+    this.addLabel(name.slice(0, 28), x + 10, y, CBE.inkMint);
+    this.addLabel(`背包 ${bag.count}`, x + 10, y + 16, CBE.inkLabel);
+
+    const boxY = y + 40;
+    const boxH = 36;
+    this.bg
+      .roundRect(x + 10, boxY, w - 20, boxH, 3)
+      .fill({ color: CBE.bgPanel })
+      .stroke({ width: 1, color: CBE.borderBright });
+    this.addLabelCentered(
+      `⇦ 数量 ${this.listCount}/${max} ⇨`,
+      LCD_WIDTH / 2,
+      boxY + boxH / 2,
+      CBE.inkTipGreen,
+    );
+
+    const btnY = boxY + boxH + 14;
+    const btnW = 64;
+    const btnH = 26;
+    const gap = 16;
+    const leftX = x + Math.floor((w - (btnW * 2 + gap)) / 2);
+    const rightX = leftX + btnW + gap;
+    for (const side of [
+      { label: "−", x: leftX, dir: -1 as const },
+      { label: "+", x: rightX, dir: 1 as const },
+    ]) {
+      this.bg
+        .roundRect(side.x, btnY, btnW, btnH, 3)
+        .fill({ color: CBE.bgDeep })
+        .stroke({ width: 1, color: CBE.borderBright });
+      this.addLabelCentered(
+        side.label,
+        side.x + btnW / 2,
+        btnY + btnH / 2,
+        CBE.inkMint,
+      );
+      this.rowHits.push(
+        attachRowPointerHit(this, side.x, btnY, btnW, btnH, () => {
+          this.adjustListCount(side.dir);
+        }),
+      );
+    }
+    this.addLabel("左右调数量 · 确认定价", x + 10, btnY + btnH + 12, CBE.inkLabel);
+  }
+
   /** webglcontextrestored: remount Graphics then redraw. */
   nudgeAfterGpuResume(): void {
     this.bg = replaceGraphics(this.bg);
@@ -953,6 +1446,11 @@ export class ZangbaoPanel extends Container {
       drawPanelTipOverlay(this, this.tip);
       return;
     }
+    if (this.countMode) {
+      this.drawCountPicker(PANEL_X, y, pw);
+      drawPanelTipOverlay(this, this.tip);
+      return;
+    }
     if (this.detailListing) {
       this.drawDetail(PANEL_X, y, pw, ph - (y - PANEL_Y));
       drawPanelTipOverlay(this, this.tip);
@@ -964,16 +1462,16 @@ export class ZangbaoPanel extends Container {
       this.addLabel(t.label, PANEL_X + 6 + i * 40, y, on ? CBE.ink : CBE.inkMint);
       this.rowHits.push(
         attachRowPointerHit(this, PANEL_X + 4 + i * 40, y, 36, 14, () => {
-          if (this.detailListing) return;
+          if (this.detailListing || this.countMode || this.priceMode) return;
           const tabChanged = this.tab !== t.id;
-          const wasPrice = this.priceMode;
           this.tab = t.id;
           this.rowIndex = 0;
           this.page = 0;
           this.priceMode = false;
+          this.countMode = false;
           this.amountKind = "list";
           this.redraw();
-          if (tabChanged || wasPrice) this.notifySoftkeys();
+          if (tabChanged) this.notifySoftkeys();
         }),
       );
     }
@@ -1045,7 +1543,10 @@ export class ZangbaoPanel extends Container {
       let text = "";
       if (this.tab === "list") {
         const b = slice[i] as BagItem;
-        const name = lookupItemSync(b.itemId)?.name || `#${b.itemId}`;
+        const name =
+          b.itemId === ROLE_SEAL_SCROLL_ITEM_ID && b.sealedRole?.name
+            ? `[印]${b.sealedRole.name}`
+            : lookupItemSync(b.itemId)?.name || `#${b.itemId}`;
         text = `${name} x${b.count} seq${b.seq}`;
       } else {
         const L = slice[i] as ZangbaoListing;

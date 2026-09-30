@@ -527,6 +527,7 @@ const server = http.createServer((req, res) => {
     path === "/api/zangbao/browse" ||
     path === "/api/zangbao/mine" ||
     path === "/api/zangbao/order" ||
+    path === "/api/zangbao/seal-detail" ||
     path === "/api/kcoin/balance" ||
     path === "/api/kcoin/withdraw/list"
   ) {

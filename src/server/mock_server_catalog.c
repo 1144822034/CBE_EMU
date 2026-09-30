@@ -125,13 +125,19 @@ typedef struct
     u32 itemId;
     char name[VM_NET_MOCK_SHOP_NAME_BYTES + 1];
     char description[VM_NET_MOCK_SHOP_DESC_BYTES + 1];
+    /* Mall / 酷宝 unit price (14/5 秘宝、coolmall). */
     u32 price;
+    /* NPC / 铜币 unit price (药商、武器/防具商人). Independent of price. */
+    u32 npcPrice;
     u32 stock;
     u8 stack;
     u8 visual;
     u8 isEquip;
     u8 category;
+    /* Mall shelf (14/5 秘宝等); independent of NPC medicine shelf. */
     u8 enabled;
+    /* NPC 药商货架（HP/MP 药品）；与 enabled 独立，可双通道或全关. */
+    u8 npcEnabled;
     /* 1 once a server_shop_items row was applied (price/enabled override). */
     u8 shopDbListed;
 } vm_net_mock_shop_catalog_item;
@@ -1511,12 +1517,15 @@ static bool vm_net_mock_add_shop_catalog_item(u32 itemId, const u8 *name, u32 na
         item->description[copyLen] = 0;
     }
     item->price = price ? price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    /* DSH 默认：铜币价与商城价同源，后台可再拆开. */
+    item->npcPrice = item->price;
     item->stock = stock ? stock : VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK;
     item->stack = stack ? stack : 1;
     item->visual = visual ? visual : 1;
     item->isEquip = equip ? 1 : 0;
     item->category = (u8)(category > 255 ? 255 : category);
     item->enabled = 1;
+    item->npcEnabled = 0;
     item->shopDbListed = 0;
     return true;
 }
@@ -1729,6 +1738,101 @@ typedef struct
     u32 skipped;
 } vm_net_mock_shop_admin_load_context;
 
+typedef struct
+{
+    bool found;
+    bool invalid;
+} vm_net_mock_shop_migration_marker_context;
+
+static bool vm_net_mock_shop_migration_marker_row(void *contextValue,
+                                                  unsigned int columnCount,
+                                                  const char *const *values,
+                                                  const size_t *lengths)
+{
+    vm_net_mock_shop_migration_marker_context *context =
+        (vm_net_mock_shop_migration_marker_context *)contextValue;
+
+    (void)lengths;
+    if (context == NULL)
+        return true;
+    if (columnCount < 1 || values == NULL || values[0] == NULL)
+    {
+        context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+/* Existing installs: add npc_enabled; one-time backfill of former mall-off
+ * rows (enabled=0) which used to mean「药商上架」via inverted enabled. */
+static void vm_net_mock_shop_admin_ensure_npc_enabled_column(void)
+{
+    vm_net_mock_shop_migration_marker_context marker;
+
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_shop_items ADD COLUMN npc_enabled "
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER enabled");
+    (void)vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS server_data_migrations ("
+        "migration_name VARCHAR(127) CHARACTER SET ascii COLLATE ascii_bin "
+        "NOT NULL,"
+        "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(migration_name)) ENGINE=InnoDB");
+    memset(&marker, 0, sizeof(marker));
+    if (!vm_mysql_query(
+            "SELECT migration_name FROM server_data_migrations "
+            "WHERE migration_name='shop-npc-enabled-v1'",
+            vm_net_mock_shop_migration_marker_row, &marker) ||
+        marker.invalid || marker.found)
+    {
+        return;
+    }
+    (void)vm_mysql_exec(
+        "UPDATE server_shop_items SET npc_enabled=1 WHERE enabled=0");
+    if (vm_mysql_exec(
+            "INSERT IGNORE INTO server_data_migrations(migration_name) "
+            "VALUES('shop-npc-enabled-v1')"))
+    {
+        printf("[info][mock-admin] shop_npc_enabled backfill applied "
+               "(enabled=0 -> npc_enabled=1)\n");
+    }
+}
+
+/* Existing installs: add npc_price; one-time copy from shared price. */
+static void vm_net_mock_shop_admin_ensure_npc_price_column(void)
+{
+    vm_net_mock_shop_migration_marker_context marker;
+
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_shop_items ADD COLUMN npc_price "
+        "INT UNSIGNED NOT NULL DEFAULT 0 AFTER price");
+    (void)vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS server_data_migrations ("
+        "migration_name VARCHAR(127) CHARACTER SET ascii COLLATE ascii_bin "
+        "NOT NULL,"
+        "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(migration_name)) ENGINE=InnoDB");
+    memset(&marker, 0, sizeof(marker));
+    if (!vm_mysql_query(
+            "SELECT migration_name FROM server_data_migrations "
+            "WHERE migration_name='shop-npc-price-v1'",
+            vm_net_mock_shop_migration_marker_row, &marker) ||
+        marker.invalid || marker.found)
+    {
+        return;
+    }
+    (void)vm_mysql_exec(
+        "UPDATE server_shop_items SET npc_price=price WHERE npc_price=0");
+    if (vm_mysql_exec(
+            "INSERT IGNORE INTO server_data_migrations(migration_name) "
+            "VALUES('shop-npc-price-v1')"))
+    {
+        printf("[info][mock-admin] shop_npc_price backfill applied "
+               "(npc_price=price)\n");
+    }
+}
+
 static bool vm_net_mock_shop_admin_db_row(void *contextValue,
                                           unsigned int columnCount,
                                           const char *const *values,
@@ -1738,13 +1842,19 @@ static bool vm_net_mock_shop_admin_db_row(void *contextValue,
         (vm_net_mock_shop_admin_load_context *)contextValue;
     u32 itemId = 0;
     u32 price = 0;
+    u32 npcPrice = 0;
     u32 enabled = 0;
+    u32 npcEnabled = 0;
     vm_net_mock_shop_catalog_item *item = NULL;
 
-    if (context == NULL || columnCount != 3 ||
+    if (context == NULL || columnCount != 5 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &itemId) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &price) || price == 0 ||
-        !vm_mock_mysql_parse_u32(values[2], lengths[2], &enabled) || enabled > 1)
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &npcPrice) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &enabled) ||
+        enabled > 1 ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &npcEnabled) ||
+        npcEnabled > 1)
     {
         if (context != NULL)
             ++context->skipped;
@@ -1764,7 +1874,10 @@ static bool vm_net_mock_shop_admin_db_row(void *contextValue,
         return true;
     }
     item->price = price;
+    /* 0 means legacy row not yet backfilled: keep mall price as copper. */
+    item->npcPrice = npcPrice ? npcPrice : price;
     item->enabled = enabled ? 1 : 0;
+    item->npcEnabled = npcEnabled ? 1 : 0;
     item->shopDbListed = 1;
     ++context->loaded;
     return true;
@@ -1783,12 +1896,22 @@ static bool vm_net_mock_shop_admin_db_load(void)
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_shop_items ("
             "item_id INT UNSIGNED NOT NULL,price INT UNSIGNED NOT NULL,"
+            "npc_price INT UNSIGNED NOT NULL DEFAULT 0,"
             "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "npc_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
-            "PRIMARY KEY(item_id)) ENGINE=InnoDB") ||
-        !vm_mysql_query(
-            "SELECT item_id,price,enabled FROM server_shop_items ORDER BY item_id",
+            "PRIMARY KEY(item_id)) ENGINE=InnoDB"))
+    {
+        printf("[error][mock-admin] shop_item_db_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    vm_net_mock_shop_admin_ensure_npc_enabled_column();
+    vm_net_mock_shop_admin_ensure_npc_price_column();
+    if (!vm_mysql_query(
+            "SELECT item_id,price,npc_price,enabled,npc_enabled "
+            "FROM server_shop_items ORDER BY item_id",
             vm_net_mock_shop_admin_db_row, &context))
     {
         printf("[error][mock-admin] shop_item_db_load failed error=%s\n",
@@ -1801,11 +1924,12 @@ static bool vm_net_mock_shop_admin_db_load(void)
     return true;
 }
 
-static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
+static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, u32 npcPrice,
+                                        bool enabled, bool npcEnabled,
                                         const char **errorOut)
 {
     vm_net_mock_shop_catalog_item *item = NULL;
-    char query[512];
+    char query[720];
 
     if (errorOut)
         *errorOut = "商品参数无效";
@@ -1820,7 +1944,7 @@ static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
             return false;
         }
     }
-    if (itemId == 0 || price == 0)
+    if (itemId == 0 || price == 0 || npcPrice == 0)
         return false;
     for (u32 i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
     {
@@ -1837,9 +1961,13 @@ static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
         return false;
     }
     snprintf(query, sizeof(query),
-             "INSERT INTO server_shop_items(item_id,price,enabled) VALUES(%u,%u,%u) "
-             "ON DUPLICATE KEY UPDATE price=VALUES(price),enabled=VALUES(enabled)",
-             itemId, price, enabled ? 1u : 0u);
+             "INSERT INTO server_shop_items"
+             "(item_id,price,npc_price,enabled,npc_enabled) "
+             "VALUES(%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "price=VALUES(price),npc_price=VALUES(npc_price),"
+             "enabled=VALUES(enabled),npc_enabled=VALUES(npc_enabled)",
+             itemId, price, npcPrice, enabled ? 1u : 0u,
+             npcEnabled ? 1u : 0u);
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
@@ -1847,12 +1975,16 @@ static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
         return false;
     }
     item->price = price;
+    item->npcPrice = npcPrice;
     item->enabled = enabled ? 1 : 0;
+    item->npcEnabled = npcEnabled ? 1 : 0;
     item->shopDbListed = 1;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] shop_item_save item=%u price=%u enabled=%u\n",
-           itemId, price, enabled ? 1u : 0u);
+    printf("[info][mock-admin] shop_item_save item=%u price=%u npc_price=%u "
+           "enabled=%u npc_enabled=%u\n",
+           itemId, price, npcPrice, enabled ? 1u : 0u,
+           npcEnabled ? 1u : 0u);
     return true;
 }
 
@@ -1904,7 +2036,7 @@ static void vm_net_mock_ensure_hunt_order_catalog_item(void)
     if (item == NULL)
         return;
     snprintf(query, sizeof(query),
-             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items WHERE item_id=%u",
              VM_NET_MOCK_HUNT_ORDER_ITEM_ID);
     if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
     {
@@ -1913,13 +2045,15 @@ static void vm_net_mock_ensure_hunt_order_catalog_item(void)
                item->itemId, item->price, item->enabled);
         return;
     }
-    if (!vm_net_mock_shop_admin_save(
-            VM_NET_MOCK_HUNT_ORDER_ITEM_ID,
-            item->price ? item->price : VM_NET_MOCK_HUNT_ORDER_SHOP_PRICE, true,
-            &err))
     {
-        printf("[warn][network] mock_hunt_order_shop_seed_failed error=%s\n",
-               err ? err : "?");
+        u32 seedMall = item->price ? item->price : VM_NET_MOCK_HUNT_ORDER_SHOP_PRICE;
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedMall;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_HUNT_ORDER_ITEM_ID, seedMall,
+                                        seedNpc, true, false, &err))
+        {
+            printf("[warn][network] mock_hunt_order_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
@@ -1971,7 +2105,7 @@ static void vm_net_mock_ensure_force_pk_proof_catalog_item(void)
     if (item == NULL)
         return;
     snprintf(query, sizeof(query),
-             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items WHERE item_id=%u",
              VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID);
     if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
     {
@@ -1980,13 +2114,15 @@ static void vm_net_mock_ensure_force_pk_proof_catalog_item(void)
                item->itemId, item->price, item->enabled);
         return;
     }
-    if (!vm_net_mock_shop_admin_save(
-            VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID,
-            item->price ? item->price : VM_NET_MOCK_FORCE_PK_PROOF_SHOP_PRICE, true,
-            &err))
     {
-        printf("[warn][network] mock_force_pk_proof_shop_seed_failed error=%s\n",
-               err ? err : "?");
+        u32 seedMall = item->price ? item->price : VM_NET_MOCK_FORCE_PK_PROOF_SHOP_PRICE;
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedMall;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_FORCE_PK_PROOF_ITEM_ID, seedMall,
+                                        seedNpc, true, false, &err))
+        {
+            printf("[warn][network] mock_force_pk_proof_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
@@ -2040,7 +2176,7 @@ static void vm_net_mock_ensure_star_sky_stone_catalog_item(void)
     if (item == NULL)
         return;
     snprintf(query, sizeof(query),
-             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items WHERE item_id=%u",
              VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID);
     if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
     {
@@ -2049,13 +2185,15 @@ static void vm_net_mock_ensure_star_sky_stone_catalog_item(void)
                item->itemId, item->price, item->enabled);
         return;
     }
-    if (!vm_net_mock_shop_admin_save(
-            VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID,
-            item->price ? item->price : VM_NET_MOCK_STAR_SKY_STONE_SHOP_PRICE, true,
-            &err))
     {
-        printf("[warn][network] mock_star_sky_stone_shop_seed_failed error=%s\n",
-               err ? err : "?");
+        u32 seedMall = item->price ? item->price : VM_NET_MOCK_STAR_SKY_STONE_SHOP_PRICE;
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedMall;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_STAR_SKY_STONE_ITEM_ID, seedMall,
+                                        seedNpc, true, false, &err))
+        {
+            printf("[warn][network] mock_star_sky_stone_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
@@ -2108,7 +2246,7 @@ static void vm_net_mock_ensure_rename_card_catalog_item(void)
     if (item == NULL)
         return;
     snprintf(query, sizeof(query),
-             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items WHERE item_id=%u",
              VM_NET_MOCK_RENAME_CARD_ITEM_ID);
     if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
     {
@@ -2117,13 +2255,15 @@ static void vm_net_mock_ensure_rename_card_catalog_item(void)
                item->itemId, item->price, item->enabled);
         return;
     }
-    if (!vm_net_mock_shop_admin_save(
-            VM_NET_MOCK_RENAME_CARD_ITEM_ID,
-            item->price ? item->price : VM_NET_MOCK_RENAME_CARD_SHOP_PRICE, true,
-            &err))
     {
-        printf("[warn][network] mock_rename_card_shop_seed_failed error=%s\n",
-               err ? err : "?");
+        u32 seedMall = item->price ? item->price : VM_NET_MOCK_RENAME_CARD_SHOP_PRICE;
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedMall;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_RENAME_CARD_ITEM_ID, seedMall,
+                                        seedNpc, true, false, &err))
+        {
+            printf("[warn][network] mock_rename_card_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
@@ -2193,7 +2333,7 @@ static void vm_net_mock_ensure_gold_scroll_catalog_item(void)
         item->description[copyLen] = 0;
     }
     snprintf(query, sizeof(query),
-             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items WHERE item_id=%u",
              VM_NET_MOCK_GOLD_SCROLL_ITEM_ID);
     if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
     {
@@ -2202,13 +2342,15 @@ static void vm_net_mock_ensure_gold_scroll_catalog_item(void)
                item->itemId, item->price, item->enabled);
         return;
     }
-    if (!vm_net_mock_shop_admin_save(
-            VM_NET_MOCK_GOLD_SCROLL_ITEM_ID,
-            item->price ? item->price : VM_NET_MOCK_GOLD_SCROLL_SHOP_PRICE, true,
-            &err))
     {
-        printf("[warn][network] mock_gold_scroll_shop_seed_failed error=%s\n",
-               err ? err : "?");
+        u32 seedMall = item->price ? item->price : VM_NET_MOCK_GOLD_SCROLL_SHOP_PRICE;
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedMall;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_GOLD_SCROLL_ITEM_ID, seedMall,
+                                        seedNpc, true, false, &err))
+        {
+            printf("[warn][network] mock_gold_scroll_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
@@ -2689,7 +2831,7 @@ static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void)
     if (item == NULL)
         return;
     snprintf(query, sizeof(query),
-             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items WHERE item_id=%u",
              VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID);
     if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
     {
@@ -2698,14 +2840,16 @@ static void vm_net_mock_ensure_crystal_extract_stone_catalog_item(void)
                item->itemId, item->price, item->enabled);
         return;
     }
-    if (!vm_net_mock_shop_admin_save(
-            VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID,
-            item->price ? item->price
-                        : VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_SHOP_PRICE,
-            true, &err))
     {
-        printf("[warn][network] mock_crystal_extract_stone_shop_seed_failed error=%s\n",
-               err ? err : "?");
+        u32 seedMall = item->price ? item->price
+                                   : VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_SHOP_PRICE;
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedMall;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_CRYSTAL_EXTRACT_STONE_ITEM_ID,
+                                        seedMall, seedNpc, true, false, &err))
+        {
+            printf("[warn][network] mock_crystal_extract_stone_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
@@ -2714,14 +2858,15 @@ static void vm_net_mock_ensure_cross_quality_recast_stone_catalog_item(void)
 {
     static const u8 nameGbk[] =
         "\xbf\xe7\xc6\xb7\xd6\xd8\xd6\xfd\xca\xaf"; /* 跨品重铸石 */
-    static const u8 descGbk[] =
+        static const u8 descGbk[] =
         "\xc7\xbf\xbb\xaf\xd7\xaa\xd2\xc6\xca\xb1\xbf\xc9\xbf\xe7\xd7\xb0"
         "\xb1\xb8\xc6\xb7\xd6\xca\xa1\xa3\xbf\xe7\xc6\xb7\xd6\xca\xc8\xb7"
-        "\xcf\xfb\xba\xc4\x31\xb8\xf6\xa3\xac\xcd\xac\xc6\xb7\xd6\xca\xb2"
-        "\xbb\xcf\xfb\xba\xc4\xa3\xbb\xc8\xd4\xd0\xe8\xcd\xac\xc0\xe0\xb2"
-        "\xbf\xce\xbb\xb2\xa2\xbf\xdb\xd6\xd8\xd6\xfd\xbd\xf0\xc7\xae\xa1"
-        "\xa3";
-        /* 强化转移时可跨装备品质。跨品质确认消耗1个，同品质不消耗；仍需同类部位并扣重铸金钱。 */
+        "\xc8\xcf\xcf\xfb\xba\xc4\x31\xb8\xf6\xa3\xac\xcd\xac\xc6\xb7\xd6"
+        "\xca\xb2\xbb\xcf\xfb\xba\xc4\xa3\xbb\xc8\xd4\xd0\xe8\xcd\xac\xc0"
+        "\xe0\xb2\xbf\xce\xbb\xa3\xbb\x2b\x31\xd2\xd4\xc9\xcf\xd6\xd8\xd6"
+        "\xfd\xc1\xed\xba\xc4\x31\xb8\xf6\xd2\xbb\xbc\xb6\xd0\xfe\xbe\xa7"
+        "\xa1\xa3";
+        /* 强化转移时可跨装备品质。跨品质确认消耗1个，同品质不消耗；仍需同类部位；+1以上重铸另耗1个一级玄晶。 */
     const char *err = NULL;
     vm_net_mock_shop_catalog_item *item = NULL;
     vm_net_mock_shop_admin_load_context one;
@@ -2765,7 +2910,7 @@ static void vm_net_mock_ensure_cross_quality_recast_stone_catalog_item(void)
     if (item == NULL)
         return;
     snprintf(query, sizeof(query),
-             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items WHERE item_id=%u",
              VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID);
     if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
     {
@@ -2774,19 +2919,26 @@ static void vm_net_mock_ensure_cross_quality_recast_stone_catalog_item(void)
                item->itemId, item->price, item->enabled);
         return;
     }
-    if (!vm_net_mock_shop_admin_save(
-            VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID,
-            item->price ? item->price
-                        : VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_SHOP_PRICE,
-            true, &err))
     {
-        printf("[warn][network] "
-               "mock_cross_quality_recast_stone_shop_seed_failed error=%s\n",
-               err ? err : "?");
+        u32 seedMall =
+            item->price ? item->price
+                        : VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_SHOP_PRICE;
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedMall;
+        if (!vm_net_mock_shop_admin_save(
+                VM_NET_MOCK_CROSS_QUALITY_RECAST_STONE_ITEM_ID, seedMall, seedNpc,
+                true, false, &err))
+        {
+            printf("[warn][network] "
+                   "mock_cross_quality_recast_stone_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
-/* Pixi 自定义 856 金币堆：1 堆 = 1 万金；可堆叠消耗。不默认商城上架。 */
+/* Pixi 自定义 856 金币堆：1 堆 = 1 万金；可堆叠消耗。不默认商城上架。
+ * DSH 无此 ID：须在 shop_admin_db_load 之后注入，再单独 SELECT 回绑
+ * server_shop_items（与 847+ 自定义道具同契约）。否则批量 load 时目录尚无
+ * 856 → skip，重启会丢掉后台改过的价格/上架状态。 */
 static void vm_net_mock_ensure_gold_pile_catalog_item(void)
 {
     static const u8 nameGbk[] = "\xbd\xf0\xb1\xd2\xb6\xd1"; /* 金币堆 */
@@ -2795,9 +2947,14 @@ static void vm_net_mock_ensure_gold_pile_catalog_item(void)
         "\xa1\xa3\xbf\xc9\xd4\xda\xb2\xd6\xbf\xe2\xd3\xc3\xbd\xf0\xb1\xd2\xb6"
         "\xd2\xbb\xbb\xa1\xa3";
         /* 使用后获得1万金币。可在仓库用金币兑换。 */
+    const char *err = NULL;
     vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
     u32 i = 0;
+    u32 seedPrice = 0;
 
+    memset(&one, 0, sizeof(one));
     for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
     {
         if (g_vm_net_mock_shop_catalog[i].itemId == VM_NET_MOCK_GOLD_PILE_ITEM_ID)
@@ -2808,6 +2965,7 @@ static void vm_net_mock_ensure_gold_pile_catalog_item(void)
     }
     if (item == NULL)
     {
+        /* SHOP_PRICE=0 → add 内抬成 DEFAULT(1)；enabled 先强制 0，避免误上架。 */
         if (!vm_net_mock_add_shop_catalog_item(
                 VM_NET_MOCK_GOLD_PILE_ITEM_ID, nameGbk, sizeof(nameGbk) - 1,
                 descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_GOLD_PILE_SHOP_PRICE,
@@ -2817,10 +2975,25 @@ static void vm_net_mock_ensure_gold_pile_catalog_item(void)
             return;
         }
         vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_GOLD_PILE_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+        if (item != NULL)
+        {
+            item->enabled = 0;
+            item->shopDbListed = 0;
+        }
         printf("[info][network] mock_gold_pile_catalog_added item=%u\n",
                VM_NET_MOCK_GOLD_PILE_ITEM_ID);
-        return;
     }
+    else
     {
         u32 copyLen = vm_net_mock_shop_safe_name_len(
             nameGbk, sizeof(nameGbk) - 1, VM_NET_MOCK_SHOP_NAME_BYTES);
@@ -2833,9 +3006,34 @@ static void vm_net_mock_ensure_gold_pile_catalog_item(void)
         item->category = 10;
         item->stack = 99;
     }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items "
+             "WHERE item_id=%u",
+             VM_NET_MOCK_GOLD_PILE_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) &&
+        one.loaded > 0)
+    {
+        printf("[info][network] mock_gold_pile_catalog_bound item=%u price=%u "
+               "enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    seedPrice = item->price ? item->price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    {
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedPrice;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_GOLD_PILE_ITEM_ID, seedPrice,
+                                        seedNpc, false, false, &err))
+        {
+            printf("[warn][network] mock_gold_pile_shop_seed_failed error=%s\n",
+                   err ? err : "?");
+        }
+    }
 }
 
-/* Pixi 自定义 857 角色封印卷：空白可堆叠；封印绑定 instance。不默认商城上架。 */
+/* Pixi 自定义 857 角色封印卷：空白可堆叠；封印绑定 instance。不默认商城上架。
+ * 同 856：注入后再回绑 MySQL，避免重启覆盖后台价格/上架状态。 */
 static void vm_net_mock_ensure_role_seal_scroll_catalog_item(void)
 {
     static const u8 nameGbk[] =
@@ -2846,9 +3044,14 @@ static void vm_net_mock_ensure_role_seal_scroll_catalog_item(void)
         "\xbd\xc7\xc9\xab\xa1\xa3\xd2\xd1\xb7\xe2\xd3\xa1\xbe\xed\xbf\xc9\xc9"
         "\xcf\xbc\xdc\xb2\xd8\xb1\xa6\xb8\xf1\xa1\xa3";
         /* 空白封印卷，使用后可封印同账号其它角色。已封印卷可上架藏宝阁。 */
+    const char *err = NULL;
     vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
     u32 i = 0;
+    u32 seedPrice = 0;
 
+    memset(&one, 0, sizeof(one));
     for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
     {
         if (g_vm_net_mock_shop_catalog[i].itemId ==
@@ -2869,10 +3072,25 @@ static void vm_net_mock_ensure_role_seal_scroll_catalog_item(void)
             return;
         }
         vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId ==
+                VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+        if (item != NULL)
+        {
+            item->enabled = 0;
+            item->shopDbListed = 0;
+        }
         printf("[info][network] mock_role_seal_scroll_catalog_added item=%u\n",
                VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID);
-        return;
     }
+    else
     {
         u32 copyLen = vm_net_mock_shop_safe_name_len(
             nameGbk, sizeof(nameGbk) - 1, VM_NET_MOCK_SHOP_NAME_BYTES);
@@ -2884,6 +3102,31 @@ static void vm_net_mock_ensure_role_seal_scroll_catalog_item(void)
         item->description[copyLen] = 0;
         item->category = 14;
         item->stack = 99;
+    }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,npc_price,enabled,npc_enabled FROM server_shop_items "
+             "WHERE item_id=%u",
+             VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) &&
+        one.loaded > 0)
+    {
+        printf("[info][network] mock_role_seal_scroll_catalog_bound item=%u "
+               "price=%u enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    seedPrice = item->price ? item->price : VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    {
+        u32 seedNpc = item->npcPrice ? item->npcPrice : seedPrice;
+        if (!vm_net_mock_shop_admin_save(VM_NET_MOCK_ROLE_SEAL_SCROLL_ITEM_ID,
+                                        seedPrice, seedNpc, false, false, &err))
+        {
+            printf("[warn][network] mock_role_seal_scroll_shop_seed_failed "
+                   "error=%s\n",
+                   err ? err : "?");
+        }
     }
 }
 
@@ -3260,6 +3503,19 @@ static u32 vm_net_mock_shop_effective_unit_price(u32 itemId, u32 catalogPrice)
     if (catalogPrice == 0)
         return VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
     return catalogPrice;
+}
+
+/* NPC 铜币单价：优先 npc_price，缺省回落到商城/DSH price. */
+static u32 vm_net_mock_shop_npc_unit_price(
+    const vm_net_mock_shop_catalog_item *item)
+{
+    if (item == NULL)
+        return VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
+    if (item->npcPrice != 0)
+        return item->npcPrice;
+    if (item->price != 0)
+        return item->price;
+    return VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE;
 }
 
 /* web_admin 神兵分区仍用 slot；商城 14/6..13 已停售，不再走货架匹配。 */
