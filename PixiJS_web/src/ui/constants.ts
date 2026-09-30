@@ -31,15 +31,15 @@ export const NAMEPLATE_SCALE = ACTOR_DISPLAY_SCALE;
 export const CBE = {
   bgDeep: 0x0e1b18,
   /** Main panel / content well fill (ref 背包·详情·装备 body). */
-  bgPanel: 0x152421,
-  bgPanelDark: 0x2a4840,
-  bgHudRow: 0x4a6e62,
+  bgPanel: 0x102520,//0x152421,
+  bgPanelDark: 0x1F3C38,
+  bgHudRow: 0x10231F,
   border: 0x548e66,
   borderBright: 0x5c9874,
   borderDim: 0x487460,
   /** Outer frame hairline (ref panel edge). */
   borderOuter: 0x183418,
-  select: 0x2f5248,
+  select: 0x213830,
   ink: 0xffffff,
   inkMint: 0xd0e8d5,
   inkLabel: 0xd5dba5,

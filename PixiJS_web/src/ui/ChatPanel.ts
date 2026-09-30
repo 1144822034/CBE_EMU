@@ -63,6 +63,8 @@ const CHANNELS: ChannelDef[] = [
 ];
 
 const LOCAL_CHANNEL_IDX = 2;
+/** 「统」系统频道 — 打开聊天默认落此标签. */
+const SYSTEM_CHANNEL_IDX = 4;
 const MSG_PAGE = 12;
 /** Same display size as 高清/宋体（{@link UC3_CELL}）；tabs / soft hints already use it. */
 const CHAT_MSG_FONT_SIZE = UC3_CELL;
@@ -179,7 +181,7 @@ export class ChatPanel extends Container {
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
   private entries: ChatEntry[] = [];
-  private channelIdx = 0;
+  private channelIdx = SYSTEM_CHANNEL_IDX;
   private scroll = 0;
   private draft = "";
   private ime = new ChatIme();
@@ -268,7 +270,7 @@ export class ChatPanel extends Container {
     this.sendBusy = false;
     this.clearFocusTimer();
     this.entries = entries.slice();
-    if (!opts?.keepChannel) this.channelIdx = 0;
+    if (!opts?.keepChannel) this.channelIdx = SYSTEM_CHANNEL_IDX;
     this.scroll = 0;
     this.draft = "";
     if (opts && "pm" in opts) {
