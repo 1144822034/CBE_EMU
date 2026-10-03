@@ -1,6 +1,8 @@
 import { Container, Graphics, Sprite, Texture } from "pixi.js";
 import {
   CBE,
+  CBE_TITLE_H,
+  LCD_WIDTH,
   drawCbePanel,
   drawCbePanelVectorCorners,
   drawCbeTitlePill,
@@ -8,7 +10,72 @@ import {
   layoutCbeTitledChrome,
   type CbeTitledChrome,
 } from "./constants";
+import { BitmapLabel } from "./BitmapLabel";
 import { loadUiCrop, tryLoadUiTexture, uiSprite } from "./UiAssets";
+
+/** Horizontal inset so capsule end-caps read against the LCD edge. */
+const LOC_BANNER_INSET = 4;
+/** Dedicated flower hosts so panel `clearCbeFlowerCorners` on a sibling won't wipe the title. */
+const locBannerFlowerHosts = new WeakMap<Container, Container>();
+
+function ensureLocBannerFlowerHost(labelHost: Container): Container {
+  let h = locBannerFlowerHosts.get(labelHost);
+  if (!h || h.destroyed || h.parent !== labelHost) {
+    h = new Container();
+    h.eventMode = "none";
+    labelHost.addChild(h);
+    locBannerFlowerHosts.set(labelHost, h);
+  } else {
+    clearCbeFlowerCorners(h);
+  }
+  return h;
+}
+
+/**
+ * Capsule title chrome for map / login banners (same pill + 边花 as 背包).
+ * `flowerHost` should be a dedicated container (not the panel body host).
+ */
+export function paintLocTitleChrome(
+  g: Graphics,
+  flowerHost: Container,
+  y = 2,
+): { titleX: number; titleY: number; titleW: number; titleH: number; titleCy: number } {
+  const titleH = CBE_TITLE_H;
+  const titleW = LCD_WIDTH - LOC_BANNER_INSET * 2;
+  const titleX = Math.floor((LCD_WIDTH - titleW) / 2);
+  const titleY = y;
+  drawCbeTitlePill(g, titleX + titleW / 2, titleY, titleW, titleH);
+  if (!addCbeTitleSideFlowers(flowerHost, titleX, titleY, titleW, titleH)) {
+    drawCbeTitleSideVectorFlowers(g, titleX, titleY, titleW, titleH);
+  }
+  return {
+    titleX,
+    titleY,
+    titleW,
+    titleH,
+    titleCy: titleY + titleH / 2,
+  };
+}
+
+/**
+ * Floating capsule title strip (login / version / zone / role / map name).
+ * Side flowers live on a child host so body `paintCbePanel` clear won't erase them.
+ */
+export function drawLocBanner(
+  g: Graphics,
+  labelHost: Container,
+  text: string,
+  y = 2,
+): BitmapLabel {
+  const flowerHost = ensureLocBannerFlowerHost(labelHost);
+  const { titleCy } = paintLocTitleChrome(g, flowerHost, y);
+  const t = new BitmapLabel();
+  t.show(text, CBE.ink, { outline: false, smooth: false });
+  t.anchor.set(0.5, 0.5);
+  t.position.set(Math.round(LCD_WIDTH / 2), Math.round(titleCy));
+  labelHost.addChild(t);
+  return t;
+}
 
 /** flowerStyle.gif — 70×38, four 35×19 corner tiles (TL TR BL BR). */
 export const FLOWER_CORNER_W = 35;

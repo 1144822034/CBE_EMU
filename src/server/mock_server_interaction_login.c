@@ -2499,6 +2499,21 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
     objectCount += 1;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     vm_net_mock_mark_direct_scene_enter_completed(&respawnTarget, "battle-death-respawn");
+    role = vm_net_mock_active_role();
+    {
+        vm_mock_service_client_session *respawnSession =
+            vm_mock_service_get_active_client_session();
+
+        if (respawnSession != NULL && role != NULL)
+        {
+            respawnSession->onlineHp = role->hp;
+            respawnSession->onlineHpMax = role->hpMax ? role->hpMax : role->hp;
+            respawnSession->onlineMp = role->mp;
+            respawnSession->onlineMpMax = role->mpMax ? role->mpMax : role->mp;
+            vm_mock_service_session_arm_map_actor_vitals_sync(
+                respawnSession, 0, 0, false);
+        }
+    }
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
 

@@ -7390,10 +7390,26 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
     route = "wmap-neighbor";
 
 resolved_target:
-    if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(smap[targetIndex].scene,
-                                                          &landingX, &landingY, NULL))
     {
-        return false;
+        vm_net_mock_role_state *fromRole = vm_net_mock_active_role();
+        u16 fromX = 1;
+        u16 fromY = 1;
+
+        if (fromRole != NULL)
+        {
+            if (fromRole->x)
+                fromX = fromRole->x;
+            if (fromRole->y)
+                fromY = fromRole->y;
+        }
+        /* Hub spawn is n_telestone, not the nearest edge-portal to map centre. */
+        if (!vm_net_mock_get_scene_nearest_telestone_pos_from_sce(
+                smap[targetIndex].scene, fromX, fromY, &landingX, &landingY) &&
+            !vm_net_mock_get_scene_reasonable_spawn_from_sce(smap[targetIndex].scene,
+                                                              &landingX, &landingY, NULL))
+        {
+            return false;
+        }
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(smap[targetIndex].scene, &landingX, &landingY);
     snprintf(sceneOut, sceneOutCap, "%s", smap[targetIndex].scene);
@@ -9236,6 +9252,23 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
            entryId);
 }
 
+static void vm_net_mock_unstuck_refresh_scene_presence(
+    const vm_net_mock_scene_change_target *target,
+    const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (target == NULL || session == NULL)
+        return;
+    vm_mock_service_session_promote_nearby_after_land(
+        session,
+        target->scene,
+        target->x,
+        target->y,
+        reason ? reason : "settings-unstuck");
+}
+
 static u32 vm_net_mock_build_settings_unstuck_response(const u8 *request, u32 requestLen,
                                                        u8 *out, u32 outCap)
 {
@@ -9257,6 +9290,7 @@ static u32 vm_net_mock_build_settings_unstuck_response(const u8 *request, u32 re
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "settings-unstuck-target");
+    vm_net_mock_unstuck_refresh_scene_presence(&target, "settings-unstuck");
     printf("[info][network] mock_settings_unstuck id=%u scene=%s pos=(%u,%u) response=12/3+16/3 resp=%u\n",
            id, target.scene, target.x, target.y, pos);
     vm_autotest_note("mock_settings_unstuck id=%u scene=%s pos=(%u,%u) response=12/3+16/3 evidence=mmGame:0x5BCA,0x6512,0x11CE,0x0BCC\n",
@@ -9315,6 +9349,7 @@ static u32 vm_net_mock_build_settings_unstuck_16_2_response(const u8 *request, u
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "settings-unstuck-16-2-target");
+    vm_net_mock_unstuck_refresh_scene_presence(&target, "settings-unstuck-16-2");
     printf("[info][network] mock_settings_unstuck_16_2 scene=%s pos=(%u,%u) response=16/2-direct-enter resp=%u\n",
            target.scene, target.x, target.y, pos);
     vm_autotest_note("mock_settings_unstuck_16_2 scene=%s pos=(%u,%u) response=16/2-result1 evidence=mmGame:0x11CE/0x0BCC\n",

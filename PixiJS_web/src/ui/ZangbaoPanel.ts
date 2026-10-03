@@ -16,6 +16,7 @@ import {
   isReservoirFlaskItemId,
   ROLE_SEAL_SCROLL_ITEM_ID,
   roleJobDisplayName,
+  sortBagByName,
   type BagItem,
 } from "../net/protocolExtras";
 import { lookupItemSync, qualityColor, WORN_SLOT_NAMES } from "../resources/itemCatalog";
@@ -117,6 +118,21 @@ function listingAsBagItem(r: ZangbaoListing): BagItem {
   };
 }
 
+function zangbaoListingSortName(r: ZangbaoListing): string {
+  if (r.itemId === ROLE_SEAL_SCROLL_ITEM_ID && r.sealedRole?.name) {
+    return `[印]${r.sealedRole.name}`;
+  }
+  return lookupItemSync(r.itemId)?.name || `#${r.itemId}`;
+}
+
+function sortZangbaoListings(rows: ZangbaoListing[]): ZangbaoListing[] {
+  return rows
+    .slice()
+    .sort((a, b) =>
+      zangbaoListingSortName(a).localeCompare(zangbaoListingSortName(b), "zh"),
+    );
+}
+
 export class ZangbaoPanel extends Container {
   private bg = new Graphics();
   private tip: PanelTipState = createPanelTipState();
@@ -176,9 +192,9 @@ export class ZangbaoPanel extends Container {
     withdraws?: { withdrawId: number; amount: number; status: number }[];
     preferTab?: Tab;
   }): void {
-    this.browse = data.browse || [];
-    this.mine = data.mine || [];
-    this.bag = data.bag || [];
+    this.browse = sortZangbaoListings(data.browse || []);
+    this.mine = sortZangbaoListings(data.mine || []);
+    this.bag = sortBagByName(data.bag || []);
     this.kcoin = data.kcoin || 0;
     this.hasPayee = !!data.hasPayee;
     this.withdrawRows = data.withdraws || [];
@@ -205,9 +221,9 @@ export class ZangbaoPanel extends Container {
       withdraws: { withdrawId: number; amount: number; status: number }[];
     }>,
   ): void {
-    if (partial.browse) this.browse = partial.browse;
-    if (partial.mine) this.mine = partial.mine;
-    if (partial.bag) this.bag = partial.bag;
+    if (partial.browse) this.browse = sortZangbaoListings(partial.browse);
+    if (partial.mine) this.mine = sortZangbaoListings(partial.mine);
+    if (partial.bag) this.bag = sortBagByName(partial.bag);
     if (partial.kcoin != null) this.kcoin = partial.kcoin;
     if (partial.hasPayee != null) this.hasPayee = partial.hasPayee;
     if (partial.withdraws) this.withdrawRows = partial.withdraws;

@@ -12107,16 +12107,97 @@ static void vm_net_mock_copy_normalized_scene_name(const char *scene, char *out,
     }
 }
 
+/*
+ * sMap / unstuck often omit the town `c` prefix (`4临安府_10` vs `c04临安府_10`).
+ * Keep the Chinese middle + slot intact — do NOT fingerprint as digit_slot alone
+ * (that equated unrelated maps sharing prefix+slot and broke portal 切图).
+ */
+static bool vm_net_mock_scene_alias_push(char aliases[][64], u32 *count, u32 cap,
+                                         const char *value)
+{
+    u32 i = 0;
+
+    if (value == NULL || value[0] == 0 || count == NULL || *count >= cap)
+        return false;
+    for (i = 0; i < *count; ++i)
+    {
+        if (strcmp(aliases[i], value) == 0)
+            return true;
+    }
+    snprintf(aliases[*count], 64, "%s", value);
+    ++(*count);
+    return true;
+}
+
+static u32 vm_net_mock_scene_name_town_aliases(const char *scene,
+                                               char aliases[][64],
+                                               u32 aliasCap)
+{
+    char stem[64];
+    const char *p = NULL;
+    const char *rest = NULL;
+    char *endPrefix = NULL;
+    unsigned long prefix = 0;
+    u32 count = 0;
+    char digPlain[16];
+    char digPad2[16];
+    char candidate[64];
+
+    if (aliases == NULL || aliasCap == 0)
+        return 0;
+    vm_net_mock_copy_normalized_scene_name(scene, stem, sizeof(stem));
+    if (stem[0] == 0)
+        return 0;
+    vm_net_mock_scene_alias_push(aliases, &count, aliasCap, stem);
+
+    p = stem;
+    if ((p[0] == 'c' || p[0] == 'C') && p[1] >= '0' && p[1] <= '9')
+        ++p;
+    if (p[0] < '0' || p[0] > '9')
+        return count;
+    prefix = strtoul(p, &endPrefix, 10);
+    if (endPrefix == NULL || endPrefix == p)
+        return count;
+    rest = endPrefix;
+    snprintf(digPlain, sizeof(digPlain), "%lu", prefix);
+    digPad2[0] = 0;
+    if (prefix < 100u)
+        snprintf(digPad2, sizeof(digPad2), "%02lu", prefix);
+
+    snprintf(candidate, sizeof(candidate), "%s%s", digPlain, rest);
+    vm_net_mock_scene_alias_push(aliases, &count, aliasCap, candidate);
+    snprintf(candidate, sizeof(candidate), "c%s%s", digPlain, rest);
+    vm_net_mock_scene_alias_push(aliases, &count, aliasCap, candidate);
+    if (digPad2[0] != 0 && strcmp(digPad2, digPlain) != 0)
+    {
+        snprintf(candidate, sizeof(candidate), "%s%s", digPad2, rest);
+        vm_net_mock_scene_alias_push(aliases, &count, aliasCap, candidate);
+        snprintf(candidate, sizeof(candidate), "c%s%s", digPad2, rest);
+        vm_net_mock_scene_alias_push(aliases, &count, aliasCap, candidate);
+    }
+    return count;
+}
+
 static bool vm_net_mock_scene_names_equal_loose(const char *a, const char *b)
 {
-    char normalizedA[64];
-    char normalizedB[64];
+    char aliasesA[8][64];
+    char aliasesB[8][64];
+    u32 countA = 0;
+    u32 countB = 0;
 
-    vm_net_mock_copy_normalized_scene_name(a, normalizedA, sizeof(normalizedA));
-    vm_net_mock_copy_normalized_scene_name(b, normalizedB, sizeof(normalizedB));
-    return normalizedA[0] != 0 &&
-           normalizedB[0] != 0 &&
-           strcmp(normalizedA, normalizedB) == 0;
+    countA = vm_net_mock_scene_name_town_aliases(a, aliasesA, 8);
+    countB = vm_net_mock_scene_name_town_aliases(b, aliasesB, 8);
+    if (countA == 0 || countB == 0)
+        return false;
+    for (u32 i = 0; i < countA; ++i)
+    {
+        for (u32 j = 0; j < countB; ++j)
+        {
+            if (strcmp(aliasesA[i], aliasesB[j]) == 0)
+                return true;
+        }
+    }
+    return false;
 }
 
 static bool vm_net_mock_add_auto_monster_catalog_item(const u8 *scene,

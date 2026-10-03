@@ -341,34 +341,6 @@ function drawCorner(
 }
 
 /**
- * Full-LCD-width location / title bar (CBE map name strip).
- */
-export function drawLocBanner(
-  g: Graphics,
-  labelHost: Container,
-  text: string,
-  y = 2,
-): BitmapLabel {
-  const h = 24;
-  g.rect(0, y, LCD_WIDTH, h).fill({ color: CBE.titlePill });
-  g.moveTo(0, y + h)
-    .lineTo(LCD_WIDTH, y + h)
-    .stroke({ width: 1, color: CBE.border });
-  // Top edge highlight
-  g.moveTo(0, y)
-    .lineTo(LCD_WIDTH, y)
-    .stroke({ width: 1, color: CBE.borderDim });
-
-  // Map title — follows global TTF (or ?uc3=1 bitmap).
-  const t = new BitmapLabel();
-  t.show(text, CBE.ink, { outline: false, smooth: false });
-  t.anchor.set(0.5, 0.5);
-  t.position.set(Math.round(LCD_WIDTH / 2), Math.round(y + h / 2));
-  labelHost.addChild(t);
-  return t;
-}
-
-/**
  * Create UI text. Default = preferred UC3 pack.
  * `size` is ignored for UC3 cell sizing.
  */
@@ -403,6 +375,8 @@ export function makePixelText(
 export {
   paintCbePanel,
   paintCbeTitledChrome,
+  paintLocTitleChrome,
+  drawLocBanner,
   preloadCbeFlowerCorners,
   clearCbeFlowerCorners,
 } from "./cbePanelCorners";

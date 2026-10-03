@@ -21,7 +21,11 @@ import {
 import { BitmapLabel, wrapChars, measureUiTextWidth } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
 import type { BagItem } from "../net/protocolExtras";
-import { formatCultivationBookName, isCultivationBookItem } from "../net/protocolExtras";
+import {
+  formatCultivationBookName,
+  isCultivationBookItem,
+  sortBagByName,
+} from "../net/protocolExtras";
 import type { TradeOfferItem, TradeOfferView, TradeSessionUpdate } from "../net/protocolSocial";
 import { COPPER_PER_GOLD } from "../net/protocolAuction";
 import { isTradeableItem, lookupItemSync, qualityColor } from "../resources/itemCatalog";
@@ -1338,10 +1342,12 @@ export class TradePanel extends Container {
 }
 
 function filterTradeBag(bag: BagItem[]): BagItem[] {
-  return bag.filter(
-    (b) =>
-      b.seq > 0 &&
-      isTradeableItem(b.itemId, { enhance: b.enhance, kind: b.kind }),
+  return sortBagByName(
+    bag.filter(
+      (b) =>
+        b.seq > 0 &&
+        isTradeableItem(b.itemId, { enhance: b.enhance, kind: b.kind }),
+    ),
   );
 }
 
@@ -1367,37 +1373,48 @@ function cloneTradePanelSnap(snap: TradePanelSnap): TradePanelSnap {
   };
 }
 
+/** Empty stall snap used when folding session updates without a prior UI capture. */
+export function emptyTradePanelSnap(
+  peerName: string,
+  bag?: BagItem[],
+): TradePanelSnap {
+  return {
+    peerName: peerName || "对方",
+    bag: filterTradeBag(bag ?? []),
+    myMoney: 0,
+    myItems: [],
+    peerOffer: { money: 0, items: [] },
+    waitingPeer: false,
+    offerSubmitted: false,
+    peerSubmitted: false,
+    flowStep: 1,
+    mode: "list",
+    listCursor: 0,
+    bagScroll: 0,
+    pickQty: 1,
+    moneyDraft: "",
+    moneyMax: 0,
+  };
+}
+
 /**
- * Fold a background trade session update into a per-slot snap.
+ * Fold a background / mid-switch trade session update into a per-slot snap.
  * Returns null when the stall should close (cancel / done).
+ * When snap is null, bootstraps from peerName so 21/6 is not dropped.
  */
 export function foldTradeSessionSnap(
   snap: TradePanelSnap | null,
   u: TradeSessionUpdate,
   bag?: BagItem[],
+  peerName?: string,
 ): TradePanelSnap | null {
   if (u.kind === "open") {
-    return {
-      peerName: u.peerName || "对方",
-      bag: filterTradeBag(bag ?? []),
-      myMoney: 0,
-      myItems: [],
-      peerOffer: { money: 0, items: [] },
-      waitingPeer: false,
-      offerSubmitted: false,
-      peerSubmitted: false,
-      flowStep: 1,
-      mode: "list",
-      listCursor: 0,
-      bagScroll: 0,
-      pickQty: 1,
-      moneyDraft: "",
-      moneyMax: 0,
-    };
+    return emptyTradePanelSnap(u.peerName || peerName || "对方", bag);
   }
   if (u.kind === "cancel" || u.kind === "done") return null;
-  if (!snap) return null;
-  const next = cloneTradePanelSnap(snap);
+  const base =
+    snap ?? emptyTradePanelSnap(peerName || "对方", bag);
+  const next = cloneTradePanelSnap(base);
   if (u.kind === "peer_offer") {
     next.peerOffer = {
       money: u.offer.money >>> 0,

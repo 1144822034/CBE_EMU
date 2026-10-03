@@ -27,6 +27,7 @@ import {
 } from "./ItemArt";
 import {
   canCombineCrystalFragment,
+  canBatchCombineCrystalFragment,
   canCombineDreamBadge,
   canCombineEnhanceCrystal,
   canCombineGem,
@@ -38,6 +39,7 @@ import {
   parseGemItem,
   formatCultivationBookName,
   formatRoleSealScrollName,
+  sortBagByName,
   isChestBoxItem,
   isCrystalFragment,
   isCultivationBookItem,
@@ -1347,8 +1349,10 @@ export class SystemPanel extends Container {
           acts.push("换宝石");
         }
       } else if (isCrystalFragment(it.itemId)) {
-        // 玄晶碎片：≥10 →「合成」一级玄晶
+        // 玄晶碎片：≥10 →「合成」一级玄晶；≥20 →「批量合成」
         if (canCombineCrystalFragment(it.itemId, it.count)) acts.push("合成");
+        if (canBatchCombineCrystalFragment(it.itemId, it.count))
+          acts.push("批量合成");
       } else if (isGemFragment(it.itemId)) {
         if (canCombineGemFragment(it.itemId, it.count)) acts.push("合成");
         if (canBatchCombineGemFragment(it.itemId, it.count)) acts.push("批量合成");
@@ -3055,13 +3059,6 @@ export class SystemPanel extends Container {
 
 function bagCatalogName(it: BagItem): string {
   return lookupItemSync(it.itemId)?.name ?? it.name;
-}
-
-/** UI list order: Chinese collation on the name the player sees. */
-function sortBagByName(items: BagItem[]): BagItem[] {
-  return items
-    .slice()
-    .sort((a, b) => bagItemDisplayName(a).localeCompare(bagItemDisplayName(b), "zh"));
 }
 
 function cultivationBookDisplayName(it: BagItem): string {

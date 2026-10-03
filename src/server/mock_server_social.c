@@ -2300,6 +2300,16 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         g_vm_net_mock_teleport_stone_direct_enter_pending = false;
         g_vm_net_mock_teleport_stone_map_enter_pending = false;
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        {
+            vm_mock_service_client_session *enterSession =
+                vm_mock_service_get_active_client_session();
+            vm_mock_service_session_promote_nearby_after_land(
+                enterSession,
+                target.scene,
+                target.x,
+                target.y,
+                "scene-change-post-enter-repeat");
+        }
         printf("[info][network] mock_scene_change_post_enter_repeat_ack scene=%s pos=(%u,%u) objects=%u resp=%u age=%u\n",
                target.scene,
                target.x,
@@ -2417,6 +2427,8 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     objectCount += 1;
     vm_net_mock_mark_completed_scene_change_target(&target);
     {
+        vm_mock_service_client_session *enterSession =
+            vm_mock_service_get_active_client_session();
         u8 addedNearbyObjects = vm_net_mock_append_scene_nearby_role_objects(out,
                                                                              outCap,
                                                                              &pos,
@@ -2434,6 +2446,12 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
                    nearbyMoveinfoCount,
                    pos);
         }
+        vm_mock_service_session_promote_nearby_after_land(
+            enterSession,
+            target.scene,
+            target.x,
+            target.y,
+            "scene-change-post-enter-complete");
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
@@ -6979,6 +6997,12 @@ static u32 vm_net_mock_try_deliver_pending_team_follow_scene_enter(
     g_vm_net_mock_scene_moveinfo_npc_wait_post_enter = true;
     vm_mock_service_session_clear_scene_npc_catalog_seeded(
         session, "team-follow-enter");
+    vm_mock_service_session_promote_nearby_after_land(
+        session,
+        target.scene,
+        target.x,
+        target.y,
+        "team-follow-enter");
 
     printf("[info][network] mock_team_follow_enter client=%08x scene=%s "
            "pos=(%u,%u) via=%s response=30/1 evidence=leader-transfer-follow\n",

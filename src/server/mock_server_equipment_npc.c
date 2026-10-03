@@ -2736,17 +2736,21 @@ static u32 vm_net_mock_build_crystal_combine_response(const u8 *request,
 }
 
 /*
- * PixiJS-only 玄晶碎片合成: 1/29/11 { seq }.
- * Consume 10× item 900 → grant 1× 一级玄晶(901).
- * If 901 already in bag, stack +1; else need a free slot (consuming a full
- * stack of exactly 10 frees one slot before grant).
- * result: 1=ok, 2=bad item, 3=bag full, 4=count<10.
+ * PixiJS-only 玄晶碎片合成: 1/29/11 { seq, times? }.
+ * 每次消耗 10× item 900 → 发放 1× 一级玄晶(901)。
+ * times 缺省为 1；批量合成把本格能凑满的次数一次做完。
+ * If 901 already in bag, stack +times; else need a free slot (consuming the
+ * whole fragment stack frees one slot before grant).
+ * result: 1=ok, 2=bad item, 3=bag full, 4=count insufficient.
  */
 static u32 vm_net_mock_build_crystal_fragment_combine_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u32 offset = 4;
     u32 seqValue = 0;
+    u32 timesValue = 0;
+    u32 times = 1;
+    u32 needCost = 0;
     u32 objectStart = 0;
     u32 pos = 5;
     u8 objectCount = 1;
@@ -2759,6 +2763,8 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
     u32 destCount = 0;
     const u32 cost = (u32)VM_NET_MOCK_CRYSTAL_FRAGMENT_COMBINE_COST;
     const char *reason = "ok";
+    const char *message = "";
+    char messageStore[48];
     vm_net_mock_request_object object;
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_backpack_item_state *src = NULL;
@@ -2780,21 +2786,33 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
         return 0;
     }
     srcSeq = (u16)seqValue;
+    if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                            "times", &timesValue))
+        times = timesValue;
 
     role = vm_net_mock_active_role();
-    if (role == NULL)
+    if (times == 0 || cost == 0 || times > (0xffffffffu / cost))
+    {
+        result = 2;
+        reason = "bad-times";
+        message = "合成数量无效";
+    }
+    else if (role == NULL)
     {
         result = 2;
         reason = "no-role";
+        message = "角色无效";
     }
     else
     {
         vm_net_mock_role_normalize_backpack(role);
         src = vm_net_mock_role_find_backpack_item(role, 0, srcSeq);
+        needCost = cost * times;
         if (src == NULL || src->count == 0)
         {
             result = 2;
             reason = "fragment-not-found";
+            message = "碎片不存在";
         }
         else
         {
@@ -2803,11 +2821,13 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
             {
                 result = 2;
                 reason = "not-fragment";
+                message = "不是玄晶碎片";
             }
-            else if (src->count < cost)
+            else if (src->count < needCost)
             {
                 result = 4;
                 reason = "count-lt-10";
+                message = times > 1 ? "碎片不足" : "碎片不足10个";
             }
             else
             {
@@ -2815,12 +2835,13 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
                 u32 freeSlots = role->backpackCapacity > itemCount
                                     ? (u32)role->backpackCapacity - itemCount
                                     : 0;
-                bool freesSlot = (src->count == cost);
+                bool freesSlot = (src->count == needCost);
                 dest = vm_net_mock_role_find_backpack_item(role, destItemId, 0);
                 if (dest == NULL && freeSlots == 0 && !freesSlot)
                 {
                     result = 3;
                     reason = "bag-full";
+                    message = "背包空间不足";
                 }
             }
         }
@@ -2829,27 +2850,41 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
     if (result == 1 && role != NULL && src != NULL)
     {
         if (!vm_net_mock_role_consume_backpack_item(role, srcItemId, srcSeq,
-                                                     cost, &srcRemaining))
+                                                     needCost, &srcRemaining))
         {
             result = 4;
             reason = "consume-failed";
+            message = "扣除失败";
         }
         else if (!vm_net_mock_role_add_backpack_item_to_role(
-                     role, destItemId, 1, 0, &destSeq,
+                     role, destItemId, times, 0, &destSeq,
                      "crystal-fragment-combine", NULL, 0))
         {
             (void)vm_net_mock_role_add_backpack_item_to_role(
-                role, srcItemId, cost, 0, NULL,
+                role, srcItemId, needCost, 0, NULL,
                 "crystal-fragment-combine-rollback", NULL, 0);
             result = 3;
             reason = "grant-failed";
-            srcRemaining = srcRemaining + cost;
+            message = "背包空间不足";
+            srcRemaining = srcRemaining + needCost;
         }
         else
         {
             dest = vm_net_mock_role_find_backpack_item(role, destItemId, destSeq);
-            destCount = dest ? dest->count : 1;
+            /* times=1 仍回报该格堆叠数；批量回报本次产出颗数。 */
+            destCount = times > 1 ? times : (dest ? dest->count : 1);
+            if (!vm_net_mock_role_db_save("crystal-fragment-combine"))
+                vm_net_mock_role_mark_inventory_dirty(
+                    "crystal-fragment-combine");
             reason = "fragment-combine-ok";
+            if (times > 1)
+            {
+                snprintf(messageStore, sizeof(messageStore),
+                         "合成成功，获得%u个一级玄晶", times);
+                message = messageStore;
+            }
+            else
+                message = "合成成功";
         }
     }
 
@@ -2861,21 +2896,23 @@ static u32 vm_net_mock_build_crystal_fragment_combine_response(
         !vm_net_mock_put_object_u32(out, outCap, &pos, "destid", destItemId) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining",
                                     srcRemaining) ||
-        !vm_net_mock_put_object_u32(out, outCap, &pos, "destcount", destCount))
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "destcount", destCount) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "times", times) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "message", message))
     {
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     printf("[info][network] mock_crystal_fragment_combine seq=%u src=%u "
-           "dest=%u src_remain=%u dest_count=%u result=%u reason=%s "
+           "dest=%u times=%u src_remain=%u dest_count=%u result=%u reason=%s "
            "resp=29/11\n",
-           srcSeq, srcItemId, destItemId, srcRemaining, destCount, result,
+           srcSeq, srcItemId, destItemId, times, srcRemaining, destCount, result,
            reason);
     vm_autotest_note(
-        "mock_crystal_fragment_combine seq=%u src=%u dest=%u result=%u "
-        "reason=%s evidence=pixijs-only-29/11\n",
-        srcSeq, srcItemId, destItemId, result, reason);
+        "mock_crystal_fragment_combine seq=%u src=%u dest=%u times=%u "
+        "result=%u reason=%s evidence=pixijs-only-29/11\n",
+        srcSeq, srcItemId, destItemId, times, result, reason);
     return pos;
 }
 
@@ -12389,7 +12426,6 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     if (session == NULL)
         return;
     hadPresence = session->onlinePresenceValid;
-    session->onlinePresenceValid = false;
     role = vm_net_mock_active_role();
     if (role == NULL)
         return;
@@ -12476,7 +12512,12 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
         y = session->sceneVisibleY;
     }
     if (!vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0)
+    {
+        /* Do not wipe a good presence snapshot on a transient bad role row. */
+        if (hadPresence)
+            session->onlinePresenceValid = true;
         return;
+    }
     vitalsChanged = hadPresence && session->onlineRoleId == role->roleId &&
                     (session->onlineHp != hp ||
                      session->onlineHpMax != hpMax ||
@@ -12642,6 +12683,58 @@ static void vm_mock_service_team_enqueue_hsp_resync_for_client(
             session, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP, 0,
             peer, NULL, peer->accountId);
     }
+}
+
+/*
+ * After any mmGame shell remount (portal, map-stone, unstuck, team-follow):
+ * promote sceneVisibleReady, refresh presence, drop stale peerSync cursors,
+ * and nudge teammates to relearn map vitals so 2/10 / 2/7 can list party mates.
+ */
+static void vm_mock_service_session_promote_nearby_after_land(
+    vm_mock_service_client_session *session,
+    const char *scene,
+    u16 x,
+    u16 y,
+    const char *reason)
+{
+    vm_mock_service_team *team = NULL;
+
+    if (session == NULL || !vm_net_mock_scene_name_is_safe(scene) ||
+        x == 0 || y == 0)
+    {
+        return;
+    }
+    vm_mock_service_capture_session_presence(session->clientId);
+    if (!session->sceneVisibleReady ||
+        session->sceneVisiblePending ||
+        !vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene) ||
+        session->sceneVisibleX != x ||
+        session->sceneVisibleY != y)
+    {
+        vm_mock_service_session_mark_scene_ready(session, scene, x, y,
+                                                 reason ? reason : "nearby-promote");
+    }
+    vm_mock_service_session_invalidate_nearby_observer_cursors(
+        session, reason ? reason : "nearby-promote");
+    /*
+     * Mates still holding peerSync.visible=1 for this seat skip 2/10 baseline
+     * after shell remount / unstuck.  Drop their cursors so the next poll
+     * re-seeds the lander (and lander↔mate stay mutual).
+     */
+    team = vm_mock_service_team_find_for_client(session->clientId);
+    if (team != NULL && team->active && team->memberCount >= 2)
+    {
+        for (u8 i = 0; i < team->memberCount; ++i)
+        {
+            vm_mock_service_client_session *mate =
+                vm_mock_service_find_client_session(team->memberClientIds[i]);
+            if (mate == NULL || mate->clientId == session->clientId)
+                continue;
+            vm_mock_service_session_invalidate_nearby_observer_cursors(
+                mate, reason ? reason : "nearby-promote-mate");
+        }
+    }
+    vm_mock_service_team_enqueue_hsp_resync_for_client(session);
 }
 
 static void vm_mock_service_team_enqueue_shop_return_peer_joins(

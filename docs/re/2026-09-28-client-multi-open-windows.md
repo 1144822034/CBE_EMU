@@ -39,7 +39,7 @@
 | 赏金「擂」闪 | `leiBlink`；后台 `onWagerEvent` 写槽并入聊天 |
 | 环任务 tracker | `cachedRingStatus` |
 | 挂机结算累计 | `hangupTally`（`BattleScreen` 切号 reset/restore） |
-| 交易摊位 | `tradeUiSnap`：切号不取消协议交易；后台 `onTradeSession` fold 进槽，切回 restore |
+| 交易摊位 | `tradeUiSnap`：切号不取消协议交易；后台/`accountSwitchInFlight` 期 `onTradeSession` 只 fold 进槽（避免写脏共享 TradePanel）；切回 restore；活跃更新后同步 snap |
 | 洗炼/确认框/自动臂 | 切号 `washUi.close` + `clearTransientUiPending`（丢弃/宝石/好友删等 pending） |
 
 仍共享（单 Pixi 壳）：`SceneView`/`BattleScreen` 实例本身；切号时关 overlay 再按目标槽重建展示。

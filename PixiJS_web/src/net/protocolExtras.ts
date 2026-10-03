@@ -452,6 +452,11 @@ export const EquipSellService = {
   VIEW_BASE: 0xf3000000,
 } as const;
 
+/** High 16 bits as u32 — JS `&` is signed, so 0xf3xxxxxx must be `>>> 0`. */
+function equipSellOpHi(value: number): number {
+  return ((value >>> 0) & 0xffff0000) >>> 0;
+}
+
 /**
  * True when this 26/1 is already inside the equip-sell UI (root / list / detail).
  * Do not treat NPC root dialogs that merely offer OPEN_EQUIP_SELL (e.g. repair NPC
@@ -466,12 +471,11 @@ export function isEquipSellDialog(dialog: NpcDialog): boolean {
     return true;
   }
   return dialog.options.some((o) => {
-    const v = o.value >>> 0;
-    const hi = v & 0xffff0000;
+    const hi = equipSellOpHi(o.value);
     return (
-      hi === EquipSellService.MENU ||
-      hi === EquipSellService.SELL_BASE ||
-      hi === EquipSellService.VIEW_BASE ||
+      hi === (EquipSellService.MENU >>> 0) ||
+      hi === (EquipSellService.SELL_BASE >>> 0) ||
+      hi === (EquipSellService.VIEW_BASE >>> 0) ||
       o.label === "出售装备" ||
       o.label === "出售该装备"
     );
@@ -517,10 +521,107 @@ export function matchEquipSellQuality(
 }
 
 /**
- * Inject client-only batch/quality sell options only on the equip-sell root
- * (same level as 「出售装备」). Bag list / detail / repair NPC outer: no inject.
+ * Display name used for bag-style Chinese collation (seal / 天书 / catalog).
  */
-export function augmentEquipSellDialog(dialog: NpcDialog): NpcDialog {
+export function bagItemSortName(it: BagItem): string {
+  const catalog = lookupItemSync(it.itemId)?.name ?? it.name;
+  if (isRoleSealScroll(it.itemId) && it.sealedRole?.name) {
+    return formatRoleSealScrollName(catalog, it.sealedRole);
+  }
+  if (isCultivationBookItem(it.itemId) && (it.bookLevel ?? 0) > 0) {
+    const base = lookupItemSync(it.itemId)?.name ?? "修炼天书";
+    return formatCultivationBookName(base, it.bookLevel, it.bookFull);
+  }
+  return catalog;
+}
+
+/** UI list order: Chinese collation on the name the player sees. */
+export function sortBagByName(items: BagItem[]): BagItem[] {
+  return items
+    .slice()
+    .sort((a, b) => bagItemSortName(a).localeCompare(bagItemSortName(b), "zh"));
+}
+
+/** True when 26/1 is the sellable-equip pick list (not root / not detail). */
+export function isEquipSellItemListDialog(dialog: NpcDialog): boolean {
+  if (dialog.options.some((o) => o.label === "出售该装备" || o.label === "出售装备")) {
+    return false;
+  }
+  if (
+    /请选择装备查看属性|出售成功|没有可出售|已无可售/.test(dialog.body)
+  ) {
+    return true;
+  }
+  return dialog.options.some(
+    (o) => equipSellOpHi(o.value) === (EquipSellService.VIEW_BASE >>> 0),
+  );
+}
+
+function equipSellListNavOptions(dialog: NpcDialog): NpcDialog["options"] {
+  return dialog.options.filter((o) => {
+    if (equipSellOpHi(o.value) === (EquipSellService.VIEW_BASE >>> 0)) return false;
+    if (o.label === "上一页" || o.label === "下一页") return false;
+    return true;
+  });
+}
+
+function equipSellRefundCopper(it: BagItem): number {
+  const cat = lookupItemSync(it.itemId);
+  if (!cat || cat.price < 10) return 0;
+  return Math.floor(cat.price / 10);
+}
+
+/**
+ * Pixi-only: sell list = bag equips sorted by name (14/page), drop server paging.
+ */
+function augmentEquipSellListFromBag(
+  dialog: NpcDialog,
+  bagItems: BagItem[],
+): NpcDialog {
+  const nav = equipSellListNavOptions(dialog);
+  const seenSeq = new Set<number>();
+  const sellable = sortBagByName(
+    bagItems.filter((it) => {
+      if (it.kind !== "equip" || !(it.seq > 0)) return false;
+      if (seenSeq.has(it.seq)) return false;
+      seenSeq.add(it.seq);
+      return true;
+    }),
+  );
+  if (!sellable.length) {
+    return {
+      ...dialog,
+      options: nav.length ? nav : dialog.options,
+      optionPageSize: WAREHOUSE_LIST_PAGE_SIZE,
+      tallList: true,
+    };
+  }
+  const items: NpcDialog["options"] = sellable.map((it) => ({
+    label: formatWarehouseBagLabel(it),
+    action: 1,
+    value: (EquipSellService.VIEW_BASE | (it.seq & 0xffff)) >>> 0,
+    description: `${equipSellRefundCopper(it)}铜 查看属性`,
+    nameColor: qualityColor(it.quality),
+  }));
+  return {
+    ...dialog,
+    options: [...items, ...nav],
+    optionPageSize: WAREHOUSE_LIST_PAGE_SIZE,
+    tallList: true,
+  };
+}
+
+/**
+ * Inject client-only batch/quality sell options on the equip-sell root, and
+ * rebuild the sellable-equip list from bag (name-sorted, like 背包/仓库).
+ */
+export function augmentEquipSellDialog(
+  dialog: NpcDialog,
+  bagItems: BagItem[] = [],
+): NpcDialog {
+  if (isEquipSellItemListDialog(dialog)) {
+    return augmentEquipSellListFromBag(dialog, bagItems);
+  }
   /* Root only — list「返回」后仍回此页，批量项只在这一层出现一次语义位置。 */
   if (!/请选择要出售的装备/.test(dialog.body)) return dialog;
   if (!dialog.options.some((o) => o.label === "出售装备")) return dialog;
@@ -2021,20 +2122,42 @@ export function canCombineCrystalFragment(
   return isCrystalFragment(itemId) && (count | 0) >= CRYSTAL_FRAGMENT_COMBINE_COST;
 }
 
-export function buildCrystalFragmentCombineRequest(seq: number): Uint8Array {
+/** How many 一级玄晶 one batch of this fragment stack can produce. 0 unless ≥2. */
+export function crystalFragmentCombineBatchTimes(count: number): number {
+  const n = Math.floor(Math.max(0, count | 0) / CRYSTAL_FRAGMENT_COMBINE_COST);
+  return n >= 2 ? n : 0;
+}
+
+/** ≥20 碎片时背包多一个「批量合成」，一次出 floor(count/10) 个一级玄晶。 */
+export function canBatchCombineCrystalFragment(
+  itemId: number,
+  count: number,
+): boolean {
+  return (
+    canCombineCrystalFragment(itemId, count) &&
+    crystalFragmentCombineBatchTimes(count) > 0
+  );
+}
+
+export function buildCrystalFragmentCombineRequest(
+  seq: number,
+  times = 1,
+): Uint8Array {
   const b = new WtBuilder();
-  b.object(1, 29, 11).u32("seq", seq);
+  const obj = b.object(1, 29, 11).u32("seq", seq);
+  const n = times | 0;
+  if (n > 1) obj.u32("times", n >>> 0);
   return b.finish();
 }
 
-function crystalFragmentCombineFailMessage(result: number): string {
+function crystalFragmentCombineFailMessage(result: number, times = 1): string {
   switch (result) {
     case 2:
       return "不是玄晶碎片";
     case 3:
       return "背包空间不足";
     case 4:
-      return "碎片不足10个";
+      return times > 1 ? "碎片不足" : "碎片不足10个";
     default:
       return "合成失败";
   }
@@ -2050,14 +2173,21 @@ export function parseCrystalFragmentCombineResult(
   const destItemId = fieldU32(obj, "destid");
   const remaining = fieldU32(obj, "remaining");
   const destCount = fieldU32(obj, "destcount");
+  const times = fieldU32(obj, "times") || 1;
+  const serverMsg = fieldStringNamed(obj, "message") || "";
   if (result === 1) {
     const name = enhanceCrystalName(
       destItemId || ENHANCE_CRYSTAL_FIRST,
     );
+    const message =
+      serverMsg ||
+      (times > 1
+        ? `合成成功：获得${times}个${name}`
+        : `合成成功：获得${name}`);
     return {
       result,
       ok: true,
-      message: `合成成功：获得${name}`,
+      message,
       srcItemId,
       destItemId,
       remaining,
@@ -2067,7 +2197,7 @@ export function parseCrystalFragmentCombineResult(
   return {
     result,
     ok: false,
-    message: crystalFragmentCombineFailMessage(result),
+    message: serverMsg || crystalFragmentCombineFailMessage(result, times),
     srcItemId,
     destItemId,
     remaining,
@@ -2983,6 +3113,27 @@ export function parseServerSceneLanding(
 export function buildSettingsUnstuckRequest(id = 2): Uint8Array {
   const b = new WtBuilder();
   b.object(1, 0x0c, 3).u32("id", id >>> 0);
+  return b.finish();
+}
+
+/**
+ * After mmGame direct enter (settings 12/3 → 16/3, or compact 16/2):
+ * CBE `scene_runtime_init_and_sync` sends
+ * `1/16/3 { exitID=currentX, type=0 } + empty 27/11 + empty 7/42`.
+ * Server `builtin-scene-runtime-direct-enter-object-stream` answers nonempty
+ * 27/11 for the current scene — portal post-enter must NOT be used here
+ * (completed direct-enter targets only return empty 27/11 repeat acks).
+ * Evidence: docs/re/2026-07-23-unstuck-scene-authority.md.
+ */
+export function buildSceneRuntimeDirectEnterFollowupRequest(
+  posX: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 0x10, 3)
+    .u32("exitID", (posX | 0) & 0xffff)
+    .u8("type", 0);
+  b.object(1, 0x1b, 11);
+  b.object(1, 7, 42);
   return b.finish();
 }
 
@@ -4021,8 +4172,8 @@ function augmentWarehouseDepositFromBag(
   bagItems: BagItem[],
 ): NpcDialog {
   const nav = warehouseNavOptions(dialog, WarehouseService.DEPOSIT_BASE >>> 24);
-  const depositable = bagItems.filter((it) =>
-    isWarehouseDepositableItemId(it.itemId),
+  const depositable = sortBagByName(
+    bagItems.filter((it) => isWarehouseDepositableItemId(it.itemId)),
   );
   if (!depositable.length) {
     return {
@@ -4079,6 +4230,7 @@ export function augmentWarehouseDialog(
   dialog: NpcDialog,
   bagItems: BagItem[],
 ): NpcDialog {
+  if (isEquipSellDialog(dialog)) return dialog;
   if (isWarehouseDepositListDialog(dialog)) {
     return augmentWarehouseDepositFromBag(dialog, bagItems);
   }

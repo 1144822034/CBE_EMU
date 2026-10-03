@@ -197,6 +197,7 @@ import {
   encodeNpcBuyItem,
   isBattleMedicineOrFlask,
   isCrystalFragment,
+  crystalFragmentCombineBatchTimes,
   isDreamBadge,
   isGemFragment,
   isDurableMallPassItemId,
@@ -2998,6 +2999,8 @@ async function main(): Promise<void> {
   setActiveCredSlotId("main");
   const accountSlots = new Map<string, AccountSlot>();
   let multiAccountDialogSlotIds: string[] = [];
+  /** True while switchAccountSlot remounts world — trade packets must fold into snap only. */
+  let accountSwitchInFlight = false;
 
   const uiCallbacks: SessionCallbacks = {
     onStatus: (s) => setChromeStatus(`[${s.mode}] ${s.phase}: ${s.detail}`),
@@ -3116,21 +3119,65 @@ async function main(): Promise<void> {
       );
       // Same-town role switch: showScene skips marker clear on identical map —
       // force catalog/peer refresh so role A's NPCs/players do not linger.
+      // Cross-map: showScene already actors.clear(); clearPeers is still needed
+      // so a same-map remount does not keep the previous role's markers.
       view.actors.clearPeers();
       if (isDreamInstanceScene(loadedScene)) {
         // Ops: dream shells are solo — drop stale outdoor peers / 2/7 paint.
         session.nearbyList = [];
         session.syncMapPeersFromNearbyPage([]);
+      } else {
+        /*
+         * Landing poll / muted slot may have filled scenePeerById before the
+         * shell remount.  Re-paint from cache; otherwise clearPeers leaves the
+         * map empty until a fresh 2/10 baseline (often never re-sent).
+         */
+        const peers = session.mapPeersSnapshot();
+        if (peers.length) {
+          view.actors.applyPeers(peers, []);
+          for (const cos of session.peerCosmeticsSnapshot()) {
+            view.actors.applyPeerCosmetics(
+              cos.actorId,
+              cos.eqChenghao,
+              cos.eqWing,
+              cos.eqMount,
+              cos.guild || "",
+            );
+          }
+        }
       }
       view.actors.setNpcs(session.npcs);
       view.actors.setTaskPrompts(session.npcTaskPrompts);
-      view.actors.setSceneMonsters(session.sceneMonsters);
+      // Collide / hangup write liveSceneMonsters (already-suppressed omitted).
+      // Painting that list on same-shell revive drops suppress rematch AND the
+      // SCE seed — instance death → original-map reenter → fought spawns gone.
+      const combatPaint = session.sceneMonsterCatalog.length
+        ? session.sceneMonsterCatalog
+        : session.sceneMonsters;
+      view.actors.setSceneMonsters(combatPaint);
+      session.sceneMonsters = view.actors.liveSceneMonsters();
       // Instance exit / scene hop can land on SCE combat spawns — brief lockout
       // so the first frames do not auto-start a wild fight before NPCs paint.
       view.armCollideCooldown(3000);
-      // Ordinary death revive (1/7/14 result=2) lands via 20/1+30/1 while battle UI
-      // was still mounted — tear it down with the scene enter.
-      if (phase === "battle") battle.hide();
+      // Late same-shell 30/1 after teleport/poll must not hide a live fight.
+      // Ordinary revive (hp already 0, or 20/1+30/1) must still tear down
+      // mmBattle even when the telestone is on the current map.
+      if (
+        (phase === "battle" || session.inBattle) &&
+        view.showsSceneFile(loadedScene) &&
+        session.hp > 0
+      ) {
+        console.info(
+          `[main] keep battle over same-scene enter ${loadedScene}`,
+        );
+        return;
+      }
+      if (phase === "battle") {
+        // Death leave skips endBattleToWorld — suppressed SCE still has
+        // respawnAt=null and would never tick back without this arm.
+        view.actors.armSuppressedRespawns(8_000);
+        battle.hide();
+      }
       showPhase("world");
       // Soft shell: provisional map-center until server posinfo; don't stamp old-map x/y.
       if (hasPos || session.hasServerPos) {
@@ -3150,6 +3197,11 @@ async function main(): Promise<void> {
       /* Authoritative guild for self nameplate「门派-xxx」(1/1/21). */
       void session.openCharacterStats();
       void syncRingQuestTracker();
+      // Peer refresh polls while loadedScene is still the old map; await would
+      // delay commit and let a second 30/1 wipe the catalog that just painted.
+      if (!isDreamInstanceScene(loadedScene)) {
+        void session.refreshNearbyPeersAfterEnter();
+      }
     },
     onPlayerPos: (x, y) => {
       view.setPlayerPos(x, y);
@@ -3523,31 +3575,33 @@ async function main(): Promise<void> {
       }
     },
     onTradeSession: (u) => {
+      const rec = accountSlots.get(activeSlotId);
       if (u.kind === "open") {
         tradeUi.open(u.peerName, session.bagItems);
         showPhase("trade");
         void session.openBag().then(() => tradeUi.setBag(session.bagItems));
         hud.pushChat(`[交]与 ${u.peerName || "对方"} 交易`);
-        const rec = accountSlots.get(activeSlotId);
         if (rec) rec.tradeUiSnap = tradeUi.snapshot();
         return;
       }
       if (u.kind === "peer_offer") {
         tradeUi.setPeerOffer(u.offer);
+        if (rec) rec.tradeUiSnap = tradeUi.snapshot();
         return;
       }
       if (u.kind === "offer_ack") {
         tradeUi.setStatus(u.tip, false, u.result === 1);
+        if (rec) rec.tradeUiSnap = tradeUi.snapshot();
         return;
       }
       if (u.kind === "waiting") {
         tradeUi.setStatus("等待对方确认", true, true);
+        if (rec) rec.tradeUiSnap = tradeUi.snapshot();
         return;
       }
       if (u.kind === "cancel" || u.kind === "done") {
         hud.pushChat(`[交]${u.tip}`);
         tradeUi.hide();
-        const rec = accountSlots.get(activeSlotId);
         if (rec) rec.tradeUiSnap = null;
         if (phase === "trade" || phase === "dialog") showPhase("world");
         if (u.tip) showGameTip(u.tip);
@@ -4024,7 +4078,10 @@ async function main(): Promise<void> {
       ) {
         session.dropDepositedBagRow(pending);
       }
-      const shown = augmentWarehouseDialog(augmentEquipSellDialog(d), session.bagItems);
+      const shown = augmentWarehouseDialog(
+        augmentEquipSellDialog(d, session.bagItems),
+        session.bagItems,
+      );
       dialog.show(shown);
       showPhase("dialog");
       setChromeStatus(`对话 · ${shown.options.length} 选项`);
@@ -4487,13 +4544,21 @@ async function main(): Promise<void> {
       onSocialInvite: when(uiCallbacks.onSocialInvite),
       onSocialNotice: when(uiCallbacks.onSocialNotice),
       onTradeSession: (u) => {
-        if (activeSlotId !== slotId) {
-          const rec = accountSlots.get(slotId);
-          if (!rec) return;
+        const rec = accountSlots.get(slotId);
+        if (!rec) {
+          if (activeSlotId === slotId) uiCallbacks.onTradeSession?.(u);
+          return;
+        }
+        // Background, or active mid-switch (shared stall unbound): fold snap only.
+        // Do not call setPeerOffer on leftover tradeUi from the other account —
+        // applyTradeUiForActiveSlot would then restore a stale snap and keep
+        // showing「等待对方锁定」after the peer already locked.
+        if (activeSlotId !== slotId || accountSwitchInFlight) {
           rec.tradeUiSnap = foldTradeSessionSnap(
             rec.tradeUiSnap,
             u,
             rec.session.bagItems,
+            rec.session.tradePeerName || undefined,
           );
           if (u.kind === "open") {
             appendSlotChatEntry(rec, {
@@ -4505,6 +4570,16 @@ async function main(): Promise<void> {
               type: 0,
               text: `[交]${u.tip}`,
             });
+          }
+          if (
+            activeSlotId === slotId &&
+            accountSwitchInFlight &&
+            (u.kind === "cancel" || u.kind === "done")
+          ) {
+            if (u.tip) showGameTip(u.tip);
+            if (u.kind === "done" && u.result === 1) {
+              void rec.session.openBag();
+            }
           }
           return;
         }
@@ -4784,6 +4859,19 @@ async function main(): Promise<void> {
     if (slotId === activeSlotId && !opts?.toLogin) {
       return;
     }
+    accountSwitchInFlight = true;
+    try {
+      await switchAccountSlotBody(rec, slotId, opts);
+    } finally {
+      accountSwitchInFlight = false;
+    }
+  };
+
+  const switchAccountSlotBody = async (
+    rec: AccountSlot,
+    slotId: string,
+    opts?: { toLogin?: boolean },
+  ): Promise<void> => {
     const leavingId = activeSlotId;
     const leaving = accountSlots.get(leavingId);
     if (leaving) snapshotActiveSlotUi(leaving);
@@ -4875,14 +4963,18 @@ async function main(): Promise<void> {
         console.warn("[multi] resync scene", e);
         showPhase("world");
       }
-      // Pull a fresh 2/7 so map peers match server after background time.
+      // Poll + 2/7 so map peers match server after background / muted slot time.
       if (!isDreamInstanceScene(session.scene)) {
-        void session.openNearbyPlayers(0).catch((e) => {
+        try {
+          await session.refreshNearbyPeersAfterEnter();
+        } catch (e) {
           console.warn("[multi] nearby refresh", e);
-        });
+        }
       }
       syncAccountSwitchHud();
       applyTradeUiForActiveSlot(rec);
+      // Stall rebound — further trade packets go to live panel + snap sync.
+      accountSwitchInFlight = false;
       // Invites arrived while muted — session kept pendingSocialInvite.
       if (session.pendingSocialInvite) {
         uiCallbacks.onSocialInvite?.(session.pendingSocialInvite);
@@ -7312,12 +7404,16 @@ async function main(): Promise<void> {
       }
       if (action === "gem_batch_combine") {
         void (async () => {
-          const times = Math.floor((bag.count | 0) / 3);
+          const times = isCrystalFragment(bag.itemId)
+            ? crystalFragmentCombineBatchTimes(bag.count)
+            : Math.floor((bag.count | 0) / 3);
           showGameTip(`批量合成 ${bag.name}×${times}…`);
           try {
-            const fb = isGemFragment(bag.itemId)
-              ? await session.combineGemFragment(bag.itemId, bag.seq, times)
-              : await session.combineGem(bag.itemId, bag.seq, times);
+            const fb = isCrystalFragment(bag.itemId)
+              ? await session.combineCrystalFragment(bag.itemId, bag.seq, times)
+              : isGemFragment(bag.itemId)
+                ? await session.combineGemFragment(bag.itemId, bag.seq, times)
+                : await session.combineGem(bag.itemId, bag.seq, times);
             if (fb.ok) await refreshAfterGem("bag");
             else showPhase("system");
             showGameTip(fb.message || (fb.ok ? "合成成功" : "合成失败"));
@@ -9057,7 +9153,11 @@ async function main(): Promise<void> {
           mapUiMode = "off";
           miniMap.hide();
           worldMap.hide();
-          showPhase("world");
+          // Hangup / collide can start 4/1 during catalog settle. showPhase
+          // world would hide mmBattle the instant the teleport promise lands.
+          if (!(session.inBattle || phase === "battle")) {
+            showPhase("world");
+          }
           if (args.free) {
             hud.pushChat(`[系]免费传送 → ${args.alias}`);
             showGameTip(`免费传送 → ${args.alias}`);

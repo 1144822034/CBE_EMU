@@ -270,21 +270,52 @@ static u32 vm_mock_ring_pick_truth_id(void)
     return 1u + (vm_mock_activities_rng_next() % g_vm_mock_ring_truth_count);
 }
 
-static bool vm_mock_activities_account_hex(char *hexOut, size_t hexCap)
-{
-    const char *accountId = g_vm_mock_service_active_account_id;
-
-    if (accountId == NULL || accountId[0] == 0 || hexOut == NULL || hexCap == 0)
-        return false;
-    return vm_mysql_hex_encode(accountId, strlen(accountId), hexOut, hexCap) != 0;
-}
-
 static bool vm_mock_activities_account_hex_of(const char *accountId, char *hexOut,
                                               size_t hexCap)
 {
+    char canonical[64];
+    const char *id = accountId;
+    vm_mock_service_account_record *record;
+
     if (accountId == NULL || accountId[0] == 0 || hexOut == NULL || hexCap == 0)
         return false;
-    return vm_mysql_hex_encode(accountId, strlen(accountId), hexOut, hexCap) != 0;
+    /*
+     * accounts.account_id is ascii_bin.  Session bind stores the canonical
+     * spelling, but account_state / typed login may still hold another case.
+     * UNHEX is byte-exact, so vitality grant vs panel must share one key.
+     */
+    canonical[0] = 0;
+    record = vm_mock_service_account_find_record(accountId);
+    if (record != NULL && record->username[0] != 0)
+        snprintf(canonical, sizeof(canonical), "%s", record->username);
+    if (canonical[0] != 0)
+        id = canonical;
+    return vm_mysql_hex_encode(id, strlen(id), hexOut, hexCap) != 0;
+}
+
+static bool vm_mock_activities_account_hex(char *hexOut, size_t hexCap)
+{
+    return vm_mock_activities_account_hex_of(g_vm_mock_service_active_account_id,
+                                             hexOut, hexCap);
+}
+
+static const char *vm_mock_activities_vitality_account_for_role(
+    const vm_net_mock_role_state *role)
+{
+    vm_mock_service_client_session *session;
+
+    if (role != NULL && role->roleId != 0)
+    {
+        for (session = g_vm_mock_service_client_sessions; session != NULL;
+             session = session->next)
+        {
+            if (!session->roleOnline || session->accountId[0] == 0)
+                continue;
+            if (session->onlineRoleId == role->roleId)
+                return session->accountId;
+        }
+    }
+    return g_vm_mock_service_active_account_id;
 }
 
 static u32 vm_mock_activities_backpack_count(const vm_net_mock_role_state *role,
@@ -823,8 +854,63 @@ static bool vm_mock_vitality_row_cb(void *ctx, unsigned int cc,
     return true;
 }
 
-static void vm_mock_activities_vitality_load(vm_net_mock_role_state *role,
-                                             u32 *vitalityOut, u32 *maxOut)
+/*
+ * ascii_bin 大小写不一致时，发放可能写在另一行。面板读规范键若仍是 0，
+ * 把同角色大小写折叠命中的活力/进度并回规范键，并删掉孤儿行。
+ */
+static void vm_mock_activities_vitality_merge_case_orphans(const char *accountHex,
+                                                           u32 roleId,
+                                                           vm_mock_vitality_row_ctx *row)
+{
+    vm_mock_vitality_row_ctx fold;
+    char query[640];
+
+    if (accountHex == NULL || accountHex[0] == 0 || roleId == 0 || row == NULL)
+        return;
+    memset(&fold, 0, sizeof(fold));
+    snprintf(query, sizeof(query),
+             "SELECT vitality,vitality_max,online_accrue_sec FROM "
+             "account_role_vitality WHERE role_id=%u AND "
+             "LOWER(CAST(account_id AS CHAR CHARACTER SET ascii))=LOWER(CAST(UNHEX('%s') "
+             "AS CHAR CHARACTER SET ascii)) AND account_id<>UNHEX('%s') "
+             "ORDER BY vitality DESC,online_accrue_sec DESC LIMIT 1",
+             roleId, accountHex, accountHex);
+    (void)vm_mysql_query(query, vm_mock_vitality_row_cb, &fold);
+    if (!fold.found)
+        return;
+    if (fold.vitality > row->vitality)
+        row->vitality = fold.vitality;
+    if (fold.vitalityMax > row->vitalityMax)
+        row->vitalityMax = fold.vitalityMax;
+    if (fold.onlineAccrueSec > row->onlineAccrueSec)
+        row->onlineAccrueSec = fold.onlineAccrueSec;
+    if (row->vitalityMax < (u32)VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT)
+        row->vitalityMax = VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT;
+    row->found = true;
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_vitality "
+             "(account_id,role_id,vitality,vitality_max,online_accrue_sec) VALUES "
+             "(UNHEX('%s'),%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "vitality=GREATEST(vitality,VALUES(vitality)),"
+             "vitality_max=GREATEST(vitality_max,VALUES(vitality_max)),"
+             "online_accrue_sec=GREATEST(online_accrue_sec,VALUES(online_accrue_sec))",
+             accountHex, roleId, row->vitality, row->vitalityMax,
+             row->onlineAccrueSec);
+    if (!vm_mysql_exec(query))
+        return;
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_role_vitality WHERE role_id=%u AND "
+             "LOWER(CAST(account_id AS CHAR CHARACTER SET ascii))=LOWER(CAST(UNHEX('%s') "
+             "AS CHAR CHARACTER SET ascii)) AND account_id<>UNHEX('%s')",
+             roleId, accountHex, accountHex);
+    (void)vm_mysql_exec(query);
+    printf("[info][mock-service] vitality_case_orphan_merged role=%u "
+           "vitality=%u accrue=%u evidence=ascii-bin-account-key\n",
+           roleId, row->vitality, row->onlineAccrueSec);
+}
+
+static void vm_mock_activities_vitality_load_of(const char *accountId, u32 roleId,
+                                               u32 *vitalityOut, u32 *maxOut)
 {
     char accountHex[160];
     char query[512];
@@ -834,10 +920,10 @@ static void vm_mock_activities_vitality_load(vm_net_mock_role_state *role,
         *vitalityOut = VM_MOCK_ACTIVITIES_VITALITY_DEFAULT;
     if (maxOut)
         *maxOut = VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT;
-    if (role == NULL)
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0)
         return;
     (void)vm_mock_activities_ensure_tables();
-    if (!vm_mock_activities_account_hex(accountHex, sizeof(accountHex)))
+    if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
         return;
     memset(&row, 0, sizeof(row));
     row.vitality = VM_MOCK_ACTIVITIES_VITALITY_DEFAULT;
@@ -846,17 +932,30 @@ static void vm_mock_activities_vitality_load(vm_net_mock_role_state *role,
              "SELECT vitality,vitality_max,online_accrue_sec FROM "
              "account_role_vitality "
              "WHERE account_id=UNHEX('%s') AND role_id=%u LIMIT 1",
-             accountHex, role->roleId);
+             accountHex, roleId);
     (void)vm_mysql_query(query, vm_mock_vitality_row_cb, &row);
+    if (!row.found || row.vitality == 0)
+        vm_mock_activities_vitality_merge_case_orphans(accountHex, roleId, &row);
     if (!row.found)
     {
         snprintf(query, sizeof(query),
                  "INSERT IGNORE INTO account_role_vitality "
                  "(account_id,role_id,vitality,vitality_max) "
                  "VALUES(UNHEX('%s'),%u,%u,%u)",
-                 accountHex, role->roleId, VM_MOCK_ACTIVITIES_VITALITY_DEFAULT,
+                 accountHex, roleId, VM_MOCK_ACTIVITIES_VITALITY_DEFAULT,
                  VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT);
         (void)vm_mysql_exec(query);
+        memset(&row, 0, sizeof(row));
+        row.vitality = VM_MOCK_ACTIVITIES_VITALITY_DEFAULT;
+        row.vitalityMax = VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT;
+        snprintf(query, sizeof(query),
+                 "SELECT vitality,vitality_max,online_accrue_sec FROM "
+                 "account_role_vitality "
+                 "WHERE account_id=UNHEX('%s') AND role_id=%u LIMIT 1",
+                 accountHex, roleId);
+        (void)vm_mysql_query(query, vm_mock_vitality_row_cb, &row);
+        if (!row.found || row.vitality == 0)
+            vm_mock_activities_vitality_merge_case_orphans(accountHex, roleId, &row);
     }
     else if (row.vitalityMax < (u32)VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT)
     {
@@ -864,7 +963,7 @@ static void vm_mock_activities_vitality_load(vm_net_mock_role_state *role,
         snprintf(query, sizeof(query),
                  "UPDATE account_role_vitality SET vitality_max=%u "
                  "WHERE account_id=UNHEX('%s') AND role_id=%u",
-                 row.vitalityMax, accountHex, role->roleId);
+                 row.vitalityMax, accountHex, roleId);
         (void)vm_mysql_exec(query);
     }
     if (vitalityOut)
@@ -873,12 +972,14 @@ static void vm_mock_activities_vitality_load(vm_net_mock_role_state *role,
         *maxOut = row.vitalityMax;
 }
 
-static bool vm_mock_activities_vitality_save(vm_net_mock_role_state *role,
-                                             u32 vitality, u32 vitalityMax)
+static bool vm_mock_activities_vitality_save_of(const char *accountId, u32 roleId,
+                                               u32 vitality, u32 vitalityMax)
 {
     char accountHex[160];
     char query[512];
-    if (role == NULL || !vm_mock_activities_account_hex(accountHex, sizeof(accountHex)))
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0)
+        return false;
+    if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO account_role_vitality "
@@ -886,8 +987,34 @@ static bool vm_mock_activities_vitality_save(vm_net_mock_role_state *role,
              "(UNHEX('%s'),%u,%u,%u) "
              "ON DUPLICATE KEY UPDATE vitality=VALUES(vitality),"
              "vitality_max=VALUES(vitality_max)",
-             accountHex, role->roleId, vitality, vitalityMax);
+             accountHex, roleId, vitality, vitalityMax);
     return vm_mysql_exec(query);
+}
+
+static void vm_mock_activities_vitality_load(vm_net_mock_role_state *role,
+                                             u32 *vitalityOut, u32 *maxOut)
+{
+    const char *accountId = vm_mock_activities_vitality_account_for_role(role);
+    if (role == NULL)
+    {
+        if (vitalityOut)
+            *vitalityOut = VM_MOCK_ACTIVITIES_VITALITY_DEFAULT;
+        if (maxOut)
+            *maxOut = VM_MOCK_ACTIVITIES_VITALITY_MAX_DEFAULT;
+        return;
+    }
+    vm_mock_activities_vitality_load_of(accountId, role->roleId, vitalityOut,
+                                        maxOut);
+}
+
+static bool vm_mock_activities_vitality_save(vm_net_mock_role_state *role,
+                                             u32 vitality, u32 vitalityMax)
+{
+    if (role == NULL)
+        return false;
+    return vm_mock_activities_vitality_save_of(
+        vm_mock_activities_vitality_account_for_role(role), role->roleId,
+        vitality, vitalityMax);
 }
 
 void vm_mock_activities_vitality_wire(vm_net_mock_role_state *role,
@@ -902,17 +1029,27 @@ void vm_mock_activities_vitality_wire(vm_net_mock_role_state *role,
         *energyMaxOut = m;
 }
 
-static bool vm_mock_activities_vitality_add(vm_net_mock_role_state *role, u32 add)
+/* 按指定账号写活力（在线 tick 等跨会话路径禁止用 active account）. */
+static bool vm_mock_activities_vitality_add_of(const char *accountId, u32 roleId,
+                                              u32 add)
 {
     u32 v;
     u32 m;
-    if (role == NULL || add == 0)
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0 || add == 0)
         return false;
-    vm_mock_activities_vitality_load(role, &v, &m);
+    vm_mock_activities_vitality_load_of(accountId, roleId, &v, &m);
     v = vm_net_mock_add_capped_u32(v, add);
     if (v > m)
         v = m;
-    return vm_mock_activities_vitality_save(role, v, m);
+    return vm_mock_activities_vitality_save_of(accountId, roleId, v, m);
+}
+
+static bool vm_mock_activities_vitality_add(vm_net_mock_role_state *role, u32 add)
+{
+    if (role == NULL || add == 0)
+        return false;
+    return vm_mock_activities_vitality_add_of(
+        vm_mock_activities_vitality_account_for_role(role), role->roleId, add);
 }
 
 static bool vm_mock_activities_vitality_spend(vm_net_mock_role_state *role, u32 cost)
@@ -1005,9 +1142,8 @@ static bool vm_mock_activities_vitality_load_accrue(const char *accountId,
     (void)vm_mysql_query(query, vm_mock_vitality_row_cb, &row);
     if (!row.found)
         return true;
+    /* 保留可能未发放的整小时进度；由 begin/tick/end 负责发放后再取余. */
     *accrueOut = row.onlineAccrueSec;
-    if (*accrueOut >= (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC)
-        *accrueOut %= (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
     return true;
 }
 
@@ -1021,8 +1157,6 @@ static bool vm_mock_activities_vitality_save_accrue(const char *accountId,
         return false;
     if (!vm_mock_activities_account_hex_of(accountId, accountHex, sizeof(accountHex)))
         return false;
-    if (accrueSec >= (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC)
-        accrueSec %= (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
     snprintf(query, sizeof(query),
              "INSERT INTO account_role_vitality "
              "(account_id,role_id,vitality,vitality_max,online_accrue_sec) VALUES "
@@ -1033,11 +1167,81 @@ static bool vm_mock_activities_vitality_save_accrue(const char *accountId,
     return vm_mysql_exec(query);
 }
 
+/* 满小时发放到 session 本人账号；成功才消耗 bank 中的整小时. */
+static bool vm_mock_activities_vitality_online_try_grant(
+    vm_mock_service_client_session *session, u32 *bankInOut, u32 perHour)
+{
+    u32 bank;
+    u32 hours;
+    u32 grant;
+    u32 remainder;
+    u32 before = 0;
+    u32 after = 0;
+    u32 vmax = 0;
+    u32 expected = 0;
+
+    if (session == NULL || bankInOut == NULL || perHour == 0)
+        return false;
+    if (session->accountId[0] == 0 || session->onlineRoleId == 0)
+        return false;
+    bank = *bankInOut;
+    hours = bank / (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
+    if (hours == 0)
+        return false;
+    remainder = bank % (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
+    grant = hours * perHour;
+    vm_mock_activities_vitality_load_of(session->accountId, session->onlineRoleId,
+                                        &before, &vmax);
+    if (!vm_mock_activities_vitality_add_of(session->accountId,
+                                           session->onlineRoleId, grant))
+    {
+        printf("[warn][mock-service] vitality_online_grant_fail role=%u "
+               "hours=%u add=%u account=%s evidence=account-scoped-write\n",
+               session->onlineRoleId, hours, grant,
+               session->accountId[0] ? session->accountId : "-");
+        return false;
+    }
+    vm_mock_activities_vitality_load_of(session->accountId, session->onlineRoleId,
+                                        &after, &vmax);
+    expected = vm_net_mock_add_capped_u32(before, grant);
+    if (vmax != 0 && expected > vmax)
+        expected = vmax;
+    if (after != expected)
+    {
+        printf("[warn][mock-service] vitality_online_grant_mismatch role=%u "
+               "hours=%u add=%u before=%u after=%u expected=%u account=%s "
+               "evidence=panel-key-must-match-grant\n",
+               session->onlineRoleId, hours, grant, before, after, expected,
+               session->accountId[0] ? session->accountId : "-");
+        /* 回读仍是发放前的值：键没写上，保留整小时下次再发；已写上则继续提示. */
+        if (after == before && before < vmax)
+            return false;
+    }
+    *bankInOut = remainder;
+    session->vitalityOnlineAccrueSec = remainder;
+    (void)vm_mock_activities_vitality_save_accrue(
+        session->accountId, session->onlineRoleId, remainder);
+    printf("[info][mock-service] vitality_online_grant role=%u hours=%u "
+           "add=%u per_hour=%u bank=%u account=%s\n",
+           session->onlineRoleId, hours, grant, perHour, remainder,
+           session->accountId[0] ? session->accountId : "-");
+    {
+        char tip[64];
+        /* 在线满时获得活力：N */
+        snprintf(tip, sizeof(tip),
+                 "\xd4\xda\xcf\xdf\xc2\xfa\xca\xb1\xbb\xf1\xb5\xc3\xbb\xee\xc1\xa6\xa3\xba%u",
+                 grant);
+        (void)vm_mock_service_session_enqueue_system_message(session, tip);
+    }
+    return true;
+}
+
 static void vm_mock_activities_vitality_online_session_begin(
     vm_mock_service_client_session *session)
 {
     u32 accrue = 0;
     u32 now = (u32)time(NULL);
+    u32 perHour;
 
     if (session == NULL || session->accountId[0] == 0 || session->onlineRoleId == 0)
         return;
@@ -1045,12 +1249,23 @@ static void vm_mock_activities_vitality_online_session_begin(
                                                   session->onlineRoleId, &accrue);
     session->vitalityOnlineAccrueSec = accrue;
     session->vitalityOnlineLastUnix = now ? now : 1;
+    /* 上次下线未发出的整小时：上线立刻补发. */
+    vm_mock_vitality_online_load_config(false);
+    perHour = g_vm_mock_vitality_online_per_hour;
+    if (perHour != 0 &&
+        session->vitalityOnlineAccrueSec >= (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC)
+    {
+        u32 bank = session->vitalityOnlineAccrueSec;
+        (void)vm_mock_activities_vitality_online_try_grant(session, &bank, perHour);
+        session->vitalityOnlineAccrueSec = bank;
+    }
 }
 
 static void vm_mock_activities_vitality_online_session_end(
     vm_mock_service_client_session *session)
 {
     u32 now = (u32)time(NULL);
+    u32 perHour;
 
     if (session == NULL || session->vitalityOnlineLastUnix == 0)
         return;
@@ -1061,10 +1276,24 @@ static void vm_mock_activities_vitality_online_session_end(
             u32 delta = now - session->vitalityOnlineLastUnix;
             session->vitalityOnlineAccrueSec =
                 vm_net_mock_add_capped_u32(session->vitalityOnlineAccrueSec, delta);
-            if (session->vitalityOnlineAccrueSec >=
+        }
+        vm_mock_vitality_online_load_config(false);
+        perHour = g_vm_mock_vitality_online_per_hour;
+        if (perHour != 0 &&
+            session->vitalityOnlineAccrueSec >=
                 (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC)
-                session->vitalityOnlineAccrueSec %=
-                    (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
+        {
+            u32 bank = session->vitalityOnlineAccrueSec;
+            (void)vm_mock_activities_vitality_online_try_grant(session, &bank,
+                                                              perHour);
+            session->vitalityOnlineAccrueSec = bank;
+        }
+        else if (session->vitalityOnlineAccrueSec >=
+                 (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC)
+        {
+            /* 发放关闭：只保留不足 1 小时的余数，避免进度膨胀. */
+            session->vitalityOnlineAccrueSec %=
+                (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
         }
         (void)vm_mock_activities_vitality_save_accrue(
             session->accountId, session->onlineRoleId,
@@ -1093,11 +1322,8 @@ static void vm_mock_activities_vitality_online_tick(void)
     for (session = g_vm_mock_service_client_sessions; session != NULL;
          session = session->next)
     {
-        vm_net_mock_role_state *role;
         u32 delta;
         u32 bank;
-        u32 hours;
-        u32 grant;
 
         if (!session->roleOnline || session->accountId[0] == 0 ||
             session->onlineRoleId == 0)
@@ -1117,25 +1343,18 @@ static void vm_mock_activities_vitality_online_tick(void)
             continue;
         }
         bank = vm_net_mock_add_capped_u32(session->vitalityOnlineAccrueSec, delta);
-        hours = bank / (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
-        session->vitalityOnlineAccrueSec =
-            bank % (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC;
-        if (hours == 0)
-            continue;
-        role = vm_mock_service_trade_role_for_session(session, NULL);
-        if (role == NULL)
-            continue;
-        grant = hours * perHour;
-        if (vm_mock_activities_vitality_add(role, grant))
+        if (bank < (u32)VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC)
         {
-            printf("[info][mock-service] vitality_online_grant role=%u hours=%u "
-                   "add=%u per_hour=%u bank=%u\n",
-                   role->roleId, hours, grant, perHour,
-                   session->vitalityOnlineAccrueSec);
+            session->vitalityOnlineAccrueSec = bank;
+            continue;
         }
-        (void)vm_mock_activities_vitality_save_accrue(
-            session->accountId, session->onlineRoleId,
-            session->vitalityOnlineAccrueSec);
+        /* 成功才消耗整小时；失败保留 bank，下次再发. */
+        if (!vm_mock_activities_vitality_online_try_grant(session, &bank, perHour))
+        {
+            session->vitalityOnlineAccrueSec = bank;
+            continue;
+        }
+        session->vitalityOnlineAccrueSec = bank;
     }
 }
 

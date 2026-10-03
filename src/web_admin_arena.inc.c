@@ -395,8 +395,11 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
             &page,
             "<tr><td>%u</td><td>%u</td><td>%u</td><td>%u</td><td>%u</td>"
             "<td>%u</td><td>%s</td><td>%s</td>"
-            "<td><a class=\"btn-edit\" href=\"" VM_MOCK_ADMIN_ROOT_PATH
-            "?tab=arena&amp;edit_job=%u&amp;edit_bracket=%u&amp;edit_rank=%u"
+            /* Use href="/?tab=…" — prefix_page_routes rewrites to admin root.
+             * Do not embed VM_MOCK_ADMIN_ROOT_PATH here or it double-prefixes
+             * and 404s as /admin-…/admin-…/ (页面不存在). */
+            "<td><a class=\"btn-edit\" href=\"/?tab=arena&amp;edit_job=%u"
+            "&amp;edit_bracket=%u&amp;edit_rank=%u"
             "#arena-reward-form\">编辑</a></td></tr>",
             r->job, r->bracket, r->rankPos, r->rewardExp, r->rewardMoney,
             r->rewardVitality, itemCell, equipCell, (u32)r->job,
@@ -430,8 +433,8 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
             "<div><label>物品数量</label><input name=\"item_count\" value=\"%u\"></div>"
             "<div><label>装备ID</label><input name=\"equip_id\" value=\"%u\"></div>"
             "<div><button type=\"submit\">保存奖励</button>"
-            "<a class=\"btn-cancel\" href=\"" VM_MOCK_ADMIN_ROOT_PATH
-            "?tab=arena#arena-reward-form\">取消编辑</a></div>",
+            "<a class=\"btn-cancel\" href=\"/?tab=arena#arena-reward-form\">"
+            "取消编辑</a></div>",
             (u32)editReward->job, (u32)editReward->bracket,
             (u32)editReward->rankPos, editReward->rewardExp,
             editReward->rewardMoney, editReward->rewardVitality,

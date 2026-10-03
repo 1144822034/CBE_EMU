@@ -3140,8 +3140,8 @@ export class BattleScreen extends Container {
     const lines = [
       "你已经死亡",
       this.deathPromptHasStone
-        ? "可使用复活石原地满血（无惩罚）"
-        : "无复活石 · 可选商城购买或普通",
+        ? "复活石原地满血（无惩罚）"
+        : "无复活石",
       ...opts.map((o, i) => `${i === this.deathPromptCursor ? "▶ " : "  "}${o.label}`),
       this.deathPromptHasStone
         ? "确定=当前项 · 右键普通复活"

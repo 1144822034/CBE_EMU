@@ -4850,10 +4850,7 @@ static void vm_net_mock_monster_stats_apply_combat_attr_multiplier(
     multiplier = vm_net_mock_monster_level_combat_attr_multiplier(stats->level);
     if (multiplier > 1u)
     {
-        if (multiplier >= 6u)
-            stats->hp = vm_net_mock_u32_mul_sat(stats->hp, multiplier * 3u);
-        else
-            stats->hp = vm_net_mock_u32_mul_sat(stats->hp, multiplier);
+        stats->hp = vm_net_mock_u32_mul_sat(stats->hp, multiplier);
         stats->mp = vm_net_mock_u32_mul_sat(stats->mp, multiplier);
         stats->attack = vm_net_mock_u32_mul_sat(stats->attack, multiplier);
         stats->defense = vm_net_mock_u32_mul_sat(stats->defense, multiplier);

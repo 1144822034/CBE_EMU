@@ -192,6 +192,7 @@ import {
   buildMoveRequest,
   buildNpcDialogRequest,
   buildSettingsUnstuckRequest,
+  buildSceneRuntimeDirectEnterFollowupRequest,
   buildTaskAcceptRequest,
   buildTaskAbandonRequest,
   buildTaskDetailRequest,
@@ -640,6 +641,21 @@ const HANGUP_ENCOUNTER_INTERVAL_MS = 8000;
  */
 const HANGUP_ENCOUNTER_RETRY_MS = 1500;
 
+/** True when a later 27/11 is the same map catalog (avoid destroy/rebuild flicker). */
+function npcCatalogUnchanged(prev: NpcActor[], next: NpcActor[]): boolean {
+  if (prev.length !== next.length) return false;
+  if (!next.length) return true;
+  const byId = new Map<number, NpcActor>();
+  for (const n of prev) byId.set(n.actorId >>> 0, n);
+  for (const n of next) {
+    const o = byId.get(n.actorId >>> 0);
+    if (!o) return false;
+    if ((o.x | 0) !== (n.x | 0) || (o.y | 0) !== (n.y | 0)) return false;
+    if ((o.name || "") !== (n.name || "")) return false;
+  }
+  return true;
+}
+
 export class GameSession {
   transport: GameTransport | null = null;
   servers: ServerRow[] = [];
@@ -795,6 +811,8 @@ export class GameSession {
    * sameScene skip must use this or portal NPCs land on the previous map.
    */
   private loadedScene = "";
+  /** Scene whose showScene is in flight (before loadedScene commits). */
+  private enteringScene = "";
   /** While set, ignore poll/soft reloads for any other scene leaf. */
   private sceneTransferExpected: string | null = null;
   /** Guard nested poll while settling leader-follow catalog. */
@@ -996,6 +1014,7 @@ export class GameSession {
     this.scenePeerCosmeticsById.clear();
     this.scene = "";
     this.loadedScene = "";
+    this.enteringScene = "";
     this.sceneTransferExpected = null;
     this.transferIgnoredScene = null;
     this.roleEnterSceneLock = null;
@@ -1099,6 +1118,7 @@ export class GameSession {
   private clearWorldState(): void {
     this.scene = "";
     this.loadedScene = "";
+    this.enteringScene = "";
     this.sceneTransferExpected = null;
     this.roleEnterSceneLock = null;
     this.enterSceneGen++;
@@ -1313,6 +1333,7 @@ export class GameSession {
       // merge-by-itemId and same-town NPC catalogs otherwise leak across roles.
       this.scene = "";
       this.loadedScene = "";
+      this.enteringScene = "";
       this.sceneTransferExpected = null;
       this.roleEnterSceneLock = null;
       this.enterSceneGen++;
@@ -1425,15 +1446,20 @@ export class GameSession {
       );
       this.handleBodies(bodies);
       await this.awaitEnterScene();
-      // New scene shell: post-enter combo owns nonempty 27/11 (not bare 6/1).
-      const catalogBodies = await this.transport.exchange(
-        0,
-        buildSceneChangePostEnterFollowupRequest(mapId, exitId, mapType),
-      );
-      this.handleBodies(catalogBodies);
-      await this.awaitEnterScene();
+      // First 2/3 is often an empty gate; post-enter owns nonempty 27/11.
+      // Skip when the enter packet already seeded the catalog (instance / some
+      // full-bootstrap hops) — a second 30/1 remounts feet+NPC markers.
+      if (!this.npcs.length) {
+        const catalogBodies = await this.transport.exchange(
+          0,
+          buildSceneChangePostEnterFollowupRequest(mapId, exitId, mapType),
+        );
+        this.handleBodies(catalogBodies);
+        await this.awaitEnterScene();
+      }
       // Footfall must come from server posinfo — not prior-map or SCE spawn guess.
       await this.awaitAuthoritativeLanding();
+      await this.refreshNearbyPeersAfterEnter();
     } catch (e) {
       this.landingWait = null;
       this.setPhase(
@@ -1453,6 +1479,13 @@ export class GameSession {
     hasPos = true,
   ): void {
     if (hasPos) this.hasServerPos = true;
+    // In-flight showScene has not committed loadedScene yet. A poll 30/1 for
+    // the same dest would look like another cross-scene hop and wipe the
+    // catalog that just painted (dream exit → 庆阳宫).
+    if (this.alreadyOnScene(scene)) {
+      if (hasPos) this.noteAuthoritativeLanding(scene);
+      return;
+    }
     // Cross-scene: drop stale catalog until the new map's 27/11 arrives
     // (临安大使 stuck on 桃花岛 was re-stamping old session.npcs after showScene).
     if (
@@ -1467,7 +1500,10 @@ export class GameSession {
       this.sceneMonsters = [];
       this.sceneMonsterCatalog = [];
       this.clearNpcTaskPrompts("scene-change");
+      // Old-map peers must not survive showScene clear + onEnterScene reapply.
+      this.dropScenePeers("cross-scene");
     }
+    this.enteringScene = scene;
     const gen = ++this.enterSceneGen;
     this.enterScenePromise = Promise.resolve(
       this.cb.onEnterScene(scene, x, y, { hasPos }),
@@ -1476,12 +1512,86 @@ export class GameSession {
         // A newer enter superseded this load (role-select / portal race).
         if (gen !== this.enterSceneGen) return;
         this.loadedScene = scene;
+        this.enteringScene = "";
       })
       .catch((e) => {
         if (gen !== this.enterSceneGen) return;
+        this.enteringScene = "";
         console.warn("[session] onEnterScene", e);
       });
     if (hasPos) this.noteAuthoritativeLanding(scene);
+  }
+
+  /** Painted shell or in-flight showScene for this scene leaf. */
+  private alreadyOnScene(scene: string): boolean {
+    if (!scene) return false;
+    return (
+      sceneKeysMatch(this.loadedScene, scene) ||
+      sceneKeysMatch(this.enteringScene, scene)
+    );
+  }
+
+  /**
+   * Same-map 30/1 / 30/2 / 16/3 after teleport, catalog settle, or poll is not
+   * a revive. Clearing inBattle here lets Pixi hide mmBattle the moment a wild
+   * fight starts on the new outdoor map.
+   * Dead seats (hp<=0) must still consume 20/1+30/1 ordinary revive.
+   */
+  private keepBattleThroughScenePacket(scene: string): boolean {
+    if (!this.inBattle || this.hp <= 0) return false;
+    return this.alreadyOnScene(scene);
+  }
+
+  /** Ordinary revive / shop-return dead: 20/1 simple-result + scene enter. */
+  private packetLeavesBattleViaScene(packet: WtPacket): boolean {
+    return packet.objects.some((o) => o.kind === 20 && o.subtype === 1);
+  }
+
+  /**
+   * 1/7/14 result=2 must leave mmBattle even when the telestone is on the
+   * same shell (alreadyOnScene would skip trackEnterScene and keep the death UI).
+   */
+  private applyBattleLeaveSceneEnter(
+    scene: string,
+    x: number,
+    y: number,
+    source: string,
+  ): void {
+    this.inBattle = false;
+    this.syncArenaHudForScene(scene);
+    this.scene = scene;
+    this.x = x | 0;
+    this.y = y | 0;
+    this.hasServerPos = true;
+    this.noteAuthoritativeLanding(scene);
+    /* Keep hp=0 until onEnterScene: same-shell keep-fight uses hp>0. */
+    const restoreOrdinaryVitals = this.hp <= 0;
+    const gen = ++this.enterSceneGen;
+    this.enteringScene = scene;
+    this.enterScenePromise = Promise.resolve(
+      this.cb.onEnterScene(scene, this.x, this.y, { hasPos: true }),
+    )
+      .then(() => {
+        if (gen !== this.enterSceneGen) return;
+        this.loadedScene = scene;
+        this.enteringScene = "";
+        if (restoreOrdinaryVitals && this.hp <= 0) {
+          const hpMax = Math.max(this.hpMax, 1);
+          const mpMax = Math.max(this.mpMax, 0);
+          this.hp = Math.min(hpMax, Math.max(1, Math.ceil((hpMax * 30) / 100)));
+          this.mp = Math.min(mpMax, Math.max(0, Math.ceil((mpMax * 30) / 100)));
+          this.emitVitals();
+        }
+      })
+      .catch((e) => {
+        if (gen !== this.enterSceneGen) return;
+        this.enteringScene = "";
+        console.warn("[session] onEnterScene battle-leave", e);
+      });
+    this.setPhase("inworld", `${source} ${scene} @${this.x},${this.y}`);
+    console.info(
+      `[session] battle-leave scene ${source} ${scene} @${this.x},${this.y}`,
+    );
   }
 
   /** True when role-select has pinned actorinfo scene and `scene` disagrees. */
@@ -1501,15 +1611,24 @@ export class GameSession {
   ): void {
     // Skip only when the *displayed* map already matches — not when `this.scene`
     // was advanced by a soft ack before showScene finished (07 map + 06 NPCs).
-    const mapShowing =
-      this.loadedScene !== "" && sceneKeysMatch(this.loadedScene, scene);
+    const mapShowing = this.alreadyOnScene(scene);
+    // Post-enter combo often re-delivers the same portal posinfo with 27/11.
+    // Map shell already committed feet; yanking onPlayerPos here snaps walked
+    // players back to the landing pad the moment NPCs paint.
+    const duplicateCommitted =
+      mapShowing && this.hasServerPos && source !== "16/3";
     this.scene = scene;
+    console.info(
+      `[session] landing ${source} ${scene} @${x},${y}${
+        duplicateCommitted ? " (keep feet)" : ""
+      }`,
+    );
+    this.noteAuthoritativeLanding(scene);
+    this.syncArenaHudForScene(scene);
+    if (duplicateCommitted) return;
     this.x = x;
     this.y = y;
     this.hasServerPos = true;
-    console.info(`[session] landing ${source} ${scene} @${x},${y}`);
-    this.noteAuthoritativeLanding(scene);
-    this.syncArenaHudForScene(scene);
     // 16/3 unstuck / cross-scene stone: always reload shell so feet+map match.
     if (mapShowing && source !== "16/3") {
       this.cb.onPlayerPos?.(x, y);
@@ -1577,13 +1696,38 @@ export class GameSession {
     this.setPhase("unstuck", "12/3");
     try {
       await this.flushMove();
-      const bodies = await this.transport.exchange(0, buildSettingsUnstuckRequest(2));
+      const sceneBefore = this.scene || "";
+      const bodies = await this.transport.exchange(
+        0,
+        buildSettingsUnstuckRequest(2),
+      );
       this.handleBodies(bodies);
-      if (this.hasServerPos) {
-        this.setPhase("inworld", `unstuck ${this.scene} @${this.x},${this.y}`);
-      } else {
+      if (!this.hasServerPos) {
         this.setPhase("unstuck-warn", "未解析到 16/3 落点");
+        return;
       }
+      /*
+       * 16/3 reloads the shell (SCE stones only). CBE then pulls catalog via
+       * runtime stream 16/3{exitID=x,type=0}+27/11+7/42 — not portal post-enter
+       * (that returns empty 27/11 after mark_direct_scene_enter_completed).
+       */
+      await this.awaitEnterScene();
+      const catalogBodies = await this.transport.exchange(
+        0,
+        buildSceneRuntimeDirectEnterFollowupRequest(this.x | 0),
+      );
+      this.handleBodies(catalogBodies);
+      await this.awaitEnterScene();
+      if (!this.npcs.length) {
+        console.warn(
+          "[session] unstuck landed without 27/11 NPCs",
+          this.scene,
+          `from=${sceneBefore || "∅"}`,
+        );
+      }
+      // Await: fire-and-forget 2/7 often raced empty before scene ready / mates.
+      await this.refreshNearbyPeersAfterEnter();
+      this.setPhase("inworld", `unstuck ${this.scene} @${this.x},${this.y}`);
     } catch (e) {
       this.setPhase(
         "unstuck-error",
@@ -1839,6 +1983,7 @@ export class GameSession {
         );
       }
 
+      await this.refreshNearbyPeersAfterEnter();
       this.setPhase(
         "inworld",
         `${free ? "region-free" : "map-teleport"} ${this.scene} @${this.x},${this.y}`,
@@ -3213,6 +3358,7 @@ export class GameSession {
     this.handleBodies(catalogBodies);
     await this.awaitEnterScene();
     if (!this.inBattle) await this.pollOnce();
+    await this.refreshNearbyPeersAfterEnter();
     void this.ensureArenaHudFallback("enter-scene");
   }
 
@@ -3241,6 +3387,109 @@ export class GameSession {
   /** Live map peers for UI remount (account-switch / soft resync). */
   mapPeersSnapshot(): PeerActor[] {
     return [...this.scenePeerById.values()];
+  }
+
+  /** True for dream 29* shells (solo — no nearby peers). */
+  private isDreamSoloScene(scene: string): boolean {
+    const leaf = (scene || "")
+      .replace(/^.*[/\\]/, "")
+      .replace(/\.sce$/i, "")
+      .toLowerCase();
+    return leaf.startsWith("29") || leaf.startsWith("b_29");
+  }
+
+  /** Drop cached map peers and notify UI (cross-scene / dream). */
+  private dropScenePeers(_reason: string): void {
+    if (!this.scenePeerById.size && !this.nearbyList.length) {
+      this.scenePeerCosmeticsById.clear();
+      return;
+    }
+    const drop = [...this.scenePeerById.keys()];
+    this.scenePeerById.clear();
+    this.scenePeerCosmeticsById.clear();
+    this.nearbyList = [];
+    if (drop.length) this.cb.onPeers([], drop);
+  }
+
+  /**
+   * After shell + catalog settle: poll for 2/10 baseline, then 2/7 page paint.
+   * Team-follow / multi-open: mates may still be sceneVisiblePending on the
+   * server — retry until peers appear or attempts exhaust.
+   */
+  async refreshNearbyPeersAfterEnter(): Promise<void> {
+    if (!this.transport || this.inBattle) return;
+    const scene = (this.scene || this.loadedScene || "").trim();
+    if (!scene || this.isDreamSoloScene(scene)) return;
+    const selfId = this.selectedRoleId >>> 0;
+    const expectTeamPeers =
+      this.teamMembers.length >= 2 &&
+      this.teamMembers.some((m) => m.id !== selfId);
+    const maxAttempts = expectTeamPeers ? 8 : 4;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (!this.inBattle) {
+          await this.pollOnce();
+        }
+        await this.openNearbyPlayers(0);
+        const haveMapPeers = this.scenePeerById.size > 0;
+        const haveListPeers = this.nearbyList.length > 0;
+        if (!expectTeamPeers) {
+          if (haveMapPeers || haveListPeers || attempt >= maxAttempts - 1) return;
+        } else if (haveMapPeers || haveListPeers) {
+          return;
+        }
+        await new Promise<void>((r) => window.setTimeout(r, 280));
+      } catch (e) {
+        console.warn("[session] nearby after enter", e);
+        if (attempt >= maxAttempts - 1) return;
+        await new Promise<void>((r) => window.setTimeout(r, 280));
+      }
+    }
+    if (expectTeamPeers) {
+      console.warn(
+        "[session] nearby after enter: no team peers",
+        scene,
+        `team×${this.teamMembers.length}`,
+      );
+    }
+  }
+
+  /**
+   * Post-enter 27/11 (+ optional 2/3+6/1) when a 30/1 (or spouse) landed a
+   * new map without the portal-shaped catalog follow-up.
+   */
+  private async settleLandedSceneCatalog(sceneBefore: string): Promise<void> {
+    if (!this.transport || this.inBattle) return;
+    const landed = ensureSceneFile(this.scene || "");
+    if (!landed) return;
+    if (sceneBefore && sceneKeysMatch(sceneBefore, landed)) return;
+    await this.awaitEnterScene();
+    // Instance 30/1 often already carries nonempty 27/11. A delayed post-enter
+    // 2/3+30/1 remounts the same shell and rebuilds NPC markers.
+    if (this.npcs.length > 0) return;
+    const catalogBodies = await this.transport.exchange(
+      0,
+      buildSceneChangePostEnterFollowupRequest(landed, 0, 2),
+    );
+    this.handleBodies(catalogBodies);
+    await this.awaitEnterScene();
+    if (!this.npcs.length) {
+      const completeBodies = await this.transport.exchange(
+        0,
+        buildSceneChangeRequest(landed, 0, 2),
+      );
+      this.handleBodies(completeBodies);
+      await this.awaitEnterScene();
+      const wt6Bodies = await this.transport.exchange(
+        0,
+        buildSceneNpcCatalogFollowupRequest(),
+      );
+      this.handleBodies(wt6Bodies);
+      await this.awaitEnterScene();
+    }
+    if (!this.npcs.length) {
+      console.warn("[session] landed without 27/11 NPCs", landed);
+    }
   }
 
   async fetchWagerBoard(): Promise<{
@@ -3855,18 +4104,8 @@ export class GameSession {
        */
       if (opcode === NpcServiceOpcode.ENTER_INSTANCE) {
         await this.awaitEnterScene();
-        const landed = ensureSceneFile(this.scene || "");
-        if (
-          landed &&
-          (!sceneBefore || !sceneKeysMatch(sceneBefore, landed))
-        ) {
-          const catalogBodies = await this.transport.exchange(
-            0,
-            buildSceneChangePostEnterFollowupRequest(landed, 0, 2),
-          );
-          this.handleBodies(catalogBodies);
-          await this.awaitEnterScene();
-        }
+        await this.settleLandedSceneCatalog(sceneBefore);
+        // Drain outdoor map_stone_loading_clear; onEnterScene already pulled 2/7.
         if (!this.inBattle) {
           await this.pollOnce();
         }
@@ -6098,12 +6337,14 @@ export class GameSession {
 
   /**
    * PixiJS-only: 10×玄晶碎片(900) → 1×一级玄晶(901).
-   * Pre-checks count/space; server 29/11 is authoritative.
+   * times>1 is one-shot batch (floor(count/10) 次). Server 29/11 authoritative.
    */
   async combineCrystalFragment(
     itemId: number,
     seq: number,
+    times = 1,
   ): Promise<CrystalCombineResult> {
+    const n = Math.max(1, times | 0);
     const fail = (message: string, result = 0): CrystalCombineResult => ({
       result,
       ok: false,
@@ -6119,8 +6360,9 @@ export class GameSession {
     }
     const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
     const count = row?.count ?? 0;
-    if (!canCombineCrystalFragment(itemId, count)) {
-      return fail("碎片不足10个", 4);
+    const need = CRYSTAL_FRAGMENT_COMBINE_COST * n;
+    if (!canCombineCrystalFragment(itemId, count) || count < need) {
+      return fail(n > 1 ? "碎片不足" : "碎片不足10个", 4);
     }
     const destId = ENHANCE_CRYSTAL_FIRST;
     const destExists = this.bagItems.some(
@@ -6131,14 +6373,14 @@ export class GameSession {
         this.characterStats?.backpackCapacity ||
         Math.max(20, this.bagItems.length);
       const empty = Math.max(0, (cap | 0) - this.bagItems.length);
-      const freesSlot = count === CRYSTAL_FRAGMENT_COMBINE_COST;
+      const freesSlot = count === need;
       if (empty < 1 && !freesSlot) {
         return fail("背包空间不足", 3);
       }
     }
     const bodies = await this.transport.exchange(
       0,
-      buildCrystalFragmentCombineRequest(seq),
+      buildCrystalFragmentCombineRequest(seq, n),
     );
     this.handleBodies(bodies);
     for (const body of bodies) {
@@ -6805,6 +7047,7 @@ export class GameSession {
     if (this.isTeamMemberNotLeader()) {
       return { ok: false, tip: "队员不能传送" };
     }
+    const sceneBefore = this.scene || "";
     const bodies = await this.transport.exchange(0, buildSpouseTeleportRequest());
     let tip = "";
     let fail = false;
@@ -6818,6 +7061,15 @@ export class GameSession {
       }
     }
     this.handleBodies(bodies);
+    if (!fail) {
+      try {
+        // 32/x + 30/1 alone does not arm portal post-enter — pull 27/11.
+        await this.settleLandedSceneCatalog(sceneBefore);
+        await this.refreshNearbyPeersAfterEnter();
+      } catch (e) {
+        console.warn("[session] spouse-teleport settle", e);
+      }
+    }
     return { ok: !fail, tip };
   }
 
@@ -7463,27 +7715,8 @@ export class GameSession {
     this.teamFollowSettleInFlight = true;
     this.setPhase("team-follow", `跟随队长 → ${landed}`);
     try {
-      await this.awaitEnterScene();
-      const catalogBodies = await this.transport.exchange(
-        0,
-        buildSceneChangePostEnterFollowupRequest(landed, 0, 2),
-      );
-      this.handleBodies(catalogBodies);
-      await this.awaitEnterScene();
-      if (!this.npcs.length) {
-        const completeBodies = await this.transport.exchange(
-          0,
-          buildSceneChangeRequest(landed, 0, 2),
-        );
-        this.handleBodies(completeBodies);
-        await this.awaitEnterScene();
-        const wt6Bodies = await this.transport.exchange(
-          0,
-          buildSceneNpcCatalogFollowupRequest(),
-        );
-        this.handleBodies(wt6Bodies);
-        await this.awaitEnterScene();
-      }
+      await this.settleLandedSceneCatalog(sceneBefore);
+      await this.refreshNearbyPeersAfterEnter();
       this.setPhase("inworld", `team-follow ${this.scene} @${this.x},${this.y}`);
     } catch (e) {
       console.warn("[session] team-follow catalog settle", e);
@@ -7583,13 +7816,41 @@ export class GameSession {
           console.info(
             `[session] ignore enter ${enter.scene} during role-select lock→${this.roleEnterSceneLock}`,
           );
+        } else if (
+          this.inBattle &&
+          (this.hp <= 0 || this.packetLeavesBattleViaScene(packet))
+        ) {
+          this.applyBattleLeaveSceneEnter(
+            enter.scene,
+            enter.x,
+            enter.y,
+            this.packetLeavesBattleViaScene(packet) ? "20/1+30/1" : "dead-30/1",
+          );
+        } else if (this.keepBattleThroughScenePacket(enter.scene)) {
+          this.noteAuthoritativeLanding(enter.scene);
+          console.info(
+            `[session] keep battle over same-scene enter ${enter.scene}`,
+          );
         } else {
-          this.scene = enter.scene;
-          this.x = enter.x;
-          this.y = enter.y;
           this.inBattle = false;
           this.syncArenaHudForScene(enter.scene);
-          this.trackEnterScene(enter.scene, enter.x, enter.y, true);
+          const mapShowing = this.alreadyOnScene(enter.scene);
+          this.scene = enter.scene;
+          this.noteAuthoritativeLanding(enter.scene);
+          if (mapShowing) {
+            // Same shell already painted (instance exit 30/1 then delayed
+            // post-enter / poll 30/1). Do not remount or yank walked feet.
+            if (!this.hasServerPos) {
+              this.x = enter.x;
+              this.y = enter.y;
+              this.hasServerPos = true;
+              this.cb.onPlayerPos?.(enter.x, enter.y);
+            }
+          } else {
+            this.x = enter.x;
+            this.y = enter.y;
+            this.trackEnterScene(enter.scene, enter.x, enter.y, true);
+          }
           this.setPhase("inworld", `${enter.scene} @${enter.x},${enter.y}`);
         }
       } else {
@@ -7603,6 +7864,23 @@ export class GameSession {
           } else if (this.roleEnterIgnoresScene(landing.scene)) {
             console.info(
               `[session] ignore landing ${landing.scene} during role-select lock→${this.roleEnterSceneLock}`,
+            );
+          } else if (
+            this.inBattle &&
+            (this.hp <= 0 || this.packetLeavesBattleViaScene(packet))
+          ) {
+            this.applyBattleLeaveSceneEnter(
+              landing.scene,
+              landing.x,
+              landing.y,
+              this.packetLeavesBattleViaScene(packet)
+                ? `20/1+${landing.source}`
+                : landing.source,
+            );
+          } else if (this.keepBattleThroughScenePacket(landing.scene)) {
+            this.noteAuthoritativeLanding(landing.scene);
+            console.info(
+              `[session] keep battle over same-scene landing ${landing.source} ${landing.scene}`,
             );
           } else {
             // Authoritative server footfall — never reuse prior-map coords.
@@ -7627,6 +7905,21 @@ export class GameSession {
             console.info(
               `[session] ignore reload+pos ${reload.scene} during role-select lock→${this.roleEnterSceneLock}`,
             );
+          } else if (
+            this.inBattle &&
+            (this.hp <= 0 || this.packetLeavesBattleViaScene(packet))
+          ) {
+            this.applyBattleLeaveSceneEnter(
+              reload.scene,
+              reload.x,
+              reload.y,
+              "dead-30/reload",
+            );
+          } else if (this.keepBattleThroughScenePacket(reload.scene)) {
+            this.noteAuthoritativeLanding(reload.scene);
+            console.info(
+              `[session] keep battle over same-scene reload+pos ${reload.scene}`,
+            );
           } else {
             this.inBattle = false;
             this.applyServerLanding(reload.scene, reload.x, reload.y, "30/reload");
@@ -7641,10 +7934,13 @@ export class GameSession {
             console.info(
               `[session] ignore soft ${reload.scene} during role-select lock→${this.roleEnterSceneLock}`,
             );
+          } else if (this.keepBattleThroughScenePacket(reload.scene)) {
+            this.noteAuthoritativeLanding(reload.scene);
+            console.info(
+              `[session] keep battle over same-scene soft ${reload.scene}`,
+            );
           } else {
-            const mapShowing =
-              this.loadedScene !== "" &&
-              sceneKeysMatch(this.loadedScene, reload.scene);
+            const mapShowing = this.alreadyOnScene(reload.scene);
             this.scene = reload.scene;
             this.inBattle = false;
             // Soft ack without posinfo: load shell only; wait for 30/2+pos / 27/12.
@@ -7669,18 +7965,21 @@ export class GameSession {
       }
 
       // 27/11 present replaces catalog; missing object keeps prior.
-      // Empty gate during an armed scene transfer must not wipe a nonempty
-      // catalog (map-stone poll may seed before current-scene 2/3 empty-11).
+      // Empty npcnum=0 is a gate/ack (portal 2/3, post-enter-repeat, poll
+      // once_or_empty). Cross-scene already zeroed session.npcs in
+      // trackEnterScene; applying empty here after a nonempty seed wipes
+      // 庆阳宫 etc. the moment dream-exit poll / 2/7 repeats.
       if (packetHasNpcCatalog(packet)) {
         const npcs = parseNpcCatalog(packet);
-        if (
-          npcs.length === 0 &&
-          this.sceneTransferExpected &&
-          this.npcs.length > 0
-        ) {
+        if (npcs.length === 0 && this.npcs.length > 0) {
           console.info(
-            `[session] 27/11 empty gate ignored during transfer→${this.sceneTransferExpected} keep npc×${this.npcs.length}`,
+            `[session] 27/11 empty gate ignored keep npc×${this.npcs.length}` +
+              (this.sceneTransferExpected
+                ? ` transfer→${this.sceneTransferExpected}`
+                : ""),
           );
+        } else if (npcCatalogUnchanged(this.npcs, npcs)) {
+          /* same catalog — skip marker rebuild */
         } else {
           this.npcs = npcs;
           this.cb.onNpcs(npcs);

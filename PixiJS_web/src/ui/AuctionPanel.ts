@@ -18,6 +18,7 @@ import {
   bagVisibleStackCount,
   isDurableMallPassItemId,
   isReservoirFlaskItemId,
+  sortBagByName,
   type BagItem,
 } from "../net/protocolExtras";
 import { lookupItemSync, qualityColor } from "../resources/itemCatalog";
@@ -99,6 +100,18 @@ function listingAsBagItem(r: AuctionListing): BagItem {
       ? { enhanceAttrs: r.enhanceAttrs }
       : {}),
   };
+}
+
+function auctionListingSortName(r: AuctionListing): string {
+  return r.itemName || lookupItemSync(r.itemId)?.name || `#${r.itemId}`;
+}
+
+function sortAuctionListings(rows: AuctionListing[]): AuctionListing[] {
+  return rows
+    .slice()
+    .sort((a, b) =>
+      auctionListingSortName(a).localeCompare(auctionListingSortName(b), "zh"),
+    );
 }
 
 /**
@@ -236,10 +249,10 @@ export class AuctionPanel extends Container {
   ): void {
     this.clearBuyoutCaptcha();
     this.releaseIme();
-    this.rows = rows;
-    this.mine = mine;
+    this.rows = sortAuctionListings(rows);
+    this.mine = sortAuctionListings(mine);
     this.claims = claims?.slice() ?? [];
-    this.bag = bag.slice();
+    this.bag = sortBagByName(bag);
     this.status = status;
     this.myRoleId = myRoleId ?? 0;
     this.pendingClaims = status?.pendingClaims ?? 0;
@@ -287,10 +300,10 @@ export class AuctionPanel extends Container {
     claims?: AuctionClaimRow[],
     myRoleId?: number,
   ): void {
-    this.rows = rows;
-    this.mine = mine;
+    this.rows = sortAuctionListings(rows);
+    this.mine = sortAuctionListings(mine);
     if (claims) this.claims = claims.slice();
-    this.bag = bag.slice();
+    this.bag = sortBagByName(bag);
     this.status = status;
     if (myRoleId != null) this.myRoleId = myRoleId;
     this.pendingClaims = status?.pendingClaims ?? 0;

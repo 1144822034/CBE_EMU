@@ -1,12 +1,16 @@
 import { Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
 import {
   CBE,
+  CBE_TITLE_H,
   LCD_HEIGHT,
   LCD_WIDTH,
   MAP_STATUS_STRIP_H,
   WORLD_BOTTOM_H,
   WORLD_TOP_H,
+  clearCbeFlowerCorners,
   makePixelText,
+  paintLocTitleChrome,
+  preloadCbeFlowerCorners,
 } from "./constants";
 import {
   BitmapLabel,
@@ -172,6 +176,7 @@ export class WorldHud extends Container {
 
   private locText: BitmapLabel;
   private locBannerGfx = new Graphics();
+  private locBannerFlowerHost = new Container();
   private portraitHost = new Container();
   private portraitFrameHost = new Container();
   private tiaoHost = new Container();
@@ -264,11 +269,17 @@ export class WorldHud extends Container {
     this.paintTopBands();
     this.top.addChild(this.topDeepGfx, this.topStatusGfx, this.topBelowGfx);
 
-    this.top.addChild(this.locBannerGfx);
+    this.top.addChild(this.locBannerGfx, this.locBannerFlowerHost);
     this.paintLocBanner();
+    preloadCbeFlowerCorners(() => {
+      if (!this.destroyed) this.paintLocBanner();
+    });
     this.locText = makePixelText("场景", 12, CBE.ink);
     this.locText.anchor.set(0.5, 0.5);
-    this.locText.position.set(Math.round(LCD_WIDTH / 2), Math.round(2 + 24 / 2));
+    this.locText.position.set(
+      Math.round(LCD_WIDTH / 2),
+      Math.round(2 + CBE_TITLE_H / 2),
+    );
     this.top.addChild(this.locText);
 
     // handkuang.gif portrait frame (same asset as equip slots); art in mountArt.
@@ -936,20 +947,9 @@ export class WorldHud extends Container {
   }
 
   private paintLocBanner(): void {
-    const y = 2;
-    const h = 24;
-    this.locBannerGfx
-      .clear()
-      .rect(0, y, LCD_WIDTH, h)
-      .fill({ color: CBE.titlePill });
-    this.locBannerGfx
-      .moveTo(0, y + h)
-      .lineTo(LCD_WIDTH, y + h)
-      .stroke({ width: 1, color: CBE.border });
-    this.locBannerGfx
-      .moveTo(0, y)
-      .lineTo(LCD_WIDTH, y)
-      .stroke({ width: 1, color: CBE.borderDim });
+    this.locBannerGfx.clear();
+    clearCbeFlowerCorners(this.locBannerFlowerHost);
+    paintLocTitleChrome(this.locBannerGfx, this.locBannerFlowerHost, 2);
   }
 
   private paintSoftBands(): void {
