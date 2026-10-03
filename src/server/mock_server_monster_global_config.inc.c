@@ -11,6 +11,9 @@ typedef struct
     u32 dropRatePercent;     /* default 100 */
     u32 rewardExpPercent;    /* default 100 */
     u32 rewardMoneyPercent;  /* default 100 */
+    /* When level multiplier >= 6 (Lv>=56), multiply HP by 3 after the
+     * level scale and before Boss HP×5 / whole-server percents. 0=off. */
+    u32 hpExtraX3WhenMultGe6;
 } vm_net_mock_monster_global_config;
 
 static vm_net_mock_monster_global_config g_vm_net_mock_monster_global_config;
@@ -28,6 +31,7 @@ static void vm_net_mock_monster_global_config_set_defaults(
     cfg->dropRatePercent = 100;
     cfg->rewardExpPercent = 100;
     cfg->rewardMoneyPercent = 100;
+    cfg->hpExtraX3WhenMultGe6 = 0;
 }
 
 static void vm_net_mock_monster_global_config_sanitize(
@@ -53,6 +57,7 @@ static void vm_net_mock_monster_global_config_sanitize(
         cfg->rewardExpPercent = 1000u;
     if (cfg->rewardMoneyPercent > 1000u)
         cfg->rewardMoneyPercent = 1000u;
+    cfg->hpExtraX3WhenMultGe6 = cfg->hpExtraX3WhenMultGe6 != 0 ? 1u : 0u;
 }
 
 static u32 vm_net_mock_scale_u32_by_percent(u32 value, u32 percent)
@@ -145,6 +150,7 @@ static bool vm_net_mock_monster_global_config_ensure_table(void)
             "drop_rate_percent INT UNSIGNED NOT NULL DEFAULT 100,"
             "reward_exp_percent INT UNSIGNED NOT NULL DEFAULT 100,"
             "reward_money_percent INT UNSIGNED NOT NULL DEFAULT 100,"
+            "hp_extra_x3_when_mult_ge6 TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY (id)"
@@ -164,15 +170,21 @@ static bool vm_net_mock_monster_global_config_ensure_table(void)
             "reward_money_percent",
             "ALTER TABLE server_monster_global_config ADD COLUMN "
             "reward_money_percent INT UNSIGNED NOT NULL DEFAULT 100 "
-            "AFTER reward_exp_percent"))
+            "AFTER reward_exp_percent") ||
+        !vm_net_mock_monster_global_ensure_column(
+            "hp_extra_x3_when_mult_ge6",
+            "ALTER TABLE server_monster_global_config ADD COLUMN "
+            "hp_extra_x3_when_mult_ge6 TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER reward_money_percent"))
     {
         return false;
     }
     if (!vm_mysql_exec(
             "INSERT IGNORE INTO server_monster_global_config ("
             "id,hp_percent,attack_percent,defense_percent,drop_rate_percent,"
-            "reward_exp_percent,reward_money_percent) "
-            "VALUES (1,100,100,100,100,100,100)"))
+            "reward_exp_percent,reward_money_percent,"
+            "hp_extra_x3_when_mult_ge6) "
+            "VALUES (1,100,100,100,100,100,100,0)"))
     {
         printf("[error][mock-service] monster_global seed failed error=%s\n",
                vm_mysql_last_error());
@@ -189,12 +201,12 @@ static bool vm_net_mock_monster_global_config_row(void *contextValue,
 {
     vm_net_mock_monster_global_config *cfg =
         (vm_net_mock_monster_global_config *)contextValue;
-    u32 fields[6];
+    u32 fields[7];
     u32 i;
 
-    if (cfg == NULL || values == NULL || lengths == NULL || columnCount < 6)
+    if (cfg == NULL || values == NULL || lengths == NULL || columnCount < 7)
         return true;
-    for (i = 0; i < 6; ++i)
+    for (i = 0; i < 7; ++i)
     {
         if (values[i] == NULL ||
             !vm_mock_mysql_parse_u32(values[i], lengths[i], &fields[i]))
@@ -206,6 +218,7 @@ static bool vm_net_mock_monster_global_config_row(void *contextValue,
     cfg->dropRatePercent = fields[3];
     cfg->rewardExpPercent = fields[4];
     cfg->rewardMoneyPercent = fields[5];
+    cfg->hpExtraX3WhenMultGe6 = fields[6];
     vm_net_mock_monster_global_config_sanitize(cfg);
     return true;
 }
@@ -225,7 +238,8 @@ static void vm_net_mock_monster_global_config_load(bool force)
     }
     if (!vm_mysql_query(
             "SELECT hp_percent,attack_percent,defense_percent,"
-            "drop_rate_percent,reward_exp_percent,reward_money_percent "
+            "drop_rate_percent,reward_exp_percent,reward_money_percent,"
+            "hp_extra_x3_when_mult_ge6 "
             "FROM server_monster_global_config WHERE id=1 LIMIT 1",
             vm_net_mock_monster_global_config_row,
             &g_vm_net_mock_monster_global_config))
@@ -239,13 +253,14 @@ static void vm_net_mock_monster_global_config_load(bool force)
         &g_vm_net_mock_monster_global_config);
     g_vm_net_mock_monster_global_config_loaded = true;
     printf("[info][mock-service] monster_global_config_load hp%%=%u atk%%=%u "
-           "def%%=%u drop%%=%u exp%%=%u money%%=%u\n",
+           "def%%=%u drop%%=%u exp%%=%u money%%=%u hp_x3=%u\n",
            g_vm_net_mock_monster_global_config.hpPercent,
            g_vm_net_mock_monster_global_config.attackPercent,
            g_vm_net_mock_monster_global_config.defensePercent,
            g_vm_net_mock_monster_global_config.dropRatePercent,
            g_vm_net_mock_monster_global_config.rewardExpPercent,
-           g_vm_net_mock_monster_global_config.rewardMoneyPercent);
+           g_vm_net_mock_monster_global_config.rewardMoneyPercent,
+           g_vm_net_mock_monster_global_config.hpExtraX3WhenMultGe6);
 }
 
 static bool vm_net_mock_monster_global_config_admin_save(
@@ -263,17 +278,20 @@ static bool vm_net_mock_monster_global_config_admin_save(
     snprintf(query, sizeof(query),
              "INSERT INTO server_monster_global_config ("
              "id,hp_percent,attack_percent,defense_percent,drop_rate_percent,"
-             "reward_exp_percent,reward_money_percent) "
-             "VALUES (1,%u,%u,%u,%u,%u,%u) "
+             "reward_exp_percent,reward_money_percent,"
+             "hp_extra_x3_when_mult_ge6) "
+             "VALUES (1,%u,%u,%u,%u,%u,%u,%u) "
              "ON DUPLICATE KEY UPDATE "
              "hp_percent=VALUES(hp_percent),"
              "attack_percent=VALUES(attack_percent),"
              "defense_percent=VALUES(defense_percent),"
              "drop_rate_percent=VALUES(drop_rate_percent),"
              "reward_exp_percent=VALUES(reward_exp_percent),"
-             "reward_money_percent=VALUES(reward_money_percent)",
+             "reward_money_percent=VALUES(reward_money_percent),"
+             "hp_extra_x3_when_mult_ge6=VALUES(hp_extra_x3_when_mult_ge6)",
              cfg.hpPercent, cfg.attackPercent, cfg.defensePercent,
-             cfg.dropRatePercent, cfg.rewardExpPercent, cfg.rewardMoneyPercent);
+             cfg.dropRatePercent, cfg.rewardExpPercent, cfg.rewardMoneyPercent,
+             cfg.hpExtraX3WhenMultGe6);
     if (!vm_mysql_exec(query))
     {
         printf("[error][mock-service] monster_global save failed error=%s\n",

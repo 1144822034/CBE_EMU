@@ -4805,6 +4805,8 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 en
  * double-scaled on save round-trips.
  *
  * Boss (family=BOSS) HP gets an extra fixed 5x after the level scale.
+ * Optional extra HP ×3 when multiplier >= 6 is an admin toggle
+ * (server_monster_global_config.hp_extra_x3_when_mult_ge6).
  */
 static u32 vm_net_mock_monster_level_combat_attr_multiplier(u32 level)
 {
@@ -4848,6 +4850,7 @@ static void vm_net_mock_monster_stats_apply_combat_attr_multiplier(
     if (stats == NULL)
         return;
     multiplier = vm_net_mock_monster_level_combat_attr_multiplier(stats->level);
+    globalCfg = vm_net_mock_monster_global_config_get();
     if (multiplier > 1u)
     {
         stats->hp = vm_net_mock_u32_mul_sat(stats->hp, multiplier);
@@ -4855,12 +4858,14 @@ static void vm_net_mock_monster_stats_apply_combat_attr_multiplier(
         stats->attack = vm_net_mock_u32_mul_sat(stats->attack, multiplier);
         stats->defense = vm_net_mock_u32_mul_sat(stats->defense, multiplier);
     }
+    if (globalCfg != NULL && globalCfg->hpExtraX3WhenMultGe6 != 0 &&
+        multiplier >= 6u)
+        stats->hp = vm_net_mock_u32_mul_sat(stats->hp, 3u);
     if (family == (u8)VM_NET_MOCK_MONSTER_BOSS)
         stats->hp = vm_net_mock_u32_mul_sat(stats->hp, 5u);
     /* Whole-server percent knobs (admin 怪物管理). Applied after level/Boss
      * scale so scene HP and battle damage stay consistent. Admin list/edit
      * still uses raw bases via _raw. */
-    globalCfg = vm_net_mock_monster_global_config_get();
     if (globalCfg != NULL)
     {
         stats->hp = vm_net_mock_scale_u32_by_percent(stats->hp,

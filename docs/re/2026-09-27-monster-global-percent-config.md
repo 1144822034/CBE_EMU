@@ -17,13 +17,16 @@
 | drop_rate_percent | 100 | 0–1000 |
 | reward_exp_percent | 100 | 0–1000 |
 | reward_money_percent | 100 | 0–1000 |
+| hp_extra_x3_when_mult_ge6 | 0 | 0 或 1 |
+
+`hp_extra_x3_when_mult_ge6`：等级档位倍率 ≥6（Lv≥56）时，在等级倍率之后、首领 HP×5 与全服血量% 之前，对 HP 再 ×3。默认关闭。迁移：`server/mysql/migrate_add_monster_hp_extra_x3.sql`。
 
 迁移：`server/mysql/migrate_add_monster_global_config.sql`；服务首次读取也会建表。
 
 ## 运行时应用点
 
 1. **HP / 攻击 / 防御 / 经验 / 铜钱**  
-   `vm_net_mock_monster_stats_apply_combat_attr_multiplier()`：在等级倍率与首领 HP×5 之后再乘全服百分比。  
+   `vm_net_mock_monster_stats_apply_combat_attr_multiplier()`：顺序为等级倍率 →（可选）倍率≥6 时 HP×3 → 首领 HP×5 → 全服百分比。  
    管理列表/保存仍走 `_raw`，不会把倍率写回 MySQL。
 
 2. **掉落概率**  

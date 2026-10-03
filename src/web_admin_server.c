@@ -8650,6 +8650,17 @@ static void vm_mock_admin_handle_monster_global_action(
             "百分比须为整数：血量/攻击 1–1000，其余 0–1000");
         return;
     }
+    {
+        char extraX3[8];
+
+        memset(extraX3, 0, sizeof(extraX3));
+        cfg.hpExtraX3WhenMultGe6 =
+            vm_mock_admin_form_value(body, "hp_extra_x3_when_mult_ge6", extraX3,
+                                     sizeof(extraX3)) &&
+                    strcmp(extraX3, "1") == 0
+                ? 1u
+                : 0u;
+    }
     if (vm_net_mock_monster_global_config_admin_save(&cfg))
         vm_mock_admin_redirect_monster_global(client, "ok",
                                               "全服怪物百分比已保存并立即生效");

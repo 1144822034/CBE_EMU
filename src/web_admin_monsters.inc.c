@@ -35,7 +35,8 @@ static void vm_mock_admin_render_monster_global_card(vm_mock_admin_text *page)
         "<p class=\"hint\" style=\"margin-top:0\">作用于全部怪物的运行时倍率，不改各怪基数。"
         "100%%=不变，90%%=降低，110%%=提高。血量/攻击/防御在等级与首领倍率之后再乘；"
         "经验/铜钱在角色卡/心得等加成之前乘；掉落只放大投掷概率（上限 100%%，"
-        "不影响独立/抽奖行选择）。表：<code>server_monster_global_config</code>。</p>"
+        "不影响独立/抽奖行选择）。「倍率≥6 时 HP 再 ×3」默认关闭，勾选后仅 HP 在等级倍率后再 ×3。"
+        "表：<code>server_monster_global_config</code>。</p>"
         "<div class=\"fields\">"
         "<label class=\"field\"><span>血量 %%（1–1000）</span>"
         "<input type=\"number\" name=\"hp_percent\" min=\"1\" max=\"1000\" value=\"%u\" required></label>"
@@ -50,12 +51,17 @@ static void vm_mock_admin_render_monster_global_card(vm_mock_admin_text *page)
         "<label class=\"field\"><span>金钱 %%（0–1000）</span>"
         "<input type=\"number\" name=\"reward_money_percent\" min=\"0\" max=\"1000\" value=\"%u\" required></label>"
         "</div>"
+        "<label class=\"field\" style=\"margin-top:10px\"><span>高等级 HP 额外倍率</span>"
+        "<span class=\"check\"><input type=\"checkbox\" name=\"hp_extra_x3_when_mult_ge6\" "
+        "value=\"1\"%s>等级倍率≥6（Lv≥56）时 HP 再 ×3</span></label>"
+        "<p class=\"hint\">仅 HP；MP/攻击/防御仍只乘档位倍率。首领 HP×5 与全服血量%% 在其后叠加。</p>"
         "<div class=\"actions\" style=\"justify-content:flex-start\">"
         "<button type=\"submit\">保存全服百分比</button></div></form></section>",
         cfg ? cfg->hpPercent : 100u, cfg ? cfg->attackPercent : 100u,
         cfg ? cfg->defensePercent : 100u, cfg ? cfg->dropRatePercent : 100u,
         cfg ? cfg->rewardExpPercent : 100u,
-        cfg ? cfg->rewardMoneyPercent : 100u);
+        cfg ? cfg->rewardMoneyPercent : 100u,
+        (cfg != NULL && cfg->hpExtraX3WhenMultGe6 != 0) ? " checked" : "");
 }
 
 static const char *vm_mock_admin_monster_family_name(u32 family)
