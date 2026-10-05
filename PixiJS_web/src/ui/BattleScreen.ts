@@ -647,7 +647,6 @@ export class BattleScreen extends Container {
         outline: false,
         smooth: false,
         crisp: true,
-        uc3: true,
       });
 
       const id = slot.id;
@@ -1285,6 +1284,7 @@ export class BattleScreen extends Container {
     /* Keep hangupTallyArmed so the next fight continues session 战斗场次. */
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
+    this.deathPromptBusy = false;
     this.silenceRounds = 0;
     this.statusActorCache.clear();
     this.statusActorLoads.clear();
@@ -2607,8 +2607,14 @@ export class BattleScreen extends Container {
     this.autoBannerHangupTip = null;
 
     const panelW = 134;
-    const wordsTex = await tryLoadUiTexture("autobattle_words.gif");
-    const btnTex = await tryLoadUiTexture("autobattle_button.gif");
+    // HD Songti: skip baked GIF copy so 自动/挂机/关闭 follow 字体切换.
+    const textChrome = preferSystemFont();
+    const wordsTex = textChrome
+      ? null
+      : await tryLoadUiTexture("autobattle_words.gif");
+    const btnTex = textChrome
+      ? null
+      : await tryLoadUiTexture("autobattle_button.gif");
     if (gen !== this.autoBannerArtGen) return;
 
     if (!wordsTex) {
@@ -2669,17 +2675,31 @@ export class BattleScreen extends Container {
 
   private paintAutoBannerTip(): void {
     const hangup = this.hangupActive;
+    const textChrome = preferSystemFont();
     if (this.autoBannerWords) {
-      this.autoBannerWords.visible = !hangup;
+      this.autoBannerWords.visible = !hangup && !textChrome;
     }
     if (this.autoBannerHangupTip) {
-      this.autoBannerHangupTip.visible = hangup;
-      if (hangup) {
-        this.autoBannerHangupTip.show("挂机战斗中", CBE.inkTip, {
-          outline: false,
-        });
+      const showText = hangup || textChrome;
+      this.autoBannerHangupTip.visible = showText;
+      if (showText) {
+        this.autoBannerHangupTip.show(
+          hangup ? "挂机战斗中" : "自动战斗中",
+          CBE.inkTip,
+          { outline: false },
+        );
       }
     }
+  }
+
+  /** Font switch: GIF chrome ↔ Songti, and rebake live battle labels. */
+  refreshAfterFontChange(): void {
+    void this.mountAutoBannerArt();
+    this.rebuildAccountSwitchChips();
+    if (!this.visible) return;
+    this.redrawMenu();
+    if (this.awaitingDeathPrompt) this.paintDeathPrompt();
+    this.refreshBottomHud();
   }
 
   private refreshAutoBannerVisibility(): void {
@@ -3109,6 +3129,7 @@ export class BattleScreen extends Container {
   private beginDeathPrompt(): void {
     this.awaitingDeathPrompt = true;
     this.deathPromptBusy = false;
+    this.awaitingRound = false;
     this.menuOpen = false;
     this.autoActive = false;
     /* No 801: default to 普通复活 — left softkey/确定 must not open mall. */
@@ -3119,6 +3140,11 @@ export class BattleScreen extends Container {
       maxWidth: LCD_WIDTH - 16,
     });
     this.onDeathPromptShown?.();
+  }
+
+  /** Mall / overlay path is not a 1/7/14 wait — allow another tap. */
+  clearDeathPromptBusy(): void {
+    this.deathPromptBusy = false;
   }
 
   /** Re-show death UI if 1/7/14 was rejected / produced no exit. */
@@ -3132,6 +3158,9 @@ export class BattleScreen extends Container {
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     clearPointerHits(this.rowHits);
+    this.settleHost.eventMode = "static";
+    /* Enemy HP bars sit above settleHost; raise so 普通复活/商城购买 receive taps. */
+    this.addChild(this.settleHost);
     const opts = this.deathPromptOptions();
     const h = 80 + opts.length * 18;
     const box = new Graphics();

@@ -10,8 +10,14 @@ import {
   UC3_CELL,
   measureUiTextWidth,
 } from "./BitmapLabel";
+import {
+  applyBattleHpspDigits,
+  BATTLE_HPSP_NUM_SIZE,
+  hideBattleHpspDigits,
+} from "./BattlePartyHud";
 import { nudgeTextureSource, replaceGraphics } from "../render/gpuResume";
 import { getEnemyHpBarPlacement } from "../resources/enemyHpBarPref";
+import { preferSystemFont } from "../resources/systemFont";
 
 const HP_FILL = 0xe03828;
 /** Match party HUD leader name ink (PvP foe is a player). */
@@ -86,6 +92,7 @@ type SlotArt = {
   barHost: Container;
   hpFill: Graphics;
   hpNum: DigitStrip | null;
+  hpNumLab: BitmapLabel;
   /** PvP foe name (hidden for PvE monsters). */
   name: BitmapLabel;
   lastPlateW: number;
@@ -216,6 +223,7 @@ export class BattleEnemyHud extends Container {
         slot,
         painted.contentW,
         painted.numsBelow,
+        painted.numH,
         anchor.headLocalY,
       );
     }
@@ -263,10 +271,11 @@ export class BattleEnemyHud extends Container {
     slot: SlotArt,
     contentW: number,
     numsBelow: boolean,
+    numH: number,
     headLocalY: number,
   ): void {
     const bw = this.barWidth();
-    const rowH = numsBelow ? BAR_H + 1 + NUM_H : SLOT_H;
+    const rowH = numsBelow ? BAR_H + 1 + numH : SLOT_H;
     const plateW = Math.max(bw, contentW) + PLATE_PAD * 2;
     const plateH = rowH + PLATE_PAD * 2;
     slot.plate
@@ -322,7 +331,7 @@ export class BattleEnemyHud extends Container {
   private paintVitals(
     slot: SlotArt,
     row: BattleSide,
-  ): { contentW: number; numsBelow: boolean } {
+  ): { contentW: number; numsBelow: boolean; numH: number } {
     const maxHp = Math.max(1, row.maxHp || row.hp || 1);
     const hp = Math.max(0, Math.min(maxHp, row.hp));
     const hpW = Math.max(0, Math.floor((BAR_FILL.w * hp) / maxHp));
@@ -334,12 +343,13 @@ export class BattleEnemyHud extends Container {
     const bh = this.barHeight();
     const player = isPlayerEnemy(row);
     const showNums = !player;
-    if (slot.hpNum) slot.hpNum.root.visible = showNums;
+    const numH = preferSystemFont() ? BATTLE_HPSP_NUM_SIZE : NUM_H;
+    if (!showNums) hideBattleHpspDigits(slot.hpNum, slot.hpNumLab);
     slot.name.visible = false;
 
     if (player) {
       const label = enemyDisplayName(row);
-      if (!label) return { contentW: bw, numsBelow: false };
+      if (!label) return { contentW: bw, numsBelow: false, numH };
       slot.name.visible = true;
       slot.name.scale.set(NAME_SIZE / UC3_CELL);
       void slot.name.setText(label, NAME_PINK, {
@@ -351,23 +361,25 @@ export class BattleEnemyHud extends Container {
       );
       const ny = Math.max(0, Math.floor((bh - NAME_SIZE) / 2));
       slot.name.position.set(bw + NUM_GAP, ny);
-      return { contentW: bw + NUM_GAP + tw, numsBelow: false };
+      return { contentW: bw + NUM_GAP + tw, numsBelow: false, numH };
     }
 
-    if (!slot.hpNum || !showNums) return { contentW: bw, numsBelow: false };
+    if (!showNums) return { contentW: bw, numsBelow: false, numH };
     const text = `${hp}/${maxHp}`;
-    slot.hpNum.setText(text);
-    const cell = slot.hpNum.cellW || DIGIT_W;
-    const tw = text.length * cell;
+    const painted = applyBattleHpspDigits(slot.hpNum, slot.hpNumLab, text);
+    const tw = painted.w;
+    const h = painted.h;
     if (this.followMode) {
-      // Center under xuetiao; never hang left of the bar.
       const nx = Math.max(0, Math.floor((bw - tw) / 2));
-      slot.hpNum.root.position.set(nx, bh + 1);
-      return { contentW: Math.max(bw, nx + tw), numsBelow: true };
+      const ny = bh + 1;
+      if (slot.hpNum) slot.hpNum.root.position.set(nx, ny);
+      slot.hpNumLab.position.set(nx, ny);
+      return { contentW: Math.max(bw, nx + tw), numsBelow: true, numH: h };
     }
-    const ny = Math.max(0, Math.floor((bh - NUM_H) / 2));
-    slot.hpNum.root.position.set(bw + NUM_GAP, ny);
-    return { contentW: bw + NUM_GAP + tw, numsBelow: false };
+    const ny = Math.max(0, Math.floor((bh - h) / 2));
+    if (slot.hpNum) slot.hpNum.root.position.set(bw + NUM_GAP, ny);
+    slot.hpNumLab.position.set(bw + NUM_GAP, ny);
+    return { contentW: bw + NUM_GAP + tw, numsBelow: false, numH: h };
   }
 
   private async makeSlot(): Promise<SlotArt> {
@@ -396,6 +408,10 @@ export class BattleEnemyHud extends Container {
       barHost.addChild(hpNum.root);
     }
 
+    const hpNumLab = new BitmapLabel();
+    hpNumLab.visible = false;
+    barHost.addChild(hpNumLab);
+
     const name = new BitmapLabel();
     name.scale.set(NAME_SIZE / UC3_CELL);
     name.visible = false;
@@ -409,6 +425,7 @@ export class BattleEnemyHud extends Container {
       barHost,
       hpFill: fill,
       hpNum,
+      hpNumLab,
       name,
       lastPlateW: 0,
       lastPlateH: 0,

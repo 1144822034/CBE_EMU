@@ -492,6 +492,7 @@ import {
 import { lookupItemSync, warmItemCatalogs, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
 import { monsterActorForEnemyId } from "../resources/monsterLevels";
 import { setResourceExchange } from "../resources/loader";
+import { setEnhanceBaseScaleFromStats } from "../ui/equipDetail";
 
 export type SessionStatus = {
   mode: string;
@@ -874,6 +875,12 @@ export class GameSession {
   mallState: MallState | null = null;
   characterStats: CharacterStats | null = null;
   inBattle = false;
+  /**
+   * Armed when the player confirms 普通复活 (1/7/14 result=2) or the response
+   * already contains 20/1.  Same-shell dream-enter / bag-poll 30/1 must not
+   * tear down the death prompt before that confirm.
+   */
+  private ordinaryReviveLeaveArmed = false;
   private pollTimer: number | null = null;
   private phase = "idle";
   private moveBuf: number[] = [];
@@ -1548,6 +1555,20 @@ export class GameSession {
   }
 
   /**
+   * Leave mmBattle only for the 1/7/14 ordinary-revive contract (20/1 in this
+   * WT, or a trailing 30/1 after that 20/1).  hp=0 alone is not enough: dream
+   * enter catalog / stats / bag-poll 30/1 would steal the death UI.
+   */
+  private scenePacketLeavesDeadBattle(packet: WtPacket): boolean {
+    if (!this.inBattle) return false;
+    if (this.packetLeavesBattleViaScene(packet)) {
+      this.ordinaryReviveLeaveArmed = true;
+      return true;
+    }
+    return this.ordinaryReviveLeaveArmed;
+  }
+
+  /**
    * 1/7/14 result=2 must leave mmBattle even when the telestone is on the
    * same shell (alreadyOnScene would skip trackEnterScene and keep the death UI).
    */
@@ -1558,6 +1579,7 @@ export class GameSession {
     source: string,
   ): void {
     this.inBattle = false;
+    this.ordinaryReviveLeaveArmed = false;
     this.syncArenaHudForScene(scene);
     this.scene = scene;
     this.x = x | 0;
@@ -3498,6 +3520,7 @@ export class GameSession {
     listResult: number;
     listMessage: string;
     vitalityCost: number;
+    minStakeGold: number;
   }> {
     if (!this.transport) {
       return {
@@ -3506,6 +3529,7 @@ export class GameSession {
         listResult: 0,
         listMessage: "no-transport",
         vitalityCost: 0,
+        minStakeGold: 100,
       };
     }
     const listBodies = await this.transport.exchange(0, buildWagerListRequest());
@@ -3517,6 +3541,7 @@ export class GameSession {
     let listResult = 0;
     let listMessage = "";
     let vitalityCost = 0;
+    let minStakeGold = 100;
     for (const body of listBodies) {
       try {
         const list = parseWagerList(decodeWtPacket(body));
@@ -3525,6 +3550,7 @@ export class GameSession {
           listResult = list.result;
           listMessage = list.message || "";
           vitalityCost = list.vitalityCost >>> 0;
+          minStakeGold = list.minStakeGold >>> 0;
         }
       } catch {
         /* ignore */
@@ -3538,7 +3564,7 @@ export class GameSession {
         /* ignore */
       }
     }
-    return { rows, mine, listResult, listMessage, vitalityCost };
+    return { rows, mine, listResult, listMessage, vitalityCost, minStakeGold };
   }
 
   async wagerCreate(stake: number): Promise<WagerResult | null> {
@@ -7578,6 +7604,8 @@ export class GameSession {
   private async prepareLiveExchange(reason: string): Promise<void> {
     if (!(this.transport instanceof LiveTransport)) return;
     await this.transport.ensureConnected();
+    // Scene-poll 30/1 while dead in battle used to look like ordinary revive.
+    if (this.inBattle) return;
     if (this.pollTimer == null || !this.selectedRoleId) return;
     try {
       const sceneBefore = this.scene || "";
@@ -7816,15 +7844,17 @@ export class GameSession {
           console.info(
             `[session] ignore enter ${enter.scene} during role-select lock→${this.roleEnterSceneLock}`,
           );
-        } else if (
-          this.inBattle &&
-          (this.hp <= 0 || this.packetLeavesBattleViaScene(packet))
-        ) {
+        } else if (this.scenePacketLeavesDeadBattle(packet)) {
           this.applyBattleLeaveSceneEnter(
             enter.scene,
             enter.x,
             enter.y,
             this.packetLeavesBattleViaScene(packet) ? "20/1+30/1" : "dead-30/1",
+          );
+        } else if (this.inBattle && this.hp <= 0) {
+          this.noteAuthoritativeLanding(enter.scene);
+          console.info(
+            `[session] keep death prompt over enter ${enter.scene}`,
           );
         } else if (this.keepBattleThroughScenePacket(enter.scene)) {
           this.noteAuthoritativeLanding(enter.scene);
@@ -7865,10 +7895,7 @@ export class GameSession {
             console.info(
               `[session] ignore landing ${landing.scene} during role-select lock→${this.roleEnterSceneLock}`,
             );
-          } else if (
-            this.inBattle &&
-            (this.hp <= 0 || this.packetLeavesBattleViaScene(packet))
-          ) {
+          } else if (this.scenePacketLeavesDeadBattle(packet)) {
             this.applyBattleLeaveSceneEnter(
               landing.scene,
               landing.x,
@@ -7876,6 +7903,11 @@ export class GameSession {
               this.packetLeavesBattleViaScene(packet)
                 ? `20/1+${landing.source}`
                 : landing.source,
+            );
+          } else if (this.inBattle && this.hp <= 0) {
+            this.noteAuthoritativeLanding(landing.scene);
+            console.info(
+              `[session] keep death prompt over ${landing.source} ${landing.scene}`,
             );
           } else if (this.keepBattleThroughScenePacket(landing.scene)) {
             this.noteAuthoritativeLanding(landing.scene);
@@ -7905,15 +7937,17 @@ export class GameSession {
             console.info(
               `[session] ignore reload+pos ${reload.scene} during role-select lock→${this.roleEnterSceneLock}`,
             );
-          } else if (
-            this.inBattle &&
-            (this.hp <= 0 || this.packetLeavesBattleViaScene(packet))
-          ) {
+          } else if (this.scenePacketLeavesDeadBattle(packet)) {
             this.applyBattleLeaveSceneEnter(
               reload.scene,
               reload.x,
               reload.y,
               "dead-30/reload",
+            );
+          } else if (this.inBattle && this.hp <= 0) {
+            this.noteAuthoritativeLanding(reload.scene);
+            console.info(
+              `[session] keep death prompt over reload+pos ${reload.scene}`,
             );
           } else if (this.keepBattleThroughScenePacket(reload.scene)) {
             this.noteAuthoritativeLanding(reload.scene);
@@ -7933,6 +7967,11 @@ export class GameSession {
           } else if (this.roleEnterIgnoresScene(reload.scene)) {
             console.info(
               `[session] ignore soft ${reload.scene} during role-select lock→${this.roleEnterSceneLock}`,
+            );
+          } else if (this.inBattle && this.hp <= 0 && !this.ordinaryReviveLeaveArmed) {
+            this.noteAuthoritativeLanding(reload.scene);
+            console.info(
+              `[session] keep death prompt over soft ${reload.scene}`,
             );
           } else if (this.keepBattleThroughScenePacket(reload.scene)) {
             this.noteAuthoritativeLanding(reload.scene);
@@ -8285,6 +8324,7 @@ export class GameSession {
       });
       if (battle) {
         this.inBattle = true;
+        this.ordinaryReviveLeaveArmed = false;
         this.cb.onBattle(battle);
       }
 
@@ -8511,17 +8551,25 @@ export class GameSession {
       const stats = parsePanelStats(packet);
       if (stats) {
         this.characterStats = stats;
+        setEnhanceBaseScaleFromStats(stats);
         // Keep settle baseline aligned with 1/1/21 authority when available.
         this.exp = stats.exp >>> 0;
         this.gold = stats.money >>> 0;
         this.pkPoints = stats.pkPoints >>> 0;
         if (stats.level > 0) this.level = stats.level;
         // Panel 生命/法力 is map durable authority — keep WorldHud bars in sync.
-        this.hp = stats.hp;
-        this.hpMax = Math.max(stats.hpMax, stats.hp, 1);
-        this.mp = stats.mp;
-        this.mpMax = Math.max(stats.mpMax, stats.mp, 1);
-        this.emitVitals();
+        // In-fight (esp. death prompt) the seat / 4/6 is authority; a late
+        // dream-enter 1/1/21 must not revive session.hp and keep mmBattle.
+        if (!this.inBattle) {
+          this.hp = stats.hp;
+          this.hpMax = Math.max(stats.hpMax, stats.hp, 1);
+          this.mp = stats.mp;
+          this.mpMax = Math.max(stats.mpMax, stats.mp, 1);
+          this.emitVitals();
+        } else {
+          this.hpMax = Math.max(stats.hpMax, this.hpMax, this.hp, 1);
+          this.mpMax = Math.max(stats.mpMax, this.mpMax, this.mp, 0);
+        }
         {
           const g = (stats.guild || "").replace(/\0+$/g, "").trim();
           if (g && g !== "无" && g !== "无帮派") this.guildName = g;

@@ -20,7 +20,7 @@ import {
   type BattleState,
 } from "./protocol";
 import { starterSkillIdForJob } from "../resources/skill";
-import { lookupItemSync, lookupItemByNameSync, qualityColor, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
+import { lookupItemSync, lookupItemByNameSync, qualityColor, itemQualityColor, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
 export {
   buildTeamInviteRequest,
   buildTeamReplyRequest,
@@ -3165,25 +3165,24 @@ export function parseMmGameUnstuckLanding(
  * With insight active — or admin hangupQuotaWithoutInsight=0 — max is unlimited.
  */
 export const HANGUP_BATTLES_WITHOUT_INSIGHT = 64;
-/** Sentinel combatinfo.maximum while 战斗心得 is active — UI shows「不限次」. */
+/** Sentinel combatinfo.maximum — UI shows「不限次」(insight or not). */
 export const HANGUP_BATTLES_WITH_INSIGHT = 0xffff;
 
 export function hangupBattlesMaximum(
-  insightActive: boolean,
-  quotaWithoutInsight = true,
+  _insightActive: boolean,
+  _quotaWithoutInsight = true,
 ): number {
-  if (insightActive || !quotaWithoutInsight) return HANGUP_BATTLES_WITH_INSIGHT;
-  return HANGUP_BATTLES_WITHOUT_INSIGHT;
+  /* Product: hangup battle count is always unlimited. */
+  return HANGUP_BATTLES_WITH_INSIGHT;
 }
 
-/** True when hangup must stop: quota on, no insight, completed ≥ 64. */
+/** Always false — hangup battle quota disabled for all insight states. */
 export function hangupBattlesQuotaExhausted(
-  completed: number,
-  insightActive: boolean,
-  quotaWithoutInsight = true,
+  _completed: number,
+  _insightActive: boolean,
+  _quotaWithoutInsight = true,
 ): boolean {
-  if (insightActive || !quotaWithoutInsight) return false;
-  return (completed | 0) >= HANGUP_BATTLES_WITHOUT_INSIGHT;
+  return false;
 }
 
 /** mmBattle:sub_7794 — 4/7.combatinfo hangup session snapshot (8×u32 + u8). */
@@ -4188,7 +4187,7 @@ function augmentWarehouseDepositFromBag(
     action: 1,
     value: (WarehouseService.DEPOSIT_BASE | (it.seq & 0xffffff)) >>> 0,
     description: "背包",
-    nameColor: qualityColor(it.quality),
+    nameColor: itemQualityColor(it.itemId, it.quality),
     count: it.count,
   }));
   return {
@@ -4199,12 +4198,23 @@ function augmentWarehouseDepositFromBag(
   };
 }
 
-/** Retrieve keeps server rows + paging; color via DSH name (wash unknown). */
+/** Server warehouse option desc: `个人仓库#itemId` / `背包#itemId`. */
+function warehouseOptionItemId(description: string | undefined): number {
+  const m = /#(\d+)\s*$/.exec(description ?? "");
+  if (!m) return 0;
+  const id = Number(m[1]);
+  return Number.isFinite(id) && id > 0 ? id >>> 0 : 0;
+}
+
+/** Retrieve keeps server rows + paging; color via itemId (name is not unique). */
 function augmentWarehouseRetrieveColors(dialog: NpcDialog): NpcDialog {
   const options = dialog.options.map((o) => {
     if (warehouseOpcode(o.value) !== (WarehouseService.RETRIEVE_BASE >>> 24)) {
       return o;
     }
+    const itemId = warehouseOptionItemId(o.description);
+    const byId = itemId ? lookupItemSync(itemId) : null;
+    if (byId) return { ...o, nameColor: qualityColor(byId.quality) };
     const m =
       /^取回(.+?)\s+x\d+$/.exec(o.label) ||
       /^取回(.+)$/.exec(o.label);
@@ -4416,6 +4426,20 @@ export type CharacterStats = {
   transferCrystalEnabled: number;
   /** Admin: 29/6 consume legacy 48金65银. 1=on; default 0. */
   transferMoneyEnabled: number;
+  /** Admin enhance base scale: step% / +4 extra% / per-attr apply%. */
+  enhanceStepPercent: number;
+  enhanceTierExtraPercent: number;
+  enhanceApplyAttack: number;
+  enhanceApplyArmor: number;
+  enhanceApplyStrength: number;
+  enhanceApplyAgility: number;
+  enhanceApplyWisdom: number;
+  enhanceApplyHp: number;
+  enhanceApplyMp: number;
+  enhanceApplyDodge: number;
+  enhanceApplyHit: number;
+  enhanceApplyCrit: number;
+  enhanceApplyResist: number;
   baseStrength: number;
   baseAgility: number;
   baseWisdom: number;
@@ -5193,6 +5217,49 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
       ? fieldU32(obj, "transferMoneyEnabled")
         ? 1
         : 0
+      : 0,
+    enhanceStepPercent: obj.fields.some((f) => f.name === "enhanceStepPercent")
+      ? fieldU32(obj, "enhanceStepPercent")
+      : 10,
+    enhanceTierExtraPercent: obj.fields.some(
+      (f) => f.name === "enhanceTierExtraPercent",
+    )
+      ? fieldU32(obj, "enhanceTierExtraPercent")
+      : 35,
+    enhanceApplyAttack: obj.fields.some((f) => f.name === "enhanceApplyAttack")
+      ? fieldU32(obj, "enhanceApplyAttack")
+      : 100,
+    enhanceApplyArmor: obj.fields.some((f) => f.name === "enhanceApplyArmor")
+      ? fieldU32(obj, "enhanceApplyArmor")
+      : 50,
+    enhanceApplyStrength: obj.fields.some(
+      (f) => f.name === "enhanceApplyStrength",
+    )
+      ? fieldU32(obj, "enhanceApplyStrength")
+      : 50,
+    enhanceApplyAgility: obj.fields.some((f) => f.name === "enhanceApplyAgility")
+      ? fieldU32(obj, "enhanceApplyAgility")
+      : 50,
+    enhanceApplyWisdom: obj.fields.some((f) => f.name === "enhanceApplyWisdom")
+      ? fieldU32(obj, "enhanceApplyWisdom")
+      : 50,
+    enhanceApplyHp: obj.fields.some((f) => f.name === "enhanceApplyHp")
+      ? fieldU32(obj, "enhanceApplyHp")
+      : 50,
+    enhanceApplyMp: obj.fields.some((f) => f.name === "enhanceApplyMp")
+      ? fieldU32(obj, "enhanceApplyMp")
+      : 50,
+    enhanceApplyDodge: obj.fields.some((f) => f.name === "enhanceApplyDodge")
+      ? fieldU32(obj, "enhanceApplyDodge")
+      : 0,
+    enhanceApplyHit: obj.fields.some((f) => f.name === "enhanceApplyHit")
+      ? fieldU32(obj, "enhanceApplyHit")
+      : 0,
+    enhanceApplyCrit: obj.fields.some((f) => f.name === "enhanceApplyCrit")
+      ? fieldU32(obj, "enhanceApplyCrit")
+      : 0,
+    enhanceApplyResist: obj.fields.some((f) => f.name === "enhanceApplyResist")
+      ? fieldU32(obj, "enhanceApplyResist")
       : 0,
     baseStrength: fieldU32(obj, "baseStrength"),
     baseAgility: fieldU32(obj, "baseAgility"),

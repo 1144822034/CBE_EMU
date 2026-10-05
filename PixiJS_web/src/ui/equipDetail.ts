@@ -227,7 +227,124 @@ function milestoneValue(
   }
 }
 
-/** Effective combat totals (物攻/护甲 include M(L) enhance). */
+export type EnhanceAttrKey =
+  | "力量"
+  | "敏捷"
+  | "智慧"
+  | "物攻"
+  | "护甲"
+  | "躲闪"
+  | "命中"
+  | "暴击"
+  | "抗性"
+  | "气血"
+  | "法力";
+
+export type EnhanceBaseScale = {
+  stepPercent: number;
+  tierExtraPercent: number;
+  apply: Record<EnhanceAttrKey, number>;
+};
+
+export const DEFAULT_ENHANCE_BASE_SCALE: EnhanceBaseScale = {
+  stepPercent: 10,
+  tierExtraPercent: 35,
+  apply: {
+    力量: 50,
+    敏捷: 50,
+    智慧: 50,
+    物攻: 100,
+    护甲: 50,
+    躲闪: 0,
+    命中: 0,
+    暴击: 0,
+    抗性: 0,
+    气血: 50,
+    法力: 50,
+  },
+};
+
+let enhanceBaseScale: EnhanceBaseScale = { ...DEFAULT_ENHANCE_BASE_SCALE, apply: { ...DEFAULT_ENHANCE_BASE_SCALE.apply } };
+
+function clampScalePercent(n: number): number {
+  if (!Number.isFinite(n) || n < 0) return 0;
+  if (n > 1000) return 1000;
+  return n | 0;
+}
+
+export function setEnhanceBaseScaleFromStats(stats: {
+  enhanceStepPercent?: number;
+  enhanceTierExtraPercent?: number;
+  enhanceApplyAttack?: number;
+  enhanceApplyArmor?: number;
+  enhanceApplyStrength?: number;
+  enhanceApplyAgility?: number;
+  enhanceApplyWisdom?: number;
+  enhanceApplyHp?: number;
+  enhanceApplyMp?: number;
+  enhanceApplyDodge?: number;
+  enhanceApplyHit?: number;
+  enhanceApplyCrit?: number;
+  enhanceApplyResist?: number;
+}): void {
+  enhanceBaseScale = {
+    stepPercent: clampScalePercent(stats.enhanceStepPercent ?? 10),
+    tierExtraPercent: clampScalePercent(stats.enhanceTierExtraPercent ?? 35),
+    apply: {
+      力量: clampScalePercent(stats.enhanceApplyStrength ?? 50),
+      敏捷: clampScalePercent(stats.enhanceApplyAgility ?? 50),
+      智慧: clampScalePercent(stats.enhanceApplyWisdom ?? 50),
+      物攻: clampScalePercent(stats.enhanceApplyAttack ?? 100),
+      护甲: clampScalePercent(stats.enhanceApplyArmor ?? 50),
+      躲闪: clampScalePercent(stats.enhanceApplyDodge ?? 0),
+      命中: clampScalePercent(stats.enhanceApplyHit ?? 0),
+      暴击: clampScalePercent(stats.enhanceApplyCrit ?? 0),
+      抗性: clampScalePercent(stats.enhanceApplyResist ?? 0),
+      气血: clampScalePercent(stats.enhanceApplyHp ?? 50),
+      法力: clampScalePercent(stats.enhanceApplyMp ?? 50),
+    },
+  };
+}
+
+function attrApply(key: EnhanceAttrKey): number {
+  return enhanceBaseScale.apply[key] ?? 0;
+}
+
+function bonusScale(base: number, enhanceLevel: number): number {
+  if (base <= 0 || enhanceLevel <= 0) return base;
+  const level = Math.min(enhanceLevel, 16);
+  const tiers = Math.floor(level / 4);
+  const bonusPct =
+    enhanceBaseScale.stepPercent * level +
+    enhanceBaseScale.tierExtraPercent * tiers;
+  return base + Math.floor((base * bonusPct) / 100);
+}
+
+export function attrEnhanceDelta(
+  base: number,
+  enhanceLevel: number,
+  applyPercent: number,
+): number {
+  if (base <= 0 || enhanceLevel <= 0 || applyPercent <= 0) return 0;
+  const full = bonusScale(base, enhanceLevel);
+  if (full <= base) return 0;
+  return Math.floor(((full - base) * applyPercent) / 100);
+}
+
+export function attackEnhanceDelta(base: number, enhanceLevel: number): number {
+  return attrEnhanceDelta(base, enhanceLevel, attrApply("物攻"));
+}
+
+/** 护甲默认应用 50% 增量；以后台配置为准。 */
+export function armorEnhanceDelta(base: number, enhanceLevel: number): number {
+  return attrEnhanceDelta(base, enhanceLevel, attrApply("护甲"));
+}
+
+function keyEnhanceDelta(key: EnhanceAttrKey, base: number, enhance: number): number {
+  return attrEnhanceDelta(base, enhance, attrApply(key));
+}
+
+/** Effective combat totals (物攻满量 M(L)；护甲/力敏智/气血/法力增量减半). */
 export function equipEffectiveStats(it: BagItem): Map<CompareAttrKey, number> {
   const out = new Map<CompareAttrKey, number>();
   const cat = lookupItemSync(it.itemId);
@@ -235,23 +352,24 @@ export function equipEffectiveStats(it: BagItem): Map<CompareAttrKey, number> {
   const enhance = it.enhance | 0;
   const attackBase = cat.attack ?? 0;
   const armorBase = cat.armor ?? 0;
-  const attackDelta =
-    enhance >= 1 && attackBase > 0 ? attackEnhanceDelta(attackBase, enhance) : 0;
-  const armorDelta =
-    enhance >= 1 && armorBase > 0 ? armorEnhanceDelta(armorBase, enhance) : 0;
+  const strBase = cat.strength ?? 0;
+  const agiBase = cat.agility ?? 0;
+  const wisBase = cat.wisdom ?? 0;
+  const hpBase = cat.hpChange ?? 0;
+  const mpBase = cat.mpChange ?? 0;
   out.set("等级", cat.level | 0);
   out.set("强化", enhance);
-  out.set("力量", cat.strength ?? 0);
-  out.set("敏捷", cat.agility ?? 0);
-  out.set("智慧", cat.wisdom ?? 0);
-  out.set("物攻", attackBase + attackDelta);
-  out.set("护甲", armorBase + armorDelta);
-  out.set("躲闪", cat.dodge ?? 0);
-  out.set("命中", cat.hit ?? 0);
-  out.set("暴击", cat.crit ?? 0);
-  out.set("抗性", cat.resist ?? 0);
-  out.set("气血", cat.hpChange ?? 0);
-  out.set("法力", cat.mpChange ?? 0);
+  out.set("力量", strBase + keyEnhanceDelta("力量", strBase, enhance));
+  out.set("敏捷", agiBase + keyEnhanceDelta("敏捷", agiBase, enhance));
+  out.set("智慧", wisBase + keyEnhanceDelta("智慧", wisBase, enhance));
+  out.set("物攻", attackBase + keyEnhanceDelta("物攻", attackBase, enhance));
+  out.set("护甲", armorBase + keyEnhanceDelta("护甲", armorBase, enhance));
+  out.set("躲闪", (cat.dodge ?? 0) + keyEnhanceDelta("躲闪", cat.dodge ?? 0, enhance));
+  out.set("命中", (cat.hit ?? 0) + keyEnhanceDelta("命中", cat.hit ?? 0, enhance));
+  out.set("暴击", (cat.crit ?? 0) + keyEnhanceDelta("暴击", cat.crit ?? 0, enhance));
+  out.set("抗性", (cat.resist ?? 0) + keyEnhanceDelta("抗性", cat.resist ?? 0, enhance));
+  out.set("气血", hpBase + keyEnhanceDelta("气血", hpBase, enhance));
+  out.set("法力", mpBase + keyEnhanceDelta("法力", mpBase, enhance));
   return out;
 }
 
@@ -371,7 +489,7 @@ function resolveMilestoneTiers(it: BagItem): Map<number, ResolvedMilestone> {
 }
 
 /** Main combat attrs from equip.dsh (only non-zero columns), CBE order.
- * 物攻/护甲 append M(L) enhance delta: `[物攻]:+576(+1725)`.
+ * 物攻满量、护甲/力敏智/气血/法力半量增量：`[物攻]:+576(+1725)`.
  */
 function mainStatLines(
   cat: ItemCatalogRow,
@@ -380,22 +498,27 @@ function mainStatLines(
 ): EquipPaintLine[] {
   const attackBase = cat.attack ?? 0;
   const armorBase = cat.armor ?? 0;
-  const attackDelta =
-    enhance >= 1 && attackBase > 0 ? attackEnhanceDelta(attackBase, enhance) : 0;
-  const armorDelta =
-    enhance >= 1 && armorBase > 0 ? armorEnhanceDelta(armorBase, enhance) : 0;
-  const rows: { key: string; n: number; delta: number }[] = [
-    { key: "力量", n: cat.strength ?? 0, delta: 0 },
-    { key: "敏捷", n: cat.agility ?? 0, delta: 0 },
-    { key: "智慧", n: cat.wisdom ?? 0, delta: 0 },
-    { key: "物攻", n: attackBase, delta: attackDelta },
-    { key: "护甲", n: armorBase, delta: armorDelta },
-    { key: "躲闪", n: cat.dodge ?? 0, delta: 0 },
-    { key: "命中", n: cat.hit ?? 0, delta: 0 },
-    { key: "暴击", n: cat.crit ?? 0, delta: 0 },
-    { key: "抗性", n: cat.resist ?? 0, delta: 0 },
-    { key: "气血", n: cat.hpChange ?? 0, delta: 0 },
-    { key: "法力", n: cat.mpChange ?? 0, delta: 0 },
+  const strBase = cat.strength ?? 0;
+  const agiBase = cat.agility ?? 0;
+  const wisBase = cat.wisdom ?? 0;
+  const hpBase = cat.hpChange ?? 0;
+  const mpBase = cat.mpChange ?? 0;
+  const dodgeBase = cat.dodge ?? 0;
+  const hitBase = cat.hit ?? 0;
+  const critBase = cat.crit ?? 0;
+  const resistBase = cat.resist ?? 0;
+  const rows: { key: EnhanceAttrKey; n: number; delta: number }[] = [
+    { key: "力量", n: strBase, delta: keyEnhanceDelta("力量", strBase, enhance) },
+    { key: "敏捷", n: agiBase, delta: keyEnhanceDelta("敏捷", agiBase, enhance) },
+    { key: "智慧", n: wisBase, delta: keyEnhanceDelta("智慧", wisBase, enhance) },
+    { key: "物攻", n: attackBase, delta: keyEnhanceDelta("物攻", attackBase, enhance) },
+    { key: "护甲", n: armorBase, delta: keyEnhanceDelta("护甲", armorBase, enhance) },
+    { key: "躲闪", n: dodgeBase, delta: keyEnhanceDelta("躲闪", dodgeBase, enhance) },
+    { key: "命中", n: hitBase, delta: keyEnhanceDelta("命中", hitBase, enhance) },
+    { key: "暴击", n: critBase, delta: keyEnhanceDelta("暴击", critBase, enhance) },
+    { key: "抗性", n: resistBase, delta: keyEnhanceDelta("抗性", resistBase, enhance) },
+    { key: "气血", n: hpBase, delta: keyEnhanceDelta("气血", hpBase, enhance) },
+    { key: "法力", n: mpBase, delta: keyEnhanceDelta("法力", mpBase, enhance) },
   ];
   return rows
     .filter((r) => r.n !== 0)
@@ -521,30 +644,8 @@ export function enhanceAttrsFromWashText(
   return attrs.length ? attrs : undefined;
 }
 
-/** M(L) = base * (1 + (10L + 35*⌊L/4⌋)/100) */
-function bonusScale(base: number, enhanceLevel: number): number {
-  if (base <= 0 || enhanceLevel <= 0) return base;
-  const level = Math.min(enhanceLevel, 16);
-  const tiers = Math.floor(level / 4);
-  const bonusPct = 10 * level + 35 * tiers;
-  return base + Math.floor((base * bonusPct) / 100);
-}
-
-export function attackEnhanceDelta(base: number, enhanceLevel: number): number {
-  const scaled = bonusScale(base, enhanceLevel);
-  return scaled > base ? scaled - base : 0;
-}
-
-/** 护甲强化增量 = (M(L)-base)/2 */
-export function armorEnhanceDelta(base: number, enhanceLevel: number): number {
-  const full = bonusScale(base, enhanceLevel);
-  if (full <= base) return 0;
-  return Math.floor((full - base) / 2);
-}
-
 /**
  * Enhance UI attr rows: `[护甲]: +cur +next` (current enhance vs target L+1).
- * Matches CBE enhance panel (screenshot 传奇腰带).
  */
 export function buildEnhanceCompareLines(
   it: BagItem,
@@ -554,32 +655,24 @@ export function buildEnhanceCompareLines(
   const cat = lookupItemSync(it.itemId);
   if (!cat || cat.kind !== "equip") return [];
   const qColor = qualityColor(it.quality);
-  const rows: { key: string; base: number; kind: "flat" | "armor" | "attack" }[] =
-    [
-      { key: "力量", base: cat.strength ?? 0, kind: "flat" },
-      { key: "敏捷", base: cat.agility ?? 0, kind: "flat" },
-      { key: "智慧", base: cat.wisdom ?? 0, kind: "flat" },
-      { key: "物攻", base: cat.attack ?? 0, kind: "attack" },
-      { key: "护甲", base: cat.armor ?? 0, kind: "armor" },
-      { key: "躲闪", base: cat.dodge ?? 0, kind: "flat" },
-      { key: "命中", base: cat.hit ?? 0, kind: "flat" },
-      { key: "暴击", base: cat.crit ?? 0, kind: "flat" },
-      { key: "抗性", base: cat.resist ?? 0, kind: "flat" },
-      { key: "气血", base: cat.hpChange ?? 0, kind: "flat" },
-      { key: "法力", base: cat.mpChange ?? 0, kind: "flat" },
-    ];
+  const rows: { key: EnhanceAttrKey; base: number }[] = [
+    { key: "力量", base: cat.strength ?? 0 },
+    { key: "敏捷", base: cat.agility ?? 0 },
+    { key: "智慧", base: cat.wisdom ?? 0 },
+    { key: "物攻", base: cat.attack ?? 0 },
+    { key: "护甲", base: cat.armor ?? 0 },
+    { key: "躲闪", base: cat.dodge ?? 0 },
+    { key: "命中", base: cat.hit ?? 0 },
+    { key: "暴击", base: cat.crit ?? 0 },
+    { key: "抗性", base: cat.resist ?? 0 },
+    { key: "气血", base: cat.hpChange ?? 0 },
+    { key: "法力", base: cat.mpChange ?? 0 },
+  ];
   const out: EquipPaintLine[] = [];
   for (const r of rows) {
     if (r.base === 0) continue;
-    let cur = r.base;
-    let next = r.base;
-    if (r.kind === "armor") {
-      cur = r.base + armorEnhanceDelta(r.base, curLevel);
-      next = r.base + armorEnhanceDelta(r.base, nextLevel);
-    } else if (r.kind === "attack") {
-      cur = r.base + attackEnhanceDelta(r.base, curLevel);
-      next = r.base + attackEnhanceDelta(r.base, nextLevel);
-    }
+    const cur = r.base + keyEnhanceDelta(r.key, r.base, curLevel);
+    const next = r.base + keyEnhanceDelta(r.key, r.base, nextLevel);
     out.push({
       kind: "kv",
       key: `[${r.key}]:`,

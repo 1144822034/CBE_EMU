@@ -30,7 +30,7 @@ export { BOOT_TIPS };
 
 const CHAR_MS = 90;
 const HOLD_MS = 700;
-const VERSION_MS = 900;
+const VERSION_MS = 0;
 
 export class TipBootLayer extends Container {
   private panel = new Graphics();

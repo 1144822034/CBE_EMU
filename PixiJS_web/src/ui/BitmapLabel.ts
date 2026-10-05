@@ -561,8 +561,8 @@ export class BitmapLabel extends Container {
   private _fontSize = UI_FONT_SIZE;
   /** System / Songti weight; ignored by UC3. */
   private _bold = false;
-  /** Default UC3 bitmap glyphs. */
-  private _uc3 = true;
+  /** Default follows menu preference (cn → Songti DOM). */
+  private _uc3 = !preferSystemFont();
   /** Hard-edge bake when uc3:false. */
   private _crisp = true;
   private _bakeSs = 1;
@@ -755,8 +755,11 @@ export class BitmapLabel extends Container {
     // Popup panels paint on the canvas under #lcd-dom-text — hide world/HUD
     // DOM glyphs so they cannot float above SystemPanel / dialog / etc.
     if (show && lcdDomOccludedByPopup(this)) show = false;
+    const worldAlpha = this.getGlobalAlpha();
+    if (show && worldAlpha <= 0.02) show = false;
     el.style.display = show ? "block" : "none";
     if (!show) return;
+    el.style.opacity = worldAlpha >= 0.995 ? "1" : String(worldAlpha);
     el.style.zIndex = String(lcdDomCssZIndex(this));
     const gp = this.getGlobalPosition();
     const s = lcdDomCssScale();

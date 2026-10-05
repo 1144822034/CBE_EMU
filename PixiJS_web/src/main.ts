@@ -1215,6 +1215,7 @@ async function main(): Promise<void> {
     view.setLeiBlink(false);
     wagerPanel.open(board.rows, board.mine, session.selectedRoleId, {
       vitalityCost: board.vitalityCost,
+      minStakeGold: board.minStakeGold,
     });
     showPhase("world");
     syncWorldWalkInput();
@@ -2428,17 +2429,25 @@ async function main(): Promise<void> {
       menu.reset();
       shell.setSoftkeys({ left: "确定", right: "返回" });
     }
-    else if (p === "battle")
-      shell.setSoftkeys(
-        battle.isAwaitingRound() ||
-          battle.isHangupActive() ||
-          battle.isAutoBattleActive()
-          ? { left: "", right: "" }
-          : {
-              left: battle.softkeyLeftLabel(),
-              right: battle.softkeyRightLabel(),
-            },
-      );
+    else if (p === "battle") {
+      if (battle.isAwaitingDeathPrompt()) {
+        shell.setSoftkeys({
+          left: battle.softkeyLeftLabel(),
+          right: battle.softkeyRightLabel(),
+        });
+      } else {
+        shell.setSoftkeys(
+          battle.isAwaitingRound() ||
+            battle.isHangupActive() ||
+            battle.isAutoBattleActive()
+            ? { left: "", right: "" }
+            : {
+                left: battle.softkeyLeftLabel(),
+                right: battle.softkeyRightLabel(),
+              },
+        );
+      }
+    }
     else if (p === "dialog") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "system") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "enhance") shell.setSoftkeys({ left: "确定", right: "返回" });
@@ -3162,6 +3171,27 @@ async function main(): Promise<void> {
       // Late same-shell 30/1 after teleport/poll must not hide a live fight.
       // Ordinary revive (hp already 0, or 20/1+30/1) must still tear down
       // mmBattle even when the telestone is on the current map.
+      if (
+        battle.isAwaitingDeathPrompt() &&
+        session.inBattle &&
+        view.showsSceneFile(loadedScene)
+      ) {
+        console.info(
+          `[main] keep death prompt over same-scene enter ${loadedScene}`,
+        );
+        return;
+      }
+      if (
+        phase === "system" ||
+        phase === "enhance" ||
+        phase === "wash" ||
+        phase === "dialog"
+      ) {
+        console.info(
+          `[main] keep overlay ${phase} over scene enter ${loadedScene}`,
+        );
+        return;
+      }
       if (
         (phase === "battle" || session.inBattle) &&
         view.showsSceneFile(loadedScene) &&
@@ -3958,19 +3988,23 @@ async function main(): Promise<void> {
         );
         shell.setSoftkeys({ left: "继续", center: "", right: "继续" });
       } else if (phase === "battle" && !up.finished) {
-        const hideKeys =
-          battle.isAwaitingRound() ||
-          battle.isPlaybackBusy() ||
-          (!battle.isArenaDuel() &&
-            (session.hangupActive || session.autoBattleActive));
-        shell.setSoftkeys(
-          hideKeys
-            ? { left: "", right: "" }
-            : {
-                left: battle.softkeyLeftLabel(),
-                right: battle.softkeyRightLabel(),
-              },
-        );
+        if (battle.isAwaitingDeathPrompt()) {
+          applyBattleSoftkeys();
+        } else {
+          const hideKeys =
+            battle.isAwaitingRound() ||
+            battle.isPlaybackBusy() ||
+            (!battle.isArenaDuel() &&
+              (session.hangupActive || session.autoBattleActive));
+          shell.setSoftkeys(
+            hideKeys
+              ? { left: "", right: "" }
+              : {
+                  left: battle.softkeyLeftLabel(),
+                  right: battle.softkeyRightLabel(),
+                },
+          );
+        }
       }
       // Escape leaves immediately. Victory 4/8 waits for BattleScreen playback
       // (onExitReady); 4/7 settle panel uses onSettleConfirm — never tear down
@@ -4145,16 +4179,18 @@ async function main(): Promise<void> {
           battle.setHangupActive(session.hangupActive);
           syncWorldStatusBadges();
           if (phase === "battle" && battle.visible) {
-            shell.setSoftkeys(
-              session.hangupActive || session.autoBattleActive
-                ? { left: "", right: "" }
-                : battle.isAwaitingRound() || battle.isPlaybackBusy()
+            if (battle.isAwaitingDeathPrompt()) applyBattleSoftkeys();
+            else
+              shell.setSoftkeys(
+                session.hangupActive || session.autoBattleActive
                   ? { left: "", right: "" }
-                  : {
-                      left: battle.softkeyLeftLabel(),
-                      right: battle.softkeyRightLabel(),
-                    },
-            );
+                  : battle.isAwaitingRound() || battle.isPlaybackBusy()
+                    ? { left: "", right: "" }
+                    : {
+                        left: battle.softkeyLeftLabel(),
+                        right: battle.softkeyRightLabel(),
+                      },
+              );
           }
           continue;
         }
@@ -5252,6 +5288,13 @@ async function main(): Promise<void> {
   const entertainMinimizedStatus = () => "娱乐播放中";
 
   const applyBattleSoftkeys = () => {
+    if (battle.isAwaitingDeathPrompt()) {
+      shell.setSoftkeys({
+        left: battle.softkeyLeftLabel(),
+        right: battle.softkeyRightLabel(),
+      });
+      return;
+    }
     shell.setSoftkeys(
       battle.isAwaitingRound() ||
         battle.isHangupActive() ||
@@ -8895,6 +8938,7 @@ async function main(): Promise<void> {
           await refreshAllUc3Labels();
           view.remountAfterFontChange();
           title.refreshAfterFontChange();
+          battle.refreshAfterFontChange();
           showGameTip(`字体: ${opt.label}`);
           hud.pushChat(`[系]字体已切换为 ${opt.label} (${opt.file})`);
         } catch (e) {
@@ -9108,7 +9152,10 @@ async function main(): Promise<void> {
         : 0;
     dialog.hide();
     void session.pickNpcOption(action, value, label).then(() => {
-      if (session.inBattle) {
+      if (phase === "system" || phase === "enhance" || phase === "wash") {
+        return;
+      }
+      if (session.inBattle || battle.isAwaitingDeathPrompt()) {
         showPhase("battle");
         return;
       }
@@ -9272,6 +9319,7 @@ async function main(): Promise<void> {
   battle.onDeathPromptChoice = (result) => {
     // CBE: no 801 → open mall (no 1/7/14). Buy then return → confirm stone.
     if (result === 1 && !hasRevivalStone()) {
+      battle.clearDeathPromptBusy();
       showGameTip("打开商城购买复活石");
       hud.pushChat("[系]购买复活石后返回，再选使用复活石");
       openSystem("mall");
@@ -9741,17 +9789,16 @@ async function main(): Promise<void> {
       return;
     }
     if (phase === "battle") {
+      if (battle.isAwaitingDeathPrompt()) {
+        if (which === "left") battle.confirm();
+        if (which === "right") battle.flee();
+        applyBattleSoftkeys();
+        return;
+      }
       if (battle.isAwaitingRound()) return;
       if (which === "left") battle.confirm();
       if (which === "right") battle.flee();
-      shell.setSoftkeys(
-        battle.isAwaitingRound()
-          ? { left: "", right: "" }
-          : {
-              left: battle.softkeyLeftLabel(),
-              right: battle.softkeyRightLabel(),
-            },
-      );
+      applyBattleSoftkeys();
       return;
     }
     if (phase === "dialog") {
@@ -9895,16 +9942,14 @@ async function main(): Promise<void> {
       return;
     }
     if (phase === "battle") {
+      if (battle.isAwaitingDeathPrompt()) {
+        battle.confirm();
+        applyBattleSoftkeys();
+        return;
+      }
       if (battle.isAwaitingRound()) return;
       battle.confirm();
-      shell.setSoftkeys(
-        battle.isAwaitingRound()
-          ? { left: "", right: "" }
-          : {
-              left: battle.softkeyLeftLabel(),
-              right: battle.softkeyRightLabel(),
-            },
-      );
+      applyBattleSoftkeys();
       return;
     }
     if (phase === "menu") {
@@ -10564,16 +10609,14 @@ async function main(): Promise<void> {
       } else if (phase === "login" || phase === "register" || phase === "password") {
         title.cancelLogin();
       } else if (phase === "battle") {
+        if (battle.isAwaitingDeathPrompt()) {
+          battle.flee();
+          applyBattleSoftkeys();
+          return;
+        }
         if (battle.isAwaitingRound()) return;
         battle.flee();
-        shell.setSoftkeys(
-          battle.isAwaitingRound()
-            ? { left: "", right: "" }
-            : {
-                left: battle.softkeyLeftLabel(),
-                right: battle.softkeyRightLabel(),
-              },
-        );
+        applyBattleSoftkeys();
       } else {
         shell.softkeys.onSoftkey?.("right");
       }

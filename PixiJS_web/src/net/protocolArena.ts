@@ -406,6 +406,7 @@ export function parseWagerList(packet: WtPacket): {
   rows: WagerListRow[];
   message: string;
   vitalityCost: number;
+  minStakeGold: number;
 } | null {
   const obj = packet.objects.find(
     (o) => o.kind === ARENA_WT_KIND && o.subtype === 10,
@@ -413,6 +414,8 @@ export function parseWagerList(packet: WtPacket): {
   if (!obj) return null;
   const count = fieldU32(obj, "count");
   const vitalityCost = fieldU32(obj, "vitalityCost");
+  let minStakeGold = fieldU32(obj, "minStakeGold");
+  if (minStakeGold === 0) minStakeGold = 100;
   const raw = findField(obj, "rows");
   const rows: WagerListRow[] = [];
   const msgField = findField(obj, "message");
@@ -478,7 +481,7 @@ export function parseWagerList(packet: WtPacket): {
       }
     }
   }
-  return { result: fieldU32(obj, "result"), rows, message, vitalityCost };
+  return { result: fieldU32(obj, "result"), rows, message, vitalityCost, minStakeGold };
 }
 
 export function parseWagerMine(packet: WtPacket): WagerMine | null {

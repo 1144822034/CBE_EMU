@@ -617,7 +617,6 @@ export class WorldHud extends Container {
       root.addChild(bg);
 
       // One setText only — makePixelText+show raced and could leave wrong ink.
-      // Force UC3 bake so soft-row color is the canvas glyph (not Songti DOM).
       const ink = active ? 0xc060ff : 0xffffff;
       const label = new BitmapLabel();
       label.eventMode = "none";
@@ -629,7 +628,6 @@ export class WorldHud extends Container {
         outline: false,
         smooth: false,
         crisp: true,
-        uc3: true,
       });
 
       const id = slot.id;

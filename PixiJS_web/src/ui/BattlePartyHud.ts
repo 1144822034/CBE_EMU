@@ -6,7 +6,9 @@ import {
   tryLoadUiTexture,
   uiSprite,
 } from "./UiAssets";
-import { BitmapLabel, UC3_CELL } from "./BitmapLabel";
+import { BitmapLabel, UC3_CELL, measureUiTextWidth } from "./BitmapLabel";
+import { CBE } from "./constants";
+import { preferSystemFont } from "../resources/systemFont";
 import {
   composeActorFrameIndex,
   loadActor,
@@ -18,7 +20,72 @@ const NAME_PINK = 0xff40c8;
 const HP_FILL = 0xe03828;
 const SP_FILL = 0x40e060;
 /** ui_hpspnum.gif opaque ink — HP/SP digit glyph color. */
-const HP_NUM = 0xd6f7a5;
+export const BATTLE_HPSP_NUM_INK = 0xd6f7a5;
+const HP_NUM = BATTLE_HPSP_NUM_INK;
+/** Visual HP/SP number size when 高清字体 (scaled like party names). */
+export const BATTLE_HPSP_NUM_SIZE = 10;
+const HPSP_STRIP_H = 5;
+const HPSP_STRIP_CELL = 4;
+
+/** GIF strip on pixel packs; Songti DOM when preferSystemFont(). */
+export function applyBattleHpspDigits(
+  strip: DigitStrip | null,
+  label: BitmapLabel,
+  text: string,
+  color = BATTLE_HPSP_NUM_INK,
+): { w: number; h: number } {
+  if (preferSystemFont()) {
+    if (strip) strip.root.visible = false;
+    label.visible = true;
+    const scale = BATTLE_HPSP_NUM_SIZE / UC3_CELL;
+    label.scale.set(scale);
+    void label.setText(text, color, { smooth: false, outline: false });
+    return {
+      w: Math.ceil(measureUiTextWidth(text, UC3_CELL) * scale),
+      h: BATTLE_HPSP_NUM_SIZE,
+    };
+  }
+  label.visible = false;
+  if (!strip) return { w: 0, h: HPSP_STRIP_H };
+  strip.root.visible = true;
+  strip.setText(text);
+  return {
+    w: text.length * (strip.cellW || HPSP_STRIP_CELL),
+    h: HPSP_STRIP_H,
+  };
+}
+
+export function hideBattleHpspDigits(
+  strip: DigitStrip | null,
+  label: BitmapLabel,
+): void {
+  if (strip) strip.root.visible = false;
+  label.visible = false;
+}
+
+const HPSP_TAG_STRIP_W = 9;
+
+/** GIF `ui_hpsp` / `HP.gif` tags; Songti 「HP」「SP」 when 高清字体. */
+export function applyBattleHpspTag(
+  spr: Sprite | null,
+  label: BitmapLabel,
+  text: "HP" | "SP",
+): number {
+  if (preferSystemFont()) {
+    if (spr) spr.visible = false;
+    label.visible = true;
+    const scale = BATTLE_HPSP_NUM_SIZE / UC3_CELL;
+    label.scale.set(scale);
+    void label.setText(text, CBE.inkTip, {
+      smooth: false,
+      outline: false,
+    });
+    return Math.ceil(measureUiTextWidth(text, UC3_CELL) * scale);
+  }
+  label.visible = false;
+  if (spr) spr.visible = true;
+  return Math.max(HPSP_TAG_STRIP_W, Math.ceil(spr?.width || 0));
+}
 /** xuetiao.gif inner track — fill draws ABOVE opaque black pixels. */
 const BAR_FILL = { x: 5, y: 4, w: 34, h: 3 } as const;
 const SLOT_W = 78;
@@ -54,6 +121,14 @@ type SlotArt = {
   spFill: Graphics;
   hpNum: DigitStrip | null;
   spNum: DigitStrip | null;
+  hpNumLab: BitmapLabel;
+  spNumLab: BitmapLabel;
+  hpTag: Sprite | null;
+  spTag: Sprite | null;
+  hpTagLab: BitmapLabel;
+  spTagLab: BitmapLabel;
+  hpNumHost: Container;
+  spNumHost: Container;
 };
 
 /**
@@ -223,8 +298,12 @@ export class BattlePartyHud extends Container {
       .clear()
       .rect(BAR_FILL.x, BAR_FILL.y, spW, BAR_FILL.h)
       .fill({ color: SP_FILL });
-    slot.hpNum?.setText(`${hp}/${maxHp}`);
-    slot.spNum?.setText(`${mp}/${maxMp}`);
+    const hpTagW = applyBattleHpspTag(slot.hpTag, slot.hpTagLab, "HP");
+    const spTagW = applyBattleHpspTag(slot.spTag, slot.spTagLab, "SP");
+    slot.hpNumHost.x = FACE_X + hpTagW + 1;
+    slot.spNumHost.x = FACE_X + spTagW + 1;
+    applyBattleHpspDigits(slot.hpNum, slot.hpNumLab, `${hp}/${maxHp}`);
+    applyBattleHpspDigits(slot.spNum, slot.spNumLab, `${mp}/${maxMp}`);
   }
 
   private async makeSlot(): Promise<SlotArt> {
@@ -269,19 +348,21 @@ export class BattlePartyHud extends Container {
     hp.host.position.set(FACE_X, Y_HP_BAR);
     sp.host.position.set(FACE_X, Y_SP_BAR);
 
-    const hpLabel = this.hpLabTex
-      ? uiSprite(this.hpLabTex)
-      : new Sprite(Texture.EMPTY);
-    const spLabel = this.spLabTex
-      ? uiSprite(this.spLabTex)
-      : new Sprite(Texture.EMPTY);
-    hpLabel.position.set(FACE_X, Y_HP_NUM);
-    spLabel.position.set(FACE_X, Y_SP_NUM);
+    const hpTag = this.hpLabTex ? uiSprite(this.hpLabTex) : null;
+    const spTag = this.spLabTex ? uiSprite(this.spLabTex) : null;
+    if (hpTag) hpTag.position.set(FACE_X, Y_HP_NUM);
+    if (spTag) spTag.position.set(FACE_X, Y_SP_NUM);
+    const hpTagLab = new BitmapLabel();
+    const spTagLab = new BitmapLabel();
+    hpTagLab.position.set(FACE_X, Y_HP_NUM);
+    spTagLab.position.set(FACE_X, Y_SP_NUM);
 
     const hpNum =
       (await DigitStrip.battleHpspNum()) || (await DigitStrip.hpspNum());
     const spNum =
       (await DigitStrip.battleHpspNum()) || (await DigitStrip.hpspNum());
+    const hpNumLab = new BitmapLabel();
+    const spNumLab = new BitmapLabel();
     const hpNumHost = new Container();
     const spNumHost = new Container();
     hpNumHost.position.set(FACE_X + 10, Y_HP_NUM);
@@ -294,17 +375,13 @@ export class BattlePartyHud extends Container {
       spNum.setText("0/0");
       spNumHost.addChild(spNum.root);
     }
+    hpNumHost.addChild(hpNumLab);
+    spNumHost.addChild(spNumLab);
 
-    root.addChild(
-      portrait,
-      name,
-      hp.host,
-      sp.host,
-      hpLabel,
-      spLabel,
-      hpNumHost,
-      spNumHost,
-    );
+    root.addChild(portrait, name, hp.host, sp.host);
+    if (hpTag) root.addChild(hpTag);
+    if (spTag) root.addChild(spTag);
+    root.addChild(hpTagLab, spTagLab, hpNumHost, spNumHost);
     return {
       root,
       portrait,
@@ -313,6 +390,14 @@ export class BattlePartyHud extends Container {
       spFill: sp.fill,
       hpNum,
       spNum,
+      hpNumLab,
+      spNumLab,
+      hpTag,
+      spTag,
+      hpTagLab,
+      spTagLab,
+      hpNumHost,
+      spNumHost,
     };
   }
 

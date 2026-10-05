@@ -50,9 +50,10 @@ type WagerRowAction = {
   softLabel?: string;
 };
 
-/** 赏金押金最低 100 金（1金=10000铜）. */
-export const WAGER_MIN_STAKE_GOLD = 100;
-export const WAGER_MIN_STAKE_COPPER = WAGER_MIN_STAKE_GOLD * COPPER_PER_GOLD;
+/** 赏金押金最低默认 100 金（1金=10000铜）；实际下限由服务端 minStakeGold 下发. */
+export const WAGER_DEFAULT_MIN_STAKE_GOLD = 100;
+export const WAGER_MIN_STAKE_GOLD = WAGER_DEFAULT_MIN_STAKE_GOLD;
+export const WAGER_MIN_STAKE_COPPER = WAGER_DEFAULT_MIN_STAKE_GOLD * COPPER_PER_GOLD;
 
 const PAGE_SIZE = 5;
 const TAB_BG = 0x375946;
@@ -126,6 +127,7 @@ export class WagerPanel extends Container {
   private listCursor = 0;
   private stakeInput = WAGER_MIN_STAKE_COPPER;
   private vitalityCost = 0;
+  private minStakeGold = WAGER_DEFAULT_MIN_STAKE_GOLD;
   private toast: PanelTipState = createPanelTipState();
   onAction: ((action: WagerPanelAction, challengeId?: number) => void) | null =
     null;
@@ -149,13 +151,14 @@ export class WagerPanel extends Container {
     rows: WagerListRow[],
     mine: WagerMine | null,
     selfRoleId = 0,
-    opts?: { vitalityCost?: number },
+    opts?: { vitalityCost?: number; minStakeGold?: number },
   ): void {
     const wasVisible = this.visible;
     this.rows = rows;
     this.mine = mine;
     this.selfRoleId = selfRoleId >>> 0;
     if (opts?.vitalityCost != null) this.vitalityCost = opts.vitalityCost >>> 0;
+    this.applyMinStakeGold(opts?.minStakeGold);
     if (!wasVisible) {
       this.tab = "host";
       this.challengePage = 0;
@@ -174,12 +177,13 @@ export class WagerPanel extends Container {
     rows: WagerListRow[],
     mine: WagerMine | null,
     selfRoleId?: number,
-    opts?: { vitalityCost?: number },
+    opts?: { vitalityCost?: number; minStakeGold?: number },
   ): void {
     this.rows = rows;
     this.mine = mine;
     if (selfRoleId != null) this.selfRoleId = selfRoleId >>> 0;
     if (opts?.vitalityCost != null) this.vitalityCost = opts.vitalityCost >>> 0;
+    this.applyMinStakeGold(opts?.minStakeGold);
     this.clampPage();
     const n = this.actions().length;
     if (n > 0 && this.listCursor >= n) this.listCursor = Math.max(0, n - 1);
@@ -203,10 +207,24 @@ export class WagerPanel extends Container {
     }, ms);
   }
 
+  private minStakeCopper(): number {
+    return this.minStakeGold * COPPER_PER_GOLD;
+  }
+
+  private applyMinStakeGold(gold?: number): void {
+    const next =
+      gold && gold > 0
+        ? Math.min(10000, Math.max(1, gold >>> 0))
+        : this.minStakeGold || WAGER_DEFAULT_MIN_STAKE_GOLD;
+    this.minStakeGold = next;
+    const minCopper = this.minStakeCopper();
+    if (this.stakeInput < minCopper) this.stakeInput = minCopper;
+  }
+
   /** delta 为铜币；左右键通常一次 ±1 金. */
   adjustStake(delta: number): void {
     if (!this.visible || this.tab !== "host" || this.hasOpenHostBoard()) return;
-    const next = Math.max(WAGER_MIN_STAKE_COPPER, this.stakeInput + delta);
+    const next = Math.max(this.minStakeCopper(), this.stakeInput + delta);
     this.stakeInput = Math.min(next, 10_000 * COPPER_PER_GOLD);
     this.redraw();
   }
@@ -634,8 +652,8 @@ export class WagerPanel extends Container {
     y += 48;
     this.addLabel(
       this.vitalityCost > 0
-        ? `最低${WAGER_MIN_STAKE_GOLD}金 耗活力${this.vitalityCost} 中键确认`
-        : `最低${WAGER_MIN_STAKE_GOLD}金  ←→每次±100金  中键确认`,
+        ? `最低${this.minStakeGold}金 耗活力${this.vitalityCost} 中键确认`
+        : `最低${this.minStakeGold}金  ←→每次±100金  中键确认`,
       lx,
       y,
       CBE.inkLabel,

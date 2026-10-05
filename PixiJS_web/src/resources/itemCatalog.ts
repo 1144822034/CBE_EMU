@@ -513,21 +513,26 @@ export function lookupItemSync(itemId: number): ItemCatalogRow | null {
   return equipCache?.get(itemId) ?? itemCache?.get(itemId) ?? null;
 }
 
-/** Exact DSH name match (equip first). Used by warehouse retrieve label coloring. */
+/**
+ * Exact DSH name match (equip first). Same names exist at multiple 品质;
+ * if those rows disagree, return null instead of the first (usually green) hit.
+ */
 export function lookupItemByNameSync(name: string): ItemCatalogRow | null {
   const key = name.trim();
   if (!key) return null;
-  if (equipCache) {
-    for (const row of equipCache.values()) {
-      if (row.name === key) return row;
+  const matches: ItemCatalogRow[] = [];
+  const collect = (cache: Map<number, ItemCatalogRow> | null) => {
+    if (!cache) return;
+    for (const row of cache.values()) {
+      if (row.name === key) matches.push(row);
     }
-  }
-  if (itemCache) {
-    for (const row of itemCache.values()) {
-      if (row.name === key) return row;
-    }
-  }
-  return null;
+  };
+  collect(equipCache);
+  if (!matches.length) collect(itemCache);
+  if (!matches.length) return null;
+  const quality = matches[0].quality;
+  if (matches.some((row) => row.quality !== quality)) return null;
+  return matches[0];
 }
 
 /**
@@ -617,6 +622,11 @@ export function qualityColor(quality: number): number {
     default:
       return 0xee10f6;
   }
+}
+
+/** List/detail name color from live catalog id, then row quality. */
+export function itemQualityColor(itemId: number, fallbackQuality = 0): number {
+  return qualityColor(lookupItemSync(itemId)?.quality ?? fallbackQuality);
 }
 
 export const WORN_SLOT_NAMES = [
