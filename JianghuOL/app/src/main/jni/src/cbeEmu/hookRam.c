@@ -5,6 +5,66 @@
 
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
+/*
+ * JianghuOL.CBE ARM RVCT runtime:
+ *   0x0104D538 __aeabi_idiv / idivmod
+ *   0x0104D610 __aeabi_uidiv / uidivmod
+ * Divisor 0 (rand_range max-min+1 wrap, hangup 4/7 shell) used to take
+ * 0x0104E110 → SYS_WRITE0 "Arithmetic exception" → SYS_EXIT 0x18 → assert.
+ * Treat divisor 0 as 1 so quotient/remainder stay defined (n/1, n%1==0).
+ */
+void vm_host_aeabi_div0_divisor_one(uc_engine *uc, uint64_t address)
+{
+    u32 pc = (u32)address & ~1u;
+    u32 den = 0;
+
+    /*
+     * rand_range 0x01004CC2: after max-min, adds r0,#1 then blx idiv.
+     * Thumb blx sits at 0x01004CD2 (lr=0x01004CD7).  If range+1 wrapped
+     * to 0, use 1.  GetRandom in r1 is the AEABI divisor; 0 also → 1.
+     */
+    if (pc == 0x01004CD2u)
+    {
+        u32 range = 0;
+        u32 rnd = 0;
+
+        uc_reg_read(uc, UC_ARM_REG_R0, &range);
+        uc_reg_read(uc, UC_ARM_REG_R1, &rnd);
+        if (range == 0)
+        {
+            range = 1;
+            uc_reg_write(uc, UC_ARM_REG_R0, &range);
+        }
+        if (rnd == 0)
+        {
+            rnd = 1;
+            uc_reg_write(uc, UC_ARM_REG_R1, &rnd);
+        }
+        return;
+    }
+    if (pc != 0x0104D538u && pc != 0x0104D610u)
+        return;
+    uc_reg_read(uc, UC_ARM_REG_R1, &den);
+    if (den != 0)
+        return;
+    den = 1;
+    uc_reg_write(uc, UC_ARM_REG_R1, &den);
+    {
+        static u32 s_logs = 0;
+        if (s_logs < 16u)
+        {
+            u32 num = 0;
+            u32 lr = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &num);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            printf("[warn][cbe] aeabi_div0 divisor0->1 pc=%08x num=%08x lr=%08x "
+                   "evidence=idiv-r1-zero\n",
+                   pc, num, lr);
+            ++s_logs;
+        }
+    }
+}
+
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 void handleLcdReg(uint64_t address, u32 data, uint64_t value);
@@ -155,6 +215,33 @@ void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
             vm_readStringByPtr(arg, cbeTextString);
             printf("%s", cbeTextString);
             return;
+        }
+        /*
+         * SYS_EXIT after __rt_div0 (pc=0x0104E97C svc).  Do not assert:
+         * return to the idiv caller as n/1 (quot 0 if numerator already lost).
+         */
+        if (reason == 0x18)
+        {
+            u32 pc = 0;
+            u32 lr = 0;
+            u32 pcAlign;
+
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            pcAlign = pc & ~1u;
+            if (pcAlign == 0x0104E974u || pcAlign == 0x0104E978u ||
+                pcAlign == 0x0104E97Cu || pcAlign == 0x0104E980u)
+            {
+                u32 quot = 0;
+                u32 rem = 0;
+                printf("[warn][cbe] aeabi_div0 SYS_EXIT recovered as /1 pc=%08x "
+                       "lr=%08x arg=%x evidence=semihost-0x18\n",
+                       pc, lr, arg);
+                uc_reg_write(uc, UC_ARM_REG_R0, &quot);
+                uc_reg_write(uc, UC_ARM_REG_R1, &rem);
+                uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+                return;
+            }
         }
     }
     printf("未处理的CPU中断:%x\n", intno);

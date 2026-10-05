@@ -2605,66 +2605,85 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     wcoin = vm_net_mock_role_wcoin_balance(activeRole);
 
     /*
-     * 01769c21 contract (restored post-test23): EVERY open14 is the same
-     * five-object family ending with 1/1/14 actorinfo (bareDefense, full
-     * wire).  mmShop:0x9DE clears loading only on that actor-state branch.
+     * First 0x162C/0x11F0 (shell still inactive): 01769c21 family-5, pages
+     * inline, actor last.  mmShop:0x9DE clears loading on the actor branch.
      *
-     * Rejected deviations (debug-25c74d):
-     * - shell family-4 no actor -> stuck communication bar
-     * - live/capped/zero-paint actor -> SCR_Render NULL+0x10
-     * - host peel/kind2 -> outdoor gone, no poll, stuck on transition
+     * Menu/NPC 0x1038 combo already filled 14/5+14/6 and marked the shell.
+     * Exit 0x162C still sends 1/1/14; repeating iteminfo makes sub_7BC append
+     * from [page+6] past the row allocation, then destroy vm_free's a non-heap
+     * pointer (2026-10-05 临安府 0x00630000).  Omit pages; keep status+money
+     * and the open14 actor-state so 0x9DE can finish loading-clear and pop.
      */
-    if (!vm_net_mock_append_shop_open_status14_object(out, outCap, &pos))
-        return 0;
-    if (!vm_net_mock_append_shop_money4_object(out, outCap, &pos))
-        return 0;
-    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 5, page5Index,
-                                                    &totalItems, &pageRows, &itemInfoLen))
-        return 0;
-    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 6, 0,
-                                                    &secretTotalItems, &secretRows,
-                                                    &secretItemInfoLen))
-        return 0;
-    /*
-     * mmShop:0x9DE returns immediately after the 1/1/14 actor-state branch and
-     * clears the shop loading flag there, so keep this object last.
-     */
-    if (!vm_net_mock_append_shop_actor_state14_object_open14(out, outCap, &pos,
-                                                             &actorInfoLen))
-        return 0;
-    vm_net_mock_finish_wt_packet(out, pos, 5);
-    g_netMockShop17ListPending = 1;
-    g_netMockBackpackGridSeededRoleId = 0;
-    vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-actor-query14");
-    vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
-    vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
     {
-        char trace[192];
+        u32 objectCount = 2;
         u32 shell = vm_mock_service_mmshop_shell_is_active() ? 1u : 0u;
-        snprintf(trace, sizeof(trace),
-                 "open14 family-5 actor=%u shell=%u page5=%u resp=%u",
-                 actorInfoLen, shell, page5Index, pos);
-        vm_mock_service_shop_open14_trace(trace);
+        u32 inlinePages = shell ? 0u : 1u;
+
+        if (!vm_net_mock_append_shop_open_status14_object(out, outCap, &pos))
+            return 0;
+        if (!vm_net_mock_append_shop_money4_object(out, outCap, &pos))
+            return 0;
+        if (inlinePages)
+        {
+            if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 5,
+                                                            page5Index,
+                                                            &totalItems, &pageRows,
+                                                            &itemInfoLen))
+                return 0;
+            if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 6, 0,
+                                                            &secretTotalItems,
+                                                            &secretRows,
+                                                            &secretItemInfoLen))
+                return 0;
+            objectCount += 2;
+        }
+        /*
+         * mmShop:0x9DE returns immediately after the 1/1/14 actor-state branch
+         * and clears the shop loading flag there, so keep this object last.
+         */
+        if (!vm_net_mock_append_shop_actor_state14_object_open14(out, outCap, &pos,
+                                                                 &actorInfoLen))
+            return 0;
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, (u8)objectCount);
+        g_netMockShop17ListPending = 1;
+        g_netMockBackpackGridSeededRoleId = 0;
+        vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-actor-query14");
+        vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
+        vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
+        {
+            char trace[192];
+            snprintf(trace, sizeof(trace),
+                     "open14 objects=%u actor=%u shell=%u pages=%s page5=%u resp=%u",
+                     objectCount, actorInfoLen, shell,
+                     inlinePages ? "inline" : "omit-already-filled",
+                     page5Index, pos);
+            vm_mock_service_shop_open14_trace(trace);
+        }
+        printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u "
+               "pages=%s objects=%u actor_state=last page5=%u page6=0 "
+               "secret_total=%u secret_rows=%u secret_iteminfo_len=%u "
+               "actorinfo_len=%u grid_reseed=1 secret_ids=%s weapon_ids=%s "
+               "evidence=mmShop:0x9DE+sub_7BC-no-reappend-on-shell\n",
+               actorId,
+               activeRole ? activeRole->roleId : 0,
+               wcoin,
+               inlinePages ? "inline" : "omit-already-filled",
+               objectCount,
+               page5Index,
+               secretTotalItems,
+               secretRows,
+               secretItemInfoLen,
+               actorInfoLen,
+               page5Ids,
+               secretIds);
+        vm_autotest_note("mock_shop_open14 actorId=%u pages=%s actor_state=last "
+                         "actorinfo_len=%u evidence=mmShop:0x9DE+sub_7BC-no-reappend-on-shell\n",
+                         actorId,
+                         inlinePages ? "inline" : "omit-already-filled",
+                         actorInfoLen);
+        return pos;
     }
-    printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u "
-           "pages=inline actor_state=last page5=%u page6=0 secret_total=%u "
-           "secret_rows=%u secret_iteminfo_len=%u actorinfo_len=%u "
-           "grid_reseed=1 secret_ids=%s weapon_ids=%s "
-           "evidence=01769c21-family5+bareDefense-full-wire\n",
-           actorId,
-           activeRole ? activeRole->roleId : 0,
-           wcoin,
-           page5Index,
-           secretTotalItems,
-           secretRows,
-           secretItemInfoLen,
-           actorInfoLen,
-           page5Ids,
-           secretIds);
-    vm_autotest_note("mock_shop_open14 actorId=%u pages=inline actor_state=last "
-                     "actorinfo_len=%u evidence=01769c21-restore-post-test23\n",
-                     actorId, actorInfoLen);
-    return pos;
 }
 
 

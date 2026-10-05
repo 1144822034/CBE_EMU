@@ -38,6 +38,7 @@
 void RunArmProgram(void *);
 void hookBlockCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
+void vm_host_aeabi_div0_divisor_one(uc_engine *uc, uint64_t address);
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 void agent_dbg0b451a_on_timer_remain_write(u32 addr, u32 size, u32 value, u32 pc);
 /* Title 1/1/6 role-select: bind dream HUD visit/remain to this roleId. */

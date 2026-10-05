@@ -3803,6 +3803,29 @@ static void vm_host_pump_map_stone_dismiss_bar(void)
     g_vm_map_stone_dismiss_bar_tick = 0;
 }
 
+static void vm_host_arm_shop_return_skip_bar(const char *reason)
+{
+    /*
+     * Same ResetDownloadState pair as map-stone.  mmShop pop rebuilds mmGame
+     * and DoLoading would paint the gold bar; resources are already local.
+     */
+    g_vm_map_stone_dismiss_bar = 1;
+    g_vm_map_stone_dismiss_bar_tick = 0;
+    vm_host_clear_download_busy(reason ? reason : "mmshop-exit-skip-bar");
+    printf("[info][screen] shop_return_skip_bar_arm reason=%s "
+           "evidence=mmShop-pop-no-gold-bar\n",
+           reason ? reason : "-");
+}
+
+/*
+ * Scene DF/CBM shells: login 0x0501/0502, later maps 0x051c… after CBM load.
+ * 0xfff00000==0x05000000 missed 0x051c83e5 (dream-exit outdoor ScreenInit).
+ */
+static int vm_host_screen_init_is_loaded_df(u32 screenInitEntry)
+{
+    return (screenInitEntry & 0xff000000u) == 0x05000000u;
+}
+
 /*
  * Dream 29*: instance 30/1 already DF-ScreenInit'd.  2/3 still calls
  * EnterSceneByMapName(0x01018150).  Rejecting at screen_mgr is too late —
@@ -4215,7 +4238,8 @@ static int vm_host_screen_destroy_looks_like_mmshop(u32 screen)
         return 0;
     destroyEntry = vm_get_var(screen + 4) & ~1u;
     initEntry = vm_get_var(screen) & ~1u;
-    if (destroyEntry >= 0x05180000u && destroyEntry < 0x051A0000u)
+    if (destroyEntry >= 0x05180000u && destroyEntry < 0x051A0000u &&
+        initEntry > destroyEntry && (initEntry - destroyEntry) == 0xaa2u)
         return 1;
     /* Exact runtime pair from client_out mall open. */
     if (destroyEntry == 0x0502d217u || initEntry == 0x0502dcb9u)
@@ -5732,7 +5756,7 @@ static u8 g_hangupSkillMenuOpen = 0;
 static u8 g_hangupSkillMenuIndex = 0;
 static u8 g_hangupSkillMenuCount = 0;
 static u32 g_hangupSkillMenuOperate[VM_HANGUP_SKILL_MENU_MAX];
-static u8 g_hangupSkillMenuLabel[VM_HANGUP_SKILL_MENU_MAX][32];
+static u8 g_hangupSkillMenuLabel[VM_HANGUP_SKILL_MENU_MAX][40];
 static int g_hangupSkillMenuX = 16;
 static int g_hangupSkillMenuY = 36;
 static int g_hangupSkillMenuW = 208;
@@ -7215,8 +7239,13 @@ void keyEvent(int type, int key)
             (void)vm_host_hangup_skill_menu_key(skey, isPress);
             return;
         }
-        /* Softkey/keyboard 挂机 never hits mouse hangup rect — arm intent here. */
-        if (isPress && skey == 18)
+        /*
+         * Hangup key is 'c' (also skey 18).  Arrow Down is the same skey via
+         * 's' / Android D-pad.  Arm only the hangup key so bag list Down +
+         * 详细 cannot start hangup (client_out: hangup_softkey_arm then
+         * Type=2 after mouse_down y≈38–58 hangup_rect=0).
+         */
+        if (isPress && key == 0x63)
             vm_host_arm_hangup_intent_from_softkey();
         /* Map hangup start is host-acked; keep leftover 确定 off guest 28A4. */
         if (vm_client_hangup_suppress_guest_confirm() &&
@@ -7287,7 +7316,7 @@ static void vm_host_arm_hangup_intent_from_softkey(void)
     }
     g_lastMouseHangupArmed = 1;
     printf("[info][input] hangup_softkey_arm stack=%u bag_ui=0 "
-           "evidence=skey18-hangup-intent\n",
+           "evidence=key-c-hangup-not-skey18-down\n",
            (unsigned)g_screenStackCount);
 }
 
@@ -12415,11 +12444,27 @@ void RunArmProgram(void *param)
                         vm_host_clear_download_busy("dream-df-screeninit-complete");
                     }
                     if (p == UC_ERR_OK &&
-                        (screenInitEntry & 0xfff00000u) == 0x05000000u)
+                        vm_host_screen_init_is_loaded_df(screenInitEntry))
                     {
                         scheduler_skip_loading_wait();
-                        g_vm_map_stone_dismiss_bar = 0;
-                        g_vm_map_stone_dismiss_bar_tick = 0;
+                        /*
+                         * Loaded DF ScreenInit means WT18/7 already passed.
+                         * DoLoading / 5/10 / NPC-shop pop can re-raise
+                         * download state=2 after do-loading-immediate, and
+                         * skip_bar was only armed for mmShop/world-map.
+                         * ResetDownloadState now, then again in two ticks
+                         * so a later 2/3 cannot leave the gold bar.
+                         */
+                        vm_host_clear_download_busy(
+                            "loaded-df-screeninit-skip-bar");
+                        g_vm_map_stone_dismiss_bar = 1;
+                        g_vm_map_stone_dismiss_bar_tick =
+                            g_schedulerTick + 2u;
+                        printf("[info][screen] map_stone_dismiss_bar_arm "
+                               "init=%08x tick=%u due=%u evidence="
+                               "loaded-df-screeninit+skip-gold-bar\n",
+                               screenInitEntry, g_schedulerTick,
+                               g_vm_map_stone_dismiss_bar_tick);
                     }
 #endif
                 }
@@ -18023,6 +18068,10 @@ static bool hook_vm_manager_screen_func(u32 address)
         tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp2, &tmp5, &newTopDataPackage) ? 1 : 0;
         printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x dp=%08x\n",
                tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3, tmp5, newTopDataPackage);
+#if defined(CBE_CLIENT_ONLY)
+        if (tmp4 && vm_host_screen_destroy_looks_like_mmshop(tmp1))
+            vm_host_arm_shop_return_skip_bar("mmshop-screen-remove");
+#endif
         if (tmp4 && removingCurrent && tmp3)
         {
             bool requestAppClose = g_screenRootExitArmed &&
@@ -19212,7 +19261,9 @@ static bool hook_vm_df_datapackage_func(u32 address)
             VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
             printf("[call]DF_DataPackage_DoLoading\n");
 #if defined(CBE_CLIENT_ONLY)
-            vm_host_clear_download_busy("do-loading-immediate");
+            vm_host_clear_download_busy(
+                g_vm_map_stone_dismiss_bar ? "skip-doloading-paint"
+                                           : "do-loading-immediate");
 #endif
         }
     }
@@ -20312,6 +20363,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
     vm_restore_main_r9_for_rom_code((u32)address);
+    vm_host_aeabi_div0_divisor_one(uc, address);
 #if defined(CBE_CLIENT_ONLY)
     if (g_hangupCandidateFaultCodeBase != 0)
         vm_hangup_candidate_fault_trace_note_pc((u32)address & ~1u);

@@ -320,6 +320,11 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
      * Dream enter NPC talk 2026-08-05: drain arms poll/wt vitals remaining=2;
      * first 26/1 dialog (request≈30) was answered as builtin-map-actor-
      * vitals-sync resp=226 → client idle-timeout.  Gate kind==26 / 1/26/1.
+     *
+     * Map-stone / world-map 2026-10-05: hangup remaining=2 stole WT18/7
+     * (probe_unusable kind=1/14 resp=226) then post-ScreenInit 2/3
+     * (cbe_actorinfo_cap 1/1/14, no 30/2).  DoLoading never ResetDownloadState.
+     * Resource cache and scene-change keep their own seats; vitals stay on poll.
      */
     {
         u8 vitalsWtKind = 0;
@@ -331,6 +336,19 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         bool battleFamilyWt = gotVitalsWtHeader && vitalsWtKind == 4;
         bool hangupControlWt = gotVitalsWtHeader && vitalsWtKind == 25;
         bool dialogFamilyWt = gotVitalsWtHeader && vitalsWtKind == 26;
+        bool resourceCacheWt = gotVitalsWtHeader && vitalsWtKind == 18;
+        bool mapStoneConfirmWt = gotVitalsWtHeader && vitalsWtKind == 16;
+        bool sceneChangeWt =
+            (gotVitalsWtHeader && vitalsWtKind == 2 && vitalsWtSubtype == 3) ||
+            vm_net_mock_is_scene_change_request(request, requestLen);
+        /*
+         * 27/4 and 27/11 are the map-shell gate / NPC catalog.  Kind-2 30/1
+         * must not steal them: 临安府_06 2026-10-05 mall-exit 27/4 became
+         * EnterScene (resp=110) and stuck the gold bar.
+         */
+        bool type27GateWt =
+            vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 4) ||
+            vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 11);
         bool challengeObject =
             vm_net_mock_request_contains_object(request, requestLen, 1, 4, 1);
         bool dialogObject =
@@ -351,6 +369,10 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             !npcDialog &&
             !dialogObject &&
             !dialogFamilyWt &&
+            !resourceCacheWt &&
+            !mapStoneConfirmWt &&
+            !sceneChangeWt &&
+            !type27GateWt &&
             !vm_net_mock_is_hangup_battle_start_request(request, requestLen) &&
             !vm_net_mock_is_scene_interaction_followup_request(request,
                                                               requestLen) &&

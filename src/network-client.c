@@ -2163,6 +2163,196 @@ static bool vm_client_seq_put_compact_extra(u8 *out, u32 outCap, u32 *pos)
     return vm_client_seq_put_compact_extra_vals(out, outCap, pos, 0, 0);
 }
 
+enum
+{
+    VM_CLIENT_CBE_EQUIP_ATTR_CAP = 6,
+    VM_CLIENT_CBE_GRID30_SCRATCH = 8192
+};
+
+/*
+ * HandleItemGrid (0x01039952) / InGame.c:913: keep i16+i16+u8 attrs, but
+ * drop Pixi 0x47 gem trailer and washed flag bit7. compact extra (attr=0)
+ * also asserted.
+ */
+static bool vm_client_copy_common_extra_cbe(const u8 *in, u32 inLen, u32 *inPos,
+                                            u8 *out, u32 outCap, u32 *outPos)
+{
+    u16 first = 0;
+    u16 second = 0;
+    u8 attrCount = 0;
+    u8 outCount = 0;
+    u8 unlocks[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u8 types[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u8 flags[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u16 values[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u32 i;
+
+    if (!vm_client_seq_read_tagged_i16(in, inLen, inPos, &first) ||
+        !vm_client_seq_read_tagged_i16(in, inLen, inPos, &second))
+        return false;
+    if (*inPos + 3u > inLen || in[*inPos] != 0 || in[*inPos + 1u] != 1)
+        return false;
+    attrCount = in[*inPos + 2u];
+    *inPos += 3u;
+    for (i = 0; i < attrCount; ++i)
+    {
+        u32 unlock = 0;
+        u32 type = 0;
+        u32 flag = 0;
+        u32 value = 0;
+
+        if (!vm_client_seq_read_tagged_u32(in, inLen, inPos, &unlock) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, inPos, &type) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, inPos, &flag) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, inPos, &value))
+            return false;
+        if (outCount < VM_CLIENT_CBE_EQUIP_ATTR_CAP)
+        {
+            unlocks[outCount] = (u8)unlock;
+            types[outCount] = (u8)type;
+            flags[outCount] = (u8)(flag & 1u);
+            values[outCount] = (u16)value;
+            outCount += 1;
+        }
+    }
+    if (*inPos + 3u <= inLen && in[*inPos] == 0 && in[*inPos + 1u] == 1 &&
+        in[*inPos + 2u] == 0x47)
+    {
+        for (i = 0; i < 4u; ++i)
+        {
+            if (!vm_client_seq_skip_tagged(in, inLen, inPos))
+                return false;
+        }
+    }
+    if (outCount != attrCount)
+        second = (u16)((second & 0xffu) | ((u16)outCount << 8));
+    if (!vm_client_seq_put_tagged_i16(out, outCap, outPos, first) ||
+        !vm_client_seq_put_tagged_i16(out, outCap, outPos, second) ||
+        !vm_client_seq_put_tagged_u8(out, outCap, outPos, outCount))
+        return false;
+    for (i = 0; i < outCount; ++i)
+    {
+        if (!vm_client_seq_put_tagged_u8(out, outCap, outPos, unlocks[i]) ||
+            !vm_client_seq_put_tagged_u8(out, outCap, outPos, types[i]) ||
+            !vm_client_seq_put_tagged_u8(out, outCap, outPos, flags[i]) ||
+            !vm_client_seq_put_tagged_i16(out, outCap, outPos, values[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool vm_client_build_backpack30_grid_cbe(const u8 *in, u16 inLen, u8 *out,
+                                                u32 outCap, u16 *outLen,
+                                                u16 maxRows, u16 *keptRows,
+                                                u16 *droppedRowsOut)
+{
+    u32 inPos = 0;
+    u32 outPos = 0;
+    u16 kept = 0;
+    u16 dropped = 0;
+
+    if (keptRows != NULL)
+        *keptRows = 0;
+    if (droppedRowsOut != NULL)
+        *droppedRowsOut = 0;
+    if (in == NULL || out == NULL || outLen == NULL || maxRows == 0)
+        return false;
+    while (inPos < inLen)
+    {
+        u32 itemId = 0;
+        u32 seq = 0;
+        u32 count = 0;
+        u32 wireCount = 0;
+
+        if (!vm_client_seq_read_tagged_u32(in, inLen, &inPos, &itemId) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &seq) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &count))
+            return false;
+        if (!vm_client_cbe_item_is_client_grid_item(itemId))
+        {
+            if (!vm_client_seq_skip_common_extra(in, inLen, &inPos))
+                return false;
+            ++dropped;
+            continue;
+        }
+        wireCount = vm_client_cbe_grid_wire_count(itemId, count);
+        if (kept >= maxRows)
+        {
+            if (!vm_client_seq_skip_common_extra(in, inLen, &inPos))
+                return false;
+            ++dropped;
+            continue;
+        }
+        if (!vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, itemId) ||
+            !vm_client_seq_put_tagged_i16(out, outCap, &outPos, (u16)seq) ||
+            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, wireCount) ||
+            !vm_client_copy_common_extra_cbe(in, inLen, &inPos, out, outCap,
+                                             &outPos))
+            return false;
+        ++kept;
+    }
+    *outLen = (u16)outPos;
+    if (keptRows != NULL)
+        *keptRows = kept;
+    if (droppedRowsOut != NULL)
+        *droppedRowsOut = dropped;
+    return true;
+}
+
+/* mmGame:sub_D04 7/7 rows: seq + itemId + count + extra; Pixi gem trailer
+ * desyncs the next row (InGame.c:913, itemId leftover e.g. 0x5cd). */
+static bool vm_client_build_77_iteminfo_cbe(const u8 *in, u16 inLen, u8 *out,
+                                            u32 outCap, u16 *outLen,
+                                            u16 *keptRows)
+{
+    u32 inPos = 0;
+    u32 outPos = 0;
+    u32 rowCount = 0;
+    u8 tagSize = 0;
+    u32 countValuePos = 0;
+    u32 i;
+    u16 kept = 0;
+
+    if (keptRows != NULL)
+        *keptRows = 0;
+    if (in == NULL || out == NULL || outLen == NULL)
+        return false;
+    if (inLen == 0)
+    {
+        *outLen = 0;
+        return true;
+    }
+    if (!vm_client_seq_read_row_count(in, inLen, &inPos, &rowCount, &tagSize) ||
+        !vm_client_seq_write_row_count(out, outCap, &outPos, 0, 1))
+        return false;
+    countValuePos = outPos - 1u;
+    for (i = 0; i < rowCount; ++i)
+    {
+        u32 seq = 0;
+        u32 itemId = 0;
+        u32 count = 0;
+
+        if (!vm_client_seq_read_tagged_u32(in, inLen, &inPos, &seq) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &itemId) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &count) ||
+            !vm_client_seq_put_tagged_i16(out, outCap, &outPos, (u16)seq) ||
+            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, itemId) ||
+            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, count) ||
+            !vm_client_copy_common_extra_cbe(in, inLen, &inPos, out, outCap,
+                                             &outPos))
+            return false;
+        ++kept;
+        if (kept <= 8)
+            printf("[info][network] cbe_77_row i=%u item=%u seq=%u count=%u\n",
+                   kept, itemId, seq, count);
+    }
+    out[countValuePos] = (u8)kept;
+    *outLen = (u16)outPos;
+    if (keptRows != NULL)
+        *keptRows = kept;
+    return inPos <= inLen;
+}
+
 static bool vm_client_cbe_patch_common_extra_stack1(u8 *extra, u32 extraLen)
 {
     if (extra == NULL || extraLen < 3u || extra[0] != 0)
@@ -2425,9 +2615,8 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
         const u8 *resultEnc = NULL;
         u16 resultLen = 0;
         u16 droppedRows = 0;
-        bool countFixed = false;
         u8 emptyIteminfo[1];
-        bool gridSeeded = false;
+        bool rebuilt = false;
 
         if (!vm_client_response_object_field(object, "result", &resultEnc,
                                              &resultLen) ||
@@ -2440,38 +2629,33 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
         }
         if (!vm_client_decode_tagged_u32(gridnumEnc, gridnumLen, &gridnumValue))
             return false;
-        newIteminfo = (u8 *)malloc(2048u);
-        if (newIteminfo != NULL &&
-            vm_client_build_backpack30_grid_compact(
-                iteminfo, iteminfoLen, newIteminfo, 2048u, &newIteminfoLen,
-                (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows, &droppedRows) &&
-            keptRows > 0)
+        newIteminfo = (u8 *)malloc(VM_CLIENT_CBE_GRID30_SCRATCH);
+        if (newIteminfo == NULL)
+            return false;
+        if (!vm_client_build_backpack30_grid_cbe(
+                iteminfo, iteminfoLen, newIteminfo, VM_CLIENT_CBE_GRID30_SCRATCH,
+                &newIteminfoLen, (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows,
+                &droppedRows) ||
+            keptRows == 0)
         {
-            gridSeeded = true;
-            if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
-                                             &newGridnumLen, keptRows, 1))
-            {
-                free(newIteminfo);
-                return false;
-            }
-        }
-        else
-        {
-            if (newIteminfo != NULL)
-            {
-                (void)vm_client_sanitize_backpack30_iteminfo(
-                    iteminfo, iteminfoLen, newIteminfo, 2048u,
-                    &newIteminfoLen, (u16)VM_CLIENT_CBE_BACKPACK_SLOTS,
-                    &keptRows, &droppedRows, &countFixed);
-                free(newIteminfo);
-                newIteminfo = NULL;
-            }
+            free(newIteminfo);
             if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
                                              &newGridnumLen, 0, 1))
                 return false;
             emptyIteminfo[0] = 0;
             newIteminfoLen = 0;
             newIteminfo = emptyIteminfo;
+            keptRows = 0;
+        }
+        else
+        {
+            rebuilt = true;
+            if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
+                                             &newGridnumLen, keptRows, 1))
+            {
+                free(newIteminfo);
+                return false;
+            }
         }
         objectStart = 0;
         outObj[pos++] = object->major;
@@ -2487,11 +2671,11 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
             !vm_client_put_object_field(outObj, outCap, &pos, "iteminfo",
                                          newIteminfo, newIteminfoLen))
         {
-            if (gridSeeded && newIteminfo != emptyIteminfo)
+            if (rebuilt && newIteminfo != emptyIteminfo)
                 free(newIteminfo);
             return false;
         }
-        if (gridSeeded && newIteminfo != emptyIteminfo)
+        if (rebuilt && newIteminfo != emptyIteminfo)
             free(newIteminfo);
         outObj[objectStart + 4] = (u8)(pos >> 8);
         outObj[objectStart + 5] = (u8)pos;
@@ -2500,10 +2684,59 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
             *changedOut = true;
         printf("[info][network] cbe_backpack_clamp object=30/21 gridnum=%u "
                "rows_kept=%u dropped=%u iteminfo_len=%u "
-               "mode=%s evidence=CBE_EMU:30/21-compact-seed+HandleItemGrid\n",
-               gridSeeded ? keptRows : 0u, keptRows, droppedRows,
-               newIteminfoLen,
-               gridSeeded ? "compact-grid-seed" : "empty-grid");
+               "mode=cbe-no-gem-trailer evidence=InGame.c:913-HandleItemGrid\n",
+               keptRows, keptRows, droppedRows, newIteminfoLen);
+        return true;
+    }
+
+    if (object->major == 1 && object->kind == 7 && object->subtype == 7)
+    {
+        const u8 *typeEnc = NULL;
+        u16 typeLen = 0;
+
+        if (!vm_client_response_object_field(object, "type", &typeEnc,
+                                             &typeLen) ||
+            !vm_client_response_object_field(object, "iteminfo", &iteminfo,
+                                             &iteminfoLen))
+            return false;
+        newIteminfo = (u8 *)malloc(VM_CLIENT_CBE_GRID30_SCRATCH);
+        if (newIteminfo == NULL)
+            return false;
+        if (!vm_client_build_77_iteminfo_cbe(iteminfo, iteminfoLen, newIteminfo,
+                                             VM_CLIENT_CBE_GRID30_SCRATCH,
+                                             &newIteminfoLen, &keptRows))
+        {
+            printf("[warn][network] cbe_77_rewrite_failed iteminfo_len=%u "
+                   "evidence=keep-original-7/7\n",
+                   iteminfoLen);
+            free(newIteminfo);
+            return false;
+        }
+        objectStart = 0;
+        outObj[pos++] = object->major;
+        outObj[pos++] = object->kind;
+        outObj[pos++] = object->subtype;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        if (!vm_client_put_object_field(outObj, outCap, &pos, "type", typeEnc,
+                                         typeLen) ||
+            !vm_client_put_object_field(outObj, outCap, &pos, "iteminfo",
+                                         newIteminfo, newIteminfoLen))
+        {
+            free(newIteminfo);
+            return false;
+        }
+        free(newIteminfo);
+        outObj[objectStart + 4] = (u8)(pos >> 8);
+        outObj[objectStart + 5] = (u8)pos;
+        *outLen = pos;
+        if (changedOut != NULL)
+            *changedOut = true;
+        printf("[info][network] cbe_backpack_clamp object=7/7 rows_kept=%u "
+               "iteminfo_len=%u->%u mode=cbe-no-gem-trailer "
+               "evidence=mmGame:0xD04-InGame.c:913\n",
+               keptRows, iteminfoLen, newIteminfoLen);
         return true;
     }
 
@@ -2527,7 +2760,7 @@ static bool vm_client_cbe_clamp_backpack_packet(u8 **response, u32 *responseLen)
         return false;
     packet = *response;
 
-    /* 30/21 compact-grid-seed + 17/1 compact-extra via rewrite. */
+    /* 17/1 compact-extra rewrite; 30/21 CBE HandleItemGrid rewrite. */
     offset = 5;
     {
         bool needRebuild = false;
@@ -2541,9 +2774,13 @@ static bool vm_client_cbe_clamp_backpack_packet(u8 **response, u32 *responseLen)
                 needRebuild = true;
                 break;
             }
+            if (object.major == 1 && object.kind == 7 && object.subtype == 7)
+            {
+                needRebuild = true;
+                break;
+            }
             if (object.major == 1 && object.kind == 17 && object.subtype == 1)
             {
-                /* Always rewrite live 17/1 rows for mmGame:0x418C. */
                 needRebuild = true;
                 break;
             }
@@ -2569,6 +2806,10 @@ static bool vm_client_cbe_clamp_backpack_packet(u8 **response, u32 *responseLen)
     {
         u8 *rewritten = NULL;
         u32 rewrittenCap = (u32)object.payloadLen + 64u;
+        if (object.kind == 30 && object.subtype == 21)
+            rewrittenCap = VM_CLIENT_CBE_GRID30_SCRATCH + 256u;
+        if (object.kind == 7 && object.subtype == 7)
+            rewrittenCap = VM_CLIENT_CBE_GRID30_SCRATCH + 256u;
         u32 rewrittenLen = 0;
         bool changed = false;
         const u8 *src = packet + (offset - (object.payloadLen + 6u));
@@ -2759,6 +3000,8 @@ static u8 g_vmClientHangupOnSettleShell;
  * 0=idle 1=local 25/3 shown 2=25/2(type=1) accepted (hangup mode).
  */
 static u8 g_vmClientHangupNativeMode;
+/* Swallow map Type=2 for a few seconds after settle 停止挂机. */
+static u32 g_vmClientHangupStopHoldUntilMs;
 /* After host confirm, guest still gets a second DOWN/UP on the soft row
  * (client_out: hangup_panel_confirm then mouse_down y=381 → 28A4). */
 static u32 g_vmHangupSkipGuestConfirmUntilMs;
@@ -3619,6 +3862,171 @@ static void vm_client_hangup_note_operate_uplink(const u8 *req, u32 len)
     g_vmHangupLastOperateValid = 1;
 }
 
+enum
+{
+    VM_CLIENT_HANGUP_SKILL_NAME_MAX = 24,
+    VM_CLIENT_HANGUP_SKILL_CATALOG_MAX = 256
+};
+
+typedef struct
+{
+    u32 skillId;
+    u8 name[VM_CLIENT_HANGUP_SKILL_NAME_MAX];
+} vm_client_hangup_skill_name_row;
+
+static vm_client_hangup_skill_name_row
+    g_vmHangupSkillNames[VM_CLIENT_HANGUP_SKILL_CATALOG_MAX];
+static u32 g_vmHangupSkillNameCount;
+static u8 g_vmHangupSkillNamesTried;
+
+static u32 vm_client_hangup_read_le32(const u8 *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+static u32 vm_client_hangup_parse_dsh_u32(const u8 *raw, u32 len)
+{
+    u32 value = 0;
+    u8 haveDigit = 0;
+    u32 i;
+
+    if (raw == NULL || len == 0)
+        return 0;
+    for (i = 0; i < len; ++i)
+    {
+        if (raw[i] < '0' || raw[i] > '9')
+            break;
+        haveDigit = 1;
+        value = value * 10u + (u32)(raw[i] - '0');
+    }
+    return haveDigit ? value : 0;
+}
+
+static void vm_client_hangup_store_skill_name(u32 skillId, const u8 *name,
+                                              u32 nameLen)
+{
+    vm_client_hangup_skill_name_row *row;
+    u32 n;
+
+    if (skillId == 0 || name == NULL || nameLen == 0)
+        return;
+    if (g_vmHangupSkillNameCount >= VM_CLIENT_HANGUP_SKILL_CATALOG_MAX)
+        return;
+    while (nameLen > 0 && (name[nameLen - 1u] == 0 || name[nameLen - 1u] == ' '))
+        nameLen--;
+    if (nameLen == 0)
+        return;
+    row = &g_vmHangupSkillNames[g_vmHangupSkillNameCount++];
+    memset(row, 0, sizeof(*row));
+    row->skillId = skillId;
+    n = nameLen;
+    if (n >= VM_CLIENT_HANGUP_SKILL_NAME_MAX)
+        n = VM_CLIENT_HANGUP_SKILL_NAME_MAX - 1u;
+    memcpy(row->name, name, n);
+}
+
+static void vm_client_hangup_load_skill_names(void)
+{
+    static const char *paths[] = {
+        "JHOnlineData/skill.dsh",
+        "bin/JHOnlineData/skill.dsh"
+    };
+    static u8 data[32768];
+    FILE *fp = NULL;
+    size_t nread = 0;
+    u32 len;
+    u32 columnCount;
+    u32 rowCount;
+    u32 pos;
+    u32 row;
+    u32 i;
+
+    if (g_vmHangupSkillNamesTried)
+        return;
+    g_vmHangupSkillNamesTried = 1;
+    g_vmHangupSkillNameCount = 0;
+    for (i = 0; i < (u32)(sizeof(paths) / sizeof(paths[0])); ++i)
+    {
+        fp = fopen(paths[i], "rb");
+        if (fp != NULL)
+            break;
+    }
+    if (fp == NULL)
+        return;
+    nread = fread(data, 1, sizeof(data), fp);
+    fclose(fp);
+    if (nread < 16)
+        return;
+    len = (u32)nread;
+    columnCount = vm_client_hangup_read_le32(data + 4);
+    rowCount = vm_client_hangup_read_le32(data + 8);
+    if (columnCount == 0 || columnCount > 64 || rowCount > 512)
+        return;
+    pos = 16;
+    for (i = 0; i < columnCount; ++i)
+    {
+        u32 fieldLen;
+
+        if (pos >= len)
+            return;
+        fieldLen = data[pos++];
+        if (pos + fieldLen > len)
+            return;
+        pos += fieldLen;
+    }
+    for (row = 0; row < rowCount && pos + 4u <= len; ++row)
+    {
+        u32 rowLen = vm_client_hangup_read_le32(data + pos);
+        u32 rowPos = pos + 4u;
+        u32 rowEnd = rowPos + rowLen;
+        u32 skillId = 0;
+        const u8 *name = NULL;
+        u32 nameLen = 0;
+        u32 col;
+
+        if (rowEnd > len || rowEnd < rowPos)
+            break;
+        for (col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            if (col == 0)
+                skillId = vm_client_hangup_parse_dsh_u32(value, valueLen);
+            else if (col == 1)
+            {
+                name = value;
+                nameLen = valueLen;
+            }
+            rowPos += valueLen;
+        }
+        vm_client_hangup_store_skill_name(skillId, name, nameLen);
+        pos = rowEnd;
+    }
+    printf("[info][network] cbe_hangup_skill_names count=%u "
+           "evidence=JHOnlineData/skill.dsh\n",
+           g_vmHangupSkillNameCount);
+}
+
+static int vm_client_hangup_copy_skill_name(u32 skillId, u8 *gbk, u32 cap)
+{
+    u32 i;
+
+    if (skillId == 0 || gbk == NULL || cap == 0)
+        return 0;
+    vm_client_hangup_load_skill_names();
+    for (i = 0; i < g_vmHangupSkillNameCount; ++i)
+    {
+        if (g_vmHangupSkillNames[i].skillId != skillId)
+            continue;
+        snprintf((char *)gbk, cap, "%s", (const char *)g_vmHangupSkillNames[i].name);
+        return gbk[0] != 0;
+    }
+    return 0;
+}
+
 u8 vm_client_hangup_skill_option_count(void)
 {
     u8 n = (u8)(1u + g_vmHangupLearnedSkillCount);
@@ -3659,6 +4067,7 @@ void vm_client_hangup_skill_option_label(u8 index, u8 *gbk, u32 cap)
 {
     static const u8 kNa[] = {0xC6, 0xD5, 0xCD, 0xA8, 0xB9, 0xA5, 0xBB, 0xF7, 0};
     u32 operate;
+    u32 skillId;
     int wrote;
 
     if (gbk == NULL || cap == 0)
@@ -3666,12 +4075,15 @@ void vm_client_hangup_skill_option_label(u8 index, u8 *gbk, u32 cap)
     gbk[0] = 0;
     if (index == 0)
     {
-        if (cap > sizeof(kNa))
+        if (cap >= sizeof(kNa))
             memcpy(gbk, kNa, sizeof(kNa));
         return;
     }
     operate = vm_client_hangup_skill_option_operate(index);
-    wrote = snprintf((char *)gbk, cap, "\xBC\xBC\xC4\xDC#%u", operate);
+    skillId = (operate >= 2u) ? (operate - 2u) : operate;
+    if (vm_client_hangup_copy_skill_name(skillId, gbk, cap))
+        return;
+    wrote = snprintf((char *)gbk, cap, "\xBC\xBC\xC4\xDC#%u", skillId);
     if (wrote < 0)
         gbk[0] = 0;
 }
@@ -3735,6 +4147,179 @@ static bool vm_client_hangup_pending_set_operate(u32 operate)
     printf("[info][network] cbe_hangup_pending_operate operate=%u len=%u\n",
            operate, dstPos);
     return true;
+}
+
+static bool vm_client_hangup_put_u32_field(u8 *out, u32 outCap, u32 *pos,
+                                           const char *name, u32 value)
+{
+    u8 enc[6];
+
+    enc[0] = 0;
+    enc[1] = 4;
+    enc[2] = (u8)(value >> 24);
+    enc[3] = (u8)(value >> 16);
+    enc[4] = (u8)(value >> 8);
+    enc[5] = (u8)value;
+    return vm_client_put_object_field(out, outCap, pos, name, enc, 6);
+}
+
+static bool vm_client_hangup_pick_live_combat(u32 *idOut, u32 *indexOut,
+                                              u32 *posxOut, u32 *posyOut)
+{
+    u32 sceneNodeBase = 0;
+    u16 playerX = 0;
+    u16 playerY = 0;
+    u32 bestDist = 0xffffffffu;
+    bool found = false;
+
+    if (idOut)
+        *idOut = 0;
+    if (indexOut)
+        *indexOut = 0;
+    if (posxOut)
+        *posxOut = 0;
+    if (posyOut)
+        *posyOut = 0;
+    if (Global_R9 == 0)
+        return false;
+    if (uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase,
+                    sizeof(sceneNodeBase)) != UC_ERR_OK ||
+        sceneNodeBase == 0)
+        return false;
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C8E, &playerX, sizeof(playerX));
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C90, &playerY, sizeof(playerY));
+
+    for (u32 i = 0; i < 25; ++i)
+    {
+        u32 node = sceneNodeBase + i * 340u;
+        u32 actorId = 0;
+        u32 battleX = 0;
+        u32 battleY = 0;
+        u16 gridX = 0;
+        u16 gridY = 0;
+        u8 active = 0;
+        u8 nodeKind = 0;
+        u32 dist;
+        u32 dx;
+        u32 dy;
+
+        if (uc_mem_read(MTK, node + 319, &active, sizeof(active)) != UC_ERR_OK ||
+            active == 0)
+            continue;
+        if (uc_mem_read(MTK, node + 0x13B, &nodeKind, sizeof(nodeKind)) !=
+                UC_ERR_OK ||
+            nodeKind != 2)
+            continue;
+        if (uc_mem_read(MTK, node + 100, &actorId, sizeof(actorId)) != UC_ERR_OK ||
+            actorId == 0 || actorId == 1u || actorId == 0x70ffffffu)
+            continue;
+        (void)uc_mem_read(MTK, node + 240, &battleX, sizeof(battleX));
+        (void)uc_mem_read(MTK, node + 244, &battleY, sizeof(battleY));
+        if (battleX == 0 || battleY == 0)
+            continue;
+        (void)uc_mem_read(MTK, node + 0x18, &gridX, sizeof(gridX));
+        (void)uc_mem_read(MTK, node + 0x1A, &gridY, sizeof(gridY));
+        dx = gridX > playerX ? (u32)(gridX - playerX) : (u32)(playerX - gridX);
+        dy = gridY > playerY ? (u32)(gridY - playerY) : (u32)(playerY - gridY);
+        dist = dx + dy;
+        if (dist >= bestDist)
+            continue;
+        bestDist = dist;
+        found = true;
+        if (idOut)
+            *idOut = actorId;
+        if (indexOut)
+            *indexOut = i;
+        if (posxOut)
+            *posxOut = battleX;
+        if (posyOut)
+            *posyOut = battleY;
+    }
+    return found;
+}
+
+static u32 vm_client_hangup_bind_live_combat(u8 *req, u32 len, u32 cap)
+{
+    u8 out[VM_CLIENT_REQUEST_MAX];
+    u32 srcPos = 4;
+    u32 dstPos = 4;
+    u32 liveId = 0;
+    u32 liveIndex = 0;
+    u32 livePosX = 0;
+    u32 livePosY = 0;
+
+    if (req == NULL || len < 9 || len > cap || req[0] != 'W' || req[1] != 'T')
+        return len;
+    {
+        bool hasPosx = false;
+        bool hasIndex = false;
+        u32 i;
+
+        for (i = 0; i + 4u <= len; ++i)
+        {
+            if (!hasPosx && memcmp(req + i, "posx", 4) == 0)
+                hasPosx = true;
+            if (!hasIndex && i + 5u <= len && memcmp(req + i, "index", 5) == 0)
+                hasIndex = true;
+        }
+        if (hasPosx && hasIndex)
+            return len;
+    }
+    if (!vm_client_hangup_pick_live_combat(&liveId, &liveIndex, &livePosX,
+                                           &livePosY))
+    {
+        printf("[info][network] cbe_hangup_live_bind skip "
+               "evidence=no-kind2-battle-pos\n");
+        return len;
+    }
+    memcpy(out, req, 4);
+    while (srcPos + 5 <= len)
+    {
+        u16 objectLen = (u16)(((u16)req[srcPos + 3] << 8) | req[srcPos + 4]);
+        u32 objectStart = dstPos;
+
+        if (objectLen < 5 || srcPos + objectLen > len)
+            return len;
+        if (dstPos + objectLen + 64u > sizeof(out) || dstPos + objectLen + 64u > cap)
+            return len;
+        memcpy(out + dstPos, req + srcPos, 5);
+        dstPos += 5;
+        if (srcPos + 5 < srcPos + objectLen)
+        {
+            memcpy(out + dstPos, req + srcPos + 5, objectLen - 5u);
+            dstPos += objectLen - 5u;
+        }
+        if (req[srcPos] == 1 && req[srcPos + 1] == 2 && req[srcPos + 2] == 10)
+        {
+            if (!vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos, "id",
+                                                liveId) ||
+                !vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos,
+                                                "index", liveIndex) ||
+                !vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos,
+                                                "posx", livePosX) ||
+                !vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos,
+                                                "posy", livePosY))
+                return len;
+            {
+                u32 newLen = dstPos - objectStart;
+
+                out[objectStart + 3] = (u8)(newLen >> 8);
+                out[objectStart + 4] = (u8)newLen;
+            }
+        }
+        srcPos += objectLen;
+    }
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(dstPos >> 8);
+    out[3] = (u8)dstPos;
+    if (dstPos > cap)
+        return len;
+    memcpy(req, out, dstPos);
+    printf("[info][network] cbe_hangup_live_bind id=%u index=%u pos=(%u,%u) "
+           "len=%u evidence=subtype5-request-live-node\n",
+           liveId, liveIndex, livePosX, livePosY, dstPos);
+    return dstPos;
 }
 
 int vm_client_hangup_confirm_skill_and_start(u32 operate)
@@ -5659,9 +6244,21 @@ static void vm_client_hangup_maybe_flush_scene_default_ack(u32 connectId,
 
     if (g_vmClientHangupOweSceneDefaultAck == 0)
         return;
-    if (!vm_client_packet_has_battle_subtype8(packet, packetLen) ||
-        vm_client_packet_has_battle_subtype(packet, packetLen, 5))
+    /*
+     * Lone 4/8 is map return → complete swallowed mmGame 25/5.
+     * Hangup fight 2 is 4/8+4/10 (CBE poll-synth, no live scene node) or
+     * 4/8+4/5 (Pixi live-node).  client_out 2026-10-05: flushing 25/5 on
+     * 4/8+4/10 made guest send 4/1; second enter left font obj+0xc=0
+     * → UC_ERR_MAP pc=0x01004E36 SCR_Render.
+     */
+    if (!vm_client_packet_has_battle_subtype8(packet, packetLen))
+        return;
+    if (vm_client_packet_has_battle_subtype(packet, packetLen, 5) ||
+        vm_client_packet_has_battle_subtype(packet, packetLen, 10))
     {
+        printf("[info][network] cbe_hangup_keep_25_5 connect=%u "
+               "evidence=4/8-plus-4/5-or-4/10-reenter-no-map-flush\n",
+               connectId);
         return;
     }
     flushConnect = g_vmClientHangupOweSceneDefaultConnect != 0
@@ -6070,6 +6667,21 @@ static bool vm_client_request_is_empty_scene_default_25_5(const u8 *req, u32 len
         pos += objectLen;
     }
     return extra == 0 && pos == len;
+}
+
+static bool vm_client_request_is_map_battle_enter_4_1(const u8 *req, u32 len)
+{
+    u32 pos = 4;
+    u16 objectLen;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return false;
+    if (pos + 5 > len)
+        return false;
+    objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+    if (objectLen < 5 || pos + objectLen > len)
+        return false;
+    return req[pos] == 1 && req[pos + 1] == 4 && req[pos + 2] == 1;
 }
 
 /*
@@ -6509,6 +7121,8 @@ static int vm_client_hangup_ack_guest_25_2(u32 connectId)
     if (pendingLen != 0)
     {
         memcpy(pending, g_vmClientHangupPendingStart, pendingLen);
+        pendingLen = vm_client_hangup_bind_live_combat(pending, pendingLen,
+                                                       sizeof(pending));
         g_vmClientHangupPendingStartLen = 0;
         g_vmClientHangupPendingConnectId = 0;
         printf("[info][network] cbe_hangup_replay_start connect=%u len=%u "
@@ -6632,6 +7246,16 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
             (void)vm_client_deliver_local_hangup_dismiss(connectId);
             return;
         }
+        if (g_vmClientHangupStopHoldUntilMs != 0 &&
+            SDL_GetTicks() < g_vmClientHangupStopHoldUntilMs)
+        {
+            printf("[info][network] cbe_hangup_uplink Type=2 len=%u "
+                   "forwarded=0 action=swallow-after-settle-stop "
+                   "evidence=map-type2-after-25/2-type2\n",
+                   readLen);
+            (void)vm_client_deliver_local_hangup_dismiss(connectId);
+            return;
+        }
         /*
          * Do not bind mmBattle R9 or forward 25/3 here.  client_out 2026-10-05:
          * hangup_confirm_bind_r9 on the outdoor map rewrote
@@ -6673,6 +7297,20 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
                readLen, connectId);
         return;
     }
+    /*
+     * After hangup 4/8+4/10 reenter, mmGame still emits map 4/1.  Forwarding
+     * it stacked a second battle (resp=231) on the 4/10 shell → font +0xc=0
+     * UC_ERR_MAP pc=0x01004E36.  CBE hangup next fight is poll 4/10, not 4/1.
+     */
+    if (g_vmClientHangupNativeMode == 2 &&
+        vm_client_request_is_map_battle_enter_4_1(request, readLen))
+    {
+        printf("[info][network] cbe_hangup_swallow_4_1 len=%u connect=%u "
+               "evidence=hangup-owns-encounter-poll-4/10\n",
+               readLen, connectId);
+        (void)vm_client_deliver_local_empty_wt(connectId);
+        return;
+    }
     {
         u8 modeType = 0;
         bool compoundStop = false;
@@ -6689,6 +7327,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
             g_vmClientHangupPendingConnectId = 0;
             g_vmClientHangupPanelVia8996 = 0;
             vm_client_hangup_settle_ui_clear("native-settle-stop");
+            g_vmClientHangupStopHoldUntilMs = SDL_GetTicks() + 4000u;
         }
     }
 #endif

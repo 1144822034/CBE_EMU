@@ -6,6 +6,29 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
+#include <windows.h>
+
+/* Must run before SDL creates any HWND. Windows 10/11 may treat unmanifested
+ * processes as system-DPI-aware; SDL 2.0.10 then BitBlts a small surface into
+ * the top-left of a larger client, leaving black margins. */
+static void vm_win32_force_dpi_unaware(void)
+{
+    HMODULE shcore = LoadLibraryA("Shcore.dll");
+    if (shcore)
+    {
+        typedef HRESULT(WINAPI *SetProcessDpiAwarenessFn)(int);
+        SetProcessDpiAwarenessFn setAware =
+            (SetProcessDpiAwarenessFn)GetProcAddress(shcore, "SetProcessDpiAwareness");
+        if (setAware)
+            setAware(0); /* PROCESS_DPI_UNAWARE */
+        FreeLibrary(shcore);
+    }
+}
+
+static void __attribute__((constructor(101))) vm_win32_dpi_constructor(void)
+{
+    vm_win32_force_dpi_unaware();
+}
 #else
 #include <unistd.h>
 #endif
@@ -19,6 +42,7 @@
 #if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
     !defined(CBE_PLATFORM_NO_WINDOW)
 #include "gameLauncher.h"
+#include "../Lib/sdl2-2.0.10/include/SDL2/SDL_syswm.h"
 #endif
 static bool vm_file_try_download_named_resource(const char *normalizedPath);
 #include "vmFunc.c"
@@ -248,6 +272,10 @@ static u32 g_screenLoadResourcePendingScreen = 0;
 static u32 g_screenLoadResourcePendingParam = 0;
 static u32 g_currentScreenThis = 0;
 u32 g_currentScreenModuleBase = 0;
+/* Hangup 25/3|25/2 must fire mmBattle:0x8996 with module R9, not Global. */
+static u32 g_hangupNetCallEntry = 0;
+static u32 g_hangupNetCallR9 = 0;
+static u32 g_lastNetSendLr = 0;
 static u32 g_currentScreenDataPackage = 0;
 static u32 g_dlSpBf = 0;
 static u32 g_poolModuleR9s[16];
@@ -284,6 +312,7 @@ static int vm_client_server_list_apply(const char *selectedName,
                                       int allowPrompt,
                                       int *appliedOut);
 static bool vm_cbe_load_and_start(const char *cbe_path_utf8);
+static void vm_lcd_apply_native_size_for_cbe_path(const char *cbePath);
 
 static void vm_game_launcher_update(void)
 {
@@ -327,6 +356,20 @@ static u8 g_coolmallAwaitMapThenDialog = 0;
 static u8 g_softkeyLeftCache[128];
 static u8 g_softkeyCenterCache[128];
 static u8 g_softkeyRightCache[128];
+static u8 g_winTitleCache[128];
+static u8 g_winTitleFresh = 0;
+static u8 g_vmHangupTouchSwallowed = 0;
+/* Last press was world HUD 挂机 rect — only then forward 2/10 Type=2. */
+static u8 g_lastMouseHangupArmed = 0;
+#if defined(CBE_CLIENT_ONLY)
+/*
+ * World-map / map-stone WT30/1: live 2/3 often has no 30/2.  Host dismisses
+ * the DoLoading bar after outdoor ScreenInit (ResetDownloadState pair).
+ * Skip restoring queued state=2 so 2/3 cannot raise the bar again.
+ */
+static u8 g_vm_map_stone_dismiss_bar = 0;
+static u32 g_vm_map_stone_dismiss_bar_tick = 0;
+#endif
 enum { VM_HOST_KEYQ_MAX = 24 };
 static struct
 {
@@ -352,6 +395,12 @@ static void vm_host_realign_attr_panel_value_rows(void);
 static void vm_host_clear_download_busy(const char *reason);
 /* Drop mmShop mall uplink and simulate 右软/返回; defined after coolmall helpers. */
 static int vm_host_coolmall_try_truncate_mall_send(const u8 *req, u32 len);
+/* Bag/equip chrome: drop hangup 2/10 Type=2 (network-client on_send). */
+static int vm_host_should_block_hangup_uplink(void);
+static void vm_host_arm_hangup_intent_from_softkey(void);
+static int vm_host_bind_hangup_confirm_mmbattle_r9(void);
+static void vm_hangup_candidate_fault_arm(u32 codeBase);
+static void vm_hangup_candidate_fault_disarm(void);
 #endif
 /* Used from net_fire before definition (client + server TU). */
 static void vm_host_coolmall_dismiss_after_shop_net(u32 respLen);
@@ -455,6 +504,7 @@ static u32 g_netCurrentObject = 0;
 static u32 g_netDebugReadWindow = 0;
 static const u32 VM_GAME_NET_BUSINESS_CALLBACK = 0x01012e4d;
 static u8 g_lastStartupScreenState = 0xff;
+static u8 g_vm_pump_loading_now = 0;
 static void vm_autotest_note(const char *fmt, ...);
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
@@ -596,13 +646,15 @@ static u32 g_mockBattleRoleHpMax = 0;
 static u32 g_mockBattleRoleMpCurrent = 0;
 static u32 g_mockBattleRoleMpMax = 0;
 static u8 g_mockBattleEnemyCountCurrent = 1;
+static u32 g_mockBattleEnemyIdSlots[3] = {0, 0, 0};
+/* 0=天机 1=幻剑 2=鬼道; 0xff=unknown (shared offensive pool). */
+static u8 g_mockBattleEnemyJobSlots[3] = {0xff, 0xff, 0xff};
 static u32 g_mockBattleEnemyHpSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpMaxSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpCurrent = 0;
 static u32 g_mockBattleEnemyHpMax = 0;
-/* Set to g_mockBattleOperateSessionSerial when the monster self-heals.
- * Same de-dupe pattern as rewarded/settlement serials; captured per account. */
-static u32 g_mockBattleMonsterHealUsedSerial = 0;
+/* Per-slot: set to OperateSessionSerial when that monster self-heals once. */
+static u32 g_mockBattleMonsterHealUsedSerialSlots[3] = {0, 0, 0};
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static bool vm_host_file_exists(const char *path);
@@ -757,8 +809,8 @@ static void vm_lcd_draw_line(int x0, int y0, int x1, int y1, u16 color)
 
     while (1)
     {
-        if (x0 >= 0 && x0 < LCD_WIDTH && y0 >= 0 && y0 < LCD_HEIGHT)
-            ((u16 *)Lcd_Cache_Buffer)[y0 * LCD_PITCH + x0] = color;
+        if (x0 >= 0 && x0 < LcdGetNativeWidth() && y0 >= 0 && y0 < LcdGetNativeHeight())
+            ((u16 *)Lcd_Cache_Buffer)[y0 * LcdGetScreenPitchPixels() + x0] = color;
         if (x0 == x1 && y0 == y1)
             break;
         int e2 = err * 2;
@@ -897,15 +949,15 @@ static int vm_lcd_draw_image_to_screen(u32 imageInfo, int dstX, int dstY)
         w = srcW - srcX;
     if (srcY + h > srcH)
         h = srcH - srcY;
-    if (dstX + w > LCD_WIDTH)
-        w = LCD_WIDTH - dstX;
-    if (dstY + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - dstY;
+    if (dstX + w > LcdGetNativeWidth())
+        w = LcdGetNativeWidth() - dstX;
+    if (dstY + h > LcdGetNativeHeight())
+        h = LcdGetNativeHeight() - dstY;
     if (w <= 0 || h <= 0)
         return 1;
 
     int srcPitch = vm_lcd_image_pitch_bytes(srcW);
-    int dstPitch = LCD_PITCH * PIXEL_PER_BYTE;
+    int dstPitch = LcdGetScreenPitchPixels() * PIXEL_PER_BYTE;
     int copyBytes = w * PIXEL_PER_BYTE;
     if (copyBytes > (int)sizeof(rowBuf))
         return 0;
@@ -996,10 +1048,69 @@ static u32 vm_df_get_t_resource(u32 namePtr, int stream)
     return stream ? vm_DF_GetStreamTResource(namePtr) : vm_DF_GetTResource(namePtr);
 }
 
+static void scheduler_force_scene_callback(u32 r9)
+{
+    u8 sceneState = 0;
+    u8 next = 101;
+    u8 zero = 0;
+    u8 done = 100;
+    if (r9 == 0)
+        return;
+    uc_mem_read(MTK, r9 + 19638, &sceneState, 1);
+    if (sceneState != 100)
+        return;
+    uc_mem_write(MTK, r9 + 19638, &next, 1);
+    uc_mem_write(MTK, r9 + 21655, &zero, 1);
+    uc_mem_write(MTK, r9 + 0x5494, &done, 1);
+    g_vm_pump_loading_now = 1;
+}
+
+static int scheduler_startup_ui_active(void)
+{
+    u32 debugUiObj = 0;
+    if (Global_R9 == 0)
+        return 0;
+    uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &debugUiObj, 4);
+    return debugUiObj != 0;
+}
+
+static void scheduler_skip_loading_wait(void)
+{
+    u8 sceneState = 0;
+    u8 busy = 0;
+    u8 dlState = 0;
+    u8 zero = 0;
+    u32 r9 = Global_R9;
+
+    if (scheduler_startup_ui_active())
+        return;
+    scheduler_force_scene_callback(r9);
+    if (r9 == 0)
+        return;
+    uc_mem_read(MTK, r9 + 19638, &sceneState, 1);
+    uc_mem_read(MTK, r9 + 21808, &busy, 1);
+    uc_mem_read(MTK, r9 + 0x9584, &dlState, 1);
+    if (sceneState == 100 || busy != 0 || dlState == 2)
+        g_vm_pump_loading_now = 1;
+    if (busy != 0 || dlState == 2)
+    {
+        uc_mem_write(MTK, r9 + 21808, &zero, 1);
+        uc_mem_write(MTK, r9 + 21804, &zero, 1);
+        uc_mem_write(MTK, r9 + 0x9584, &zero, 1);
+        uc_mem_write(MTK, r9 + 21655, &zero, 1);
+    }
+}
+
 static void scheduler_normalize_startup_screen_state(void)
 {
-    u32 debugUiRoot = Global_R9 + 0x9928;
+    u32 debugUiRoot;
     u32 debugUiObj = 0;
+
+    scheduler_skip_loading_wait();
+
+    if (Global_R9 == 0)
+        return;
+    debugUiRoot = Global_R9 + 0x9928;
     uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
     if (debugUiObj == 0)
         return;
@@ -1039,9 +1150,13 @@ static void scheduler_normalize_startup_screen_state(void)
             g_lastStartupUpdateState = updateState;
         }
     }
-    if (state == 10 && updateObj == 0)
+    if (state == 10)
     {
+        u8 done = 100;
+        uc_mem_write(MTK, Global_R9 + 0x5494, &done, 1);
     }
+    /* Keep connect/data tick gaps; only skip the 50/100ms sleep. */
+    g_vm_pump_loading_now = 1;
 }
 
 static uc_err vm_emu_start(u32 begin, u32 until);
@@ -1454,6 +1569,94 @@ static void vm_config_program_mapping(void)
         Program_ROM_Mapped_Size = size_16mb;
     else
         Program_ROM_Mapped_Size = vm_round_up_page(imageEnd - Program_ROM_Address);
+}
+
+/*
+ * BE RWPI softfloat resolves FP status via:
+ *   ip=*[r9]; ip=*[ip]; return ip + literal
+ * (pattern e599c000 e59cc000 ..., literal at +0x14). BSS leaves *[r9]==0;
+ * overwriting slot0 with a self-pointer breaks sb+0 module object users
+ * (DF_PictureLibrary assert). Instead, when slot0 is still 0, return
+ * Program_Data_Address + literal so heaven_03.sce FP paths do not deref NULL.
+ */
+static u32 g_rwpi_fp_status_helper = 0;
+static u32 g_rwpi_fp_status_literal = 0;
+static uc_hook g_rwpi_fp_status_hook = 0;
+
+static void vm_cbe_scan_rwpi_fp_status_helper(void)
+{
+    static const u8 kPat[] = {
+        0xe5, 0x99, 0xc0, 0x00, 0xe5, 0x9c, 0xc0, 0x00, 0xe5, 0x9f, 0x00, 0x04,
+        0xe0, 0x80, 0x00, 0x0c, 0xe1, 0x2f, 0xff, 0x1e};
+    const u8 *code;
+    u32 codeLen;
+    u32 i;
+
+    g_rwpi_fp_status_helper = 0;
+    g_rwpi_fp_status_literal = 0;
+    if (!g_cbeInfo.isBiggianProgram || g_cbeFileBuffer == NULL)
+        return;
+    code = g_cbeFileBuffer + g_cbeInfo.codeOffset;
+    codeLen = g_cbeInfo.codeLen;
+    if (codeLen < sizeof(kPat) + 4)
+        return;
+    for (i = 0; i + sizeof(kPat) + 4 <= codeLen; i += 2)
+    {
+        if (memcmp(code + i, kPat, sizeof(kPat)) != 0)
+            continue;
+        g_rwpi_fp_status_helper = Program_ROM_Address + i;
+        g_rwpi_fp_status_literal =
+            ((u32)code[i + 20] << 24) | ((u32)code[i + 21] << 16) |
+            ((u32)code[i + 22] << 8) | (u32)code[i + 23];
+        printf("[info][cbe] rwpi fp-status helper=%08x literal=%08x\n",
+               g_rwpi_fp_status_helper, g_rwpi_fp_status_literal);
+        return;
+    }
+}
+
+static void hook_rwpi_fp_status_helper(uc_engine *uc, uint64_t address,
+                                       uint32_t size, void *user_data)
+{
+    u32 r9 = 0;
+    u32 slot0;
+    u32 r0;
+    u32 lr = 0;
+    (void)address;
+    (void)size;
+    (void)user_data;
+    if (g_rwpi_fp_status_helper == 0 || Program_Data_Address == 0)
+        return;
+    uc_reg_read(uc, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        return;
+    slot0 = vm_get_var(r9);
+    if (slot0 != 0)
+        return; /* relocated: let guest softfloat run */
+    r0 = Program_Data_Address + g_rwpi_fp_status_literal;
+    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+    uc_reg_write(uc, UC_ARM_REG_R0, &r0);
+    uc_reg_write(uc, UC_ARM_REG_PC, &lr);
+}
+
+static void vm_cbe_install_rwpi_fp_status_helper_hook(uc_engine *uc)
+{
+    uc_err err;
+    if (uc == NULL || g_rwpi_fp_status_helper == 0)
+        return;
+    if (g_rwpi_fp_status_hook != 0)
+    {
+        uc_hook_del(uc, g_rwpi_fp_status_hook);
+        g_rwpi_fp_status_hook = 0;
+    }
+    err = uc_hook_add(uc, &g_rwpi_fp_status_hook, UC_HOOK_CODE,
+                      hook_rwpi_fp_status_helper, NULL, g_rwpi_fp_status_helper,
+                      g_rwpi_fp_status_helper);
+    if (err != UC_ERR_OK)
+    {
+        printf("[warn][cbe] rwpi fp-status hook failed: %u (%s)\n", err,
+               uc_strerror(err));
+        g_rwpi_fp_status_hook = 0;
+    }
 }
 
 /* initMtkSimalator 里 IDA XRAM 后备缓冲首址，供 Find* 在映像溢出段扫 magic */
@@ -2610,6 +2813,7 @@ static uc_err scheduler_dispatch_net_tasks(void)
             vm_net_remote_observation taskRemoteObservation =
                 task->remoteObservation;
             u32 remoteSceneTargetClearSerial = 0;
+            uc_err err;
             task->fired = 1;
             task->active = 0;
             g_netTaskDispatchDepth++;
@@ -2634,17 +2838,14 @@ static uc_err scheduler_dispatch_net_tasks(void)
                     uc_mem_read(MTK, Global_R9 + 0x9584, &dlState, 1);
                 }
                 /*
-                 * Coolmall 26/1: never re-arm DoLoading snapshot around the
-                 * dialog callback — that left the progress bar over the UI.
-                 * While AwaitMapThenDialog, scene-enter 30/1 MUST keep the
-                 * normal busy/DoLoading contract (clearing busy here = 卡加载).
+                 * Queued downloadSnapshot state=2 is restored on every 2/3
+                 * (and other event-7) fire.  That re-raises DoLoading after
+                 * ScreenInit / 30/2 already called ResetDownloadState, so
+                 * 切图 and shop-return sit on the gold bar.  Never write it
+                 * back; busy-clear after the callback closes the wait.
                  */
-                if (g_coolmallGuardNetDeliver &&
-                    !g_coolmallAwaitMapThenDialog &&
-                    task->downloadSnapshotValid && snapState == 2)
-                {
+                if (task->downloadSnapshotValid && snapState == 2)
                     skipRestore = 1;
-                }
                 if (!skipRestore && task->downloadSnapshotValid &&
                     task->downloadSnapshotState == 2)
                 {
@@ -2670,7 +2871,15 @@ static uc_err scheduler_dispatch_net_tasks(void)
             }
             remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
                 &taskRemoteObservation);
-            uc_err err = vm_call4_preserve_regs_clear_stack_args(taskCallback, taskR0, taskR1, taskR2, taskEvent);
+            {
+                u32 savedHangupMod = g_currentScreenModuleBase;
+                if (g_hangupNetCallR9 != 0 && g_hangupNetCallEntry != 0 &&
+                    (taskCallback & ~1u) == (g_hangupNetCallEntry & ~1u))
+                    g_currentScreenModuleBase = g_hangupNetCallR9;
+                err = vm_call4_preserve_regs_clear_stack_args(
+                    taskCallback, taskR0, taskR1, taskR2, taskEvent);
+                g_currentScreenModuleBase = savedHangupMod;
+            }
             if (g_netDebugReadWindow)
             {
                 printf("[info][network] net_done slot=%u event=%u cb=%08x err=%u remaining_read=%u/%u\n",
@@ -2694,6 +2903,10 @@ static uc_err scheduler_dispatch_net_tasks(void)
             if (err == UC_ERR_OK)
                 vm_net_mock_finish_remote_observation(
                     remoteSceneTargetClearSerial);
+#if defined(CBE_CLIENT_ONLY)
+            if (err == UC_ERR_OK && taskEvent == 7)
+                scheduler_skip_loading_wait();
+#endif
             if (err != UC_ERR_OK)
                 return err;
             if (taskEvent == 7)
@@ -2735,6 +2948,11 @@ static uc_err scheduler_dispatch_net_tasks(void)
 /* Android ships only the remote game client transport.  The desktop build
  * keeps the embedded service, persistence and web-admin implementation. */
 #ifdef CBE_CLIENT_ONLY
+static int vm_host_hangup_skill_menu_open(void);
+static int vm_host_hangup_skill_menu_active(void);
+static void vm_host_hangup_skill_menu_draw(void);
+static int vm_host_hangup_skill_menu_key(int skey, int press);
+static int vm_host_hangup_skill_menu_touch(int type, int x, int y);
 #include "network-client.c"
 #else
 #include "server/mock-server.c"
@@ -3123,6 +3341,7 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
     u16 localVersion = 0;
     bool fileExists = false;
     bool ok = false;
+    u32 probeUnexpectedRetries = 0;
 
     if (active || g_mockServiceOnly || g_mockServiceClientId == 0 ||
         normalizedPath == NULL || normalizedPath[0] == 0)
@@ -3215,6 +3434,37 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
             !vm_named_resource_response_u32(response, responseLen, "crc",
                                             &responseCrc))
         {
+            u8 wt0 = (responseLen >= 1) ? response[0] : 0;
+            u8 wt1 = (responseLen >= 2) ? response[1] : 0;
+            u8 kind = (responseLen >= 7) ? response[6] : 0;
+            u8 subtype = (responseLen >= 8) ? response[7] : 0;
+            int unexpectedShape =
+                requestOk &&
+                (responseLen == 0 || wt0 != 'W' || wt1 != 'T' ||
+                 kind != 18 || subtype != 7);
+
+            printf("[warn][resource] resource_cache_probe_unusable file=%s "
+                   "request_ok=%u event=%u resp=%u wt=%02x%02x kind=%u/%u "
+                   "result=%u unexpected=%d exists=%u protocol=WT18/7\n",
+                   leaf, requestOk ? 1u : 0u, eventType, responseLen, wt0, wt1,
+                   (unsigned)kind, (unsigned)subtype, (unsigned)result,
+                   unexpectedShape, fileExists ? 1u : 0u);
+#if defined(CBE_CLIENT_ONLY)
+            if (unexpectedShape && probeUnexpectedRetries < 2u)
+            {
+                ++probeUnexpectedRetries;
+                vm_client_live_session_close(&g_vmClientDataSession);
+                continue;
+            }
+#endif
+            if (fileExists && start == 0)
+            {
+                ok = true;
+                printf("[info][resource] resource_cache_keep_local file=%s "
+                       "local_version=%u protocol=WT18/7 "
+                       "evidence=probe-unusable-existing-cache\n",
+                       leaf, localVersion);
+            }
             break;
         }
         /* Published version matches local content hash: keep cache. */
@@ -3416,6 +3666,44 @@ static u32 vm_net_queue_http_get_mock_response(u32 urlPtr, u32 callback, u32 con
         body = wpayPaySuccessBody;
         bodyLen = (u32)sizeof(wpayPaySuccessBody);
     }
+    else if (strstr(url, "SinAngelCongfig") != NULL)
+    {
+        /*
+         * 原罪天使 title FSM (R9+0x2008+2): after HTTP get, state=7 waits for
+         * Congfig validation (0x10014d8 → 0x100691c).  691c requires size>4 and
+         * a matching header checksum.  defaultBody={1} matches the shipped
+         * offline stub but FAILS that check, so state stays 7 forever while the
+         * input dispatcher (0x1002714) spins — client_out "卡加载" / wpay_trace
+         * game_pay_* spam (Castlevania PC labels, not real pay).
+         *
+         * Offline contract: local open of an invalid stub makes 6baa return 2
+         * and 0fa8 sets state=0 (skip download).  Live CDN is dead; mock HTTP
+         * *failure* (callback event 2 → flag=2 → state 8 → timer drain) rather
+         * than a fake success body.  Prefer resolving/seeding the stub so HTTP
+         * is never requested (see vm_file_try_resolve_sinangel_resource_path).
+         */
+        scheduler_queue_net_event(2, 0, 0, 0, callback, context);
+        printf("[info][network] http_get_mock url=%s events=2 cb=%08x ctx=%08x\n",
+               url[0] ? url : "-", callback, context);
+        vm_autotest_note("http_get_mock url=%s events=2 cb=%08x ctx=%08x\n",
+                         url[0] ? url : "-", callback, context);
+        return 1;
+    }
+    else if (strstr(url, "wmix.kvbar.com") != NULL ||
+             strstr(url, "/wmix/") != NULL)
+    {
+        /*
+         * CoolBar wmix bootstrap (vmdlEnterNet): response is a 2-byte header
+         * plus optional payload.  Parser returns (len-2) and then copies that
+         * many bytes from buf+2; defaultBody={1} yields -1 and asserts at
+         * vmdlEnterNet.c:154 (封神演义V2 single-player enter path).
+         * Empty payload with status bytes is enough to pass the length
+         * contract for offline/embedded-DF titles; live wmix is long dead.
+         */
+        static const u8 wmixEmptyOkBody[] = {1, 0};
+        body = wmixEmptyOkBody;
+        bodyLen = (u32)sizeof(wmixEmptyOkBody);
+    }
 
     responsePtr = vm_net_mock_sync_buffer_to_vm(body, bodyLen);
     if (responsePtr == 0)
@@ -3502,6 +3790,36 @@ static void vm_host_clear_download_busy(const char *reason)
     printf("[info][screen] download_busy_clear reason=%s r9=%08x "
            "evidence=ResetDownloadState:0x0103993C\n",
            reason ? reason : "-", r9);
+}
+
+static void vm_host_pump_map_stone_dismiss_bar(void)
+{
+    if (!g_vm_map_stone_dismiss_bar || g_vm_map_stone_dismiss_bar_tick == 0)
+        return;
+    if (g_schedulerTick < g_vm_map_stone_dismiss_bar_tick)
+        return;
+    vm_host_clear_download_busy("map-stone-world-teleport-screeninit");
+    g_vm_map_stone_dismiss_bar = 0;
+    g_vm_map_stone_dismiss_bar_tick = 0;
+}
+
+static void vm_host_arm_shop_return_skip_bar(const char *reason)
+{
+    g_vm_map_stone_dismiss_bar = 1;
+    g_vm_map_stone_dismiss_bar_tick = 0;
+    vm_host_clear_download_busy(reason ? reason : "mmshop-exit-skip-bar");
+    printf("[info][screen] shop_return_skip_bar_arm reason=%s "
+           "evidence=mmShop-pop-no-gold-bar\n",
+           reason ? reason : "-");
+}
+
+/*
+ * Scene DF/CBM shells: login 0x0501/0502, later maps 0x051c… after CBM load.
+ * 0xfff00000==0x05000000 missed 0x051c83e5 (dream-exit outdoor ScreenInit).
+ */
+static int vm_host_screen_init_is_loaded_df(u32 screenInitEntry)
+{
+    return (screenInitEntry & 0xff000000u) == 0x05000000u;
 }
 
 /*
@@ -3775,6 +4093,9 @@ static void vm_input_enqueue_utf8_text(const char *text)
 
 static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
     if (x < 0)
     {
         w += x;
@@ -3785,16 +4106,16 @@ static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
         h += y;
         y = 0;
     }
-    if (x + w > LCD_WIDTH)
-        w = LCD_WIDTH - x;
-    if (y + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - y;
+    if (x + w > screenW)
+        w = screenW - x;
+    if (y + h > screenH)
+        h = screenH - y;
     if (w <= 0 || h <= 0)
         return;
 
     for (int row = 0; row < h; ++row)
     {
-        u32 off = (y + row) * LCD_WIDTH + x;
+        u32 off = (y + row) * pitch + x;
         for (int col = 0; col < w; ++col)
             ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
     }
@@ -3802,6 +4123,9 @@ static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
 
 static void vm_lcd_sync_cache_rect_to_vm(int x, int y, int w, int h)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
     if (x < 0)
     {
         w += x;
@@ -3812,22 +4136,25 @@ static void vm_lcd_sync_cache_rect_to_vm(int x, int y, int w, int h)
         h += y;
         y = 0;
     }
-    if (x + w > LCD_WIDTH)
-        w = LCD_WIDTH - x;
-    if (y + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - y;
+    if (x + w > screenW)
+        w = screenW - x;
+    if (y + h > screenH)
+        h = screenH - y;
     if (w <= 0 || h <= 0)
         return;
 
     for (int row = 0; row < h; ++row)
     {
-        u32 off = (y + row) * LCD_WIDTH + x;
+        u32 off = (y + row) * pitch + x;
         uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
     }
 }
 
 static void vm_lcd_sync_vm_rect_to_cache(int x, int y, int w, int h)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    int pitch = LcdGetScreenPitchPixels();
     if (x < 0)
     {
         w += x;
@@ -3838,16 +4165,16 @@ static void vm_lcd_sync_vm_rect_to_cache(int x, int y, int w, int h)
         h += y;
         y = 0;
     }
-    if (x + w > LCD_WIDTH)
-        w = LCD_WIDTH - x;
-    if (y + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - y;
+    if (x + w > screenW)
+        w = screenW - x;
+    if (y + h > screenH)
+        h = screenH - y;
     if (w <= 0 || h <= 0)
         return;
 
     for (int row = 0; row < h; ++row)
     {
-        u32 off = (y + row) * LCD_WIDTH + x;
+        u32 off = (y + row) * pitch + x;
         uc_mem_read(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
     }
 }
@@ -3907,7 +4234,8 @@ static int vm_host_screen_destroy_looks_like_mmshop(u32 screen)
         return 0;
     destroyEntry = vm_get_var(screen + 4) & ~1u;
     initEntry = vm_get_var(screen) & ~1u;
-    if (destroyEntry >= 0x05180000u && destroyEntry < 0x051A0000u)
+    if (destroyEntry >= 0x05180000u && destroyEntry < 0x051A0000u &&
+        initEntry > destroyEntry && (initEntry - destroyEntry) == 0xaa2u)
         return 1;
     /* Exact runtime pair from client_out mall open. */
     if (destroyEntry == 0x0502d217u || initEntry == 0x0502dcb9u)
@@ -5417,13 +5745,184 @@ static void vm_input_draw_overlay(void)
     }
 }
 
-static void vm_frame_delay(u32 ms) { SDL_Delay(ms); }
+#if defined(CBE_CLIENT_ONLY)
+static void vm_lcd_update_with_input_overlay(void);
+enum { VM_HANGUP_SKILL_MENU_MAX = 16 };
+static u8 g_hangupSkillMenuOpen = 0;
+static u8 g_hangupSkillMenuIndex = 0;
+static u8 g_hangupSkillMenuCount = 0;
+static u32 g_hangupSkillMenuOperate[VM_HANGUP_SKILL_MENU_MAX];
+static u8 g_hangupSkillMenuLabel[VM_HANGUP_SKILL_MENU_MAX][40];
+static int g_hangupSkillMenuX = 16;
+static int g_hangupSkillMenuY = 36;
+static int g_hangupSkillMenuW = 208;
+static int g_hangupSkillMenuRowH = 18;
+
+static int vm_host_hangup_skill_menu_active(void)
+{
+    return g_hangupSkillMenuOpen ? 1 : 0;
+}
+
+static int vm_host_hangup_skill_menu_open(void)
+{
+    u8 i;
+    u8 n;
+    static const u8 kCancel[] = {0xC8, 0xA1, 0xCF, 0xFB, 0};
+
+    n = vm_client_hangup_skill_option_count();
+    if (n > VM_HANGUP_SKILL_MENU_MAX - 1u)
+        n = VM_HANGUP_SKILL_MENU_MAX - 1u;
+    g_hangupSkillMenuCount = 0;
+    for (i = 0; i < n; ++i)
+    {
+        g_hangupSkillMenuOperate[g_hangupSkillMenuCount] =
+            vm_client_hangup_skill_option_operate(i);
+        vm_client_hangup_skill_option_label(
+            i, g_hangupSkillMenuLabel[g_hangupSkillMenuCount],
+            sizeof(g_hangupSkillMenuLabel[0]));
+        g_hangupSkillMenuCount++;
+    }
+    g_hangupSkillMenuOperate[g_hangupSkillMenuCount] = 0xffffffffu;
+    memcpy(g_hangupSkillMenuLabel[g_hangupSkillMenuCount], kCancel,
+           sizeof(kCancel));
+    g_hangupSkillMenuCount++;
+    g_hangupSkillMenuIndex = 0;
+    g_hangupSkillMenuOpen = 1;
+    vm_lcd_update_with_input_overlay();
+    printf("[info][input] hangup_skill_menu_open rows=%u\n",
+           g_hangupSkillMenuCount);
+    return 1;
+}
+
+static void vm_host_hangup_skill_menu_close(void)
+{
+    g_hangupSkillMenuOpen = 0;
+}
+
+static void vm_host_hangup_skill_menu_draw(void)
+{
+    static const u8 kTitle[] = {0xB9, 0xD2, 0xBB, 0xFA, 0xBC, 0xBC, 0xC4, 0xDC, 0};
+    int x;
+    int y;
+    int w;
+    int h;
+    u8 i;
+
+    if (!g_hangupSkillMenuOpen)
+        return;
+    x = g_hangupSkillMenuX;
+    y = g_hangupSkillMenuY;
+    w = g_hangupSkillMenuW;
+    h = 22 + (int)g_hangupSkillMenuCount * g_hangupSkillMenuRowH + 8;
+    vm_lcd_fill_rect_local(x, y, w, h, 0x0148);
+    vm_lcd_draw_rect_local(x, y, w, h, 0x9fe6);
+    vm_lcd_draw_rect_local(x + 1, y + 1, w - 2, h - 2, 0x2b6d);
+    drawFontString((u8 *)kTitle, x + 8, y + 4, 0xffe0);
+    for (i = 0; i < g_hangupSkillMenuCount; ++i)
+    {
+        int rowY = y + 22 + (int)i * g_hangupSkillMenuRowH;
+        u16 color = (i == g_hangupSkillMenuIndex) ? 0xffff : 0x9fe6;
+
+        if (i == g_hangupSkillMenuIndex)
+            vm_lcd_fill_rect_local(x + 4, rowY - 1, w - 8, g_hangupSkillMenuRowH,
+                                   0x2b6d);
+        drawFontString(g_hangupSkillMenuLabel[i], x + 8, rowY, color);
+    }
+}
+
+static void vm_host_hangup_skill_menu_confirm(void)
+{
+    u32 operate;
+
+    if (!g_hangupSkillMenuOpen || g_hangupSkillMenuIndex >= g_hangupSkillMenuCount)
+        return;
+    operate = g_hangupSkillMenuOperate[g_hangupSkillMenuIndex];
+    vm_host_hangup_skill_menu_close();
+    if (operate == 0xffffffffu)
+    {
+        (void)vm_client_hangup_host_cancel();
+        printf("[info][input] hangup_skill_menu_cancel\n");
+        vm_lcd_update_with_input_overlay();
+        return;
+    }
+    printf("[info][input] hangup_skill_menu_confirm operate=%u\n", operate);
+    (void)vm_client_hangup_confirm_skill_and_start(operate);
+    vm_lcd_update_with_input_overlay();
+}
+
+static int vm_host_hangup_skill_menu_key(int skey, int press)
+{
+    if (!g_hangupSkillMenuOpen || !press)
+        return 0;
+    if (skey == 17)
+    {
+        if (g_hangupSkillMenuIndex > 0)
+            g_hangupSkillMenuIndex--;
+        vm_lcd_update_with_input_overlay();
+        return 1;
+    }
+    if (skey == 18)
+    {
+        if (g_hangupSkillMenuIndex + 1u < g_hangupSkillMenuCount)
+            g_hangupSkillMenuIndex++;
+        vm_lcd_update_with_input_overlay();
+        return 1;
+    }
+    if (skey == 14 || skey == 12)
+    {
+        vm_host_hangup_skill_menu_confirm();
+        return 1;
+    }
+    if (skey == 13)
+    {
+        g_hangupSkillMenuIndex = (u8)(g_hangupSkillMenuCount - 1u);
+        vm_host_hangup_skill_menu_confirm();
+        return 1;
+    }
+    return 1;
+}
+
+static int vm_host_hangup_skill_menu_touch(int type, int x, int y)
+{
+    int row;
+
+    if (!g_hangupSkillMenuOpen)
+        return 0;
+    if (type != MR_MOUSE_DOWN)
+        return 1;
+    row = (y - (g_hangupSkillMenuY + 22)) / g_hangupSkillMenuRowH;
+    if (x < g_hangupSkillMenuX || x > g_hangupSkillMenuX + g_hangupSkillMenuW ||
+        row < 0 || row >= (int)g_hangupSkillMenuCount)
+        return 1;
+    g_hangupSkillMenuIndex = (u8)row;
+    vm_host_hangup_skill_menu_confirm();
+    return 1;
+}
+#endif
+
+static void vm_frame_delay(u32 ms)
+{
+    if (g_vm_pump_loading_now)
+    {
+        g_vm_pump_loading_now = 0;
+        return;
+    }
+    SDL_Delay(ms);
+}
 
 static void vm_lcd_update_with_input_overlay(void)
 {
-    uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
+    int pitch = LcdGetScreenPitchPixels();
+    int screenH = LcdGetNativeHeight();
+    u32 bytes = (u32)pitch * (u32)screenH * (u32)PIXEL_PER_BYTE;
+    if (bytes > (u32)LCD_WIDTH * (u32)LCD_HEIGHT * (u32)PIXEL_PER_BYTE)
+        bytes = (u32)LCD_WIDTH * (u32)LCD_HEIGHT * (u32)PIXEL_PER_BYTE;
+    uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, bytes);
 #ifndef CBE_PLATFORM_NO_WINDOW
     vm_input_draw_overlay();
+#if defined(CBE_CLIENT_ONLY)
+    vm_host_hangup_skill_menu_draw();
+#endif
 #endif
     UpdateLcd();
 }
@@ -5530,10 +6029,16 @@ static void vm_debug_log_login_input_state(const char *phase, u32 callback, u32 
 
 static void vm_lcd_init_screen_image_struct(void)
 {
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
+    if (screenW < 1)
+        screenW = LCD_WIDTH;
+    if (screenH < 1)
+        screenH = LCD_HEIGHT;
     uc_mem_write(MTK, VM_screenImageStruct_ADDRESS, emptyBuff, 24);
     vm_set_var(VM_screenImageStruct_ADDRESS, VM_screenImage_ADDRESS);
-    vm_set_var_short(VM_screenImageStruct_ADDRESS + 4, LCD_WIDTH);
-    vm_set_var_short(VM_screenImageStruct_ADDRESS + 6, LCD_HEIGHT);
+    vm_set_var_short(VM_screenImageStruct_ADDRESS + 4, (u16)screenW);
+    vm_set_var_short(VM_screenImageStruct_ADDRESS + 6, (u16)screenH);
 }
 
 static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen)
@@ -6629,6 +7134,7 @@ static uc_err scheduler_tick(void)
 #if defined(CBE_CLIENT_ONLY)
     /* Flag may arrive with the shop-exit response just dispatched above. */
     vm_host_pump_mmshop_loading_clear_flag();
+    vm_host_pump_map_stone_dismiss_bar();
 #endif
     vm_screen_root_exit_maybe_request();
     return UC_ERR_OK;
@@ -6723,22 +7229,233 @@ void keyEvent(int type, int key)
             if (skey == 14)
                 return;
         }
+#if defined(CBE_CLIENT_ONLY)
+        if (vm_host_hangup_skill_menu_active())
+        {
+            (void)vm_host_hangup_skill_menu_key(skey, isPress);
+            return;
+        }
+        /*
+         * Hangup key is 'c' (also skey 18).  Arrow Down is the same skey via
+         * 's' / Android D-pad.  Arm only the hangup key so bag list Down +
+         * 详细 cannot start hangup (client_out: hangup_softkey_arm then
+         * Type=2 after mouse_down y≈38–58 hangup_rect=0).
+         */
+        if (isPress && key == 0x63)
+            vm_host_arm_hangup_intent_from_softkey();
+        if (vm_client_hangup_suppress_guest_confirm() &&
+            (skey == 14 || skey == 12 || skey == 13))
+        {
+            printf("[info][input] hangup_softkey_swallowed skey=%d press=%d "
+                   "evidence=host-hangup-start-no-bind-r9\n",
+                   skey, isPress);
+            return;
+        }
+#endif
         /* Chat/map shortcuts are Android UI digit keys ('6'/'4'), not softkey remap. */
         EnqueueVMEvent(VM_EVENT_KEYBOARD, skey, isPress);
     }
 }
 
+/*
+ * Native mmGame 挂机 is UI7 in the soft row (Pixi/WorldHud: x40–92, y342–364).
+ * client_out: outdoor taps land at x≈44–65 y≈340–354 with stack=3 and empty
+ * Ctrl softkey cache (mmGame draws its own bar).  Do not gate on stack==1 or
+ * left==「菜单」— those false-negatives swallow every hangup press.
+ */
+static int vm_host_touch_in_map_hangup_rect(int x, int y)
+{
+    int w = LcdGetNativeWidth();
+    int h = LcdGetNativeHeight();
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+
+    if (w <= 0)
+        w = 240;
+    if (h <= 0)
+        h = 400;
+    /* Match UI7.gif 49×22 (+small pad); keep clear of chat y364+. */
+    x0 = (w * 36) / 240;
+    x1 = (w * 96) / 240;
+    y0 = (h * 338) / 400;
+    y1 = (h * 366) / 400;
+    return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+}
+
+/*
+ * Bag/equip/detail overlay signal: Ctrl win title, or 使用/详细 softkeys.
+ * Outdoor mmGame often never refreshes Ctrl softkey cache (left="").
+ */
+static int vm_host_bag_or_equip_ui_open(void)
+{
+    static const u8 kDetail[] = {0xCF, 0xEA, 0xCF, 0xB8}; /* 详细 */
+    static const u8 kUse[] = {0xCA, 0xB9, 0xD3, 0xC3};    /* 使用 */
+
+    if (g_winTitleCache[0] != 0)
+        return 1;
+    if (vm_softkey_eq_gbk(g_softkeyLeftCache, kUse, sizeof(kUse)) ||
+        vm_softkey_eq_gbk(g_softkeyLeftCache, kDetail, sizeof(kDetail)) ||
+        vm_softkey_eq_gbk(g_softkeyCenterCache, kDetail, sizeof(kDetail)))
+        return 1;
+    return 0;
+}
+
+static void vm_host_arm_hangup_intent_from_softkey(void)
+{
+    if (vm_host_bag_or_equip_ui_open())
+    {
+        g_lastMouseHangupArmed = 0;
+        return;
+    }
+    g_lastMouseHangupArmed = 1;
+    printf("[info][input] hangup_softkey_arm stack=%u bag_ui=0 "
+           "evidence=key-c-hangup-not-skey18-down\n",
+           (unsigned)g_screenStackCount);
+}
+
+/*
+ * client_out confirm crash: pc=mmBattle+0x2908 R0=0 R9=Global.  Panel screen
+ * often has stack moduleBase=0, so prepare_screen_call leaves Global_R9 while
+ * running pool logic → 28A4 walks with the wrong module.  Bind inferred
+ * mmBattle R9 onto current/stack before guest A4D4 (emulator bookkeeping only).
+ */
+static int vm_host_bind_hangup_confirm_mmbattle_r9(void)
+{
+    u32 codeBase = 0;
+    u32 moduleR9 = 0;
+    u32 i;
+    int bound = 0;
+
+    if (vm_infer_battle_module_from_screen(vmAddedScreen, &codeBase, &moduleR9))
+        bound = 1;
+    else
+    {
+        for (i = g_screenStackCount; i > 0; --i)
+        {
+            if (!vm_infer_battle_module_from_screen(g_screenStack[i - 1],
+                                                    &codeBase, &moduleR9))
+                continue;
+            bound = 1;
+            break;
+        }
+    }
+    if (!bound || moduleR9 == 0)
+    {
+        printf("[warn][input] hangup_confirm_bind_r9 fail evidence=no-mmBattle\n");
+        return 0;
+    }
+    g_currentScreenModuleBase = moduleR9;
+    vm_dl_note_sp_bf(moduleR9, "hangup-confirm-mmbattle");
+    vm_pool_module_remember_r9(moduleR9);
+    vm_hangup_candidate_fault_arm(codeBase);
+    for (i = 0; i < g_screenStackCount; ++i)
+    {
+        u32 slotCode = 0;
+        u32 slotR9 = 0;
+
+        if (!vm_infer_battle_module_from_screen(g_screenStack[i], &slotCode,
+                                                &slotR9))
+            continue;
+        if (g_screenStackModuleBase[i] == 0)
+            g_screenStackModuleBase[i] = moduleR9;
+    }
+    printf("[info][input] hangup_confirm_bind_r9 code=%08x r9=%08x "
+           "evidence=avoid-Global-R9-on-28A4\n",
+           codeBase, moduleR9);
+    return 1;
+}
+
+static int vm_host_should_block_hangup_uplink(void)
+{
+    /* Mall/dialogs: packet shape already excludes non-pure 2/10 Type=2.
+     * Outdoor world routinely has stack>=3 after title/role/mmGame pushes. */
+    if (vm_host_bag_or_equip_ui_open())
+        return 1;
+    if (!g_lastMouseHangupArmed)
+        return 1;
+    return 0;
+}
+
+static int vm_host_should_swallow_map_hangup_touch(int x, int y)
+{
+    if (!vm_host_touch_in_map_hangup_rect(x, y))
+        return 0;
+    /* Only eat hangup hits under bag/equip chrome — never for empty left /
+     * deep stack (that was eating every outdoor UI7 tap). */
+    if (vm_host_bag_or_equip_ui_open())
+        return 1;
+    return 0;
+}
+
+static void vm_host_log_hangup_rect_touch(int x, int y, int swallow)
+{
+    printf("[info][input] hangup_rect_touch x=%d y=%d stack=%u "
+           "bag_ui=%u swallow=%d title=\"%s\" left=\"%s\" center=\"%s\" "
+           "right=\"%s\" evidence=bag-equip-detail-clickthrough\n",
+           x, y, (unsigned)g_screenStackCount,
+           vm_host_bag_or_equip_ui_open() ? 1 : 0, swallow,
+           (const char *)g_winTitleCache, (const char *)g_softkeyLeftCache,
+           (const char *)g_softkeyCenterCache,
+           (const char *)g_softkeyRightCache);
+}
+
 // 1按下3弹起
 void mouseEvent(int type, int x, int y)
 {
+    int maxX = LcdGetNativeWidth() - 1;
+    int maxY = LcdGetNativeHeight() - 1;
+    if (maxX < 0)
+        maxX = 0;
+    if (maxY < 0)
+        maxY = 0;
     if (x < 0)
         x = 0;
-    else if (x > 239)
-        x = 239;
+    else if (x > maxX)
+        x = maxX;
     if (y < 0)
         y = 0;
-    else if (y > 399)
-        y = 399;
+    else if (y > maxY)
+        y = maxY;
+
+#if defined(CBE_CLIENT_ONLY)
+    if (vm_host_hangup_skill_menu_touch(type, x, y))
+        return;
+    if (type == MR_MOUSE_DOWN)
+    {
+        int inHangup = vm_host_touch_in_map_hangup_rect(x, y);
+
+        g_lastMouseHangupArmed =
+            (inHangup && !vm_host_bag_or_equip_ui_open()) ? 1 : 0;
+        printf("[info][input] mouse_down x=%d y=%d stack=%u "
+               "bag_ui=%u hangup_rect=%d hangup_arm=%u title=\"%s\" "
+               "left=\"%s\" evidence=bag-equip-detail-clickthrough\n",
+               x, y, (unsigned)g_screenStackCount,
+               vm_host_bag_or_equip_ui_open() ? 1 : 0, inHangup,
+               (unsigned)g_lastMouseHangupArmed, (const char *)g_winTitleCache,
+               (const char *)g_softkeyLeftCache);
+        if (inHangup)
+        {
+            int swallow = vm_host_should_swallow_map_hangup_touch(x, y);
+
+            vm_host_log_hangup_rect_touch(x, y, swallow);
+            if (swallow)
+            {
+                g_vmHangupTouchSwallowed = 1;
+                g_lastMouseHangupArmed = 0;
+                return;
+            }
+        }
+        g_vmHangupTouchSwallowed = 0;
+    }
+    else if (g_vmHangupTouchSwallowed)
+    {
+        if (type == MR_MOUSE_UP)
+            g_vmHangupTouchSwallowed = 0;
+        return;
+    }
+#endif
 
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
@@ -7351,6 +8068,167 @@ static void vm_autotest_note(const char *fmt, ...)
     fflush(g_autotestStateFile);
 }
 
+/*
+ * Optional mock-server.conf (key=value). Applied only for env vars that are
+ * still unset, so priority stays: CLI > env > config file > defaults.
+ * See bin/mock-server.conf.
+ */
+static void vm_mock_config_trim(char *text)
+{
+    char *start;
+    size_t len;
+
+    if (text == NULL)
+        return;
+    start = text;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')
+        ++start;
+    if (start != text)
+        memmove(text, start, strlen(start) + 1);
+    len = strlen(text);
+    while (len > 0 &&
+           (text[len - 1] == ' ' || text[len - 1] == '\t' ||
+            text[len - 1] == '\r' || text[len - 1] == '\n'))
+    {
+        text[len - 1] = 0;
+        --len;
+    }
+}
+
+static int vm_mock_config_env_unset(const char *name)
+{
+    const char *value = getenv(name);
+    return value == NULL || value[0] == 0;
+}
+
+static void vm_mock_config_setenv_if_unset(const char *name, const char *value)
+{
+    if (name == NULL || name[0] == 0 || value == NULL ||
+        !vm_mock_config_env_unset(name))
+        return;
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 0);
+#endif
+}
+
+static const char *vm_mock_config_env_name_for_key(const char *key)
+{
+    if (key == NULL || key[0] == 0)
+        return NULL;
+    if (strcmp(key, "service_bind") == 0 ||
+        strcmp(key, "mock_service_bind") == 0)
+        return "CBE_MOCK_SERVICE_BIND";
+    if (strcmp(key, "service_port") == 0 ||
+        strcmp(key, "mock_service_port") == 0)
+        return "CBE_MOCK_SERVICE_PORT";
+    if (strcmp(key, "admin_bind") == 0 || strcmp(key, "mock_admin_bind") == 0)
+        return "CBE_MOCK_ADMIN_BIND";
+    if (strcmp(key, "admin_port") == 0 || strcmp(key, "mock_admin_port") == 0)
+        return "CBE_MOCK_ADMIN_PORT";
+    if (strcmp(key, "mysql_host") == 0)
+        return "CBE_MYSQL_HOST";
+    if (strcmp(key, "mysql_port") == 0)
+        return "CBE_MYSQL_PORT";
+    if (strcmp(key, "mysql_user") == 0)
+        return "CBE_MYSQL_USER";
+    if (strcmp(key, "mysql_password") == 0)
+        return "CBE_MYSQL_PASSWORD";
+    if (strcmp(key, "mysql_database") == 0)
+        return "CBE_MYSQL_DATABASE";
+    if (strcmp(key, "resource_root") == 0)
+        return "CBE_RESOURCE_ROOT";
+    if (strncmp(key, "CBE_", 4) == 0)
+        return key;
+    return NULL;
+}
+
+static int vm_mock_config_load_file(const char *path)
+{
+    FILE *fp = NULL;
+    char line[512];
+    int applied = 0;
+
+    if (path == NULL || path[0] == 0)
+        return 0;
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        char *eq = NULL;
+        char *key = NULL;
+        char *value = NULL;
+        const char *envName = NULL;
+
+        vm_mock_config_trim(line);
+        if (line[0] == 0 || line[0] == '#' || line[0] == ';')
+            continue;
+        eq = strchr(line, '=');
+        if (eq == NULL)
+            continue;
+        *eq = 0;
+        key = line;
+        value = eq + 1;
+        vm_mock_config_trim(key);
+        vm_mock_config_trim(value);
+        envName = vm_mock_config_env_name_for_key(key);
+        if (envName == NULL || value[0] == 0)
+            continue;
+        if (!vm_mock_config_env_unset(envName))
+            continue;
+        vm_mock_config_setenv_if_unset(envName, value);
+        ++applied;
+    }
+    fclose(fp);
+    printf("[info][mock-service] config_file path=%s applied=%d "
+           "(env/cli still override)\n",
+           path, applied);
+    return 1;
+}
+
+static void vm_mock_config_apply(int argc, char *args[])
+{
+    const char *explicitPath = NULL;
+    static const char *defaults[] = {
+        "mock-server.conf",
+        "bin/mock-server.conf",
+    };
+    int i = 0;
+
+    if (argc > 0 && args != NULL)
+    {
+        for (i = 1; i < argc; ++i)
+        {
+            if (strncmp(args[i], "--mock-config=", 14) == 0 &&
+                args[i][14] != 0)
+            {
+                explicitPath = args[i] + 14;
+                break;
+            }
+        }
+    }
+    if (explicitPath == NULL)
+    {
+        const char *envPath = getenv("CBE_MOCK_CONFIG");
+        if (envPath != NULL && envPath[0] != 0)
+            explicitPath = envPath;
+    }
+    if (explicitPath != NULL)
+    {
+        if (!vm_mock_config_load_file(explicitPath))
+            printf("[warn][mock-service] config_file missing path=%s\n",
+                   explicitPath);
+        return;
+    }
+    for (i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); ++i)
+    {
+        if (vm_mock_config_load_file(defaults[i]))
+            return;
+    }
+}
+
 static void vm_mock_service_init_config(int argc, char *args[])
 {
 #ifdef CBE_CLIENT_ONLY
@@ -7443,6 +8321,9 @@ static void vm_mock_service_init_config(int argc, char *args[])
            explicitEndpoint ? "endpoint" :
            (listApplied ? "server-list" : "default"));
 #else
+    /* File defaults before getenv so unset keys pick up mock-server.conf. */
+    vm_mock_config_apply(argc, args);
+
     const char *envOnly = getenv("CBE_MOCK_SERVICE_ONLY");
     const char *envEndpoint = getenv("CBE_MOCK_SERVICE");
     const char *envBind = getenv("CBE_MOCK_SERVICE_BIND");
@@ -9705,6 +10586,7 @@ static void vm_game_launcher_start_selected(const char *path)
     if (!vm_cbe_load_and_start(path))
     {
         printf("[error][launcher] failed to load %s\n", path);
+        LcdReleasePresentBackend();
         g_gameLauncherActive = true;
         g_gameLauncherState.loading = false;
         g_gameLauncherState.selected_server_name[0] = 0;
@@ -9798,6 +10680,17 @@ void loop()
                         EnqueueVMEvent(VM_EVENT_INPUT_BACKSPACE, 0, 0);
                     break;
                 }
+#if defined(CBE_CLIENT_ONLY)
+                if (vm_host_hangup_skill_menu_active())
+                {
+                    if (isKeyDown == SDLK_UNKNOWN)
+                    {
+                        isKeyDown = ev.key.keysym.sym;
+                        keyEvent(MR_KEY_PRESS, ev.key.keysym.sym);
+                    }
+                    break;
+                }
+#endif
                 if (isKeyDown == SDLK_UNKNOWN)
                 {
                     isKeyDown = ev.key.keysym.sym;
@@ -10013,6 +10906,9 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
         return false;
     snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", cbe_path_utf8);
 
+    /* Switch host present size before VM screen struct / first frames. */
+    vm_lcd_apply_native_size_for_cbe_path(g_cbeLoadPathUtf8);
+
 #ifdef CBE_HOST_UTF8_PATHS
     snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", cbe_path_utf8);
 #else
@@ -10096,6 +10992,8 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
                g_cbeInfo.codeOffset, Program_ROM_Address);
         uc_mem_write(MTK, Program_Data_Address,
                      fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        vm_cbe_scan_rwpi_fp_status_helper();
+        vm_cbe_install_rwpi_fp_status_helper_hook(MTK);
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
         vm_set_var(VM_Manager_Table_ADDRESS + 8, changeTmp3);
@@ -10168,6 +11066,8 @@ static void vm_reset_runtime_state_for_restart(void)
     {
         uc_mem_write(MTK, Program_ROM_Address, g_cbeFileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
         uc_mem_write(MTK, Program_Data_Address, g_cbeFileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        vm_cbe_scan_rwpi_fp_status_helper();
+        vm_cbe_install_rwpi_fp_status_helper_hook(MTK);
     }
 
     vm_close_open_files_for_restart();
@@ -10463,6 +11363,61 @@ static int vm_bytes_contains(const char *haystack, const unsigned char *needle, 
     return 0;
 }
 
+static void vm_lcd_apply_native_size_for_cbe_path(const char *cbePath)
+{
+    /* Several BE MTK titles (封神演义V2 / 原罪天使) only paint a classic
+     * 176x220 frame inside the 240x400 host buffer. Presenting the full
+     * buffer leaves a content island + garbage/black margins ("花屏"/黑边). */
+    static const unsigned char fengshenUtf8[] = {
+        0xe5, 0xb0, 0x81, 0xe7, 0xa5, 0x9e /* 封神 */
+    };
+    static const unsigned char fengshenGbk[] = {0xb7, 0xe2, 0xc9, 0xf1};
+    static const unsigned char yuanzuiUtf8[] = {
+        0xe5, 0x8e, 0x9f, 0xe7, 0xbd, 0xaa /* 原罪 */
+    };
+    static const unsigned char yuanzuiGbk[] = {0xd4, 0xad, 0xd7, 0xef};
+    static const unsigned char angelUtf8[] = {
+        0xe5, 0xa4, 0xa9, 0xe4, 0xbd, 0xbf /* 天使 */
+    };
+    int width = LCD_WIDTH;
+    int height = LCD_HEIGHT;
+    const char *source = "default";
+    int useClassic176 = 0;
+
+    if (cbePath &&
+        (vm_bytes_contains(cbePath, fengshenUtf8, sizeof(fengshenUtf8)) ||
+         vm_bytes_contains(cbePath, fengshenGbk, sizeof(fengshenGbk)) ||
+         strstr(cbePath, "FengShen") != NULL ||
+         strstr(cbePath, "fengshen") != NULL))
+    {
+        useClassic176 = 1;
+        source = "fengshen-176x220";
+    }
+    else if (cbePath &&
+             (((vm_bytes_contains(cbePath, yuanzuiUtf8, sizeof(yuanzuiUtf8)) ||
+                vm_bytes_contains(cbePath, yuanzuiGbk, sizeof(yuanzuiGbk))) &&
+               (vm_bytes_contains(cbePath, angelUtf8, sizeof(angelUtf8)) ||
+                strstr(cbePath, "Angel") != NULL ||
+                strstr(cbePath, "angel") != NULL)) ||
+              strstr(cbePath, "SinAngel") != NULL))
+    {
+        useClassic176 = 1;
+        source = "yuanzui-angel-176x220";
+    }
+
+    if (useClassic176)
+    {
+        width = 176;
+        height = 220;
+    }
+
+    LcdSetNativeSize(width, height);
+    if (useClassic176)
+        LcdSetScale(3);
+    printf("[info][lcd] native_size=%dx%d source=%s scale=%d cbe=%s\n", width,
+           height, source, LcdGetScale(), cbePath ? cbePath : "(null)");
+}
+
 static vm_lcd_rotation vm_lcd_auto_rotation_for_current_cbe(void)
 {
     static const unsigned char angryUtf8[] = {
@@ -10545,7 +11500,16 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
     vm_lcd_rotation rotation = vm_lcd_auto_rotation_for_current_cbe();
     const char *source = "auto";
     const char *envRotate = getenv("CBE_LCD_ROTATE");
+    const char *envScale = getenv("CBE_LCD_SCALE");
+    const char *envSize = getenv("CBE_LCD_SIZE");
     int isAuto = 0;
+    int scale;
+    int sizeW = -1;
+    int sizeH = -1;
+
+    vm_lcd_apply_native_size_for_cbe_path(g_cbeLoadPathUtf8);
+    /* Pick up CBE defaults (e.g. 封神 -> scale 3) before env/arg overrides. */
+    scale = LcdGetScale();
 
     if (envRotate != NULL)
     {
@@ -10553,6 +11517,26 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
             source = isAuto ? "env:auto" : "env";
         else
             printf("[warn][lcd] invalid CBE_LCD_ROTATE=%s\n", envRotate);
+    }
+    if (envScale != NULL)
+    {
+        int parsed = atoi(envScale);
+        if (parsed >= 1 && parsed <= 8)
+            scale = parsed;
+        else
+            printf("[warn][lcd] invalid CBE_LCD_SCALE=%s (use 1..8)\n", envScale);
+    }
+    if (envSize != NULL)
+    {
+        int w = 0;
+        int h = 0;
+        if (sscanf(envSize, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+        {
+            sizeW = w;
+            sizeH = h;
+        }
+        else
+            printf("[warn][lcd] invalid CBE_LCD_SIZE=%s (use WxH)\n", envSize);
     }
 
     for (int i = 1; i < argc; ++i)
@@ -10562,6 +11546,33 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
             value = args[i] + 9;
         else if (strncmp(args[i], "--lcd-rotate=", 13) == 0)
             value = args[i] + 13;
+        else if (strncmp(args[i], "--scale=", 8) == 0 ||
+                 strncmp(args[i], "--lcd-scale=", 12) == 0)
+        {
+            const char *scaleValue =
+                (args[i][2] == 's') ? (args[i] + 8) : (args[i] + 12);
+            int parsed = atoi(scaleValue);
+            if (parsed >= 1 && parsed <= 8)
+                scale = parsed;
+            else
+                printf("[warn][lcd] invalid scale option=%s (use 1..8)\n",
+                       scaleValue);
+            continue;
+        }
+        else if (strncmp(args[i], "--lcd-size=", 11) == 0)
+        {
+            int w = 0;
+            int h = 0;
+            if (sscanf(args[i] + 11, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+            {
+                sizeW = w;
+                sizeH = h;
+            }
+            else
+                printf("[warn][lcd] invalid --lcd-size=%s (use WxH)\n",
+                       args[i] + 11);
+            continue;
+        }
 
         if (value != NULL)
         {
@@ -10572,11 +11583,16 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
         }
     }
 
+    if (sizeW > 0 && sizeH > 0)
+        LcdSetNativeSize(sizeW, sizeH);
+
+    LcdSetScale(scale);
     LcdSetRotation(rotation);
-    printf("[info][lcd] rotate=%s source=%s view=%dx%d window=%dx%d\n",
-           LcdRotationName(LcdGetRotation()), source,
-           LcdGetViewWidth(), LcdGetViewHeight(),
-           LcdGetWindowWidth(), LcdGetWindowHeight());
+    printf("[info][lcd] rotate=%s source=%s scale=%d native=%dx%d view=%dx%d "
+           "window=%dx%d\n",
+           LcdRotationName(LcdGetRotation()), source, LcdGetScale(),
+           LcdGetNativeWidth(), LcdGetNativeHeight(), LcdGetViewWidth(),
+           LcdGetViewHeight(), LcdGetWindowWidth(), LcdGetWindowHeight());
 }
 
 static void vm_persist_ensure_dir(void)
@@ -11240,6 +12256,7 @@ void RunArmProgram(void *param)
                 }
                 if (screenStructChange == 1 || g_screenRemovedWithoutNext || vmAddedScreen == 0)
                     break;
+                scheduler_normalize_startup_screen_state();
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
                 p = vm_emu_start(tScreenRenderEntry, exitAddr);
@@ -11403,6 +12420,29 @@ void RunArmProgram(void *param)
                     if (p == UC_ERR_OK && g_vm_scene_block_dream_completion_reenter)
                     {
                         vm_host_clear_download_busy("dream-df-screeninit-complete");
+                    }
+                    if (p == UC_ERR_OK &&
+                        vm_host_screen_init_is_loaded_df(screenInitEntry))
+                    {
+                        scheduler_skip_loading_wait();
+                        /*
+                         * Loaded DF ScreenInit means WT18/7 already passed.
+                         * DoLoading / 5/10 / NPC-shop pop can re-raise
+                         * download state=2 after do-loading-immediate, and
+                         * skip_bar was only armed for mmShop/world-map.
+                         * ResetDownloadState now, then again in two ticks
+                         * so a later 2/3 cannot leave the gold bar.
+                         */
+                        vm_host_clear_download_busy(
+                            "loaded-df-screeninit-skip-bar");
+                        g_vm_map_stone_dismiss_bar = 1;
+                        g_vm_map_stone_dismiss_bar_tick =
+                            g_schedulerTick + 2u;
+                        printf("[info][screen] map_stone_dismiss_bar_arm "
+                               "init=%08x tick=%u due=%u evidence="
+                               "loaded-df-screeninit+skip-gold-bar\n",
+                               screenInitEntry, g_schedulerTick,
+                               g_vm_map_stone_dismiss_bar_tick);
                     }
 #endif
                 }
@@ -11683,6 +12723,7 @@ void RunArmProgram(void *param)
 
                         if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                             break;
+                        scheduler_normalize_startup_screen_state();
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         scheduler_prepare_screen_call(screenThisPtr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
@@ -11707,7 +12748,11 @@ void RunArmProgram(void *param)
                     vm_lcd_update_with_input_overlay();
                     u32 _now = SDL_GetTicks();
                     u32 _elapsed = _now - _frameTick;
-                    if (_elapsed < (u32)VM_SCHED_FRAME_MS)
+                    if (g_vm_pump_loading_now)
+                    {
+                        g_vm_pump_loading_now = 0;
+                    }
+                    else if (_elapsed < (u32)VM_SCHED_FRAME_MS)
                         SDL_Delay((u32)VM_SCHED_FRAME_MS - _elapsed);
                     _frameTick = SDL_GetTicks();
                 }
@@ -11990,6 +13035,7 @@ int main(int argc, char *args[])
 
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+    vm_win32_force_dpi_unaware();
 #endif
     // while(1);
 
@@ -12014,12 +13060,9 @@ int main(int argc, char *args[])
             return -1;
         }
         LcdApplyWindowSize();
-        SDL_Surface *startupSurface = SDL_GetWindowSurface(window);
-        if (startupSurface)
-        {
-            SDL_FillRect(startupSurface, NULL, SDL_MapRGB(startupSurface->format, 0, 0, 0));
-            SDL_UpdateWindowSurface(window);
-        }
+        printf("[info][lcd] present=surface_blit scale=%d view=%dx%d window=%dx%d\n",
+               LcdGetScale(), LcdGetViewWidth(), LcdGetViewHeight(),
+               LcdGetWindowWidth(), LcdGetWindowHeight());
     }
 #endif
 
@@ -12151,6 +13194,8 @@ int main(int argc, char *args[])
         // 数据段起始位置放这里
         // codeSize = headerInt2 + headerInt4
         uc_mem_write(MTK, Program_Data_Address, fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        vm_cbe_scan_rwpi_fp_status_helper();
+        vm_cbe_install_rwpi_fp_status_helper_hook(MTK);
         printf("Data In Rom Address:0x%x - 0x%x\n", Program_Data_Address, Program_Data_Address + g_cbeInfo.headerInt4);
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
@@ -12230,13 +13275,6 @@ void cbeShutdown(void)
     vm_request_host_quit("android-destroy");
     EnqueueVMEvent(VM_EVENT_EXIT, 0, 0);
     g_vmInputSdlTextInputWanted = 0;
-}
-
-const char *cbeAndroidGetPreferredServerName(void)
-{
-    if (g_mockPreferredTitleServerUtf8[0] != 0)
-        return g_mockPreferredTitleServerUtf8;
-    return "";
 }
 
 const char *cbeGetCpuInfoText(void)
@@ -13153,6 +14191,52 @@ return 4;
             printf("assert_stack[%02x]=%08x\n", off, word);
             if ((word >= Program_ROM_Address && word < Program_ROM_Address + Program_ROM_Mapped_Size))
             {
+            }
+        }
+        /* 封神演义 wmix 引导：vmdlEnterNet.c:154 时 r5/r7 指向 mix 状态，转储解析对象与缓冲。 */
+        if (strstr((char *)cbeTextString, "vmdlEnterNet") != NULL)
+        {
+            u32 r5 = 0, r9 = 0, obj = 0, fn0 = 0, fn14 = 0;
+            u32 st = 0, buf = 0, got = 0;
+            u8 head[16];
+            memset(head, 0, sizeof(head));
+            uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+            uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+            if (r5)
+                obj = vm_get_var(r5);
+            if (obj)
+            {
+                fn0 = vm_get_var(obj);
+                fn14 = vm_get_var(obj + 0x14);
+            }
+            st = r9 + 0x5ecc;
+            buf = vm_get_var(st + 8);
+            got = vm_get_var(st + 0xc);
+            if (buf)
+                uc_mem_read(MTK, buf, head, sizeof(head));
+            {
+                u32 r4 = 0, r6 = 0;
+                char pathBuf[128];
+                memset(pathBuf, 0, sizeof(pathBuf));
+                uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+                uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+                if (r4)
+                {
+                    u8 raw[64];
+                    memset(raw, 0, sizeof(raw));
+                    uc_mem_read(MTK, r4, raw, sizeof(raw));
+                    vm_read_path_string(r4, pathBuf, sizeof(pathBuf));
+                    printf("[forensic][wmix] path_raw=");
+                    for (u32 i = 0; i < 32; ++i)
+                        printf("%02x", raw[i]);
+                    printf("\n");
+                }
+                printf("[forensic][wmix] r5=%08x obj=%08x fn0=%08x fn14=%08x "
+                       "st=%08x buf=%08x got=%u head=%02x%02x%02x%02x "
+                       "r4=%08x r6=%08x path='%s'\n",
+                       r5, obj, fn0, fn14, st, buf, got,
+                       head[0], head[1], head[2], head[3],
+                       r4, r6, pathBuf[0] ? pathBuf : "(empty)");
             }
         }
         dumpCpuInfo();
@@ -14109,11 +15193,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int y0 = vm_lcd_coord_from_reg(tmp2);
         int x1 = vm_lcd_coord_from_reg(tmp3);
         int y1 = vm_lcd_coord_from_reg(tmp4);
-        vm_lcd_draw_line(x0, y0, x1, y1, color);
         int sx = x0 < x1 ? x0 : x1;
         int sy = y0 < y1 ? y0 : y1;
         int ex = x0 > x1 ? x0 : x1;
         int ey = y0 > y1 ? y0 : y1;
+        vm_lcd_draw_line(x0, y0, x1, y1, color);
         vm_lcd_sync_cache_rect_to_vm(sx, sy, ex - sx + 1, ey - sy + 1);
         vm_set_call_result(1);
     }
@@ -14127,11 +15211,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int x1 = vm_lcd_coord_from_reg(tmp2);
         int y1 = vm_lcd_coord_from_reg(tmp2 >> 16);
         u16 color = (u16)tmp3;
-        vm_lcd_draw_line(x0, y0, x1, y1, color);
         int sx = x0 < x1 ? x0 : x1;
         int sy = y0 < y1 ? y0 : y1;
         int ex = x0 > x1 ? x0 : x1;
         int ey = y0 > y1 ? y0 : y1;
+        vm_lcd_draw_line(x0, y0, x1, y1, color);
         vm_lcd_sync_cache_rect_to_vm(sx, sy, ex - sx + 1, ey - sy + 1);
         vm_set_call_result(1);
     }
@@ -14158,32 +15242,35 @@ static bool hook_vm_manager_lcd_func(u32 address)
             h = vm_lcd_coord_from_reg(rectH);
         }
         u16 color = (u16)rectColor;
-        if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
-            u16 *rowBuf = (u16 *)cbeTextString;
-            for (int col = 0; col < w; col++)
-                rowBuf[col] = color;
-            u32 top = y * LCD_WIDTH + x;
-            uc_mem_write(MTK, VM_screenImage_ADDRESS + top * 2, rowBuf, w * 2);
-            for (int col = 0; col < w; col++)
-                ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
-            if (h > 1)
+            int screenPitch = LcdGetScreenPitchPixels();
+            if (vm_lcd_clip_rect(&x, &y, &w, &h, LcdGetNativeWidth(), LcdGetNativeHeight()))
             {
-                u32 bottom = (y + h - 1) * LCD_WIDTH + x;
-                uc_mem_write(MTK, VM_screenImage_ADDRESS + bottom * 2, rowBuf, w * 2);
+                u16 *rowBuf = (u16 *)cbeTextString;
                 for (int col = 0; col < w; col++)
-                    ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
-            }
-            for (int row = 1; row < h - 1; row++)
-            {
-                u32 left = (y + row) * LCD_WIDTH + x;
-                ((u16 *)Lcd_Cache_Buffer)[left] = color;
-                uc_mem_write(MTK, VM_screenImage_ADDRESS + left * 2, &color, 2);
-                if (w > 1)
+                    rowBuf[col] = color;
+                u32 top = y * screenPitch + x;
+                uc_mem_write(MTK, VM_screenImage_ADDRESS + top * 2, rowBuf, w * 2);
+                for (int col = 0; col < w; col++)
+                    ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
+                if (h > 1)
                 {
-                    u32 right = left + w - 1;
-                    ((u16 *)Lcd_Cache_Buffer)[right] = color;
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + right * 2, &color, 2);
+                    u32 bottom = (y + h - 1) * screenPitch + x;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + bottom * 2, rowBuf, w * 2);
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
+                }
+                for (int row = 1; row < h - 1; row++)
+                {
+                    u32 left = (y + row) * screenPitch + x;
+                    ((u16 *)Lcd_Cache_Buffer)[left] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + left * 2, &color, 2);
+                    if (w > 1)
+                    {
+                        u32 right = left + w - 1;
+                        ((u16 *)Lcd_Cache_Buffer)[right] = color;
+                        uc_mem_write(MTK, VM_screenImage_ADDRESS + right * 2, &color, 2);
+                    }
                 }
             }
         }
@@ -14206,8 +15293,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
             dstPixels = VM_screenImage_ADDRESS;
-            dstW = LCD_WIDTH;
-            dstH = LCD_HEIGHT;
+            dstW = (u16)LcdGetNativeWidth();
+            dstH = (u16)LcdGetNativeHeight();
         }
         int x = vm_lcd_coord_from_reg(tmp1);
         int y = vm_lcd_coord_from_reg(tmp2);
@@ -14221,14 +15308,14 @@ static bool hook_vm_manager_lcd_func(u32 address)
                 rowBuf[col] = color;
             u32 top = y * dstW + x;
             uc_mem_write(MTK, dstPixels + top * 2, rowBuf, w * 2);
-            if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+            if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                 for (int col = 0; col < w; col++)
                     ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
             if (h > 1)
             {
                 u32 bottom = (y + h - 1) * dstW + x;
                 uc_mem_write(MTK, dstPixels + bottom * 2, rowBuf, w * 2);
-                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                     for (int col = 0; col < w; col++)
                         ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
             }
@@ -14236,13 +15323,13 @@ static bool hook_vm_manager_lcd_func(u32 address)
             {
                 u32 left = (y + row) * dstW + x;
                 uc_mem_write(MTK, dstPixels + left * 2, &color, 2);
-                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                     ((u16 *)Lcd_Cache_Buffer)[left] = color;
                 if (w > 1)
                 {
                     u32 right = left + w - 1;
                     uc_mem_write(MTK, dstPixels + right * 2, &color, 2);
-                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                         ((u16 *)Lcd_Cache_Buffer)[right] = color;
                 }
             }
@@ -14271,15 +15358,18 @@ static bool hook_vm_manager_lcd_func(u32 address)
             w = vm_lcd_coord_from_reg(tmp3);
             h = vm_lcd_coord_from_reg(fillH);
         }
-        if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
-            u16 color = (u16)fillColor;
-            for (int row = 0; row < h; row++)
+            int screenPitch = LcdGetScreenPitchPixels();
+            if (vm_lcd_clip_rect(&x, &y, &w, &h, LcdGetNativeWidth(), LcdGetNativeHeight()))
             {
-                u32 off = (y + row) * LCD_WIDTH + x;
-                for (int col = 0; col < w; col++)
-                    ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
-                uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                u16 color = (u16)fillColor;
+                for (int row = 0; row < h; row++)
+                {
+                    u32 off = (y + row) * screenPitch + x;
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                }
             }
         }
         vm_set_call_result(1);
@@ -14302,15 +15392,18 @@ static bool hook_vm_manager_lcd_func(u32 address)
             int y = vm_lcd_coord_from_reg(tmp1);
             int w = vm_lcd_coord_from_reg(tmp2);
             int h = vm_lcd_coord_from_reg(tmp3);
-            if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
             {
-                u16 color = (u16)fillH;
-                for (int row = 0; row < h; row++)
+                int screenPitch = LcdGetScreenPitchPixels();
+                if (vm_lcd_clip_rect(&x, &y, &w, &h, LcdGetNativeWidth(), LcdGetNativeHeight()))
                 {
-                    u32 off = (y + row) * LCD_WIDTH + x;
-                    for (int col = 0; col < w; col++)
-                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                    u16 color = (u16)fillH;
+                    for (int row = 0; row < h; row++)
+                    {
+                        u32 off = (y + row) * screenPitch + x;
+                        for (int col = 0; col < w; col++)
+                            ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                        uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                    }
                 }
             }
             vm_set_call_result(1);
@@ -14325,8 +15418,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
             dstPixels = VM_screenImage_ADDRESS;
-            dstW = LCD_WIDTH;
-            dstH = LCD_HEIGHT;
+            dstW = (u16)LcdGetNativeWidth();
+            dstH = (u16)LcdGetNativeHeight();
         }
         int x = vm_lcd_coord_from_reg(tmp1);
         int y = vm_lcd_coord_from_reg(tmp2);
@@ -14341,7 +15434,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
                 u32 off = (y + row) * dstW + x;
                 for (int col = 0; col < w; col++)
                     rowBuf[col] = color;
-                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LcdGetNativeWidth())
                 {
                     for (int col = 0; col < w; col++)
                         ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
@@ -14545,8 +15638,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
         gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-        tmp3 = strlen_utf16((u16 *)sprintfBuff);
-        uc_mem_write(MTK, tmp2, sprintfBuff, (tmp3 + 1) * 2);
+        tmp3 = (u32)strlen_utf16((u16 *)sprintfBuff);
+        vm_write_ucs2_host_le_to_guest(tmp2, (const u16 *)sprintfBuff, tmp3 + 1u);
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
     }
     else if (idx == 40)
@@ -15514,6 +16607,11 @@ static u32 vm_ctrl_draw_win_title(u32 imageInfo, u32 textPtr, u32 color, int x, 
     vm_ctrl_read_text(textPtr, ucs2, text, sizeof(text));
     if (text[0] == 0)
         return 0;
+#if defined(CBE_CLIENT_ONLY)
+    memcpy(g_winTitleCache, text, sizeof(g_winTitleCache));
+    g_winTitleCache[sizeof(g_winTitleCache) - 1] = 0;
+    g_winTitleFresh = 1;
+#endif
 
     if (!explicitPos)
     {
@@ -15533,15 +16631,17 @@ static u32 vm_ctrl_draw_softkey_bar(u32 imageInfo, u32 leftPtr, u32 centerPtr, u
     u8 left[128];
     u8 center[128];
     u8 right[128];
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
     int barH = vm_ctrl_image_height(imageInfo, 27);
     int y;
 
     if (imageInfo)
-        vm_lcd_draw_image_to_screen(imageInfo, 0, LCD_HEIGHT - barH);
+        vm_lcd_draw_image_to_screen(imageInfo, 0, screenH - barH);
 
-    y = LCD_HEIGHT - barH + (barH - getFontHeight()) / 2;
+    y = screenH - barH + (barH - getFontHeight()) / 2;
     if (y < 0)
-        y = LCD_HEIGHT - getFontHeight();
+        y = screenH - getFontHeight();
 
     vm_ctrl_read_text(leftPtr, ucs2, left, sizeof(left));
     vm_ctrl_read_text(centerPtr, ucs2, center, sizeof(center));
@@ -15549,18 +16649,28 @@ static u32 vm_ctrl_draw_softkey_bar(u32 imageInfo, u32 leftPtr, u32 centerPtr, u
     memcpy(g_softkeyLeftCache, left, sizeof(g_softkeyLeftCache));
     memcpy(g_softkeyCenterCache, center, sizeof(g_softkeyCenterCache));
     memcpy(g_softkeyRightCache, right, sizeof(g_softkeyRightCache));
+#if defined(CBE_CLIENT_ONLY)
+    {
+        static const u8 kMenu[] = {0xB2, 0xCB, 0xB5, 0xA5}; /* 菜单 */
+
+        if (vm_softkey_eq_gbk(g_softkeyLeftCache, kMenu, sizeof(kMenu)) &&
+            !g_winTitleFresh)
+            g_winTitleCache[0] = 0;
+        g_winTitleFresh = 0;
+    }
+#endif
 
     if (left[0])
         vm_ctrl_draw_text(left, 10, y, color);
     if (center[0])
     {
         int w = vm_lcd_measure_current_string_render_width(center);
-        vm_ctrl_draw_text(center, (LCD_WIDTH - w) / 2, y, color);
+        vm_ctrl_draw_text(center, (screenW - w) / 2, y, color);
     }
     if (right[0])
     {
         int w = vm_lcd_measure_current_string_render_width(right);
-        vm_ctrl_draw_text(right, LCD_WIDTH - 11 - w, y, color);
+        vm_ctrl_draw_text(right, screenW - 11 - w, y, color);
     }
     return 1;
 }
@@ -15570,11 +16680,13 @@ static u32 vm_ctrl_tp_press_softkey_bar(u32 imageInfo, u32 textPtr, u32 xReg, u3
     u8 text[128];
     int x = vm_lcd_coord_from_reg(xReg);
     int y = vm_lcd_coord_from_reg(yReg);
+    int screenW = LcdGetNativeWidth();
+    int screenH = LcdGetNativeHeight();
     int barH = vm_ctrl_image_height(imageInfo, 27);
-    int top = LCD_HEIGHT - barH;
-    int bottom = LCD_HEIGHT - 1;
+    int top = screenH - barH;
+    int bottom = screenH - 1;
     int left = 0;
-    int right = LCD_WIDTH - 1;
+    int right = screenW - 1;
     int textW;
 
     if (textPtr == 0)
@@ -15591,13 +16703,13 @@ static u32 vm_ctrl_tp_press_softkey_bar(u32 imageInfo, u32 textPtr, u32 xReg, u3
     }
     else if (pos == 1)
     {
-        left = (230 - textW) / 2;
+        left = (screenW - 10 - textW) / 2;
         right = left + textW + 10;
     }
     else if (pos == 2)
     {
-        left = LCD_WIDTH - 11 - textW;
-        right = LCD_WIDTH - 1;
+        left = screenW - 11 - textW;
+        right = screenW - 1;
     }
 
     return (x >= left && x <= right && y >= top && y <= bottom) ? 1 : 0;
@@ -15771,6 +16883,7 @@ static bool hook_vm_manager_network_func(u32 address)
     {
         if (netR4)
             g_netCurrentObject = netR4;
+        g_lastNetSendLr = netLr;
         vm_net_mock_on_send(tmp1, tmp3, tmp2);
         vm_set_call_result(tmp2);
     }
@@ -16405,7 +17518,8 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // dst
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // src
         vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
-        uc_mem_write(MTK, tmp1, cbeTextString, (strlen_utf16(cbeTextString) + 1) * 2);
+        tmp3 = (u32)strlen_utf16((u16 *)cbeTextString);
+        vm_write_ucs2_host_le_to_guest(tmp1, (const u16 *)cbeTextString, tmp3 + 1u);
         vm_set_call_result(tmp1);
     }
     else if (idx == 3)
@@ -16413,19 +17527,18 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // dst
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // src
         u32 dstChars = 0;
-        u16 ch = 0;
         if (tmp1 && tmp2)
         {
             while (dstChars < 512)
             {
-                uc_mem_read(MTK, tmp1 + dstChars * 2, &ch, 2);
+                u16 ch = vm_get_var_short(tmp1 + dstChars * 2);
                 if (ch == 0)
                     break;
                 dstChars++;
             }
             vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
-            u32 srcChars = strlen_utf16((u16 *)cbeTextString);
-            uc_mem_write(MTK, tmp1 + dstChars * 2, cbeTextString, (srcChars + 1) * 2);
+            u32 srcChars = (u32)strlen_utf16((u16 *)cbeTextString);
+            vm_write_ucs2_host_le_to_guest(tmp1 + dstChars * 2, (const u16 *)cbeTextString, srcChars + 1u);
         }
         vm_set_call_result(tmp1);
     }
@@ -16435,8 +17548,8 @@ static bool hook_vm_manager_ucs2_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         vm_readStringByPtr(tmp2, cbeTextString);
         gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-        tmp3 = strlen_utf16((u16 *)sprintfBuff);
-        uc_mem_write(MTK, tmp1, sprintfBuff, (tmp3 + 1) * 2);
+        tmp3 = (u32)strlen_utf16((u16 *)sprintfBuff);
+        vm_write_ucs2_host_le_to_guest(tmp1, (const u16 *)sprintfBuff, tmp3 + 1u);
         vm_set_call_result(tmp1);
     }
     else if (idx == 5)
@@ -16933,6 +18046,10 @@ static bool hook_vm_manager_screen_func(u32 address)
         tmp4 = vm_screen_stack_remove(tmp1, &tmp3, &tmp2, &tmp5, &newTopDataPackage) ? 1 : 0;
         printf("[info][screen] screen_mgr remove requested=%08x current=%08x result=%u current_match=%u new_top=%08x module=%08x dp=%08x\n",
                tmp1, vmAddedScreen, tmp4, removingCurrent ? 1u : 0u, tmp3, tmp5, newTopDataPackage);
+#if defined(CBE_CLIENT_ONLY)
+        if (tmp4 && vm_host_screen_destroy_looks_like_mmshop(tmp1))
+            vm_host_arm_shop_return_skip_bar("mmshop-screen-remove");
+#endif
         if (tmp4 && removingCurrent && tmp3)
         {
             bool requestAppClose = g_screenRootExitArmed &&
@@ -18121,6 +19238,11 @@ static bool hook_vm_df_datapackage_func(u32 address)
         {
             VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
             printf("[call]DF_DataPackage_DoLoading\n");
+#if defined(CBE_CLIENT_ONLY)
+            vm_host_clear_download_busy(
+                g_vm_map_stone_dismiss_bar ? "skip-doloading-paint"
+                                           : "do-loading-immediate");
+#endif
         }
     }
     else if (idx == 6)
@@ -19122,11 +20244,115 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     return UC_ERR_OK;
 }
 
+/*
+ * Armed only while local 25/3 confirm is pending (see bind_r9).  Hot path is
+ * two integer compares — never infer/dl-scan per instruction (that tanked FPS).
+ */
+static u32 g_hangupCandidateFaultCodeBase = 0;
+static u8 g_hangupCandidateFaultDumped = 0;
+
+static void vm_hangup_candidate_fault_arm(u32 codeBase)
+{
+    g_hangupCandidateFaultCodeBase = codeBase;
+    g_hangupCandidateFaultDumped = 0;
+}
+
+static void vm_hangup_candidate_fault_disarm(void)
+{
+    g_hangupCandidateFaultCodeBase = 0;
+}
+
+static void vm_hangup_candidate_fault_trace_note_pc(u32 pc)
+{
+    u32 codeBase = g_hangupCandidateFaultCodeBase;
+    u32 regs[8] = {0};
+    u32 lr = 0;
+    u32 moduleR9 = 0;
+    u8 candidateCount = 0xff;
+    u8 code[0x80];
+    u8 argumentObject[0x80];
+    u8 node[0x40];
+    FILE *dump;
+    FILE *trace;
+
+    if (codeBase == 0 || g_hangupCandidateFaultDumped ||
+        pc != codeBase + 0x2908u)
+        return;
+    g_hangupCandidateFaultDumped = 1;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R4, &regs[4]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &regs[5]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R6, &regs[6]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R7, &regs[7]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+    if (moduleR9 != 0)
+        (void)uc_mem_read(MTK, moduleR9 + 0x3450u, &candidateCount,
+                          sizeof(candidateCount));
+    memset(argumentObject, 0, sizeof(argumentObject));
+    memset(node, 0, sizeof(node));
+    if (regs[2] != 0)
+        (void)uc_mem_read(MTK, regs[2], argumentObject, sizeof(argumentObject));
+    if (regs[4] != 0)
+        (void)uc_mem_read(MTK, regs[4], node, sizeof(node));
+    if (uc_mem_read(MTK, codeBase + 0x28C0u, code, sizeof(code)) == UC_ERR_OK)
+    {
+        dump = fopen("logs/hangup-candidate-fault-current.bin", "wb");
+        if (dump != NULL)
+        {
+            (void)fwrite(code, 1, sizeof(code), dump);
+            (void)fwrite(argumentObject, 1, sizeof(argumentObject), dump);
+            (void)fwrite(node, 1, sizeof(node), dump);
+            fflush(dump);
+            fclose(dump);
+        }
+    }
+    printf("[info][network] cbe_hangup_candidate_fault_preexec "
+           "local_pc=2908 base=%08x r9=%08x cand3450=%u "
+           "regs=%08x/%08x/%08x/%08x/%08x/%08x/%08x/%08x lr=%08x "
+           "node=%02x%02x%02x%02x%02x%02x%02x%02x "
+           "path=logs/hangup-candidate-fault-current.bin\n",
+           codeBase, moduleR9, (unsigned)candidateCount, regs[0], regs[1],
+           regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], lr,
+           node[0], node[1], node[2], node[3], node[4], node[5], node[6],
+           node[7]);
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] cbe_hangup_candidate_fault_preexec "
+            "local_pc=2908 base=%08x r9=%08x cand3450=%u "
+            "regs=%08x/%08x/%08x/%08x/%08x/%08x/%08x/%08x lr=%08x "
+            "node=%02x%02x%02x%02x%02x%02x%02x%02x "
+            "path=logs/hangup-candidate-fault-current.bin\n",
+            codeBase, moduleR9, (unsigned)candidateCount, regs[0], regs[1],
+            regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], lr,
+            node[0], node[1], node[2], node[3], node[4], node[5], node[6],
+            node[7]);
+    fflush(trace);
+    fclose(trace);
+}
+
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
     vm_restore_main_r9_for_rom_code((u32)address);
+    vm_host_aeabi_div0_divisor_one(uc, address);
+#if defined(CBE_CLIENT_ONLY)
+    if (g_hangupCandidateFaultCodeBase != 0)
+        vm_hangup_candidate_fault_trace_note_pc((u32)address & ~1u);
+#endif
+    if (((u32)address & ~1u) == 0x01003CFCu)
+    {
+        u32 r9 = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        scheduler_force_scene_callback(r9);
+        scheduler_force_scene_callback(Global_R9);
+    }
     vm_autotest_note_startup_pc((u32)address & ~1u);
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);

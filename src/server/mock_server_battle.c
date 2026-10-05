@@ -14643,6 +14643,56 @@ static u32 vm_net_mock_build_scene_hangup_panel_response(
     return pos;
 }
 
+static bool vm_net_mock_read_hangup_mode_type(const u8 *payload, u32 payloadLen,
+                                             u8 *typeOut)
+{
+    u8 value8 = 0;
+    u32 value32 = 0;
+
+    if (typeOut)
+        *typeOut = 0;
+    if (payload == NULL || payloadLen == 0)
+        return false;
+    if (vm_net_mock_get_object_u8_field(payload, payloadLen, "type", &value8) ||
+        vm_net_mock_get_object_u8_field(payload, payloadLen, "Type", &value8))
+    {
+        if (value8 != 1 && value8 != 2)
+            return false;
+        if (typeOut)
+            *typeOut = value8;
+        return true;
+    }
+    if (vm_net_mock_get_object_u32_field(payload, payloadLen, "type",
+                                         &value32) ||
+        vm_net_mock_get_object_u32_field(payload, payloadLen, "Type",
+                                         &value32))
+    {
+        if (value32 != 1 && value32 != 2)
+            return false;
+        if (typeOut)
+            *typeOut = (u8)value32;
+        return true;
+    }
+    return false;
+}
+
+static void vm_net_mock_hangup_apply_native_panel_stop(
+    vm_mock_service_client_session *session)
+{
+    /* GBK: 已停止挂机 */
+    static const char stopHangupGbk[] =
+        "\xd2\xd1\xcd\xa3\xd6\xb9\xb9\xd2\xbb\xfa";
+
+    if (session != NULL)
+        vm_mock_service_session_clear_scene_hangup(session, "native-panel-stop");
+    g_mockBattleAutoPrefer = 0;
+    g_mockBattleAutoPreferNoHangup = 0;
+    g_mockBattleAutoSuppressNext12 = 0;
+    vm_net_mock_battle_auto_clear_pending();
+    vm_net_mock_hangup_loop_clear("native-panel-stop");
+    vm_net_mock_hangup_notify_system_chat(stopHangupGbk);
+}
+
 static u32 vm_net_mock_build_scene_hangup_mode_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -14653,9 +14703,11 @@ static u32 vm_net_mock_build_scene_hangup_mode_response(
     u8 kind = 0;
     u8 subtype = 0;
     u8 requestedType = 0;
+    u8 actorType = 0;
     u32 offset = 4;
     u32 pos = 5;
     u32 objectStart = 0;
+    u8 objectCount = 0;
     bool compoundStop = false;
 
     if (request == NULL || out == NULL || outCap < pos || requestLen < 9 ||
@@ -14670,9 +14722,8 @@ static u32 vm_net_mock_build_scene_hangup_mode_response(
                                              &object) ||
             offset != requestLen || object.major != 1 || object.kind != 25 ||
             object.subtype != 2 ||
-            !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
-                                              "type", &requestedType) ||
-            (requestedType != 1 && requestedType != 2))
+            !vm_net_mock_read_hangup_mode_type(object.payload, object.payloadLen,
+                                               &requestedType))
         {
             return 0;
         }
@@ -14683,16 +14734,16 @@ static u32 vm_net_mock_build_scene_hangup_mode_response(
                                              &actorOther) ||
             actorOther.major != 1 || actorOther.kind != 2 ||
             actorOther.subtype != 10 ||
-            !vm_net_mock_get_object_u8_field(actorOther.payload,
-                                              actorOther.payloadLen,
-                                              "Type", &requestedType) ||
-            requestedType != 2 ||
+            !vm_net_mock_read_hangup_mode_type(actorOther.payload,
+                                               actorOther.payloadLen,
+                                               &actorType) ||
+            actorType != 2 ||
             !vm_net_mock_next_request_object(request, requestLen, &offset,
                                              &object) ||
             offset != requestLen || object.major != 1 || object.kind != 25 ||
             object.subtype != 2 ||
-            !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
-                                              "type", &requestedType) ||
+            !vm_net_mock_read_hangup_mode_type(object.payload, object.payloadLen,
+                                               &requestedType) ||
             requestedType != 2)
         {
             return 0;
@@ -14706,14 +14757,24 @@ static u32 vm_net_mock_build_scene_hangup_mode_response(
 
     session = vm_mock_service_get_active_client_session();
     scene = vm_net_mock_current_scene_name();
-    if (session == NULL || session->onlineRoleId == 0 ||
-        !vm_net_mock_scene_name_is_safe(scene) ||
-        !vm_mock_service_session_scene_is_visible(session, scene))
+    if (session == NULL || session->onlineRoleId == 0)
+    {
+        printf("[warn][network] mock_scene_hangup_mode skip reason=no-session "
+               "type=%u compound=%u\n",
+               requestedType, compoundStop ? 1u : 0u);
+        return 0;
+    }
+    /*
+     * type=1 still needs a visible outdoor scene.  type=2 stop is issued from
+     * the map hangup shell between fights; dropping it lets poll 4/5 start
+     * another fight and cue「已开始挂机」.
+     */
+    if (requestedType == 1 &&
+        (!vm_net_mock_scene_name_is_safe(scene) ||
+         !vm_mock_service_session_scene_is_visible(session, scene)))
     {
         return 0;
     }
-    if (compoundStop && !session->sceneHangupEnabled)
-        return 0;
     if (compoundStop &&
         !vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
     {
@@ -14727,7 +14788,16 @@ static u32 vm_net_mock_build_scene_hangup_mode_response(
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, compoundStop ? 2 : 1);
+    objectCount = compoundStop ? 2 : 1;
+    if (requestedType == 2)
+    {
+        static const char stopHangupGbk[] =
+            "\xd2\xd1\xcd\xa3\xd6\xb9\xb9\xd2\xbb\xfa";
+
+        (void)vm_net_mock_hangup_append_system_chat_object(
+            out, outCap, &pos, &objectCount, stopHangupGbk);
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     if (requestedType == 1)
     {
@@ -14744,7 +14814,7 @@ static u32 vm_net_mock_build_scene_hangup_mode_response(
         session->sceneHangupTotalMpRecovered = 0;
         session->sceneHangupLastAccountedBattleSerial = 0;
         snprintf(session->sceneHangupScene, sizeof(session->sceneHangupScene),
-                 "%s", scene);
+                 "%s", scene ? scene : "");
         /*
          * CBE_EMU: 25/2 only arms sceneHangupEnabled.  Setting
          * g_mockHangupLoopActive here makes the immediately replayed Type=2
@@ -14757,16 +14827,17 @@ static u32 vm_net_mock_build_scene_hangup_mode_response(
     }
     else
     {
-        vm_mock_service_session_clear_scene_hangup(session,
-                                                   "native-panel-stop");
-        vm_net_mock_hangup_loop_clear("native-panel-stop");
+        vm_net_mock_hangup_apply_native_panel_stop(session);
     }
     printf("[info][network] mock_scene_hangup_mode client=%08x role=%u "
-           "scene=%s request=%s25/2(type=%u) response=%s "
+           "scene=%s request=%s25/2(type=%u) response=%s objects=%u resp=%u "
            "evidence=mmBattle:0xA4D4->0x28A4->0x87DA->0x8996\n",
-           session->clientId, session->onlineRoleId, scene,
+           session->clientId, session->onlineRoleId, scene ? scene : "-",
            compoundStop ? "2/10+" : "", requestedType,
-           compoundStop ? "2/10+25/2(result-1)" : "25/2(result-1)");
+           requestedType == 2
+               ? (compoundStop ? "2/10+25/2+1/3/3" : "25/2+1/3/3")
+               : (compoundStop ? "2/10+25/2(result-1)" : "25/2(result-1)"),
+           objectCount, pos);
     return pos;
 }
 
@@ -15403,8 +15474,9 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
      * built a null-visual unit that crashed at JianghuOL.CBE:0x01004EA8.
      *
      * Resolve only from (1) this session's last challenge live-node or
-     * (2) an in-process emulator live-table scan.  Otherwise fall back to
-     * non-scene subtype 10, which embeds the enemy template directly.
+     * (2) an in-process emulator live-table scan that remaps each node to a
+     * hangup-slot species (not the first keep-id).  Otherwise fall back to
+     * non-scene subtype 10, which cannot carry a monster .actor.
      */
     if (!useSceneMonsterStart &&
         activeSession != NULL &&
@@ -15444,29 +15516,54 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
             useSceneMonsterStart = true;
             targetSource = "session-live-node";
         }
+        else
+        {
+            u32 hangupSlots[3] = {0, 0, 0};
+            u32 slotEnemy = liveRemap != 0 ? liveRemap : liveWire;
+
+            if (slotEnemy != 0 &&
+                vm_net_mock_scene_monster_admin_get(
+                    scene, hangupSlots, NULL) &&
+                (slotEnemy == hangupSlots[0] || slotEnemy == hangupSlots[1] ||
+                 slotEnemy == hangupSlots[2] ||
+                 liveWire == hangupSlots[0] || liveWire == hangupSlots[1] ||
+                 liveWire == hangupSlots[2]))
+            {
+                requestedEnemyId = slotEnemy;
+                sceneMonsterIndex = activeSession->lastSceneMonsterLiveIndex;
+                sceneMonsterPosX = activeSession->lastSceneMonsterLiveX;
+                sceneMonsterPosY = activeSession->lastSceneMonsterLiveY;
+                hangupMoveinfoWireId = liveWire;
+                useSceneMonsterStart = true;
+                targetSource = "session-live-node";
+            }
+        }
     }
     if (!useSceneMonsterStart)
     {
-        u32 lookWire = vm_net_mock_sce_combat_spawn_wire_for_real(
-            scene, requestedEnemyId);
-        if (lookWire == 0)
-            lookWire = requestedEnemyId;
-        if (vm_net_mock_select_scene_actor_moveinfo_target(
-                lookWire, &sceneMonsterIndex, &sceneMonsterPosX,
-                &sceneMonsterPosY, false))
+        u32 liveWire = 0;
+        u32 matchedEnemy = 0;
+
+        if (vm_net_mock_select_scene_combat_live_node_for_hangup(
+                scene, requestedEnemyId, &sceneMonsterIndex, &sceneMonsterPosX,
+                &sceneMonsterPosY, &liveWire, &matchedEnemy))
         {
-            hangupMoveinfoWireId = lookWire;
+            hangupMoveinfoWireId = liveWire;
+            if (matchedEnemy != 0)
+                requestedEnemyId = matchedEnemy;
             useSceneMonsterStart = true;
             targetSource = "emulator-live-node";
-        }
-        else if (lookWire != requestedEnemyId &&
-                 vm_net_mock_select_scene_actor_moveinfo_target(
-                     requestedEnemyId, &sceneMonsterIndex, &sceneMonsterPosX,
-                     &sceneMonsterPosY, false))
-        {
-            hangupMoveinfoWireId = requestedEnemyId;
-            useSceneMonsterStart = true;
-            targetSource = "emulator-live-node";
+            if (activeSession != NULL && vm_net_mock_scene_name_is_safe(scene))
+            {
+                activeSession->lastSceneMonsterLiveValid = true;
+                snprintf(activeSession->lastSceneMonsterLiveScene,
+                         sizeof(activeSession->lastSceneMonsterLiveScene),
+                         "%s", scene);
+                activeSession->lastSceneMonsterLiveActorId = liveWire;
+                activeSession->lastSceneMonsterLiveIndex = sceneMonsterIndex;
+                activeSession->lastSceneMonsterLiveX = sceneMonsterPosX;
+                activeSession->lastSceneMonsterLiveY = sceneMonsterPosY;
+            }
         }
     }
     if (!useSceneMonsterStart)

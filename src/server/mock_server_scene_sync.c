@@ -5174,18 +5174,39 @@ static bool vm_net_mock_is_npc_service_dialog_request(
         request[0] != 'W' || request[1] != 'T' || request[4] != 1 ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
         object.major != 1 || object.kind != 26 || object.subtype != 1 ||
-        object.payloadLen == 0 || offset != requestLen ||
-        !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
-                                         "type", &requestType) ||
-        requestType != 2 ||
-        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
-                                             "id", &serviceValue) ||
-        (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) <
-            (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
-             VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
-        (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_TIANXIA_SIGNATURE &
-             VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
+        object.payloadLen == 0 || offset != requestLen)
+    {
+        return false;
+    }
+    if (!vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                         "type", &requestType))
+    {
+        u32 typeNum = 0;
+
+        if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                 "type", &typeNum) ||
+            typeNum != 2)
+            return false;
+        requestType = 2;
+    }
+    if (requestType != 2)
+        return false;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "id", &serviceValue))
+    {
+        return false;
+    }
+    /*
+     * CBE 点「确定」value=0 会再发 type=2 id=0；放进服务通道回 26/0，
+     * 避免落到 unimplemented-handler「功能暂未实现(1/26/1)」。
+     */
+    if (serviceValue != 0 &&
+        ((serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) <
+             (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
+              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
+         (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
+             (VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_VIEW_BASE &
+              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK)))
     {
         return false;
     }
@@ -8117,16 +8138,65 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         optionValues[optionCount] = 0;
         ++optionCount;
     }
-    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_RANK)
+    else if (serviceValue == 0 ||
+             serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLOSE)
     {
+        u32 ackStart = 0;
+
+        action = "arena-rank-close";
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0, &ackStart))
+            return 0;
+        vm_net_mock_finish_wt_object(out, ackStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        printf("[info][network] mock_npc_service action=%s opcode=%08x role=%u "
+               "response=26/0 evidence=cbe-arena-rank-close\n",
+               action, serviceValue, role->roleId);
+        return pos;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_RANK ||
+             serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLAIM ||
+             (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ==
+                 VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_VIEW_BASE)
+    {
+        u8 job = 0;
+        u8 page = 0;
+        u16 bracket = 0;
+        char claimTip[82];
+
+        claimTip[0] = 0;
         action = "arena-rank";
-        dialogText =
-            "\xc7\xeb\xb4\xf2\xbf\xaa\xb1\xc8\xce\xe4\xc5\xc5\xd0\xd0\xb0\xf1"
-            "\xb2\xe9\xbf\xb4\xbb\xf2\xc1\xec\xc8\xa1\xbd\xb1\xc0\xf8\xa1\xa3"; /* 请打开比武排行榜查看或领取奖励。 */
-        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
-        optionDescriptions[optionCount] = "";
-        optionValues[optionCount] = 0;
-        ++optionCount;
+        if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLAIM)
+        {
+            action = "arena-rank-claim";
+            (void)vm_mock_arena_try_claim(claimTip, sizeof(claimTip));
+            if (claimTip[0] != 0)
+                appendMoneyRefresh = true;
+        }
+        if ((serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ==
+            VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_VIEW_BASE)
+        {
+            page = (u8)(serviceValue & 0xffu);
+            job = (u8)((serviceValue >> 8) & 0xffu);
+            bracket = (u16)((serviceValue >> 16) & 0xffu);
+        }
+        else
+            vm_mock_arena_npc_rank_default_board(&job, &bracket);
+        if (!vm_mock_arena_npc_rank_fill(
+                job, bracket, page, claimTip[0] ? claimTip : NULL,
+                dialogTextStorage, sizeof(dialogTextStorage), optionNameStorage,
+                optionDescriptionStorage, optionNames, optionDescriptions,
+                optionValues, &optionCount,
+                VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS))
+        {
+            dialogText =
+                "\xc5\xc5\xd0\xd0\xb0\xf1\xb4\xf2\xbf\xaa\xca\xa7\xb0\xdc\xa1\xa3";
+            optionNames[0] = "\xb9\xd8\xb1\xd5";
+            optionDescriptions[0] = "";
+            optionValues[0] = VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLOSE;
+            optionCount = 1;
+        }
+        else
+            dialogText = dialogTextStorage;
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER)
     {

@@ -4357,13 +4357,331 @@ static void vm_mock_arena_format_claim_tip(const vm_mock_arena_reward *reward,
     }
 }
 
-static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 requestLen,
-                                                   u8 *out, u32 outCap)
+static const char *vm_mock_arena_npc_job_name_gbk(u8 job)
 {
-    u32 offset = 4;
-    vm_net_mock_request_object object;
-    u32 pos = 5;
-    u32 objectStart = 0;
+    switch (job)
+    {
+    case 2:
+        return "\xbb\xc3\xbd\xa3"; /* 幻剑 */
+    case 3:
+        return "\xb9\xed\xb5\xc0"; /* 鬼道 */
+    case 0:
+        return "\xc2\xd2\xb6\xb7"; /* 乱斗 */
+    default:
+        return "\xcc\xec\xbb\xfa"; /* 天机 */
+    }
+}
+
+static const char *vm_mock_arena_npc_bracket_short_gbk(u16 bracket)
+{
+    if (vm_mock_arena_is_ffa_bracket(bracket))
+        return "77";
+    switch (bracket)
+    {
+    case 70:
+        return "70+";
+    case 60:
+        return "60-69";
+    case 50:
+        return "50-59";
+    case 40:
+        return "40-49";
+    case 30:
+        return "30-39";
+    case 10:
+        return "10-29";
+    default:
+        return "?";
+    }
+}
+
+static u16 vm_mock_arena_npc_rank_next_bracket(u16 cur)
+{
+    static const u16 keys[] = {10, 30, 40, 50, 60, 70,
+                               (u16)VM_MOCK_ARENA_BRACKET_FFA70};
+    u32 i;
+
+    for (i = 0; i < (u32)(sizeof(keys) / sizeof(keys[0])); ++i)
+    {
+        if (keys[i] == cur)
+            return keys[(i + 1u) % (u32)(sizeof(keys) / sizeof(keys[0]))];
+    }
+    return 10;
+}
+
+static u32 vm_mock_arena_npc_rank_pack(u8 job, u16 bracket, u8 page)
+{
+    u16 b = vm_mock_arena_normalize_bracket_key(bracket);
+
+    if (b == 0)
+        b = 10;
+    if (vm_mock_arena_is_ffa_bracket(b))
+        job = 0;
+    else if (job < 1 || job > 3)
+        job = 1;
+    return VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_VIEW_BASE |
+           ((u32)page & 0xffu) | (((u32)job & 0xffu) << 8) |
+           (((u32)b & 0xffu) << 16);
+}
+
+static void vm_mock_arena_npc_rank_default_board(u8 *jobOut, u16 *bracketOut)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 job = 1;
+    u16 bracket = 10;
+
+    (void)vm_mock_arena_tick();
+    if (role != NULL)
+    {
+        if (role->job >= 1 && role->job <= 3)
+            job = role->job;
+        bracket = vm_mock_arena_enrollment_bracket(role->level);
+        if (bracket == 0)
+            bracket = vm_mock_arena_bracket_for_level(role->level);
+        if (bracket == 0)
+            bracket = 10;
+    }
+    if (vm_mock_arena_is_ffa_bracket(bracket))
+        job = 0;
+    if (jobOut)
+        *jobOut = job;
+    if (bracketOut)
+        *bracketOut = bracket;
+}
+
+static bool vm_mock_arena_npc_rank_add_option(
+    char optionNameStorage[][64],
+    char optionDescStorage[][VM_NET_MOCK_NPC_DIALOG_OPTION_DESC_BYTES + 1],
+    const char **optionNames, const char **optionDescs, u32 *optionValues,
+    u8 *optionCount, u8 optionCap, const char *name, const char *desc,
+    u32 value)
+{
+    u8 i;
+
+    if (optionNameStorage == NULL || optionDescStorage == NULL ||
+        optionNames == NULL || optionDescs == NULL || optionValues == NULL ||
+        optionCount == NULL || *optionCount >= optionCap)
+        return false;
+    i = *optionCount;
+    snprintf(optionNameStorage[i], 64, "%s", name ? name : "");
+    snprintf(optionDescStorage[i],
+             VM_NET_MOCK_NPC_DIALOG_OPTION_DESC_BYTES + 1, "%s",
+             desc ? desc : "");
+    optionNames[i] = optionNameStorage[i];
+    optionDescs[i] = optionDescStorage[i];
+    optionValues[i] = value;
+    *optionCount += 1;
+    return true;
+}
+
+static void vm_mock_arena_npc_rank_clip_name(const char *src, char *dst,
+                                             u32 dstCap)
+{
+    u32 i = 0;
+
+    if (dst == NULL || dstCap == 0)
+        return;
+    dst[0] = 0;
+    if (src == NULL)
+        return;
+    while (src[i] != 0 && i + 1u < dstCap)
+    {
+        unsigned char c = (unsigned char)src[i];
+        if (c >= 0x80u)
+        {
+            if (i + 2u >= dstCap || src[i + 1] == 0)
+                break;
+            dst[i] = src[i];
+            dst[i + 1] = src[i + 1];
+            i += 2;
+        }
+        else
+        {
+            dst[i] = src[i];
+            i += 1;
+        }
+    }
+    dst[i] = 0;
+}
+
+static bool vm_mock_arena_npc_rank_fill(
+    u8 job, u16 bracket, u8 page, const char *claimTip, char *dialogText,
+    u32 dialogCap, char optionNameStorage[][64],
+    char optionDescStorage[][VM_NET_MOCK_NPC_DIALOG_OPTION_DESC_BYTES + 1],
+    const char **optionNames, const char **optionDescs, u32 *optionValues,
+    u8 *optionCount, u8 optionCap)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_arena_participant sorted[VM_MOCK_ARENA_PARTICIPANT_MAX];
+    u32 sortedCount = 0;
+    u32 i;
+    u32 used = 0;
+    u32 start;
+    u32 shown = 0;
+    u32 myRank = 0;
+    u32 myScore = 0;
+    u32 myClaimed = 0;
+    char line[80];
+    char nameClip[16];
+    const vm_mock_arena_reward *myReward;
+    char myRewardName[96];
+    u8 nextJob;
+    u16 nextBracket;
+    u8 ffa;
+    const char *statusGbk;
+
+    if (dialogText == NULL || dialogCap == 0 || optionCount == NULL)
+        return false;
+    dialogText[0] = 0;
+    *optionCount = 0;
+    (void)vm_mock_arena_tick();
+    if (vm_mock_arena_normalize_bracket_key(bracket) == 0)
+        vm_mock_arena_npc_rank_default_board(&job, &bracket);
+    else
+    {
+        bracket = vm_mock_arena_normalize_bracket_key(bracket);
+        if (vm_mock_arena_is_ffa_bracket(bracket))
+            job = 0;
+        else if (job < 1 || job > 3)
+            job = 1;
+    }
+    ffa = vm_mock_arena_is_ffa_bracket(bracket) ? 1 : 0;
+    for (i = 0; i < g_vm_mock_arena_part_count; ++i)
+    {
+        if (g_vm_mock_arena_parts[i].bracket != bracket ||
+            g_vm_mock_arena_parts[i].score == 0)
+            continue;
+        if (!ffa && g_vm_mock_arena_parts[i].job != job)
+            continue;
+        sorted[sortedCount++] = g_vm_mock_arena_parts[i];
+    }
+    if (sortedCount > 1)
+        qsort(sorted, sortedCount, sizeof(sorted[0]), vm_mock_arena_cmp_score_desc);
+    if (role != NULL)
+    {
+        vm_mock_arena_participant *self = vm_mock_arena_find_part(role->roleId);
+        if (self != NULL)
+            myScore = self->score;
+        for (i = 0; i < sortedCount; ++i)
+        {
+            if (sorted[i].roleId == role->roleId)
+            {
+                myRank = i + 1;
+                myScore = sorted[i].score;
+                break;
+            }
+        }
+        if (self != NULL && self->claimed && self->bracket == bracket &&
+            (ffa || self->job == job))
+            myClaimed = 1;
+    }
+    if (claimTip != NULL && claimTip[0] != 0)
+    {
+        (void)vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used,
+                                             claimTip);
+        (void)vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used, "\n");
+    }
+    if (g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_SETTLED)
+        statusGbk = "\xd2\xd1\xbd\xe1\xcb\xe3"; /* 已结算 */
+    else if (g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_LIVE)
+        statusGbk = "\xb1\xc8\xc8\xfc\xd6\xd0"; /* 比赛中 */
+    else if (g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_ENTRY)
+        statusGbk = "\xbd\xf8\xb3\xa1\xd6\xd0"; /* 进场中 */
+    else
+        statusGbk = "\xce\xb4\xbf\xaa\xb7\xc5"; /* 未开放 */
+    snprintf(line, sizeof(line), "%s %s %s %s\n",
+             "\xb1\xc8\xce\xe4\xb0\xf1", /* 比武榜 */
+             vm_mock_arena_npc_job_name_gbk(job),
+             vm_mock_arena_npc_bracket_short_gbk(bracket), statusGbk);
+    (void)vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used, line);
+    myReward = (myRank >= 1 && myRank <= 5)
+                   ? vm_mock_arena_find_reward(ffa ? 0 : job, bracket,
+                                               (u8)myRank)
+                   : NULL;
+    myRewardName[0] = 0;
+    vm_mock_arena_format_reward_summary(myReward, myRewardName,
+                                        sizeof(myRewardName));
+    if (myRank == 0)
+        snprintf(line, sizeof(line), "%s %u\n",
+                 "\xce\xb4\xc9\xcf\xb0\xf1 \xbb\xfd\xb7\xd6", myScore);
+    else
+        snprintf(line, sizeof(line), "%s%u %s%u%s\n", "\xb5\xda", myRank, "\xc3\xfb ",
+                 myScore, myClaimed ? " \xd2\xd1\xc1\xec" : "");
+    (void)vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used, line);
+    if (myRewardName[0] != 0 && !myClaimed)
+    {
+        (void)vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used,
+                                             "\xbd\xb1:");
+        (void)vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used,
+                                             myRewardName);
+        (void)vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used, "\n");
+    }
+    start = (u32)page * VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_PAGE_ITEMS;
+    if (sortedCount == 0)
+        (void)vm_mock_arena_claim_tip_append(
+            dialogText, dialogCap, &used,
+            "\xd4\xdd\xce\xde\xc9\xcf\xb0\xf1\xcd\xe6\xbc\xd2");
+    for (i = start; i < sortedCount &&
+                    shown < VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_PAGE_ITEMS;
+         ++i)
+    {
+        vm_mock_arena_npc_rank_clip_name(sorted[i].roleName, nameClip,
+                                         sizeof(nameClip));
+        snprintf(line, sizeof(line), "%u.%s %u\n", i + 1, nameClip,
+                 sorted[i].score);
+        if (!vm_mock_arena_claim_tip_append(dialogText, dialogCap, &used, line))
+            break;
+        shown += 1;
+    }
+    {
+        vm_mock_arena_participant *selfPart =
+            role != NULL ? vm_mock_arena_find_part(role->roleId) : NULL;
+        bool canClaim =
+            selfPart != NULL &&
+            g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_SETTLED &&
+            !selfPart->claimed && selfPart->rankPos >= 1 &&
+            selfPart->rankPos <= 5;
+        if (canClaim)
+            (void)vm_mock_arena_npc_rank_add_option(
+                optionNameStorage, optionDescStorage, optionNames, optionDescs,
+                optionValues, optionCount, optionCap,
+                "\xc1\xec\xc8\xa1\xbd\xb1\xc0\xf8", "\xc7\xb0\xce\xe5\xc3\xfb",
+                VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLAIM);
+        nextJob = ffa ? 0 : (u8)(job >= 3 ? 1 : job + 1);
+        nextBracket = vm_mock_arena_npc_rank_next_bracket(bracket);
+        if (!ffa)
+            (void)vm_mock_arena_npc_rank_add_option(
+                optionNameStorage, optionDescStorage, optionNames, optionDescs,
+                optionValues, optionCount, optionCap,
+                "\xc7\xd0\xbb\xbb\xd6\xb0\xd2\xb5",
+                vm_mock_arena_npc_job_name_gbk(nextJob),
+                vm_mock_arena_npc_rank_pack(nextJob, bracket, 0));
+        (void)vm_mock_arena_npc_rank_add_option(
+            optionNameStorage, optionDescStorage, optionNames, optionDescs,
+            optionValues, optionCount, optionCap,
+            "\xc7\xd0\xbb\xbb\xb6\xce\xce\xbb",
+            vm_mock_arena_npc_bracket_short_gbk(nextBracket),
+            vm_mock_arena_npc_rank_pack(ffa ? 1 : job, nextBracket, 0));
+        if (page > 0)
+            (void)vm_mock_arena_npc_rank_add_option(
+                optionNameStorage, optionDescStorage, optionNames, optionDescs,
+                optionValues, optionCount, optionCap, "\xc9\xcf\xd2\xbb\xd2\xb3",
+                "", vm_mock_arena_npc_rank_pack(job, bracket, (u8)(page - 1u)));
+        if (start + VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_PAGE_ITEMS < sortedCount)
+            (void)vm_mock_arena_npc_rank_add_option(
+                optionNameStorage, optionDescStorage, optionNames, optionDescs,
+                optionValues, optionCount, optionCap, "\xcf\xc2\xd2\xbb\xd2\xb3",
+                "", vm_mock_arena_npc_rank_pack(job, bracket, (u8)(page + 1u)));
+        (void)vm_mock_arena_npc_rank_add_option(
+            optionNameStorage, optionDescStorage, optionNames, optionDescs,
+            optionValues, optionCount, optionCap, "\xb9\xd8\xb1\xd5", "",
+            VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLOSE);
+    }
+    return true;
+}
+
+static u32 vm_mock_arena_try_claim(char *tipGbk, u32 tipCap)
+{
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
@@ -4371,42 +4689,36 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
     const vm_mock_arena_reward *reward = NULL;
     u32 result = 0;
     u16 seq = 0;
-    char tipGbk[82];
 
-    tipGbk[0] = 0;
-    if (out == NULL || outCap < 5 || request == NULL || role == NULL ||
-        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
-        object.major != 1 || object.kind != VM_MOCK_ARENA_WT_KIND ||
-        object.subtype != VM_MOCK_ARENA_WT_CLAIM)
+    if (tipGbk != NULL && tipCap > 0)
+        tipGbk[0] = 0;
+    if (role == NULL)
         return 0;
     p = vm_mock_arena_find_part(role->roleId);
     if (p == NULL)
     {
         result = 2;
-        /* 未参赛，无法领奖 */
-        snprintf(tipGbk, sizeof(tipGbk),
-                 "\xce\xb4\xb2\xce\xc8\xfc\xa3\xac\xce\xde\xb7\xa8\xc1\xec\xbd\xb1");
+        if (tipGbk && tipCap)
+            snprintf(tipGbk, tipCap,
+                     "\xce\xb4\xb2\xce\xc8\xfc\xa3\xac\xce\xde\xb7\xa8\xc1\xec\xbd\xb1");
     }
     else if (g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_SETTLED)
     {
         result = 2;
-        /* 比赛尚未结束 */
-        snprintf(tipGbk, sizeof(tipGbk),
-                 "\xb1\xc8\xc8\xfc\xc9\xd0\xce\xb4\xbd\xe1\xca\xf8");
+        if (tipGbk && tipCap)
+            snprintf(tipGbk, tipCap, "\xb1\xc8\xc8\xfc\xc9\xd0\xce\xb4\xbd\xe1\xca\xf8");
     }
     else if (p->claimed)
     {
         result = 3;
-        /* 奖励已领取 */
-        snprintf(tipGbk, sizeof(tipGbk),
-                 "\xbd\xb1\xc0\xf8\xd2\xd1\xc1\xec\xc8\xa1");
+        if (tipGbk && tipCap)
+            snprintf(tipGbk, tipCap, "\xbd\xb1\xc0\xf8\xd2\xd1\xc1\xec\xc8\xa1");
     }
     else if (p->rankPos == 0 || p->rankPos > 5)
     {
         result = 4;
-        /* 未进入前五名 */
-        snprintf(tipGbk, sizeof(tipGbk),
-                 "\xce\xb4\xbd\xf8\xc8\xeb\xc7\xb0\xce\xe5\xc3\xfb");
+        if (tipGbk && tipCap)
+            snprintf(tipGbk, tipCap, "\xce\xb4\xbd\xf8\xc8\xeb\xc7\xb0\xce\xe5\xc3\xfb");
     }
     else
     {
@@ -4417,9 +4729,9 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
         if (reward == NULL)
         {
             result = 5;
-            /* 该名次未配置奖励 */
-            snprintf(tipGbk, sizeof(tipGbk),
-                     "\xb8\xc3\xc3\xfb\xb4\xce\xce\xb4\xc5\xe4\xd6\xc3\xbd\xb1\xc0\xf8");
+            if (tipGbk && tipCap)
+                snprintf(tipGbk, tipCap,
+                         "\xb8\xc3\xc3\xfb\xb4\xce\xce\xb4\xc5\xe4\xd6\xc3\xbd\xb1\xc0\xf8");
         }
         else
         {
@@ -4427,11 +4739,6 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
             vm_net_mock_role_state beforeBag;
             bool wasInventoryDirty = false;
 
-            /*
-             * Grant bag rows first. If item/equip cannot enter, refuse the
-             * whole claim (no exp/money/vitality, claimed stays 0) so a full
-             * backpack cannot burn the reward.
-             */
             if ((reward->itemId && reward->itemCount) || reward->equipId)
             {
                 wasInventoryDirty = g_vm_net_mock_role_inventory_dirty;
@@ -4451,18 +4758,17 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
                     *role = beforeBag;
                     g_vm_net_mock_role_inventory_dirty = wasInventoryDirty;
                     result = 6;
-                    /* 背包已满，请清理后再领奖 */
-                    snprintf(tipGbk, sizeof(tipGbk),
-                             "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac"
-                             "\xc7\xeb\xc7\xe5\xc0\xed\xba\xf3\xd4\xd9"
-                             "\xc1\xec\xbd\xb1");
+                    if (tipGbk && tipCap)
+                        snprintf(tipGbk, tipCap,
+                                 "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac"
+                                 "\xc7\xeb\xc7\xe5\xc0\xed\xba\xf3\xd4\xd9"
+                                 "\xc1\xec\xbd\xb1");
                     printf("[info][mock-service] arena_claim_bag_full "
                            "role=%u rank=%u item=%u x%u equip=%u\n",
                            role->roleId, (u32)p->rankPos, reward->itemId,
                            reward->itemCount, reward->equipId);
                 }
             }
-
             if (bagOk)
             {
                 if (reward->rewardExp)
@@ -4479,8 +4785,9 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
                 p->claimed = 1;
                 (void)vm_mock_arena_persist_score(p);
                 result = 1;
-                vm_mock_arena_format_claim_tip(reward, tipGbk, sizeof(tipGbk));
-                if (tipGbk[0] != 0 && session != NULL)
+                if (tipGbk && tipCap)
+                    vm_mock_arena_format_claim_tip(reward, tipGbk, tipCap);
+                if (tipGbk && tipGbk[0] != 0 && session != NULL)
                 {
                     (void)vm_mock_service_session_enqueue_system_message(
                         session, tipGbk);
@@ -4495,6 +4802,29 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
             }
         }
     }
+    return result;
+}
+
+static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 requestLen,
+                                                   u8 *out, u32 outCap)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_arena_participant *p;
+    u32 result = 0;
+    char tipGbk[82];
+
+    tipGbk[0] = 0;
+    if (out == NULL || outCap < 5 || request == NULL || role == NULL ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != VM_MOCK_ARENA_WT_KIND ||
+        object.subtype != VM_MOCK_ARENA_WT_CLAIM)
+        return 0;
+    result = vm_mock_arena_try_claim(tipGbk, sizeof(tipGbk));
+    p = vm_mock_arena_find_part(role->roleId);
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_ARENA_WT_KIND,
                                      VM_MOCK_ARENA_WT_CLAIM, &objectStart) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "result", result) ||

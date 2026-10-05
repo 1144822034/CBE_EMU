@@ -145,8 +145,9 @@ console.log(
   hangupWt.length,
   [...hangupWt].map((x) => x.toString(16).padStart(2, "0")).join(" "),
 );
-const hangBodies = await exchange(ws, hangupWt);
+  const hangBodies = await exchange(ws, hangupWt);
 console.log("\n=== hangup response bodies=", hangBodies.length, "===");
+let sawPanel = false;
 for (const [i, b] of hangBodies.entries()) {
   const p = ingestPacket(b);
   if (!p) {
@@ -157,6 +158,10 @@ for (const [i, b] of hangBodies.entries()) {
     i,
     p.objects.map((o) => `${o.kind}/${o.subtype}`).join(", "),
   );
+  if (p.objects.some((o) => o.kind === 25 && o.subtype === 3)) {
+    sawPanel = true;
+    console.log("  PANEL 25/3 (CBE native confirm; Pixi HUD hangup uses 4/1)");
+  }
   const battle = parseBattleStart(p, { roleName: roles[0]!.name });
   if (battle) {
     console.log(
@@ -177,6 +182,9 @@ for (const [i, b] of hangBodies.entries()) {
   if (ascii.includes("\xb2\xbb\xc4\xdc\xb9\xd2\xbb\xfa")) {
     console.log("  TIP: 不能挂机");
   }
+}
+if (sawPanel) {
+  console.log("ok: 2/10 Type=2 first response is 25/3 confirm panel");
 }
 
 ws.close();

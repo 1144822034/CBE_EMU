@@ -4952,6 +4952,12 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER               0xf6000004u
 /* 南宣门月老：缔结姻缘（亲密度>=3000 且同场景未婚好友）. */
 #define VM_NET_MOCK_NPC_SERVICE_MARRY                    0xf6000005u
+/* CBE 比武排行：嵌套 26/1（Pixi 仍拦截 RANK 走 41/2 面板）. */
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLAIM          0xf6000006u
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_CLOSE          0xf6000007u
+/* low24: page:8 | job:8 | bracket:8 */
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_VIEW_BASE      0xf8000000u
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_RANK_PAGE_ITEMS     5u
 /* Pixi 节日使者 / 关隘使者 / 跑环使者 */
 #define VM_NET_MOCK_NPC_SERVICE_FESTIVAL_EXCHANGE        0xf7000001u
 #define VM_NET_MOCK_NPC_SERVICE_YANMEN_EXCHANGE          0xf7000002u

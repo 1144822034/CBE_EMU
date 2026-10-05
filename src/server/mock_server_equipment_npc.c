@@ -13293,39 +13293,27 @@ static void vm_mock_service_finish_shop_return_rehydrate(
             !session->shopReturnNpcCatalogPending &&
             !session->shopReturnNpcInlineOnShell)
         {
-            bool dreamScene = scene[0] == '2' && scene[1] == '9';
-
             /*
-             * Warm outdoor / dream 29*: early-shell nonempty 27/11 in the
-             * shell 30/2 window (type27-inject; no same-packet 30/2).  One
-             * DoLoading only — kind-2 same-scene EnterScene is outdoor's
-             * empty-map path, not NPC maps (user 2026-08-05: match 野外).
-             *
-             * Prior dream defer_after_kind2 skipped early 27/11 then armed
-             * dream-battle-mapctrl 30/1 → second bar + WT18/7 stuck.
+             * Never put nonempty 27/11 on the first shell-clear poll.
+             * 临安府_06 2026-10-05: warm inline 27/11 (poll resp=55) opened a
+             * second DoLoading, then empty poll (resp=11) never sent 30/2.
+             * Contract: shell 30/2 first, then poll 27/11, then post-catalog
+             * 30/2 (docs/re/2026-08-01-shop-return-npc-second-loading-stall.md).
+             * readyTick=0 waits until shell-clear-done.
              */
-            if (dreamScene || session->shopReturnNpcResourcesWarm)
-            {
-                session->shopReturnNpcInlineOnShell = true;
-                printf("[info][mock-service] shop_return_npc_inline_on_shell "
-                       "client=%08x scene=%s npcnum=%u dream=%u warm=%u "
-                       "evidence=early-shell-27/11-before-30/2\n",
-                       session->clientId, scene, (u32)npcCount,
-                       dreamScene ? 1u : 0u,
-                       session->shopReturnNpcResourcesWarm ? 1u : 0u);
-            }
-            else
-            {
-                session->shopReturnNpcCatalogPending = true;
-                snprintf(session->shopReturnNpcCatalogScene,
-                         sizeof(session->shopReturnNpcCatalogScene), "%s",
-                         scene);
-                session->shopReturnNpcCatalogReadyTick = g_schedulerTick;
-                printf("[info][mock-service] shop_return_npc_catalog_defer "
-                       "client=%08x scene=%s npcnum=%u via=rehydrate-missed-warm "
-                       "evidence=post-test24-mmShop-clears-type21\n",
-                       session->clientId, scene, (u32)npcCount);
-            }
+            session->shopReturnNpcInlineOnShell = false;
+            session->shopReturnNpcCatalogPending = true;
+            snprintf(session->shopReturnNpcCatalogScene,
+                     sizeof(session->shopReturnNpcCatalogScene), "%s",
+                     scene);
+            session->shopReturnNpcCatalogReadyTick = 0;
+            printf("[info][mock-service] shop_return_npc_catalog_defer "
+                   "client=%08x scene=%s npcnum=%u warm=%u dream=%u "
+                   "via=rehydrate-after-shell-30/2 "
+                   "evidence=no-early-27/11-before-ResetDownloadState\n",
+                   session->clientId, scene, (u32)npcCount,
+                   session->shopReturnNpcResourcesWarm ? 1u : 0u,
+                   (scene[0] == '2' && scene[1] == '9') ? 1u : 0u);
         }
         printf("[info][mock-service] scene_npc_reseed_consume client=%08x "
                "scene=%s reason=shop-return-rehydrate warm=%u catalog_pending=%u "

@@ -247,6 +247,15 @@ static bool vm_mock_arena_poll_needs_body(vm_mock_service_client_session *sessio
 static u32 vm_net_mock_build_arena_enter_response(u8 *out, u32 outCap);
 static u32 vm_net_mock_build_arena_leave_response(u8 *out, u32 outCap);
 static const char *vm_mock_arena_enter_refuse_tip(void);
+static u32 vm_mock_arena_npc_rank_pack(u8 job, u16 bracket, u8 page);
+static void vm_mock_arena_npc_rank_default_board(u8 *jobOut, u16 *bracketOut);
+static u32 vm_mock_arena_try_claim(char *tipGbk, u32 tipCap);
+static bool vm_mock_arena_npc_rank_fill(
+    u8 job, u16 bracket, u8 page, const char *claimTip, char *dialogText,
+    u32 dialogCap, char optionNameStorage[][64],
+    char optionDescStorage[][VM_NET_MOCK_NPC_DIALOG_OPTION_DESC_BYTES + 1],
+    const char **optionNames, const char **optionDescs, u32 *optionValues,
+    u8 *optionCount, u8 optionCap);
 static u32 vm_net_mock_build_arena_protocol_response(const u8 *request,
                                                       u32 requestLen, u8 *out,
                                                       u32 outCap);

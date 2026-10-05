@@ -919,34 +919,6 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
         launcher_draw_utf8(sfc, footer, fx, fy, mutedColor);
     }
 
-    if (state->loading) {
-        launcher_dim_surface(sfc);
-        draw_rounded_rect(sfc,
-            (state->viewport_w - 168) / 2,
-            (state->viewport_h - 64) / 2,
-            168, 64, LC_PANEL, 6);
-        draw_rect_border(sfc,
-            (state->viewport_w - 168) / 2,
-            (state->viewport_h - 64) / 2,
-            168, 64, SDL_MapRGB(sfc->format, (LC_ACCENT >> 16) & 0xff,
-                                (LC_ACCENT >> 8) & 0xff, LC_ACCENT & 0xff));
-        {
-            const char *label = "加载中...";
-            int lw = launcher_measure_utf8(label);
-            launcher_draw_utf8(sfc, label,
-                (state->viewport_w - lw) / 2,
-                (state->viewport_h - getFontHeight()) / 2 - 6, textColor);
-        }
-        if (state->loading_name[0]) {
-            int nw = launcher_measure_string_width(state->loading_name);
-            launcher_draw_font_string(sfc, state->loading_name,
-                (state->viewport_w - nw) / 2,
-                (state->viewport_h - getFontHeight()) / 2 + getFontHeight(),
-                SDL_MapRGB(sfc->format, (LC_ACCENT >> 16) & 0xff,
-                           (LC_ACCENT >> 8) & 0xff, LC_ACCENT & 0xff));
-        }
-    }
-
     if (state->server_select_active)
         launcher_render_server_select(state, sfc);
 

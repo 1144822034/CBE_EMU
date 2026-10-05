@@ -56,7 +56,7 @@ enum
      */
     VM_CLIENT_POLL_CONNECT_TIMEOUT_MS = 2000,
     /* Minimum wall time between scene-poll attempts (scheduler ticks are ~frame).
-     * 2s balances sync freshness vs short-TCP load; server presence timeout ~90s. */
+     * 2s balances sync freshness vs short-TCP load; server presence timeout ~30s. */
     VM_CLIENT_POLL_MIN_INTERVAL_MS = 2000,
     VM_CLIENT_REQUEST_MAX = 512,
     VM_CLIENT_QUEUE_MAX = 64,
@@ -263,6 +263,11 @@ static u32 vm_net_mock_apply_remote_observation(
 
             g_vm_scene_allow_one_map_stone_completion_reenter =
                 observation->sceneSubtype == 1 && !isDream29;
+            if (observation->sceneSubtype == 1 && !isDream29)
+            {
+                g_vm_map_stone_dismiss_bar = 1;
+                g_vm_map_stone_dismiss_bar_tick = 0;
+            }
             if (observation->sceneSubtype == 1 && alreadyOnSameDream)
             {
                 g_vm_scene_allow_one_dream_shop_return_reenter = true;
@@ -1424,6 +1429,19 @@ static bool vm_client_seq_skip_common_extra(const u8 *buf, u32 len, u32 *pos)
             !vm_client_seq_skip_tagged(buf, len, pos))
             return false;
     }
+    /*
+     * Pixi 装备行在 attr 后跟 gem trailer：tagged u8 0x47 + reflect/combo/revive.
+     * CBE 0x418C 停在 attr_count；不跳过则下一格 itemId 错位，800 等后续道具丢失。
+     */
+    if (*pos + 3u <= len && buf[*pos] == 0 && buf[*pos + 1u] == 1 &&
+        buf[*pos + 2u] == 0x47)
+    {
+        for (i = 0; i < 4u; ++i)
+        {
+            if (!vm_client_seq_skip_tagged(buf, len, pos))
+                return false;
+        }
+    }
     return true;
 }
 
@@ -1849,8 +1867,9 @@ static bool vm_client_truncate_backpack17_iteminfo(const u8 *in, u16 inLen,
     if (!vm_client_seq_read_row_count(in, inLen, &pos, &count, &tagSize))
         return false;
     /*
-     * mmGame:0x418C needs tagged u8 row count.  Keep live row bodies (834 etc.
-     * are valid list rows); only drop 808/817-819 per CBE_EMU client_grid_item.
+     * mmGame:0x418C 按 bootstrap-compact 解析 17/1：itemId + i16 + i16 + attr0.
+     * Live Pixi 行带强化词条/宝石 trailer；原样拷贝会在装备行后错位，
+     * 传送石 800 等后续消耗品进不了背包列表。
      */
     if (!vm_client_seq_write_row_count(out, outCap, &outPos, 0, 1))
         return false;
@@ -1859,23 +1878,63 @@ static bool vm_client_truncate_backpack17_iteminfo(const u8 *in, u16 inLen,
         *countTagToU8Out = (tagSize != 1);
     for (i = 0; i < count; ++i)
     {
-        u32 rowStart = pos;
-        u32 rowLen = 0;
         u32 itemId = 0;
+        u16 firstWire = 0;
+        u16 secondWire = 0;
+        u32 extraPos;
 
         if (!vm_client_seq_read_tagged_u32(in, inLen, &pos, &itemId))
             return false;
-        if (!vm_client_seq_skip_common_extra(in, inLen, &pos))
+        extraPos = pos;
+        if (!vm_client_seq_read_tagged_i16(in, inLen, &pos, &firstWire))
+        {
+            pos = extraPos;
+            if (!vm_client_seq_skip_common_extra(in, inLen, &pos))
+                return false;
+            firstWire = 0;
+            secondWire = 0;
+        }
+        else if (!vm_client_seq_read_tagged_i16(in, inLen, &pos, &secondWire))
+        {
             return false;
-        rowLen = pos - rowStart;
+        }
+        else
+        {
+            u8 attrCount;
+            u32 a;
+
+            if (pos + 3u > inLen || in[pos] != 0 || in[pos + 1u] != 1)
+                return false;
+            attrCount = in[pos + 2u];
+            pos += 3u;
+            for (a = 0; a < attrCount; ++a)
+            {
+                if (!vm_client_seq_skip_tagged(in, inLen, &pos) ||
+                    !vm_client_seq_skip_tagged(in, inLen, &pos) ||
+                    !vm_client_seq_skip_tagged(in, inLen, &pos) ||
+                    !vm_client_seq_skip_tagged(in, inLen, &pos))
+                    return false;
+            }
+            if (pos + 3u <= inLen && in[pos] == 0 && in[pos + 1u] == 1 &&
+                in[pos + 2u] == 0x47)
+            {
+                for (a = 0; a < 4u; ++a)
+                {
+                    if (!vm_client_seq_skip_tagged(in, inLen, &pos))
+                        return false;
+                }
+            }
+            /* Compact extra: attr_count is the following u8, not i16 high byte. */
+            secondWire = (u16)(secondWire & 0xffu);
+        }
         if (!vm_client_cbe_item_is_client_grid_item(itemId))
             continue;
         if (keep >= maxRows)
             break;
-        if (outPos + rowLen > outCap)
+        if (!vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, itemId) ||
+            !vm_client_seq_put_compact_extra_vals(out, outCap, &outPos,
+                                                  firstWire, secondWire))
             return false;
-        memcpy(out + outPos, in + rowStart, rowLen);
-        outPos += rowLen;
         ++keep;
     }
     out[countValuePos] = (u8)keep;
@@ -2038,14 +2097,18 @@ static u32 vm_client_cbe_grid_wire_count(u32 itemId, u32 count)
 {
     if (count == 0)
         return 0;
+    /* 802/803 reservoir + equipment: visible stack is 1 (count is durability). */
     if (itemId == 802 || itemId == 803)
         return 1;
     if (itemId >= 1000u)
         return 1;
-    /* Cap ordinary stacks so stack_limit==0 ids cannot blow the 74-record pool. */
-    if (count > 1u)
-        return 1;
-    (void)itemId;
+    /*
+     * 808/817-819 (stack_limit 0) are already dropped as non-grid.  Remaining
+     * consumables (800 传送石, 801, …) use this u32 as item+0xf2 quantity.
+     * Forcing 1 hid every stack after 17/1 made the row visible.
+     */
+    if (count > 255u)
+        return 255u;
     return count;
 }
 
@@ -2098,6 +2161,196 @@ static bool vm_client_seq_put_compact_extra_vals(u8 *out, u32 outCap, u32 *pos,
 static bool vm_client_seq_put_compact_extra(u8 *out, u32 outCap, u32 *pos)
 {
     return vm_client_seq_put_compact_extra_vals(out, outCap, pos, 0, 0);
+}
+
+enum
+{
+    VM_CLIENT_CBE_EQUIP_ATTR_CAP = 6,
+    VM_CLIENT_CBE_GRID30_SCRATCH = 8192
+};
+
+/*
+ * HandleItemGrid (0x01039952) / InGame.c:913: keep i16+i16+u8 attrs, but
+ * drop Pixi 0x47 gem trailer and washed flag bit7. compact extra (attr=0)
+ * also asserted.
+ */
+static bool vm_client_copy_common_extra_cbe(const u8 *in, u32 inLen, u32 *inPos,
+                                            u8 *out, u32 outCap, u32 *outPos)
+{
+    u16 first = 0;
+    u16 second = 0;
+    u8 attrCount = 0;
+    u8 outCount = 0;
+    u8 unlocks[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u8 types[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u8 flags[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u16 values[VM_CLIENT_CBE_EQUIP_ATTR_CAP];
+    u32 i;
+
+    if (!vm_client_seq_read_tagged_i16(in, inLen, inPos, &first) ||
+        !vm_client_seq_read_tagged_i16(in, inLen, inPos, &second))
+        return false;
+    if (*inPos + 3u > inLen || in[*inPos] != 0 || in[*inPos + 1u] != 1)
+        return false;
+    attrCount = in[*inPos + 2u];
+    *inPos += 3u;
+    for (i = 0; i < attrCount; ++i)
+    {
+        u32 unlock = 0;
+        u32 type = 0;
+        u32 flag = 0;
+        u32 value = 0;
+
+        if (!vm_client_seq_read_tagged_u32(in, inLen, inPos, &unlock) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, inPos, &type) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, inPos, &flag) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, inPos, &value))
+            return false;
+        if (outCount < VM_CLIENT_CBE_EQUIP_ATTR_CAP)
+        {
+            unlocks[outCount] = (u8)unlock;
+            types[outCount] = (u8)type;
+            flags[outCount] = (u8)(flag & 1u);
+            values[outCount] = (u16)value;
+            outCount += 1;
+        }
+    }
+    if (*inPos + 3u <= inLen && in[*inPos] == 0 && in[*inPos + 1u] == 1 &&
+        in[*inPos + 2u] == 0x47)
+    {
+        for (i = 0; i < 4u; ++i)
+        {
+            if (!vm_client_seq_skip_tagged(in, inLen, inPos))
+                return false;
+        }
+    }
+    if (outCount != attrCount)
+        second = (u16)((second & 0xffu) | ((u16)outCount << 8));
+    if (!vm_client_seq_put_tagged_i16(out, outCap, outPos, first) ||
+        !vm_client_seq_put_tagged_i16(out, outCap, outPos, second) ||
+        !vm_client_seq_put_tagged_u8(out, outCap, outPos, outCount))
+        return false;
+    for (i = 0; i < outCount; ++i)
+    {
+        if (!vm_client_seq_put_tagged_u8(out, outCap, outPos, unlocks[i]) ||
+            !vm_client_seq_put_tagged_u8(out, outCap, outPos, types[i]) ||
+            !vm_client_seq_put_tagged_u8(out, outCap, outPos, flags[i]) ||
+            !vm_client_seq_put_tagged_i16(out, outCap, outPos, values[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool vm_client_build_backpack30_grid_cbe(const u8 *in, u16 inLen, u8 *out,
+                                                u32 outCap, u16 *outLen,
+                                                u16 maxRows, u16 *keptRows,
+                                                u16 *droppedRowsOut)
+{
+    u32 inPos = 0;
+    u32 outPos = 0;
+    u16 kept = 0;
+    u16 dropped = 0;
+
+    if (keptRows != NULL)
+        *keptRows = 0;
+    if (droppedRowsOut != NULL)
+        *droppedRowsOut = 0;
+    if (in == NULL || out == NULL || outLen == NULL || maxRows == 0)
+        return false;
+    while (inPos < inLen)
+    {
+        u32 itemId = 0;
+        u32 seq = 0;
+        u32 count = 0;
+        u32 wireCount = 0;
+
+        if (!vm_client_seq_read_tagged_u32(in, inLen, &inPos, &itemId) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &seq) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &count))
+            return false;
+        if (!vm_client_cbe_item_is_client_grid_item(itemId))
+        {
+            if (!vm_client_seq_skip_common_extra(in, inLen, &inPos))
+                return false;
+            ++dropped;
+            continue;
+        }
+        wireCount = vm_client_cbe_grid_wire_count(itemId, count);
+        if (kept >= maxRows)
+        {
+            if (!vm_client_seq_skip_common_extra(in, inLen, &inPos))
+                return false;
+            ++dropped;
+            continue;
+        }
+        if (!vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, itemId) ||
+            !vm_client_seq_put_tagged_i16(out, outCap, &outPos, (u16)seq) ||
+            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, wireCount) ||
+            !vm_client_copy_common_extra_cbe(in, inLen, &inPos, out, outCap,
+                                             &outPos))
+            return false;
+        ++kept;
+    }
+    *outLen = (u16)outPos;
+    if (keptRows != NULL)
+        *keptRows = kept;
+    if (droppedRowsOut != NULL)
+        *droppedRowsOut = dropped;
+    return true;
+}
+
+/* mmGame:sub_D04 7/7 rows: seq + itemId + count + extra; Pixi gem trailer
+ * desyncs the next row (InGame.c:913, itemId leftover e.g. 0x5cd). */
+static bool vm_client_build_77_iteminfo_cbe(const u8 *in, u16 inLen, u8 *out,
+                                            u32 outCap, u16 *outLen,
+                                            u16 *keptRows)
+{
+    u32 inPos = 0;
+    u32 outPos = 0;
+    u32 rowCount = 0;
+    u8 tagSize = 0;
+    u32 countValuePos = 0;
+    u32 i;
+    u16 kept = 0;
+
+    if (keptRows != NULL)
+        *keptRows = 0;
+    if (in == NULL || out == NULL || outLen == NULL)
+        return false;
+    if (inLen == 0)
+    {
+        *outLen = 0;
+        return true;
+    }
+    if (!vm_client_seq_read_row_count(in, inLen, &inPos, &rowCount, &tagSize) ||
+        !vm_client_seq_write_row_count(out, outCap, &outPos, 0, 1))
+        return false;
+    countValuePos = outPos - 1u;
+    for (i = 0; i < rowCount; ++i)
+    {
+        u32 seq = 0;
+        u32 itemId = 0;
+        u32 count = 0;
+
+        if (!vm_client_seq_read_tagged_u32(in, inLen, &inPos, &seq) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &itemId) ||
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &count) ||
+            !vm_client_seq_put_tagged_i16(out, outCap, &outPos, (u16)seq) ||
+            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, itemId) ||
+            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, count) ||
+            !vm_client_copy_common_extra_cbe(in, inLen, &inPos, out, outCap,
+                                             &outPos))
+            return false;
+        ++kept;
+        if (kept <= 8)
+            printf("[info][network] cbe_77_row i=%u item=%u seq=%u count=%u\n",
+                   kept, itemId, seq, count);
+    }
+    out[countValuePos] = (u8)kept;
+    *outLen = (u16)outPos;
+    if (keptRows != NULL)
+        *keptRows = kept;
+    return inPos <= inLen;
 }
 
 static bool vm_client_cbe_patch_common_extra_stack1(u8 *extra, u32 extraLen)
@@ -2208,8 +2461,12 @@ static bool vm_client_sanitize_backpack30_iteminfo(const u8 *in, u16 inLen,
         extraOutPos = outPos;
         memcpy(out + outPos, in + extraStart, extraLen);
         outPos += extraLen;
-        if (vm_client_cbe_patch_common_extra_stack1(out + extraOutPos, extraLen))
-            countFixed = true;
+        if (itemId == 802 || itemId == 803 || itemId >= 1000u)
+        {
+            if (vm_client_cbe_patch_common_extra_stack1(out + extraOutPos,
+                                                       extraLen))
+                countFixed = true;
+        }
         ++kept;
         (void)rowStart;
     }
@@ -2342,7 +2599,7 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
             *changedOut = true;
         printf("[info][network] cbe_backpack_clamp object=17/1 maxnum=%u "
                "rows_kept=%u truncated=%u maxnum_tag=%s count_tag=%s "
-               "iteminfo_len=%u mode=live-rows "
+               "iteminfo_len=%u mode=compact-extra "
                "hex=%02x%02x%02x%02x "
                "evidence=CBE_EMU:17/1-detail+mmGame:0x418C\n",
                maxnumValue, keptRows, truncated ? 1u : 0u,
@@ -2358,9 +2615,8 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
         const u8 *resultEnc = NULL;
         u16 resultLen = 0;
         u16 droppedRows = 0;
-        bool countFixed = false;
         u8 emptyIteminfo[1];
-        bool gridSeeded = false;
+        bool rebuilt = false;
 
         if (!vm_client_response_object_field(object, "result", &resultEnc,
                                              &resultLen) ||
@@ -2373,38 +2629,33 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
         }
         if (!vm_client_decode_tagged_u32(gridnumEnc, gridnumLen, &gridnumValue))
             return false;
-        newIteminfo = (u8 *)malloc(2048u);
-        if (newIteminfo != NULL &&
-            vm_client_build_backpack30_grid_compact(
-                iteminfo, iteminfoLen, newIteminfo, 2048u, &newIteminfoLen,
-                (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows, &droppedRows) &&
-            keptRows > 0)
+        newIteminfo = (u8 *)malloc(VM_CLIENT_CBE_GRID30_SCRATCH);
+        if (newIteminfo == NULL)
+            return false;
+        if (!vm_client_build_backpack30_grid_cbe(
+                iteminfo, iteminfoLen, newIteminfo, VM_CLIENT_CBE_GRID30_SCRATCH,
+                &newIteminfoLen, (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows,
+                &droppedRows) ||
+            keptRows == 0)
         {
-            gridSeeded = true;
-            if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
-                                             &newGridnumLen, keptRows, 1))
-            {
-                free(newIteminfo);
-                return false;
-            }
-        }
-        else
-        {
-            if (newIteminfo != NULL)
-            {
-                (void)vm_client_sanitize_backpack30_iteminfo(
-                    iteminfo, iteminfoLen, newIteminfo, 2048u,
-                    &newIteminfoLen, (u16)VM_CLIENT_CBE_BACKPACK_SLOTS,
-                    &keptRows, &droppedRows, &countFixed);
-                free(newIteminfo);
-                newIteminfo = NULL;
-            }
+            free(newIteminfo);
             if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
                                              &newGridnumLen, 0, 1))
                 return false;
             emptyIteminfo[0] = 0;
             newIteminfoLen = 0;
             newIteminfo = emptyIteminfo;
+            keptRows = 0;
+        }
+        else
+        {
+            rebuilt = true;
+            if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
+                                             &newGridnumLen, keptRows, 1))
+            {
+                free(newIteminfo);
+                return false;
+            }
         }
         objectStart = 0;
         outObj[pos++] = object->major;
@@ -2420,11 +2671,11 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
             !vm_client_put_object_field(outObj, outCap, &pos, "iteminfo",
                                          newIteminfo, newIteminfoLen))
         {
-            if (gridSeeded && newIteminfo != emptyIteminfo)
+            if (rebuilt && newIteminfo != emptyIteminfo)
                 free(newIteminfo);
             return false;
         }
-        if (gridSeeded && newIteminfo != emptyIteminfo)
+        if (rebuilt && newIteminfo != emptyIteminfo)
             free(newIteminfo);
         outObj[objectStart + 4] = (u8)(pos >> 8);
         outObj[objectStart + 5] = (u8)pos;
@@ -2433,10 +2684,59 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
             *changedOut = true;
         printf("[info][network] cbe_backpack_clamp object=30/21 gridnum=%u "
                "rows_kept=%u dropped=%u iteminfo_len=%u "
-               "mode=%s evidence=CBE_EMU:30/21-compact-seed+HandleItemGrid\n",
-               gridSeeded ? keptRows : 0u, keptRows, droppedRows,
-               newIteminfoLen,
-               gridSeeded ? "compact-grid-seed" : "empty-grid");
+               "mode=cbe-no-gem-trailer evidence=InGame.c:913-HandleItemGrid\n",
+               keptRows, keptRows, droppedRows, newIteminfoLen);
+        return true;
+    }
+
+    if (object->major == 1 && object->kind == 7 && object->subtype == 7)
+    {
+        const u8 *typeEnc = NULL;
+        u16 typeLen = 0;
+
+        if (!vm_client_response_object_field(object, "type", &typeEnc,
+                                             &typeLen) ||
+            !vm_client_response_object_field(object, "iteminfo", &iteminfo,
+                                             &iteminfoLen))
+            return false;
+        newIteminfo = (u8 *)malloc(VM_CLIENT_CBE_GRID30_SCRATCH);
+        if (newIteminfo == NULL)
+            return false;
+        if (!vm_client_build_77_iteminfo_cbe(iteminfo, iteminfoLen, newIteminfo,
+                                             VM_CLIENT_CBE_GRID30_SCRATCH,
+                                             &newIteminfoLen, &keptRows))
+        {
+            printf("[warn][network] cbe_77_rewrite_failed iteminfo_len=%u "
+                   "evidence=keep-original-7/7\n",
+                   iteminfoLen);
+            free(newIteminfo);
+            return false;
+        }
+        objectStart = 0;
+        outObj[pos++] = object->major;
+        outObj[pos++] = object->kind;
+        outObj[pos++] = object->subtype;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        outObj[pos++] = 0;
+        if (!vm_client_put_object_field(outObj, outCap, &pos, "type", typeEnc,
+                                         typeLen) ||
+            !vm_client_put_object_field(outObj, outCap, &pos, "iteminfo",
+                                         newIteminfo, newIteminfoLen))
+        {
+            free(newIteminfo);
+            return false;
+        }
+        free(newIteminfo);
+        outObj[objectStart + 4] = (u8)(pos >> 8);
+        outObj[objectStart + 5] = (u8)pos;
+        *outLen = pos;
+        if (changedOut != NULL)
+            *changedOut = true;
+        printf("[info][network] cbe_backpack_clamp object=7/7 rows_kept=%u "
+               "iteminfo_len=%u->%u mode=cbe-no-gem-trailer "
+               "evidence=mmGame:0xD04-InGame.c:913\n",
+               keptRows, iteminfoLen, newIteminfoLen);
         return true;
     }
 
@@ -2460,7 +2760,7 @@ static bool vm_client_cbe_clamp_backpack_packet(u8 **response, u32 *responseLen)
         return false;
     packet = *response;
 
-    /* 30/21 compact-grid-seed + 17/1 live-rows via rewrite. */
+    /* 17/1 compact-extra rewrite; 30/21 CBE HandleItemGrid rewrite. */
     offset = 5;
     {
         bool needRebuild = false;
@@ -2470,6 +2770,11 @@ static bool vm_client_cbe_clamp_backpack_packet(u8 **response, u32 *responseLen)
                                                &object))
         {
             if (object.major == 1 && object.kind == 30 && object.subtype == 21)
+            {
+                needRebuild = true;
+                break;
+            }
+            if (object.major == 1 && object.kind == 7 && object.subtype == 7)
             {
                 needRebuild = true;
                 break;
@@ -2502,6 +2807,10 @@ static bool vm_client_cbe_clamp_backpack_packet(u8 **response, u32 *responseLen)
     {
         u8 *rewritten = NULL;
         u32 rewrittenCap = (u32)object.payloadLen + 64u;
+        if (object.kind == 30 && object.subtype == 21)
+            rewrittenCap = VM_CLIENT_CBE_GRID30_SCRATCH + 256u;
+        if (object.kind == 7 && object.subtype == 7)
+            rewrittenCap = VM_CLIENT_CBE_GRID30_SCRATCH + 256u;
         u32 rewrittenLen = 0;
         bool changed = false;
         const u8 *src = packet + (offset - (object.payloadLen + 6u));
@@ -2645,8 +2954,11 @@ static bool vm_client_strip_cbe_unsupported_objects(u8 **packet, u32 *packetLen)
  */
 enum
 {
-    VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX = 64u,
-    /* Insight active → unlimited hangup battles (u16 max sentinel). */
+    /*
+     * Always unlimited hangup battles (insight or not).  Pixi / admin treat
+     * 0xffff as「不限次」; CBE combatinfo.maximum uses the same sentinel.
+     */
+    VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX = 0xffffu,
     VM_CLIENT_HANGUP_SETTLE_INSIGHT_MAX = 0xffffu
 };
 
@@ -2668,6 +2980,77 @@ typedef struct
 } vm_client_hangup_settle_ui_state;
 
 static vm_client_hangup_settle_ui_state g_vmClientHangupSettleUi;
+/*
+ * Hangup skip-4/8 keeps Battle.cbm on the 4/7 shell while mmGame still ticks
+ * empty 25/5.  Completing that wait (empty WT or 25/5 result=4) runs
+ * JianghuOL.CBE:0x01012E4C Handle25 → 0x01004CC2 rand_range →
+ * __aeabi_idiv DIV0 pc=0x0104E980 (client_out 2026-10-05, resp=5).
+ * Defer the ACK until a map-side 4/8 (no 4/5 in the same WT).
+ * Swallowing the 25/5 uplink is not enough: host scene-poll still returns
+ * empty WT (client_out 2026-10-05 queue_scene_poll resp=5 after swallow).
+ * Drop that empty event-7 only after 4/7「挂机中」sets OnSettleShell.
+ * Do NOT drop generic empty WT while settle_ui is only armed from 2/10 —
+ * that ate the 4/12 ACK and the next poll 4/7 (resp=718) was parsed as
+ * the 4/12 wait (client_out 2026-10-05 DIV0 after drop_empty_wt_ack).
+ */
+static u8 g_vmClientHangupOweSceneDefaultAck;
+static u32 g_vmClientHangupOweSceneDefaultConnect;
+static u8 g_vmClientHangupOnSettleShell;
+/*
+ * Native hangup mode (game+1136) is set only by Handle25_2 after 25/3 confirm.
+ * Live/immediate Type=2 skips that → combatinfo injected but sub_7794 ignored.
+ * 0=idle 1=local 25/3 shown 2=25/2(type=1) accepted (hangup mode).
+ */
+static u8 g_vmClientHangupNativeMode;
+/* Swallow map Type=2 for a few seconds after settle 停止挂机. */
+static u32 g_vmClientHangupStopHoldUntilMs;
+/* After host confirm, guest still gets a second DOWN/UP on the soft row
+ * (client_out: hangup_panel_confirm then mouse_down y=381 → 28A4). */
+static u32 g_vmHangupSkipGuestConfirmUntilMs;
+/* Server 25/3 panel must not reach CBE channel (Global R9 → 2908 crash). */
+static u8 g_vmClientHangupAutoAckAfterPanel;
+static u8 g_vmClientHangupPanelVia8996;
+/* Captured 2/10 Type=2 (+25/3) uplink; replayed to live after local 25/2(type=1). */
+static u8 g_vmClientHangupPendingStart[VM_CLIENT_REQUEST_MAX];
+static u32 g_vmClientHangupPendingStartLen;
+static u32 g_vmClientHangupPendingConnectId;
+/* Guest R9 at hangup 2/10 send — preferred module base for 8996 deliver. */
+static u32 g_vmClientHangupSendR9;
+
+static void vm_client_hangup_log_mode_flag(const char *reason);
+static int vm_client_hangup_ack_guest_25_2(u32 connectId);
+static void vm_client_hangup_arm_skip_guest_confirm(u32 holdMs);
+static void vm_client_hangup_arm_settle_after_mode(const char *reason);
+static u32 vm_client_build_hangup_dismiss_wt(u8 *out, u32 outCap);
+static bool vm_client_begin_local_wt_object(u8 *out, u32 outCap, u32 *pos,
+                                            u8 major, u8 kind, u8 subtype,
+                                            u32 *objectStart);
+static void vm_client_finish_local_wt_object(u8 *out, u32 objectStart, u32 pos);
+static bool vm_client_put_object_u8_field(u8 *out, u32 outCap, u32 *pos,
+                                          const char *name, u8 value);
+static bool vm_client_response_has_object(const u8 *packet, u32 packetLen,
+                                          u8 kind, u8 subtype, u16 minPayload);
+static bool vm_client_hangup_deliver_wt_to_8996(u32 connectId, u8 *packet,
+                                                u32 packetLen, const char *tag);
+
+/* GBK 挂机中 — live 4/7.fdata banner; native reward text, not combatinfo. */
+static const u8 kVmClientGbkHangupZhong[6] = {
+    0xB9, 0xD2, 0xBB, 0xFA, 0xD6, 0xD0};
+
+static bool vm_client_mem_has_hangup_zhong(const u8 *buf, u32 len)
+{
+    u32 i;
+
+    if (buf == NULL || len < sizeof(kVmClientGbkHangupZhong))
+        return false;
+    for (i = 0; i + sizeof(kVmClientGbkHangupZhong) <= len; ++i)
+    {
+        if (memcmp(buf + i, kVmClientGbkHangupZhong,
+                   sizeof(kVmClientGbkHangupZhong)) == 0)
+            return true;
+    }
+    return false;
+}
 
 static u32 vm_client_add_capped_u32(u32 a, u32 b)
 {
@@ -2678,6 +3061,14 @@ static u32 vm_client_add_capped_u32(u32 a, u32 b)
 static void vm_client_hangup_settle_ui_clear(const char *reason)
 {
     memset(&g_vmClientHangupSettleUi, 0, sizeof(g_vmClientHangupSettleUi));
+    g_vmClientHangupOnSettleShell = 0;
+    g_vmClientHangupNativeMode = 0;
+    g_vmClientHangupPanelVia8996 = 0;
+    g_hangupNetCallEntry = 0;
+    g_hangupNetCallR9 = 0;
+    g_vmClientHangupSendR9 = 0;
+    g_vmClientHangupPendingStartLen = 0;
+    g_vmClientHangupPendingConnectId = 0;
     if (reason != NULL && reason[0] != 0)
     {
         printf("[info][network] cbe_hangup_settle_ui_clear reason=%s\n", reason);
@@ -2703,6 +3094,11 @@ static bool vm_client_hangup_settle_ui_active(void)
     return g_vmClientHangupSettleUi.armed != 0 &&
            g_vmClientHangupSettleUi.maxBattles != 0;
 }
+
+static bool vm_client_deliver_local_scene_default25_5(u32 connectId);
+static void vm_client_hangup_maybe_flush_scene_default_ack(u32 connectId,
+                                                           const u8 *packet,
+                                                           u32 packetLen);
 
 static bool vm_client_decode_object_u32(const vm_client_response_object *object,
                                         const char *field, u32 *valueOut)
@@ -2885,7 +3281,8 @@ static bool vm_client_rewrite_battle47_add_combatinfo(
     return true;
 }
 
-static void vm_client_hangup_settle_note_downlink(const u8 *packet, u32 packetLen)
+static bool vm_client_packet_has_battle_subtype(const u8 *packet, u32 packetLen,
+                                                 u8 subtype)
 {
     u32 offset = 5;
     u8 objectCount = 0;
@@ -2893,12 +3290,63 @@ static void vm_client_hangup_settle_note_downlink(const u8 *packet, u32 packetLe
     vm_client_response_object object;
 
     if (packet == NULL || packetLen < 5 || packet[0] != 'W' || packet[1] != 'T')
-        return;
+        return false;
     objectCount = packet[4];
     while (parsed < objectCount &&
            offset + 6u <= packetLen &&
            vm_client_next_response_object(packet, packetLen, &offset, &object))
     {
+        if (object.major == 1 && object.kind == 4 && object.subtype == subtype)
+            return true;
+        ++parsed;
+    }
+    return false;
+}
+
+static bool vm_client_packet_has_battle_subtype8(const u8 *packet, u32 packetLen)
+{
+    return vm_client_packet_has_battle_subtype(packet, packetLen, 8);
+}
+
+static bool vm_client_packet_is_empty_wt(const u8 *packet, u32 packetLen)
+{
+    return packet != NULL && packetLen == 5 &&
+           packet[0] == 'W' && packet[1] == 'T' && packet[4] == 0;
+}
+
+static void vm_client_hangup_settle_note_downlink(const u8 *packet, u32 packetLen)
+{
+    u32 offset = 5;
+    u8 objectCount = 0;
+    u8 parsed = 0;
+    vm_client_response_object object;
+    bool settleTearDown = false;
+
+    if (packet == NULL || packetLen < 5 || packet[0] != 'W' || packet[1] != 'T')
+        return;
+    settleTearDown = vm_client_packet_has_battle_subtype8(packet, packetLen);
+    objectCount = packet[4];
+    while (parsed < objectCount &&
+           offset + 6u <= packetLen &&
+           vm_client_next_response_object(packet, packetLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 4 && object.subtype == 7 &&
+            vm_client_mem_has_hangup_zhong(object.payload, object.payloadLen))
+        {
+            if (!vm_client_hangup_settle_ui_active())
+            {
+                vm_client_hangup_settle_ui_arm(
+                    (u16)VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX,
+                    "4/7-fdata-挂机中");
+            }
+            if (g_vmClientHangupSettleUi.battleToken == 0)
+                g_vmClientHangupSettleUi.battleToken = 1;
+            printf("[info][network] cbe_hangup_fdata_mark "
+                   "evidence=4/7.fdata-挂机中\n");
+            g_vmClientHangupOnSettleShell = 1;
+        }
+        if (object.major == 1 && object.kind == 4 && object.subtype == 8)
+            g_vmClientHangupOnSettleShell = 0;
         if (object.major == 1 && object.kind == 4 && object.subtype == 11)
         {
             u8 result = 0;
@@ -2907,7 +3355,13 @@ static void vm_client_hangup_settle_note_downlink(const u8 *packet, u32 packetLe
             (void)vm_client_decode_object_u8(&object, "type", &battle11Type);
             if (result == 1 && battle11Type == 0)
             {
-                vm_client_hangup_settle_ui_clear("battle-auto-off");
+                /*
+                 * Hangup loop exit used to be 4/8+4/11 type=0+4/9.  type=0 here
+                 * is tear-down, not「关自动」; wiping combatinfo reset 挂机累计
+                 * every fight.  Explicit auto-off is a 4/11-only packet.
+                 */
+                if (!settleTearDown)
+                    vm_client_hangup_settle_ui_clear("battle-auto-off");
             }
             else if (result == 1 && battle11Type == 1)
             {
@@ -2927,7 +3381,10 @@ static void vm_client_hangup_settle_note_downlink(const u8 *packet, u32 packetLe
         if (object.major == 1 && object.kind == 25 && object.subtype == 6)
         {
             u32 insightMax = 0;
-            /* Live wire: maxnum≥200 marks insight hangup quota → unlimited. */
+            /*
+             * 25/6.maxnum is tagged-u16 200 while insight is active
+             * (CBE_EMU item.dsh 828 / mock_scene_hangup_active_battle_limit).
+             */
             if (vm_client_decode_object_u32(&object, "maxnum", &insightMax) &&
                 insightMax >= 200u)
             {
@@ -2977,9 +3434,6 @@ static bool vm_client_cbe_inject_hangup_combatinfo(u8 **packet, u32 *packetLen)
     {
         return false;
     }
-    if (!vm_client_hangup_settle_ui_active())
-        return false;
-
     objectCount = (*packet)[4];
     outCap = *packetLen + 256u;
     out = (u8 *)malloc(outCap);
@@ -2996,9 +3450,12 @@ static bool vm_client_cbe_inject_hangup_combatinfo(u8 **packet, u32 *packetLen)
         const u8 *copySrc = *packet + objectStart;
         u32 copyLen = objectLen;
 
-        if (object.major == 1 && object.kind == 4 && object.subtype == 7 &&
-            !vm_client_object_has_field(&object, "combatinfo"))
+        if (object.major == 1 && object.kind == 4 && object.subtype == 7)
         {
+            bool hangupMark = vm_client_mem_has_hangup_zhong(
+                object.payload, object.payloadLen);
+            bool wantHangupUi =
+                hangupMark || g_vmClientHangupNativeMode == 2;
             u8 result = 0;
             u32 wireExp = 0;
             u32 wireGold = 0;
@@ -3007,75 +3464,157 @@ static bool vm_client_cbe_inject_hangup_combatinfo(u8 **packet, u32 *packetLen)
             u32 expGain = 0;
             u32 goldGain = 0;
             u16 completed = 0;
-            u16 maximum = g_vmClientHangupSettleUi.maxBattles;
+            u16 maximum = 0;
             u8 combatInfo[64];
             u16 combatInfoLen = 0;
-            u8 rewritten[512];
+            u32 rewriteCap = 0;
+            u8 *rewritten = NULL;
             u32 rewrittenLen = 0;
+            bool doRewrite = false;
 
-            (void)vm_client_decode_object_u8(&object, "result", &result);
-            (void)vm_client_decode_object_u32(&object, "exp", &wireExp);
-            (void)vm_client_decode_object_u32(&object, "gold", &wireGold);
-            (void)vm_client_decode_object_u32(&object, "hp", &recoverHp);
-            (void)vm_client_decode_object_u32(&object, "mp", &recoverMp);
-            if (result == 1 &&
-                g_vmClientHangupSettleUi.lastAccountedToken !=
-                    g_vmClientHangupSettleUi.battleToken)
+            if (hangupMark)
             {
-                if (g_vmClientHangupSettleUi.battlePreExp != 0 &&
-                    wireExp >= g_vmClientHangupSettleUi.battlePreExp)
+                if (!vm_client_hangup_settle_ui_active())
                 {
-                    expGain = wireExp - g_vmClientHangupSettleUi.battlePreExp;
+                    vm_client_hangup_settle_ui_arm(
+                        (u16)VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX,
+                        "4/7-fdata-挂机中");
                 }
-                else if (wireExp > g_vmClientHangupSettleUi.lastRoleExp)
-                {
-                    expGain = wireExp - g_vmClientHangupSettleUi.lastRoleExp;
-                }
-                if (g_vmClientHangupSettleUi.battlePreGold != 0 &&
-                    wireGold >= g_vmClientHangupSettleUi.battlePreGold)
-                {
-                    goldGain = wireGold - g_vmClientHangupSettleUi.battlePreGold;
-                }
-                else if (wireGold > g_vmClientHangupSettleUi.lastRoleGold)
-                {
-                    goldGain = wireGold - g_vmClientHangupSettleUi.lastRoleGold;
-                }
-                g_vmClientHangupSettleUi.totalExp = vm_client_add_capped_u32(
-                    g_vmClientHangupSettleUi.totalExp, expGain);
-                g_vmClientHangupSettleUi.totalGold = vm_client_add_capped_u32(
-                    g_vmClientHangupSettleUi.totalGold, goldGain);
-                g_vmClientHangupSettleUi.totalHpRecovered = vm_client_add_capped_u32(
-                    g_vmClientHangupSettleUi.totalHpRecovered, recoverHp);
-                g_vmClientHangupSettleUi.totalMpRecovered = vm_client_add_capped_u32(
-                    g_vmClientHangupSettleUi.totalMpRecovered, recoverMp);
-                g_vmClientHangupSettleUi.lastAccountedToken =
-                    g_vmClientHangupSettleUi.battleToken;
-                if (g_vmClientHangupSettleUi.completed < 0xffffu)
-                    ++g_vmClientHangupSettleUi.completed;
+                if (g_vmClientHangupSettleUi.battleToken == 0)
+                    g_vmClientHangupSettleUi.battleToken = 1;
             }
-            completed = g_vmClientHangupSettleUi.completed;
-            if (!vm_client_build_hangup_combatinfo_raw(
-                    combatInfo, sizeof(combatInfo), &combatInfoLen, completed,
-                    maximum, g_vmClientHangupSettleUi.totalExp,
-                    g_vmClientHangupSettleUi.totalGold,
-                    g_vmClientHangupSettleUi.totalMpRecovered,
-                    g_vmClientHangupSettleUi.totalHpRecovered) ||
-                !vm_client_rewrite_battle47_add_combatinfo(
-                    &object, rewritten, sizeof(rewritten), &rewrittenLen,
-                    combatInfo, combatInfoLen))
+            if (!wantHangupUi || !vm_client_hangup_settle_ui_active())
             {
-                free(out);
-                return false;
+                /* Keep original 4/7 object. */
             }
-            copySrc = rewritten;
-            copyLen = rewrittenLen;
-            changed = true;
-            printf("[info][network] cbe_hangup_combatinfo tally=%u/%u exp=%u "
-                   "gold=%u hp=%u mp=%u raw_len=%u evidence=4/7.combatinfo\n",
-                   completed, maximum, g_vmClientHangupSettleUi.totalExp,
-                   g_vmClientHangupSettleUi.totalGold,
-                   g_vmClientHangupSettleUi.totalHpRecovered,
-                   g_vmClientHangupSettleUi.totalMpRecovered, combatInfoLen);
+            else
+            {
+                (void)vm_client_decode_object_u8(&object, "result", &result);
+                (void)vm_client_decode_object_u32(&object, "exp", &wireExp);
+                (void)vm_client_decode_object_u32(&object, "gold", &wireGold);
+                (void)vm_client_decode_object_u32(&object, "hp", &recoverHp);
+                (void)vm_client_decode_object_u32(&object, "mp", &recoverMp);
+                if (result == 1 &&
+                    g_vmClientHangupSettleUi.lastAccountedToken !=
+                        g_vmClientHangupSettleUi.battleToken)
+                {
+                    /*
+                     * 4/7.exp/gold are post-reward ABSOLUTE totals. Session
+                     * panel needs this-fight gains = wire - baseline.
+                     */
+                    u32 baseExp = g_vmClientHangupSettleUi.battlePreExp;
+                    u32 baseGold = g_vmClientHangupSettleUi.battlePreGold;
+
+                    if (baseExp == 0)
+                        baseExp = g_vmClientHangupSettleUi.lastRoleExp;
+                    if (baseGold == 0)
+                        baseGold = g_vmClientHangupSettleUi.lastRoleGold;
+                    if (baseExp != 0 && wireExp >= baseExp)
+                        expGain = wireExp - baseExp;
+                    if (baseGold != 0 && wireGold >= baseGold)
+                        goldGain = wireGold - baseGold;
+                    g_vmClientHangupSettleUi.totalExp =
+                        vm_client_add_capped_u32(
+                            g_vmClientHangupSettleUi.totalExp, expGain);
+                    g_vmClientHangupSettleUi.totalGold =
+                        vm_client_add_capped_u32(
+                            g_vmClientHangupSettleUi.totalGold, goldGain);
+                    g_vmClientHangupSettleUi.totalHpRecovered =
+                        vm_client_add_capped_u32(
+                            g_vmClientHangupSettleUi.totalHpRecovered,
+                            recoverHp);
+                    g_vmClientHangupSettleUi.totalMpRecovered =
+                        vm_client_add_capped_u32(
+                            g_vmClientHangupSettleUi.totalMpRecovered,
+                            recoverMp);
+                    if (wireExp != 0)
+                        g_vmClientHangupSettleUi.lastRoleExp = wireExp;
+                    if (wireGold != 0)
+                        g_vmClientHangupSettleUi.lastRoleGold = wireGold;
+                    g_vmClientHangupSettleUi.lastAccountedToken =
+                        g_vmClientHangupSettleUi.battleToken;
+                    if (g_vmClientHangupSettleUi.completed < 0xffffu)
+                        ++g_vmClientHangupSettleUi.completed;
+                }
+                completed = g_vmClientHangupSettleUi.completed;
+                maximum = g_vmClientHangupSettleUi.maxBattles;
+                /*
+                 * Optional wire combatinfo (native ignores without 1136).
+                 * Host overlay always uses the tally below.
+                 */
+                doRewrite = !vm_client_object_has_field(&object, "combatinfo");
+                if (doRewrite)
+                {
+                    rewriteCap = (u32)object.payloadLen + 6u + 128u;
+                    if (rewriteCap < 256u)
+                        rewriteCap = 256u;
+                    rewritten = (u8 *)malloc(rewriteCap);
+                    if (rewritten == NULL)
+                    {
+                        free(out);
+                        return false;
+                    }
+                    if (!vm_client_build_hangup_combatinfo_raw(
+                            combatInfo, sizeof(combatInfo), &combatInfoLen,
+                            completed, maximum,
+                            g_vmClientHangupSettleUi.totalExp,
+                            g_vmClientHangupSettleUi.totalGold,
+                            g_vmClientHangupSettleUi.totalMpRecovered,
+                            g_vmClientHangupSettleUi.totalHpRecovered) ||
+                        !vm_client_rewrite_battle47_add_combatinfo(
+                            &object, rewritten, rewriteCap, &rewrittenLen,
+                            combatInfo, combatInfoLen))
+                    {
+                        printf("[warn][network] "
+                               "cbe_hangup_combatinfo_rewrite_fail "
+                               "payload=%u cap=%u "
+                               "evidence=manual-settle-fallback\n",
+                               object.payloadLen, rewriteCap);
+                        free(rewritten);
+                        rewritten = NULL;
+                        doRewrite = false;
+                    }
+                    else
+                    {
+                        copySrc = rewritten;
+                        copyLen = rewrittenLen;
+                        changed = true;
+                    }
+                }
+                printf("[info][network] cbe_hangup_combatinfo tally=%u/%u "
+                       "exp=%u gold=%u hp=%u mp=%u raw_len=%u rewrite=%u "
+                       "evidence=4/7.fdata-挂机中|combatinfo\n",
+                       completed, maximum, g_vmClientHangupSettleUi.totalExp,
+                       g_vmClientHangupSettleUi.totalGold,
+                       g_vmClientHangupSettleUi.totalHpRecovered,
+                       g_vmClientHangupSettleUi.totalMpRecovered, combatInfoLen,
+                       doRewrite ? 1u : 0u);
+                vm_client_hangup_log_mode_flag("at-4/7-combatinfo");
+                if (doRewrite && rewritten != NULL)
+                {
+                    if (dstPos + copyLen > outCap)
+                    {
+                        u32 grownCap = outCap + copyLen + 128u;
+                        u8 *grown = (u8 *)realloc(out, grownCap);
+                        if (grown == NULL)
+                        {
+                            free(rewritten);
+                            free(out);
+                            return false;
+                        }
+                        out = grown;
+                        outCap = grownCap;
+                    }
+                    memcpy(out + dstPos, copySrc, copyLen);
+                    dstPos += copyLen;
+                    ++newCount;
+                    ++parsed;
+                    free(rewritten);
+                    continue;
+                }
+                if (rewritten != NULL)
+                    free(rewritten);
+            }
         }
         if (dstPos + copyLen > outCap)
         {
@@ -3116,6 +3655,685 @@ static bool vm_client_cbe_inject_hangup_combatinfo(u8 **packet, u32 *packetLen)
     return true;
 }
 
+/*
+ * Native hangup needs the server 25/3 panel to reach guest Handle25_3
+ * (mmBattle:0x8996) so confirm → sub_28A4 → 25/2 can set game+1136.
+ * Do not rewrite the panel to dismiss; that path left flag1136=255 and
+ * manual settle despite combatinfo on the wire.
+ */
+static bool vm_client_hangup_rewrite_panel_to_dismiss(u8 **packet,
+                                                      u32 *packetLen)
+{
+    (void)packet;
+    (void)packetLen;
+    return false;
+}
+
+/*
+ * Hangup 4/7 stays on Battle.cbm.  Seed 1/14 is mmGame/mmShop actor-state
+ * (0x9DE).  Same-packet 4/6+1/14+4/7 DIV0s at rand_range (stack len=718).
+ */
+static bool vm_client_hangup_strip_settle_actor14(u8 **packet, u32 *packetLen)
+{
+    u32 offset = 5;
+    u32 outPos = 5;
+    u8 objectCount = 0;
+    u8 removed = 0;
+    u8 hasHangup47 = 0;
+    u8 *out = NULL;
+    u8 *src = NULL;
+    u32 outCap = 0;
+    vm_client_response_object object;
+
+    if (packet == NULL || *packet == NULL || packetLen == NULL ||
+        *packetLen < 5 || (*packet)[0] != 'W' || (*packet)[1] != 'T')
+        return false;
+    src = *packet;
+    while (offset + 6u <= *packetLen &&
+           vm_client_next_response_object(src, *packetLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 4 && object.subtype == 7 &&
+            vm_client_mem_has_hangup_zhong(object.payload, object.payloadLen))
+            hasHangup47 = 1;
+    }
+    if (hasHangup47 == 0)
+        return false;
+
+    outCap = *packetLen;
+    out = (u8 *)malloc(outCap);
+    if (out == NULL)
+        return false;
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = 0;
+    out[3] = 0;
+    out[4] = 0;
+    offset = 5;
+    while (offset + 6u <= *packetLen &&
+           vm_client_next_response_object(src, *packetLen, &offset, &object))
+    {
+        u32 objectStart = offset - ((u32)object.payloadLen + 6u);
+        u32 objectLen = (u32)object.payloadLen + 6u;
+
+        if (object.major == 1 && object.kind == 1 && object.subtype == 14)
+        {
+            ++removed;
+            continue;
+        }
+        if (outPos + objectLen > outCap)
+        {
+            u8 *grown = (u8 *)realloc(out, outCap + objectLen + 64u);
+            if (grown == NULL)
+            {
+                free(out);
+                return false;
+            }
+            out = grown;
+            outCap += objectLen + 64u;
+        }
+        memcpy(out + outPos, src + objectStart, objectLen);
+        outPos += objectLen;
+        ++objectCount;
+    }
+    if (offset != *packetLen || removed == 0)
+    {
+        free(out);
+        return false;
+    }
+    vm_client_finish_wt_packet(out, outPos, objectCount);
+    if (outPos > *packetLen)
+    {
+        u8 *grown = (u8 *)realloc(*packet, outPos);
+        if (grown == NULL)
+        {
+            free(out);
+            return false;
+        }
+        *packet = grown;
+    }
+    memcpy(*packet, out, outPos);
+    *packetLen = outPos;
+    free(out);
+    printf("[info][network] cbe_hangup_strip_actor14 removed=%u objects=%u "
+           "resp=%u evidence=4/7-shell-1/14-div0-0x0104e980\n",
+           removed, objectCount, outPos);
+    return true;
+}
+
+static bool vm_client_response_has_object(const u8 *packet, u32 packetLen,
+                                          u8 kind, u8 subtype, u16 minPayload)
+{
+    u32 offset = 5;
+    vm_client_response_object object;
+
+    if (packet == NULL || packetLen < 5 || packet[0] != 'W' || packet[1] != 'T')
+        return false;
+    while (offset + 6u <= packetLen &&
+           vm_client_next_response_object(packet, packetLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == kind &&
+            object.subtype == subtype && object.payloadLen >= minPayload)
+            return true;
+    }
+    return false;
+}
+
+static u32 g_vmHangupLearnedSkillIds[12];
+static u8 g_vmHangupLearnedSkillCount;
+static u32 g_vmHangupLastOperate;
+static u8 g_vmHangupLastOperateValid;
+static bool vm_client_find_u8_field(const u8 *buf, u32 len, const char *field,
+                                    u8 *value);
+
+static void vm_client_hangup_note_learnedskill_blob(const u8 *blob, u16 blobLen)
+{
+    u32 pos = 0;
+    u8 n = 0;
+
+    if (blob == NULL || blobLen < 6u)
+        return;
+    memset(g_vmHangupLearnedSkillIds, 0, sizeof(g_vmHangupLearnedSkillIds));
+    while (pos + 6u <= blobLen && n < 12u)
+    {
+        u32 skillId;
+
+        if (blob[pos] != 0 || blob[pos + 1u] != 4)
+            break;
+        skillId = ((u32)blob[pos + 2u] << 24) | ((u32)blob[pos + 3u] << 16) |
+                  ((u32)blob[pos + 4u] << 8) | (u32)blob[pos + 5u];
+        pos += 6u;
+        if (skillId == 0)
+            continue;
+        g_vmHangupLearnedSkillIds[n++] = skillId;
+    }
+    g_vmHangupLearnedSkillCount = n;
+    if (n != 0)
+        printf("[info][network] cbe_hangup_learnedskill count=%u "
+               "evidence=downlink-learnedskill\n",
+               n);
+}
+
+static void vm_client_hangup_note_downlink_skills(const u8 *packet, u32 packetLen)
+{
+    u32 offset = 5;
+    vm_client_response_object object;
+
+    if (packet == NULL || packetLen < 5 || packet[0] != 'W' || packet[1] != 'T')
+        return;
+    while (offset + 6u <= packetLen &&
+           vm_client_next_response_object(packet, packetLen, &offset, &object))
+    {
+        const u8 *blob = NULL;
+        u16 blobLen = 0;
+
+        if (vm_client_response_object_field(&object, "learnedskill", &blob,
+                                            &blobLen) &&
+            blobLen >= 6u)
+            vm_client_hangup_note_learnedskill_blob(blob, blobLen);
+    }
+}
+
+static void vm_client_hangup_note_operate_uplink(const u8 *req, u32 len)
+{
+    u32 operate = 0;
+    u8 operate8 = 0;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return;
+    if (req[5] != 4 || req[6] != 2)
+        return;
+    if (vm_client_find_u8_field(req, len, "Operate", &operate8))
+        operate = operate8;
+    {
+        u32 i;
+        u32 fieldLen = 7;
+
+        for (i = 0; i + fieldLen + 8 <= len; ++i)
+        {
+            if (req[i] != 7 || memcmp(req + i + 1, "Operate", 7) != 0)
+                continue;
+            if (i + 1 + 7 + 2 + 4 <= len && req[i + 8] == 0 && req[i + 9] == 4)
+            {
+                operate = ((u32)req[i + 10] << 24) | ((u32)req[i + 11] << 16) |
+                          ((u32)req[i + 12] << 8) | (u32)req[i + 13];
+                break;
+            }
+        }
+    }
+    g_vmHangupLastOperate = operate;
+    g_vmHangupLastOperateValid = 1;
+}
+
+enum
+{
+    VM_CLIENT_HANGUP_SKILL_NAME_MAX = 24,
+    VM_CLIENT_HANGUP_SKILL_CATALOG_MAX = 256
+};
+
+typedef struct
+{
+    u32 skillId;
+    u8 name[VM_CLIENT_HANGUP_SKILL_NAME_MAX];
+} vm_client_hangup_skill_name_row;
+
+static vm_client_hangup_skill_name_row
+    g_vmHangupSkillNames[VM_CLIENT_HANGUP_SKILL_CATALOG_MAX];
+static u32 g_vmHangupSkillNameCount;
+static u8 g_vmHangupSkillNamesTried;
+
+static u32 vm_client_hangup_read_le32(const u8 *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+static u32 vm_client_hangup_parse_dsh_u32(const u8 *raw, u32 len)
+{
+    u32 value = 0;
+    u8 haveDigit = 0;
+    u32 i;
+
+    if (raw == NULL || len == 0)
+        return 0;
+    for (i = 0; i < len; ++i)
+    {
+        if (raw[i] < '0' || raw[i] > '9')
+            break;
+        haveDigit = 1;
+        value = value * 10u + (u32)(raw[i] - '0');
+    }
+    return haveDigit ? value : 0;
+}
+
+static void vm_client_hangup_store_skill_name(u32 skillId, const u8 *name,
+                                              u32 nameLen)
+{
+    vm_client_hangup_skill_name_row *row;
+    u32 n;
+
+    if (skillId == 0 || name == NULL || nameLen == 0)
+        return;
+    if (g_vmHangupSkillNameCount >= VM_CLIENT_HANGUP_SKILL_CATALOG_MAX)
+        return;
+    while (nameLen > 0 && (name[nameLen - 1u] == 0 || name[nameLen - 1u] == ' '))
+        nameLen--;
+    if (nameLen == 0)
+        return;
+    row = &g_vmHangupSkillNames[g_vmHangupSkillNameCount++];
+    memset(row, 0, sizeof(*row));
+    row->skillId = skillId;
+    n = nameLen;
+    if (n >= VM_CLIENT_HANGUP_SKILL_NAME_MAX)
+        n = VM_CLIENT_HANGUP_SKILL_NAME_MAX - 1u;
+    memcpy(row->name, name, n);
+}
+
+static void vm_client_hangup_load_skill_names(void)
+{
+    static const char *paths[] = {
+        "JHOnlineData/skill.dsh",
+        "bin/JHOnlineData/skill.dsh"
+    };
+    static u8 data[32768];
+    FILE *fp = NULL;
+    size_t nread = 0;
+    u32 len;
+    u32 columnCount;
+    u32 rowCount;
+    u32 pos;
+    u32 row;
+    u32 i;
+
+    if (g_vmHangupSkillNamesTried)
+        return;
+    g_vmHangupSkillNamesTried = 1;
+    g_vmHangupSkillNameCount = 0;
+    for (i = 0; i < (u32)(sizeof(paths) / sizeof(paths[0])); ++i)
+    {
+        fp = fopen(paths[i], "rb");
+        if (fp != NULL)
+            break;
+    }
+    if (fp == NULL)
+        return;
+    nread = fread(data, 1, sizeof(data), fp);
+    fclose(fp);
+    if (nread < 16)
+        return;
+    len = (u32)nread;
+    columnCount = vm_client_hangup_read_le32(data + 4);
+    rowCount = vm_client_hangup_read_le32(data + 8);
+    if (columnCount == 0 || columnCount > 64 || rowCount > 512)
+        return;
+    pos = 16;
+    for (i = 0; i < columnCount; ++i)
+    {
+        u32 fieldLen;
+
+        if (pos >= len)
+            return;
+        fieldLen = data[pos++];
+        if (pos + fieldLen > len)
+            return;
+        pos += fieldLen;
+    }
+    for (row = 0; row < rowCount && pos + 4u <= len; ++row)
+    {
+        u32 rowLen = vm_client_hangup_read_le32(data + pos);
+        u32 rowPos = pos + 4u;
+        u32 rowEnd = rowPos + rowLen;
+        u32 skillId = 0;
+        const u8 *name = NULL;
+        u32 nameLen = 0;
+        u32 col;
+
+        if (rowEnd > len || rowEnd < rowPos)
+            break;
+        for (col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+                break;
+            if (col == 0)
+                skillId = vm_client_hangup_parse_dsh_u32(value, valueLen);
+            else if (col == 1)
+            {
+                name = value;
+                nameLen = valueLen;
+            }
+            rowPos += valueLen;
+        }
+        vm_client_hangup_store_skill_name(skillId, name, nameLen);
+        pos = rowEnd;
+    }
+    printf("[info][network] cbe_hangup_skill_names count=%u "
+           "evidence=JHOnlineData/skill.dsh\n",
+           g_vmHangupSkillNameCount);
+}
+
+static int vm_client_hangup_copy_skill_name(u32 skillId, u8 *gbk, u32 cap)
+{
+    u32 i;
+
+    if (skillId == 0 || gbk == NULL || cap == 0)
+        return 0;
+    vm_client_hangup_load_skill_names();
+    for (i = 0; i < g_vmHangupSkillNameCount; ++i)
+    {
+        if (g_vmHangupSkillNames[i].skillId != skillId)
+            continue;
+        snprintf((char *)gbk, cap, "%s", (const char *)g_vmHangupSkillNames[i].name);
+        return gbk[0] != 0;
+    }
+    return 0;
+}
+
+u8 vm_client_hangup_skill_option_count(void)
+{
+    u8 n = (u8)(1u + g_vmHangupLearnedSkillCount);
+
+    if (g_vmHangupLastOperateValid && g_vmHangupLastOperate != 0)
+    {
+        u8 i;
+        u8 found = 0;
+
+        for (i = 0; i < g_vmHangupLearnedSkillCount; ++i)
+        {
+            if (g_vmHangupLearnedSkillIds[i] + 2u == g_vmHangupLastOperate)
+            {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+            n++;
+    }
+    return n;
+}
+
+u32 vm_client_hangup_skill_option_operate(u8 index)
+{
+    u8 learned = g_vmHangupLearnedSkillCount;
+
+    if (index == 0)
+        return 0;
+    if (index <= learned)
+        return g_vmHangupLearnedSkillIds[index - 1u] + 2u;
+    if (g_vmHangupLastOperateValid)
+        return g_vmHangupLastOperate;
+    return 0;
+}
+
+void vm_client_hangup_skill_option_label(u8 index, u8 *gbk, u32 cap)
+{
+    static const u8 kNa[] = {0xC6, 0xD5, 0xCD, 0xA8, 0xB9, 0xA5, 0xBB, 0xF7, 0};
+    u32 operate;
+    u32 skillId;
+    int wrote;
+
+    if (gbk == NULL || cap == 0)
+        return;
+    gbk[0] = 0;
+    if (index == 0)
+    {
+        if (cap >= sizeof(kNa))
+            memcpy(gbk, kNa, sizeof(kNa));
+        return;
+    }
+    operate = vm_client_hangup_skill_option_operate(index);
+    skillId = (operate >= 2u) ? (operate - 2u) : operate;
+    if (vm_client_hangup_copy_skill_name(skillId, gbk, cap))
+        return;
+    wrote = snprintf((char *)gbk, cap, "\xBC\xBC\xC4\xDC#%u", skillId);
+    if (wrote < 0)
+        gbk[0] = 0;
+}
+
+static bool vm_client_hangup_pending_set_operate(u32 operate)
+{
+    u8 out[VM_CLIENT_REQUEST_MAX];
+    u32 srcPos = 4;
+    u32 dstPos = 4;
+    u32 len = g_vmClientHangupPendingStartLen;
+    const u8 *req = g_vmClientHangupPendingStart;
+    u8 operateEnc[6];
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return false;
+    memcpy(out, req, 4);
+    operateEnc[0] = 0;
+    operateEnc[1] = 4;
+    operateEnc[2] = (u8)(operate >> 24);
+    operateEnc[3] = (u8)(operate >> 16);
+    operateEnc[4] = (u8)(operate >> 8);
+    operateEnc[5] = (u8)operate;
+    while (srcPos + 5 <= len)
+    {
+        u16 objectLen = (u16)(((u16)req[srcPos + 3] << 8) | req[srcPos + 4]);
+        u32 objectStart = dstPos;
+
+        if (objectLen < 5 || srcPos + objectLen > len)
+            return false;
+        if (dstPos + objectLen + 16u > sizeof(out))
+            return false;
+        memcpy(out + dstPos, req + srcPos, 5);
+        dstPos += 5;
+        if (srcPos + 5 < srcPos + objectLen)
+        {
+            memcpy(out + dstPos, req + srcPos + 5, objectLen - 5u);
+            dstPos += objectLen - 5u;
+        }
+        if (req[srcPos] == 1 && req[srcPos + 1] == 2 && req[srcPos + 2] == 10)
+        {
+            if (!vm_client_put_object_field(out, sizeof(out), &dstPos, "Operate",
+                                            operateEnc, 6))
+                return false;
+            {
+                u32 newLen = dstPos - objectStart;
+
+                out[objectStart + 3] = (u8)(newLen >> 8);
+                out[objectStart + 4] = (u8)newLen;
+            }
+        }
+        srcPos += objectLen;
+    }
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(dstPos >> 8);
+    out[3] = (u8)dstPos;
+    if (dstPos > sizeof(g_vmClientHangupPendingStart))
+        return false;
+    memcpy(g_vmClientHangupPendingStart, out, dstPos);
+    g_vmClientHangupPendingStartLen = dstPos;
+    printf("[info][network] cbe_hangup_pending_operate operate=%u len=%u\n",
+           operate, dstPos);
+    return true;
+}
+
+static bool vm_client_hangup_put_u32_field(u8 *out, u32 outCap, u32 *pos,
+                                           const char *name, u32 value)
+{
+    u8 enc[6];
+
+    enc[0] = 0;
+    enc[1] = 4;
+    enc[2] = (u8)(value >> 24);
+    enc[3] = (u8)(value >> 16);
+    enc[4] = (u8)(value >> 8);
+    enc[5] = (u8)value;
+    return vm_client_put_object_field(out, outCap, pos, name, enc, 6);
+}
+
+static bool vm_client_hangup_pick_live_combat(u32 *idOut, u32 *indexOut,
+                                              u32 *posxOut, u32 *posyOut)
+{
+    u32 sceneNodeBase = 0;
+    u16 playerX = 0;
+    u16 playerY = 0;
+    u32 bestDist = 0xffffffffu;
+    bool found = false;
+
+    if (idOut)
+        *idOut = 0;
+    if (indexOut)
+        *indexOut = 0;
+    if (posxOut)
+        *posxOut = 0;
+    if (posyOut)
+        *posyOut = 0;
+    if (Global_R9 == 0)
+        return false;
+    if (uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase,
+                    sizeof(sceneNodeBase)) != UC_ERR_OK ||
+        sceneNodeBase == 0)
+        return false;
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C8E, &playerX, sizeof(playerX));
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C90, &playerY, sizeof(playerY));
+
+    for (u32 i = 0; i < 25; ++i)
+    {
+        u32 node = sceneNodeBase + i * 340u;
+        u32 actorId = 0;
+        u32 battleX = 0;
+        u32 battleY = 0;
+        u16 gridX = 0;
+        u16 gridY = 0;
+        u8 active = 0;
+        u8 nodeKind = 0;
+        u32 dist;
+        u32 dx;
+        u32 dy;
+
+        if (uc_mem_read(MTK, node + 319, &active, sizeof(active)) != UC_ERR_OK ||
+            active == 0)
+            continue;
+        if (uc_mem_read(MTK, node + 0x13B, &nodeKind, sizeof(nodeKind)) !=
+                UC_ERR_OK ||
+            nodeKind != 2)
+            continue;
+        if (uc_mem_read(MTK, node + 100, &actorId, sizeof(actorId)) != UC_ERR_OK ||
+            actorId == 0 || actorId == 1u || actorId == 0x70ffffffu)
+            continue;
+        (void)uc_mem_read(MTK, node + 240, &battleX, sizeof(battleX));
+        (void)uc_mem_read(MTK, node + 244, &battleY, sizeof(battleY));
+        if (battleX == 0 || battleY == 0)
+            continue;
+        (void)uc_mem_read(MTK, node + 0x18, &gridX, sizeof(gridX));
+        (void)uc_mem_read(MTK, node + 0x1A, &gridY, sizeof(gridY));
+        dx = gridX > playerX ? (u32)(gridX - playerX) : (u32)(playerX - gridX);
+        dy = gridY > playerY ? (u32)(gridY - playerY) : (u32)(playerY - gridY);
+        dist = dx + dy;
+        if (dist >= bestDist)
+            continue;
+        bestDist = dist;
+        found = true;
+        if (idOut)
+            *idOut = actorId;
+        if (indexOut)
+            *indexOut = i;
+        if (posxOut)
+            *posxOut = battleX;
+        if (posyOut)
+            *posyOut = battleY;
+    }
+    return found;
+}
+
+static u32 vm_client_hangup_bind_live_combat(u8 *req, u32 len, u32 cap)
+{
+    u8 out[VM_CLIENT_REQUEST_MAX];
+    u32 srcPos = 4;
+    u32 dstPos = 4;
+    u32 liveId = 0;
+    u32 liveIndex = 0;
+    u32 livePosX = 0;
+    u32 livePosY = 0;
+
+    if (req == NULL || len < 9 || len > cap || req[0] != 'W' || req[1] != 'T')
+        return len;
+    {
+        bool hasPosx = false;
+        bool hasIndex = false;
+        u32 i;
+
+        for (i = 0; i + 4u <= len; ++i)
+        {
+            if (!hasPosx && memcmp(req + i, "posx", 4) == 0)
+                hasPosx = true;
+            if (!hasIndex && i + 5u <= len && memcmp(req + i, "index", 5) == 0)
+                hasIndex = true;
+        }
+        if (hasPosx && hasIndex)
+            return len;
+    }
+    if (!vm_client_hangup_pick_live_combat(&liveId, &liveIndex, &livePosX,
+                                           &livePosY))
+    {
+        printf("[info][network] cbe_hangup_live_bind skip "
+               "evidence=no-kind2-battle-pos\n");
+        return len;
+    }
+    memcpy(out, req, 4);
+    while (srcPos + 5 <= len)
+    {
+        u16 objectLen = (u16)(((u16)req[srcPos + 3] << 8) | req[srcPos + 4]);
+        u32 objectStart = dstPos;
+
+        if (objectLen < 5 || srcPos + objectLen > len)
+            return len;
+        if (dstPos + objectLen + 64u > sizeof(out) || dstPos + objectLen + 64u > cap)
+            return len;
+        memcpy(out + dstPos, req + srcPos, 5);
+        dstPos += 5;
+        if (srcPos + 5 < srcPos + objectLen)
+        {
+            memcpy(out + dstPos, req + srcPos + 5, objectLen - 5u);
+            dstPos += objectLen - 5u;
+        }
+        if (req[srcPos] == 1 && req[srcPos + 1] == 2 && req[srcPos + 2] == 10)
+        {
+            if (!vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos, "id",
+                                                liveId) ||
+                !vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos,
+                                                "index", liveIndex) ||
+                !vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos,
+                                                "posx", livePosX) ||
+                !vm_client_hangup_put_u32_field(out, sizeof(out), &dstPos,
+                                                "posy", livePosY))
+                return len;
+            {
+                u32 newLen = dstPos - objectStart;
+
+                out[objectStart + 3] = (u8)(newLen >> 8);
+                out[objectStart + 4] = (u8)newLen;
+            }
+        }
+        srcPos += objectLen;
+    }
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(dstPos >> 8);
+    out[3] = (u8)dstPos;
+    if (dstPos > cap)
+        return len;
+    memcpy(req, out, dstPos);
+    printf("[info][network] cbe_hangup_live_bind id=%u index=%u pos=(%u,%u) "
+           "len=%u evidence=subtype5-request-live-node\n",
+           liveId, liveIndex, livePosX, livePosY, dstPos);
+    return dstPos;
+}
+
+int vm_client_hangup_confirm_skill_and_start(u32 operate)
+{
+    u32 connectId = g_vmClientHangupPendingConnectId;
+
+    (void)vm_client_hangup_pending_set_operate(operate);
+    g_vmHangupLastOperate = operate;
+    g_vmHangupLastOperateValid = 1;
+    return vm_client_hangup_ack_guest_25_2(connectId);
+}
+
 static void vm_client_prepare_cbe_downlink(u8 **packet, u32 *packetLen)
 {
     u32 offset = 5;
@@ -3128,11 +4346,14 @@ static void vm_client_prepare_cbe_downlink(u8 **packet, u32 *packetLen)
 
     if (packet == NULL || packetLen == NULL)
         return;
+    (void)vm_client_hangup_rewrite_panel_to_dismiss(packet, packetLen);
     vm_client_hangup_settle_note_downlink(*packet, *packetLen);
+    (void)vm_client_hangup_strip_settle_actor14(packet, packetLen);
     (void)vm_client_cbe_inject_hangup_combatinfo(packet, packetLen);
     (void)vm_client_cbe_patch_actorinfo_packet(packet, packetLen);
     (void)vm_client_strip_cbe_unsupported_objects(packet, packetLen);
     (void)vm_client_cbe_clamp_backpack_packet(packet, packetLen);
+    vm_client_hangup_note_downlink_skills(*packet, *packetLen);
 
     /* Narrow forensics: confirm whether login 30/21 reached CBE with 17/1. */
     if (*packet == NULL || *packetLen < 5 || (*packet)[0] != 'W' ||
@@ -3390,6 +4611,19 @@ static u32 vm_client_deliver_wt_response(
 
     if (packet == NULL || packetLen < 5)
         return 0;
+    /*
+     * After 4/7 hangup shell, mmGame still waits on swallowed 25/5.
+     * Empty WT completes that wait → rand_range DIV0 (stack 0x01012E4D).
+     * 4/12 empty ACK happens before OnSettleShell.
+     */
+    if (eventType == 7 && g_vmClientHangupOnSettleShell != 0 &&
+        vm_client_packet_is_empty_wt(packet, packetLen))
+    {
+        printf("[info][network] cbe_hangup_drop_empty_wt_ack connect=%u "
+               "len=%u evidence=settle-shell-empty-wt-completes-25/5\n",
+               connectId, packetLen);
+        return 0;
+    }
 
     objectTotal = vm_client_count_parsed_response_objects(packet, packetLen);
     if (eventType != 7 || objectTotal == 0 ||
@@ -4778,6 +6012,19 @@ static void vm_net_mock_async_drain_completions(void)
             vm_client_free_completion(completion);
             continue;
         }
+        vm_client_hangup_maybe_flush_scene_default_ack(
+            completion->connectId, completion->response,
+            completion->responseLen);
+        if (g_vmClientHangupAutoAckAfterPanel)
+        {
+            u32 hangupConnect = completion->connectId;
+
+            g_vmClientHangupAutoAckAfterPanel = 0;
+            printf("[info][network] cbe_hangup_auto_ack_after_panel "
+                   "connect=%u evidence=legacy-swallowed-path\n",
+                   hangupConnect);
+            (void)vm_client_hangup_ack_guest_25_2(hangupConnect);
+        }
         g_netDownLinkData += completion->responseLen;
         nowMs = SDL_GetTicks();
         {
@@ -4906,11 +6153,7 @@ static void vm_net_mock_async_shutdown(void)
     pthread_mutex_unlock(&g_vmClientAsync.mutex);
 }
 
-#ifdef CBE_PLATFORM_ANDROID
-/*
- * Local empty WT (objectCount=0) on the same connectId so title net callback
- * runs and clears the login progress bar without forwarding to the service.
- */
+/* Local empty WT so a truncated uplink still dismisses CBE net-wait. */
 static bool vm_client_deliver_local_empty_wt(u32 connectId)
 {
     u8 packet[8];
@@ -4937,7 +6180,1015 @@ static bool vm_client_deliver_local_empty_wt(u32 connectId)
            connectId);
     return true;
 }
-#endif
+
+static u32 vm_client_build_scene_default25_5_ack(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < 32u)
+        return 0;
+    memset(out, 0, 5);
+    if (!vm_client_begin_local_wt_object(out, outCap, &pos, 1, 25, 5,
+                                         &objectStart) ||
+        !vm_client_put_object_u8_field(out, outCap, &pos, "result", 4))
+    {
+        return 0;
+    }
+    vm_client_finish_local_wt_object(out, objectStart, pos);
+    vm_client_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+static bool vm_client_deliver_local_scene_default25_5(u32 connectId)
+{
+    u8 packet[64];
+    u32 packetLen;
+    vm_net_channel *channel = scheduler_find_net_channel(connectId);
+
+    if (channel == NULL || channel->callback == 0)
+    {
+        printf("[warn][network] cbe_hangup_flush_25_5 no channel connect=%u\n",
+               connectId);
+        return false;
+    }
+    packetLen = vm_client_build_scene_default25_5_ack(packet, sizeof(packet));
+    if (packetLen == 0)
+        return false;
+    if (vm_client_deliver_wt_response(packet, packetLen, 7, channel->callback,
+                                      channel->context, connectId, false,
+                                      false) == 0)
+    {
+        printf("[warn][network] cbe_hangup_flush_25_5 deliver failed "
+               "connect=%u\n",
+               connectId);
+        return false;
+    }
+    printf("[info][network] cbe_hangup_flush_25_5 connect=%u len=%u "
+           "evidence=4/8-map-then-mmGame-25/5-result4\n",
+           connectId, packetLen);
+    return true;
+}
+
+static void vm_client_hangup_maybe_flush_scene_default_ack(u32 connectId,
+                                                           const u8 *packet,
+                                                           u32 packetLen)
+{
+    u32 flushConnect;
+
+    if (g_vmClientHangupOweSceneDefaultAck == 0)
+        return;
+    /*
+     * Lone 4/8 is map return → complete swallowed mmGame 25/5.
+     * Hangup fight 2 is 4/8+4/10 (CBE poll-synth, no live scene node) or
+     * 4/8+4/5 (Pixi live-node).  client_out 2026-10-05: flushing 25/5 on
+     * 4/8+4/10 made guest send 4/1; second enter left font obj+0xc=0
+     * → UC_ERR_MAP pc=0x01004E36 SCR_Render.
+     */
+    if (!vm_client_packet_has_battle_subtype8(packet, packetLen))
+        return;
+    if (vm_client_packet_has_battle_subtype(packet, packetLen, 5) ||
+        vm_client_packet_has_battle_subtype(packet, packetLen, 10))
+    {
+        printf("[info][network] cbe_hangup_keep_25_5 connect=%u "
+               "evidence=4/8-plus-4/5-or-4/10-reenter-no-map-flush\n",
+               connectId);
+        return;
+    }
+    flushConnect = g_vmClientHangupOweSceneDefaultConnect != 0
+                       ? g_vmClientHangupOweSceneDefaultConnect
+                       : connectId;
+    g_vmClientHangupOweSceneDefaultAck = 0;
+    g_vmClientHangupOweSceneDefaultConnect = 0;
+    (void)vm_client_deliver_local_scene_default25_5(flushConnect);
+}
+
+/*
+ * HandleBattleEnterReq sets enter-state=3 (「获取数据」) before 2/10 leaves.
+ * Empty WT ack leaves that wait forever.  Same dismiss contract as mock hangup
+ * soft-fail prefix: empty 2/10 + 25/12 result=4 (no tip — bag clickthrough
+ * must stay silent).
+ */
+static bool vm_client_begin_local_wt_object(u8 *out, u32 outCap, u32 *pos,
+                                            u8 major, u8 kind, u8 subtype,
+                                            u32 *objectStart)
+{
+    if (out == NULL || pos == NULL || *pos + 6u > outCap)
+        return false;
+    if (objectStart != NULL)
+        *objectStart = *pos;
+    out[(*pos)++] = major;
+    out[(*pos)++] = kind;
+    out[(*pos)++] = subtype;
+    out[(*pos)++] = 0;
+    out[(*pos)++] = 0;
+    out[(*pos)++] = 0;
+    return true;
+}
+
+static void vm_client_finish_local_wt_object(u8 *out, u32 objectStart, u32 pos)
+{
+    u32 objectLen = pos - objectStart;
+
+    out[objectStart + 4] = (u8)(objectLen >> 8);
+    out[objectStart + 5] = (u8)objectLen;
+}
+
+static u32 vm_client_build_hangup_dismiss_wt(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+    static const u8 kEmpty = 0;
+    static const u8 kOthernum0[] = {0x00, 0x04, 0x00, 0x00, 0x00, 0x00};
+    static const u8 kResult4[] = {0x00, 0x01, 0x04};
+
+    if (out == NULL || outCap < 64u)
+        return 0;
+    memset(out, 0, 5);
+    if (!vm_client_begin_local_wt_object(out, outCap, &pos, 1, 2, 10,
+                                         &objectStart) ||
+        !vm_client_put_object_field(out, outCap, &pos, "othernum", kOthernum0,
+                                    (u16)sizeof(kOthernum0)) ||
+        !vm_client_put_object_field(out, outCap, &pos, "otherinfo", &kEmpty,
+                                    0))
+    {
+        return 0;
+    }
+    vm_client_finish_local_wt_object(out, objectStart, pos);
+    ++objectCount;
+    if (!vm_client_begin_local_wt_object(out, outCap, &pos, 1, 0x19, 12,
+                                         &objectStart) ||
+        !vm_client_put_object_field(out, outCap, &pos, "result", kResult4,
+                                    (u16)sizeof(kResult4)))
+    {
+        return 0;
+    }
+    vm_client_finish_local_wt_object(out, objectStart, pos);
+    ++objectCount;
+    vm_client_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}
+
+static bool vm_client_deliver_local_hangup_dismiss(u32 connectId)
+{
+    u8 packet[128];
+    u32 packetLen;
+    vm_net_channel *channel = scheduler_find_net_channel(connectId);
+
+    if (channel == NULL || channel->callback == 0)
+    {
+        printf("[warn][network] hangup_dismiss_ack no channel connect=%u\n",
+               connectId);
+        return false;
+    }
+    packetLen = vm_client_build_hangup_dismiss_wt(packet, sizeof(packet));
+    if (packetLen == 0)
+    {
+        printf("[warn][network] hangup_dismiss_ack build failed connect=%u\n",
+               connectId);
+        return vm_client_deliver_local_empty_wt(connectId);
+    }
+    if (vm_client_deliver_wt_response(packet, packetLen, 7, channel->callback,
+                                      channel->context, connectId, false,
+                                      false) == 0)
+    {
+        printf("[warn][network] hangup_dismiss_ack deliver failed connect=%u "
+               "len=%u\n",
+               connectId, packetLen);
+        return false;
+    }
+    printf("[info][network] hangup_dismiss_ack connect=%u event=7 len=%u "
+           "objects=2/10+25/12 evidence=battle-enter-state3-clear\n",
+           connectId, packetLen);
+    return true;
+}
+
+static bool vm_client_put_object_u8_field(u8 *out, u32 outCap, u32 *pos,
+                                          const char *name, u8 value)
+{
+    u8 enc[3];
+
+    enc[0] = 0;
+    enc[1] = 1;
+    enc[2] = value;
+    return vm_client_put_object_field(out, outCap, pos, name, enc, 3);
+}
+
+static bool vm_client_put_object_u16_field(u8 *out, u32 outCap, u32 *pos,
+                                           const char *name, u16 value)
+{
+    u8 enc[4];
+
+    enc[0] = 0;
+    enc[1] = 2;
+    enc[2] = (u8)(value >> 8);
+    enc[3] = (u8)value;
+    return vm_client_put_object_field(out, outCap, pos, name, enc, 4);
+}
+
+static bool vm_client_put_object_blob_field(u8 *out, u32 outCap, u32 *pos,
+                                            const char *name, const u8 *data,
+                                            u16 dataLen)
+{
+    u32 nameLen = name ? (u32)strlen(name) : 0;
+    u16 valueLen;
+
+    if (out == NULL || pos == NULL || nameLen == 0 || nameLen > 0xffu ||
+        (data == NULL && dataLen != 0))
+        return false;
+    valueLen = (u16)(dataLen + 2u);
+    if (*pos + 1u + nameLen + 2u + valueLen > outCap)
+        return false;
+    out[(*pos)++] = (u8)nameLen;
+    memcpy(out + *pos, name, nameLen);
+    *pos += nameLen;
+    out[(*pos)++] = (u8)(valueLen >> 8);
+    out[(*pos)++] = (u8)valueLen;
+    out[(*pos)++] = (u8)(dataLen >> 8);
+    out[(*pos)++] = (u8)dataLen;
+    if (dataLen != 0)
+    {
+        memcpy(out + *pos, data, dataLen);
+        *pos += dataLen;
+    }
+    return true;
+}
+
+/*
+ * CBE_EMU native confirm: 2/10 empty + 25/3 {num, info[181], mnum}.
+ * info[180]=row count; Handle25_2 then sets game+1136 hangup mode.
+ */
+static u32 vm_client_build_hangup_panel_wt(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+    static const u8 kEmpty = 0;
+    static const u8 kOthernum0[] = {0x00, 0x04, 0x00, 0x00, 0x00, 0x00};
+    /* GBK: 本次挂机确认 / 挂机场次上限：不限次 / 掉落放入背包 / 是否继续挂机？ */
+    static const char panelFormat[] =
+        "\xB1\xBE\xB4\xCE\xB9\xD2\xBB\xFA\xC8\xB7\xC8\xCF\n"
+        "\xB9\xD2\xBB\xFA\xB3\xA1\xB4\xCE\xC9\xCF\xCF\xDE\xA3\xBA\xB2\xBB\xCF\xDE\xB4\xCE\n"
+        "\xB5\xF4\xC2\xE4\xCE\xEF\xC6\xB7\xBD\xAB\xB7\xC5\xC8\xEB\xB1\xB3\xB0\xFC\n"
+        "\xCA\xC7\xB7\xF1\xBC\xCC\xD0\xF8\xB9\xD2\xBB\xFA\xA3\xBF";
+    u8 info[181];
+    int textLen;
+
+    if (out == NULL || outCap < 256u)
+        return 0;
+    memset(out, 0, 5);
+    memset(info, 0, sizeof(info));
+    textLen = snprintf((char *)info, 180, "%s", panelFormat);
+    if (textLen < 0 || textLen >= 180)
+        return 0;
+    info[180] = 4;
+    if (!vm_client_begin_local_wt_object(out, outCap, &pos, 1, 2, 10,
+                                         &objectStart) ||
+        !vm_client_put_object_field(out, outCap, &pos, "othernum", kOthernum0,
+                                    (u16)sizeof(kOthernum0)) ||
+        !vm_client_put_object_field(out, outCap, &pos, "otherinfo", &kEmpty,
+                                    0))
+    {
+        return 0;
+    }
+    vm_client_finish_local_wt_object(out, objectStart, pos);
+    ++objectCount;
+    if (!vm_client_begin_local_wt_object(out, outCap, &pos, 1, 25, 3,
+                                         &objectStart) ||
+        !vm_client_put_object_u16_field(out, outCap, &pos, "num", 0) ||
+        !vm_client_put_object_blob_field(out, outCap, &pos, "info", info,
+                                         (u16)sizeof(info)) ||
+        !vm_client_put_object_u8_field(out, outCap, &pos, "mnum", 0))
+    {
+        return 0;
+    }
+    vm_client_finish_local_wt_object(out, objectStart, pos);
+    ++objectCount;
+    vm_client_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}
+
+/*
+ * Guest uplink wire (not response): WT + u16 len + objects with 5-byte
+ * headers (major/kind/subtype/len16).  Response-shaped packets put
+ * objectCount at [4], so get_wt_header_kind_subtype reads kind=1/subtype=25
+ * and mock falls through to tip「功能暂未实现(1/25)」.
+ */
+static u32 vm_client_build_hangup_mode25_2_wt(u8 *out, u32 outCap, u8 type)
+{
+    u32 pos = 4;
+    u32 objectStart;
+    u8 resultEnc[3];
+    u8 typeEnc[3];
+
+    if (out == NULL || outCap < 40u)
+        return 0;
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = 0;
+    out[3] = 0;
+    objectStart = pos;
+    if (pos + 5u > outCap)
+        return 0;
+    out[pos++] = 1;
+    out[pos++] = 25;
+    out[pos++] = 2;
+    out[pos++] = 0;
+    out[pos++] = 0;
+    resultEnc[0] = 0;
+    resultEnc[1] = 1;
+    resultEnc[2] = 1;
+    typeEnc[0] = 0;
+    typeEnc[1] = 1;
+    typeEnc[2] = type;
+    if (!vm_client_put_object_field(out, outCap, &pos, "result", resultEnc, 3) ||
+        !vm_client_put_object_field(out, outCap, &pos, "type", typeEnc, 3))
+    {
+        return 0;
+    }
+    {
+        u32 objectLen = pos - objectStart;
+
+        out[objectStart + 3] = (u8)(objectLen >> 8);
+        out[objectStart + 4] = (u8)objectLen;
+    }
+    out[2] = (u8)(pos >> 8);
+    out[3] = (u8)pos;
+    return pos;
+}
+
+static bool vm_client_deliver_local_wt_buf(u32 connectId, const u8 *packet,
+                                           u32 packetLen, const char *tag)
+{
+    vm_net_channel *channel = scheduler_find_net_channel(connectId);
+
+    if (packet == NULL || packetLen < 5 || channel == NULL ||
+        channel->callback == 0)
+    {
+        printf("[warn][network] %s no channel/packet connect=%u\n",
+               tag ? tag : "local_wt", connectId);
+        return false;
+    }
+    if (vm_client_deliver_wt_response(packet, packetLen, 7, channel->callback,
+                                      channel->context, connectId, false,
+                                      false) == 0)
+    {
+        printf("[warn][network] %s deliver failed connect=%u len=%u\n",
+               tag ? tag : "local_wt", connectId, packetLen);
+        return false;
+    }
+    printf("[info][network] %s connect=%u event=7 len=%u\n",
+           tag ? tag : "local_wt", connectId, packetLen);
+    return true;
+}
+
+static bool vm_client_find_u8_field(const u8 *buf, u32 len, const char *field,
+                                    u8 *value)
+{
+    u32 fieldLen;
+    u32 i;
+
+    if (buf == NULL || field == NULL || value == NULL)
+        return false;
+    fieldLen = (u32)strlen(field);
+    if (fieldLen == 0 || fieldLen > 0xff || len < fieldLen + 5)
+        return false;
+    for (i = 0; i + fieldLen + 5 <= len; ++i)
+    {
+        u32 p;
+
+        if (buf[i] != (u8)fieldLen)
+            continue;
+        if (memcmp(buf + i + 1, field, fieldLen) != 0)
+            continue;
+        p = i + 1 + fieldLen;
+        if (p < len && buf[p] == 0)
+            p++;
+        if (p + 4 <= len && buf[p] == 0x03 && buf[p + 1] == 0 &&
+            buf[p + 2] == 1)
+        {
+            *value = buf[p + 3];
+            return true;
+        }
+        if (p + 2 <= len && buf[p] == 1)
+        {
+            *value = buf[p + 1];
+            return true;
+        }
+        if (p + 5 <= len && buf[p] == 0 && buf[p + 1] == 3 &&
+            buf[p + 2] == 0 && buf[p + 3] == 1)
+        {
+            *value = buf[p + 4];
+            return true;
+        }
+        if (p + 3 <= len && buf[p] == 0 && buf[p + 1] == 1)
+        {
+            *value = buf[p + 2];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_client_request_is_cbe_hangup_start(const u8 *req, u32 len)
+{
+    u32 pos = 4;
+    bool have210 = false;
+    u8 type = 0;
+    u32 extraObjects = 0;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return false;
+    /*
+     * Hangup start is 2/10 Type=2 plus optional 25/3 / 2/1.  mmShop open
+     * batches the same 2/10 companion with 14/14+14/4+14/5+14/6; scanning the
+     * whole WT for Type==2 then swallowing (stack>=2) acked the mall with an
+     * empty WT and left the shop with no items.
+     */
+    while (pos + 5 <= len)
+    {
+        u16 objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+        u8 kind;
+        u8 subtype;
+
+        if (objectLen < 5 || pos + objectLen > len)
+            break;
+        kind = req[pos + 1];
+        subtype = req[pos + 2];
+        if (req[pos] == 1 && kind == 2 && subtype == 10)
+        {
+            have210 = true;
+            if (!vm_client_find_u8_field(req + pos, objectLen, "Type", &type))
+                (void)vm_client_find_u8_field(req + pos, objectLen, "type",
+                                              &type);
+        }
+        else if (!((kind == 25 && subtype == 3) ||
+                   (kind == 2 && subtype == 1)))
+        {
+            ++extraObjects;
+        }
+        pos += objectLen;
+    }
+    return have210 && extraObjects == 0 && type == 2;
+}
+
+static bool vm_client_request_is_empty_scene_default_25_5(const u8 *req, u32 len)
+{
+    u32 pos = 4;
+    u16 objectLen;
+    u32 extra = 0;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return false;
+    if (pos + 5 > len)
+        return false;
+    objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+    if (objectLen < 5 || pos + objectLen > len ||
+        req[pos] != 1 || req[pos + 1] != 25 || req[pos + 2] != 5)
+    {
+        return false;
+    }
+    if (objectLen != 5)
+        return false;
+    pos += objectLen;
+    while (pos + 5 <= len)
+    {
+        objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+        if (objectLen < 5 || pos + objectLen > len)
+            break;
+        ++extra;
+        pos += objectLen;
+    }
+    return extra == 0 && pos == len;
+}
+
+static bool vm_client_request_is_map_battle_enter_4_1(const u8 *req, u32 len)
+{
+    u32 pos = 4;
+    u16 objectLen;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return false;
+    if (pos + 5 > len)
+        return false;
+    objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+    if (objectLen < 5 || pos + objectLen > len)
+        return false;
+    return req[pos] == 1 && req[pos + 1] == 4 && req[pos + 2] == 1;
+}
+
+/*
+ * Standalone 25/2(type=1|2) or compound stop 2/10(Type=2)+25/2(type=2).
+ * evidence: CBE_EMU vm_net_mock_build_scene_hangup_mode_response
+ */
+static bool vm_client_request_parse_hangup_mode25_2(const u8 *req, u32 len,
+                                                    u8 *typeOut,
+                                                    bool *compoundStopOut)
+{
+    u32 pos = 4;
+    u8 kind = 0;
+    u8 subtype = 0;
+    u8 requestedType = 0;
+    bool compoundStop = false;
+
+    if (typeOut)
+        *typeOut = 0;
+    if (compoundStopOut)
+        *compoundStopOut = false;
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return false;
+    /* Request WT: first object begins at offset 4 (major/kind/subtype). */
+    kind = req[5];
+    subtype = req[6];
+    if (kind == 25 && subtype == 2)
+    {
+        u16 objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+
+        if (objectLen < 5 || pos + objectLen != len || req[pos] != 1 ||
+            req[pos + 1] != 25 || req[pos + 2] != 2)
+            return false;
+        if (!vm_client_find_u8_field(req + pos, objectLen, "type",
+                                     &requestedType) &&
+            !vm_client_find_u8_field(req + pos, objectLen, "Type",
+                                     &requestedType))
+            return false;
+        if (requestedType != 1 && requestedType != 2)
+            return false;
+    }
+    else if (kind == 2 && subtype == 10)
+    {
+        u16 objectLen;
+        u8 actorType = 0;
+
+        if (pos + 5 > len)
+            return false;
+        objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+        if (objectLen < 5 || pos + objectLen > len || req[pos] != 1 ||
+            req[pos + 1] != 2 || req[pos + 2] != 10)
+            return false;
+        if (!vm_client_find_u8_field(req + pos, objectLen, "Type", &actorType) &&
+            !vm_client_find_u8_field(req + pos, objectLen, "type", &actorType))
+            return false;
+        if (actorType != 2)
+            return false;
+        pos += objectLen;
+        if (pos + 5 > len)
+            return false;
+        objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+        if (objectLen < 5 || pos + objectLen != len || req[pos] != 1 ||
+            req[pos + 1] != 25 || req[pos + 2] != 2)
+            return false;
+        if (!vm_client_find_u8_field(req + pos, objectLen, "type",
+                                     &requestedType) &&
+            !vm_client_find_u8_field(req + pos, objectLen, "Type",
+                                     &requestedType))
+            return false;
+        if (requestedType != 2)
+            return false;
+        compoundStop = true;
+    }
+    else
+    {
+        return false;
+    }
+    if (typeOut)
+        *typeOut = requestedType;
+    if (compoundStopOut)
+        *compoundStopOut = compoundStop;
+    return true;
+}
+
+static void vm_client_hangup_store_pending_start(u32 connectId, const u8 *req,
+                                                 u32 len)
+{
+    if (req == NULL || len == 0 || len > sizeof(g_vmClientHangupPendingStart))
+        return;
+    memcpy(g_vmClientHangupPendingStart, req, len);
+    g_vmClientHangupPendingStartLen = len;
+    g_vmClientHangupPendingConnectId = connectId;
+}
+
+static bool vm_client_find_mmbattle_8996(u32 *entryOut, u32 *moduleR9Out)
+{
+    u32 codeBase = 0;
+    u32 moduleR9 = 0;
+    u32 i;
+    int appIndex;
+
+    if (entryOut)
+        *entryOut = 0;
+    if (moduleR9Out)
+        *moduleR9Out = 0;
+    /* Prefer the module that issued the hangup uplink (send LR / send R9). */
+    appIndex = vm_dl_find_loaded_index_by_pc(g_lastNetSendLr);
+    if (appIndex < 0)
+        appIndex = vm_dl_find_loaded_index_by_pc(g_lastNetSendLr | 1u);
+    if (appIndex < 0 && g_vmClientHangupSendR9 != 0)
+        appIndex = vm_dl_find_loaded_index_by_sp_bf(g_vmClientHangupSendR9);
+    if (appIndex >= 0)
+    {
+        codeBase = g_vmDlLoadedApps[appIndex].buffer;
+        moduleR9 = g_vmDlLoadedApps[appIndex].spBf;
+        if (moduleR9 == 0 && g_vmClientHangupSendR9 != 0)
+            moduleR9 = g_vmClientHangupSendR9;
+        if (moduleR9 == 0)
+            moduleR9 = codeBase + 0x14000u;
+        if (codeBase != 0)
+        {
+            if (entryOut)
+                *entryOut = (codeBase + 0x8996u) | 1u;
+            if (moduleR9Out)
+                *moduleR9Out = moduleR9;
+            return true;
+        }
+    }
+    if (g_vmClientHangupSendR9 != 0 &&
+        g_vmClientHangupSendR9 >= VM_Memory_Pool_ADDRESS &&
+        g_vmClientHangupSendR9 <
+            VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        codeBase = g_vmClientHangupSendR9 - 0x14000u;
+        if (entryOut)
+            *entryOut = (codeBase + 0x8996u) | 1u;
+        if (moduleR9Out)
+            *moduleR9Out = g_vmClientHangupSendR9;
+        return true;
+    }
+    if (vm_infer_battle_module_from_screen(vmAddedScreen, &codeBase, &moduleR9))
+    {
+        if (entryOut)
+            *entryOut = (codeBase + 0x8996u) | 1u;
+        if (moduleR9Out)
+            *moduleR9Out = moduleR9;
+        return true;
+    }
+    for (i = g_screenStackCount; i > 0; --i)
+    {
+        if (!vm_infer_battle_module_from_screen(g_screenStack[i - 1], &codeBase,
+                                                &moduleR9))
+            continue;
+        if (g_screenStackModuleBase[i - 1] != 0)
+            moduleR9 = g_screenStackModuleBase[i - 1];
+        if (entryOut)
+            *entryOut = (codeBase + 0x8996u) | 1u;
+        if (moduleR9Out)
+            *moduleR9Out = moduleR9;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_client_hangup_deliver_wt_to_8996(u32 connectId, u8 *packet,
+                                                u32 packetLen, const char *tag)
+{
+    u32 entry = 0;
+    u32 moduleR9 = 0;
+    vm_net_channel *channel;
+    uc_err fireErr;
+
+    if (!vm_client_find_mmbattle_8996(&entry, &moduleR9))
+        return false;
+    channel = scheduler_find_net_channel(connectId);
+    g_hangupNetCallEntry = entry;
+    g_hangupNetCallR9 = moduleR9;
+    if (!vm_client_deliver_wt_single(
+            packet, packetLen, 7, entry,
+            moduleR9 != 0 ? moduleR9 : (channel ? channel->context : 0),
+            connectId, false, true))
+    {
+        g_hangupNetCallEntry = 0;
+        g_hangupNetCallR9 = 0;
+        return false;
+    }
+    /*
+     * Fire immediately so Handle25_3/Handle25_2 run before Type=2 replay
+     * or the next guest tick.  Module R9 is forced in net_fire.
+     */
+    fireErr = scheduler_dispatch_net_tasks();
+    printf("[info][network] %s connect=%u entry=%08x r9=%08x len=%u "
+           "parser=mmBattle:0x8996 fire_err=%u\n",
+           tag ? tag : "cbe_hangup_8996", connectId, entry, moduleR9,
+           packetLen, (unsigned)fireErr);
+    vm_client_hangup_log_mode_flag(tag ? tag : "after-8996");
+    if (fireErr != UC_ERR_OK)
+    {
+        g_hangupNetCallEntry = 0;
+        g_hangupNetCallR9 = 0;
+        printf("[warn][network] %s 8996_fire_err=%u fallback=channel\n",
+               tag ? tag : "cbe_hangup_8996", (unsigned)fireErr);
+        return false;
+    }
+    return true;
+}
+
+static bool vm_client_hangup_deliver_local_panel(u32 connectId)
+{
+    u8 packet[320];
+    u32 packetLen = vm_client_build_hangup_panel_wt(packet, sizeof(packet));
+
+    if (packetLen == 0)
+        return false;
+    /*
+     * Do NOT cold-call mmBattle:0x8996 here.  client_out 2026-10-05:
+     * entry=050276f7 r9=05032d60 fire_err=11 → UC_ERR_MAP / SCR_Event.
+     * game at r9+8272 is non-writable (b5f8bd70).  Channel shows the local
+     * 25/3 confirm shell; native game+1136 remains unresolved without a
+     * real guest 25/2 wait after sub_28A4.
+     */
+    g_vmClientHangupPanelVia8996 = 0;
+    if (!vm_client_deliver_local_wt_buf(connectId, packet, packetLen,
+                                        "cbe_hangup_panel_open"))
+        return false;
+    g_vmClientHangupNativeMode = 1;
+    printf("[info][network] cbe_hangup_panel_open connect=%u mode=1 "
+           "via=channel evidence=no-cold-8996\n",
+           connectId);
+    return true;
+}
+
+static bool vm_client_hangup_deliver_local_mode25_2(u32 connectId, u8 type,
+                                                    bool compoundStop)
+{
+    u8 packet[128];
+    u32 packetLen = 0;
+
+    if (!compoundStop)
+    {
+        packetLen = vm_client_build_hangup_mode25_2_wt(packet, sizeof(packet),
+                                                       type);
+    }
+    else
+    {
+        u32 pos = 5;
+        u32 objectStart = 0;
+        u8 objectCount = 0;
+        static const u8 kEmpty = 0;
+        static const u8 kOthernum0[] = {0x00, 0x04, 0x00, 0x00, 0x00, 0x00};
+
+        memset(packet, 0, 5);
+        if (!vm_client_begin_local_wt_object(packet, sizeof(packet), &pos, 1, 2,
+                                             10, &objectStart) ||
+            !vm_client_put_object_field(packet, sizeof(packet), &pos, "othernum",
+                                        kOthernum0, (u16)sizeof(kOthernum0)) ||
+            !vm_client_put_object_field(packet, sizeof(packet), &pos, "otherinfo",
+                                        &kEmpty, 0))
+            return false;
+        vm_client_finish_local_wt_object(packet, objectStart, pos);
+        ++objectCount;
+        if (!vm_client_begin_local_wt_object(packet, sizeof(packet), &pos, 1, 25,
+                                             2, &objectStart) ||
+            !vm_client_put_object_u8_field(packet, sizeof(packet), &pos,
+                                           "result", 1) ||
+            !vm_client_put_object_u8_field(packet, sizeof(packet), &pos, "type",
+                                           type))
+            return false;
+        vm_client_finish_local_wt_object(packet, objectStart, pos);
+        ++objectCount;
+        vm_client_finish_wt_packet(packet, pos, objectCount);
+        packetLen = pos;
+    }
+    if (packetLen == 0)
+        return false;
+    /*
+     * Channel ack only — does not reach Handle25_2 / game+1136.  Cold 8996
+     * for type=1 also UC_ERR_MAP (same session as panel).  Keep host path
+     * crash-free; settle shell stays manual until a real 25/2 wait exists.
+     */
+    if (!vm_client_deliver_local_wt_buf(connectId, packet, packetLen,
+                                        "cbe_hangup_mode25_2"))
+        return false;
+    printf("[info][network] cbe_hangup_mode25_2 connect=%u type=%u "
+           "compound_stop=%u via=channel evidence=no-cold-8996\n",
+           connectId, type, compoundStop ? 1u : 0u);
+    return true;
+}
+
+/* mode==1: native 25/3 panel open; guest must receive 确定 for 28A4. */
+static int vm_client_hangup_confirm_pending(void)
+{
+    return g_vmClientHangupNativeMode == 1;
+}
+
+static void vm_client_hangup_arm_skip_guest_confirm(u32 holdMs)
+{
+    u32 now = SDL_GetTicks();
+
+    if (holdMs < 500u)
+        holdMs = 500u;
+    g_vmHangupSkipGuestConfirmUntilMs = now + holdMs;
+}
+
+/* Swallow leftover 确定 after host hangup start (no native 25/3 on map). */
+static int vm_client_hangup_suppress_guest_confirm(void)
+{
+    u32 now;
+
+    if (g_vmClientHangupNativeMode == 1)
+        return 1;
+    if (g_vmHangupSkipGuestConfirmUntilMs == 0)
+        return 0;
+    now = SDL_GetTicks();
+    if (now < g_vmHangupSkipGuestConfirmUntilMs)
+        return 1;
+    g_vmHangupSkipGuestConfirmUntilMs = 0;
+    return 0;
+}
+
+static void vm_client_hangup_log_mode_flag(const char *reason)
+{
+    u32 codeBase = 0;
+    u32 moduleR9 = 0;
+    u32 game = 0;
+    u8 flag = 0xff;
+    u32 si;
+    int writable = 0;
+
+    if (g_hangupNetCallR9 != 0)
+        moduleR9 = g_hangupNetCallR9;
+    else if (g_vmClientHangupSendR9 != 0)
+        moduleR9 = g_vmClientHangupSendR9;
+    else if (!vm_infer_battle_module_from_screen(vmAddedScreen, &codeBase,
+                                                 &moduleR9))
+    {
+        for (si = g_screenStackCount; si > 0; --si)
+        {
+            if (!vm_infer_battle_module_from_screen(g_screenStack[si - 1],
+                                                    &codeBase, &moduleR9))
+                continue;
+            if (g_screenStackModuleBase[si - 1] != 0)
+                moduleR9 = g_screenStackModuleBase[si - 1];
+            break;
+        }
+    }
+    if (moduleR9 != 0 &&
+        uc_mem_read(MTK, moduleR9 + 8272u, &game, sizeof(game)) == UC_ERR_OK &&
+        game != 0 && vm_is_writable_vm_range(game, 1137u))
+    {
+        writable = 1;
+        (void)uc_mem_read(MTK, game + 1136u, &flag, sizeof(flag));
+    }
+    printf("[info][network] cbe_hangup_mode_flag reason=%s r9=%08x game=%08x "
+           "writable=%d flag1136=%u send_r9=%08x net_r9=%08x "
+           "evidence=read-only\n",
+           reason ? reason : "-", moduleR9, game, writable,
+           writable ? (unsigned)flag : 0xffu, g_vmClientHangupSendR9,
+           g_hangupNetCallR9);
+}
+
+static void vm_client_hangup_arm_settle_after_mode(const char *reason)
+{
+    if (vm_client_hangup_settle_ui_active())
+        return;
+    vm_client_hangup_settle_ui_arm((u16)VM_CLIENT_HANGUP_SETTLE_DEFAULT_MAX,
+                                   reason);
+    g_vmClientHangupSettleUi.battleToken = 1;
+    g_vmClientHangupSettleUi.battlePreExp =
+        g_vmClientHangupSettleUi.lastRoleExp;
+    g_vmClientHangupSettleUi.battlePreGold =
+        g_vmClientHangupSettleUi.lastRoleGold;
+}
+
+/*
+ * Guest completed A4D4→28A4 and uplinked standalone 25/2(type=1).  Channel-ack
+ * that wait (0x87DA→0x8996) so Handle25_2 sets game+1136, then replay Type=2
+ * so 19090 still starts fights.  Must not host-call 0x8996 directly.
+ */
+static int vm_client_hangup_ack_guest_25_2(u32 connectId)
+{
+    u32 pendingLen = g_vmClientHangupPendingStartLen;
+    u8 pending[VM_CLIENT_REQUEST_MAX];
+
+    if (connectId == 0)
+        connectId = g_vmClientHangupPendingConnectId;
+    if (connectId == 0)
+    {
+        printf("[warn][network] cbe_hangup_ack_guest_25_2 no connect\n");
+        return 0;
+    }
+    vm_client_hangup_arm_skip_guest_confirm(2500u);
+    if (g_vmClientHangupNativeMode == 2)
+    {
+        printf("[info][network] cbe_hangup_ack_guest_25_2 already-mode2 "
+               "connect=%u evidence=idempotent-skip-28A4\n",
+               connectId);
+        return 1;
+    }
+    if (g_vmClientHangupNativeMode != 1 && g_vmClientHangupNativeMode != 2)
+    {
+        /* Allow ack if panel was shown (mode 1) or already armed. */
+        if (g_vmClientHangupPendingStartLen == 0 &&
+            g_vmClientHangupNativeMode == 0)
+        {
+            printf("[warn][network] cbe_hangup_ack_guest_25_2 mode=%u "
+                   "no-pending\n",
+                   g_vmClientHangupNativeMode);
+            return 0;
+        }
+    }
+    vm_client_hangup_log_mode_flag("before-guest-25_2-ack");
+    /*
+     * Do not run guest 28A4 (R0=0 / Global R9 → UC_ERR_MAP) and do not
+     * cold-call 8996.  Forward standalone 25/2 so the server arms
+     * sceneHangupEnabled, then replay Type=2 for 19090 battles.
+     */
+    {
+        u8 req25[128];
+        u32 reqLen = vm_client_build_hangup_mode25_2_wt(req25, sizeof(req25), 1);
+
+        if (reqLen == 0 ||
+            !vm_client_enqueue(VM_CLIENT_JOB_DATA, connectId, req25, reqLen))
+        {
+            printf("[warn][network] cbe_hangup_ack_guest_25_2 enqueue_fail "
+                   "connect=%u\n",
+                   connectId);
+            return 0;
+        }
+        g_netUpLinkData += reqLen;
+        printf("[info][network] cbe_hangup_uplink_25_2 connect=%u len=%u "
+               "evidence=host-confirm-skip-28A4\n",
+               connectId, reqLen);
+    }
+    g_vmClientHangupNativeMode = 2;
+    vm_client_hangup_arm_settle_after_mode("hangup-guest-25/2-ack");
+    vm_client_hangup_log_mode_flag("after-guest-25_2-ack-queued");
+    if (pendingLen != 0)
+    {
+        memcpy(pending, g_vmClientHangupPendingStart, pendingLen);
+        pendingLen = vm_client_hangup_bind_live_combat(pending, pendingLen,
+                                                       sizeof(pending));
+        g_vmClientHangupPendingStartLen = 0;
+        g_vmClientHangupPendingConnectId = 0;
+        printf("[info][network] cbe_hangup_replay_start connect=%u len=%u "
+               "after=guest-25/2-ack\n",
+               connectId, pendingLen);
+        if (!vm_client_enqueue(VM_CLIENT_JOB_DATA, connectId, pending,
+                               pendingLen))
+        {
+            printf("[warn][network] cbe_hangup_replay_start_fail connect=%u "
+                   "len=%u\n",
+                   connectId, pendingLen);
+        }
+        else
+        {
+            g_netUpLinkData += pendingLen;
+        }
+    }
+    printf("[info][network] cbe_hangup_ack_guest_25_2 connect=%u mode=2 "
+           "evidence=8996-25/2+Type2-replay\n",
+           connectId);
+    vm_hangup_candidate_fault_disarm();
+    return 1;
+}
+
+static int vm_client_hangup_host_cancel(void)
+{
+    u32 connectId = g_vmClientHangupPendingConnectId;
+
+    if (g_vmClientHangupNativeMode != 1)
+        return 0;
+    if (connectId != 0)
+        (void)vm_client_deliver_local_hangup_dismiss(connectId);
+    g_vmClientHangupPendingStartLen = 0;
+    g_vmClientHangupPendingConnectId = 0;
+    g_vmClientHangupNativeMode = 0;
+    vm_client_hangup_arm_skip_guest_confirm(800u);
+    vm_client_hangup_settle_ui_clear("hangup-host-cancel");
+    printf("[info][network] cbe_hangup_host_cancel connect=%u\n", connectId);
+    vm_hangup_candidate_fault_disarm();
+    return 1;
+}
+
+static void vm_client_log_uplink_objects(const u8 *req, u32 len)
+{
+    u32 pos = 4;
+    char list[160];
+    u32 used = 0;
+    u32 n = 0;
+
+    list[0] = 0;
+    if (req == NULL || len < 4 || req[0] != 'W' || req[1] != 'T')
+        return;
+    while (pos + 5 <= len && n < 12)
+    {
+        u16 objectLen = (u16)(((u16)req[pos + 3] << 8) | req[pos + 4]);
+        int wrote;
+
+        if (objectLen < 5 || pos + objectLen > len)
+            break;
+        wrote = snprintf(list + used, sizeof(list) - used, "%s%u/%u/%u",
+                         used ? "," : "", req[pos], req[pos + 1],
+                         req[pos + 2]);
+        if (wrote < 0 || (u32)wrote >= sizeof(list) - used)
+            break;
+        used += (u32)wrote;
+        pos += objectLen;
+        ++n;
+    }
+    printf("[info][network] cbe_uplink len=%u hdr=%u/%u/%u objects=%s\n",
+           len, (unsigned)req[4], (unsigned)req[5], (unsigned)req[6],
+           list[0] ? list : "-");
+}
 
 static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
 {
@@ -4960,6 +7211,118 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
         vm_android_request_need_login_tip("no_account_start");
         (void)vm_client_deliver_local_empty_wt(connectId);
         return;
+    }
+#endif
+#if defined(CBE_CLIENT_ONLY)
+    vm_client_log_uplink_objects(request, readLen);
+    vm_client_hangup_note_operate_uplink(request, readLen);
+    if (vm_client_request_is_cbe_hangup_start(request, readLen))
+    {
+        if (vm_host_should_block_hangup_uplink())
+        {
+            printf("[info][network] swallow_hangup_uplink len=%u "
+                   "evidence=bag-equip-detail-clickthrough "
+                   "ack=2/10+25/12\n",
+                   readLen);
+            (void)vm_client_deliver_local_hangup_dismiss(connectId);
+            return;
+        }
+        /*
+         * Already hanging: map/world 二次点击 is NOT stop.  Native stop is
+         * hangup-settle 停止挂机 → 2/10+25/2(type=2).
+         */
+        if (g_vmClientHangupNativeMode == 2)
+        {
+            printf("[info][network] cbe_hangup_uplink Type=2 len=%u "
+                   "forwarded=0 action=map-tap-ignored "
+                   "evidence=stop-is-settle-button-25/2-type2\n",
+                   readLen);
+            (void)vm_client_deliver_local_hangup_dismiss(connectId);
+            return;
+        }
+        if (g_vmClientHangupStopHoldUntilMs != 0 &&
+            SDL_GetTicks() < g_vmClientHangupStopHoldUntilMs)
+        {
+            printf("[info][network] cbe_hangup_uplink Type=2 len=%u "
+                   "forwarded=0 action=swallow-after-settle-stop "
+                   "evidence=map-type2-after-25/2-type2\n",
+                   readLen);
+            (void)vm_client_deliver_local_hangup_dismiss(connectId);
+            return;
+        }
+        /*
+         * Do not bind mmBattle R9 or forward 25/3 here.  client_out 2026-10-05:
+         * hangup_confirm_bind_r9 on the outdoor map rewrote
+         * g_currentScreenModuleBase; next mmGame ScreenLogic (pc=502da7a)
+         * ran with this=6a8e3180 → UC_ERR_MAP / SCR_Event.  Outdoor module
+         * is mmGame, not mmBattle:0x8996.
+         * Keep the crash-free start: dismiss wait, host 25/2 to arm
+         * sceneHangupEnabled, replay Type=2 for hangup_battle_start.
+         */
+        printf("[info][network] cbe_hangup_uplink Type=2 len=%u forwarded=0 "
+               "evidence=map-send-pick-skill-then-start\n",
+               readLen);
+        vm_client_hangup_store_pending_start(connectId, request, readLen);
+        g_vmClientHangupNativeMode = 1;
+        g_vmClientHangupAutoAckAfterPanel = 0;
+        g_vmClientHangupPanelVia8996 = 0;
+        vm_client_hangup_arm_settle_after_mode("hangup-uplink-2/10");
+        (void)vm_client_deliver_local_hangup_dismiss(connectId);
+        if (!vm_host_hangup_skill_menu_open())
+        {
+            printf("[info][network] cbe_hangup_skill_menu_skip "
+                   "action=start-na\n");
+            (void)vm_client_hangup_ack_guest_25_2(connectId);
+        }
+        return;
+    }
+    if (vm_client_request_is_empty_scene_default_25_5(request, readLen) &&
+        g_vmClientHangupOnSettleShell != 0)
+    {
+        /*
+         * mmGame scene_runtime_tick still emits empty 25/5 on the 4/7
+         * hangup shell.  Empty WT / 25/5 result=4 both DIV0 at 0x0104E980.
+         * Do not complete the wait until map-side 4/8 (no 4/5).
+         */
+        g_vmClientHangupOweSceneDefaultAck = 1;
+        g_vmClientHangupOweSceneDefaultConnect = connectId;
+        printf("[info][network] cbe_hangup_swallow_25_5 len=%u connect=%u "
+               "evidence=div0-0x0104e980-Handle25-on-4/7-shell\n",
+               readLen, connectId);
+        return;
+    }
+    /*
+     * After hangup 4/8+4/10 reenter, mmGame still emits map 4/1.  Forwarding
+     * it stacked a second battle (resp=231) on the 4/10 shell → font +0xc=0
+     * UC_ERR_MAP pc=0x01004E36.  CBE hangup next fight is poll 4/10, not 4/1.
+     */
+    if (g_vmClientHangupNativeMode == 2 &&
+        vm_client_request_is_map_battle_enter_4_1(request, readLen))
+    {
+        printf("[info][network] cbe_hangup_swallow_4_1 len=%u connect=%u "
+               "evidence=hangup-owns-encounter-poll-4/10\n",
+               readLen, connectId);
+        (void)vm_client_deliver_local_empty_wt(connectId);
+        return;
+    }
+    {
+        u8 modeType = 0;
+        bool compoundStop = false;
+
+        if (vm_client_request_parse_hangup_mode25_2(request, readLen, &modeType,
+                                                    &compoundStop) &&
+            modeType == 2)
+        {
+            printf("[info][network] cbe_hangup_uplink stop len=%u "
+                   "compound=%u evidence=settle-stop-button-25/2-type2\n",
+                   readLen, compoundStop ? 1u : 0u);
+            g_vmClientHangupNativeMode = 0;
+            g_vmClientHangupPendingStartLen = 0;
+            g_vmClientHangupPendingConnectId = 0;
+            g_vmClientHangupPanelVia8996 = 0;
+            vm_client_hangup_settle_ui_clear("native-settle-stop");
+            g_vmClientHangupStopHoldUntilMs = SDL_GetTicks() + 4000u;
+        }
     }
 #endif
     /*

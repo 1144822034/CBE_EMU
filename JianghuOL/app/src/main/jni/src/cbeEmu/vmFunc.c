@@ -3234,6 +3234,9 @@ void vM_DrawImageWithClipEx()
         return;
 
 
+    if (vm_host_skip_loading_overlay_image(dstX, dstY, w, h))
+        return;
+
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
     int copyBytes = w * 2;
@@ -3342,6 +3345,9 @@ void vm_vMDrawImageClipAndAlphaEx()
     if (w <= 0 || h <= 0)
         return;
 
+
+    if (vm_host_skip_loading_overlay_image(dstX, dstY, w, h))
+        return;
 
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
     int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
