@@ -1924,6 +1924,122 @@ static bool vm_net_mock_shop_admin_db_load(void)
     return true;
 }
 
+/* Equipment sell / discard / battle-insight auto-sell refund:
+ * floor(catalog 价值 * percent / 100). Default 10 (= historical /10). */
+enum
+{
+    VM_NET_MOCK_EQUIP_SELL_PERCENT_DEFAULT = 10u,
+    VM_NET_MOCK_EQUIP_SELL_PERCENT_MAX = 100u
+};
+
+static u32 g_vm_net_mock_equip_sell_percent = VM_NET_MOCK_EQUIP_SELL_PERCENT_DEFAULT;
+static bool g_vm_net_mock_equip_sell_percent_loaded = false;
+
+static void vm_net_mock_equip_sell_percent_sanitize(u32 *percent)
+{
+    if (percent == NULL)
+        return;
+    if (*percent > VM_NET_MOCK_EQUIP_SELL_PERCENT_MAX)
+        *percent = VM_NET_MOCK_EQUIP_SELL_PERCENT_MAX;
+}
+
+static bool vm_net_mock_equip_sell_percent_row(void *contextValue,
+                                              unsigned int columnCount,
+                                              const char *const *values,
+                                              const size_t *lengths)
+{
+    u32 *percent = (u32 *)contextValue;
+    u32 tmp = 0;
+
+    (void)columnCount;
+    if (percent == NULL || values == NULL || lengths == NULL)
+        return false;
+    if (values[0] && vm_mock_mysql_parse_u32(values[0], lengths[0], &tmp))
+        *percent = tmp;
+    return true;
+}
+
+static void vm_net_mock_equip_sell_percent_load(bool force)
+{
+    u32 percent = VM_NET_MOCK_EQUIP_SELL_PERCENT_DEFAULT;
+
+    if (g_vm_net_mock_equip_sell_percent_loaded && !force)
+        return;
+    g_vm_net_mock_equip_sell_percent = VM_NET_MOCK_EQUIP_SELL_PERCENT_DEFAULT;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_equip_sell_config ("
+            "id TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "sell_percent INT UNSIGNED NOT NULL DEFAULT 10,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(id)) ENGINE=InnoDB"))
+    {
+        printf("[error][mock-admin] equip_sell_config create failed error=%s\n",
+               vm_mysql_last_error());
+        g_vm_net_mock_equip_sell_percent_loaded = true;
+        return;
+    }
+    if (!vm_mysql_query(
+            "SELECT sell_percent FROM server_equip_sell_config WHERE id=1 LIMIT 1",
+            vm_net_mock_equip_sell_percent_row, &percent))
+    {
+        printf("[error][mock-admin] equip_sell_config load failed error=%s\n",
+               vm_mysql_last_error());
+        g_vm_net_mock_equip_sell_percent_loaded = true;
+        return;
+    }
+    vm_net_mock_equip_sell_percent_sanitize(&percent);
+    g_vm_net_mock_equip_sell_percent = percent;
+    g_vm_net_mock_equip_sell_percent_loaded = true;
+}
+
+static u32 vm_net_mock_equip_sell_percent_get(void)
+{
+    vm_net_mock_equip_sell_percent_load(false);
+    return g_vm_net_mock_equip_sell_percent;
+}
+
+static bool vm_net_mock_equip_sell_percent_admin_save(u32 percent)
+{
+    char query[256];
+
+    vm_net_mock_equip_sell_percent_sanitize(&percent);
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_equip_sell_config ("
+            "id TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "sell_percent INT UNSIGNED NOT NULL DEFAULT 10,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(id)) ENGINE=InnoDB"))
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_equip_sell_config (id,sell_percent) VALUES (1,%u) "
+             "ON DUPLICATE KEY UPDATE sell_percent=VALUES(sell_percent)",
+             percent);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-admin] equip_sell_config save failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_equip_sell_percent_loaded = false;
+    vm_net_mock_equip_sell_percent_load(true);
+    return true;
+}
+
+static u32 vm_net_mock_equip_discard_refund_unit_price(
+    const vm_net_mock_shop_catalog_item *catalog)
+{
+    uint64_t product;
+    u32 percent;
+
+    if (catalog == NULL || catalog->price == 0)
+        return 0;
+    percent = vm_net_mock_equip_sell_percent_get();
+    if (percent == 0)
+        return 0;
+    product = ((uint64_t)catalog->price * (uint64_t)percent) / 100ull;
+    return product > 0xffffffffull ? 0xffffffffu : (u32)product;
+}
+
 static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, u32 npcPrice,
                                         bool enabled, bool npcEnabled,
                                         const char **errorOut)
@@ -3838,20 +3954,21 @@ static const vm_net_mock_equip_enhance_attr_def
         {VM_NET_MOCK_EQUIP_ATTR_WISDOM, 0}, /* +16 智慧 [P] */
 };
 
+#include "mock_server_enhance_base_scale.inc.c"
+
 /*
  * Equip.dsh columns with base > 0 scale by enhance level:
- *   M(L) = 1 + (10*L + 35*floor(L/4)) / 100
- * Regular step +10% of base; milestones +4/+8/+12/+16 add an extra +35%
- * (that step is +45%).  +16 → exactly 4× base.  Base 0 stays 0.
- *
+ *   bonusPct = stepPercent*L + tierExtraPercent*floor(L/4)  (admin)
+ *   M(L) = base + base*bonusPct/100
+ * Per-attr applyPercent keeps base and takes that % of (M(L)-base).
  * Shared by role collect_equipment_bonus and shop/sell detail text.
- * 强化基础缩放（M(L)）仅护甲/物攻；气血/法力不参与。
- * 护甲强化增量相对物攻再 /2（物防平衡）；物攻仍用满量 M(L)。
  * 强化附加 UI: +4/+8/+12/+16 milestones, then M(L) deltas for
  * 护甲/物攻 with base>0 (client cap 6).
  */
 static u32 vm_net_mock_equipment_bonus_scale(u32 base, u16 enhanceLevel)
 {
+    const vm_net_mock_enhance_base_scale *cfg =
+        vm_net_mock_enhance_base_scale_get();
     u32 level = enhanceLevel;
     u32 tiers;
     u32 bonusPct;
@@ -3861,18 +3978,30 @@ static u32 vm_net_mock_equipment_bonus_scale(u32 base, u16 enhanceLevel)
     if (level > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
         level = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
     tiers = level / 4u;
-    bonusPct = 10u * level + 35u * tiers;
+    bonusPct = cfg->stepPercent * level + cfg->tierExtraPercent * tiers;
     return base + (base * bonusPct) / 100u;
 }
 
-/* 护甲：基值保留，强化增量 = M(L)-base 的一半。 */
-static u32 vm_net_mock_equipment_armor_bonus_scale(u32 base, u16 enhanceLevel)
+static u32 vm_net_mock_equipment_bonus_scale_apply(u32 base, u16 enhanceLevel,
+                                                  u32 applyPercent)
 {
-    u32 full = vm_net_mock_equipment_bonus_scale(base, enhanceLevel);
+    u32 full;
+    u32 delta;
 
+    if (base == 0 || enhanceLevel == 0 || applyPercent == 0)
+        return base;
+    full = vm_net_mock_equipment_bonus_scale(base, enhanceLevel);
     if (full <= base)
         return base;
-    return base + (full - base) / 2u;
+    delta = full - base;
+    return base + (u32)(((uint64_t)delta * (uint64_t)applyPercent) / 100ull);
+}
+
+/* 护甲默认 apply=50：强化增量 = M(L)-base 的一半。 */
+static u32 vm_net_mock_equipment_armor_bonus_scale(u32 base, u16 enhanceLevel)
+{
+    return vm_net_mock_equipment_bonus_scale_apply(
+        base, enhanceLevel, vm_net_mock_enhance_base_scale_get()->applyArmor);
 }
 
 static u32 vm_net_mock_equipment_bonus_enhance_delta(u32 base, u16 enhanceLevel)
@@ -3887,6 +4016,48 @@ static u32 vm_net_mock_equipment_armor_enhance_delta(u32 base, u16 enhanceLevel)
     u32 scaled = vm_net_mock_equipment_armor_bonus_scale(base, enhanceLevel);
 
     return scaled > base ? scaled - base : 0;
+}
+
+static u32 vm_net_mock_equipment_bonus_scale_apply_delta(u32 base,
+                                                        u16 enhanceLevel,
+                                                        u32 applyPercent)
+{
+    u32 scaled =
+        vm_net_mock_equipment_bonus_scale_apply(base, enhanceLevel, applyPercent);
+
+    return scaled > base ? scaled - base : 0;
+}
+
+static void vm_net_mock_equipment_bonus_apply_enhance_level(
+    vm_net_mock_equipment_bonus *bonus, u16 enhanceLevel)
+{
+    const vm_net_mock_enhance_base_scale *cfg =
+        vm_net_mock_enhance_base_scale_get();
+
+    if (bonus == NULL)
+        return;
+    bonus->attack = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->attack, enhanceLevel, cfg->applyAttack);
+    bonus->armor = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->armor, enhanceLevel, cfg->applyArmor);
+    bonus->hp = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->hp, enhanceLevel, cfg->applyHp);
+    bonus->mp = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->mp, enhanceLevel, cfg->applyMp);
+    bonus->strength = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->strength, enhanceLevel, cfg->applyStrength);
+    bonus->agility = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->agility, enhanceLevel, cfg->applyAgility);
+    bonus->wisdom = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->wisdom, enhanceLevel, cfg->applyWisdom);
+    bonus->dodge = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->dodge, enhanceLevel, cfg->applyDodge);
+    bonus->hit = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->hit, enhanceLevel, cfg->applyHit);
+    bonus->crit = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->crit, enhanceLevel, cfg->applyCrit);
+    bonus->resist = vm_net_mock_equipment_bonus_scale_apply(
+        bonus->resist, enhanceLevel, cfg->applyResist);
 }
 
 /*
@@ -4211,11 +4382,9 @@ static bool vm_net_mock_seq_put_item_common_extra(
                 }
                 if (base == 0)
                     continue;
-                delta = (type == VM_NET_MOCK_EQUIP_ATTR_ARMOR)
-                            ? vm_net_mock_equipment_armor_enhance_delta(base,
-                                                                       level)
-                            : vm_net_mock_equipment_bonus_enhance_delta(base,
-                                                                       level);
+                delta = vm_net_mock_equipment_bonus_scale_apply_delta(
+                    base, level,
+                    vm_net_mock_enhance_base_scale_apply_for_type(type));
                 if (delta == 0)
                     continue;
                 if (delta > 0x7FFFu)
@@ -4888,6 +5057,32 @@ static bool vm_net_mock_is_backpack_open_request(const u8 *request, u32 requestL
            object.kind == 7 &&
            object.subtype == 42 &&
            object.payloadLen == 0;
+}
+
+/*
+ * CBE HUD 打开背包时常把 7/42 与场景 companion 打在同一 WT：
+ *   7/42 + 25/5 + 6/1 + 6/13 + 6/14 + 2/10 + 25/5  (len=49)
+ * 这不是进图 WT6/1（那种以 12/1 打头）。若只认单独 7/42，组合包会被
+ * task-subset 抢走且 includeSkillBooks=0，不回 17/1，背包列表（含 800
+ * 传送石）不会加载。mmGame:0x418C 需要 17/1+7/42。
+ */
+static bool vm_net_mock_is_cbe_backpack_open_combo_request(const u8 *request,
+                                                          u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 14 || request[0] != 'W' ||
+        request[1] != 'T')
+        return false;
+    if (vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1))
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 7 || object.subtype != 42 ||
+        object.payloadLen != 0)
+        return false;
+    return offset != requestLen;
 }
 
 static bool vm_net_mock_is_backpack_items_books_combo_request(const u8 *request, u32 requestLen,
@@ -10679,21 +10874,19 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
                     (void)vm_net_mock_equipment_instance_retire(
                         role->roleId, retireInstanceId, seq);
                 /*
-                 * Equipment discard refunds floor(equip.dsh 价值 / 10) copper
-                 * per removed instance.  Ordinary item.dsh rows get no refund.
+                 * Equipment discard refunds floor(catalog 价值 * sell_percent / 100)
+                 * copper per removed instance.  Ordinary item.dsh rows get no refund.
                  */
                 if (equipment != NULL)
                 {
                     catalog = vm_net_mock_find_shop_catalog_item(itemId);
-                    if (catalog != NULL && catalog->price >= 10u)
+                    refundMoney = vm_net_mock_mul_capped_u32(
+                        vm_net_mock_equip_discard_refund_unit_price(catalog),
+                        discardCount);
+                    if (refundMoney != 0)
                     {
-                        refundMoney = vm_net_mock_mul_capped_u32(
-                            catalog->price / 10u, discardCount);
-                        if (refundMoney != 0)
-                        {
-                            role->money = vm_net_mock_add_capped_u32(
-                                role->money, refundMoney);
-                        }
+                        role->money = vm_net_mock_add_capped_u32(
+                            role->money, refundMoney);
                     }
                 }
             }
@@ -11343,6 +11536,9 @@ static u32 vm_net_mock_build_backpack_open_response(u8 *out, u32 outCap)
     objectCount += 1;
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_backpack_open objects=%u response=17/1+7/42 "
+           "evidence=mmGame:0x418C+sub_2434\n",
+           objectCount);
     return pos;
 }
 

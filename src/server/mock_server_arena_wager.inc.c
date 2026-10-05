@@ -28,8 +28,11 @@ enum
     VM_MOCK_WAGER_EVT_SETTLE = 3,
     VM_MOCK_WAGER_EVT_REJECT = 4,
     VM_MOCK_WAGER_EVT_CANCEL = 5,
-    /* 1金=10000铜；最低押金 100金 */
-    VM_MOCK_WAGER_MIN_STAKE_COPPER = 1000000u,
+    /* 1金=10000铜；最低押金默认 100金（后台 wager_min_stake_gold 可改） */
+    VM_MOCK_WAGER_COPPER_PER_GOLD = 10000u,
+    VM_MOCK_WAGER_DEFAULT_MIN_STAKE_GOLD = 100u,
+    VM_MOCK_WAGER_MIN_STAKE_COPPER =
+        VM_MOCK_WAGER_DEFAULT_MIN_STAKE_GOLD * VM_MOCK_WAGER_COPPER_PER_GOLD,
     /* OPEN 无人应战 / AWAIT 无人确认或拒绝：10 分钟空闲自动撤擂 */
     VM_MOCK_WAGER_IDLE_TIMEOUT_SEC = 600u,
     VM_MOCK_WAGER_STREAK_ANNOUNCE = 3,
@@ -1301,6 +1304,8 @@ static u32 vm_net_mock_build_wager_list_response(const u8 *request, u32 requestL
         !vm_net_mock_put_object_u32(out, outCap, &pos, "count", count) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "vitalityCost",
                                     g_vm_mock_arena_config.wagerVitalityCost) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "minStakeGold",
+                                    vm_mock_wager_min_stake_gold()) ||
         /* entry not blob: Pixi SeqReader expects naked seq (same as auction/rank). */
         !vm_net_mock_put_object_entry(out, outCap, &pos, "rows", rows,
                                       (u16)rowsPos))
@@ -1343,7 +1348,7 @@ static u32 vm_net_mock_build_wager_create_response(const u8 *request,
     if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
         !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
                                           "stake", &stake) ||
-        stake < VM_MOCK_WAGER_MIN_STAKE_COPPER)
+        stake < vm_mock_wager_min_stake_copper())
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
                                              "bad-stake");

@@ -1,5 +1,5 @@
 /* Pixi client UI visibility knobs (MySQL server_client_ui_config).
- * Defaults: wash/翅/骑 ON; multi_open_limit=1; hangup quota without insight ON. */
+ * Defaults: wash/翅/骑 ON; multi_open_limit=1; hangup quota without insight OFF. */
 
 typedef struct vm_net_mock_client_ui_config
 {
@@ -33,7 +33,8 @@ static void vm_net_mock_client_ui_config_set_defaults(
     cfg->wingStatusEnabled = 1;
     cfg->mountStatusEnabled = 1;
     cfg->multiOpenLimit = 1;
-    cfg->hangupQuotaWithoutInsight = 1;
+    /* 0 = hangup battles unlimited without 战斗心得 (product default). */
+    cfg->hangupQuotaWithoutInsight = 0;
 }
 
 static void vm_net_mock_client_ui_config_sanitize(
@@ -155,7 +156,7 @@ static bool vm_net_mock_client_ui_config_ensure_table(void)
             "wing_status_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "mount_status_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "multi_open_limit TINYINT UNSIGNED NOT NULL DEFAULT 1,"
-            "hangup_quota_without_insight TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "hangup_quota_without_insight TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(id)"
@@ -170,15 +171,19 @@ static bool vm_net_mock_client_ui_config_ensure_table(void)
     if (!vm_net_mock_client_ui_config_ensure_column(
             "hangup_quota_without_insight",
             "ALTER TABLE server_client_ui_config ADD COLUMN "
-            "hangup_quota_without_insight TINYINT UNSIGNED NOT NULL DEFAULT 1 "
+            "hangup_quota_without_insight TINYINT UNSIGNED NOT NULL DEFAULT 0 "
             "AFTER multi_open_limit"))
         return false;
     if (!vm_mysql_exec(
             "INSERT IGNORE INTO server_client_ui_config "
             "(id,wash_button_enabled,wing_status_enabled,mount_status_enabled,"
             "multi_open_limit,hangup_quota_without_insight) "
-            "VALUES (1,1,1,1,1,1)"))
+            "VALUES (1,1,1,1,1,0)"))
         return false;
+    /* Product: hangup battles always unlimited; clear legacy quota-on rows. */
+    (void)vm_mysql_exec(
+        "UPDATE server_client_ui_config SET hangup_quota_without_insight=0 "
+        "WHERE id=1 AND hangup_quota_without_insight<>0");
     return true;
 }
 

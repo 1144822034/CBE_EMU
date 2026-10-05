@@ -58,6 +58,8 @@ typedef struct
     u8 wagerCurrency;
     /* 摆擂消耗活力（撤擂不退）；0=不扣. */
     u32 wagerVitalityCost;
+    /* 赏金最低押金（金）；1金=10000铜. 0 按默认 100 金. */
+    u32 wagerMinStakeGold;
     /* Timed-arena duel rules (admin). Defaults preserve historical contract. */
     u8 damageScaleEnabled; /* round damage/hit 2^n */
     u8 allowHeal;          /* 1: each seat, one heal/buff/silence/dispel; items stay banned */
@@ -537,6 +539,7 @@ static void vm_mock_arena_config_set_defaults(vm_mock_arena_config *cfg)
     cfg->wagerFeePercent = 10;
     cfg->wagerCurrency = 0;
     cfg->wagerVitalityCost = 50;
+    cfg->wagerMinStakeGold = 100;
     cfg->damageScaleEnabled = 1;
     cfg->allowHeal = 0;
     cfg->allowDodge = 1;
@@ -571,6 +574,7 @@ static bool vm_mock_arena_ensure_tables(void)
             "wager_fee_percent TINYINT UNSIGNED NOT NULL DEFAULT 10,"
             "wager_currency TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "wager_vitality_cost INT UNSIGNED NOT NULL DEFAULT 50,"
+            "wager_min_stake_gold INT UNSIGNED NOT NULL DEFAULT 100,"
             "damage_scale_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "allow_heal TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "allow_dodge TINYINT UNSIGNED NOT NULL DEFAULT 1,"
@@ -674,6 +678,9 @@ static bool vm_mock_arena_ensure_tables(void)
     (void)vm_mysql_exec(
         "ALTER TABLE server_arena_config ADD COLUMN wager_vitality_cost "
         "INT UNSIGNED NOT NULL DEFAULT 50 AFTER wager_currency");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_config ADD COLUMN wager_min_stake_gold "
+        "INT UNSIGNED NOT NULL DEFAULT 100 AFTER wager_vitality_cost");
     /* 排行奖励：历史 reward_wcoin（酷宝）改名为 reward_vitality（活力） */
     (void)vm_mysql_exec(
         "ALTER TABLE server_arena_rewards CHANGE COLUMN reward_wcoin "
@@ -742,14 +749,20 @@ static bool vm_mock_arena_config_row(void *contextValue, unsigned int columnCoun
         cfg->wagerCurrency = (u8)tmp;
     if (values[19] && vm_mock_mysql_parse_u32(values[19], lengths[19], &tmp))
         cfg->wagerVitalityCost = tmp;
-    if (values[20] && lengths[20])
-        cfg->damageScaleEnabled = (u8)(values[20][0] == '0' ? 0 : 1);
+    if (values[20] && vm_mock_mysql_parse_u32(values[20], lengths[20], &tmp))
+        cfg->wagerMinStakeGold = tmp;
     if (values[21] && lengths[21])
-        cfg->allowHeal = (u8)(values[21][0] == '0' ? 0 : 1);
+        cfg->damageScaleEnabled = (u8)(values[21][0] == '0' ? 0 : 1);
     if (values[22] && lengths[22])
-        cfg->allowDodge = (u8)(values[22][0] == '0' ? 0 : 1);
+        cfg->allowHeal = (u8)(values[22][0] == '0' ? 0 : 1);
     if (values[23] && lengths[23])
-        cfg->allowCombatPill = (u8)(values[23][0] == '0' ? 0 : 1);
+        cfg->allowDodge = (u8)(values[23][0] == '0' ? 0 : 1);
+    if (values[24] && lengths[24])
+        cfg->allowCombatPill = (u8)(values[24][0] == '0' ? 0 : 1);
+    if (cfg->wagerMinStakeGold == 0)
+        cfg->wagerMinStakeGold = 100;
+    if (cfg->wagerMinStakeGold > 10000u)
+        cfg->wagerMinStakeGold = 10000u;
     return true;
 }
 
@@ -796,7 +809,7 @@ static bool vm_mock_arena_load_config(bool force)
     u32 count = 0;
     char sceneHex[192];
     char kwHex[96];
-    char query[1024];
+    char query[1536];
 
     if (g_vm_mock_arena_config_loaded && !force)
         return true;
@@ -809,8 +822,8 @@ static bool vm_mock_arena_load_config(bool force)
             "entry_start_minute,entry_end_minute,match_start_minute,match_end_minute,"
             "round_seconds,battle_timeout_seconds,score_win,score_bye,score_draw,"
             "npc_name_keyword,wager_enabled,wager_fee_percent,wager_currency,"
-            "wager_vitality_cost,damage_scale_enabled,allow_heal,allow_dodge,"
-            "allow_combat_pill "
+            "wager_vitality_cost,wager_min_stake_gold,damage_scale_enabled,"
+            "allow_heal,allow_dodge,allow_combat_pill "
             "FROM server_arena_config WHERE id=1 LIMIT 1",
             vm_mock_arena_config_row, &g_vm_mock_arena_config))
     {
@@ -836,11 +849,12 @@ static bool vm_mock_arena_load_config(bool force)
                      "match_end_minute,round_seconds,battle_timeout_seconds,"
                      "score_win,score_bye,score_draw,npc_name_keyword,"
                      "wager_enabled,wager_fee_percent,wager_currency,"
-                     "wager_vitality_cost,damage_scale_enabled,allow_heal,"
-                     "allow_dodge,allow_combat_pill) "
+                     "wager_vitality_cost,wager_min_stake_gold,"
+                     "damage_scale_enabled,allow_heal,allow_dodge,"
+                     "allow_combat_pill) "
                      "VALUES ("
                      "1,1,UNHEX('%s'),%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-                     "UNHEX('%s'),0,10,0,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE id=id",
+                     "UNHEX('%s'),0,10,0,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE id=id",
                      sceneHex, g_vm_mock_arena_config.spawnX,
                      g_vm_mock_arena_config.spawnY,
                      g_vm_mock_arena_config.weekdayMask, bracketsText,
@@ -854,6 +868,7 @@ static bool vm_mock_arena_load_config(bool force)
                      g_vm_mock_arena_config.scoreBye,
                      g_vm_mock_arena_config.scoreDraw, kwHex,
                      g_vm_mock_arena_config.wagerVitalityCost,
+                     g_vm_mock_arena_config.wagerMinStakeGold,
                      (u32)g_vm_mock_arena_config.damageScaleEnabled,
                      (u32)g_vm_mock_arena_config.allowHeal,
                      (u32)g_vm_mock_arena_config.allowDodge,
@@ -869,6 +884,24 @@ static bool vm_mock_arena_load_config(bool force)
         vm_mock_arena_reward_row, &g_vm_mock_arena_reward_count);
     g_vm_mock_arena_config_loaded = true;
     return true;
+}
+
+static u32 vm_mock_wager_min_stake_gold(void)
+{
+    u32 gold;
+
+    (void)vm_mock_arena_load_config(false);
+    gold = g_vm_mock_arena_config.wagerMinStakeGold;
+    if (gold == 0)
+        gold = 100;
+    if (gold > 10000u)
+        gold = 10000u;
+    return gold;
+}
+
+static u32 vm_mock_wager_min_stake_copper(void)
+{
+    return vm_mock_wager_min_stake_gold() * 10000u;
 }
 
 static bool vm_mock_arena_is_arena_scene(const char *scene)
@@ -4516,17 +4549,21 @@ static bool vm_net_mock_arena_admin_save_config(
     const u16 weekdayBrackets[7], u16 entryStart, u16 entryEnd, u16 matchStart,
     u16 matchEnd, u32 roundSec, u32 battleTimeout, u32 scoreWin, u32 scoreBye,
     u32 scoreDraw, const char *npcKeyword, u8 wagerEnabled, u8 wagerFee,
-    u8 wagerCurrency, u32 wagerVitalityCost, u8 damageScaleEnabled, u8 allowHeal,
-    u8 allowDodge, u8 allowCombatPill)
+    u8 wagerCurrency, u32 wagerVitalityCost, u32 wagerMinStakeGold,
+    u8 damageScaleEnabled, u8 allowHeal, u8 allowDodge, u8 allowCombatPill)
 {
     char sceneHex[192];
     char kwHex[96];
     char bracketsText[48];
-    char query[2800];
+    char query[3200];
     int written;
     vm_mock_arena_config tmpCfg;
     u32 i;
 
+    if (wagerMinStakeGold == 0)
+        wagerMinStakeGold = 100;
+    if (wagerMinStakeGold > 10000u)
+        wagerMinStakeGold = 10000u;
     if (!vm_mock_arena_ensure_tables() || scene == NULL || scene[0] == 0)
         return false;
     if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
@@ -4554,10 +4591,10 @@ static bool vm_net_mock_arena_admin_save_config(
         "weekday_mask,weekday_brackets,entry_start_minute,entry_end_minute,"
         "match_start_minute,match_end_minute,round_seconds,battle_timeout_seconds,"
         "score_win,score_bye,score_draw,npc_name_keyword,wager_enabled,"
-        "wager_fee_percent,wager_currency,wager_vitality_cost,"
+        "wager_fee_percent,wager_currency,wager_vitality_cost,wager_min_stake_gold,"
         "damage_scale_enabled,allow_heal,allow_dodge,allow_combat_pill) VALUES "
         "(1,%u,UNHEX('%s'),%u,%u,%u,'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,UNHEX('%s'),"
-        "%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+        "%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
         "enabled=VALUES(enabled),scene=VALUES(scene),spawn_x=VALUES(spawn_x),"
         "spawn_y=VALUES(spawn_y),weekday_mask=VALUES(weekday_mask),"
         "weekday_brackets=VALUES(weekday_brackets),"
@@ -4573,6 +4610,7 @@ static bool vm_net_mock_arena_admin_save_config(
         "wager_fee_percent=VALUES(wager_fee_percent),"
         "wager_currency=VALUES(wager_currency),"
         "wager_vitality_cost=VALUES(wager_vitality_cost),"
+        "wager_min_stake_gold=VALUES(wager_min_stake_gold),"
         "damage_scale_enabled=VALUES(damage_scale_enabled),"
         "allow_heal=VALUES(allow_heal),allow_dodge=VALUES(allow_dodge),"
         "allow_combat_pill=VALUES(allow_combat_pill)",
@@ -4580,7 +4618,7 @@ static bool vm_net_mock_arena_admin_save_config(
         bracketsText, (u32)entryStart, (u32)entryEnd, (u32)matchStart,
         (u32)matchEnd, roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw,
         kwHex, (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency,
-        wagerVitalityCost, (u32)(damageScaleEnabled ? 1u : 0u),
+        wagerVitalityCost, wagerMinStakeGold, (u32)(damageScaleEnabled ? 1u : 0u),
         (u32)(allowHeal ? 1u : 0u), (u32)(allowDodge ? 1u : 0u),
         (u32)(allowCombatPill ? 1u : 0u));
     if (written < 0 || (size_t)written >= sizeof(query))

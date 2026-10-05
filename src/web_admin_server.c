@@ -6586,6 +6586,26 @@ static void vm_mock_admin_render_shop_page(char *response,
     }
     vm_mock_admin_text_appendf(
         &page,
+        "<form method=\"post\" action=\"/action\" style=\"display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin:0 0 12px\">"
+        "<input type=\"hidden\" name=\"action\" value=\"save-equip-sell-ratio\">"
+        "<input type=\"hidden\" name=\"category\" value=\"%s\">"
+        "<input type=\"hidden\" name=\"mall\" value=\"%s\">"
+        "<input type=\"hidden\" name=\"npc\" value=\"%s\">"
+        "<input type=\"hidden\" name=\"q\" value=\"",
+        categoryFilter, mallFilterText, npcFilterText);
+    vm_mock_admin_text_append_html(&page, search);
+    vm_mock_admin_text_appendf(
+        &page,
+        "\"><input type=\"hidden\" name=\"page\" value=\"%u\">"
+        "<label style=\"display:grid;gap:4px;min-width:220px\"><span style=\"font-size:12px;color:#667085\">"
+        "装备出售/丢弃价格比例 %%（相对目录「价值」）</span>"
+        "<input type=\"number\" name=\"equip_sell_percent\" min=\"0\" max=\"100\" value=\"%u\" required></label>"
+        "<button type=\"submit\">保存出售比例</button>"
+        "<span class=\"muted\" style=\"align-self:center\">当前回收 = floor(价值 × 比例 / 100)；默认 10%%。"
+        "表 <code>server_equip_sell_config</code>。</span></form>",
+        pageNumber, vm_net_mock_equip_sell_percent_get());
+    vm_mock_admin_text_appendf(
+        &page,
         "<div class=\"summary\"><span class=\"badge\">目录 %u</span>"
         "<span class=\"badge\">商城上架 %u</span>"
         "<span class=\"badge off\">商城下架 %u</span>"
@@ -6748,6 +6768,7 @@ static void vm_mock_admin_render_shop_page(char *response,
         "<strong>上架NPC</strong>（npc_enabled）的非装备出现在药品商人（铜币）。"
         "两开关相互独立，可同时开、只开其一或全关。"
         "武器/防具 NPC 仍按白装目录出售，不受本页 NPC 开关影响（NPC 价仍可用本表覆盖）。"
+        "装备出售、丢弃、战斗心得自动卖出共用上方「出售价格比例」。"
         "下架不会删除角色已有物品，也不影响后台赠送。</p></section></main></body></html>");
     if (page.truncated)
     {
@@ -10635,6 +10656,54 @@ static void vm_mock_admin_handle_shop_action(vm_mock_service_socket client,
                                 npcFilter, page, "ok", okMessage);
 }
 
+static void vm_mock_admin_handle_equip_sell_ratio_action(
+    vm_mock_service_socket client, const char *body)
+{
+    char category[16];
+    char search[128];
+    char mallFilter[8];
+    char npcFilter[8];
+    char pageText[32];
+    u32 page = 1;
+    u32 percent = 10;
+
+    memset(category, 0, sizeof(category));
+    memset(search, 0, sizeof(search));
+    memset(mallFilter, 0, sizeof(mallFilter));
+    memset(npcFilter, 0, sizeof(npcFilter));
+    memset(pageText, 0, sizeof(pageText));
+    (void)vm_mock_admin_form_value(body, "category", category, sizeof(category));
+    (void)vm_mock_admin_form_value(body, "q", search, sizeof(search));
+    (void)vm_mock_admin_form_value(body, "mall", mallFilter, sizeof(mallFilter));
+    (void)vm_mock_admin_form_value(body, "npc", npcFilter, sizeof(npcFilter));
+    (void)vm_mock_admin_form_value(body, "page", pageText, sizeof(pageText));
+    vm_mock_admin_shop_shelf_filter_text(
+        vm_mock_admin_shop_shelf_filter_value(mallFilter), mallFilter,
+        sizeof(mallFilter));
+    vm_mock_admin_shop_shelf_filter_text(
+        vm_mock_admin_shop_shelf_filter_value(npcFilter), npcFilter,
+        sizeof(npcFilter));
+    if (pageText[0] != 0 &&
+        (!vm_net_mock_parse_u32_strict(pageText, &page) || page == 0))
+        page = 1;
+    if (!vm_mock_admin_form_u32(body, "equip_sell_percent", 100u, &percent))
+    {
+        vm_mock_admin_redirect_shop(client, category, search, mallFilter,
+                                    npcFilter, page, "error",
+                                    "出售比例无效（0–100）");
+        return;
+    }
+    if (!vm_net_mock_equip_sell_percent_admin_save(percent))
+    {
+        vm_mock_admin_redirect_shop(client, category, search, mallFilter,
+                                    npcFilter, page, "error",
+                                    "保存出售比例失败");
+        return;
+    }
+    vm_mock_admin_redirect_shop(client, category, search, mallFilter, npcFilter,
+                                page, "ok", "装备出售价格比例已保存");
+}
+
 static void vm_mock_admin_handle_login_server_action(
     vm_mock_service_socket client, const char *action, const char *body)
 {
@@ -11129,6 +11198,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_shop_action(client, body);
         return;
     }
+    if (strcmp(action, "save-equip-sell-ratio") == 0)
+    {
+        vm_mock_admin_handle_equip_sell_ratio_action(client, body);
+        return;
+    }
     if (strcmp(action, "create-catalog-item") == 0 ||
         strcmp(action, "save-catalog-item") == 0 ||
         strcmp(action, "delete-catalog-item") == 0 ||
@@ -11159,7 +11233,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "enhance-pool-upsert") == 0 ||
         strcmp(action, "enhance-pool-save-all") == 0 ||
         strcmp(action, "enhance-wash-settings-save") == 0 ||
-        strcmp(action, "enhance-wash-quality-scale-save") == 0)
+        strcmp(action, "enhance-wash-quality-scale-save") == 0 ||
+        strcmp(action, "enhance-base-scale-save") == 0)
     {
         vm_mock_admin_handle_enhance_action(client, action, body);
         return;
@@ -12763,7 +12838,7 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             else if (createMessage &&
                      strcmp(createMessage, "daily registration limit reached") == 0)
             {
-                err = "今日全服注册名额已满,gmQQ:958421665";
+                err = "今日全服注册名额已满,gmQQ:2350321870";
             }
             else if (createMessage &&
                      strcmp(createMessage, "account db unavailable") == 0)

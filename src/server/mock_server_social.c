@@ -2022,6 +2022,26 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
     {
         g_mockBattleOperateSessionFinished = 0;
     }
+    /*
+     * client_out 2026-10-05: 4/7 hangup settle then 25/5 result=4 →
+     * Arithmetic DIV0 pc=0x0104e980 lr=0x01004cd7.  scene_runtime_tick is
+     * mmGame; Battle.cbm still owns the settle shell.  Empty WT dismisses
+     * the wait without running map default on mmBattle.
+     */
+    if (g_mockBattleOperateSessionArmed != 0 ||
+        g_mockBattleAwaitingSettlement != 0 ||
+        g_mockBattleSettlementExitPending != 0)
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[info][network] mock_scene_default_event action=suppress-battle-settle "
+               "armed=%u awaiting=%u exit_pending=%u resp=%u "
+               "evidence=25/5-result4-div0-on-4/7-shell\n",
+               g_mockBattleOperateSessionArmed ? 1 : 0,
+               g_mockBattleAwaitingSettlement ? 1 : 0,
+               g_mockBattleSettlementExitPending ? 1 : 0,
+               pos);
+        return pos;
+    }
     if (g_mockBattlePostExitSuppressSceneDefaultUntilMs != 0)
     {
         u32 nowMs = scheduler_get_tick_ms();
@@ -3112,6 +3132,13 @@ static bool vm_net_mock_is_scene_task_subset_followup_request(const u8 *request,
 {
     u8 typeValue = 0;
     if (request == NULL || requestLen < 24)
+        return false;
+    /*
+     * CBE 开背包：7/42 打头的 6/*+2/10 Type=101 组合包。task-subset 的
+     * includeSkillBooks 还要求 12/1，抢走后不会下发 17/1。
+     */
+    if (vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42) &&
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1))
         return false;
     if (!vm_net_mock_request_contains_object(request, requestLen, 1, 6, 1) ||
         !vm_net_mock_request_contains_object(request, requestLen, 1, 6, 13) ||
@@ -6101,28 +6128,10 @@ static u32 vm_net_mock_build_pending_shop_return_loading_clear_response(
         return 0;
     }
     /*
-     * Gap after follow-up / prior clear.  Cold post-catalog (deferred 27/11,
-     * no prior seed) needs a longer settle — 蓬莱_02 npcnum=3 stuck with gap=8.
-     * Warm lite (already seeded this visit) matches shell gap.
+     * Gap after follow-up / prior clear.  Host ResetDownloadState on
+     * ScreenInit / net_fire already closes DoLoading; do not wait 8–12
+     * ticks before the first 30/2.
      */
-    {
-        u32 minAge = 8u;
-
-        if (session->shopReturnLoadingClearPostCatalog &&
-            !session->shopReturnLoadingClearLite)
-            minAge = 12u;
-
-        if (ageTicks < minAge)
-        {
-            /*
-             * Silent wait used to let the same poll fall through to task
-             * prompts (resp≈77) while remaining>0 — “有网无清条”.
-             * Callers that own ResetDownloadState (poll / 25/5) must treat
-             * pending post-catalog clear as occupying the response slot.
-             */
-            return 0;
-        }
-    }
     if (!vm_net_mock_scene_name_is_safe(session->shopReturnLoadingClearScene))
     {
         vm_mock_service_session_cancel_shop_return_loading_clear(session,
@@ -6387,8 +6396,6 @@ static u32 vm_net_mock_build_pending_shop_return_busy_ack_response(
         return 0;
     }
     /* Let the final poll 30/2 event finish before kind-26 busy clear. */
-    if (ageTicks < 2u)
-        return 0;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0, &objectStart))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
@@ -6779,9 +6786,8 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
     /*
      * Wait at least one poll cadence after 2/3 so async EnterSceneByMapName
      * ScreenInit (0x01018150) can finish before ResetDownloadState.
+     * Host now clears busy on mmGame ScreenInit, so do not wait extra polls.
      */
-    if (ageTicks < 2u)
-        return 0;
     /*
      * Cross-scene map-stone arms wait_wt6 so type27 / WT6/1 / task-subset owns
      * the nonempty 27/11 (and often a trailing 30/2).  Poll clear before that
@@ -6791,7 +6797,7 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
      * Hold until wait_wt6 clears; same age floor as NPC wait_wt6 poll fallback
      * allows a timeout so a missing follow-up cannot starve loading forever.
      */
-    if (g_vm_net_mock_scene_moveinfo_npc_wait_wt6 && ageTicks < 15u)
+    if (g_vm_net_mock_scene_moveinfo_npc_wait_wt6 && ageTicks < 1u)
     {
         /*
          * Dream 29* instance 2/3 loading_clear_only: DF ScreenInit already

@@ -3853,19 +3853,10 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
         if (enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             enhanceLevel = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         scaled = item->bonus;
-        /* 物攻满量 M(L)；护甲强化增量减半（物防平衡）。 */
-        scaled.attack =
-            vm_net_mock_equipment_bonus_scale(scaled.attack, enhanceLevel);
-        scaled.armor =
-            vm_net_mock_equipment_armor_bonus_scale(scaled.armor, enhanceLevel);
-        /* scaled.hp = vm_net_mock_equipment_bonus_scale(scaled.hp, enhanceLevel); */
-        /* scaled.mp = vm_net_mock_equipment_bonus_scale(scaled.mp, enhanceLevel); */
-        /* ??????????????????? add_unlocked_milestones? */
+        /* 目录基值按后台 server_enhance_base_scale 应用 M(L) 增量。 */
+        vm_net_mock_equipment_bonus_apply_enhance_level(&scaled, enhanceLevel);
         vm_net_mock_equipment_bonus_add(bonus, &scaled);
-        /*
-         * ???? UI ????????????????unlock<=L ???
-         * ???=Q+1 ????? bonus???%/??% ?????�????
-         */
+        /* 已解锁 +4/+8/+12/+16 里程碑（含洗练）叠加到 bonus。 */
         vm_net_mock_equipment_bonus_add_unlocked_milestones(
             bonus, item, enhanceLevel, &role->equippedEnhanceWash[slot]);
     }
@@ -4340,6 +4331,45 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
         !vm_net_mock_put_object_u32(
             out, outCap, &pos, "transferMoneyEnabled",
             vm_net_mock_enhance_transfer_money_enabled() ? 1u : 0u) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceStepPercent",
+            vm_net_mock_enhance_base_scale_get()->stepPercent) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceTierExtraPercent",
+            vm_net_mock_enhance_base_scale_get()->tierExtraPercent) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyAttack",
+            vm_net_mock_enhance_base_scale_get()->applyAttack) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyArmor",
+            vm_net_mock_enhance_base_scale_get()->applyArmor) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyStrength",
+            vm_net_mock_enhance_base_scale_get()->applyStrength) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyAgility",
+            vm_net_mock_enhance_base_scale_get()->applyAgility) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyWisdom",
+            vm_net_mock_enhance_base_scale_get()->applyWisdom) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyHp",
+            vm_net_mock_enhance_base_scale_get()->applyHp) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyMp",
+            vm_net_mock_enhance_base_scale_get()->applyMp) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyDodge",
+            vm_net_mock_enhance_base_scale_get()->applyDodge) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyHit",
+            vm_net_mock_enhance_base_scale_get()->applyHit) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyCrit",
+            vm_net_mock_enhance_base_scale_get()->applyCrit) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "enhanceApplyResist",
+            vm_net_mock_enhance_base_scale_get()->applyResist) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "baseStrength",
                                      stats.baseStrength) ||
 
@@ -13337,19 +13367,13 @@ static bool vm_net_mock_equip_sell_item_is_sellable(u32 itemId)
 
 /*
  * Same copper as equipment discard / battle-insight auto-sell:
- * floor(equip.dsh 价值 / 10). Catalog missing => unresolved.
+ * floor(catalog 价值 * sell_percent / 100). Catalog missing => 0.
+ * Helper lives in mock_server_catalog.c (shop sell ratio).
  */
-static u32 vm_net_mock_equip_discard_refund_unit_price(
-    const vm_net_mock_shop_catalog_item *catalog)
-{
-    if (catalog == NULL || catalog->price < 10u)
-        return 0;
-    return catalog->price / 10u;
-}
 
 /*
  * Permanent sell: remove one backpack equipment row and credit discard refund
- * floor(catalog 价值 / 10) copper (same as 7/4 equipment discard).
+ * floor(catalog 价值 * sell_percent / 100) copper (same as 7/4 equipment discard).
  */
 static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
                                                 u16 backpackSeq,
@@ -13424,8 +13448,10 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
     if (soldItemIdOut)
         *soldItemIdOut = itemId;
     printf("[info][network] mock_equip_sell role=%u bag_seq=%u item=%u "
-           "price=%u catalog=%u money=%u bag_rows=%u evidence=discard-floor-价值/10\n",
-           role->roleId, backpackSeq, itemId, price, catalog->price, role->money,
+           "price=%u catalog=%u percent=%u money=%u bag_rows=%u "
+           "evidence=discard-floor-价值*sell_percent/100\n",
+           role->roleId, backpackSeq, itemId, price, catalog->price,
+           vm_net_mock_equip_sell_percent_get(), role->money,
            role->backpackItemCount);
     return true;
 }
@@ -13433,7 +13459,7 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
 /*
  * item.dsh 828: while battle insight is active, monster drops that cannot
  * enter the bag are auto-sold for catalog copper instead of being lost.
- * All shop-listed rows use the same discard refund floor(price/10).
+ * All shop-listed rows use the same discard refund floor(price * percent / 100).
  */
 static u32 vm_net_mock_battle_insight_drop_auto_sell_unit_price(u32 itemId)
 {

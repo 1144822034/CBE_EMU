@@ -94,8 +94,8 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         "与管理端解锁。隐藏洗练按钮后背包/强化面板不再出现「洗练」。"
         "多开上限=1 时客户端菜单「账号多开」不可再开新槽；同页多会话切换，"
         "其他账号长连接保持。默认均为显示，多开上限默认 1。"
-        "「无战斗心得挂机限额」默认限制 64 场；选「不限制」后无心得也可无限挂机"
-        "（有战斗心得时始终不限次）。</p>"
+        "「无战斗心得挂机限额」默认不限制；客户端挂机场次心得/非心得均为不限次。"
+        "</p>"
         "<button type=\"submit\">保存</button></form></section></body></html>",
         cfg && cfg->washButtonEnabled ? " selected" : "",
         cfg && !cfg->washButtonEnabled ? " selected" : "",
@@ -105,7 +105,7 @@ static void vm_mock_admin_render_client_ui_page(char *response, size_t responseC
         cfg && !cfg->mountStatusEnabled ? " selected" : "",
         (u32)(cfg ? cfg->multiOpenLimit : 1u),
         cfg && cfg->hangupQuotaWithoutInsight ? " selected" : "",
-        cfg && !cfg->hangupQuotaWithoutInsight ? " selected" : "");
+        !cfg || !cfg->hangupQuotaWithoutInsight ? " selected" : "");
     if (page.truncated)
     {
         snprintf(response, responseCap,
@@ -121,7 +121,7 @@ static void vm_mock_admin_handle_client_ui_action(vm_mock_service_socket client,
     u32 wingStatus = 1;
     u32 mountStatus = 1;
     u32 multiOpenLimit = 1;
-    u32 hangupQuota = 1;
+    u32 hangupQuota = 0;
 
     if (strcmp(action, "save-client-ui-config") != 0)
     {
@@ -133,7 +133,7 @@ static void vm_mock_admin_handle_client_ui_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "mount_status_enabled", 1u, &mountStatus) ||
         !vm_mock_admin_form_u32(body, "multi_open_limit", 8u, &multiOpenLimit) ||
         multiOpenLimit < 1u ||
-        !vm_mock_admin_form_u32(body, "hangup_quota_without_insight", 1u,
+        !vm_mock_admin_form_u32(body, "hangup_quota_without_insight", 0u,
                                 &hangupQuota))
     {
         vm_mock_admin_redirect_client_ui(client, "error", "表单参数无效");

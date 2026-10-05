@@ -5000,7 +5000,7 @@ static u32 vm_net_mock_npc_shop_selector_total(u32 selector, u32 levelBand)
 
 static void vm_net_mock_npc_shop_append_stat_line(
     char *out, size_t outCap, size_t *pos, const char *labelGb, u32 base,
-    u16 enhanceLevel, bool armorHalfEnhance)
+    u16 enhanceLevel, u32 applyPercent)
 {
     int wrote = 0;
     u32 scaled = 0;
@@ -5014,11 +5014,10 @@ static void vm_net_mock_npc_shop_append_stat_line(
     /*
      * Match native detail semantics (c0[物攻]:c4+%d): the main number is the
      * post-enhance total.  Keep (+bonus) so the reinforce delta stays visible.
-     * 护甲强化增量与 collect 一致：相对满量 M(L) 再 /2。
+     * applyPercent 来自 server_enhance_base_scale（100=满量 M(L)，50=增量减半）。
      */
-    scaled = armorHalfEnhance
-                 ? vm_net_mock_equipment_armor_bonus_scale(base, enhanceLevel)
-                 : vm_net_mock_equipment_bonus_scale(base, enhanceLevel);
+    scaled = vm_net_mock_equipment_bonus_scale_apply(base, enhanceLevel,
+                                                    applyPercent);
     bonus = scaled > base ? scaled - base : 0;
     if (bonus != 0)
         wrote = snprintf(out + *pos, outCap - *pos, "%s+%u(+%u) ", labelGb,
@@ -5062,40 +5061,44 @@ static bool vm_net_mock_npc_shop_format_equipment_detail(
         if (wrote > 0)
             pos += (size_t)wrote;
     }
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xb9\xa5\xbb\xf7", equipment->bonus.attack,
-        level, false); /* 攻击 — 强化基础缩放 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xbb\xa4\xbc\xd7", equipment->bonus.armor,
-        level, true); /* 护甲 — 强化增量减半 */
-    /* 气血/法力：显示基值，不套强化基础缩放 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xc9\xfa\xc3\xfc", equipment->bonus.hp, 0,
-        false); /* 生命 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xb7\xa8\xc1\xa6", equipment->bonus.mp, 0,
-        false); /* 法力 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xc1\xa6\xc1\xbf", equipment->bonus.strength,
-        0, false); /* 力量 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xc3\xf4\xbd\xdd", equipment->bonus.agility,
-        0, false); /* 敏捷 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xd6\xc7\xc1\xa6", equipment->bonus.wisdom,
-        0, false); /* 智力 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xb1\xac\xbb\xf7", equipment->bonus.crit,
-        0, false); /* 暴击 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xc3\xfc\xd6\xd0", equipment->bonus.hit, 0,
-        false); /* 命中 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xb6\xe3\xc9\xc1", equipment->bonus.dodge,
-        0, false); /* 闪避 */
-    vm_net_mock_npc_shop_append_stat_line(
-        out, outCap, &pos, "\xbf\xb9\xd0\xd4", equipment->bonus.resist,
-        0, false); /* 抗性 */
+    {
+        const vm_net_mock_enhance_base_scale *sc =
+            vm_net_mock_enhance_base_scale_get();
+
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xb9\xa5\xbb\xf7", equipment->bonus.attack,
+            level, sc->applyAttack); /* 攻击 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xbb\xa4\xbc\xd7", equipment->bonus.armor,
+            level, sc->applyArmor); /* 护甲 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xc9\xfa\xc3\xfc", equipment->bonus.hp, level,
+            sc->applyHp); /* 生命 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xb7\xa8\xc1\xa6", equipment->bonus.mp, level,
+            sc->applyMp); /* 法力 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xc1\xa6\xc1\xbf", equipment->bonus.strength,
+            level, sc->applyStrength); /* 力量 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xc3\xf4\xbd\xdd", equipment->bonus.agility,
+            level, sc->applyAgility); /* 敏捷 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xd6\xc7\xc1\xa6", equipment->bonus.wisdom,
+            level, sc->applyWisdom); /* 智力 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xb1\xac\xbb\xf7", equipment->bonus.crit,
+            level, sc->applyCrit); /* 暴击 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xc3\xfc\xd6\xd0", equipment->bonus.hit, level,
+            sc->applyHit); /* 命中 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xb6\xe3\xc9\xc1", equipment->bonus.dodge,
+            level, sc->applyDodge); /* 闪避 */
+        vm_net_mock_npc_shop_append_stat_line(
+            out, outCap, &pos, "\xbf\xb9\xd0\xd4", equipment->bonus.resist,
+            level, sc->applyResist); /* 抗性 */
+    }
     if (equipment->durabilityMax != 0 && pos < outCap)
     {
         wrote = snprintf(out + pos, outCap - pos, "%s%u",
@@ -9164,8 +9167,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                  item->itemId),
                              item->count);
                     optionNames[optionCount] = optionNameStorage[optionCount];
+                    /* Pixi colors retrieve rows by itemId; names collide across 品质. */
+                    snprintf(optionDescriptionStorage[optionCount],
+                             sizeof(optionDescriptionStorage[optionCount]),
+                             "%s#%u",
+                             "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2", /* 个人仓库 */
+                             item->itemId);
                     optionDescriptions[optionCount] =
-                        "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2"; /* 个人仓库 */
+                        optionDescriptionStorage[optionCount];
                     optionValues[optionCount] =
                         VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE |
                         ordinal;
@@ -9274,7 +9283,13 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                  item->itemId),
                              item->count);
                     optionNames[optionCount] = optionNameStorage[optionCount];
-                    optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc";
+                    snprintf(optionDescriptionStorage[optionCount],
+                             sizeof(optionDescriptionStorage[optionCount]),
+                             "%s#%u",
+                             "\xb1\xb3\xb0\xfc", /* 背包 */
+                             item->itemId);
+                    optionDescriptions[optionCount] =
+                        optionDescriptionStorage[optionCount];
                     optionValues[optionCount] =
                         VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE |
                         item->seq;

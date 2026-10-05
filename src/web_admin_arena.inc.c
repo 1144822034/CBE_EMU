@@ -470,6 +470,8 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<option value=\"1\"%s>开启</option></select></div>"
         "<div><label>摆擂消耗活力</label>"
         "<input name=\"wager_vitality\" value=\"%u\"></div>"
+        "<div><label>最低押金（金）</label>"
+        "<input name=\"wager_min_stake_gold\" value=\"%u\"></div>"
         "<div><label>系统抽成%%（胜方结算）</label>"
         "<input name=\"wager_fee\" value=\"%u\"></div>"
         "<div><label>货币(0铜币)</label>"
@@ -477,11 +479,13 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<button type=\"submit\">保存赏金配置</button></form>"
         "<p class=\"muted\">入口挂在显示名含「擂台宗主」的 NPC；仅可在该 NPC 所在地图摆擂。"
         "摆擂扣押金并消耗活力（后台可配，撤擂只退押金不退活力）；等人数挑战队压同额后，擂主方全员确认开战。"
-        "1v1直接决斗；2v2/3v3按座位逐对决斗、胜场多者获胜；胜方均分奖池（扣系统抽成）；平局全额退押。</p>"
+        "1v1直接决斗；2v2/3v3按座位逐对决斗、胜场多者获胜；胜方均分奖池（扣系统抽成）；平局全额退押。"
+        "最低押金单位为金（1金=10000铜），默认 100，范围 1–10000。</p>"
         "</section>",
         cfg && !cfg->wagerEnabled ? " selected" : "",
         cfg && cfg->wagerEnabled ? " selected" : "",
         cfg ? cfg->wagerVitalityCost : 50,
+        cfg && cfg->wagerMinStakeGold ? cfg->wagerMinStakeGold : 100,
         cfg ? cfg->wagerFeePercent : 10,
         cfg ? cfg->wagerCurrency : 0);
 
@@ -582,6 +586,7 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
     u32 wagerFee = 10;
     u32 wagerCurrency = 0;
     u32 wagerVitality = 50;
+    u32 wagerMinStakeGold = 100;
     u32 damageScaleEnabled = 1;
     u32 allowHeal = 0;
     u32 allowDodge = 1;
@@ -659,7 +664,9 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
                 scoreWin, scoreBye, scoreDraw, kwGbk,
                 cfg ? cfg->wagerEnabled : 0, cfg ? cfg->wagerFeePercent : 10,
                 cfg ? cfg->wagerCurrency : 0,
-                cfg ? cfg->wagerVitalityCost : 50u, (u8)damageScaleEnabled,
+                cfg ? cfg->wagerVitalityCost : 50u,
+                cfg && cfg->wagerMinStakeGold ? cfg->wagerMinStakeGold : 100u,
+                (u8)damageScaleEnabled,
                 (u8)allowHeal, (u8)allowDodge, (u8)allowCombatPill))
             vm_mock_admin_redirect_arena(client, "ok", "比武配置已保存");
         else
@@ -712,6 +719,11 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         (void)vm_mock_admin_form_u32(body, "wager_currency", 10u, &wagerCurrency);
         (void)vm_mock_admin_form_u32(body, "wager_vitality", 100000u,
                                      &wagerVitality);
+        wagerMinStakeGold = cfg->wagerMinStakeGold ? cfg->wagerMinStakeGold : 100u;
+        (void)vm_mock_admin_form_u32(body, "wager_min_stake_gold", 10000u,
+                                     &wagerMinStakeGold);
+        if (wagerMinStakeGold == 0)
+            wagerMinStakeGold = 100;
         if (vm_net_mock_arena_admin_save_config(
                 cfg->enabled, cfg->scene, cfg->spawnX, cfg->spawnY,
                 cfg->weekdayMask, cfg->weekdayBrackets, cfg->entryStartMinute,
@@ -719,6 +731,7 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
                 cfg->roundSeconds, cfg->battleTimeoutSeconds, cfg->scoreWin,
                 cfg->scoreBye, cfg->scoreDraw, cfg->npcNameKeyword,
                 (u8)wagerEnabled, (u8)wagerFee, (u8)wagerCurrency, wagerVitality,
+                wagerMinStakeGold,
                 cfg->damageScaleEnabled, cfg->allowHeal, cfg->allowDodge,
                 cfg->allowCombatPill))
             vm_mock_admin_redirect_arena(client, "ok", "赏金擂台配置已保存");

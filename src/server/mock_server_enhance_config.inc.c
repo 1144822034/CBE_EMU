@@ -654,6 +654,7 @@ static bool vm_net_mock_enhance_config_db_load(void)
         g_vm_net_mock_enhance_attr_pool_db_loaded)
     {
         vm_net_mock_enhance_wash_settings_load(false);
+        vm_net_mock_enhance_base_scale_load(false);
         return g_vm_net_mock_enhance_milestone_db_valid &&
                g_vm_net_mock_enhance_attr_pool_db_valid;
     }
@@ -700,12 +701,14 @@ static bool vm_net_mock_enhance_config_db_load(void)
         vm_net_mock_enhance_config_fill_builtin_milestones();
         vm_net_mock_enhance_config_fill_builtin_pool();
         vm_net_mock_enhance_wash_settings_load(true);
+        vm_net_mock_enhance_base_scale_load(true);
         return false;
     }
 
     (void)vm_net_mock_enhance_config_seed_milestones_if_empty();
     (void)vm_net_mock_enhance_config_seed_pool_if_empty();
     vm_net_mock_enhance_wash_settings_load(true);
+    vm_net_mock_enhance_base_scale_load(true);
 
     if (!vm_mysql_query(
             "SELECT equip_slot,unlock_level,attr_type,flag,enabled,"
@@ -750,6 +753,7 @@ static bool vm_net_mock_enhance_config_admin_reload(void)
     g_vm_net_mock_enhance_milestone_db_loaded = false;
     g_vm_net_mock_enhance_attr_pool_db_loaded = false;
     g_vm_net_mock_enhance_wash_settings_loaded = false;
+    g_vm_net_mock_enhance_base_scale_loaded = false;
     return vm_net_mock_enhance_config_db_load();
 }
 

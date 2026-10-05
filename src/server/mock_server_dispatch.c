@@ -329,6 +329,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
                                                    &vitalsWtKind,
                                                    &vitalsWtSubtype);
         bool battleFamilyWt = gotVitalsWtHeader && vitalsWtKind == 4;
+        bool hangupControlWt = gotVitalsWtHeader && vitalsWtKind == 25;
         bool dialogFamilyWt = gotVitalsWtHeader && vitalsWtKind == 26;
         bool challengeObject =
             vm_net_mock_request_contains_object(request, requestLen, 1, 4, 1);
@@ -346,6 +347,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         if (!vm_net_mock_is_challenge_interaction_request(request, requestLen) &&
             !challengeObject &&
             !battleFamilyWt &&
+            !hangupControlWt &&
             !npcDialog &&
             !dialogObject &&
             !dialogFamilyWt &&
@@ -400,6 +402,28 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             vm_net_log_handled_packet("builtin-actor-moveinfo-ack", request, requestLen, hookedLen);
             return hookedLen;
         }
+    }
+
+    /*
+     * Hangup confirm (25/3 panel, 25/2 mode) before battle-start.  First
+     * 2/10 Type=2+25/3 is a native confirm, not an immediate 4/5 fight.
+     */
+    hookedLen = vm_net_mock_build_scene_hangup_panel_response(request, requestLen,
+                                                               out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-hangup-panel", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_scene_hangup_mode_response(request, requestLen,
+                                                              out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-hangup-mode", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
     }
 
     /*
@@ -600,7 +624,8 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             vm_net_log_handled_packet("builtin-shop-buy-backpack-sync-combo", request, requestLen, hookedLen);
             return hookedLen;
         }
-        if (vm_net_mock_is_backpack_open_request(request, requestLen))
+        if (vm_net_mock_is_backpack_open_request(request, requestLen) ||
+            vm_net_mock_is_cbe_backpack_open_combo_request(request, requestLen))
         {
             hookedLen = vm_net_mock_build_backpack_open_response(out, outCap);
             if (hookedLen)
@@ -1522,13 +1547,18 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
-    if (vm_net_mock_is_backpack_open_request(request, requestLen))
+    if (vm_net_mock_is_backpack_open_request(request, requestLen) ||
+        vm_net_mock_is_cbe_backpack_open_combo_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_backpack_open_response(out, outCap);
         if (hookedLen)
         {
             vm_net_mock_note_backpack_open_cleared_deposit_resync("7/42->17/1+7/42");
-            vm_net_log_handled_packet("builtin-backpack-open", request, requestLen, hookedLen);
+            vm_net_log_handled_packet(
+                vm_net_mock_is_cbe_backpack_open_combo_request(request, requestLen)
+                    ? "builtin-backpack-open-combo"
+                    : "builtin-backpack-open",
+                request, requestLen, hookedLen);
             return hookedLen;
         }
     }

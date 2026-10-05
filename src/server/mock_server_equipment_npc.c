@@ -5935,6 +5935,21 @@ typedef struct vm_mock_service_client_session
     u8 mockHangupStartPendingArmed;
     u32 mockHangupStartNotBeforeMs;
     u8 mockHangupStopAfterBattle;
+    /* Native CBE hangup (25/3 panel → 25/2 type=1). Not used by Pixi 4/1. */
+    bool sceneHangupEnabled;
+    bool sceneHangupOperateValid;
+    u32 sceneHangupOperate;
+    bool sceneHangupRestartPending;
+    u32 sceneHangupBattleSessionSerial;
+    u32 sceneHangupRestartNotBeforeTick;
+    u16 sceneHangupCompletedBattles;
+    u16 sceneHangupMaxBattles;
+    u32 sceneHangupTotalExp;
+    u32 sceneHangupTotalGold;
+    u32 sceneHangupTotalHpRecovered;
+    u32 sceneHangupTotalMpRecovered;
+    u32 sceneHangupLastAccountedBattleSerial;
+    char sceneHangupScene[64];
     /* The native action=4 task path carries only task_id after the NPC dialog.
      * Retain the server-observed offer source so a completed task cannot be
      * reaccepted by forging the later 6/11 request. */
@@ -5946,6 +5961,9 @@ typedef struct vm_mock_service_client_session
 } vm_mock_service_client_session;
 
 static vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
+static void vm_mock_service_session_clear_scene_hangup(
+    vm_mock_service_client_session *session,
+    const char *reason);
 static void vm_mock_service_session_arm_map_actor_vitals_sync(
     vm_mock_service_client_session *session,
     u16 bagClearSeq,
@@ -11403,6 +11421,8 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
     if (session == NULL)
         return;
     scene = (target != NULL && vm_net_mock_scene_name_is_safe(target->scene)) ? target->scene : NULL;
+    if (session->sceneHangupEnabled || session->sceneHangupRestartPending)
+        vm_mock_service_session_clear_scene_hangup(session, "scene-pending");
     changed = !session->sceneVisiblePending ||
               !session->sceneVisibleReady ||
               ((scene != NULL || session->scenePendingScene[0] != 0) &&
@@ -12006,6 +12026,39 @@ static void vm_mock_service_session_update_move_position(vm_mock_service_client_
     session->sceneVisibleTick = g_schedulerTick;
 }
 
+static void vm_mock_service_session_clear_scene_hangup(
+    vm_mock_service_client_session *session,
+    const char *reason)
+{
+    if (session == NULL ||
+        (!session->sceneHangupEnabled && !session->sceneHangupRestartPending))
+    {
+        return;
+    }
+    printf("[info][mock-service] scene_hangup_stop client=%08x role=%u scene=%s "
+           "battle=%u restart_pending=%u reason=%s\n",
+           session->clientId,
+           session->onlineRoleId,
+           session->sceneHangupScene[0] ? session->sceneHangupScene : "-",
+           session->sceneHangupBattleSessionSerial,
+           session->sceneHangupRestartPending ? 1u : 0u,
+           reason ? reason : "-");
+    session->sceneHangupEnabled = false;
+    session->sceneHangupOperateValid = false;
+    session->sceneHangupOperate = 0;
+    session->sceneHangupRestartPending = false;
+    session->sceneHangupBattleSessionSerial = 0;
+    session->sceneHangupRestartNotBeforeTick = 0;
+    session->sceneHangupCompletedBattles = 0;
+    session->sceneHangupMaxBattles = 0;
+    session->sceneHangupTotalExp = 0;
+    session->sceneHangupTotalGold = 0;
+    session->sceneHangupTotalHpRecovered = 0;
+    session->sceneHangupTotalMpRecovered = 0;
+    session->sceneHangupLastAccountedBattleSerial = 0;
+    session->sceneHangupScene[0] = 0;
+}
+
 static void vm_mock_service_session_mark_offline(vm_mock_service_client_session *session,
                                                  const char *reason)
 {
@@ -12013,6 +12066,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
 
     if (session == NULL)
         return;
+    vm_mock_service_session_clear_scene_hangup(session,
+                                               reason ? reason : "offline");
     wasOnline = session->roleOnline || session->onlinePresenceValid || session->sceneVisibleReady;
     /* Notify the remaining clients before clearing the departing session's
      * cached role identity; subtype 5/7 needs that id to remove its HUD row. */
@@ -12813,14 +12868,14 @@ static void vm_mock_service_session_arm_map_stone_loading_clear(
     if (session == NULL || !vm_net_mock_scene_name_is_safe(scene))
         return;
     session->mapStoneLoadingClearPending = true;
-    session->mapStoneLoadingClearRemaining = 3;
+    session->mapStoneLoadingClearRemaining = 1;
     session->mapStoneLoadingClearTick = g_schedulerTick;
     snprintf(session->mapStoneLoadingClearScene,
              sizeof(session->mapStoneLoadingClearScene),
              "%s",
              scene);
     printf("[info][mock-service] map_stone_loading_clear_arm client=%08x scene=%s "
-           "remaining=3 evidence=30/2-no-posinfo-after-async-EnterScene\n",
+           "remaining=1 evidence=30/2-no-posinfo-after-async-EnterScene\n",
            session->clientId,
            scene);
 }
@@ -12837,8 +12892,8 @@ static void vm_mock_service_session_rearm_map_stone_loading_clear(
     if (session == NULL || !session->mapStoneLoadingClearPending)
         return;
     session->mapStoneLoadingClearTick = g_schedulerTick;
-    if (session->mapStoneLoadingClearRemaining < 2u)
-        session->mapStoneLoadingClearRemaining = 2;
+    if (session->mapStoneLoadingClearRemaining < 1u)
+        session->mapStoneLoadingClearRemaining = 1;
     printf("[info][mock-service] map_stone_loading_clear_rearm client=%08x "
            "scene=%s remaining=%u reason=%s evidence=wait_wt6-followup-owns-no-30/2\n",
            session->clientId,
@@ -13133,7 +13188,7 @@ static void vm_mock_service_session_arm_shop_return_loading_clear(
         return;
     vm_mock_service_session_cancel_shop_return_busy_ack(session, "re-arm-clear");
     session->shopReturnLoadingClearPending = true;
-    session->shopReturnLoadingClearRemaining = 5;
+    session->shopReturnLoadingClearRemaining = 1;
     session->shopReturnLoadingClearPostCatalog = false;
     session->shopReturnLoadingClearLite = false;
     session->shopReturnLoadingClearTick = g_schedulerTick;
@@ -13143,7 +13198,7 @@ static void vm_mock_service_session_arm_shop_return_loading_clear(
              "%s",
              scene);
     printf("[info][mock-service] shop_return_loading_clear_arm client=%08x scene=%s "
-           "remaining=5 post_catalog=0 "
+           "remaining=1 post_catalog=0 "
            "evidence=poll-30/2-after-shop-return-27/11-no-same-packet\n",
            session->clientId,
            scene);
@@ -13166,19 +13221,9 @@ static void vm_mock_service_session_arm_shop_return_loading_clear_after_catalog(
      * Warm prior-seeded: short window like map-stone wait_wt6 rearm; long
      * standing 30/2 drips after map-stone→shop left DF stuck (蓬莱_01).
      */
-    session->shopReturnLoadingClearRemaining = priorSeeded ? 3u : 8u;
-    /*
-     * Catalog response already consumed this poll/25/5 slot.  Backdate so the
-     * next keep-alive can drip the first post-catalog 30/2 without waiting a
-     * full minAge after arm (蓬莱站立出店：catalog 后仅见 25/5).
-     */
-    {
-        u32 minAge = priorSeeded ? 8u : 12u;
-
-        session->shopReturnLoadingClearTick =
-            (g_schedulerTick > minAge) ? (g_schedulerTick - minAge)
-                                       : 0u;
-    }
+    session->shopReturnLoadingClearRemaining = 1;
+    session->shopReturnLoadingClearTick =
+        (g_schedulerTick > 1u) ? (g_schedulerTick - 1u) : 0u;
     session->shopReturnLoadingClearArmTick = g_schedulerTick;
     snprintf(session->shopReturnLoadingClearScene,
              sizeof(session->shopReturnLoadingClearScene),

@@ -272,6 +272,10 @@ static u32 g_screenLoadResourcePendingScreen = 0;
 static u32 g_screenLoadResourcePendingParam = 0;
 static u32 g_currentScreenThis = 0;
 u32 g_currentScreenModuleBase = 0;
+/* Hangup 25/3|25/2 must fire mmBattle:0x8996 with module R9, not Global. */
+static u32 g_hangupNetCallEntry = 0;
+static u32 g_hangupNetCallR9 = 0;
+static u32 g_lastNetSendLr = 0;
 static u32 g_currentScreenDataPackage = 0;
 static u32 g_dlSpBf = 0;
 static u32 g_poolModuleR9s[16];
@@ -352,6 +356,20 @@ static u8 g_coolmallAwaitMapThenDialog = 0;
 static u8 g_softkeyLeftCache[128];
 static u8 g_softkeyCenterCache[128];
 static u8 g_softkeyRightCache[128];
+static u8 g_winTitleCache[128];
+static u8 g_winTitleFresh = 0;
+static u8 g_vmHangupTouchSwallowed = 0;
+/* Last press was world HUD 挂机 rect — only then forward 2/10 Type=2. */
+static u8 g_lastMouseHangupArmed = 0;
+#if defined(CBE_CLIENT_ONLY)
+/*
+ * World-map / map-stone WT30/1: live 2/3 often has no 30/2.  Host dismisses
+ * the DoLoading bar after outdoor ScreenInit (ResetDownloadState pair).
+ * Skip restoring queued state=2 so 2/3 cannot raise the bar again.
+ */
+static u8 g_vm_map_stone_dismiss_bar = 0;
+static u32 g_vm_map_stone_dismiss_bar_tick = 0;
+#endif
 enum { VM_HOST_KEYQ_MAX = 24 };
 static struct
 {
@@ -377,7 +395,13 @@ static void vm_host_realign_attr_panel_value_rows(void);
 static void vm_host_clear_download_busy(const char *reason);
 /* Drop mmShop mall uplink and simulate 右软/返回; defined after coolmall helpers. */
 static int vm_host_coolmall_try_truncate_mall_send(const u8 *req, u32 len);
+/* Bag/equip chrome: drop hangup 2/10 Type=2 (network-client on_send). */
+static int vm_host_should_block_hangup_uplink(void);
+static void vm_host_arm_hangup_intent_from_softkey(void);
+static int vm_host_bind_hangup_confirm_mmbattle_r9(void);
 #endif
+static void vm_hangup_candidate_fault_arm(u32 codeBase);
+static void vm_hangup_candidate_fault_disarm(void);
 /* Used from net_fire before definition (client + server TU). */
 static void vm_host_coolmall_dismiss_after_shop_net(u32 respLen);
 
@@ -480,6 +504,7 @@ static u32 g_netCurrentObject = 0;
 static u32 g_netDebugReadWindow = 0;
 static const u32 VM_GAME_NET_BUSINESS_CALLBACK = 0x01012e4d;
 static u8 g_lastStartupScreenState = 0xff;
+static u8 g_vm_pump_loading_now = 0;
 static void vm_autotest_note(const char *fmt, ...);
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
@@ -1023,10 +1048,69 @@ static u32 vm_df_get_t_resource(u32 namePtr, int stream)
     return stream ? vm_DF_GetStreamTResource(namePtr) : vm_DF_GetTResource(namePtr);
 }
 
+static void scheduler_force_scene_callback(u32 r9)
+{
+    u8 sceneState = 0;
+    u8 next = 101;
+    u8 zero = 0;
+    u8 done = 100;
+    if (r9 == 0)
+        return;
+    uc_mem_read(MTK, r9 + 19638, &sceneState, 1);
+    if (sceneState != 100)
+        return;
+    uc_mem_write(MTK, r9 + 19638, &next, 1);
+    uc_mem_write(MTK, r9 + 21655, &zero, 1);
+    uc_mem_write(MTK, r9 + 0x5494, &done, 1);
+    g_vm_pump_loading_now = 1;
+}
+
+static int scheduler_startup_ui_active(void)
+{
+    u32 debugUiObj = 0;
+    if (Global_R9 == 0)
+        return 0;
+    uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &debugUiObj, 4);
+    return debugUiObj != 0;
+}
+
+static void scheduler_skip_loading_wait(void)
+{
+    u8 sceneState = 0;
+    u8 busy = 0;
+    u8 dlState = 0;
+    u8 zero = 0;
+    u32 r9 = Global_R9;
+
+    if (scheduler_startup_ui_active())
+        return;
+    scheduler_force_scene_callback(r9);
+    if (r9 == 0)
+        return;
+    uc_mem_read(MTK, r9 + 19638, &sceneState, 1);
+    uc_mem_read(MTK, r9 + 21808, &busy, 1);
+    uc_mem_read(MTK, r9 + 0x9584, &dlState, 1);
+    if (sceneState == 100 || busy != 0 || dlState == 2)
+        g_vm_pump_loading_now = 1;
+    if (busy != 0 || dlState == 2)
+    {
+        uc_mem_write(MTK, r9 + 21808, &zero, 1);
+        uc_mem_write(MTK, r9 + 21804, &zero, 1);
+        uc_mem_write(MTK, r9 + 0x9584, &zero, 1);
+        uc_mem_write(MTK, r9 + 21655, &zero, 1);
+    }
+}
+
 static void scheduler_normalize_startup_screen_state(void)
 {
-    u32 debugUiRoot = Global_R9 + 0x9928;
+    u32 debugUiRoot;
     u32 debugUiObj = 0;
+
+    scheduler_skip_loading_wait();
+
+    if (Global_R9 == 0)
+        return;
+    debugUiRoot = Global_R9 + 0x9928;
     uc_mem_read(MTK, debugUiRoot + 0x10, &debugUiObj, 4);
     if (debugUiObj == 0)
         return;
@@ -1066,9 +1150,13 @@ static void scheduler_normalize_startup_screen_state(void)
             g_lastStartupUpdateState = updateState;
         }
     }
-    if (state == 10 && updateObj == 0)
+    if (state == 10)
     {
+        u8 done = 100;
+        uc_mem_write(MTK, Global_R9 + 0x5494, &done, 1);
     }
+    /* Keep connect/data tick gaps; only skip the 50/100ms sleep. */
+    g_vm_pump_loading_now = 1;
 }
 
 static uc_err vm_emu_start(u32 begin, u32 until);
@@ -2725,6 +2813,7 @@ static uc_err scheduler_dispatch_net_tasks(void)
             vm_net_remote_observation taskRemoteObservation =
                 task->remoteObservation;
             u32 remoteSceneTargetClearSerial = 0;
+            uc_err err;
             task->fired = 1;
             task->active = 0;
             g_netTaskDispatchDepth++;
@@ -2749,17 +2838,14 @@ static uc_err scheduler_dispatch_net_tasks(void)
                     uc_mem_read(MTK, Global_R9 + 0x9584, &dlState, 1);
                 }
                 /*
-                 * Coolmall 26/1: never re-arm DoLoading snapshot around the
-                 * dialog callback — that left the progress bar over the UI.
-                 * While AwaitMapThenDialog, scene-enter 30/1 MUST keep the
-                 * normal busy/DoLoading contract (clearing busy here = 卡加载).
+                 * Queued downloadSnapshot state=2 is restored on every 2/3
+                 * (and other event-7) fire.  That re-raises DoLoading after
+                 * ScreenInit / 30/2 already called ResetDownloadState, so
+                 * 切图 and shop-return sit on the gold bar.  Never write it
+                 * back; busy-clear after the callback closes the wait.
                  */
-                if (g_coolmallGuardNetDeliver &&
-                    !g_coolmallAwaitMapThenDialog &&
-                    task->downloadSnapshotValid && snapState == 2)
-                {
+                if (task->downloadSnapshotValid && snapState == 2)
                     skipRestore = 1;
-                }
                 if (!skipRestore && task->downloadSnapshotValid &&
                     task->downloadSnapshotState == 2)
                 {
@@ -2785,7 +2871,15 @@ static uc_err scheduler_dispatch_net_tasks(void)
             }
             remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
                 &taskRemoteObservation);
-            uc_err err = vm_call4_preserve_regs_clear_stack_args(taskCallback, taskR0, taskR1, taskR2, taskEvent);
+            {
+                u32 savedHangupMod = g_currentScreenModuleBase;
+                if (g_hangupNetCallR9 != 0 && g_hangupNetCallEntry != 0 &&
+                    (taskCallback & ~1u) == (g_hangupNetCallEntry & ~1u))
+                    g_currentScreenModuleBase = g_hangupNetCallR9;
+                err = vm_call4_preserve_regs_clear_stack_args(
+                    taskCallback, taskR0, taskR1, taskR2, taskEvent);
+                g_currentScreenModuleBase = savedHangupMod;
+            }
             if (g_netDebugReadWindow)
             {
                 printf("[info][network] net_done slot=%u event=%u cb=%08x err=%u remaining_read=%u/%u\n",
@@ -2809,6 +2903,10 @@ static uc_err scheduler_dispatch_net_tasks(void)
             if (err == UC_ERR_OK)
                 vm_net_mock_finish_remote_observation(
                     remoteSceneTargetClearSerial);
+#if defined(CBE_CLIENT_ONLY)
+            if (err == UC_ERR_OK && taskEvent == 7)
+                scheduler_skip_loading_wait();
+#endif
             if (err != UC_ERR_OK)
                 return err;
             if (taskEvent == 7)
@@ -2850,6 +2948,11 @@ static uc_err scheduler_dispatch_net_tasks(void)
 /* Android ships only the remote game client transport.  The desktop build
  * keeps the embedded service, persistence and web-admin implementation. */
 #ifdef CBE_CLIENT_ONLY
+static int vm_host_hangup_skill_menu_open(void);
+static int vm_host_hangup_skill_menu_active(void);
+static void vm_host_hangup_skill_menu_draw(void);
+static int vm_host_hangup_skill_menu_key(int skey, int press);
+static int vm_host_hangup_skill_menu_touch(int type, int x, int y);
 #include "network-client.c"
 #else
 #include "server/mock-server.c"
@@ -3238,6 +3341,7 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
     u16 localVersion = 0;
     bool fileExists = false;
     bool ok = false;
+    u32 probeUnexpectedRetries = 0;
 
     if (active || g_mockServiceOnly || g_mockServiceClientId == 0 ||
         normalizedPath == NULL || normalizedPath[0] == 0)
@@ -3330,6 +3434,37 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
             !vm_named_resource_response_u32(response, responseLen, "crc",
                                             &responseCrc))
         {
+            u8 wt0 = (responseLen >= 1) ? response[0] : 0;
+            u8 wt1 = (responseLen >= 2) ? response[1] : 0;
+            u8 kind = (responseLen >= 7) ? response[6] : 0;
+            u8 subtype = (responseLen >= 8) ? response[7] : 0;
+            int unexpectedShape =
+                requestOk &&
+                (responseLen == 0 || wt0 != 'W' || wt1 != 'T' ||
+                 kind != 18 || subtype != 7);
+
+            printf("[warn][resource] resource_cache_probe_unusable file=%s "
+                   "request_ok=%u event=%u resp=%u wt=%02x%02x kind=%u/%u "
+                   "result=%u unexpected=%d exists=%u protocol=WT18/7\n",
+                   leaf, requestOk ? 1u : 0u, eventType, responseLen, wt0, wt1,
+                   (unsigned)kind, (unsigned)subtype, (unsigned)result,
+                   unexpectedShape, fileExists ? 1u : 0u);
+#if defined(CBE_CLIENT_ONLY)
+            if (unexpectedShape && probeUnexpectedRetries < 2u)
+            {
+                ++probeUnexpectedRetries;
+                vm_client_live_session_close(&g_vmClientDataSession);
+                continue;
+            }
+#endif
+            if (fileExists && start == 0)
+            {
+                ok = true;
+                printf("[info][resource] resource_cache_keep_local file=%s "
+                       "local_version=%u protocol=WT18/7 "
+                       "evidence=probe-unusable-existing-cache\n",
+                       leaf, localVersion);
+            }
             break;
         }
         /* Published version matches local content hash: keep cache. */
@@ -3655,6 +3790,17 @@ static void vm_host_clear_download_busy(const char *reason)
     printf("[info][screen] download_busy_clear reason=%s r9=%08x "
            "evidence=ResetDownloadState:0x0103993C\n",
            reason ? reason : "-", r9);
+}
+
+static void vm_host_pump_map_stone_dismiss_bar(void)
+{
+    if (!g_vm_map_stone_dismiss_bar || g_vm_map_stone_dismiss_bar_tick == 0)
+        return;
+    if (g_schedulerTick < g_vm_map_stone_dismiss_bar_tick)
+        return;
+    vm_host_clear_download_busy("map-stone-world-teleport-screeninit");
+    g_vm_map_stone_dismiss_bar = 0;
+    g_vm_map_stone_dismiss_bar_tick = 0;
 }
 
 /*
@@ -5579,7 +5725,170 @@ static void vm_input_draw_overlay(void)
     }
 }
 
-static void vm_frame_delay(u32 ms) { SDL_Delay(ms); }
+#if defined(CBE_CLIENT_ONLY)
+static void vm_lcd_update_with_input_overlay(void);
+enum { VM_HANGUP_SKILL_MENU_MAX = 16 };
+static u8 g_hangupSkillMenuOpen = 0;
+static u8 g_hangupSkillMenuIndex = 0;
+static u8 g_hangupSkillMenuCount = 0;
+static u32 g_hangupSkillMenuOperate[VM_HANGUP_SKILL_MENU_MAX];
+static u8 g_hangupSkillMenuLabel[VM_HANGUP_SKILL_MENU_MAX][32];
+static int g_hangupSkillMenuX = 16;
+static int g_hangupSkillMenuY = 36;
+static int g_hangupSkillMenuW = 208;
+static int g_hangupSkillMenuRowH = 18;
+
+static int vm_host_hangup_skill_menu_active(void)
+{
+    return g_hangupSkillMenuOpen ? 1 : 0;
+}
+
+static int vm_host_hangup_skill_menu_open(void)
+{
+    u8 i;
+    u8 n;
+    static const u8 kCancel[] = {0xC8, 0xA1, 0xCF, 0xFB, 0};
+
+    n = vm_client_hangup_skill_option_count();
+    if (n > VM_HANGUP_SKILL_MENU_MAX - 1u)
+        n = VM_HANGUP_SKILL_MENU_MAX - 1u;
+    g_hangupSkillMenuCount = 0;
+    for (i = 0; i < n; ++i)
+    {
+        g_hangupSkillMenuOperate[g_hangupSkillMenuCount] =
+            vm_client_hangup_skill_option_operate(i);
+        vm_client_hangup_skill_option_label(
+            i, g_hangupSkillMenuLabel[g_hangupSkillMenuCount],
+            sizeof(g_hangupSkillMenuLabel[0]));
+        g_hangupSkillMenuCount++;
+    }
+    g_hangupSkillMenuOperate[g_hangupSkillMenuCount] = 0xffffffffu;
+    memcpy(g_hangupSkillMenuLabel[g_hangupSkillMenuCount], kCancel,
+           sizeof(kCancel));
+    g_hangupSkillMenuCount++;
+    g_hangupSkillMenuIndex = 0;
+    g_hangupSkillMenuOpen = 1;
+    vm_lcd_update_with_input_overlay();
+    printf("[info][input] hangup_skill_menu_open rows=%u\n",
+           g_hangupSkillMenuCount);
+    return 1;
+}
+
+static void vm_host_hangup_skill_menu_close(void)
+{
+    g_hangupSkillMenuOpen = 0;
+}
+
+static void vm_host_hangup_skill_menu_draw(void)
+{
+    static const u8 kTitle[] = {0xB9, 0xD2, 0xBB, 0xFA, 0xBC, 0xBC, 0xC4, 0xDC, 0};
+    int x;
+    int y;
+    int w;
+    int h;
+    u8 i;
+
+    if (!g_hangupSkillMenuOpen)
+        return;
+    x = g_hangupSkillMenuX;
+    y = g_hangupSkillMenuY;
+    w = g_hangupSkillMenuW;
+    h = 22 + (int)g_hangupSkillMenuCount * g_hangupSkillMenuRowH + 8;
+    vm_lcd_fill_rect_local(x, y, w, h, 0x0148);
+    vm_lcd_draw_rect_local(x, y, w, h, 0x9fe6);
+    vm_lcd_draw_rect_local(x + 1, y + 1, w - 2, h - 2, 0x2b6d);
+    drawFontString((u8 *)kTitle, x + 8, y + 4, 0xffe0);
+    for (i = 0; i < g_hangupSkillMenuCount; ++i)
+    {
+        int rowY = y + 22 + (int)i * g_hangupSkillMenuRowH;
+        u16 color = (i == g_hangupSkillMenuIndex) ? 0xffff : 0x9fe6;
+
+        if (i == g_hangupSkillMenuIndex)
+            vm_lcd_fill_rect_local(x + 4, rowY - 1, w - 8, g_hangupSkillMenuRowH,
+                                   0x2b6d);
+        drawFontString(g_hangupSkillMenuLabel[i], x + 8, rowY, color);
+    }
+}
+
+static void vm_host_hangup_skill_menu_confirm(void)
+{
+    u32 operate;
+
+    if (!g_hangupSkillMenuOpen || g_hangupSkillMenuIndex >= g_hangupSkillMenuCount)
+        return;
+    operate = g_hangupSkillMenuOperate[g_hangupSkillMenuIndex];
+    vm_host_hangup_skill_menu_close();
+    if (operate == 0xffffffffu)
+    {
+        (void)vm_client_hangup_host_cancel();
+        printf("[info][input] hangup_skill_menu_cancel\n");
+        vm_lcd_update_with_input_overlay();
+        return;
+    }
+    printf("[info][input] hangup_skill_menu_confirm operate=%u\n", operate);
+    (void)vm_client_hangup_confirm_skill_and_start(operate);
+    vm_lcd_update_with_input_overlay();
+}
+
+static int vm_host_hangup_skill_menu_key(int skey, int press)
+{
+    if (!g_hangupSkillMenuOpen || !press)
+        return 0;
+    if (skey == 17)
+    {
+        if (g_hangupSkillMenuIndex > 0)
+            g_hangupSkillMenuIndex--;
+        vm_lcd_update_with_input_overlay();
+        return 1;
+    }
+    if (skey == 18)
+    {
+        if (g_hangupSkillMenuIndex + 1u < g_hangupSkillMenuCount)
+            g_hangupSkillMenuIndex++;
+        vm_lcd_update_with_input_overlay();
+        return 1;
+    }
+    if (skey == 14 || skey == 12)
+    {
+        vm_host_hangup_skill_menu_confirm();
+        return 1;
+    }
+    if (skey == 13)
+    {
+        g_hangupSkillMenuIndex = (u8)(g_hangupSkillMenuCount - 1u);
+        vm_host_hangup_skill_menu_confirm();
+        return 1;
+    }
+    return 1;
+}
+
+static int vm_host_hangup_skill_menu_touch(int type, int x, int y)
+{
+    int row;
+
+    if (!g_hangupSkillMenuOpen)
+        return 0;
+    if (type != MR_MOUSE_DOWN)
+        return 1;
+    row = (y - (g_hangupSkillMenuY + 22)) / g_hangupSkillMenuRowH;
+    if (x < g_hangupSkillMenuX || x > g_hangupSkillMenuX + g_hangupSkillMenuW ||
+        row < 0 || row >= (int)g_hangupSkillMenuCount)
+        return 1;
+    g_hangupSkillMenuIndex = (u8)row;
+    vm_host_hangup_skill_menu_confirm();
+    return 1;
+}
+#endif
+
+static void vm_frame_delay(u32 ms)
+{
+    if (g_vm_pump_loading_now)
+    {
+        g_vm_pump_loading_now = 0;
+        return;
+    }
+    SDL_Delay(ms);
+}
 
 static void vm_lcd_update_with_input_overlay(void)
 {
@@ -5591,6 +5900,9 @@ static void vm_lcd_update_with_input_overlay(void)
     uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, bytes);
 #ifndef CBE_PLATFORM_NO_WINDOW
     vm_input_draw_overlay();
+#if defined(CBE_CLIENT_ONLY)
+    vm_host_hangup_skill_menu_draw();
+#endif
 #endif
     UpdateLcd();
 }
@@ -6802,6 +7114,7 @@ static uc_err scheduler_tick(void)
 #if defined(CBE_CLIENT_ONLY)
     /* Flag may arrive with the shop-exit response just dispatched above. */
     vm_host_pump_mmshop_loading_clear_flag();
+    vm_host_pump_map_stone_dismiss_bar();
 #endif
     vm_screen_root_exit_maybe_request();
     return UC_ERR_OK;
@@ -6896,9 +7209,172 @@ void keyEvent(int type, int key)
             if (skey == 14)
                 return;
         }
+#if defined(CBE_CLIENT_ONLY)
+        if (vm_host_hangup_skill_menu_active())
+        {
+            (void)vm_host_hangup_skill_menu_key(skey, isPress);
+            return;
+        }
+        /* Softkey/keyboard 挂机 never hits mouse hangup rect — arm intent here. */
+        if (isPress && skey == 18)
+            vm_host_arm_hangup_intent_from_softkey();
+        /* Map hangup start is host-acked; keep leftover 确定 off guest 28A4. */
+        if (vm_client_hangup_suppress_guest_confirm() &&
+            (skey == 14 || skey == 12 || skey == 13))
+        {
+            printf("[info][input] hangup_softkey_swallowed skey=%d press=%d "
+                   "evidence=host-hangup-start-no-bind-r9\n",
+                   skey, isPress);
+            return;
+        }
+#endif
         /* Chat/map shortcuts are Android UI digit keys ('6'/'4'), not softkey remap. */
         EnqueueVMEvent(VM_EVENT_KEYBOARD, skey, isPress);
     }
+}
+
+/*
+ * Native mmGame 挂机 is UI7 in the soft row (Pixi/WorldHud: x40–92, y342–364).
+ * client_out: outdoor taps land at x≈44–65 y≈340–354 with stack=3 and empty
+ * Ctrl softkey cache (mmGame draws its own bar).  Do not gate on stack==1 or
+ * left==「菜单」— those false-negatives swallow every hangup press.
+ */
+static int vm_host_touch_in_map_hangup_rect(int x, int y)
+{
+    int w = LcdGetNativeWidth();
+    int h = LcdGetNativeHeight();
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+
+    if (w <= 0)
+        w = 240;
+    if (h <= 0)
+        h = 400;
+    /* Match UI7.gif 49×22 (+small pad); keep clear of chat y364+. */
+    x0 = (w * 36) / 240;
+    x1 = (w * 96) / 240;
+    y0 = (h * 338) / 400;
+    y1 = (h * 366) / 400;
+    return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+}
+
+/*
+ * Bag/equip/detail overlay signal: Ctrl win title, or 使用/详细 softkeys.
+ * Outdoor mmGame often never refreshes Ctrl softkey cache (left="").
+ */
+static int vm_host_bag_or_equip_ui_open(void)
+{
+    static const u8 kDetail[] = {0xCF, 0xEA, 0xCF, 0xB8}; /* 详细 */
+    static const u8 kUse[] = {0xCA, 0xB9, 0xD3, 0xC3};    /* 使用 */
+
+    if (g_winTitleCache[0] != 0)
+        return 1;
+    if (vm_softkey_eq_gbk(g_softkeyLeftCache, kUse, sizeof(kUse)) ||
+        vm_softkey_eq_gbk(g_softkeyLeftCache, kDetail, sizeof(kDetail)) ||
+        vm_softkey_eq_gbk(g_softkeyCenterCache, kDetail, sizeof(kDetail)))
+        return 1;
+    return 0;
+}
+
+static void vm_host_arm_hangup_intent_from_softkey(void)
+{
+    if (vm_host_bag_or_equip_ui_open())
+    {
+        g_lastMouseHangupArmed = 0;
+        return;
+    }
+    g_lastMouseHangupArmed = 1;
+    printf("[info][input] hangup_softkey_arm stack=%u bag_ui=0 "
+           "evidence=skey18-hangup-intent\n",
+           (unsigned)g_screenStackCount);
+}
+
+/*
+ * client_out confirm crash: pc=mmBattle+0x2908 R0=0 R9=Global.  Panel screen
+ * often has stack moduleBase=0, so prepare_screen_call leaves Global_R9 while
+ * running pool logic → 28A4 walks with the wrong module.  Bind inferred
+ * mmBattle R9 onto current/stack before guest A4D4 (emulator bookkeeping only).
+ */
+static int vm_host_bind_hangup_confirm_mmbattle_r9(void)
+{
+    u32 codeBase = 0;
+    u32 moduleR9 = 0;
+    u32 i;
+    int bound = 0;
+
+    if (vm_infer_battle_module_from_screen(vmAddedScreen, &codeBase, &moduleR9))
+        bound = 1;
+    else
+    {
+        for (i = g_screenStackCount; i > 0; --i)
+        {
+            if (!vm_infer_battle_module_from_screen(g_screenStack[i - 1],
+                                                    &codeBase, &moduleR9))
+                continue;
+            bound = 1;
+            break;
+        }
+    }
+    if (!bound || moduleR9 == 0)
+    {
+        printf("[warn][input] hangup_confirm_bind_r9 fail evidence=no-mmBattle\n");
+        return 0;
+    }
+    g_currentScreenModuleBase = moduleR9;
+    vm_dl_note_sp_bf(moduleR9, "hangup-confirm-mmbattle");
+    vm_pool_module_remember_r9(moduleR9);
+    vm_hangup_candidate_fault_arm(codeBase);
+    for (i = 0; i < g_screenStackCount; ++i)
+    {
+        u32 slotCode = 0;
+        u32 slotR9 = 0;
+
+        if (!vm_infer_battle_module_from_screen(g_screenStack[i], &slotCode,
+                                                &slotR9))
+            continue;
+        if (g_screenStackModuleBase[i] == 0)
+            g_screenStackModuleBase[i] = moduleR9;
+    }
+    printf("[info][input] hangup_confirm_bind_r9 code=%08x r9=%08x "
+           "evidence=avoid-Global-R9-on-28A4\n",
+           codeBase, moduleR9);
+    return 1;
+}
+
+static int vm_host_should_block_hangup_uplink(void)
+{
+    /* Mall/dialogs: packet shape already excludes non-pure 2/10 Type=2.
+     * Outdoor world routinely has stack>=3 after title/role/mmGame pushes. */
+    if (vm_host_bag_or_equip_ui_open())
+        return 1;
+    if (!g_lastMouseHangupArmed)
+        return 1;
+    return 0;
+}
+
+static int vm_host_should_swallow_map_hangup_touch(int x, int y)
+{
+    if (!vm_host_touch_in_map_hangup_rect(x, y))
+        return 0;
+    /* Only eat hangup hits under bag/equip chrome — never for empty left /
+     * deep stack (that was eating every outdoor UI7 tap). */
+    if (vm_host_bag_or_equip_ui_open())
+        return 1;
+    return 0;
+}
+
+static void vm_host_log_hangup_rect_touch(int x, int y, int swallow)
+{
+    printf("[info][input] hangup_rect_touch x=%d y=%d stack=%u "
+           "bag_ui=%u swallow=%d title=\"%s\" left=\"%s\" center=\"%s\" "
+           "right=\"%s\" evidence=bag-equip-detail-clickthrough\n",
+           x, y, (unsigned)g_screenStackCount,
+           vm_host_bag_or_equip_ui_open() ? 1 : 0, swallow,
+           (const char *)g_winTitleCache, (const char *)g_softkeyLeftCache,
+           (const char *)g_softkeyCenterCache,
+           (const char *)g_softkeyRightCache);
 }
 
 // 1按下3弹起
@@ -6918,6 +7394,61 @@ void mouseEvent(int type, int x, int y)
         y = 0;
     else if (y > maxY)
         y = maxY;
+
+#if defined(CBE_CLIENT_ONLY)
+    if (vm_host_hangup_skill_menu_touch(type, x, y))
+        return;
+    if (type == MR_MOUSE_DOWN)
+    {
+        int inHangup = vm_host_touch_in_map_hangup_rect(x, y);
+        int maxYSoft;
+        int softRowH;
+        int onSoftRow;
+
+        softRowH = (maxY + 1) / 10;
+        if (softRowH < 28)
+            softRowH = 28;
+        maxYSoft = (maxY + 1) - softRowH;
+        onSoftRow = (y >= maxYSoft) ? 1 : 0;
+        if (vm_client_hangup_suppress_guest_confirm() && onSoftRow)
+        {
+            printf("[info][input] hangup_softrow_swallowed x=%d y=%d "
+                   "evidence=host-hangup-start-no-bind-r9\n",
+                   x, y);
+            g_vmHangupTouchSwallowed = 1;
+            return;
+        }
+
+        g_lastMouseHangupArmed =
+            (inHangup && !vm_host_bag_or_equip_ui_open()) ? 1 : 0;
+        printf("[info][input] mouse_down x=%d y=%d stack=%u "
+               "bag_ui=%u hangup_rect=%d hangup_arm=%u title=\"%s\" "
+               "left=\"%s\" evidence=bag-equip-detail-clickthrough\n",
+               x, y, (unsigned)g_screenStackCount,
+               vm_host_bag_or_equip_ui_open() ? 1 : 0, inHangup,
+               (unsigned)g_lastMouseHangupArmed, (const char *)g_winTitleCache,
+               (const char *)g_softkeyLeftCache);
+        if (inHangup)
+        {
+            int swallow = vm_host_should_swallow_map_hangup_touch(x, y);
+
+            vm_host_log_hangup_rect_touch(x, y, swallow);
+            if (swallow)
+            {
+                g_vmHangupTouchSwallowed = 1;
+                g_lastMouseHangupArmed = 0;
+                return;
+            }
+        }
+        g_vmHangupTouchSwallowed = 0;
+    }
+    else if (g_vmHangupTouchSwallowed)
+    {
+        if (type == MR_MOUSE_UP)
+            g_vmHangupTouchSwallowed = 0;
+        return;
+    }
+#endif
 
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
@@ -10142,6 +10673,17 @@ void loop()
                         EnqueueVMEvent(VM_EVENT_INPUT_BACKSPACE, 0, 0);
                     break;
                 }
+#if defined(CBE_CLIENT_ONLY)
+                if (vm_host_hangup_skill_menu_active())
+                {
+                    if (isKeyDown == SDLK_UNKNOWN)
+                    {
+                        isKeyDown = ev.key.keysym.sym;
+                        keyEvent(MR_KEY_PRESS, ev.key.keysym.sym);
+                    }
+                    break;
+                }
+#endif
                 if (isKeyDown == SDLK_UNKNOWN)
                 {
                     isKeyDown = ev.key.keysym.sym;
@@ -11707,6 +12249,7 @@ void RunArmProgram(void *param)
                 }
                 if (screenStructChange == 1 || g_screenRemovedWithoutNext || vmAddedScreen == 0)
                     break;
+                scheduler_normalize_startup_screen_state();
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
                 p = vm_emu_start(tScreenRenderEntry, exitAddr);
@@ -11870,6 +12413,13 @@ void RunArmProgram(void *param)
                     if (p == UC_ERR_OK && g_vm_scene_block_dream_completion_reenter)
                     {
                         vm_host_clear_download_busy("dream-df-screeninit-complete");
+                    }
+                    if (p == UC_ERR_OK &&
+                        (screenInitEntry & 0xfff00000u) == 0x05000000u)
+                    {
+                        scheduler_skip_loading_wait();
+                        g_vm_map_stone_dismiss_bar = 0;
+                        g_vm_map_stone_dismiss_bar_tick = 0;
                     }
 #endif
                 }
@@ -12150,6 +12700,7 @@ void RunArmProgram(void *param)
 
                         if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                             break;
+                        scheduler_normalize_startup_screen_state();
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         scheduler_prepare_screen_call(screenThisPtr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
@@ -12174,7 +12725,11 @@ void RunArmProgram(void *param)
                     vm_lcd_update_with_input_overlay();
                     u32 _now = SDL_GetTicks();
                     u32 _elapsed = _now - _frameTick;
-                    if (_elapsed < (u32)VM_SCHED_FRAME_MS)
+                    if (g_vm_pump_loading_now)
+                    {
+                        g_vm_pump_loading_now = 0;
+                    }
+                    else if (_elapsed < (u32)VM_SCHED_FRAME_MS)
                         SDL_Delay((u32)VM_SCHED_FRAME_MS - _elapsed);
                     _frameTick = SDL_GetTicks();
                 }
@@ -14615,11 +15170,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int y0 = vm_lcd_coord_from_reg(tmp2);
         int x1 = vm_lcd_coord_from_reg(tmp3);
         int y1 = vm_lcd_coord_from_reg(tmp4);
-        vm_lcd_draw_line(x0, y0, x1, y1, color);
         int sx = x0 < x1 ? x0 : x1;
         int sy = y0 < y1 ? y0 : y1;
         int ex = x0 > x1 ? x0 : x1;
         int ey = y0 > y1 ? y0 : y1;
+        vm_lcd_draw_line(x0, y0, x1, y1, color);
         vm_lcd_sync_cache_rect_to_vm(sx, sy, ex - sx + 1, ey - sy + 1);
         vm_set_call_result(1);
     }
@@ -14633,11 +15188,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int x1 = vm_lcd_coord_from_reg(tmp2);
         int y1 = vm_lcd_coord_from_reg(tmp2 >> 16);
         u16 color = (u16)tmp3;
-        vm_lcd_draw_line(x0, y0, x1, y1, color);
         int sx = x0 < x1 ? x0 : x1;
         int sy = y0 < y1 ? y0 : y1;
         int ex = x0 > x1 ? x0 : x1;
         int ey = y0 > y1 ? y0 : y1;
+        vm_lcd_draw_line(x0, y0, x1, y1, color);
         vm_lcd_sync_cache_rect_to_vm(sx, sy, ex - sx + 1, ey - sy + 1);
         vm_set_call_result(1);
     }
@@ -16029,6 +16584,11 @@ static u32 vm_ctrl_draw_win_title(u32 imageInfo, u32 textPtr, u32 color, int x, 
     vm_ctrl_read_text(textPtr, ucs2, text, sizeof(text));
     if (text[0] == 0)
         return 0;
+#if defined(CBE_CLIENT_ONLY)
+    memcpy(g_winTitleCache, text, sizeof(g_winTitleCache));
+    g_winTitleCache[sizeof(g_winTitleCache) - 1] = 0;
+    g_winTitleFresh = 1;
+#endif
 
     if (!explicitPos)
     {
@@ -16066,6 +16626,16 @@ static u32 vm_ctrl_draw_softkey_bar(u32 imageInfo, u32 leftPtr, u32 centerPtr, u
     memcpy(g_softkeyLeftCache, left, sizeof(g_softkeyLeftCache));
     memcpy(g_softkeyCenterCache, center, sizeof(g_softkeyCenterCache));
     memcpy(g_softkeyRightCache, right, sizeof(g_softkeyRightCache));
+#if defined(CBE_CLIENT_ONLY)
+    {
+        static const u8 kMenu[] = {0xB2, 0xCB, 0xB5, 0xA5}; /* 菜单 */
+
+        if (vm_softkey_eq_gbk(g_softkeyLeftCache, kMenu, sizeof(kMenu)) &&
+            !g_winTitleFresh)
+            g_winTitleCache[0] = 0;
+        g_winTitleFresh = 0;
+    }
+#endif
 
     if (left[0])
         vm_ctrl_draw_text(left, 10, y, color);
@@ -16290,6 +16860,7 @@ static bool hook_vm_manager_network_func(u32 address)
     {
         if (netR4)
             g_netCurrentObject = netR4;
+        g_lastNetSendLr = netLr;
         vm_net_mock_on_send(tmp1, tmp3, tmp2);
         vm_set_call_result(tmp2);
     }
@@ -18640,6 +19211,9 @@ static bool hook_vm_df_datapackage_func(u32 address)
         {
             VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
             printf("[call]DF_DataPackage_DoLoading\n");
+#if defined(CBE_CLIENT_ONLY)
+            vm_host_clear_download_busy("do-loading-immediate");
+#endif
         }
     }
     else if (idx == 6)
@@ -19641,11 +20215,114 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     return UC_ERR_OK;
 }
 
+/*
+ * Armed only while local 25/3 confirm is pending (see bind_r9).  Hot path is
+ * two integer compares — never infer/dl-scan per instruction (that tanked FPS).
+ */
+static u32 g_hangupCandidateFaultCodeBase = 0;
+static u8 g_hangupCandidateFaultDumped = 0;
+
+static void vm_hangup_candidate_fault_arm(u32 codeBase)
+{
+    g_hangupCandidateFaultCodeBase = codeBase;
+    g_hangupCandidateFaultDumped = 0;
+}
+
+static void vm_hangup_candidate_fault_disarm(void)
+{
+    g_hangupCandidateFaultCodeBase = 0;
+}
+
+static void vm_hangup_candidate_fault_trace_note_pc(u32 pc)
+{
+    u32 codeBase = g_hangupCandidateFaultCodeBase;
+    u32 regs[8] = {0};
+    u32 lr = 0;
+    u32 moduleR9 = 0;
+    u8 candidateCount = 0xff;
+    u8 code[0x80];
+    u8 argumentObject[0x80];
+    u8 node[0x40];
+    FILE *dump;
+    FILE *trace;
+
+    if (codeBase == 0 || g_hangupCandidateFaultDumped ||
+        pc != codeBase + 0x2908u)
+        return;
+    g_hangupCandidateFaultDumped = 1;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R4, &regs[4]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &regs[5]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R6, &regs[6]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R7, &regs[7]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+    if (moduleR9 != 0)
+        (void)uc_mem_read(MTK, moduleR9 + 0x3450u, &candidateCount,
+                          sizeof(candidateCount));
+    memset(argumentObject, 0, sizeof(argumentObject));
+    memset(node, 0, sizeof(node));
+    if (regs[2] != 0)
+        (void)uc_mem_read(MTK, regs[2], argumentObject, sizeof(argumentObject));
+    if (regs[4] != 0)
+        (void)uc_mem_read(MTK, regs[4], node, sizeof(node));
+    if (uc_mem_read(MTK, codeBase + 0x28C0u, code, sizeof(code)) == UC_ERR_OK)
+    {
+        dump = fopen("logs/hangup-candidate-fault-current.bin", "wb");
+        if (dump != NULL)
+        {
+            (void)fwrite(code, 1, sizeof(code), dump);
+            (void)fwrite(argumentObject, 1, sizeof(argumentObject), dump);
+            (void)fwrite(node, 1, sizeof(node), dump);
+            fflush(dump);
+            fclose(dump);
+        }
+    }
+    printf("[info][network] cbe_hangup_candidate_fault_preexec "
+           "local_pc=2908 base=%08x r9=%08x cand3450=%u "
+           "regs=%08x/%08x/%08x/%08x/%08x/%08x/%08x/%08x lr=%08x "
+           "node=%02x%02x%02x%02x%02x%02x%02x%02x "
+           "path=logs/hangup-candidate-fault-current.bin\n",
+           codeBase, moduleR9, (unsigned)candidateCount, regs[0], regs[1],
+           regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], lr,
+           node[0], node[1], node[2], node[3], node[4], node[5], node[6],
+           node[7]);
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] cbe_hangup_candidate_fault_preexec "
+            "local_pc=2908 base=%08x r9=%08x cand3450=%u "
+            "regs=%08x/%08x/%08x/%08x/%08x/%08x/%08x/%08x lr=%08x "
+            "node=%02x%02x%02x%02x%02x%02x%02x%02x "
+            "path=logs/hangup-candidate-fault-current.bin\n",
+            codeBase, moduleR9, (unsigned)candidateCount, regs[0], regs[1],
+            regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], lr,
+            node[0], node[1], node[2], node[3], node[4], node[5], node[6],
+            node[7]);
+    fflush(trace);
+    fclose(trace);
+}
+
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
     vm_restore_main_r9_for_rom_code((u32)address);
+#if defined(CBE_CLIENT_ONLY)
+    if (g_hangupCandidateFaultCodeBase != 0)
+        vm_hangup_candidate_fault_trace_note_pc((u32)address & ~1u);
+#endif
+    if (((u32)address & ~1u) == 0x01003CFCu)
+    {
+        u32 r9 = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        scheduler_force_scene_callback(r9);
+        scheduler_force_scene_callback(Global_R9);
+    }
     vm_autotest_note_startup_pc((u32)address & ~1u);
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);

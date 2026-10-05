@@ -124,9 +124,9 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         "<script src=\"/admin.js?v=7\" defer></script>"
         "</head><body><main class=\"wrap\"><header><div>"
         "<h1>强化配置</h1>"
-        "<p class=\"sub\">配置各部位 +4/+8/+12/+16 默认词条，以及洗练可随机的属性区间。"
+        "<p class=\"sub\">配置强化基础缩放、各部位 +4/+8/+12/+16 默认词条，以及洗练属性池。"
         "未洗练装备显示默认档词条；洗练从属性池随机类型并在区间内取值。"
-        "保存后立即生效。</p></div></header>");
+        "保存后立即生效（装备详情需重新打开人物信息/重登后同步客户端显示）。</p></div></header>");
     vm_mock_admin_append_tabs(&page, "enhance");
 
     if (status[0] != 0 && message[0] != 0)
@@ -205,6 +205,85 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
             transferCrystalOn ? "" : " selected",
             transferMoneyOn ? " selected" : "",
             transferMoneyOn ? "" : " selected");
+    }
+
+    {
+        const vm_net_mock_enhance_base_scale *sc =
+            vm_net_mock_enhance_base_scale_get();
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\">"
+            "<form method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" "
+            "value=\"enhance-base-scale-save\">"
+            "<div class=\"toolbar\"><h2 style=\"margin:0\">强化基础缩放</h2>"
+            "<button type=\"submit\">保存</button></div>"
+            "<p class=\"muted\" style=\"margin:0 0 12px\">"
+            "满量公式 <code>M(L)=基值+基值×(每级%%×L + 里程碑附加%%×⌊L/4⌋)/100</code>。"
+            "各属性取增量的应用%%：100=满量，50=增量减半，0=不随强化放大。上限 1000。"
+            "表：<code>server_enhance_base_scale</code>。"
+            "</p>"
+            "<div class=\"grid\">"
+            "<label class=\"field\"><span>每级加成 %%（默认 10）</span>"
+            "<input name=\"step_percent\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>+4 档额外 %%（默认 35）</span>"
+            "<input name=\"tier_extra_percent\" type=\"number\" min=\"0\" "
+            "max=\"1000\" value=\"%u\" style=\"max-width:none;width:100%%;"
+            "margin-top:4px\"></label>"
+            "<label class=\"field\"><span>物攻应用 %%（默认 100）</span>"
+            "<input name=\"apply_attack\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>护甲应用 %%（默认 50）</span>"
+            "<input name=\"apply_armor\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>力量应用 %%（默认 50）</span>"
+            "<input name=\"apply_strength\" type=\"number\" min=\"0\" "
+            "max=\"1000\" value=\"%u\" style=\"max-width:none;width:100%%;"
+            "margin-top:4px\"></label>"
+            "<label class=\"field\"><span>敏捷应用 %%（默认 50）</span>"
+            "<input name=\"apply_agility\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>智慧应用 %%（默认 50）</span>"
+            "<input name=\"apply_wisdom\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>气血应用 %%（默认 50）</span>"
+            "<input name=\"apply_hp\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>法力应用 %%（默认 50）</span>"
+            "<input name=\"apply_mp\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>躲闪应用 %%（默认 0）</span>"
+            "<input name=\"apply_dodge\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>命中应用 %%（默认 0）</span>"
+            "<input name=\"apply_hit\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>暴击应用 %%（默认 0）</span>"
+            "<input name=\"apply_crit\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "<label class=\"field\"><span>抗性应用 %%（默认 0）</span>"
+            "<input name=\"apply_resist\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\" style=\"max-width:none;width:100%%;margin-top:4px\">"
+            "</label>"
+            "</div></form></section>",
+            sc ? sc->stepPercent : 10u, sc ? sc->tierExtraPercent : 35u,
+            sc ? sc->applyAttack : 100u, sc ? sc->applyArmor : 50u,
+            sc ? sc->applyStrength : 50u, sc ? sc->applyAgility : 50u,
+            sc ? sc->applyWisdom : 50u, sc ? sc->applyHp : 50u,
+            sc ? sc->applyMp : 50u, sc ? sc->applyDodge : 0u,
+            sc ? sc->applyHit : 0u, sc ? sc->applyCrit : 0u,
+            sc ? sc->applyResist : 0u);
     }
 
     vm_mock_admin_text_appendf(
@@ -380,6 +459,75 @@ static void vm_mock_admin_handle_enhance_action(vm_mock_service_socket client,
     memset(maxText, 0, sizeof(maxText));
     memset(weightText, 0, sizeof(weightText));
     memset(countText, 0, sizeof(countText));
+
+    if (strcmp(action, "enhance-base-scale-save") == 0)
+    {
+        vm_net_mock_enhance_base_scale cfg;
+        const vm_net_mock_enhance_base_scale *cur =
+            vm_net_mock_enhance_base_scale_get();
+        char okMsg[160];
+
+        if (cur == NULL)
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "强化基础缩放未加载");
+            return;
+        }
+        cfg = *cur;
+        if (!vm_mock_admin_form_u32_or_default(body, "step_percent", 1000u,
+                                               cfg.stepPercent,
+                                               &cfg.stepPercent) ||
+            !vm_mock_admin_form_u32_or_default(body, "tier_extra_percent",
+                                               1000u, cfg.tierExtraPercent,
+                                               &cfg.tierExtraPercent) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_attack", 1000u,
+                                               cfg.applyAttack,
+                                               &cfg.applyAttack) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_armor", 1000u,
+                                               cfg.applyArmor,
+                                               &cfg.applyArmor) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_strength", 1000u,
+                                               cfg.applyStrength,
+                                               &cfg.applyStrength) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_agility", 1000u,
+                                               cfg.applyAgility,
+                                               &cfg.applyAgility) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_wisdom", 1000u,
+                                               cfg.applyWisdom,
+                                               &cfg.applyWisdom) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_hp", 1000u,
+                                               cfg.applyHp, &cfg.applyHp) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_mp", 1000u,
+                                               cfg.applyMp, &cfg.applyMp) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_dodge", 1000u,
+                                               cfg.applyDodge,
+                                               &cfg.applyDodge) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_hit", 1000u,
+                                               cfg.applyHit, &cfg.applyHit) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_crit", 1000u,
+                                               cfg.applyCrit,
+                                               &cfg.applyCrit) ||
+            !vm_mock_admin_form_u32_or_default(body, "apply_resist", 1000u,
+                                               cfg.applyResist,
+                                               &cfg.applyResist))
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "强化基础缩放字段无效（0–1000）");
+            return;
+        }
+        if (!vm_net_mock_enhance_base_scale_admin_save(&cfg))
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "保存强化基础缩放失败");
+            return;
+        }
+        snprintf(okMsg, sizeof(okMsg),
+                 "基础缩放已保存（每级 %u%%，档外 +%u%%；物攻 %u%% / 护甲 %u%%）",
+                 cfg.stepPercent, cfg.tierExtraPercent, cfg.applyAttack,
+                 cfg.applyArmor);
+        vm_mock_admin_redirect_enhance(client, "milestones", "ok", okMsg);
+        return;
+    }
 
     if (strcmp(action, "enhance-wash-settings-save") == 0 ||
         strcmp(action, "enhance-wash-quality-scale-save") == 0)

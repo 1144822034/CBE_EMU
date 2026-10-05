@@ -776,6 +776,14 @@ static u32 vm_net_mock_battle_auto_choose_operate(u32 *indexOut)
     }
 
     operate = g_mockBattleLastOperateValid ? g_mockBattleLastOperate : 0;
+    {
+        vm_mock_service_client_session *hangupSession =
+            vm_mock_service_get_active_client_session();
+
+        if (hangupSession != NULL && hangupSession->sceneHangupEnabled &&
+            hangupSession->sceneHangupOperateValid)
+            operate = hangupSession->sceneHangupOperate;
+    }
     if (vm_net_mock_battle_operate_is_skill(operate))
     {
         operate = vm_net_mock_battle_resolve_operate_for_mp(
@@ -986,6 +994,10 @@ static bool vm_net_mock_battle_release_settle_for_start(u8 *out,
 }
 static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32 requestLen,
                                                           u8 *out, u32 outCap);
+static u32 vm_net_mock_build_scene_hangup_panel_response(const u8 *request, u32 requestLen,
+                                                         u8 *out, u32 outCap);
+static u32 vm_net_mock_build_scene_hangup_mode_response(const u8 *request, u32 requestLen,
+                                                        u8 *out, u32 outCap);
 static u32 vm_net_mock_build_hangup_owned_soft_fail_response(u8 *out, u32 outCap,
                                                              const char *reason);
 static void vm_net_mock_battle_auto_note_client_operate(void);
@@ -2787,8 +2799,8 @@ static bool vm_net_mock_put_battle_action_companion_teaminfo_blob(
                                       teamInfo, (u16)teamInfoLen);
 }
 
-static bool vm_net_mock_append_battle_case11_auto_flag_object(u8 *out, u32 outCap,
-                                                              u32 *pos, u8 type)
+static bool vm_net_mock_append_battle_case11_auto_flag_object_ex(
+    u8 *out, u32 outCap, u32 *pos, u8 type, int hangupField)
 {
     u32 objectStart = 0;
 
@@ -2798,8 +2810,23 @@ static bool vm_net_mock_append_battle_case11_auto_flag_object(u8 *out, u32 outCa
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "type", type))
         return false;
+    /*
+     * Pixi reads hangup=0 as HUD「自动战斗中」.  Hangup-loop 4/11 must carry
+     * hangup=1.  Omit the field when hangupField<0 (CBE mid-fight flag-ack).
+     */
+    if (hangupField >= 0 &&
+        !vm_net_mock_put_object_u8(out, outCap, pos, "hangup",
+                                   hangupField ? 1 : 0))
+        return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
+}
+
+static bool vm_net_mock_append_battle_case11_auto_flag_object(u8 *out, u32 outCap,
+                                                              u32 *pos, u8 type)
+{
+    return vm_net_mock_append_battle_case11_auto_flag_object_ex(
+        out, outCap, pos, type, -1);
 }
 
 static bool vm_net_mock_append_battle_action6_object_ex(u8 *out, u32 outCap, u32 *pos,
@@ -8184,6 +8211,103 @@ static bool vm_net_mock_append_battle_auto_flask_counts_object(
     return true;
 }
 
+enum
+{
+    VM_NET_MOCK_SCENE_HANGUP_DEFAULT_MAX_BATTLES = 64,
+    VM_NET_MOCK_SCENE_HANGUP_INSIGHT_MAX_BATTLES = 200
+};
+
+static u16 vm_net_mock_scene_hangup_active_battle_limit(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    return role != NULL &&
+                   vm_net_mock_role_active_battle_exp_bonus_percent(role) != 0
+               ? (u16)VM_NET_MOCK_SCENE_HANGUP_INSIGHT_MAX_BATTLES
+               : (u16)VM_NET_MOCK_SCENE_HANGUP_DEFAULT_MAX_BATTLES;
+}
+
+static bool vm_net_mock_scene_hangup_result_panel_active(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL &&
+           session->sceneHangupEnabled &&
+           session->onlineRoleId != 0 &&
+           (g_vm_net_mock_battle_role_id_current == 0 ||
+            session->onlineRoleId == g_vm_net_mock_battle_role_id_current);
+}
+
+static bool vm_net_mock_append_scene_hangup_combatinfo(
+    u8 *out, u32 outCap, u32 *pos, u32 expGain, u32 goldGain,
+    u32 hpRecovered, u32 mpRecovered)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    u8 combatInfo[64];
+    u32 combatInfoLen = 0;
+    u16 completedTally = 0;
+    u16 maximumTally = 0;
+
+    if (!vm_net_mock_scene_hangup_result_panel_active())
+        return true;
+    if (session == NULL)
+        return false;
+    if (session->sceneHangupLastAccountedBattleSerial !=
+        g_mockBattleOperateSessionSerial)
+    {
+        session->sceneHangupTotalExp = vm_net_mock_add_capped_u32(
+            session->sceneHangupTotalExp, expGain);
+        session->sceneHangupTotalGold = vm_net_mock_add_capped_u32(
+            session->sceneHangupTotalGold, goldGain);
+        session->sceneHangupTotalHpRecovered = vm_net_mock_add_capped_u32(
+            session->sceneHangupTotalHpRecovered, hpRecovered);
+        session->sceneHangupTotalMpRecovered = vm_net_mock_add_capped_u32(
+            session->sceneHangupTotalMpRecovered, mpRecovered);
+        session->sceneHangupLastAccountedBattleSerial =
+            g_mockBattleOperateSessionSerial;
+        if (session->sceneHangupCompletedBattles < 0xffffu)
+            session->sceneHangupCompletedBattles++;
+    }
+    completedTally = session->sceneHangupCompletedBattles;
+    maximumTally = session->sceneHangupMaxBattles;
+    if (!vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen, completedTally) ||
+        !vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen, maximumTally) ||
+        !vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen, session->sceneHangupTotalExp) ||
+        !vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen, session->sceneHangupTotalGold) ||
+        !vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen,
+                                 session->sceneHangupTotalMpRecovered) ||
+        !vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen,
+                                 session->sceneHangupTotalHpRecovered) ||
+        !vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen, 0) ||
+        !vm_net_mock_seq_put_u32(combatInfo, sizeof(combatInfo),
+                                 &combatInfoLen, 0) ||
+        !vm_net_mock_seq_put_u8(combatInfo, sizeof(combatInfo),
+                                &combatInfoLen, 0) ||
+        combatInfoLen > 0xffffu ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "combatinfo",
+                                    combatInfo, (u16)combatInfoLen))
+    {
+        return false;
+    }
+    printf("[info][network] mock_scene_hangup_combatinfo client=%08x "
+           "tally=%u/%u exp=%u gold=%u hp=%u mp=%u raw_len=%u "
+           "evidence=mmBattle:sub_7794\n",
+           session->clientId, completedTally, maximumTally,
+           session->sceneHangupTotalExp, session->sceneHangupTotalGold,
+           session->sceneHangupTotalHpRecovered,
+           session->sceneHangupTotalMpRecovered, combatInfoLen);
+    return true;
+}
+
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
                                                      u32 autoRecoverHp, u32 autoRecoverMp,
                                                      bool forceTeamVictory,
@@ -8470,9 +8594,13 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
      * and the panel shows lifetime totals as the gain.
      * Exit-prime replay must NOT emit 1/1/14 inside Battle.cbm — same-packet
      * tear-down with that seed crashed (addr fault on scene_poll resp=623).
+     * CBE hangup 4/7 keeps Battle.cbm on the settle shell (skip-4/8).  The
+     * same 1/14 in 4/6+1/14+4/7 hits mmGame actorinfo while Battle owns the
+     * screen → rand_range DIV0 pc=0x0104E980 (client_out 2026-10-05, resp=718).
      */
     if (seedMapBaseline &&
-        victory && role != NULL && (displayExpGain != 0 || displayGoldGain != 0))
+        victory && role != NULL && (displayExpGain != 0 || displayGoldGain != 0) &&
+        !vm_net_mock_scene_hangup_result_panel_active())
     {
         u32 savedExp = role->exp;
         u32 savedMoney = role->money;
@@ -8487,6 +8615,13 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         }
         role->exp = savedExp;
         role->money = savedMoney;
+    }
+    else if (seedMapBaseline && victory && role != NULL &&
+             (displayExpGain != 0 || displayGoldGain != 0) &&
+             vm_net_mock_scene_hangup_result_panel_active())
+    {
+        printf("[info][network] mock_battle_settle skip_actor14 "
+               "evidence=cbe-hangup-4/7-shell-no-1/14\n");
     }
     (void)seededBaseline;
 
@@ -8545,6 +8680,10 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     {
         return false;
     }
+    if (!vm_net_mock_append_scene_hangup_combatinfo(
+            out, outCap, pos, displayExpGain, displayGoldGain,
+            recoverHp, recoverMp))
+        return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 0))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
@@ -12275,26 +12414,91 @@ static u32 vm_net_mock_battle_auto_turn_gap_ms(void)
     return vm_net_mock_env_u32("CBE_BATTLE_AUTO_TURN_GAP_MS", 0);
 }
 
+static bool vm_net_mock_cbe_scene_hangup_active(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && session->sceneHangupEnabled;
+}
+
+/*
+ * combatinfo increments CompletedBattles at first 4/7.  Entry gap must arm
+ * on hangup start (tally still 0) so mmBattle can load before the first 4/6.
+ */
+static bool vm_net_mock_cbe_scene_hangup_first_entry(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && session->sceneHangupEnabled &&
+           session->sceneHangupCompletedBattles == 0;
+}
+
+/* First 4/7 has already tallied; keep 4/8 on the first fight's Battle.cbm. */
+static bool vm_net_mock_cbe_scene_hangup_first_exit(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && session->sceneHangupEnabled &&
+           session->sceneHangupCompletedBattles <= 1;
+}
+
 /* First synth after hangup/challenge start.  Independent of mid-fight turn gap. */
 static u32 vm_net_mock_battle_auto_entry_gap_ms(void)
 {
-    return vm_net_mock_env_u32("CBE_BATTLE_AUTO_ENTRY_GAP_MS", 0);
+    u32 fallback = 0;
+
+    /*
+     * CBE scene hangup cold start: Battle.cbm is not up when Type=2 returns
+     * 4/5.  Default 0 lets poll synth 4/6 then 4/8+next 4/5 while the guest
+     * is still loading fight 1 (docs/re/2026-10-05-cbe-hangup-first-fight-overlap.md).
+     * Pixi 4/1 hangup does not set sceneHangupEnabled.
+     */
+    if (vm_net_mock_cbe_scene_hangup_first_entry())
+        fallback = 2000;
+    return vm_net_mock_env_u32("CBE_BATTLE_AUTO_ENTRY_GAP_MS", fallback);
+}
+
+/*
+ * CBE hangup (2/10 Type=2 + HangupLoop) plays mmBattle actioninfo at ~100ms/frame.
+ * Pixi [自动]/client 4/1 hangup still needs the longer 1400ms/action hold so
+ * 4/8 cannot land on an unfinished BattleScreen playback.
+ */
+static bool vm_net_mock_hangup_loop_pacing_active(void)
+{
+    return g_mockHangupLoopActive != 0 ||
+           g_mockHangupLoopScheduleAfterExit != 0 ||
+           g_mockHangupLoopPendingArmed != 0 ||
+           g_mockHangupStartPendingArmed != 0;
 }
 
 /* Hold long enough for actioninfo (player + death + counters) to finish
- * playing before the next synth.  Optional turn-gap env adds cancel time. */
+ * playing before the next poll synth.  Optional turn-gap env adds cancel time. */
 static u32 vm_net_mock_battle_auto_playback_hold_ms(u8 actionCount)
 {
     u32 cancelGapMs = vm_net_mock_battle_auto_turn_gap_ms();
-    u32 perActionMs = vm_net_mock_env_u32("CBE_BATTLE_AUTO_ACTION_PLAYBACK_MS", 1400);
+    u32 perActionMs;
+    u32 minPlayMs;
     u32 playMs;
     u32 holdMs;
 
+    if (vm_net_mock_hangup_loop_pacing_active())
+    {
+        perActionMs = vm_net_mock_env_u32("CBE_HANGUP_AUTO_ACTION_PLAYBACK_MS", 600);
+        minPlayMs = 400;
+    }
+    else
+    {
+        perActionMs = vm_net_mock_env_u32("CBE_BATTLE_AUTO_ACTION_PLAYBACK_MS", 1400);
+        minPlayMs = 500;
+    }
     if (actionCount == 0)
         actionCount = 1;
     playMs = perActionMs * (u32)actionCount;
-    if (playMs < 500)
-        playMs = 500;
+    if (playMs < minPlayMs)
+        playMs = minPlayMs;
     holdMs = playMs + cancelGapMs;
     return holdMs;
 }
@@ -12354,14 +12558,15 @@ static void vm_net_mock_battle_note_round_playback_hold(u8 actionCount,
     }
     printf("[info][network] mock_battle_playback_hold reason=%s actions=%u "
            "hold_ms=%u not_before_ms=%u now_ms=%u prefer=%u pending=%u "
-           "evidence=actioninfo-playback-before-next-synth\n",
+           "hangup_pace=%u evidence=actioninfo-playback-before-next-synth\n",
            reason ? reason : "-",
            actionCount,
            holdMs,
            g_mockBattleAutoNextActNotBeforeMs,
            nowMs,
            g_mockBattleAutoPrefer ? 1 : 0,
-           g_mockBattleAutoPendingArmed ? 1 : 0);
+           g_mockBattleAutoPendingArmed ? 1 : 0,
+           vm_net_mock_hangup_loop_pacing_active() ? 1 : 0);
 }
 
 static bool vm_net_mock_battle_auto_in_turn_gap(void)
@@ -12395,8 +12600,16 @@ static u32 vm_net_mock_hangup_loop_interval_ms(void)
 {
     /* Default 2s pure map-side wait after settlement exit (tune via env). */
     u32 intervalMs = vm_net_mock_env_u32("CBE_HANGUP_LOOP_INTERVAL_MS", 2000);
-    if (intervalMs < 1500)
-        intervalMs = 1500;
+    u32 minMs = 1500;
+
+    /*
+     * CBE 4/8-to-map then poll 4/5: mmGame must actually leave Battle.cbm.
+     * 2s is often still fight 1 when the guest was late to the first 4/5.
+     */
+    if (vm_net_mock_cbe_scene_hangup_active())
+        minMs = vm_net_mock_env_u32("CBE_SCENE_HANGUP_LOOP_INTERVAL_MS", 3500);
+    if (intervalMs < minMs)
+        intervalMs = minMs;
     return intervalMs;
 }
 
@@ -12490,11 +12703,18 @@ static bool vm_net_mock_append_map_encounter_reject_notice(
 static u32 vm_net_mock_battle_settlement_exit_delay_ms(void)
 {
     /* Settle-panel read window before delayed 4/8 tear-down.
-     * Default 2500 matches multi-monster settle docs; 100 made the content
-     * panel almost invisible before the sticky empty 4/8 shell. */
-    u32 delayMs = vm_net_mock_env_u32("CBE_BATTLE_SETTLEMENT_EXIT_DELAY_MS", 2500);
-    if (delayMs < 100)
-        delayMs = 100;
+     * HangupLoop stays on the 4/7 shell until the next 2/10 start prepends
+     * 4/8, so CBE only needs a short combatinfo glance (default 1200).
+     * Pixi/manual keep 2500 so the content panel is readable. */
+    u32 delayMs;
+    u32 minMs = 100;
+
+    if (vm_net_mock_hangup_loop_pacing_active())
+        delayMs = vm_net_mock_env_u32("CBE_HANGUP_SETTLEMENT_EXIT_DELAY_MS", 1200);
+    else
+        delayMs = vm_net_mock_env_u32("CBE_BATTLE_SETTLEMENT_EXIT_DELAY_MS", 2500);
+    if (delayMs < minMs)
+        delayMs = minMs;
     return delayMs;
 }
 
@@ -12593,12 +12813,21 @@ static void vm_net_mock_battle_settlement_exit_arm(const char *reason)
         playMs = vm_net_mock_battle_auto_playback_hold_ms(
             g_mockBattleLastRoundActionCount);
     totalMs = playMs + panelMs;
+    if (vm_net_mock_cbe_scene_hangup_first_exit())
+    {
+        u32 minMs = vm_net_mock_env_u32("CBE_HANGUP_FIRST_SETTLE_EXIT_MIN_MS",
+                                        4000);
+
+        if (totalMs < minMs)
+            totalMs = minMs;
+    }
     g_mockBattleSettlementExitPending = 1;
     g_mockBattleSettlementExitNotBeforeMs = nowMs + totalMs;
     vm_net_mock_battle_post_exit_settle_clear("exit-rearm");
     printf("[info][network] mock_battle_settlement_exit_arm reason=%s "
            "play_ms=%u panel_ms=%u delay_ms=%u not_before_ms=%u serial=%u "
-           "prefer=%u actions_last=%u evidence=4/8-after-playback+4/7-panel\n",
+           "prefer=%u actions_last=%u cbe_first_exit=%u "
+           "evidence=4/8-after-playback+4/7-panel\n",
            reason ? reason : "-",
            playMs,
            panelMs,
@@ -12606,7 +12835,8 @@ static void vm_net_mock_battle_settlement_exit_arm(const char *reason)
            g_mockBattleSettlementExitNotBeforeMs,
            g_mockBattleOperateSessionSerial,
            g_mockBattleAutoPrefer ? 1 : 0,
-           g_mockBattleLastRoundActionCount);
+           g_mockBattleLastRoundActionCount,
+           vm_net_mock_cbe_scene_hangup_first_exit() ? 1 : 0);
 }
 
 static void vm_net_mock_battle_note_victory_settlement(const char *reason)
@@ -12796,6 +13026,13 @@ static u32 vm_net_mock_build_battle_settlement_exit_packet(u8 *out, u32 outCap,
          g_mockHangupLoopPendingArmed != 0 ||
          g_mockHangupStartPendingArmed != 0))
     {
+        /*
+         * Stay on 4/7 until the next hangup start prepends 4/8 then 4/5.
+         * CBE 4/8-to-map (2026-10-05) cleared AwaitingSettlement and let
+         * mmGame 25/5 result=4 land on the settle shell → DIV0 pc=0x0104e980.
+         * Same-packet 4/8+4/5+4/11 also stacked fight 2 on the shell; CBE
+         * hangup start already omits 4/11.
+         */
         g_mockBattleAwaitingSettlement = 1;
         vm_net_mock_battle_settlement_exit_clear(phase ? phase : "hangup-skip-4/8");
         vm_net_mock_battle_post_exit_settle_clear(phase ? phase : "hangup-skip-4/8");
@@ -13198,6 +13435,20 @@ static u32 vm_net_mock_build_pending_hangup_loop_battle_response(u8 *out, u32 ou
     nowMs = scheduler_get_tick_ms();
     if (nowMs < g_mockHangupLoopNotBeforeMs)
         return 0;
+    /*
+     * CBE 4/8-to-map can clear OperateSession while the last 4/6 hold is
+     * still live.  Do not deliver fight 2 until that clock expires.
+     */
+    if (vm_net_mock_cbe_scene_hangup_active() &&
+        g_mockBattleAutoNextActNotBeforeMs != 0 &&
+        nowMs < g_mockBattleAutoNextActNotBeforeMs)
+    {
+        printf("[info][network] mock_hangup_loop_poll_hold "
+               "reason=cbe-playback-hold remain_ms=%u "
+               "evidence=wait-fight1-actioninfo-before-next-4/5\n",
+               g_mockBattleAutoNextActNotBeforeMs - nowMs);
+        return 0;
+    }
 
     g_mockHangupLoopPendingArmed = 0;
     len = vm_net_mock_build_hangup_battle_start_response(NULL, 0, out, outCap);
@@ -13988,7 +14239,24 @@ static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u3
     if (!vm_net_mock_request_has_battle_auto12(request, requestLen))
         return 0;
     if (g_mockBattleOperateSessionArmed == 0 && !vm_net_mock_current_screen_is_battle())
+    {
+        vm_mock_service_client_session *hangupSession =
+            vm_mock_service_get_active_client_session();
+
+        /*
+         * Scene hangup is armed on the map (no operate session).  Empty ACK
+         * dismisses 4/12 wait; do not return 0 →「功能暂未实现(1/4/12)」.
+         */
+        if (hangupSession != NULL && hangupSession->sceneHangupEnabled)
+        {
+            vm_net_mock_finish_wt_packet(out, pos, 0);
+            printf("[info][network] mock_battle_auto12_cancel "
+                   "action=empty-ack-hangup-idle armed=0 "
+                   "evidence=sceneHangupEnabled-map-4/12\n");
+            return pos;
+        }
         return 0;
+    }
 
     /*
      * Settlement panel is up (or exit armed).  Never ACK type=0 here — that
@@ -14261,6 +14529,247 @@ static u32 vm_net_mock_build_hangup_owned_soft_fail_response(u8 *out, u32 outCap
     return pos;
 }
 
+static bool vm_net_mock_append_scene_hangup_panel_object(
+    u8 *out, u32 outCap, u32 *pos,
+    const vm_mock_service_client_session *session)
+{
+    static const char panelFormat[] =
+        "\xB1\xBE\xB4\xCE\xB9\xD2\xBB\xFA\xC8\xB7\xC8\xCF\n"
+        "\xB9\xD2\xBB\xFA\xB3\xA1\xB4\xCE\xC9\xCF\xCF\xDE\xA3\xBA%u\xB3\xA1\n"
+        "\xB1\xB3\xB0\xFC\xA3\xBA%u/%u\xA3\xA8\xCA\xA3\xD3\xE0%u\xB8\xF1\xA3\xA9\n"
+        "\xB5\xF4\xC2\xE4\xCE\xEF\xC6\xB7\xBD\xAB\xB7\xC5\xC8\xEB\xB1\xB3\xB0\xFC\n"
+        "\xCA\xC7\xB7\xF1\xBC\xCC\xD0\xF8\xB9\xD2\xBB\xFA\xA3\xBF";
+    u8 info[181];
+    vm_net_mock_role_state *role;
+    int textLen;
+    u32 limit;
+    u32 backpackUsed;
+    u32 backpackCapacity;
+    u32 backpackFree;
+    u32 objectStart = 0;
+
+    if (session == NULL)
+        return false;
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+        return false;
+    limit = session->sceneHangupEnabled ? session->sceneHangupMaxBattles
+                                        : vm_net_mock_scene_hangup_active_battle_limit();
+    backpackCapacity = role->backpackCapacity;
+    if (backpackCapacity == 0)
+        backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+    backpackUsed = vm_net_mock_role_backpack_count(role);
+    if (backpackUsed > backpackCapacity)
+        backpackUsed = backpackCapacity;
+    backpackFree = backpackCapacity - backpackUsed;
+    memset(info, 0, sizeof(info));
+    textLen = snprintf((char *)info, 180, panelFormat, limit, backpackUsed,
+                       backpackCapacity, backpackFree);
+    if (textLen < 0 || (u32)textLen >= 180u)
+        return false;
+    info[180] = 5;
+    printf("[info][network] mock_scene_hangup_panel_confirm client=%08x "
+           "role=%u limit=%u backpack=%u/%u free=%u "
+           "evidence=mmBattle:0x8996-native-confirm\n",
+           session->clientId, session->onlineRoleId, limit, backpackUsed,
+           backpackCapacity, backpackFree);
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 25, 3,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u16(out, outCap, pos, "num", 0) ||
+        !vm_net_mock_put_object_blob(out, outCap, pos, "info", info,
+                                     sizeof(info)) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "mnum", 0))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_scene_hangup_panel_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    const char *scene = vm_net_mock_current_scene_name();
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_hangup_battle_start_request(request, requestLen,
+                                                       NULL, NULL))
+    {
+        return 0;
+    }
+    if (session == NULL || session->onlineRoleId == 0)
+    {
+        printf("[warn][network] mock_scene_hangup_panel_skip reason=no-session "
+               "len=%u\n",
+               requestLen);
+        return 0;
+    }
+    if (session->sceneHangupEnabled)
+    {
+        printf("[info][network] mock_scene_hangup_panel_skip "
+               "reason=already-enabled client=%08x\n",
+               session->clientId);
+        return 0;
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_mock_service_session_scene_is_visible(session, scene))
+    {
+        printf("[warn][network] mock_scene_hangup_panel_skip "
+               "reason=scene-not-visible client=%08x scene=%s "
+               "ready=%u pending=%u vis_scene=%s\n",
+               session->clientId, scene ? scene : "-",
+               session->sceneVisibleReady ? 1u : 0u,
+               session->sceneVisiblePending ? 1u : 0u,
+               session->sceneVisibleScene);
+        return 0;
+    }
+    if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos) ||
+        !vm_net_mock_append_scene_hangup_panel_object(out, outCap, &pos,
+                                                      session))
+    {
+        printf("[warn][network] mock_scene_hangup_panel_skip "
+               "reason=encode-fail client=%08x\n",
+               session->clientId);
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    printf("[info][network] mock_scene_hangup_panel_open client=%08x role=%u "
+           "scene=%s response=2/10+25/3 purpose=native-confirm "
+           "evidence=mmBattle:0xA4BC->0x8996\n",
+           session->clientId, session->onlineRoleId, scene);
+    return pos;
+}
+
+static u32 vm_net_mock_build_scene_hangup_mode_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_request_object object;
+    vm_net_mock_request_object actorOther;
+    vm_mock_service_client_session *session;
+    const char *scene;
+    u8 kind = 0;
+    u8 subtype = 0;
+    u8 requestedType = 0;
+    u32 offset = 4;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    bool compoundStop = false;
+
+    if (request == NULL || out == NULL || outCap < pos || requestLen < 9 ||
+        !vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
+                                                &kind, &subtype))
+    {
+        return 0;
+    }
+    if (kind == 25 && subtype == 2)
+    {
+        if (!vm_net_mock_next_request_object(request, requestLen, &offset,
+                                             &object) ||
+            offset != requestLen || object.major != 1 || object.kind != 25 ||
+            object.subtype != 2 ||
+            !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                              "type", &requestedType) ||
+            (requestedType != 1 && requestedType != 2))
+        {
+            return 0;
+        }
+    }
+    else if (kind == 2 && subtype == 10)
+    {
+        if (!vm_net_mock_next_request_object(request, requestLen, &offset,
+                                             &actorOther) ||
+            actorOther.major != 1 || actorOther.kind != 2 ||
+            actorOther.subtype != 10 ||
+            !vm_net_mock_get_object_u8_field(actorOther.payload,
+                                              actorOther.payloadLen,
+                                              "Type", &requestedType) ||
+            requestedType != 2 ||
+            !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                             &object) ||
+            offset != requestLen || object.major != 1 || object.kind != 25 ||
+            object.subtype != 2 ||
+            !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                              "type", &requestedType) ||
+            requestedType != 2)
+        {
+            return 0;
+        }
+        compoundStop = true;
+    }
+    else
+    {
+        return 0;
+    }
+
+    session = vm_mock_service_get_active_client_session();
+    scene = vm_net_mock_current_scene_name();
+    if (session == NULL || session->onlineRoleId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_mock_service_session_scene_is_visible(session, scene))
+    {
+        return 0;
+    }
+    if (compoundStop && !session->sceneHangupEnabled)
+        return 0;
+    if (compoundStop &&
+        !vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+    {
+        return 0;
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 25, 2,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", requestedType))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, compoundStop ? 2 : 1);
+
+    if (requestedType == 1)
+    {
+        session->sceneHangupEnabled = true;
+        session->sceneHangupRestartPending = false;
+        session->sceneHangupBattleSessionSerial = 0;
+        session->sceneHangupRestartNotBeforeTick = 0;
+        session->sceneHangupCompletedBattles = 0;
+        session->sceneHangupMaxBattles =
+            vm_net_mock_scene_hangup_active_battle_limit();
+        session->sceneHangupTotalExp = 0;
+        session->sceneHangupTotalGold = 0;
+        session->sceneHangupTotalHpRecovered = 0;
+        session->sceneHangupTotalMpRecovered = 0;
+        session->sceneHangupLastAccountedBattleSerial = 0;
+        snprintf(session->sceneHangupScene, sizeof(session->sceneHangupScene),
+                 "%s", scene);
+        /*
+         * CBE_EMU: 25/2 only arms sceneHangupEnabled.  Setting
+         * g_mockHangupLoopActive here makes the immediately replayed Type=2
+         * look like a second hangup tap →「下一场完成后挂机停止」.
+         */
+        g_mockHangupLoopScheduleAfterExit = 0;
+        g_mockHangupLoopPendingArmed = 0;
+        g_mockHangupLoopNotBeforeMs = 0;
+        g_mockHangupStopAfterBattle = 0;
+    }
+    else
+    {
+        vm_mock_service_session_clear_scene_hangup(session,
+                                                   "native-panel-stop");
+        vm_net_mock_hangup_loop_clear("native-panel-stop");
+    }
+    printf("[info][network] mock_scene_hangup_mode client=%08x role=%u "
+           "scene=%s request=%s25/2(type=%u) response=%s "
+           "evidence=mmBattle:0xA4D4->0x28A4->0x87DA->0x8996\n",
+           session->clientId, session->onlineRoleId, scene,
+           compoundStop ? "2/10+" : "", requestedType,
+           compoundStop ? "2/10+25/2(result-1)" : "25/2(result-1)");
+    return pos;
+}
+
 static bool vm_net_mock_is_hangup_battle_start_request(const u8 *request,
                                                         u32 requestLen)
 {
@@ -14476,14 +14985,13 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
          g_mockHangupLoopScheduleAfterExit != 0 ||
          g_mockHangupLoopPendingArmed != 0 ||
          g_mockHangupStartPendingArmed != 0 ||
-         g_mockHangupStopAfterBattle != 0))
+         g_mockHangupStopAfterBattle != 0) &&
+        !(activeSession != NULL && activeSession->sceneHangupEnabled))
     {
         /*
-         * Second hangup tap while armed: stop after this/next fight.
-         * Soft-ACK alone leaves HandleBattleEnterReq on「获取数据」
-         * (needs 4/5 or 4/10).  Mid-fight: keep current battle + StopAfter.
-         * Map / settle / start-countdown: fall through into one last start
-         * so the Type=2 enter completes, then StopAfter ends the loop.
+         * Legacy loop (no sceneHangupEnabled): second Type=2 is stop-after.
+         * CBE scene hangup keeps the map 挂机 button as start only; stop is
+         * hangup-settle 停止挂机 → 2/10+25/2(type=2) (native-panel-stop).
          */
         bool inFight = (g_mockBattleOperateSessionArmed != 0 &&
                         g_mockBattleAwaitingSettlement == 0);
@@ -14761,6 +15269,25 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     }
 
     requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(requestedEnemyId);
+    if (request != NULL && requestLen != 0)
+    {
+        u32 reqOperateEarly = 0;
+        u8 reqOperate8Early = 0;
+
+        if (vm_net_mock_get_object_u32_field(request, requestLen, "Operate",
+                                             &reqOperateEarly) ||
+            (vm_net_mock_get_object_u8_field(request, requestLen, "Operate",
+                                             &reqOperate8Early) &&
+             (reqOperateEarly = reqOperate8Early, 1)))
+        {
+            hangupSeedOperate = reqOperateEarly;
+            if (activeSession != NULL)
+            {
+                activeSession->sceneHangupOperate = reqOperateEarly;
+                activeSession->sceneHangupOperateValid = true;
+            }
+        }
+    }
     /*
      * Pixi hangup may carry the same id/index/posx/posy as manual 4/1 so we
      * can open subtype-5 (scene wires) without an emulator live-table.  CBE
@@ -14774,14 +15301,21 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         u32 reqPosY = 0;
         u32 reqOperate = 0;
         u8 reqOperate8 = 0;
+        bool haveHangupOperate = false;
 
         (void)vm_net_mock_get_object_u32_field(request, requestLen, "id", &reqId);
         (void)vm_net_mock_get_object_u32_field(request, requestLen, "index", &reqIndex);
         (void)vm_net_mock_get_object_u32_field(request, requestLen, "posx", &reqPosX);
         (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy", &reqPosY);
-        if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &reqOperate) &&
-            vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &reqOperate8))
+        if (vm_net_mock_get_object_u32_field(request, requestLen, "Operate",
+                                             &reqOperate))
+            haveHangupOperate = true;
+        else if (vm_net_mock_get_object_u8_field(request, requestLen, "Operate",
+                                                 &reqOperate8))
+        {
             reqOperate = reqOperate8;
+            haveHangupOperate = true;
+        }
         if (reqPosX != 0 && reqPosY != 0)
         {
             u32 wireId = reqId != 0 ? reqId : requestedEnemyId;
@@ -14851,8 +15385,15 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
                    reqId, reqIndex, reqPosX, reqPosY, reqOperate,
                    requestedEnemyId);
         }
-        if (reqOperate != 0)
+        if (haveHangupOperate)
+        {
             hangupSeedOperate = reqOperate;
+            if (activeSession != NULL)
+            {
+                activeSession->sceneHangupOperate = reqOperate;
+                activeSession->sceneHangupOperateValid = true;
+            }
+        }
     }
     /*
      * Subtype-5 requires the client's live 25-row scene-node tuple.  SCE
@@ -15120,22 +15661,35 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     ++objectCount;
     /*
-     * Prefer auto must carry 4/11 type=1 on the start packet so the client
-     * hides the manual operate panel (skills/items).  Delaying type=1 until
-     * after the cancel gap left that panel up and covered the auto button.
-     * Cancel window still only gates poll synth, not this UI flag.
+     * Pixi hangup / [自动]: 4/11 type=1 hides the operate menu.
+     * CBE scene hangup (25/2, no game+1136): the same 4/11 paints「自动战斗中」
+     * and the guest waits instead of playing synth 4/6.  Keep prefer+synth
+     * but omit 4/11 so mmBattle still shows and plays attacks.
      */
     if (autoFlagType != 0)
     {
-        if (!vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos,
-                                                               autoFlagType))
-            return 0;
-        ++objectCount;
+        int hangupField =
+            (g_mockBattleAutoPreferNoHangup == 0 &&
+             g_mockHangupStopAfterBattle == 0) ? 1 : 0;
+        bool cbeSceneHangup =
+            activeSession != NULL && activeSession->sceneHangupEnabled;
+
+        if (!cbeSceneHangup)
+        {
+            if (!vm_net_mock_append_battle_case11_auto_flag_object_ex(
+                    out, outCap, &pos, autoFlagType, hangupField))
+                return 0;
+            ++objectCount;
+        }
+        else
+        {
+            printf("[info][network] mock_hangup_skip_4_11 "
+                   "evidence=cbe-scene-hangup-play-4/6-not-auto-banner\n");
+        }
     }
-    /* Real button only: tell the player hangup started (poll synth skips).
-     * Stop-after last-start already queued「下一场完成后挂机停止」. */
-    if (request != NULL && requestLen != 0 && autoFlagType != 0 &&
-        g_mockHangupStopAfterBattle == 0)
+    /* Button and poll re-enter both cue 已开始挂机. */
+    if (autoFlagType != 0 && g_mockHangupStopAfterBattle == 0 &&
+        g_mockBattleAutoPreferNoHangup == 0)
     {
         /* GBK: 已开始挂机 */
         static const char startHangupGbk[] =
@@ -15178,13 +15732,18 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         u8 defaultEnemySlot = 1;
         vm_net_mock_battle_default_wire_slots(playerOnRight, battleSide,
                                               &defaultPlayerSlot, &defaultEnemySlot);
-        if (hangupSeedOperate != 0)
+        if (hangupSeedOperate != 0 ||
+            (activeSession != NULL && activeSession->sceneHangupOperateValid))
         {
-            vm_net_mock_battle_remember_last_operate(defaultEnemySlot, hangupSeedOperate,
+            u32 seedOp = hangupSeedOperate;
+
+            if (activeSession != NULL && activeSession->sceneHangupOperateValid)
+                seedOp = activeSession->sceneHangupOperate;
+            vm_net_mock_battle_remember_last_operate(defaultEnemySlot, seedOp,
                                                      true);
             printf("[info][network] mock_hangup_seed_last_operate operate=%u "
-                   "index=%u evidence=pixi-hangup-skill-for-synth\n",
-                   hangupSeedOperate, defaultEnemySlot);
+                   "index=%u evidence=hangup-skill-for-synth\n",
+                   seedOp, defaultEnemySlot);
         }
         else if (g_mockBattleLastOperateValid != 0)
         {
