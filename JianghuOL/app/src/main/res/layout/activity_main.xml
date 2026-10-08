@@ -4,8 +4,9 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- Game fills all space above the compact control strip. -->
-    <LinearLayout
+    <!-- Game keeps 240:400; keypad eats leftover height (CbeShellLayout). -->
+    <com.xiaoxiao.mt6252simulator.CbeShellLayout
+        android:id="@+id/cbe_shell"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
@@ -15,7 +16,6 @@
             android:id="@+id/screen_frame"
             android:layout_width="match_parent"
             android:layout_height="0dp"
-            android:layout_weight="1"
             android:background="#000000"
             android:padding="0dp">
 
@@ -49,7 +49,7 @@
         <LinearLayout
             android:id="@+id/controls_panel"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="0dp"
             android:background="@drawable/bg_controls_panel"
             android:clipChildren="false"
             android:clipToPadding="false"
@@ -58,12 +58,12 @@
             android:paddingLeft="0dp"
             android:paddingTop="2dp"
             android:paddingRight="0dp"
-            android:paddingBottom="2dp">
+            android:paddingBottom="4dp">
 
             <LinearLayout
                 android:id="@+id/soft_left_column"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="match_parent"
                 android:layout_weight="1"
                 android:clipChildren="false"
                 android:gravity="left|top"
@@ -118,7 +118,7 @@
             <LinearLayout
                 android:id="@+id/center_keys"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="match_parent"
                 android:layout_weight="2"
                 android:clipChildren="false"
                 android:gravity="center_horizontal|top"
@@ -190,7 +190,7 @@
             <LinearLayout
                 android:id="@+id/soft_right_column"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="match_parent"
                 android:layout_weight="1"
                 android:clipChildren="false"
                 android:gravity="right|top"
@@ -268,7 +268,7 @@
                 android:text="重启"
                 android:visibility="gone" />
         </LinearLayout>
-    </LinearLayout>
+    </com.xiaoxiao.mt6252simulator.CbeShellLayout>
 
     <LinearLayout
         android:id="@+id/asset_loading_overlay"

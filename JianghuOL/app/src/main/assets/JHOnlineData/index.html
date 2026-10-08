@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <!--
+      Allow nested entertainment iframes (qqmp3 / arcade) to call
+      navigator.wakeLock.request — iframe allow= alone is not enough if the
+      top document does not enable the feature for cross-origin frames.
+    -->
+    <meta
+      http-equiv="Permissions-Policy"
+      content="screen-wake-lock=*, autoplay=*, fullscreen=*, encrypted-media=*, picture-in-picture=*"
+    />
+    <title>江湖 OL</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --pad-bg: #0a100e;
+        --pad-face: #1a2822;
+        --pad-edge: #3a5a50;
+        --sk-stroke: #3ddc84;
+        --ink: #e8dcc8;
+        --muted: #8a8070;
+        --accent: #c4a35a;
+        --danger: #c45c5c;
+        --ui-font: SimSun, "Songti SC", "Microsoft YaHei", monospace;
+        font-family: var(--ui-font);
+        -webkit-tap-highlight-color: transparent;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        height: 100dvh;
+        background: #05070a;
+        color: var(--ink);
+        overflow: hidden;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      /*
+       * html/body touch-action:none remaps iframe hit-tests on Chrome/WebView.
+       * Entertainment layer is position:fixed on body; restore while open.
+       */
+      html.ent-web-open,
+      html.ent-web-open body {
+        touch-action: manipulation;
+      }
+      html.ent-web-open #ent-web-layer,
+      html.ent-web-open #ent-web-layer iframe,
+      html.ent-web-open #ent-web-layer video,
+      html.ent-web-open #ent-web-chip {
+        touch-action: manipulation !important;
+      }
+      html.ent-web-open #phone-wrap canvas {
+        pointer-events: none !important;
+      }
+      #app {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        height: 100dvh;
+        padding:
+          env(safe-area-inset-top, 0)
+          env(safe-area-inset-right, 0)
+          env(safe-area-inset-bottom, 0)
+          env(safe-area-inset-left, 0);
+      }
+      #stage {
+        flex: 1;
+        min-height: 0;
+        /*
+         * Flex-center the LCD. Absolute inset+margin and left/top 50% +
+         * translate(-50%,-50%) both left sticky compositor layers after
+         * black-screen recover (field: top-left pin). Flex has no centering
+         * transform for WebView to retain across GL resume.
+         */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #05070a;
+        position: relative;
+        overflow: hidden;
+      }
+      /*
+       * Size set by fitPhoneWrap() to exact 240:400 — no side letterbox.
+       * position:relative inside flex stage; IME pan may add translate(-ox,-oy).
+       */
+      #phone-wrap {
+        position: relative;
+        left: auto;
+        right: auto;
+        top: auto;
+        bottom: auto;
+        margin: 0;
+        transform: none;
+        flex: 0 0 auto;
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+        background: #05070a;
+        overflow: hidden;
+        width: 240px;
+        height: 400px;
+      }
+      #phone-wrap canvas {
+        position: absolute;
+        inset: 0;
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+      /* Top-right of LCD (inside #phone-wrap so it tracks recover shifts) */
+      #touch-chrome-toggle {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 50;
+        width: 14px;
+        height: 14px;
+        padding: 0;
+        margin: 0;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.7);
+        background: #ffffff;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+        cursor: pointer;
+        appearance: none;
+        touch-action: manipulation;
+      }
+      #touch-chrome-toggle:active {
+        transform: scale(0.92);
+      }
+      html.touch-chrome-off #touch-chrome-toggle {
+        background: rgba(255, 255, 255, 0.35);
+        border-color: rgba(255, 255, 255, 0.45);
+      }
+      /*
+       * Compact chrome (white-dot hide OR soft-keyboard ime-open):
+       * hide D-pad arrows only; keep 左软 | OK | 右软 on one row.
+       * Login IME used to display:none the whole bar — softkeys vanished.
+       */
+      html.touch-chrome-off #touch-bar,
+      html.ime-open #touch-bar {
+        --compact-btn: 48px;
+        --compact-ok: 72px;
+        grid-template-columns: minmax(56px, 1fr) auto minmax(56px, 1fr);
+        grid-template-rows: auto;
+        gap: 6px 28px;
+        align-items: center;
+        align-content: center;
+        /* Height = half of full D-pad chrome; set by syncTouchChromeScale. */
+        height: var(--compact-chrome-h, 106px);
+        min-height: var(--compact-chrome-h, 106px);
+        max-height: var(--compact-chrome-h, 106px);
+        padding: 0 14px;
+        margin-top: 0;
+        box-sizing: border-box;
+        overflow: hidden;
+      }
+      html.touch-chrome-off #sk-left,
+      html.ime-open #sk-left {
+        grid-column: 1;
+        grid-row: 1;
+        width: 100%;
+        max-width: 88px;
+        height: var(--compact-btn);
+        justify-self: start;
+        align-self: center;
+        font-size: 0.9rem;
+      }
+      html.touch-chrome-off #sk-right,
+      html.ime-open #sk-right {
+        grid-column: 3;
+        grid-row: 1;
+        width: 100%;
+        max-width: 88px;
+        height: var(--compact-btn);
+        justify-self: end;
+        align-self: center;
+        font-size: 0.9rem;
+      }
+      html.touch-chrome-off .dpad,
+      html.ime-open .dpad {
+        grid-column: 2;
+        grid-row: 1;
+        grid-template-columns: var(--compact-ok);
+        grid-template-rows: var(--compact-ok);
+        gap: 0;
+        justify-self: center;
+        align-self: center;
+      }
+      html.touch-chrome-off .dpad .up,
+      html.touch-chrome-off .dpad .down,
+      html.touch-chrome-off .dpad .left,
+      html.touch-chrome-off .dpad .right,
+      html.ime-open .dpad .up,
+      html.ime-open .dpad .down,
+      html.ime-open .dpad .left,
+      html.ime-open .dpad .right {
+        display: none !important;
+      }
+      html.touch-chrome-off .dpad .ok,
+      html.ime-open .dpad .ok {
+        grid-column: 1;
+        grid-row: 1;
+        width: var(--compact-ok);
+        height: var(--compact-ok);
+        border-radius: 50%;
+        font-size: 1.05rem;
+      }
+      html.touch-chrome-off #sk-center,
+      html.touch-chrome-off #touch-status,
+      html.ime-open #sk-center,
+      html.ime-open #touch-status {
+        display: none !important;
+      }
+      /*
+       * L softkey | D-pad | R softkey — softkeys top-aligned with ▲ (up).
+       * --pad-scale / --sk-col-* from syncTouchChromeScale(): follow phone
+       * width; keep a usable D-pad floor, then give leftover height to LCD.
+       */
+      #touch-bar {
+        --pad-scale: 1;
+        --pad-cell-base: 56px;
+        --pad-gap-base: 8px;
+        --sk-h-base: 56px;
+        --sk-center-h-base: 32px;
+        --sk-col-min: 64px;
+        --sk-col-max: 80px;
+        --pad-cell: calc(var(--pad-cell-base) * var(--pad-scale));
+        --pad-gap: calc(var(--pad-gap-base) * var(--pad-scale));
+        --sk-h: calc(var(--sk-h-base) * var(--pad-scale));
+        --sk-center-h: calc(var(--sk-center-h-base) * var(--pad-scale));
+        flex: 0 0 auto;
+        align-self: stretch;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        display: grid;
+        grid-template-columns:
+          minmax(var(--sk-col-min), var(--sk-col-max))
+          minmax(0, 1fr)
+          minmax(var(--sk-col-min), var(--sk-col-max));
+        grid-template-rows: auto auto auto;
+        gap: calc(6px * var(--pad-scale)) calc(10px * var(--pad-scale));
+        align-items: start;
+        padding:
+          calc(6px * var(--pad-scale))
+          calc(10px * var(--pad-scale))
+          calc(8px * var(--pad-scale) + env(safe-area-inset-bottom, 0));
+        background: var(--pad-bg);
+        border-top: 1px solid rgba(158, 181, 168, 0.25);
+        overflow: hidden;
+      }
+      .sk {
+        appearance: none;
+        border: 2px solid var(--sk-stroke);
+        border-radius: calc(8px * var(--pad-scale, 1));
+        background: var(--pad-face);
+        color: #d0e8d5;
+        font: inherit;
+        font-size: calc(0.8rem * var(--pad-scale, 1));
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        touch-action: none;
+        padding: 0 4px;
+        line-height: 1.1;
+        z-index: 2;
+      }
+      .sk:disabled {
+        /* Fade face/text only — green stroke stays full strength */
+        opacity: 1;
+        color: rgba(208, 232, 213, 0.32);
+        background: #121c18;
+        border-color: var(--sk-stroke);
+        cursor: default;
+      }
+      .sk:not(:disabled):active {
+        background: #2a4a42;
+        color: #fff;
+        border-color: var(--sk-stroke);
+      }
+      /* Same row as D-pad; align-self:start → level with ▲ */
+      #sk-left,
+      #sk-right {
+        width: 100%;
+        height: var(--sk-h);
+        font-size: calc(0.8rem * var(--pad-scale, 1));
+        align-self: start;
+      }
+      #sk-left {
+        grid-column: 1;
+        grid-row: 2;
+        justify-self: stretch;
+      }
+      #sk-right {
+        grid-column: 3;
+        grid-row: 2;
+        justify-self: stretch;
+      }
+      #sk-center {
+        grid-column: 1 / -1;
+        grid-row: 1;
+        justify-self: center;
+        width: min(220px, 90%);
+        height: 0;
+        min-height: 0;
+        padding: 0;
+        border-width: 0;
+        font-size: calc(0.85rem * var(--pad-scale, 1));
+        overflow: hidden;
+        visibility: hidden;
+      }
+      #sk-center.is-on {
+        height: var(--sk-center-h);
+        border-width: 2px;
+        visibility: visible;
+      }
+      .dpad {
+        grid-column: 2;
+        grid-row: 2;
+        display: grid;
+        grid-template-columns: repeat(3, var(--pad-cell));
+        grid-template-rows: repeat(3, var(--pad-cell));
+        gap: var(--pad-gap);
+        justify-content: center;
+        justify-self: center;
+        max-width: 100%;
+        z-index: 1;
+      }
+      .dpad .pad {
+        appearance: none;
+        border: 2px solid var(--pad-edge);
+        border-radius: 50%;
+        width: 100%;
+        height: 100%;
+        aspect-ratio: 1;
+        background: var(--pad-face);
+        color: #d0e8d5;
+        font: inherit;
+        font-size: calc(1.1rem * var(--pad-scale, 1));
+        line-height: 1;
+        padding: 0;
+        cursor: pointer;
+        touch-action: none;
+      }
+      .dpad .pad:active,
+      .dpad .pad.is-down {
+        background: #2a4a42;
+        color: #fff;
+      }
+      .dpad .ok {
+        font-size: calc(0.85rem * var(--pad-scale, 1));
+        letter-spacing: 0.04em;
+        color: var(--accent);
+      }
+      .dpad .up { grid-column: 2; grid-row: 1; }
+      .dpad .left { grid-column: 1; grid-row: 2; }
+      .dpad .ok { grid-column: 2; grid-row: 2; }
+      .dpad .right { grid-column: 3; grid-row: 2; }
+      .dpad .down { grid-column: 2; grid-row: 3; }
+      #touch-status {
+        grid-column: 1 / -1;
+        grid-row: 3;
+        min-height: 0.9em;
+        font-size: calc(0.65rem * var(--pad-scale, 1));
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-align: center;
+        line-height: 1.1;
+      }
+      #touch-status.error { color: var(--danger); }
+      /* Compact: drop status line to reclaim ~12px for the LCD. */
+      #touch-bar.pad-compact #touch-status {
+        display: none;
+      }
+      /* Cell size is fully driven by syncTouchChromeScale() — no width breakpoint. */
+      /*
+       * Soft keyboard open: pin layout height so 100dvh / adjustResize cannot
+       * shrink #stage; D-pad collapses via shared compact-chrome rules above
+       * (左软|OK|右软 stay visible for login / confirm).
+       */
+      html.ime-open,
+      html.ime-open body {
+        height: var(--ime-layout-h, 100%);
+        max-height: var(--ime-layout-h, 100%);
+        overflow: hidden;
+      }
+      html.ime-open #app {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: var(--ime-layout-h, 100%);
+        max-height: var(--ime-layout-h, 100%);
+        overflow: hidden;
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-DQXIEUTE.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <div id="stage">
+        <div id="phone-wrap">
+          <button
+            type="button"
+            id="touch-chrome-toggle"
+            aria-label="隐藏或显示方向键"
+            title="隐藏方向键（保留左软/OK/右软）"
+          ></button>
+        </div>
+      </div>
+      <div id="touch-bar">
+        <button type="button" class="sk" id="sk-left" disabled>左软</button>
+        <div class="dpad" aria-label="方向键">
+          <button type="button" class="pad up" data-dir="up" aria-label="上">▲</button>
+          <button type="button" class="pad left" data-dir="left" aria-label="左">◀</button>
+          <button type="button" class="pad ok" data-action="ok" aria-label="确定">OK</button>
+          <button type="button" class="pad right" data-dir="right" aria-label="右">▶</button>
+          <button type="button" class="pad down" data-dir="down" aria-label="下">▼</button>
+        </div>
+        <button type="button" class="sk" id="sk-right" disabled>右软</button>
+        <button type="button" class="sk" id="sk-center" disabled>中软</button>
+        <div id="touch-status">就绪</div>
+      </div>
+    </div>
+  </body>
+</html>

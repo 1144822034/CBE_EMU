@@ -9,12 +9,13 @@
     <dimen name="ctrl_tools_key_height">42dp</dimen>
     <dimen name="ctrl_tools_key_gap">2dp</dimen>
     <dimen name="ctrl_extra_dot_size">22dp</dimen>
-    <dimen name="ctrl_dpad_size">60dp</dimen>
+    <!-- 3×48+2×gap ≈ 左/右三颗软键高度，避免方向键顶出屏幕底栏 -->
+    <dimen name="ctrl_dpad_size">48dp</dimen>
     <dimen name="ctrl_key_gap">2dp</dimen>
     <dimen name="ctrl_key_text">10sp</dimen>
     <dimen name="ctrl_soft_key_text">16sp</dimen>
     <dimen name="ctrl_tools_key_text">16sp</dimen>
-    <dimen name="ctrl_dpad_text">17sp</dimen>
-    <dimen name="ctrl_ok_text">13sp</dimen>
+    <dimen name="ctrl_dpad_text">15sp</dimen>
+    <dimen name="ctrl_ok_text">12sp</dimen>
     <dimen name="ctrl_key_size">28dp</dimen>
 </resources>

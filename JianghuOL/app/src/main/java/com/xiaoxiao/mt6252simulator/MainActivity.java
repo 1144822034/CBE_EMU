@@ -365,6 +365,12 @@ public class MainActivity extends Activity {
             });
         }
         applyVirtualPadEnabledUi();
+        KeypadFitter.attach(
+                findViewById(R.id.controls_panel),
+                new View[] {up, down, left, right, ok},
+                ok,
+                new View[] {confirm, btnAuto, manageAccount, cancel, btnChat, btnMap},
+                extraToolsDot);
 
         sdPath = new File(Environment.getExternalStorageDirectory(), SD_ROOT_DIR_NAME).getAbsolutePath();
         Log.i(TAG, "runtime root: " + sdPath);
