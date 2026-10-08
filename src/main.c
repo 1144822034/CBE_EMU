@@ -8,11 +8,30 @@
 #include <io.h>
 #include <windows.h>
 
-/* Must run before SDL creates any HWND. Windows 10/11 may treat unmanifested
- * processes as system-DPI-aware; SDL 2.0.10 then BitBlts a small surface into
- * the top-left of a larger client, leaving black margins. */
-static void vm_win32_force_dpi_unaware(void)
+/* Must run before SDL creates any HWND.
+ * PROCESS_DPI_UNAWARE lets DWM bilinear-scale the HWND → outdoor sand moiré.
+ * Per-monitor DPI aware + lcd.c integer nearest present matches PixiJS crispness.
+ * lcd.c already fits drawScale to the real surface when DPI enlarges it. */
+static void vm_win32_force_dpi_aware(void)
 {
+    HMODULE user32 = LoadLibraryA("User32.dll");
+    if (user32)
+    {
+        typedef BOOL(WINAPI *SetProcessDpiAwarenessContextFn)(HANDLE);
+        SetProcessDpiAwarenessContextFn setCtx =
+            (SetProcessDpiAwarenessContextFn)GetProcAddress(
+                user32, "SetProcessDpiAwarenessContext");
+        if (setCtx)
+        {
+            /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4 */
+            if (setCtx((HANDLE)(INT_PTR)-4))
+            {
+                FreeLibrary(user32);
+                return;
+            }
+        }
+        FreeLibrary(user32);
+    }
     HMODULE shcore = LoadLibraryA("Shcore.dll");
     if (shcore)
     {
@@ -20,14 +39,14 @@ static void vm_win32_force_dpi_unaware(void)
         SetProcessDpiAwarenessFn setAware =
             (SetProcessDpiAwarenessFn)GetProcAddress(shcore, "SetProcessDpiAwareness");
         if (setAware)
-            setAware(0); /* PROCESS_DPI_UNAWARE */
+            setAware(2); /* PROCESS_PER_MONITOR_DPI_AWARE */
         FreeLibrary(shcore);
     }
 }
 
 static void __attribute__((constructor(101))) vm_win32_dpi_constructor(void)
 {
-    vm_win32_force_dpi_unaware();
+    vm_win32_force_dpi_aware();
 }
 #else
 #include <unistd.h>
@@ -506,6 +525,24 @@ static const u32 VM_GAME_NET_BUSINESS_CALLBACK = 0x01012e4d;
 static u8 g_lastStartupScreenState = 0xff;
 static u8 g_vm_pump_loading_now = 0;
 static void vm_autotest_note(const char *fmt, ...);
+void vm_FillRectWithImageTiled(u32 dstInfo, u32 srcInfo, int srcX, int srcY, int tileW, int tileH,
+                               int dstX, int dstY, int fillW, int fillH);
+int vm_host_skip_loading_overlay_image(int x, int y, int w, int h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    return 0;
+}
+int vm_host_skip_loading_overlay_paint(int x, int y, int w, int h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    return 0;
+}
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
 static u8 g_lastStartupUpdateState = 0xff;
@@ -6428,6 +6465,11 @@ void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancell
     }
     g_vmAndroidInputPendingReady = 1;
     EnqueueVMEvent(VM_EVENT_INPUT_DONE, cancelled ? 1 : 0, 0);
+}
+
+const char *cbeAndroidGetPreferredServerName(void)
+{
+    return g_mockPreferredTitleServerUtf8;
 }
 #endif
 
@@ -13057,7 +13099,7 @@ int main(int argc, char *args[])
 
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
-    vm_win32_force_dpi_unaware();
+    vm_win32_force_dpi_aware();
 #endif
     // while(1);
 
@@ -15468,13 +15510,48 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 21)
     {
-        printf("[call]vMFillRectWithImage\n");
-        assert(0);
+        /* vMFillRectWithImage(dst, src, x, y, w, h) — tile full src into dst rect. */
+        u32 dstImage = 0, srcImage = 0;
+        int fx, fy, fw, fh;
+        u16 sw, sh;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &srcImage);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        fx = vm_lcd_coord_from_reg(tmp2);
+        fy = vm_lcd_coord_from_reg(tmp3);
+        fw = (int)vm_get_var(tmp4);
+        fh = (int)vm_get_var(tmp4 + 4);
+        sw = srcImage ? vm_get_var_short(srcImage + 4) : 0;
+        sh = srcImage ? vm_get_var_short(srcImage + 6) : 0;
+        if (!dstImage)
+            dstImage = VM_screenImageStruct_ADDRESS;
+        vm_FillRectWithImageTiled(dstImage, srcImage, 0, 0, (int)sw, (int)sh, fx, fy, fw, fh);
+        vm_set_call_result(1);
     }
     else if (idx == 22)
     {
-        printf("[call]vMFillRectWithImageEx\n");
-        assert(0);
+        /* vMFillRectWithImageEx(dst, src, sx, sy, sw, sh, dx, dy, dw, dh). */
+        u32 dstImage = 0, srcImage = 0;
+        int sx, sy, sw, sh, dx, dy, dw, dh;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &srcImage);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        sx = (int)tmp2;
+        sy = (int)tmp3;
+        sw = (int)vm_get_var(tmp4);
+        sh = (int)vm_get_var(tmp4 + 4);
+        dx = (int)vm_get_var(tmp4 + 8);
+        dy = (int)vm_get_var(tmp4 + 12);
+        dw = (int)vm_get_var(tmp4 + 16);
+        dh = (int)vm_get_var(tmp4 + 20);
+        if (!dstImage)
+            dstImage = VM_screenImageStruct_ADDRESS;
+        vm_FillRectWithImageTiled(dstImage, srcImage, sx, sy, sw, sh, dx, dy, dw, dh);
+        vm_set_call_result(1);
     }
     else if (idx == 23)
     {

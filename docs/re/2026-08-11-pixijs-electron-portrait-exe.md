@@ -38,6 +38,7 @@ npm run electron
 - **打包便携 exe**（`app.isPackaged`）冷启动走与 Android 相同的 dist 热更契约，但实现只在 Electron：`electron/dist-hot.cjs` + `main.cjs`。覆盖层在 `%APPDATA%/江湖OL/dist-hot/`（`userData`）。开发态 `npm run electron` **不**拉热更，继续用本机 `dist/`
 - Gateway 仍为 `FIXED_LIVE_GATEWAY`（`ws://…`）；与 APK 相同，明文 WS
 - 不改玩法协议；无 Android FGS / WakeLock（桌面不需要）；**不改** `android/` 下 `DistHotUpdate` / `MainActivity`
+- **经典怀旧**：开始界面拉起仓库 `bin/main.exe`（开发）或便携包 `resources/cbe/`（`extraResources`）。`JHOnlineData` 用解包的 `dist/JHOnlineData` 目录联接。需已编译 `bin/main.exe`。
 
 ## 实现
 

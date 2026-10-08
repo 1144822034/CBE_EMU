@@ -37,6 +37,7 @@ import {
   canExchangeGemType,
   isGemFragment,
   parseGemItem,
+  equipWashNameTag,
   formatCultivationBookName,
   formatRoleSealScrollName,
   sortBagByName,
@@ -75,7 +76,6 @@ import {
   buildEquipCompareMarks,
   buildEquipDetailLines,
   EQUIP_DETAIL_YELLOW,
-  equipHasWashedAttr,
   equipKvAttrName,
   type EquipPaintLine,
 } from "./equipDetail";
@@ -672,9 +672,17 @@ export class SystemPanel extends Container {
       this.stats?.crystal16ExchangeEnabled ?? 0;
     const prevSocket = this.stats?.gemSocketEnabled ?? 1;
     const prevWash = this.stats?.washButtonEnabled ?? 1;
+    const prevHideWashTag = (this.stats?.washFirstSeedPercent ?? 20) >= 100;
+    const hideWashTag = (stats.washFirstSeedPercent ?? 20) >= 100;
     this.stats = stats;
     if (this.visible && this.kind === "status") this.redraw();
     else if (
+      this.visible &&
+      (this.kind === "bag" || this.kind === "enhance" || this.kind === "equip") &&
+      hideWashTag !== prevHideWashTag
+    ) {
+      this.redraw();
+    } else if (
       this.visible &&
       (this.kind === "bag" || this.kind === "enhance") &&
       this.mode === "list" &&
@@ -3077,13 +3085,13 @@ function bagItemDisplayName(it: BagItem): string {
 }
 
 function formatBagLine(it: BagItem): string {
-  const wash = equipHasWashedAttr(it) ? "[洗]" : "";
+  const wash = equipWashNameTag(it);
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
   return `${bagItemDisplayName(it)}${wash}${plus} ×${it.count}`;
 }
 
 function formatBagName(it: BagItem): string {
-  const wash = equipHasWashedAttr(it) ? "[洗]" : "";
+  const wash = equipWashNameTag(it);
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
   return `${bagItemDisplayName(it)}${wash}${plus}`;
 }

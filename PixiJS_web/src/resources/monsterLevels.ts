@@ -115,6 +115,10 @@ export type CombatSpawnRealBinding = {
 };
 
 const COMBAT_SPAWN_REALS: CombatSpawnRealBinding[] = [];
+/** Catalog firstScene (playable maps only) by REAL enemy id. */
+const MONSTER_SCENE_BY_ID: Record<number, string> = {};
+/** First playable drop-source scene by item id. */
+const ITEM_DROP_SCENE_BY_ID: Record<number, string> = {};
 
 export function applyMonsterLevelOverrides(
   overrides: Record<string | number, number>,
@@ -183,6 +187,56 @@ export function applyCombatSpawnReals(
     n += 1;
   }
   return n;
+}
+
+export function applyMonsterSceneOverrides(
+  scenes: Record<string | number, string>,
+): number {
+  for (const key of Object.keys(MONSTER_SCENE_BY_ID)) {
+    delete MONSTER_SCENE_BY_ID[Number(key)];
+  }
+  let n = 0;
+  for (const [key, raw] of Object.entries(scenes)) {
+    const id = Number(key) >>> 0;
+    const scene = String(raw || "").trim();
+    if (!id || !scene || scene.toLowerCase().includes(".dsh")) continue;
+    MONSTER_SCENE_BY_ID[id] = scene;
+    n += 1;
+  }
+  return n;
+}
+
+export function applyItemDropSceneOverrides(
+  items: Record<string | number, string>,
+): number {
+  for (const key of Object.keys(ITEM_DROP_SCENE_BY_ID)) {
+    delete ITEM_DROP_SCENE_BY_ID[Number(key)];
+  }
+  let n = 0;
+  for (const [key, raw] of Object.entries(items)) {
+    const id = Number(key) >>> 0;
+    const scene = String(raw || "").trim();
+    if (!id || !scene || scene.toLowerCase().includes(".dsh")) continue;
+    ITEM_DROP_SCENE_BY_ID[id] = scene;
+    n += 1;
+  }
+  return n;
+}
+
+/** Spawn binding first, then catalog firstScene. */
+export function lookupMonsterScene(enemyId: number): string | null {
+  const id = enemyId >>> 0;
+  if (!id) return null;
+  for (const b of COMBAT_SPAWN_REALS) {
+    if (b.real === id && b.scene) return b.scene;
+  }
+  return MONSTER_SCENE_BY_ID[id] || null;
+}
+
+export function lookupItemDropScene(itemId: number): string | null {
+  const id = itemId >>> 0;
+  if (!id) return null;
+  return ITEM_DROP_SCENE_BY_ID[id] || null;
 }
 
 /** Battle .actor for catalog/custom enemy id (e.g. dream challenge 204). */
@@ -396,6 +450,8 @@ export async function loadMonsterLevelOverrides(
       overrides?: Record<string, number>;
       actors?: Record<string, string>;
       names?: Record<string, string>;
+      scenes?: Record<string, string>;
+      items?: Record<string, string>;
       reals?: Array<Record<string, string | number>>;
     };
     if (!data || typeof data !== "object") return 0;
@@ -414,12 +470,20 @@ export async function loadMonsterLevelOverrides(
     const realsN = Array.isArray(data.reals)
       ? applyCombatSpawnReals(data.reals)
       : 0;
-    if (n > 0 || actorsN > 0 || namesN > 0 || realsN > 0) {
+    const scenesN =
+      data.scenes && typeof data.scenes === "object"
+        ? applyMonsterSceneOverrides(data.scenes)
+        : 0;
+    const itemsN =
+      data.items && typeof data.items === "object"
+        ? applyItemDropSceneOverrides(data.items)
+        : 0;
+    if (n > 0 || actorsN > 0 || namesN > 0 || realsN > 0 || scenesN > 0 || itemsN > 0) {
       console.info(
-        `[monsterLevels] levels=${n} actors=${actorsN} names=${namesN} reals=${realsN} from ${target}`,
+        `[monsterLevels] levels=${n} actors=${actorsN} names=${namesN} reals=${realsN} scenes=${scenesN} items=${itemsN} from ${target}`,
       );
     }
-    return n + namesN + realsN;
+    return n + namesN + realsN + scenesN + itemsN;
   } catch (e) {
     console.warn(`[monsterLevels] load failed ${target}`, e);
     return 0;

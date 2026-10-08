@@ -11234,6 +11234,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "enhance-pool-save-all") == 0 ||
         strcmp(action, "enhance-wash-settings-save") == 0 ||
         strcmp(action, "enhance-wash-quality-scale-save") == 0 ||
+        strcmp(action, "enhance-gold-cost-save") == 0 ||
         strcmp(action, "enhance-base-scale-save") == 0)
     {
         vm_mock_admin_handle_enhance_action(client, action, body);
@@ -12155,7 +12156,8 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         return 0;
     }
     /* Public catalog for Pixi map nameplates / battle visuals (gateway proxy):
-     * overrides=levels, actors, names (UTF-8), reals=wire→real spawn bindings.
+     * overrides=levels, actors, names (UTF-8), reals=wire→real spawn bindings,
+     * scenes=enemyId→firstScene, items=itemId→drop firstScene.
      * Nameplates must key by REAL id, never SCE keep-id wire (#250). */
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, "/api/monster-levels") == 0)
@@ -12187,8 +12189,9 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             return 0;
         }
         rowTotal = vm_net_mock_monster_admin_list(rows, rowCap);
-        jsonCap = 256u + (size_t)rowTotal * 160u +
-                  (size_t)g_vm_net_mock_sce_combat_spawn_binding_count * 96u;
+        jsonCap = 256u + (size_t)rowTotal * 280u +
+                  (size_t)g_vm_net_mock_sce_combat_spawn_binding_count * 96u +
+                  16384u;
         if (jsonCap < 512u)
             jsonCap = 512u;
         json = (char *)malloc(jsonCap);
@@ -12356,9 +12359,120 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             jsonLen += (size_t)pieceLen;
             ++realWritten;
         }
+        if (ok && jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "],\"scenes\":{", 12);
+            jsonLen += 12;
+        }
+        else
+            ok = 0;
+        {
+            u32 sceneWritten = 0;
+
+            for (u32 i = 0; ok && i < rowTotal; ++i)
+            {
+                char sceneUtf8[192];
+                char sceneEsc[384];
+                char piece[512];
+                int pieceLen;
+
+                if (rows[i].enemyId == 0)
+                    continue;
+                memset(sceneUtf8, 0, sizeof(sceneUtf8));
+                if (rows[i].firstScene[0] == 0)
+                    continue;
+                if (strstr(rows[i].firstScene, ".dsh") != NULL ||
+                    strstr(rows[i].firstScene, ".DSH") != NULL)
+                    continue;
+                vm_net_mock_gbk_label_to_utf8(rows[i].firstScene, sceneUtf8,
+                                              sizeof(sceneUtf8));
+                if (sceneUtf8[0] == 0 || strstr(sceneUtf8, ".dsh") != NULL ||
+                    strstr(sceneUtf8, ".DSH") != NULL)
+                    continue;
+                if (!vm_mock_admin_json_escape(sceneUtf8, sceneEsc,
+                                               sizeof(sceneEsc)))
+                    continue;
+                pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":\"%s\"",
+                                    sceneWritten ? "," : "", rows[i].enemyId,
+                                    sceneEsc);
+                if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                    jsonLen + (size_t)pieceLen + 32u >= jsonCap)
+                    break;
+                memcpy(json + jsonLen, piece, (size_t)pieceLen);
+                jsonLen += (size_t)pieceLen;
+                ++sceneWritten;
+            }
+        }
+        if (ok && jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "},\"items\":{", 11);
+            jsonLen += 11;
+        }
+        else
+            ok = 0;
+        {
+            u32 itemSceneIds[256];
+            u32 itemSceneCount = 0;
+            u32 itemWritten = 0;
+
+            memset(itemSceneIds, 0, sizeof(itemSceneIds));
+            for (u32 i = 0; ok && i < rowTotal; ++i)
+            {
+                char sceneUtf8[192];
+                char sceneEsc[384];
+                u32 d;
+
+                if (rows[i].dropCount == 0)
+                    continue;
+                memset(sceneUtf8, 0, sizeof(sceneUtf8));
+                if (rows[i].firstScene[0] == 0)
+                    continue;
+                if (strstr(rows[i].firstScene, ".dsh") != NULL ||
+                    strstr(rows[i].firstScene, ".DSH") != NULL)
+                    continue;
+                vm_net_mock_gbk_label_to_utf8(rows[i].firstScene, sceneUtf8,
+                                              sizeof(sceneUtf8));
+                if (sceneUtf8[0] == 0 || strstr(sceneUtf8, ".dsh") != NULL ||
+                    strstr(sceneUtf8, ".DSH") != NULL)
+                    continue;
+                if (!vm_mock_admin_json_escape(sceneUtf8, sceneEsc,
+                                               sizeof(sceneEsc)))
+                    continue;
+                for (d = 0; d < rows[i].dropCount && itemSceneCount < 256; ++d)
+                {
+                    char piece[512];
+                    int pieceLen;
+                    u32 itemId = rows[i].drops[d].itemId;
+                    u32 seen = 0;
+
+                    if (itemId == 0)
+                        continue;
+                    for (u32 s = 0; s < itemSceneCount; ++s)
+                    {
+                        if (itemSceneIds[s] == itemId)
+                        {
+                            seen = 1;
+                            break;
+                        }
+                    }
+                    if (seen)
+                        continue;
+                    pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":\"%s\"",
+                                        itemWritten ? "," : "", itemId,
+                                        sceneEsc);
+                    if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                        jsonLen + (size_t)pieceLen + 32u >= jsonCap)
+                        break;
+                    memcpy(json + jsonLen, piece, (size_t)pieceLen);
+                    jsonLen += (size_t)pieceLen;
+                    itemSceneIds[itemSceneCount++] = itemId;
+                    ++itemWritten;
+                }
+            }
+        }
         if (ok && jsonLen + 4u < jsonCap)
         {
-            memcpy(json + jsonLen, "]}\n", 3);
+            memcpy(json + jsonLen, "}}\n", 3);
             jsonLen += 3;
             json[jsonLen] = 0;
             vm_mock_admin_send_response(client, "200 OK",

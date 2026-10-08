@@ -1,0 +1,25 @@
+---
+description: Never discard or overwrite local uncommitted work with git without explicit user consent
+alwaysApply: true
+---
+
+# 禁止擅自 git 恢复文件
+
+未经用户**明确同意**，禁止用 git 丢弃/覆盖工作区未提交改动。
+
+## 禁止（未获同意时）
+
+- `git checkout -- <path>` / `git checkout <ref> -- <path>`
+- `git restore`（含 `--staged` 以外会改工作树内容的用法）
+- `git reset --hard` / `git clean -f`
+- 会改工作区的 `git stash pop` / `git stash drop`（未先征得同意）
+
+## 正确做法
+
+1. 需要对照历史：只用只读命令（`git show` / `git diff` / `git log`）。
+2. 需要把某段逻辑改回旧版：用编辑器补丁做**最小定向修改**，不要整文件 checkout。
+3. 若认为非 checkout 不可：先说明会丢掉哪些未提交改动，**等用户明确说可以**再执行。
+
+## 反面教材
+
+曾为恢复白点开关擅自 `git checkout HEAD -- PixiJS_web/src/main.ts`，冲掉未提交的账号多开与技能学习确认接线。禁止再犯。

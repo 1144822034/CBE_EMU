@@ -12,6 +12,7 @@ import {
 } from "./constants";
 import {
   bagVisibleStackCount,
+  equipWashNameTag,
   isDurableMallPassItemId,
   isReservoirFlaskItemId,
   ROLE_SEAL_SCROLL_ITEM_ID,
@@ -29,7 +30,6 @@ import { formatPanelLevelExp } from "../game/roleLevelExp";
 import {
   buildEquipDetailLines,
   enhanceAttrsFromWashText,
-  equipHasWashedAttr,
   EQUIP_DETAIL_YELLOW,
   type EquipPaintLine,
 } from "./equipDetail";
@@ -1571,7 +1571,7 @@ export class ZangbaoPanel extends Container {
             ? `[印]${L.sealedRole.name}`
             : lookupItemSync(L.itemId)?.name || `#${L.itemId}`;
         const en = L.enhanceLevel > 0 ? `+${L.enhanceLevel}` : "";
-        const wash = equipHasWashedAttr(listingAsBagItem(L)) ? "[洗]" : "";
+        const wash = equipWashNameTag(listingAsBagItem(L));
         text = `${name}${wash}${en}x${L.itemCount} ${L.priceKcoin}酷币`;
       }
       this.addLabel(

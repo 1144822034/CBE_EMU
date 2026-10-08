@@ -50,6 +50,8 @@ import {
   isClientUpdateRequiredError,
   promptDownloadLatestApk,
 } from "./net/apkUpdate";
+import { launchClassicCbeClient } from "./net/cbeEmu";
+import { exitHostApp } from "./net/exitApp";
 import { openPayUrl } from "./net/openPayUrl";
 import { SceneView } from "./render/SceneView";
 import { countPlus16Worn } from "./render/Plus16Sparkles";
@@ -102,6 +104,7 @@ import {
   TIANXIA_SIGNATURE_DEFAULT,
   TIANXIA_SIGNATURE_MAX_CHARS,
   activityMsgTip,
+  ringFreeRefreshLeft,
   type RingStatus,
 } from "./net/protocolActivities";
 import { AuctionPanel } from "./ui/AuctionPanel";
@@ -3227,11 +3230,9 @@ async function main(): Promise<void> {
       /* Authoritative guild for self nameplate「门派-xxx」(1/1/21). */
       void session.openCharacterStats();
       void syncRingQuestTracker();
-      // Peer refresh polls while loadedScene is still the old map; await would
-      // delay commit and let a second 30/1 wipe the catalog that just painted.
-      if (!isDreamInstanceScene(loadedScene)) {
-        void session.refreshNearbyPeersAfterEnter();
-      }
+      // Do not pull 2/7 here: exchange is a single queue, and this runs
+      // before post-enter 27/11. Early nearby refresh delayed NPC paint.
+      // Callers refresh after catalog settle (portal / stone / instance).
     },
     onPlayerPos: (x, y) => {
       view.setPlayerPos(x, y);
@@ -6418,6 +6419,22 @@ async function main(): Promise<void> {
     title.setStatus("请选择区服");
     openZonesThenLogin();
   };
+  title.onOpenClassicClient = () => {
+    void launchClassicCbeClient({
+      onStatus: (text, error) => {
+        title.setStatus(text);
+        setChromeStatus(text, error);
+      },
+    });
+  };
+  title.onQuitGame = () => {
+    void exitHostApp().then((ret) => {
+      if (ret.ok) return;
+      const tip = ret.reason || "请关闭页面退出";
+      title.setStatus(tip);
+      setChromeStatus(tip, true);
+    });
+  };
   title.onBackToLogin = () => {
     title.setStatus("请输入账号和密码");
     showPhase("login");
@@ -7807,7 +7824,8 @@ async function main(): Promise<void> {
       return;
     }
     if (action === "detail" && taskId) {
-      void session.fetchTaskDetailText(taskId).then((text) => {
+      const detailState = taskUi.selectedDetailState;
+      void session.fetchTaskDetailText(taskId, detailState).then((text) => {
         taskUi.showDetail(text || "(无详情)");
       });
       return;
@@ -9107,15 +9125,24 @@ async function main(): Promise<void> {
     }
     if ((value >>> 0) === NPC_RING_REFRESH) {
       dialog.hide();
-      dialog.show({
-        title: "刷新跑环",
-        body: `确认消耗${RING_REFRESH_WCOIN}酷宝刷新当前跑环任务？\n不消耗今日环数`,
-        options: [
-          { label: "确认刷新", action: 284, value: 1 },
-          { label: "取消", action: 101, value: 0 },
-        ],
-      });
-      showPhase("dialog");
+      void (async () => {
+        const st = await session.fetchRingStatus();
+        applyCachedRingStatus(st);
+        const freeLeft = ringFreeRefreshLeft(st);
+        const body =
+          freeLeft > 0
+            ? `确认免费刷新当前跑环任务？\n今日剩余免费 ${freeLeft} 次\n不消耗今日环数`
+            : `确认消耗${RING_REFRESH_WCOIN}酷宝刷新当前跑环任务？\n今日免费次数已用完\n不消耗今日环数`;
+        dialog.show({
+          title: "刷新跑环",
+          body,
+          options: [
+            { label: "确认刷新", action: 284, value: 1 },
+            { label: "取消", action: 101, value: 0 },
+          ],
+        });
+        showPhase("dialog");
+      })();
       return;
     }
     if ((value >>> 0) === NPC_LADDER_CHALLENGE) {

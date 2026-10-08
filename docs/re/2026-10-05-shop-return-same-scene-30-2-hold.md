@@ -80,3 +80,9 @@ mmGame 重建仍会 `LoadPackage`/`DoLoading`，金条是 DF `state=2` 覆盖层
 post-enter-repeat 在已完成的门户上又附 27/12，二次 EnterScene 把 27/11 建进嵌套响应，CBE 不入队。随后 type27 见 alreadySeeded 回 empty-11。
 
 修改：wait_post_enter 的 post-enter-repeat 不再附 27/12、不消耗目录；把 nonempty 27/11 留给会投递的 type27。shop-return 空 27/11 闸不挡住 wait_post_enter。
+
+## 续记：Pixi 切图 NPC 约 10s 才出（2026-10-06）
+
+上一续把 portal post-enter-repeat 改成 empty-11-keep-pending，假设 CBE 还会发 type27 `25/5+27/11+27/4`。Pixi 只发 `25/5+2/3+27/11+7/42`，从不发 type27。poll 又因 `wait_post_enter` + 90-tick reuse 被 `mock_scene_npc_poll_hold` 挡住，约 9s 后才兜底。
+
+修改：post-enter-repeat 仍省略 27/12，但在该包投递 nonempty 27/11（`post-enter-portal`）。wait_post_enter 的 poll hold 与 wait_wt6 一样 15 tick 后可兜底。Pixi 空目录时补 WT6/1。需重启 `jh-online-server` 并硬刷新 Pixi。

@@ -122,6 +122,14 @@ export class TaskPanel extends Container {
     return row?.taskId ?? 0;
   }
 
+  /** 6/10 detail state: 0=可接取, 1=进行中, 2=可提交. */
+  get selectedDetailState(): number {
+    if (this.tab !== "accepted") return 0;
+    const row = this.accepted[this.listCursor];
+    const state = row?.state ?? 1;
+    return state === 2 || state === 3 ? 2 : 1;
+  }
+
   move(delta: number): void {
     if (!this.visible) return;
     if (this.mode === "actions") {

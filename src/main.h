@@ -77,6 +77,7 @@ int cbeAndroidConsumeAccountWebOpenRequest(void);
 const char *cbeAndroidGetAccountWebOpenReason(void);
 int cbeAndroidConsumeRechargeBlockedTip(void);
 int cbeAndroidConsumeNeedLoginTip(void);
+const char *cbeAndroidGetPreferredServerName(void);
 #endif
 
 u32 last_gpt1_interrupt_time;

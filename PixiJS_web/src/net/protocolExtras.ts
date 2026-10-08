@@ -4109,9 +4109,22 @@ function warehouseOpcode(value: number): number {
   return (value >>> 24) & 0xff;
 }
 
-function bagEquipHasWash(it: BagItem): boolean {
-  if (it.kind !== "equip" || !it.enhanceAttrs?.length) return false;
-  return it.enhanceAttrs.some((a) => !!a.washed);
+/** Admin first_seed_percent; 100 = every drop is washed, hide name `[洗]`. */
+let gWashFirstSeedPercent = 20;
+
+function applyWashFirstSeedPercent(n: number): void {
+  const p = n | 0;
+  gWashFirstSeedPercent = p < 0 ? 0 : p > 100 ? 100 : p;
+}
+
+/** Bag/trade/warehouse name suffix. Empty when first-seed is always-on (100%). */
+export function equipWashNameTag(it: {
+  kind?: string;
+  enhanceAttrs?: { washed?: boolean }[];
+}): string {
+  if (gWashFirstSeedPercent >= 100) return "";
+  if (it.kind !== "equip" || !it.enhanceAttrs?.length) return "";
+  return it.enhanceAttrs.some((a) => !!a.washed) ? "[洗]" : "";
 }
 
 function warehouseBagDisplayName(it: BagItem): string {
@@ -4124,7 +4137,7 @@ function warehouseBagDisplayName(it: BagItem): string {
 
 /** Bag-list style: name[洗](+enhance). */
 export function formatWarehouseBagLabel(it: BagItem): string {
-  const wash = bagEquipHasWash(it) ? "[洗]" : "";
+  const wash = equipWashNameTag(it);
   const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
   return `${warehouseBagDisplayName(it)}${wash}${plus}`;
 }
@@ -4406,6 +4419,11 @@ export type CharacterStats = {
   gemSocketEnabled: number;
   /** Admin: show bag/enhance「洗练」. 0 = hide + reject wash ops. */
   washButtonEnabled: number;
+  /**
+   * Admin first_seed_percent (0–100). 100 = every first drop is washed;
+   * Pixi hides `[洗]` on equipment names.
+   */
+  washFirstSeedPercent: number;
   /** Admin: map-corner「翅」status badge. 0 = hide. */
   wingStatusEnabled: number;
   /** Admin: map-corner「骑」status badge. 0 = hide. */
@@ -5172,6 +5190,14 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
         ? 1
         : 0
       : 1,
+    washFirstSeedPercent: (() => {
+      const n = obj.fields.some((f) => f.name === "washFirstSeedPercent")
+        ? fieldU32(obj, "washFirstSeedPercent")
+        : 20;
+      const p = n < 0 ? 0 : n > 100 ? 100 : n | 0;
+      applyWashFirstSeedPercent(p);
+      return p;
+    })(),
     wingStatusEnabled: obj.fields.some((f) => f.name === "wingStatusEnabled")
       ? fieldU32(obj, "wingStatusEnabled")
         ? 1

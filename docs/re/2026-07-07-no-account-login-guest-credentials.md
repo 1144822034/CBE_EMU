@@ -68,14 +68,15 @@ For Jianghu OL no-account first-run login:
 
 ## Implementation
 
-The mock-service now:
+The mock-service still:
 
 - no longer injects account names through host metadata
 - no longer falls back to a synthetic `default` account
-- issues a real guest account/password pair on empty-credential `1/1/12`
-- binds that `clientId` to the issued guest account immediately
-- lets later packets reuse the bound account until the client starts sending the
-  saved credentials itself
+
+As of 2026-10-05, empty-credential `1/1/12` no longer auto-creates `guestXXXXX`
+accounts. The CBE endpoint returns login failure (`result=2`, 请先登录游戏).
+Players must register via the web account center or `account create`, then send
+saved credentials. See `docs/re/2026-10-05-cbe-disable-no-account-guest-register.md`.
 
 ## Validation
 

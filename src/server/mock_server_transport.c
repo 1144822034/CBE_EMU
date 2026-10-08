@@ -2390,56 +2390,28 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
 
     if (haveLoginRequest && vm_mock_service_login_is_no_account(&loginRequest))
     {
-        char issuedPassword[64];
-        memset(issuedPassword, 0, sizeof(issuedPassword));
-        sessionAccount = vm_mock_service_find_session_account(requestMeta.clientId);
-        if (sessionAccount && sessionAccount[0] != 0)
-        {
-            vm_mock_service_copy_account_id(accountId, sizeof(accountId), sessionAccount);
-            if (!vm_mock_service_account_copy_password(accountId, issuedPassword, sizeof(issuedPassword)))
-            {
-                authError = "guest account unavailable";
-                responseLen = vm_net_mock_build_login_failure_response(loginRequest.requestSubtype,
-                                                                       authError,
-                                                                       responseBuffer,
-                                                                       responseCap);
-                vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
-                VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
-                if (!vm_mock_service_send_all(client, header, sizeof(header)))
-                    return 0;
-                if (responseLen > 0 && !vm_mock_service_send_all(client, responseBuffer, responseLen))
-                    return 0;
-                return 1;
-            }
-        }
-        else
-        {
-            if (!vm_mock_service_account_issue_guest_credentials(requestMeta.clientId,
-                                                                 accountId, sizeof(accountId),
-                                                                 issuedPassword, sizeof(issuedPassword),
-                                                                 &authError))
-            {
-                responseLen = vm_net_mock_build_login_failure_response(loginRequest.requestSubtype,
-                                                                       authError ? authError : "guest account unavailable",
-                                                                       responseBuffer,
-                                                                       responseCap);
-                vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
-                VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
-                if (!vm_mock_service_send_all(client, header, sizeof(header)))
-                    return 0;
-                if (responseLen > 0 && !vm_mock_service_send_all(client, responseBuffer, responseLen))
-                    return 0;
-                return 1;
-            }
-        }
-        vm_mock_service_bind_session_account(requestMeta.clientId, accountId);
-        snprintf(g_vm_mock_service_login_issue_username, sizeof(g_vm_mock_service_login_issue_username), "%s", accountId);
-        snprintf(g_vm_mock_service_login_issue_password, sizeof(g_vm_mock_service_login_issue_password), "%s", issuedPassword);
-        g_vm_mock_service_login_issue_result = 3;
-        printf("[info][mock-service] login_no_account_issue client=%08x user=%s result=%u\n",
+        authError = g_vm_net_mock_login_need_account_gbk;
+        responseLen = vm_net_mock_build_login_failure_response(
+            loginRequest.requestSubtype, authError, responseBuffer, responseCap);
+        vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
+        VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
+        if (!vm_mock_service_send_all(client, header, sizeof(header)))
+            return 0;
+        if (responseLen > 0 &&
+            !vm_mock_service_send_all(client, responseBuffer, responseLen))
+            return 0;
+        printf("[info][mock-service] login_reject client=%08x user=- "
+               "reason=no_account_auto_register_disabled queue_wait_ms=%u "
+               "state_wait_ms=%u state_hold_ms=%u\n",
                requestMeta.clientId,
-               accountId,
-               g_vm_mock_service_login_issue_result);
+               workerQueueWaitMs,
+               protocolWaitMs,
+               protocolHoldMs);
+        vm_mock_service_frame_forensics_note("login_reject_no_account",
+                                             protocolWaitMs,
+                                             protocolHoldMs,
+                                             0);
+        return 1;
     }
     else if (haveLoginRequest && vm_mock_service_login_requires_auth(&loginRequest))
     {

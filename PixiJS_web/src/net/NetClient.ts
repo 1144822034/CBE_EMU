@@ -27,7 +27,10 @@ export class NetClient {
         this.ws = ws;
         resolve();
       };
-      ws.onerror = () => reject(new Error(`websocket failed: ${url}`));
+      ws.onerror = () => {
+        console.warn("[net] websocket failed", url);
+        reject(new Error("网络连接失败，请检查网络后重试"));
+      };
     });
   }
 

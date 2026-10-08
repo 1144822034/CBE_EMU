@@ -11,7 +11,11 @@
 #else
 #include <strings.h>
 #endif
+#ifdef CBE_PLATFORM_NO_WINDOW
+#include "android_compat.h"
+#else
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
+#endif
 #include "fontEngine.h"
 #include "fileIoEngine.h"
 #include "mystd.h"

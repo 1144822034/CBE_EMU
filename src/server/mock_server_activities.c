@@ -27,6 +27,7 @@ enum
     VM_MOCK_ACTIVITIES_ONLINE_VITALITY_PER_HOUR_DEFAULT = 10,
     VM_MOCK_ACTIVITIES_ONLINE_HOUR_SEC = 3600,
     VM_MOCK_RING_DAILY_MAX_DEFAULT = 20,
+    VM_MOCK_RING_FREE_REFRESH_DEFAULT = 3,
     VM_MOCK_RING_KEY_RATE_DEFAULT = 5,
     VM_MOCK_RING_TYPE_VISIT = 1,
     VM_MOCK_RING_TYPE_KILL_MOB = 2,
@@ -109,6 +110,8 @@ typedef struct
     u32 baseMoney;
     u32 expPerRing;
     u32 moneyPerRing;
+    /* 每日免费刷新当前环任务次数（用尽后仍可用酷宝刷新） */
+    u16 freeRefreshDaily;
 } vm_mock_ring_config;
 
 typedef struct
@@ -469,6 +472,7 @@ static bool vm_mock_activities_ensure_tables(void)
             "base_money INT UNSIGNED NOT NULL DEFAULT 1000,"
             "exp_per_ring INT UNSIGNED NOT NULL DEFAULT 200,"
             "money_per_ring INT UNSIGNED NOT NULL DEFAULT 500,"
+            "free_refresh_daily SMALLINT UNSIGNED NOT NULL DEFAULT 3,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(id)) ENGINE=InnoDB") ||
         !vm_mysql_exec(
@@ -482,6 +486,7 @@ static bool vm_mock_activities_ensure_tables(void)
             "progress INT UNSIGNED NOT NULL DEFAULT 0,"
             "target_npc VARBINARY(16) NOT NULL DEFAULT '',"
             "task_active TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "free_refresh_used SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(account_id,role_id,day_ymd)) "
             "ENGINE=InnoDB"))
@@ -500,6 +505,12 @@ static bool vm_mock_activities_ensure_tables(void)
     (void)vm_mysql_exec(
         "INSERT IGNORE INTO server_vitality_config(id,online_per_hour) "
         "VALUES(1,10)");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_ring_config ADD COLUMN free_refresh_daily "
+        "SMALLINT UNSIGNED NOT NULL DEFAULT 3 AFTER money_per_ring");
+    (void)vm_mysql_exec(
+        "ALTER TABLE account_role_ring_daily ADD COLUMN free_refresh_used "
+        "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER task_active");
     ready = true;
     return true;
 }
@@ -761,6 +772,8 @@ static bool vm_mock_ring_config_row(void *ctx, unsigned int cc,
         cfg->expPerRing = tmp;
     if (values[12] && vm_mock_mysql_parse_u32(values[12], lengths[12], &tmp))
         cfg->moneyPerRing = tmp;
+    if (values[13] && vm_mock_mysql_parse_u32(values[13], lengths[13], &tmp))
+        cfg->freeRefreshDaily = (u16)tmp;
     return true;
 }
 
@@ -783,13 +796,14 @@ static void vm_mock_ring_load_config(bool force)
     g_vm_mock_ring_config.baseMoney = 1000;
     g_vm_mock_ring_config.expPerRing = 200;
     g_vm_mock_ring_config.moneyPerRing = 500;
+    g_vm_mock_ring_config.freeRefreshDaily = VM_MOCK_RING_FREE_REFRESH_DEFAULT;
     snprintf(g_vm_mock_ring_config.npcKeyword,
              sizeof(g_vm_mock_ring_config.npcKeyword), "%s",
              VM_MOCK_RING_NPC_KEYWORD_DEFAULT);
     (void)vm_mysql_query(
         "SELECT enabled,npc_keyword,daily_max,daily_bonus_item_id,"
         "daily_bonus_count,key_drop_rate,key_item_id1,key_item_id2,key_item_id3,"
-        "base_exp,base_money,exp_per_ring,money_per_ring "
+        "base_exp,base_money,exp_per_ring,money_per_ring,free_refresh_daily "
         "FROM server_ring_config WHERE id=1 LIMIT 1",
         vm_mock_ring_config_row, &g_vm_mock_ring_config);
     g_vm_mock_ring_config_loaded = true;
@@ -1441,6 +1455,7 @@ typedef struct
     u32 progress;
     char targetNpc[16];
     u8 taskActive;
+    u16 freeRefreshUsed;
     bool found;
 } vm_mock_ring_daily_ctx;
 
@@ -1450,7 +1465,6 @@ static bool vm_mock_ring_daily_row_cb(void *ctx, unsigned int cc,
 {
     vm_mock_ring_daily_ctx *row = (vm_mock_ring_daily_ctx *)ctx;
     u32 tmp = 0;
-    (void)cc;
     if (row == NULL || values == NULL)
         return false;
     row->found = true;
@@ -1473,6 +1487,9 @@ static bool vm_mock_ring_daily_row_cb(void *ctx, unsigned int cc,
     }
     if (values[7] && lengths[7])
         row->taskActive = (u8)(values[7][0] == '0' ? 0 : 1);
+    if (cc > 8 && values[8] &&
+        vm_mock_mysql_parse_u32(values[8], lengths[8], &tmp))
+        row->freeRefreshUsed = (u16)tmp;
     return true;
 }
 
@@ -3090,7 +3107,8 @@ static u32 vm_net_mock_build_ring_status_response(u8 *out, u32 outCap)
     {
         snprintf(query, sizeof(query),
                  "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
-                 "progress,target_npc,task_active FROM account_role_ring_daily "
+                 "progress,target_npc,task_active,free_refresh_used "
+                 "FROM account_role_ring_daily "
                  "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
                  accountHex, role->roleId, dayYmd);
         (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
@@ -3119,7 +3137,11 @@ static u32 vm_net_mock_build_ring_status_response(u8 *out, u32 outCap)
                                        g_vm_mock_ring_rt.targetNpc) ||
         !vm_net_mock_put_object_string(out, outCap, &pos, "desc",
                                        g_vm_mock_ring_rt.desc) ||
-        !vm_net_mock_put_object_u32(out, outCap, &pos, "taskActive", row.taskActive))
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "taskActive", row.taskActive) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "freeRefreshMax",
+                                    g_vm_mock_ring_config.freeRefreshDaily) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "freeRefreshUsed",
+                                    row.freeRefreshUsed))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     return vm_mock_activities_finish_packet(out, pos, 1);
@@ -3404,17 +3426,21 @@ static u32 vm_net_mock_build_ring_claim_daily_response(u8 *out, u32 outCap)
 }
 
 /*
- * 消耗酷宝刷新当前进行中的环任务：不增减当日环数，只重抽目标。
+ * 刷新当前进行中的环任务：不增减当日环数，只重抽目标。
+ * 优先消耗当日免费次数（后台 free_refresh_daily）；用尽后扣酷宝。
  * result: 1=ok 2=norole 3=disabled 4=noactive 5=nowcoin 6=savefail
+ * message: ok_free / ok_wcoin（客户端区分是否扣酷宝）
  */
 static u32 vm_net_mock_build_ring_refresh_response(u8 *out, u32 outCap)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_mock_ring_daily_ctx row;
     char accountHex[160];
-    char query[640];
+    char query[720];
     u32 dayYmd = vm_mock_activities_day_ymd();
     u32 wcoinBefore = 0;
+    bool useFree = false;
+    u16 freeUsedAfter = 0;
     vm_mock_ring_runtime prevRt;
 
     vm_mock_ring_load_config(false);
@@ -3427,32 +3453,36 @@ static u32 vm_net_mock_build_ring_refresh_response(u8 *out, u32 outCap)
                                                   VM_MOCK_RING_WT_REFRESH, 3,
                                                   "disabled");
     memset(&row, 0, sizeof(row));
-    if (vm_mock_activities_account_hex(accountHex, sizeof(accountHex)))
-    {
-        snprintf(query, sizeof(query),
-                 "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
-                 "progress,target_npc,task_active FROM account_role_ring_daily "
-                 "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
-                 accountHex, role->roleId, dayYmd);
-        (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
-    }
+    if (!vm_mock_activities_account_hex(accountHex, sizeof(accountHex)))
+        return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                  VM_MOCK_RING_WT_REFRESH, 2,
+                                                  "norole");
+    snprintf(query, sizeof(query),
+             "SELECT ring_count,bonus_claimed,task_type,target_id,target_count,"
+             "progress,target_npc,task_active,free_refresh_used "
+             "FROM account_role_ring_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u LIMIT 1",
+             accountHex, role->roleId, dayYmd);
+    (void)vm_mysql_query(query, vm_mock_ring_daily_row_cb, &row);
     if (!row.taskActive)
         return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
                                                   VM_MOCK_RING_WT_REFRESH, 4,
                                                   "noactive");
 
+    useFree = row.freeRefreshUsed < g_vm_mock_ring_config.freeRefreshDaily;
     wcoinBefore = role->wcoin;
-    if (wcoinBefore < (u32)VM_MOCK_RING_REFRESH_WCOIN)
+    if (!useFree && wcoinBefore < (u32)VM_MOCK_RING_REFRESH_WCOIN)
         return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
                                                   VM_MOCK_RING_WT_REFRESH, 5,
                                                   "nowcoin");
 
     prevRt = g_vm_mock_ring_rt;
-    role->wcoin = wcoinBefore - (u32)VM_MOCK_RING_REFRESH_WCOIN;
+    if (!useFree)
+        role->wcoin = wcoinBefore - (u32)VM_MOCK_RING_REFRESH_WCOIN;
+    freeUsedAfter = useFree ? (u16)(row.freeRefreshUsed + 1u) : row.freeRefreshUsed;
     vm_mock_yanmen_load_config(false);
     vm_mock_ring_build_desc();
-    if (!vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed) ||
-        !vm_net_mock_role_db_save("ring-refresh-wcoin"))
+    if (!vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed))
     {
         role->wcoin = wcoinBefore;
         g_vm_mock_ring_rt = prevRt;
@@ -3461,12 +3491,44 @@ static u32 vm_net_mock_build_ring_refresh_response(u8 *out, u32 outCap)
                                                   VM_MOCK_RING_WT_REFRESH, 6,
                                                   "savefail");
     }
-    printf("[info][mock-service] ring_refresh role=%u cost=%u wcoin=%u->%u "
-           "ring=%u evidence=wcoin-refresh-keep-count\n",
-           role->roleId, (u32)VM_MOCK_RING_REFRESH_WCOIN, wcoinBefore, role->wcoin,
-           (u32)row.ringCount);
+    if (useFree)
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_ring_daily SET free_refresh_used=%u "
+                 "WHERE account_id=UNHEX('%s') AND role_id=%u AND day_ymd=%u",
+                 (u32)freeUsedAfter, accountHex, role->roleId, dayYmd);
+        if (!vm_mysql_exec(query))
+        {
+            role->wcoin = wcoinBefore;
+            g_vm_mock_ring_rt = prevRt;
+            (void)vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed);
+            return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                      VM_MOCK_RING_WT_REFRESH, 6,
+                                                      "savefail");
+        }
+    }
+    else if (!vm_net_mock_role_db_save("ring-refresh-wcoin"))
+    {
+        role->wcoin = wcoinBefore;
+        g_vm_mock_ring_rt = prevRt;
+        (void)vm_mock_ring_save_runtime(role, row.ringCount, row.bonusClaimed);
+        return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
+                                                  VM_MOCK_RING_WT_REFRESH, 6,
+                                                  "savefail");
+    }
+    if (useFree)
+        printf("[info][mock-service] ring_refresh role=%u free=%u/%u "
+               "ring=%u evidence=free-refresh-keep-count\n",
+               role->roleId, (u32)freeUsedAfter,
+               (u32)g_vm_mock_ring_config.freeRefreshDaily, (u32)row.ringCount);
+    else
+        printf("[info][mock-service] ring_refresh role=%u cost=%u wcoin=%u->%u "
+               "ring=%u evidence=wcoin-refresh-keep-count\n",
+               role->roleId, (u32)VM_MOCK_RING_REFRESH_WCOIN, wcoinBefore,
+               role->wcoin, (u32)row.ringCount);
     return vm_mock_activities_build_op_result(out, outCap, VM_MOCK_RING_WT_KIND,
-                                              VM_MOCK_RING_WT_REFRESH, 1, "ok");
+                                              VM_MOCK_RING_WT_REFRESH, 1,
+                                              useFree ? "ok_free" : "ok_wcoin");
 }
 
 static bool vm_net_mock_is_activities46_request(const u8 *request, u32 requestLen,
@@ -3756,10 +3818,11 @@ bool vm_mock_yanmen_admin_save_exchange(u32 exchangeId, u32 woodCost, u32 stoneC
 bool vm_mock_ring_admin_save_config(u8 enabled, const char *npcKeyword, u16 dailyMax,
                                     u32 bonusItemId, u32 bonusCount, u8 keyRate,
                                     u32 key1, u32 key2, u32 key3, u32 baseExp,
-                                    u32 baseMoney, u32 expPerRing, u32 moneyPerRing)
+                                    u32 baseMoney, u32 expPerRing, u32 moneyPerRing,
+                                    u16 freeRefreshDaily)
 {
     char npcHex[96];
-    char query[768];
+    char query[896];
 
     if (!vm_mock_activities_ensure_tables())
         return false;
@@ -3769,18 +3832,19 @@ bool vm_mock_ring_admin_save_config(u8 enabled, const char *npcKeyword, u16 dail
              "INSERT INTO server_ring_config "
              "(id,enabled,npc_keyword,daily_max,daily_bonus_item_id,daily_bonus_count,"
              "key_drop_rate,key_item_id1,key_item_id2,key_item_id3,base_exp,base_money,"
-             "exp_per_ring,money_per_ring) VALUES "
-             "(1,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "exp_per_ring,money_per_ring,free_refresh_daily) VALUES "
+             "(1,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
              "enabled=VALUES(enabled),npc_keyword=VALUES(npc_keyword),"
              "daily_max=VALUES(daily_max),daily_bonus_item_id=VALUES(daily_bonus_item_id),"
              "daily_bonus_count=VALUES(daily_bonus_count),key_drop_rate=VALUES(key_drop_rate),"
              "key_item_id1=VALUES(key_item_id1),key_item_id2=VALUES(key_item_id2),"
              "key_item_id3=VALUES(key_item_id3),base_exp=VALUES(base_exp),"
              "base_money=VALUES(base_money),exp_per_ring=VALUES(exp_per_ring),"
-             "money_per_ring=VALUES(money_per_ring)",
+             "money_per_ring=VALUES(money_per_ring),"
+             "free_refresh_daily=VALUES(free_refresh_daily)",
              (u32)enabled, npcHex, (u32)dailyMax, bonusItemId,
              bonusCount ? bonusCount : 1, (u32)keyRate, key1, key2, key3, baseExp,
-             baseMoney, expPerRing, moneyPerRing);
+             baseMoney, expPerRing, moneyPerRing, (u32)freeRefreshDaily);
     if (!vm_mysql_exec(query))
         return false;
     g_vm_mock_ring_config_loaded = false;

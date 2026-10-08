@@ -10,7 +10,7 @@ import {
 } from "./cbms";
 
 /** Live gateway on this machine's LAN IP (PixiJS web / APK). */
-export const FIXED_LIVE_GATEWAY = "ws://106.54.59.92:19093";
+export const FIXED_LIVE_GATEWAY = "ws://43.248.102.136:19093";
 //export const FIXED_LIVE_GATEWAY = "ws://192.1.1.1:19092";
 
 export type TransportMode = "live";
@@ -91,7 +91,8 @@ export class LiveTransport implements GameTransport {
       const timer = window.setTimeout(() => {
         ws.close();
         this.connectPromise = null;
-        reject(new Error(`gateway timeout ${this.url}`));
+        console.warn("[live] gateway timeout", this.url);
+        reject(new Error("网络连接超时，请稍后重试"));
       }, 8000);
       ws.onopen = () => {
         window.clearTimeout(timer);
@@ -103,7 +104,8 @@ export class LiveTransport implements GameTransport {
       ws.onerror = () => {
         window.clearTimeout(timer);
         this.connectPromise = null;
-        reject(new Error(`gateway failed ${this.url}`));
+        console.warn("[live] gateway failed", this.url);
+        reject(new Error("网络连接失败，请检查网络后重试"));
       };
       ws.onclose = () => {
         if (this.ws === ws) {
@@ -215,7 +217,8 @@ export class LiveTransport implements GameTransport {
   ): Promise<Uint8Array[]> {
     await this.ensureConnected();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error(`live: not connected（网关未就绪 ${this.url}）`);
+      console.warn("[live] not connected", this.url);
+      throw new Error("网络连接失败，请稍后重试");
     }
     const meta = encodeRequestMeta(this.clientId);
     const req = encodeCbms(flags, meta, wtBody);
@@ -280,8 +283,12 @@ export async function connectLiveTransport(
     return live;
   } catch (e) {
     live.close();
+    console.error("[live] connect failed", url, e);
     const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`实网连接失败（${url}）: ${msg}`);
+    // User-facing tip must not include host / IP / ws URL.
+    throw new Error(
+      msg.includes("网络连接") ? msg : "网络连接失败，请稍后重试",
+    );
   }
 }
 

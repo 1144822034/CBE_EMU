@@ -54,8 +54,8 @@ Client-side / service-side priority:
 
 1. authenticated login packet credentials (`username` / `userName` + `password`)
 2. authenticated server-side session binding for that `clientId`
-3. for Jianghu OL no-account `1/1/12` with empty saved credentials: issue a new
-   guest account/password pair and bind that session immediately
+3. Jianghu OL no-account `1/1/12` with empty credentials is rejected; it does
+   not auto-register a guest account
 
 Requests that legitimately happen before account binding, such as startup
 version/update handshake packets (`WT 18/*`) and the login-bridge short control
@@ -64,9 +64,9 @@ context.
 
 In Jianghu OL specifically, the title `1/1/12` request is built from the local
 `mmorpg_LoginRecord` username/password slots. A truly first-run no-account flow
-therefore sends empty credentials; once the server has issued guest credentials
-and the client has persisted them, later `1/1/12` requests carry the saved
-guest username/password through the normal packet fields.
+therefore sends empty credentials. That first-run packet is now a login
+failure, not an auto-issued guest. Existing clients that already persisted
+credentials still log in through the normal username/password fields.
 
 For login packets that do carry non-empty `username` / `userName` plus
 `password`, the service no longer auto-creates or auto-learns accounts. The
@@ -106,9 +106,8 @@ The service request path:
 1. reads `clientId` from the TCP frame metadata
 2. if the WT request is a credential login, validates username/password against
    the account DB
-3. if the WT request is no-account `1/1/12` with empty credentials, issues a
-   new guest account/password pair (or reuses the already bound session account)
-   and returns them in the subtype-12 login response fields
+3. if the WT request is no-account `1/1/12` with empty credentials, return
+   login failure and do not create or bind an account
 4. if the WT request is a startup pre-login packet (`WT 18/*`), handles it
    statelessly with no bound account
 5. otherwise binds `clientId -> username`

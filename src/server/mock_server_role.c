@@ -2852,56 +2852,6 @@ static bool vm_mock_service_account_set_password(const char *username,
     return true;
 }
 
-static bool vm_mock_service_account_issue_guest_credentials(u32 clientId,
-                                                            char *usernameOut,
-                                                            size_t usernameOutCap,
-                                                            char *passwordOut,
-                                                            size_t passwordOutCap,
-                                                            const char **messageOut)
-{
-    u32 seedBase = 0;
-    u32 account_count = 0;
-    const char *message = "account db unavailable";
-
-    if (messageOut)
-        *messageOut = message;
-    if (usernameOut == NULL || usernameOutCap == 0 || passwordOut == NULL || passwordOutCap == 0)
-        return false;
-    usernameOut[0] = 0;
-    passwordOut[0] = 0;
-
-    vm_mock_service_account_db_load();
-    if (!g_vm_mock_service_account_db_valid ||
-        !vm_mock_service_account_count(&account_count))
-    {
-        return false;
-    }
-
-    seedBase = account_count + 1;
-    for (u32 attempt = 0; attempt < 100000; ++attempt)
-    {
-        u32 ordinal = seedBase + attempt;
-        snprintf(usernameOut, usernameOutCap, "guest%05u", ordinal);
-        snprintf(passwordOut, passwordOutCap, "g%08X", clientId ^ (ordinal * 2654435761u));
-        if (vm_mock_service_account_find_record(usernameOut) != NULL)
-            continue;
-        if (vm_mock_service_account_create_record(usernameOut, passwordOut, &message))
-        {
-            if (messageOut)
-                *messageOut = "ok";
-            return true;
-        }
-        if (message != NULL && strcmp(message, "account already exists") != 0)
-            break;
-    }
-
-    if (messageOut)
-        *messageOut = message;
-    usernameOut[0] = 0;
-    passwordOut[0] = 0;
-    return false;
-}
-
 /* EXP to advance from level L -> L+1 for L=1..69.
  * Piecewise geometric between decade anchors (exact integers):
  *   1->2=200, 29->30=5368, 39->40=85800, 49->50=1_040_000,
@@ -4309,6 +4259,9 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
                                      vm_net_mock_client_ui_wash_button_enabled()
                                          ? 1u
                                          : 0u) ||
+        !vm_net_mock_put_object_u32(
+            out, outCap, &pos, "washFirstSeedPercent",
+            (u32)vm_net_mock_enhance_wash_first_seed_percent()) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "wingStatusEnabled",
                                      vm_net_mock_client_ui_wing_status_enabled()
                                          ? 1u

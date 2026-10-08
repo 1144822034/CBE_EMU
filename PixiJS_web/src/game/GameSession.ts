@@ -632,10 +632,9 @@ export type SessionCallbacks = {
 
 /**
  * Pixi client hangup map-side gap after settle leave.
- * Align with reward gate (`CBE_BATTLE_REWARD_MIN_INTERVAL_MS` default 8000)
- * and hangup-loop-after-exit pacing so fights are evenly spaced — not paired.
+ * Independent of reward gate (`CBE_BATTLE_REWARD_MIN_INTERVAL_MS`).
  */
-const HANGUP_ENCOUNTER_INTERVAL_MS = 8000;
+const HANGUP_ENCOUNTER_INTERVAL_MS = 7000;
 /**
  * Soft-fail retry (no monster / tear-down-only). Keep short so a single miss
  * does not become interval+retry ≈ 13s (see 2026-09-12 paired-battles doc).
@@ -912,6 +911,10 @@ export class GameSession {
   private titleKeepaliveTimer: number | null = null;
   private nativeKeepAliveInFlight = false;
   private pollFailStreak = 0;
+  /** Coalesce overlapping post-enter 2/7 pulls; gen invalidates stale runs. */
+  private nearbyRefreshInFlight: Promise<void> | null = null;
+  private nearbyRefreshOwnerGen = -1;
+  private nearbyRefreshGen = 0;
 
   constructor(
     private readonly cb: SessionCallbacks,
@@ -1048,6 +1051,7 @@ export class GameSession {
    * catalogs from role A into role B (same starting town is a common case).
    */
   private clearRoleBoundState(notify = false): void {
+    this.nearbyRefreshGen++;
     this.npcs = [];
     this.sceneMonsters = [];
     this.sceneMonsterCatalog = [];
@@ -1383,6 +1387,7 @@ export class GameSession {
         console.warn("[session] scene startup follow-up", e);
       }
       this.startPoll();
+      void this.refreshNearbyPeersAfterEnter();
     } finally {
       this.roleEnterSceneLock = null;
       this.roleSelectInFlight = false;
@@ -1464,9 +1469,19 @@ export class GameSession {
         this.handleBodies(catalogBodies);
         await this.awaitEnterScene();
       }
+      if (!this.npcs.length) {
+        const wt6Bodies = await this.transport.exchange(
+          0,
+          buildSceneNpcCatalogFollowupRequest(),
+        );
+        this.handleBodies(wt6Bodies);
+        await this.awaitEnterScene();
+      }
+      if (!this.npcs.length) {
+        console.warn("[session] portal landed without 27/11 NPCs", mapId);
+      }
       // Footfall must come from server posinfo — not prior-map or SCE spawn guess.
-      await this.awaitAuthoritativeLanding();
-      await this.refreshNearbyPeersAfterEnter();
+      await this.awaitAuthoritativeLanding(1500);
     } catch (e) {
       this.landingWait = null;
       this.setPhase(
@@ -1475,7 +1490,10 @@ export class GameSession {
       );
     } finally {
       this.sceneTransferExpected = null;
-      if (this.transport && this.scene) this.startPoll();
+      if (this.transport && this.scene) {
+        this.startPoll();
+        void this.refreshNearbyPeersAfterEnter();
+      }
     }
   }
 
@@ -1747,8 +1765,7 @@ export class GameSession {
           `from=${sceneBefore || "∅"}`,
         );
       }
-      // Await: fire-and-forget 2/7 often raced empty before scene ready / mates.
-      await this.refreshNearbyPeersAfterEnter();
+      void this.refreshNearbyPeersAfterEnter();
       this.setPhase("inworld", `unstuck ${this.scene} @${this.x},${this.y}`);
     } catch (e) {
       this.setPhase(
@@ -2005,7 +2022,7 @@ export class GameSession {
         );
       }
 
-      await this.refreshNearbyPeersAfterEnter();
+      void this.refreshNearbyPeersAfterEnter();
       this.setPhase(
         "inworld",
         `${free ? "region-free" : "map-teleport"} ${this.scene} @${this.x},${this.y}`,
@@ -3336,7 +3353,7 @@ export class GameSession {
     return null;
   }
 
-  /** Spend coolmoney to reroll the active ring quest (WT47/5). */
+  /** Reroll the active ring quest (WT47/5): free daily quota first, else coolmoney. */
   async ringRefresh(): Promise<ActivityOpResult | null> {
     if (!this.transport) return null;
     const bodies = await this.transport.exchange(0, buildRingRefreshRequest());
@@ -3345,7 +3362,7 @@ export class GameSession {
       try {
         const r = parseActivityOp(decodeWtPacket(body), 47, 5);
         if (r) {
-          if (r.result === 1 && this.mallState) {
+          if (r.result === 1 && r.message === "ok_wcoin" && this.mallState) {
             this.mallState = {
               ...this.mallState,
               coolmoney: Math.max(
@@ -3380,7 +3397,7 @@ export class GameSession {
     this.handleBodies(catalogBodies);
     await this.awaitEnterScene();
     if (!this.inBattle) await this.pollOnce();
-    await this.refreshNearbyPeersAfterEnter();
+    void this.refreshNearbyPeersAfterEnter();
     void this.ensureArenaHudFallback("enter-scene");
   }
 
@@ -3439,27 +3456,46 @@ export class GameSession {
    * server — retry until peers appear or attempts exhaust.
    */
   async refreshNearbyPeersAfterEnter(): Promise<void> {
+    const gen = this.nearbyRefreshGen;
+    // Same-gen reentry (pollOnce → team-follow) must not await the in-flight
+    // poll that called us — that deadlocks the exchange queue.
+    if (this.nearbyRefreshInFlight && this.nearbyRefreshOwnerGen === gen) {
+      return;
+    }
+    const run = this.refreshNearbyPeersAfterEnterUnlocked();
+    this.nearbyRefreshOwnerGen = gen;
+    this.nearbyRefreshInFlight = run.finally(() => {
+      if (this.nearbyRefreshInFlight === run) {
+        this.nearbyRefreshInFlight = null;
+        this.nearbyRefreshOwnerGen = -1;
+      }
+    });
+    return this.nearbyRefreshInFlight;
+  }
+
+  private async refreshNearbyPeersAfterEnterUnlocked(): Promise<void> {
     if (!this.transport || this.inBattle) return;
     const scene = (this.scene || this.loadedScene || "").trim();
     if (!scene || this.isDreamSoloScene(scene)) return;
+    const gen = this.nearbyRefreshGen;
     const selfId = this.selectedRoleId >>> 0;
     const expectTeamPeers =
       this.teamMembers.length >= 2 &&
       this.teamMembers.some((m) => m.id !== selfId);
-    const maxAttempts = expectTeamPeers ? 8 : 4;
+    // Solo: one poll+2/7. Empty maps used to retry 4× (~seconds) and starve
+    // the post-enter 27/11 catalog on the same exchange queue.
+    const maxAttempts = expectTeamPeers ? 8 : 1;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (gen !== this.nearbyRefreshGen) return;
       try {
         if (!this.inBattle) {
           await this.pollOnce();
         }
+        if (gen !== this.nearbyRefreshGen) return;
         await this.openNearbyPlayers(0);
         const haveMapPeers = this.scenePeerById.size > 0;
         const haveListPeers = this.nearbyList.length > 0;
-        if (!expectTeamPeers) {
-          if (haveMapPeers || haveListPeers || attempt >= maxAttempts - 1) return;
-        } else if (haveMapPeers || haveListPeers) {
-          return;
-        }
+        if (!expectTeamPeers || haveMapPeers || haveListPeers) return;
         await new Promise<void>((r) => window.setTimeout(r, 280));
       } catch (e) {
         console.warn("[session] nearby after enter", e);
@@ -4131,10 +4167,10 @@ export class GameSession {
       if (opcode === NpcServiceOpcode.ENTER_INSTANCE) {
         await this.awaitEnterScene();
         await this.settleLandedSceneCatalog(sceneBefore);
-        // Drain outdoor map_stone_loading_clear; onEnterScene already pulled 2/7.
         if (!this.inBattle) {
           await this.pollOnce();
         }
+        void this.refreshNearbyPeersAfterEnter();
         return;
       }
       return;
@@ -7091,7 +7127,7 @@ export class GameSession {
       try {
         // 32/x + 30/1 alone does not arm portal post-enter — pull 27/11.
         await this.settleLandedSceneCatalog(sceneBefore);
-        await this.refreshNearbyPeersAfterEnter();
+        void this.refreshNearbyPeersAfterEnter();
       } catch (e) {
         console.warn("[session] spouse-teleport settle", e);
       }
@@ -7744,8 +7780,8 @@ export class GameSession {
     this.setPhase("team-follow", `跟随队长 → ${landed}`);
     try {
       await this.settleLandedSceneCatalog(sceneBefore);
-      await this.refreshNearbyPeersAfterEnter();
       this.setPhase("inworld", `team-follow ${this.scene} @${this.x},${this.y}`);
+      void this.refreshNearbyPeersAfterEnter();
     } catch (e) {
       console.warn("[session] team-follow catalog settle", e);
     } finally {

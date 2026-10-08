@@ -439,6 +439,9 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
             "<div><label>NPC关键字（跑环使）</label>"
             "<input name=\"npc_keyword\" value=\"%s\"></div>"
             "<div><label>每日环数上限</label><input name=\"daily_max\" value=\"%u\"></div>"
+            "<div><label>每日免费刷新次数</label>"
+            "<input name=\"free_refresh_daily\" type=\"number\" min=\"0\" max=\"1000\" "
+            "value=\"%u\"></div>"
             "<div><label>满环奖励物品(5玄=905)</label><input name=\"bonus_item_id\" value=\"%u\"></div>"
             "<div><label>满环奖励数量</label><input name=\"bonus_count\" value=\"%u\"></div>"
             "<div><label>钥匙掉落%%</label><input name=\"key_rate\" value=\"%u\"></div>"
@@ -449,12 +452,16 @@ static void vm_mock_admin_render_activities_page(char *response, size_t response
             "<div><label>基础金钱</label><input name=\"base_money\" value=\"%u\"></div>"
             "<div><label>每环+经验</label><input name=\"exp_per_ring\" value=\"%u\"></div>"
             "<div><label>每环+金钱</label><input name=\"money_per_ring\" value=\"%u\"></div>"
-            "</div><button type=\"submit\" style=\"margin-top:10px\">保存跑环配置</button></form>"
+            "</div>"
+            "<p class=\"muted\" style=\"margin-top:10px\">免费刷新用尽后仍可花10酷宝刷新；"
+            "不消耗当日环数。填0则仅酷宝刷新。</p>"
+            "<button type=\"submit\" style=\"margin-top:10px\">保存跑环配置</button></form>"
             "</section></body></html>",
             ring && ring->enabled ? " selected" : "",
             ring && !ring->enabled ? " selected" : "",
             ringNpcUtf8,
             ring ? ring->dailyMax : 20u,
+            ring ? ring->freeRefreshDaily : 3u,
             ring ? ring->dailyBonusItemId : 905u,
             ring ? ring->dailyBonusCount : 1u,
             ring ? ring->keyDropRate : 5u,
@@ -757,6 +764,7 @@ static void vm_mock_admin_handle_activities_action(vm_mock_service_socket client
     {
         u32 enabled = 1;
         u32 daily = 20;
+        u32 freeRefresh = 3;
         u32 bonusId = 905;
         u32 bonusCount = 1;
         u32 keyRate = 5;
@@ -773,6 +781,7 @@ static void vm_mock_admin_handle_activities_action(vm_mock_service_socket client
         (void)vm_mock_admin_form_u32(body, "enabled", 1u, &enabled);
         (void)vm_mock_admin_form_value(body, "npc_keyword", npcUtf8, sizeof(npcUtf8));
         (void)vm_mock_admin_form_u32(body, "daily_max", 1000u, &daily);
+        (void)vm_mock_admin_form_u32(body, "free_refresh_daily", 1000u, &freeRefresh);
         (void)vm_mock_admin_form_u32(body, "bonus_item_id", 0xffffffffu, &bonusId);
         (void)vm_mock_admin_form_u32(body, "bonus_count", 100u, &bonusCount);
         (void)vm_mock_admin_form_u32(body, "key_rate", 100u, &keyRate);
@@ -789,7 +798,8 @@ static void vm_mock_admin_handle_activities_action(vm_mock_service_socket client
             snprintf(npcGbk, sizeof(npcGbk), "%s", "\xc5\xdc\xbb\xb7\xca\xb9\xd5\xdf");
         if (vm_mock_ring_admin_save_config((u8)enabled, npcGbk, (u16)daily, bonusId,
                                            bonusCount, (u8)keyRate, k1, k2, k3,
-                                           baseExp, baseMoney, expRing, moneyRing))
+                                           baseExp, baseMoney, expRing, moneyRing,
+                                           (u16)freeRefresh))
             vm_mock_admin_redirect_activities(client, "ok", "跑环配置已保存");
         else
             vm_mock_admin_redirect_activities(client, "error", "保存失败");

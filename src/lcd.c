@@ -7,9 +7,10 @@
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL_syswm.h"
 #endif
 
-#define PIXEL565R(v) ((((u32)v >> 11) << 3) & 0xff)
-#define PIXEL565G(v) ((((u32)v >> 5) << 2) & 0xff)
-#define PIXEL565B(v) (((u32)v << 3) & 0xff)
+/* Match PixiJS_web rgb565ToRgba: full 0..255 range (not shift-only). */
+#define PIXEL565R(v) ((u32)((((v) >> 11) & 0x1f) * 255 / 31))
+#define PIXEL565G(v) ((u32)((((v) >> 5) & 0x3f) * 255 / 63))
+#define PIXEL565B(v) ((u32)(((v) & 0x1f) * 255 / 31))
 
 #define PIXEL888R(v) ((((u32)v >> 16)) & 0xff)
 #define PIXEL888G(v) ((((u32)v >> 8)) & 0xff)
@@ -21,8 +22,8 @@ int finalLayerBuffer[LCD_WIDTH * LCD_HEIGHT];
 #endif
 
 static vm_lcd_rotation g_lcdRotation = VM_LCD_ROTATE_0;
-/* Game-frame upscale into the host window (2x by request). */
-static int g_lcdScale = 2;
+/* Game-frame upscale into the host window (1 = native pixels). */
+static int g_lcdScale = 1;
 /* Active design resolution (may be smaller than framebuffer capacity).
  * 封神演义V2 paints a classic 176x220 frame inside the 240x400 buffer. */
 static int g_lcdNativeW = LCD_WIDTH;
@@ -33,6 +34,9 @@ static int g_lcdDstW = 0;
 static int g_lcdDstH = 0;
 static int g_lcdOutW = 0;
 static int g_lcdOutH = 0;
+/* Present size = view * scale * dpi/96 * 5/4 (Pixi-like fractional nearest). */
+static int g_lcdPresentW = 0;
+static int g_lcdPresentTbH = 0;
 
 #define LCD_TOOLBAR_HEIGHT 32
 #define LCD_TOOLBAR_BUTTON_X 4
@@ -40,6 +44,69 @@ static int g_lcdOutH = 0;
 #define LCD_TOOLBAR_BUTTON_SIZE 26
 #define LCD_SCALE_MIN 1
 #define LCD_SCALE_MAX 8
+
+static int LcdWinDpi(void)
+{
+#ifdef _WIN32
+    if (window)
+    {
+        SDL_SysWMinfo wm;
+        SDL_VERSION(&wm.version);
+        if (SDL_GetWindowWMInfo(window, &wm) && wm.subsystem == SDL_SYSWM_WINDOWS)
+        {
+            HWND hwnd = wm.info.win.window;
+            HMODULE user32 = GetModuleHandleA("user32.dll");
+            typedef UINT(WINAPI *GetDpiForWindowFn)(HWND);
+            GetDpiForWindowFn getDpi =
+                user32 ? (GetDpiForWindowFn)GetProcAddress(user32, "GetDpiForWindow")
+                       : NULL;
+            if (getDpi)
+            {
+                UINT dpi = getDpi(hwnd);
+                if (dpi >= 72 && dpi <= 384)
+                    return (int)dpi;
+            }
+            {
+                HDC hdc = GetDC(hwnd);
+                if (hdc)
+                {
+                    int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
+                    ReleaseDC(hwnd, hdc);
+                    if (dpi >= 72 && dpi <= 384)
+                        return dpi;
+                }
+            }
+        }
+    }
+#endif
+    return 96;
+}
+
+/* PixiJS: resolution + CSS pixelated often yields a non-integer scale, which
+ * breaks ordered-dither moiré on outdoor sand (m_mount). Pure 2×/3× block
+ * replicate keeps that moiré — match Pixi with *5/4 present size. */
+static void LcdComputePresentSize(int viewW, int viewH, int *outW, int *outTbH,
+                                  int *outGameH)
+{
+    int dpi = LcdWinDpi();
+    int scale = g_lcdScale > 0 ? g_lcdScale : 2;
+    /* want = view * scale * (dpi/96) * (5/4) */
+    int w = (viewW * scale * dpi * 5) / (96 * 4);
+    int gameH = (viewH * scale * dpi * 5) / (96 * 4);
+    int tbH = (LCD_TOOLBAR_HEIGHT * scale * dpi * 5) / (96 * 4);
+    if (w < viewW)
+        w = viewW;
+    if (gameH < viewH)
+        gameH = viewH;
+    if (tbH < 16)
+        tbH = 16;
+    if (outW)
+        *outW = w;
+    if (outTbH)
+        *outTbH = tbH;
+    if (outGameH)
+        *outGameH = gameH;
+}
 
 static vm_lcd_rotation LcdNormalizeRotation(vm_lcd_rotation rotation)
 {
@@ -151,12 +218,23 @@ void LcdSetScale(int scale)
 
 int LcdGetWindowWidth(void)
 {
-    return LcdGetViewWidth() * g_lcdScale;
+    int w = 0;
+    int tb = 0;
+    int gh = 0;
+    LcdComputePresentSize(LcdGetViewWidth(), LcdGetViewHeight(), &w, &tb, &gh);
+    (void)tb;
+    (void)gh;
+    return w;
 }
 
 int LcdGetWindowHeight(void)
 {
-    return LcdGetToolbarHeight() + LcdGetViewHeight() * g_lcdScale;
+    int w = 0;
+    int tb = 0;
+    int gh = 0;
+    LcdComputePresentSize(LcdGetViewWidth(), LcdGetViewHeight(), &w, &tb, &gh);
+    (void)w;
+    return tb + gh;
 }
 
 int LcdGetToolbarHeight(void)
@@ -164,7 +242,18 @@ int LcdGetToolbarHeight(void)
 #ifdef CBE_PLATFORM_NO_WINDOW
     return 0;
 #else
-    return LCD_TOOLBAR_HEIGHT;
+    /* Present-space toolbar height (scaled). Falls back to logical. */
+    if (g_lcdPresentTbH > 0)
+        return g_lcdPresentTbH;
+    {
+        int w = 0;
+        int tb = 0;
+        int gh = 0;
+        LcdComputePresentSize(LcdGetViewWidth(), LcdGetViewHeight(), &w, &tb, &gh);
+        (void)w;
+        (void)gh;
+        return tb;
+    }
 #endif
 }
 
@@ -252,13 +341,22 @@ int LcdWindowPointInToolbar(int windowX, int windowY)
 
 int LcdHandleToolbarMouseDown(int windowX, int windowY)
 {
+    int tbH = LcdGetToolbarHeight();
+    int scaleNum;
+    int bx;
+    int by;
+    int bs;
+
     if (!LcdWindowPointInToolbar(windowX, windowY))
         return 0;
 
-    if (windowX >= LCD_TOOLBAR_BUTTON_X &&
-        windowX < LCD_TOOLBAR_BUTTON_X + LCD_TOOLBAR_BUTTON_SIZE &&
-        windowY >= LCD_TOOLBAR_BUTTON_Y &&
-        windowY < LCD_TOOLBAR_BUTTON_Y + LCD_TOOLBAR_BUTTON_SIZE)
+    /* Map present coords back to logical toolbar space. */
+    scaleNum = tbH > 0 ? tbH : LCD_TOOLBAR_HEIGHT;
+    bx = windowX * LCD_TOOLBAR_HEIGHT / scaleNum;
+    by = windowY * LCD_TOOLBAR_HEIGHT / scaleNum;
+    bs = LCD_TOOLBAR_BUTTON_SIZE;
+    if (bx >= LCD_TOOLBAR_BUTTON_X && bx < LCD_TOOLBAR_BUTTON_X + bs &&
+        by >= LCD_TOOLBAR_BUTTON_Y && by < LCD_TOOLBAR_BUTTON_Y + bs)
     {
         LcdCycleRotation();
         return 2;
@@ -274,7 +372,10 @@ void LcdVmRectToWindowRect(int x, int y, int w, int h, SDL_Rect *rect)
     int y1 = y + h;
     int nativeW = g_lcdNativeW;
     int nativeH = g_lcdNativeH;
-    int scale = g_lcdScale > 0 ? g_lcdScale : 1;
+    int viewW = LcdGetViewWidth();
+    int viewH = LcdGetViewHeight();
+    int dstW = g_lcdDstW > 0 ? g_lcdDstW : viewW;
+    int dstH = g_lcdDstH > 0 ? g_lcdDstH : viewH;
 
     if (!rect)
         return;
@@ -319,10 +420,10 @@ void LcdVmRectToWindowRect(int x, int y, int w, int h, SDL_Rect *rect)
         break;
     }
 
-    rect->x = g_lcdDstX + rect->x * scale;
-    rect->y = g_lcdDstY + rect->y * scale;
-    rect->w *= scale;
-    rect->h *= scale;
+    rect->x = g_lcdDstX + (rect->x * dstW) / (viewW > 0 ? viewW : 1);
+    rect->y = g_lcdDstY + (rect->y * dstH) / (viewH > 0 ? viewH : 1);
+    rect->w = (rect->w * dstW) / (viewW > 0 ? viewW : 1);
+    rect->h = (rect->h * dstH) / (viewH > 0 ? viewH : 1);
 }
 
 void InitLcd()
@@ -365,114 +466,6 @@ static void LcdSurfaceFillRect(SDL_Surface *sfc, int x, int y, int w, int h, u32
     }
 }
 
-static void LcdDrawToolbar(SDL_Surface *sfc)
-{
-    int h = LcdGetToolbarHeight();
-    int x = LCD_TOOLBAR_BUTTON_X;
-    int y = LCD_TOOLBAR_BUTTON_Y;
-    int size = LCD_TOOLBAR_BUTTON_SIZE;
-    int indicatorX = x + size + 10;
-    int indicatorY = y + 9;
-    int segmentW = 7;
-
-    LcdSurfaceFillRect(sfc, 0, 0, sfc->w, h, 0x202329);
-    LcdSurfaceFillRect(sfc, 0, h - 1, sfc->w, 1, 0x4b515c);
-    LcdSurfaceFillRect(sfc, x, y, size, size, 0x343a44);
-    for (int i = 0; i < 4; ++i)
-    {
-        u32 color = ((int)LcdGetRotation() == i) ? 0xf2c94c : 0x676e79;
-        LcdSurfaceFillRect(sfc, indicatorX + i * (segmentW + 3), indicatorY,
-                           segmentW, 8, color);
-    }
-}
-
-#ifdef _WIN32
-/* Present the already-scaled SDL surface into the real HWND client with
- * StretchBlt.  Fixes the case where SDL's surface is logical-sized but the
- * Win32 client is larger (DPI), which otherwise leaves the game in the corner. */
-static void LcdPresentStretchToClient(SDL_Surface *sfc)
-{
-    SDL_SysWMinfo wm;
-    HWND hwnd;
-    HDC hdcWnd;
-    HDC hdcMem;
-    HBITMAP hbmp;
-    HBITMAP hold;
-    BITMAPINFO bmi;
-    void *bits = NULL;
-    RECT rc;
-    int clientW;
-    int clientH;
-    int y;
-    u32 *src;
-    u32 *dst;
-
-    if (!sfc || sfc->format->BytesPerPixel != 4)
-        return;
-
-    SDL_VERSION(&wm.version);
-    if (!SDL_GetWindowWMInfo(window, &wm) || wm.subsystem != SDL_SYSWM_WINDOWS)
-        return;
-    hwnd = wm.info.win.window;
-    if (!hwnd || !GetClientRect(hwnd, &rc))
-        return;
-
-    clientW = (int)(rc.right - rc.left);
-    clientH = (int)(rc.bottom - rc.top);
-    if (clientW < 1 || clientH < 1)
-        return;
-
-    /* Same size: SDL_UpdateWindowSurface is enough. */
-    if (clientW == sfc->w && clientH == sfc->h)
-        return;
-
-    memset(&bmi, 0, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = sfc->w;
-    bmi.bmiHeader.biHeight = -sfc->h; /* top-down */
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    hdcWnd = GetDC(hwnd);
-    if (!hdcWnd)
-        return;
-    hdcMem = CreateCompatibleDC(hdcWnd);
-    if (!hdcMem)
-    {
-        ReleaseDC(hwnd, hdcWnd);
-        return;
-    }
-    hbmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (!hbmp || !bits)
-    {
-        if (hbmp)
-            DeleteObject(hbmp);
-        DeleteDC(hdcMem);
-        ReleaseDC(hwnd, hdcWnd);
-        return;
-    }
-
-    hold = (HBITMAP)SelectObject(hdcMem, hbmp);
-    for (y = 0; y < sfc->h; ++y)
-    {
-        src = (u32 *)((u8 *)sfc->pixels + y * sfc->pitch);
-        dst = (u32 *)((u8 *)bits + y * sfc->w * 4);
-        memcpy(dst, src, (size_t)sfc->w * 4);
-    }
-
-    SetStretchBltMode(hdcWnd, COLORONCOLOR);
-    StretchBlt(hdcWnd, 0, 0, clientW, clientH, hdcMem, 0, 0, sfc->w, sfc->h, SRCCOPY);
-
-    SelectObject(hdcMem, hold);
-    DeleteObject(hbmp);
-    DeleteDC(hdcMem);
-    ReleaseDC(hwnd, hdcWnd);
-
-    g_lcdOutW = clientW;
-    g_lcdOutH = clientH;
-}
-#endif
 #endif /* !CBE_PLATFORM_NO_WINDOW */
 
 void UpdateLcd()
@@ -498,34 +491,31 @@ void UpdateLcd()
 #elif defined(CBE_PLATFORM_HEADLESS)
     return;
 #else
+    /* PixiJS-like present: nearest sample each output pixel from the 240×400
+     * LCD (css pixelated). Avoids integer-block moiré on m_mount dither. */
     int viewW;
     int viewH;
-    int toolbarH;
     int wantW;
+    int wantTbH;
+    int wantGameH;
     int wantH;
-    int preferScale;
-    int drawScale;
-    int fitX;
-    int fitY;
-    int offX;
-    int offY;
-    int availH;
+    int pitch;
+    int dx;
+    int dy;
     SDL_Surface *sfc;
-    static int s_loggedNativeW = -1;
-    static int s_loggedNativeH = -1;
-    static int s_loggedDrawScale = -1;
-    static int s_loggedSurfaceW = -1;
-    static int s_loggedSurfaceH = -1;
+    static int s_loggedW = -1;
+    static int s_loggedH = -1;
+    static int s_loggedDpi = -1;
 
     if (!window || !Lcd_Cache_Buffer)
         return;
 
-    preferScale = g_lcdScale > 0 ? g_lcdScale : 2;
     viewW = LcdGetViewWidth();
     viewH = LcdGetViewHeight();
-    toolbarH = LcdGetToolbarHeight();
-    wantW = viewW * preferScale;
-    wantH = toolbarH + viewH * preferScale;
+    LcdComputePresentSize(viewW, viewH, &wantW, &wantTbH, &wantGameH);
+    wantH = wantTbH + wantGameH;
+    g_lcdPresentW = wantW;
+    g_lcdPresentTbH = wantTbH;
 
     LcdApplyWindowSize();
     sfc = SDL_GetWindowSurface(window);
@@ -539,30 +529,29 @@ void UpdateLcd()
             return;
     }
 
-    /* CRITICAL: scale to the *actual* surface size. On Win DPI the surface can
-     * be 2x the requested window; painting only preferScale leaves the game in
-     * the top-left corner of a larger black buffer. */
-    availH = sfc->h - toolbarH;
-    if (availH < 1)
-        availH = 1;
-    fitX = sfc->w / viewW;
-    fitY = availH / viewH;
-    drawScale = fitX < fitY ? fitX : fitY;
-    if (drawScale < 1)
-        drawScale = 1;
-    offX = (sfc->w - viewW * drawScale) / 2;
-    offY = toolbarH + (availH - viewH * drawScale) / 2;
+    /* If DPI/WM still resized us, fill the real surface with nearest. */
+    if (sfc->w > 0 && sfc->h > wantTbH)
+    {
+        wantW = sfc->w;
+        wantTbH = (LCD_TOOLBAR_HEIGHT * sfc->h) / (LCD_TOOLBAR_HEIGHT + viewH);
+        if (wantTbH < 16)
+            wantTbH = 16;
+        if (wantTbH > sfc->h / 2)
+            wantTbH = sfc->h / 4;
+        wantGameH = sfc->h - wantTbH;
+        g_lcdPresentW = wantW;
+        g_lcdPresentTbH = wantTbH;
+    }
 
-    g_lcdDstX = offX;
-    g_lcdDstY = offY;
-    g_lcdDstW = viewW * drawScale;
-    g_lcdDstH = viewH * drawScale;
+    g_lcdDstX = 0;
+    g_lcdDstY = wantTbH;
+    g_lcdDstW = wantW;
+    g_lcdDstH = wantGameH;
     g_lcdOutW = sfc->w;
     g_lcdOutH = sfc->h;
 
     if (SDL_MUSTLOCK(sfc) && SDL_LockSurface(sfc) != 0)
         return;
-
     if (sfc->format->BytesPerPixel != 4)
     {
         if (SDL_MUSTLOCK(sfc))
@@ -573,106 +562,95 @@ void UpdateLcd()
     }
 
     SDL_FillRect(sfc, NULL, SDL_MapRGB(sfc->format, 0, 0, 0));
-    LcdDrawToolbar(sfc);
-
+    /* Scaled toolbar strip (logical 32px → wantTbH). */
+    LcdSurfaceFillRect(sfc, 0, 0, wantW, wantTbH, 0x202329);
+    LcdSurfaceFillRect(sfc, 0, wantTbH - 1, wantW, 1, 0x4b515c);
     {
-        int pitch = LcdGetScreenPitchPixels();
-        for (int i = 0; i < g_lcdNativeH; i++)
+        int bx = LCD_TOOLBAR_BUTTON_X * wantTbH / LCD_TOOLBAR_HEIGHT;
+        int by = LCD_TOOLBAR_BUTTON_Y * wantTbH / LCD_TOOLBAR_HEIGHT;
+        int bs = LCD_TOOLBAR_BUTTON_SIZE * wantTbH / LCD_TOOLBAR_HEIGHT;
+        int indicatorX;
+        int indicatorY;
+        int segmentW;
+        if (bs < 8)
+            bs = 8;
+        LcdSurfaceFillRect(sfc, bx, by, bs, bs, 0x343a44);
+        indicatorX = bx + bs + 10 * wantTbH / LCD_TOOLBAR_HEIGHT;
+        indicatorY = by + 9 * wantTbH / LCD_TOOLBAR_HEIGHT;
+        segmentW = 7 * wantTbH / LCD_TOOLBAR_HEIGHT;
+        if (segmentW < 2)
+            segmentW = 2;
+        for (int i = 0; i < 4; ++i)
         {
-            for (int j = 0; j < g_lcdNativeW; j++)
+            u32 color = ((int)LcdGetRotation() == i) ? 0xf2c94c : 0x676e79;
+            LcdSurfaceFillRect(sfc, indicatorX + i * (segmentW + 3), indicatorY,
+                               segmentW, 8 * wantTbH / LCD_TOOLBAR_HEIGHT, color);
+        }
+    }
+
+    pitch = LcdGetScreenPitchPixels();
+    for (dy = 0; dy < wantGameH; ++dy)
+    {
+        int viewY = dy * viewH / wantGameH;
+        u32 *dstRow =
+            (u32 *)((u8 *)sfc->pixels + (dy + wantTbH) * sfc->pitch);
+        if (viewY < 0)
+            viewY = 0;
+        if (viewY >= viewH)
+            viewY = viewH - 1;
+        for (dx = 0; dx < wantW; ++dx)
+        {
+            int viewX = dx * viewW / wantW;
+            int sampleX;
+            int sampleY;
+            u16 color;
+            if (viewX < 0)
+                viewX = 0;
+            if (viewX >= viewW)
+                viewX = viewW - 1;
+            /* Inverse of UpdateLcd rotation used when blitting native→view. */
+            switch (g_lcdRotation)
             {
-                int srcX = j;
-                int srcY = i;
-                u16 color = ((u16 *)Lcd_Cache_Buffer)[j + i * pitch];
-                u32 mapped = SDL_MapRGB(sfc->format, PIXEL565R(color), PIXEL565G(color),
-                                        PIXEL565B(color));
-                int baseX;
-                int baseY;
-
-                switch (g_lcdRotation)
-                {
-                case VM_LCD_ROTATE_90_CW:
-                    srcX = g_lcdNativeH - 1 - i;
-                    srcY = j;
-                    break;
-                case VM_LCD_ROTATE_180:
-                    srcX = g_lcdNativeW - 1 - j;
-                    srcY = g_lcdNativeH - 1 - i;
-                    break;
-                case VM_LCD_ROTATE_90_CCW:
-                    srcX = i;
-                    srcY = g_lcdNativeW - 1 - j;
-                    break;
-                default:
-                    break;
-                }
-
-                if (srcX < 0 || srcY < 0 || srcX >= viewW || srcY >= viewH)
-                    continue;
-
-                baseX = offX + srcX * drawScale;
-                baseY = offY + srcY * drawScale;
-                for (int sy = 0; sy < drawScale; ++sy)
-                {
-                    int py = baseY + sy;
-                    u32 *dstRow;
-                    if (py < 0 || py >= sfc->h)
-                        continue;
-                    dstRow = (u32 *)((u8 *)sfc->pixels + py * sfc->pitch);
-                    for (int sx = 0; sx < drawScale; ++sx)
-                    {
-                        int px = baseX + sx;
-                        if (px >= 0 && px < sfc->w)
-                            dstRow[px] = mapped;
-                    }
-                }
+            case VM_LCD_ROTATE_90_CW:
+                sampleX = viewY;
+                sampleY = g_lcdNativeH - 1 - viewX;
+                break;
+            case VM_LCD_ROTATE_180:
+                sampleX = g_lcdNativeW - 1 - viewX;
+                sampleY = g_lcdNativeH - 1 - viewY;
+                break;
+            case VM_LCD_ROTATE_90_CCW:
+                sampleX = g_lcdNativeW - 1 - viewY;
+                sampleY = viewX;
+                break;
+            default:
+                sampleX = viewX;
+                sampleY = viewY;
+                break;
             }
+            if (sampleX < 0 || sampleY < 0 || sampleX >= g_lcdNativeW ||
+                sampleY >= g_lcdNativeH)
+                continue;
+            color = ((u16 *)Lcd_Cache_Buffer)[sampleX + sampleY * pitch];
+            dstRow[dx] = SDL_MapRGB(sfc->format, PIXEL565R(color), PIXEL565G(color),
+                                    PIXEL565B(color));
         }
     }
 
     if (SDL_MUSTLOCK(sfc))
         SDL_UnlockSurface(sfc);
 
-    if (s_loggedNativeW != g_lcdNativeW || s_loggedNativeH != g_lcdNativeH ||
-        s_loggedDrawScale != drawScale || s_loggedSurfaceW != sfc->w ||
-        s_loggedSurfaceH != sfc->h)
+    if (s_loggedW != wantW || s_loggedH != wantGameH || s_loggedDpi != LcdWinDpi())
     {
-        printf("[info][lcd] game_frame_blit prefer=%d draw=%d native=%dx%d view=%dx%d "
-               "surface=%dx%d dst=(%d,%d %dx%d)\n",
-               preferScale, drawScale, g_lcdNativeW, g_lcdNativeH, viewW, viewH,
-               sfc->w, sfc->h, offX, offY, g_lcdDstW, g_lcdDstH);
-        s_loggedNativeW = g_lcdNativeW;
-        s_loggedNativeH = g_lcdNativeH;
-        s_loggedDrawScale = drawScale;
-        s_loggedSurfaceW = sfc->w;
-        s_loggedSurfaceH = sfc->h;
+        printf("[info][lcd] pixi_nearest_present scale=%d dpi=%d view=%dx%d "
+               "out=%dx%d tb=%d surface=%dx%d\n",
+               g_lcdScale, LcdWinDpi(), viewW, viewH, wantW, wantGameH, wantTbH,
+               sfc->w, sfc->h);
+        s_loggedW = wantW;
+        s_loggedH = wantGameH;
+        s_loggedDpi = LcdWinDpi();
     }
 
-#ifdef _WIN32
-    {
-        SDL_SysWMinfo wm;
-        RECT rc;
-        int clientW = 0;
-        int clientH = 0;
-        SDL_VERSION(&wm.version);
-        if (SDL_GetWindowWMInfo(window, &wm) && wm.subsystem == SDL_SYSWM_WINDOWS &&
-            GetClientRect(wm.info.win.window, &rc))
-        {
-            clientW = (int)(rc.right - rc.left);
-            clientH = (int)(rc.bottom - rc.top);
-        }
-        if (clientW > 0 && clientH > 0 &&
-            (clientW != sfc->w || clientH != sfc->h))
-        {
-            LcdPresentStretchToClient(sfc);
-        }
-        else
-        {
-            SDL_UpdateWindowSurface(window);
-        }
-    }
-#else
     SDL_UpdateWindowSurface(window);
-#endif
 #endif
 }

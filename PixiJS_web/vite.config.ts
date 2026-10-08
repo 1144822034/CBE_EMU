@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { writeHotManifest } from "./scripts/write-hot-manifest.mjs";
+import { writeJniHotManifest } from "./scripts/write-jni-hot-manifest.mjs";
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(rootDir, "..");
@@ -205,6 +206,12 @@ function hotManifestPlugin(): Plugin {
       const dist = path.join(rootDir, "dist");
       const count = await writeHotManifest(dist);
       console.log(`[hot-manifest] ${count} files → dist/hot-manifest.json`);
+      try {
+        const jniCount = await writeJniHotManifest(dist);
+        console.log(`[jni-hot] ${jniCount} files → dist/jni-hot/`);
+      } catch (err) {
+        console.warn("[jni-hot] skip:", err);
+      }
     },
   };
 }

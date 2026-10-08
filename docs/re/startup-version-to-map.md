@@ -71,10 +71,10 @@ Fix:
 
 - generic subtype `1/1/12` server-list fallback stays on subtype-12 `result=1`
   with `serverinfo`, `color`, `servernum`, and `newVer`;
-- for the true first-run no-account case where the request carries empty saved
-  credentials, the mock-service may override that with subtype-12 `result=3`
-  plus `information/username/password`, so the client can persist the issued
-  guest account and reuse it on later `1/12` requests.
+- empty-credential first-run `1/1/12` on the CBE mock-service endpoint is
+  rejected (`result=2`) and no longer auto-issues a guest account. Register
+  through the web account center or `account create`, then log in with saved
+  credentials.
 
 IDA evidence:
 

@@ -123,8 +123,16 @@ export class TitleScreen extends Container {
   onCancelPassword: (() => void) | null = null;
   onConfirmServer: (() => void) | null = null;
   onConfirmZone: (() => void) | null = null;
+  onOpenClassicClient: (() => void) | null = null;
+  onQuitGame: (() => void) | null = null;
 
-  private readonly menuItems = ["开始游戏", "登陆游戏", "江湖赞助", "游戏退出"];
+  private readonly menuItems = [
+    "开始游戏",
+    "登陆游戏",
+    "经典怀旧",
+    "江湖赞助",
+    "游戏退出",
+  ];
 
   constructor() {
     super();
@@ -398,8 +406,10 @@ export class TitleScreen extends Container {
         (this.onStartGame ?? this.onOpenLogin)?.();
       } else if (item === "登陆游戏") {
         this.onOpenLogin?.();
+      } else if (item === "经典怀旧") {
+        this.onOpenClassicClient?.();
       } else if (item === "游戏退出") {
-        this.setStatus("请关闭页面退出");
+        this.onQuitGame?.();
       } else {
         this.setStatus("赞助请使用账号中心");
       }
@@ -720,8 +730,8 @@ export class TitleScreen extends Container {
     for (const s of this.menuSprites) s.destroy();
     this.menuLabels = [];
     this.menuSprites = [];
-    const startY = 224;
-    const rowH = 26;
+    const startY = 212;
+    const rowH = 24;
 
     // UC3 / 点阵：用 title2.gif 烘焙格。系统宋体：DOM 叠字仿描边高亮。
     const useSheet =

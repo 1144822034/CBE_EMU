@@ -38,7 +38,7 @@ export const RING_WT_KIND = 47;
 export const NPC_FESTIVAL_EXCHANGE = 0xf7000001;
 export const NPC_YANMEN_EXCHANGE = 0xf7000002;
 export const NPC_RING_QUEST = 0xf7000003;
-/** 跑环使者：刷新当前环（消耗酷宝，客户端先确认） */
+/** 跑环使者：刷新当前环（优先免费次数，用尽后酷宝；客户端先确认） */
 export const NPC_RING_REFRESH = 0xf7000005;
 /** 宣阳广场天下第一雕像：膜拜 / 接受膜拜（服务端抽黄金宝箱奖池）. */
 export const NPC_TIANXIA_WORSHIP = 0xf7000006;
@@ -89,6 +89,10 @@ export type RingStatus = {
   targetNpc: string;
   desc: string;
   taskActive: boolean;
+  /** 后台配置的每日免费刷新上限 */
+  freeRefreshMax: number;
+  /** 今日已用免费刷新次数 */
+  freeRefreshUsed: number;
 };
 
 export type ActivityOpResult = {
@@ -238,12 +242,22 @@ export function parseRingStatus(packet: WtPacket): RingStatus | null {
     targetNpc: fieldStr(obj, "targetNpc"),
     desc: fieldStr(obj, "desc"),
     taskActive: fieldU32(obj, "taskActive") !== 0,
+    freeRefreshMax: fieldU32(obj, "freeRefreshMax"),
+    freeRefreshUsed: fieldU32(obj, "freeRefreshUsed"),
   };
+}
+
+/** 今日剩余免费刷新次数（状态包字段） */
+export function ringFreeRefreshLeft(st: RingStatus | null | undefined): number {
+  if (!st) return 0;
+  return Math.max(0, (st.freeRefreshMax >>> 0) - (st.freeRefreshUsed >>> 0));
 }
 
 export function activityMsgTip(code: string | undefined, ok: string): string {
   switch (code) {
     case "ok":
+    case "ok_free":
+    case "ok_wcoin":
       return ok;
     case "novital":
       return "活力不足";

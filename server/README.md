@@ -122,13 +122,11 @@ To connect to a remote public server:
 bin/main.exe --mock-service=203.0.113.10:19090
 ```
 
-For no-account title flows such as Jianghu OL `1/1/12` empty-credential login,
-the first visible request is only the server-list preflight. When the request
-does not carry saved credentials yet, the service now issues a guest
-`username/password` pair in the login response so the client can persist it into
-its own `mmorpg_LoginRecord` / `defaultLogin.dat` flow. Later no-account
-requests reuse those saved credentials through the normal packet fields instead
-of a host-side injected account override.
+Jianghu OL title `1/1/12` with empty `username/password` is no longer treated
+as a first-run auto-register. The CBE endpoint rejects that request
+(`result=2`, tip 请先登录游戏) instead of creating a `guestXXXXX` account.
+Players must register through the web account center or `account create`, then
+log in with saved credentials.
 
 Startup pre-login version/update handshake packets (`WT 18/*`) and the short
 login-bridge control ack (`WT 99/1`) still happen before any account exists.

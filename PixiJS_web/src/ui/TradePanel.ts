@@ -22,6 +22,7 @@ import { BitmapLabel, wrapChars, measureUiTextWidth } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
 import type { BagItem } from "../net/protocolExtras";
 import {
+  equipWashNameTag,
   formatCultivationBookName,
   isCultivationBookItem,
   sortBagByName,
@@ -33,7 +34,6 @@ import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import {
   buildEquipDetailLines,
-  equipHasWashedAttr,
   type EquipPaintLine,
 } from "./equipDetail";
 
@@ -998,7 +998,7 @@ export class TradePanel extends Container {
         const it = this.bag[row.index];
         if (it) {
           const en = it.enhance ? `+${it.enhance}` : "";
-          const wash = equipHasWashedAttr(it) ? "[洗]" : "";
+          const wash = equipWashNameTag(it);
           const stackable = it.kind !== "equip" && it.count > 1;
           if (hi && stackable) {
             text = `${it.name}${wash}${en} <${this.pickQtyForItem(it)}/${it.count}>`;
@@ -1492,7 +1492,7 @@ function tradeOfferAsBagItem(it: TradeOfferItem): BagItem {
 
 function formatOfferLine(it: TradeOfferItem): string {
   const en = it.enhance ? `+${it.enhance}` : "";
-  const wash = equipHasWashedAttr(tradeOfferAsBagItem(it)) ? "[洗]" : "";
+  const wash = equipWashNameTag(tradeOfferAsBagItem(it));
   let name = it.name;
   if (isCultivationBookItem(it.itemId) && (it.bookLevel ?? 0) > 0) {
     const base = lookupItemSync(it.itemId)?.name ?? "修炼天书";

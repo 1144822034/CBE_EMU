@@ -124,7 +124,7 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
         "<script src=\"/admin.js?v=7\" defer></script>"
         "</head><body><main class=\"wrap\"><header><div>"
         "<h1>强化配置</h1>"
-        "<p class=\"sub\">配置强化基础缩放、各部位 +4/+8/+12/+16 默认词条，以及洗练属性池。"
+        "<p class=\"sub\">配置强化基础缩放、强化金币消耗、各部位 +4/+8/+12/+16 默认词条，以及洗练属性池。"
         "未洗练装备显示默认档词条；洗练从属性池随机类型并在区间内取值。"
         "保存后立即生效（装备详情需重新打开人物信息/重登后同步客户端显示）。</p></div></header>");
     vm_mock_admin_append_tabs(&page, "enhance");
@@ -189,7 +189,8 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
             "质量分档开启时：首获 seed / 玩家洗练 / 29/7 pool 上限为 "
             "<code>value_max × (品质+1) / 5</code>。"
             "首获概率仅作用于新掉落/商店等首次入包（不重随交易穿脱）。"
-            "0=永不随机，100=必定随机四档（wash_count 仍为 0）。"
+            "0=永不随机，100=必定随机四档（wash_count 仍为 0；"
+            "Pixi 装备名不再标「洗」）。"
             "重铸转移洗练：影响 29/6；关时源装备洗练随强化归零丢弃。"
             "跨品重铸石：影响 29/5|6 不同品质；关时仍限同部位，但不检查/不消耗 855。"
             "玄晶/金币消耗可独立开关，可同时开启。"
@@ -205,6 +206,32 @@ static void vm_mock_admin_render_enhance_page(char *response, size_t responseCap
             transferCrystalOn ? "" : " selected",
             transferMoneyOn ? " selected" : "",
             transferMoneyOn ? "" : " selected");
+    }
+
+    {
+        u32 goldPerStep = vm_net_mock_enhance_gold_per_step();
+        vm_mock_admin_text_appendf(
+            &page,
+            "<section class=\"card\">"
+            "<form method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" "
+            "value=\"enhance-gold-cost-save\">"
+            "<div class=\"toolbar\"><h2 style=\"margin:0\">强化消耗金币</h2>"
+            "<button type=\"submit\">保存</button></div>"
+            "<p class=\"muted\" style=\"margin:0 0 12px\">"
+            "装备强化（29/2 预览、29/3 确认）扣费："
+            "<code>(当前强化等级+1) × 每档金币</code>。"
+            "默认每档 5 金：+0→+1 扣 5 金，+15→+16 扣 80 金。"
+            "填 0 则不扣金币。范围 0–10000。洗练/重铸费用不受此项影响。"
+            "表：<code>server_enhance_wash_settings.enhance_gold_per_step</code>。"
+            "</p>"
+            "<div class=\"grid\">"
+            "<label class=\"field\"><span>每档金币（默认 5）</span>"
+            "<input name=\"enhance_gold_per_step\" type=\"number\" min=\"0\" "
+            "max=\"10000\" value=\"%u\" style=\"max-width:none;width:100%%;"
+            "margin-top:4px\"></label>"
+            "</div></form></section>",
+            goldPerStep);
     }
 
     {
@@ -587,6 +614,31 @@ static void vm_mock_admin_handle_enhance_action(vm_mock_service_socket client,
                  qualityScale ? "开" : "关", firstSeedPercent,
                  transferWash ? "开" : "关", crossStone ? "是" : "否",
                  transferCrystal ? "开" : "关", transferMoney ? "开" : "关");
+        vm_mock_admin_redirect_enhance(client, "milestones", "ok", okMsg);
+        return;
+    }
+
+    if (strcmp(action, "enhance-gold-cost-save") == 0)
+    {
+        u32 goldPerStep = 5;
+        char okMsg[160];
+
+        if (!vm_mock_admin_form_u32(body, "enhance_gold_per_step", 10000u,
+                                    &goldPerStep))
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "强化金币字段无效（0–10000）");
+            return;
+        }
+        if (!vm_net_mock_enhance_gold_per_step_admin_save(goldPerStep))
+        {
+            vm_mock_admin_redirect_enhance(client, "milestones", "error",
+                                           "保存强化金币失败");
+            return;
+        }
+        snprintf(okMsg, sizeof(okMsg),
+                 "强化金币已保存（每档 %u 金；+0→+1=%u 金，+15→+16=%u 金）",
+                 goldPerStep, goldPerStep, goldPerStep * 16u);
         vm_mock_admin_redirect_enhance(client, "milestones", "ok", okMsg);
         return;
     }

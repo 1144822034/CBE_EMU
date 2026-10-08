@@ -3108,6 +3108,149 @@ int vm_DF_GetTResource(int a1)
     return DreamFactoryResourceBuffer;
 }
 
+/*
+ * Outdoor m_mount.gif fingerprint (80×112, tile0 origin RGB565 0xC52F).
+ * Evidence: map ti=0 cells are drawn with tiledef src (16,0)=tile1 ridges while
+ * Pixi compose uses tile0 sand. Track decoded pixel bases and remap that rect.
+ */
+#define VM_MMOUNT_SAND_MAX 16
+static u32 g_mmountSandPixels[VM_MMOUNT_SAND_MAX];
+static int g_mmountSandCount;
+
+static int vm_pixels_look_like_mmount_sand(const u16 *px, int w, int h)
+{
+    int pitch;
+    int uniq = 0;
+    int diff = 0;
+    u16 seen[8];
+    int y, x, i, found;
+    if (!px || w != 80 || h != 112)
+        return 0;
+    if (px[0] != 0xc52fu)
+        return 0;
+    pitch = ((4 - w) & 3) + w;
+    for (y = 0; y < 16; y++)
+    {
+        for (x = 0; x < 16; x++)
+        {
+            u16 a = px[y * pitch + x];
+            u16 b = px[y * pitch + 16 + x];
+            if (a != b)
+                diff++;
+            found = 0;
+            for (i = 0; i < uniq; i++)
+            {
+                if (seen[i] == a)
+                {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && uniq < (int)(sizeof(seen) / sizeof(seen[0])))
+                seen[uniq++] = a;
+        }
+    }
+    return (uniq == 4 && diff >= 150) ? 1 : 0;
+}
+
+static void vm_mmount_sand_register(u32 pixels)
+{
+    int i;
+    if (!pixels)
+        return;
+    for (i = 0; i < g_mmountSandCount; i++)
+    {
+        if (g_mmountSandPixels[i] == pixels)
+            return;
+    }
+    if (g_mmountSandCount >= VM_MMOUNT_SAND_MAX)
+        return;
+    g_mmountSandPixels[g_mmountSandCount++] = pixels;
+}
+
+static void vm_mmount_sand_unregister(u32 pixels)
+{
+    int i, j;
+    if (!pixels)
+        return;
+    for (i = 0; i < g_mmountSandCount; i++)
+    {
+        if (g_mmountSandPixels[i] != pixels)
+            continue;
+        for (j = i + 1; j < g_mmountSandCount; j++)
+            g_mmountSandPixels[j - 1] = g_mmountSandPixels[j];
+        g_mmountSandCount--;
+        return;
+    }
+}
+
+static int vm_mmount_sand_contains(u32 pixels)
+{
+    int i;
+    for (i = 0; i < g_mmountSandCount; i++)
+    {
+        if (g_mmountSandPixels[i] == pixels)
+            return 1;
+    }
+    return 0;
+}
+
+/* Remap guest samples of m_mount tile1 rect onto tile0 sand. */
+static void vm_maybe_remap_mmount_tile1_src(u32 srcPtr, u16 src_w, u16 src_h, int *srcX, int *srcY)
+{
+    if (!srcX || !srcY)
+        return;
+    if (!vm_mmount_sand_contains(srcPtr) || src_w != 80 || src_h != 112)
+        return;
+    if (*srcX >= 16 && *srcX < 32 && *srcY >= 0 && *srcY < 16)
+        *srcX -= 16;
+}
+
+static int vm_image_pitch_bytes(u16 width_px)
+{
+    return (((4 - (int)width_px) & 3) + (int)width_px) * 2;
+}
+
+/* Row blit with chunked host buffer (supports w > 240). */
+static void vm_blit_rgb565_rows(u32 srcPtr, int srcPitch, int srcX, int srcY,
+                                u32 dstPtr, int dstPitch, int dstX, int dstY,
+                                int w, int h, int syncLcdCache, u16 lcdW)
+{
+    u8 tmpBuffer[512];
+    int row;
+    int copyBytes = w * 2;
+    int chunkPx = (int)(sizeof(tmpBuffer) / 2);
+    if (w <= 0 || h <= 0)
+        return;
+    for (row = 0; row < h; row++)
+    {
+        int srcRow = (row + srcY) * srcPitch + srcX * 2;
+        int dstRow = (row + dstY) * dstPitch + dstX * 2;
+        int done = 0;
+        while (done < copyBytes)
+        {
+            int n = copyBytes - done;
+            if (n > (int)sizeof(tmpBuffer))
+                n = (int)sizeof(tmpBuffer);
+            /* Keep 2-byte pixel alignment. */
+            if (n & 1)
+                n--;
+            if (n <= 0)
+                break;
+            if (uc_mem_read(MTK, srcPtr + srcRow + done, tmpBuffer, (u32)n) != UC_ERR_OK)
+            {
+                printf("读取内存错误");
+                assert(0);
+            }
+            uc_mem_write(MTK, dstPtr + dstRow + done, tmpBuffer, (u32)n);
+            if (syncLcdCache && lcdW)
+                memcpy(Lcd_Cache_Buffer + dstRow + done, tmpBuffer, (size_t)n);
+            done += n;
+            (void)chunkPx;
+        }
+    }
+}
+
 int vm_IMG_Destory(u32 a1)
 {
     u32 n3 = 0;
@@ -3123,6 +3266,7 @@ int vm_IMG_Destory(u32 a1)
 
         if (ptr)
         {
+            vm_mmount_sand_unregister(ptr);
             vm_free(ptr);
         }
 
@@ -3180,19 +3324,31 @@ void vM_DrawImageWithClipEx()
     dstPtr = (int)vm_get_var(dstInfo);
     dst_w = vm_get_var_short(dstInfo + 4);
     dst_h = vm_get_var_short(dstInfo + 6);
-    if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
+    /* Only fall back to the screen buffer for the screen struct / null dest.
+     * Do NOT redirect valid offscreen images merely because they are wider
+     * than the LCD (map caches are commonly >240). */
+    if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0)
     {
         dstPtr = VM_screenImage_ADDRESS;
-        dst_w = LCD_WIDTH;
-        dst_h = LCD_HEIGHT;
+        dst_w = (u16)LcdGetNativeWidth();
+        dst_h = (u16)LcdGetNativeHeight();
+    }
+    else if (dst_w > 2048 || dst_h > 2048)
+    {
+        return;
     }
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
-    u8 tmpBuffer[480];
-    // u8 buffer[188];
-    // uc_mem_read(MTK, srcPtr, buffer, 188);
+    (void)origSrcX;
+    (void)origSrcY;
+    (void)origW;
+    (void)origH;
+    (void)origDstX;
+    (void)origDstY;
     // printf("vM_DrawImageWithClipEx(srcPtr:%x,srcX:%d,srcY:%d,clipW:%d,clipH:%d,dstX:%d,dstY:%d)\n", srcPtr, srcX, srcY, w, h, dstX, dstY);
     if (srcPtr == 0 || w <= 0 || h <= 0 || src_w == 0 || src_h == 0)
         return;
+
+    vm_maybe_remap_mmount_tile1_src((u32)srcPtr, src_w, src_h, &srcX, &srcY);
 
     if (srcX < 0)
     {
@@ -3237,23 +3393,12 @@ void vM_DrawImageWithClipEx()
     if (vm_host_skip_loading_overlay_image(dstX, dstY, w, h))
         return;
 
-    int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
-    int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
-    int copyBytes = w * 2;
-    for (int i = 0; i < h; i++)
     {
-        int srcOffset = (i + srcY) * srcImgPitch + srcX * 2;
-        u32 dstScreenOffset = (i + dstY) * dstImgPicth + dstX * 2;
-
-        uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, tmpBuffer, copyBytes);
-        if (r != UC_ERR_OK)
-        {
-            printf("读取内存错误");
-            assert(0);
-        }
-        uc_mem_write(MTK, dstPtr + dstScreenOffset, tmpBuffer, copyBytes);
-        if (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH)
-            memcpy(Lcd_Cache_Buffer + dstScreenOffset, tmpBuffer, copyBytes);
+        int srcImgPitch = vm_image_pitch_bytes(src_w);
+        int dstImgPicth = vm_image_pitch_bytes(dst_w);
+        int syncLcd = (dstPtr == VM_screenImage_ADDRESS && dst_w == (u16)LcdGetNativeWidth());
+        vm_blit_rgb565_rows((u32)srcPtr, srcImgPitch, srcX, srcY, (u32)dstPtr, dstImgPicth, dstX, dstY, w, h,
+                            syncLcd, dst_w);
     }
 }
 u16 blend565(u16 dst, u16 src, u8 a)
@@ -3293,18 +3438,30 @@ void vm_vMDrawImageClipAndAlphaEx()
     dstPtr = (int)vm_get_var(dstInfo);
     dst_w = vm_get_var_short(dstInfo + 4);
     dst_h = vm_get_var_short(dstInfo + 6);
-    if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
+    if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0)
     {
         dstPtr = VM_screenImage_ADDRESS;
-        dst_w = LCD_WIDTH;
-        dst_h = LCD_HEIGHT;
+        dst_w = (u16)LcdGetNativeWidth();
+        dst_h = (u16)LcdGetNativeHeight();
+    }
+    else if (dst_w > 2048 || dst_h > 2048)
+    {
+        return;
     }
     int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
-    u8 tmpBuffer[480];
-    u8 dstBuffer[480];
+    (void)origSrcX;
+    (void)origSrcY;
+    (void)origW;
+    (void)origH;
+    (void)origDstX;
+    (void)origDstY;
+    u8 tmpBuffer[512];
+    u8 dstBuffer[512];
     // printf("vMDrawImageClipAndAlphaEx(sx:%d,sy:%d,w:%d,h:%d,dx:%d,dy:%d)\n", srcX, srcY, w, h, dstX, dstY);
     if (srcPtr == 0 || w <= 0 || h <= 0 || src_w == 0 || src_h == 0)
         return;
+
+    vm_maybe_remap_mmount_tile1_src((u32)srcPtr, src_w, src_h, &srcX, &srcY);
 
     if (srcX < 0)
     {
@@ -3349,28 +3506,32 @@ void vm_vMDrawImageClipAndAlphaEx()
     if (vm_host_skip_loading_overlay_image(dstX, dstY, w, h))
         return;
 
-    int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
-    int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
+    int srcImgPitch = vm_image_pitch_bytes(src_w);
+    int dstImgPicth = vm_image_pitch_bytes(dst_w);
     int copyBytes = w * 2;
     int special_alpha_map = 0;
+
+    if (copyBytes > (int)sizeof(tmpBuffer))
+    {
+        /* Wide alpha blits: fall back to opaque chunked copy (no per-pixel key). */
+        int syncLcd = (dstPtr == VM_screenImage_ADDRESS && dst_w == (u16)LcdGetNativeWidth());
+        vm_blit_rgb565_rows((u32)srcPtr, srcImgPitch, srcX, srcY, (u32)dstPtr, dstImgPicth, dstX, dstY, w, h,
+                            syncLcd, dst_w);
+        return;
+    }
 
     // 下面先写“通用”行为（没有单独 alpha map）：像素值为 0 表示透明
     for (int row = 0; row < h; ++row)
     {
         int srcOffset = (row + srcY) * srcImgPitch + srcX * 2;
         u32 dstScreenOffset = (row + dstY) * dstImgPicth + dstX * 2;
-        // if (dstScreenOffset > (dstImgPicth * 400 + srcImgPitch))
-        // {
-        //     printf("dst screen offset 错误");
-        //     assert(0);
-        // }
         uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, tmpBuffer, copyBytes);
         if (r != UC_ERR_OK)
         {
             printf("读取内存错误");
             assert(0);
         }
-        int dstIsScreen = (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH);
+        int dstIsScreen = (dstPtr == VM_screenImage_ADDRESS && dst_w == (u16)LcdGetNativeWidth());
         u16 *dstBasePtr = dstIsScreen ? ((u16 *)(Lcd_Cache_Buffer + dstScreenOffset)) : (u16 *)dstBuffer;
         if (!dstIsScreen)
             uc_mem_read(MTK, dstPtr + dstScreenOffset, dstBasePtr, copyBytes);
@@ -3385,8 +3546,6 @@ void vm_vMDrawImageClipAndAlphaEx()
         }
         else
         {
-            // todo
-            //  u8 *a_ptr = alpha_map_base + sy * src_pw + sx;
             for (u16 col = 0; col < w; ++col)
             {
                 u8 alphaByte = tmpBuffer[col]; // alpha byte
@@ -3490,12 +3649,100 @@ int vm_gifDecode(int gifBufferPtr, int resultPtr)
         return vm_set_call_result(resultPtr);
     }
 
+    int isMmountSand = vm_pixels_look_like_mmount_sand(p.pixels, (int)p.width, (int)p.height);
     int vmPtr = vm_malloc(mallocSize);
 
     uc_mem_write(MTK, vmPtr, p.pixels, mallocSize);
     free_mem(p.pixels);
+    if (isMmountSand)
+        vm_mmount_sand_register((u32)vmPtr);
     vm_IMG_WriteResult(resultPtr, vmPtr, (u16)p.width, (u16)p.height, 1);
     return vm_set_call_result(resultPtr);
+}
+
+/* Tile src sub-rect across a destination rectangle (FillRectWithImage*). */
+void vm_FillRectWithImageTiled(u32 dstInfo, u32 srcInfo, int srcX, int srcY, int tileW, int tileH,
+                               int dstX, int dstY, int fillW, int fillH)
+{
+    u32 srcPtr, dstPtr;
+    u16 src_w, src_h, dst_w, dst_h;
+    int srcPitch, dstPitch;
+    int y, x;
+    int syncLcd;
+
+    if (!dstInfo || !srcInfo || tileW <= 0 || tileH <= 0 || fillW <= 0 || fillH <= 0)
+        return;
+    srcPtr = vm_get_var(srcInfo);
+    src_w = vm_get_var_short(srcInfo + 4);
+    src_h = vm_get_var_short(srcInfo + 6);
+    dstPtr = vm_get_var(dstInfo);
+    dst_w = vm_get_var_short(dstInfo + 4);
+    dst_h = vm_get_var_short(dstInfo + 6);
+    if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0)
+    {
+        dstPtr = VM_screenImage_ADDRESS;
+        dst_w = (u16)LcdGetNativeWidth();
+        dst_h = (u16)LcdGetNativeHeight();
+    }
+    else if (dst_w > 2048 || dst_h > 2048)
+    {
+        return;
+    }
+    if (!srcPtr || src_w == 0 || src_h == 0)
+        return;
+    if (srcX < 0)
+    {
+        tileW += srcX;
+        srcX = 0;
+    }
+    if (srcY < 0)
+    {
+        tileH += srcY;
+        srcY = 0;
+    }
+    if (srcX >= src_w || srcY >= src_h || tileW <= 0 || tileH <= 0)
+        return;
+    if (srcX + tileW > src_w)
+        tileW = src_w - srcX;
+    if (srcY + tileH > src_h)
+        tileH = src_h - srcY;
+    vm_maybe_remap_mmount_tile1_src(srcPtr, src_w, src_h, &srcX, &srcY);
+
+    if (dstX < 0)
+    {
+        fillW += dstX;
+        dstX = 0;
+    }
+    if (dstY < 0)
+    {
+        fillH += dstY;
+        dstY = 0;
+    }
+    if (dstX >= dst_w || dstY >= dst_h || fillW <= 0 || fillH <= 0)
+        return;
+    if (dstX + fillW > dst_w)
+        fillW = dst_w - dstX;
+    if (dstY + fillH > dst_h)
+        fillH = dst_h - dstY;
+
+    srcPitch = vm_image_pitch_bytes(src_w);
+    dstPitch = vm_image_pitch_bytes(dst_w);
+    syncLcd = (dstPtr == VM_screenImage_ADDRESS && dst_w == (u16)LcdGetNativeWidth());
+
+    for (y = 0; y < fillH; y += tileH)
+    {
+        int th = tileH;
+        if (y + th > fillH)
+            th = fillH - y;
+        for (x = 0; x < fillW; x += tileW)
+        {
+            int tw = tileW;
+            if (x + tw > fillW)
+                tw = fillW - x;
+            vm_blit_rgb565_rows(srcPtr, srcPitch, srcX, srcY, dstPtr, dstPitch, dstX + x, dstY + y, tw, th,
+                                syncLcd, dst_w);
+        }
+    }
 }
 
 static u32 vm_png_crc32(const u8 *data, u32 len)
@@ -3719,6 +3966,12 @@ static void vm_readStringUCS2ByRegLimited(uc_arm_reg reg, u16 *dst, size_t dstBy
         dst[pos++] = tmp;
     }
     dst[pos] = 0;
+}
+
+static void vm_write_ucs2_host_le_to_guest(u32 dst, const u16 *hostLe, u32 charsIncludingNull)
+{
+    for (u32 i = 0; i < charsIncludingNull; ++i)
+        vm_set_var_short(dst + i * 2u, hostLe[i]);
 }
 
 void vm_initManagerTable()

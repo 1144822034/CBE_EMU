@@ -49,10 +49,12 @@ typedef struct
     u8 crossQualityStoneRequired; /* 29/5|6 cross-quality needs 跨品重铸石 */
     u8 transferCrystalEnabled; /* 29/6 consume (level-1) 玄晶 */
     u8 transferMoneyEnabled;   /* 29/6 consume legacy 48金65银 */
+    /* 29/2|3 enhance attempt: gold = (currentLevel+1) * this. 0=free. */
+    u32 enhanceGoldPerStep;
 } vm_net_mock_enhance_wash_settings;
 
 static vm_net_mock_enhance_wash_settings g_vm_net_mock_enhance_wash_settings = {
-    1, 20, 1, 1, 1, 0};
+    1, 20, 1, 1, 1, 0, 5};
 static bool g_vm_net_mock_enhance_wash_settings_loaded = false;
 
 /* Built-in defaults matching legacy static slot tables. */
@@ -412,6 +414,7 @@ static bool vm_net_mock_enhance_wash_settings_row(void *contextValue,
     u32 crossStone = 1;
     u32 transferCrystal = 1;
     u32 transferMoney = 0;
+    u32 goldPerStep = 5;
 
     (void)columnCount;
     if (cfg == NULL || values == NULL || lengths == NULL || values[0] == NULL)
@@ -443,6 +446,11 @@ static bool vm_net_mock_enhance_wash_settings_row(void *contextValue,
         if (!vm_mock_mysql_parse_u32(values[5], lengths[5], &transferMoney))
             return false;
     }
+    if (columnCount >= 7 && values[6] != NULL)
+    {
+        if (!vm_mock_mysql_parse_u32(values[6], lengths[6], &goldPerStep))
+            return false;
+    }
     cfg->qualityScaleEnabled = scale ? 1u : 0u;
     if (percent > 100u)
         percent = 100u;
@@ -451,6 +459,9 @@ static bool vm_net_mock_enhance_wash_settings_row(void *contextValue,
     cfg->crossQualityStoneRequired = crossStone ? 1u : 0u;
     cfg->transferCrystalEnabled = transferCrystal ? 1u : 0u;
     cfg->transferMoneyEnabled = transferMoney ? 1u : 0u;
+    if (goldPerStep > 10000u)
+        goldPerStep = 10000u;
+    cfg->enhanceGoldPerStep = goldPerStep;
     return true;
 }
 
@@ -494,6 +505,7 @@ static bool vm_net_mock_enhance_wash_settings_ensure_table(void)
             "cross_quality_stone_required TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "transfer_crystal_enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "transfer_money_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "enhance_gold_per_step INT UNSIGNED NOT NULL DEFAULT 5,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
             "ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(id)"
@@ -529,6 +541,12 @@ static bool vm_net_mock_enhance_wash_settings_ensure_table(void)
             "transfer_money_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0 "
             "AFTER transfer_crystal_enabled"))
         return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_column(
+            "enhance_gold_per_step",
+            "ALTER TABLE server_enhance_wash_settings ADD COLUMN "
+            "enhance_gold_per_step INT UNSIGNED NOT NULL DEFAULT 5 "
+            "AFTER transfer_money_enabled"))
+        return false;
     if (!vm_mysql_exec(
             "INSERT IGNORE INTO server_enhance_wash_settings "
             "(id,quality_scale_enabled,first_seed_percent,transfer_wash_enabled,"
@@ -550,6 +568,7 @@ static void vm_net_mock_enhance_wash_settings_set_defaults(
     cfg->crossQualityStoneRequired = 1;
     cfg->transferCrystalEnabled = 1;
     cfg->transferMoneyEnabled = 0;
+    cfg->enhanceGoldPerStep = 5;
 }
 
 static void vm_net_mock_enhance_wash_settings_load(bool force)
@@ -566,7 +585,7 @@ static void vm_net_mock_enhance_wash_settings_load(bool force)
     (void)vm_mysql_query(
         "SELECT quality_scale_enabled,first_seed_percent,transfer_wash_enabled,"
         "cross_quality_stone_required,transfer_crystal_enabled,"
-        "transfer_money_enabled "
+        "transfer_money_enabled,enhance_gold_per_step "
         "FROM server_enhance_wash_settings WHERE id=1 LIMIT 1",
         vm_net_mock_enhance_wash_settings_row,
         &g_vm_net_mock_enhance_wash_settings);
@@ -607,6 +626,33 @@ static u8 vm_net_mock_enhance_transfer_money_enabled(void)
 {
     vm_net_mock_enhance_wash_settings_load(false);
     return g_vm_net_mock_enhance_wash_settings.transferMoneyEnabled;
+}
+
+static u32 vm_net_mock_enhance_gold_per_step(void)
+{
+    vm_net_mock_enhance_wash_settings_load(false);
+    return g_vm_net_mock_enhance_wash_settings.enhanceGoldPerStep;
+}
+
+static bool vm_net_mock_enhance_gold_per_step_admin_save(u32 goldPerStep)
+{
+    char query[192];
+
+    if (goldPerStep > 10000u)
+        return false;
+    if (!vm_net_mock_enhance_wash_settings_ensure_table())
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_enhance_wash_settings "
+             "(id,enhance_gold_per_step) VALUES (1,%u) "
+             "ON DUPLICATE KEY UPDATE "
+             "enhance_gold_per_step=VALUES(enhance_gold_per_step)",
+             goldPerStep);
+    if (!vm_mysql_exec(query))
+        return false;
+    g_vm_net_mock_enhance_wash_settings_loaded = false;
+    vm_net_mock_enhance_wash_settings_load(true);
+    return true;
 }
 
 static bool vm_net_mock_enhance_wash_settings_admin_save(
@@ -736,7 +782,8 @@ static bool vm_net_mock_enhance_config_db_load(void)
     g_vm_net_mock_enhance_attr_pool_db_valid = true;
     printf("[info][mock-admin] enhance_config_db_load milestones=%u pool=%u "
            "quality_scale=%u first_seed=%u%% transfer_wash=%u "
-           "cross_quality_stone=%u transfer_crystal=%u transfer_money=%u\n",
+           "cross_quality_stone=%u transfer_crystal=%u transfer_money=%u "
+           "enhance_gold_per_step=%u\n",
            g_vm_net_mock_enhance_milestone_count,
            g_vm_net_mock_enhance_attr_pool_count,
            (u32)g_vm_net_mock_enhance_wash_settings.qualityScaleEnabled,
@@ -744,7 +791,8 @@ static bool vm_net_mock_enhance_config_db_load(void)
            (u32)g_vm_net_mock_enhance_wash_settings.transferWashEnabled,
            (u32)g_vm_net_mock_enhance_wash_settings.crossQualityStoneRequired,
            (u32)g_vm_net_mock_enhance_wash_settings.transferCrystalEnabled,
-           (u32)g_vm_net_mock_enhance_wash_settings.transferMoneyEnabled);
+           (u32)g_vm_net_mock_enhance_wash_settings.transferMoneyEnabled,
+           g_vm_net_mock_enhance_wash_settings.enhanceGoldPerStep);
     return true;
 }
 

@@ -2333,31 +2333,18 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         vm_net_mock_finish_wt_object(out, objectStart, pos);
         objectCount += 1;
         /*
-         * Map-stone / Pixi often lands via deferred 30/1 then immediately sends
-         * portal-shaped post-enter while the arrival is still in the completed
-         * reuse window.  Empty-only repeat left that client with no NPCs when
-         * poll never owned a durable catalog (or emptied it).  Rearm when this
-         * client has no seeded ledger, or when map-stone direct-enter still
-         * owns the shell (same-scene revisit keeps a stale ledger).
+         * Skip 27/12 only (nested EnterScene ate CBE's 27/11).  Pixi never
+         * sends the later type27 25/5+27/11+27/4, so empty-11-keep-pending
+         * starved NPCs until the 90-tick poll hold (~9s).  This post-enter
+         * packet is the wait_post_enter owner — deliver nonempty 27/11 here.
          */
-        if (skipNestedPortalCatalog)
-        {
-            if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
-                return 0;
-            printf("[info][network] mock_scene_npc_post_enter_repeat_defer "
-                   "scene=%s action=empty-11-keep-pending "
-                   "evidence=type27-owns-portal-27/11\n",
-                   target.scene);
-        }
-        else
-        {
-            if (needCatalogRearm || g_vm_net_mock_teleport_stone_direct_enter_pending)
-                vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
-            if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
-                                                               target.scene,
-                                                               "post-enter-repeat"))
-                return 0;
-        }
+        if (needCatalogRearm || g_vm_net_mock_teleport_stone_direct_enter_pending ||
+            skipNestedPortalCatalog)
+            vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
+        if (!vm_net_mock_append_scene_npcs11_once_or_empty(
+                out, outCap, &pos, target.scene,
+                skipNestedPortalCatalog ? "post-enter-portal" : "post-enter-repeat"))
+            return 0;
         objectCount += 1;
         if (!vm_net_mock_append_books42_object(out, outCap, &pos))
             return 0;
@@ -2397,8 +2384,7 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
      * The non-repeat post-enter contract is the other local-shell completion
      * path.  It has no preceding 30/1 helper to arm the catalog, and may land
      * on the same scene name as the old shell.  Make its 27/11 payload a fresh
-     * one-shot catalog before task prompts are rebuilt.  The recent-completed
-     * branch above remains untouched and continues to return an empty 27/11.
+     * one-shot catalog before task prompts are rebuilt.
      */
     vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
 
@@ -7679,15 +7665,18 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
          * the one-shot 27/11 itself.
          */
         if (holdForFollowup &&
-            g_vm_net_mock_scene_moveinfo_npc_wait_wt6 &&
+            (g_vm_net_mock_scene_moveinfo_npc_wait_wt6 ||
+             g_vm_net_mock_scene_moveinfo_npc_wait_post_enter) &&
             !observer->mapStoneLoadingClearPending &&
             g_vm_net_mock_last_completed_scene_change_target_valid &&
             (g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick) >= 15u)
         {
             holdForFollowup = false;
-            printf("[info][network] mock_scene_npc_wait_wt6_poll_fallback scene=%s age_ticks=%u evidence=JianghuOL.CBE:0x01037998\n",
+            printf("[info][network] mock_scene_npc_poll_followup_fallback scene=%s age_ticks=%u wait_wt6=%u wait_post_enter=%u evidence=JianghuOL.CBE:0x01037998\n",
                    scene,
-                   g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+                   g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick,
+                   g_vm_net_mock_scene_moveinfo_npc_wait_wt6 ? 1u : 0u,
+                   g_vm_net_mock_scene_moveinfo_npc_wait_post_enter ? 1u : 0u);
         }
 
         if (holdForFollowup || holdForDreamBarClear || holdForShopReturnWarmNpc)

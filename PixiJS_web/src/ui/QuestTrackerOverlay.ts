@@ -11,6 +11,12 @@ import type { TaskListRow } from "../net/protocolExtras";
 import type { RingStatus } from "../net/protocolActivities";
 import { NPC_RING_QUEST } from "../net/protocolActivities";
 import { lookupNpcSceneFromDb } from "../resources/npcScenes";
+import { lookupItemSync } from "../resources/itemCatalog";
+import {
+  lookupItemDropScene,
+  lookupMonsterScene,
+  monsterNameForEnemyId,
+} from "../resources/monsterLevels";
 import { replaceGraphics } from "../render/gpuResume";
 import {
   isQuestTrackerCollapsed,
@@ -75,6 +81,71 @@ export function formatTaskProgress(t: TaskListRow): string {
   if (t.reqCount1) parts.push(`${t.progress1}/${t.reqCount1}`);
   if (t.reqCount2) parts.push(`${t.progress2}/${t.reqCount2}`);
   return parts.length ? parts.join(" ") : "进行中";
+}
+
+function npcSceneLabel(
+  npcName: string,
+  opts?: { npcSceneByName?: ReadonlyMap<string, string> },
+): string {
+  if (!npcName) return "";
+  const sceneKey =
+    opts?.npcSceneByName?.get(npcName) || lookupNpcSceneFromDb(npcName) || "";
+  return sceneKey ? sceneDisplayName(sceneKey) : "未知";
+}
+
+function labelScene(sceneKey: string): string {
+  const key = (sceneKey || "").trim();
+  return key ? sceneDisplayName(key) : "未知";
+}
+
+/** First incomplete collect/kill slot; null → talk/submit NPC. */
+function pickIncompleteReq(
+  t: TaskListRow,
+): { type: number; id: number } | null {
+  const slots = [
+    {
+      type: t.reqType1 >>> 0,
+      id: t.reqId1 >>> 0,
+      progress: t.progress1 >>> 0,
+      count: t.reqCount1 >>> 0,
+    },
+    {
+      type: t.reqType2 >>> 0,
+      id: t.reqId2 >>> 0,
+      progress: t.progress2 >>> 0,
+      count: t.reqCount2 >>> 0,
+    },
+  ];
+  for (const s of slots) {
+    if ((s.type !== 1 && s.type !== 2) || !s.id) continue;
+    if (s.count && s.progress >= s.count) continue;
+    return { type: s.type, id: s.id };
+  }
+  return null;
+}
+
+function resolveAcceptedGoal(
+  t: TaskListRow,
+  opts?: { npcSceneByName?: ReadonlyMap<string, string> },
+): { receiver: string; sceneLabel: string } {
+  const submitNpc = (t.receiver || "").replace(/\0+$/g, "").trim();
+  const submit = {
+    receiver: submitNpc,
+    sceneLabel: npcSceneLabel(submitNpc, opts),
+  };
+  if ((t.state >>> 0) === 2) return submit;
+  const req = pickIncompleteReq(t);
+  if (!req) return submit;
+  if (req.type === 1) {
+    return {
+      receiver: lookupItemSync(req.id)?.name || `物品${req.id}`,
+      sceneLabel: labelScene(lookupItemDropScene(req.id) || ""),
+    };
+  }
+  return {
+    receiver: monsterNameForEnemyId(req.id) || `怪物${req.id}`,
+    sceneLabel: labelScene(lookupMonsterScene(req.id) || ""),
+  };
 }
 
 /** Compact right-side progress for the map tracker. */
@@ -190,22 +261,12 @@ export function buildQuestTrackerRows(
   if (ringRow) out.push(ringRow);
   for (const t of accepted) {
     if (out.length >= MAX_TASKS) break;
-    const receiver = (t.receiver || "").replace(/\0+$/g, "").trim();
-    const sceneKey = receiver
-      ? opts?.npcSceneByName?.get(receiver) ||
-        lookupNpcSceneFromDb(receiver) ||
-        ""
-      : "";
-    const sceneLabel = sceneKey
-      ? sceneDisplayName(sceneKey)
-      : receiver
-        ? "未知"
-        : "";
+    const goal = resolveAcceptedGoal(t, opts);
     out.push({
       taskId: t.taskId >>> 0,
       name: (t.name || `任务${t.taskId}`).replace(/\0+$/g, "").trim(),
-      receiver,
-      sceneLabel,
+      receiver: goal.receiver,
+      sceneLabel: goal.sceneLabel,
       progressLabel: formatTaskProgress(t),
     });
   }

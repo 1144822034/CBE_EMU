@@ -652,10 +652,22 @@ static u32 vm_net_mock_equipment_enhance_success_rate(
 
 static u32 vm_net_mock_equipment_enhance_money_cost(u8 level)
 {
-    /* Product: 5 金 per step to next level (level is current before attempt).
-     * +0→+1: 5金, +1→+2: 10金, …  role->money is copper (1金=10000铜). */
-    u32 gold = ((u32)level + 1u) * 5u;
-    return gold * (u32)VM_NET_MOCK_MONEY_COPPER_PER_GOLD;
+    /* Admin: enhance_gold_per_step (default 5). Product formula:
+     * gold = (currentLevel+1) * step; copper = gold * 10000. 0 step = free. */
+    u32 step = vm_net_mock_enhance_gold_per_step();
+    u32 next = (u32)level + 1u;
+    u32 gold;
+    u32 copperUnit = (u32)VM_NET_MOCK_MONEY_COPPER_PER_GOLD;
+
+    if (step == 0u)
+        return 0u;
+    if (next > 0xffffffffu / step)
+        gold = 0xffffffffu / copperUnit;
+    else
+        gold = next * step;
+    if (copperUnit != 0u && gold > 0xffffffffu / copperUnit)
+        return 0xffffffffu;
+    return gold * copperUnit;
 }
 
 static bool vm_net_mock_equipment_enhance_fill_rate_tables(
@@ -7703,6 +7715,9 @@ static u32 vm_net_mock_build_crystal_extract_response(const u8 *request,
 /* GBK: 请更新客户端 */
 static const char g_vm_net_mock_login_update_required_gbk[] =
     "\xc7\xeb\xb8\xfc\xd0\xc2\xbf\xcd\xbb\xa7\xb6\xcb";
+/* GBK: 请先登录游戏 */
+static const char g_vm_net_mock_login_need_account_gbk[] =
+    "\xc7\xeb\xcf\xc8\xb5\xc7\xc2\xbc\xd3\xce\xcf\xb7";
 
 static bool vm_net_mock_parse_request_code_version(const u8 *request,
                                                    u32 requestLen,
