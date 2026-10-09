@@ -45,6 +45,8 @@ export class TouchControls {
           this.onOk?.();
         },
         this.captured,
+        // Ignore square-corner taps outside the visible OK circle.
+        { circularHit: true },
       );
     }
 
@@ -161,10 +163,12 @@ function wireSoft(
   btn: HTMLButtonElement,
   fn: () => void,
   captured: Map<HTMLButtonElement, number>,
+  opts?: { circularHit?: boolean },
 ): void {
   btn.addEventListener("pointerdown", (ev) => {
     ev.preventDefault();
     if (btn.disabled) return;
+    if (opts?.circularHit && !pointerInCircle(btn, ev)) return;
     try {
       btn.setPointerCapture(ev.pointerId);
       captured.set(btn, ev.pointerId);
@@ -180,4 +184,13 @@ function wireSoft(
   btn.addEventListener("pointercancel", clearCap);
   btn.addEventListener("lostpointercapture", clearCap);
   btn.addEventListener("contextmenu", (e) => e.preventDefault());
+}
+
+function pointerInCircle(btn: HTMLElement, ev: PointerEvent): boolean {
+  const r = btn.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return true;
+  const dx = ev.clientX - (r.left + r.width / 2);
+  const dy = ev.clientY - (r.top + r.height / 2);
+  const rad = Math.min(r.width, r.height) * 0.5;
+  return dx * dx + dy * dy <= rad * rad;
 }

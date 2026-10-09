@@ -110,16 +110,28 @@ const postjectArgs = [
   "--sentinel-fuse",
   "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
 ];
+// Node 24+ V8 turboshaft can OOM ("Fatal process out of memory: Zone") while
+// compiling postject's WASM; Liftoff avoids that path.
+const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
+const postjectNodeArgs =
+  Number.isFinite(nodeMajor) && nodeMajor >= 24
+    ? ["--liftoff-only", postjectCli, ...postjectArgs]
+    : [postjectCli, ...postjectArgs];
 if (postjectCli) {
-  execFileSync(process.execPath, [postjectCli, ...postjectArgs], {
+  execFileSync(process.execPath, postjectNodeArgs, {
     stdio: "inherit",
     cwd: root,
   });
 } else {
+  const npxEnv =
+    Number.isFinite(nodeMajor) && nodeMajor >= 24
+      ? { ...process.env, NODE_OPTIONS: [process.env.NODE_OPTIONS, "--liftoff-only"].filter(Boolean).join(" ") }
+      : process.env;
   execFileSync("npx", ["--yes", "postject", ...postjectArgs], {
     stdio: "inherit",
     cwd: root,
     shell: true,
+    env: npxEnv,
   });
 }
 

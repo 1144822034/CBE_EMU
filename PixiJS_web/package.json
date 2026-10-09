@@ -58,6 +58,15 @@
       "electron/**/*",
       "package.json"
     ],
+    "asarUnpack": [
+      "dist/JHOnlineData/**"
+    ],
+    "extraResources": [
+      {
+        "from": "build/cbe-runtime",
+        "to": "cbe"
+      }
+    ],
     "extraMetadata": {
       "main": "electron/main.cjs",
       "dependencies": {}

@@ -547,7 +547,8 @@ async function main(): Promise<void> {
     const cellFromW = clamp(vw * (REF_CELL / 360), CELL_MIN, CELL_MAX);
     const centerOn = !!touchBar.querySelector("#sk-center.is-on");
     const chromeH = (cell: number, withStatus: boolean) => {
-      const gap = cell * (8 / REF_CELL);
+      // Keep in sync with #touch-bar --pad-gap-base (12px @ 56px cell).
+      const gap = cell * (12 / REF_CELL);
       const padY = 14 * (cell / REF_CELL);
       const statusH = withStatus ? 14 * (cell / REF_CELL) : 0;
       const centerH = centerOn ? 32 * (cell / REF_CELL) + 6 : 0;

@@ -86,6 +86,8 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(HangupKeepAlivePlugin.class);
         registerPlugin(ApkUpdaterPlugin.class);
         registerPlugin(EntertainmentHttpPlugin.class);
+        registerPlugin(CbeEmuPlugin.class);
+        registerPlugin(AppExitPlugin.class);
         super.onCreate(savedInstanceState);
         hideSystemBars();
         acquireCpuWakeLock();
@@ -298,6 +300,7 @@ public class MainActivity extends BridgeActivity {
             File codeCache = getCodeCacheDir();
             if (codeCache != null) deleteRecursive(codeCache);
             DistHotUpdate.wipe(this);
+            CbeJniHotUpdate.wipe(this);
         } catch (Throwable t) {
             Log.w(TAG, "webview wipe failed", t);
         }

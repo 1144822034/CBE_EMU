@@ -29,6 +29,21 @@
 
         </activity>
 
+        <activity
+            android:name="com.xiaoxiao.mt6252simulator.MainActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.Black.NoTitleBar"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustPan" />
+
+        <service
+            android:name="com.xiaoxiao.mt6252simulator.GameKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="true" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

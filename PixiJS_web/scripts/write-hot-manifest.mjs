@@ -21,6 +21,7 @@ function walkFiles(dir, root, out) {
       continue;
     }
     if (!st.isFile() || rel === MANIFEST_NAME) continue;
+    if (rel === "jni-hot" || rel.startsWith("jni-hot/")) continue;
     out.push(rel);
   }
 }

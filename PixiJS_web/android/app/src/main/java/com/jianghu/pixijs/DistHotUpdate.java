@@ -51,8 +51,12 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class DistHotUpdate {
     private static final String TAG = "DistHotUpdate";
-    /** Published Vite dist root (index.html, assets/, JHOnlineData/, hot-manifest.json). */
-    public static final String BASE_URL = "http://106.54.59.92:8081";
+    /**
+     * Published Vite dist root (index.html, assets/, JHOnlineData/, hot-manifest.json).
+     * Host IP must match {@code FIXED_LIVE_GATEWAY} in {@code src/net/Transport.ts}
+     * (ws://HOST:… → http://HOST:8081).
+     */
+    public static final String BASE_URL = "http://43.248.102.136:8081";
     private static final String MANIFEST_NAME = "hot-manifest.json";
     private static final String ASSET_MANIFEST = "public/" + MANIFEST_NAME;
     private static final int MANIFEST_MAX_BYTES = 12 * 1024 * 1024;
@@ -104,7 +108,13 @@ public final class DistHotUpdate {
             String status = null;
             try {
                 int downloaded = sync(activity);
-                if (downloaded > 0) status = "资源已更新";
+                int jniDownloaded = 0;
+                try {
+                    jniDownloaded = CbeJniHotUpdate.sync(activity);
+                } catch (Throwable t) {
+                    Log.w(TAG, "jni hot update failed; keep local", t);
+                }
+                if (downloaded > 0 || jniDownloaded > 0) status = "资源已更新";
             } catch (Throwable t) {
                 Log.w(TAG, "hot update failed; using local assets", t);
                 status = statusForFailure(t);

@@ -22,7 +22,73 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = join(root, "..");
 const outDir = join(root, "electron-release");
+
+function isJianghuOlCbe(name) {
+  const lower = String(name).toLowerCase();
+  return lower === "江湖ol.cbe" || name === "江湖OL.cbe";
+}
+
+function firstExisting(paths) {
+  for (const p of paths) {
+    if (p && existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** Slim CBE sidecar for extraResources (exe + dlls + 江湖OL.cbe + font). */
+function stageCbeRuntime() {
+  const dest = join(root, "build", "cbe-runtime");
+  mkdirSync(join(dest, "CBE"), { recursive: true });
+  const bin = join(repoRoot, "bin");
+  const files = [
+    ["main.exe", join(bin, "main.exe")],
+    ["SDL2.dll", join(bin, "SDL2.dll")],
+    ["unicorn.dll", join(bin, "unicorn.dll")],
+    ["libwinpthread-1.dll", join(bin, "libwinpthread-1.dll")],
+    [
+      "font_gb.uc3",
+      firstExisting([
+        join(bin, "font_gb.uc3"),
+        join(repoRoot, "JianghuOL", "app", "src", "main", "assets", "font_gb.uc3"),
+      ]),
+    ],
+    [
+      "servers.conf",
+      firstExisting([
+        join(bin, "servers.conf"),
+        join(repoRoot, "JianghuOL", "app", "src", "main", "assets", "servers.conf"),
+      ]),
+    ],
+    [
+      "client_code_version.txt",
+      firstExisting([
+        join(root, "client_code_version.txt"),
+        join(root, "public", "client_code_version.txt"),
+      ]),
+    ],
+  ];
+  for (const [name, src] of files) {
+    if (!src || !existsSync(src)) {
+      console.warn(`[build:exe] skip cbe sidecar ${name}`);
+      continue;
+    }
+    copyFileSync(src, join(dest, name));
+  }
+  const cbeSrcDir = join(bin, "CBE");
+  if (existsSync(cbeSrcDir)) {
+    for (const name of readdirSync(cbeSrcDir)) {
+      if (!isJianghuOlCbe(name)) continue;
+      copyFileSync(join(cbeSrcDir, name), join(dest, "CBE", name));
+    }
+  }
+  if (!existsSync(join(dest, "main.exe"))) {
+    console.warn("[build:exe] bin/main.exe missing; PC 经典怀旧 will not start from this pack");
+  } else {
+    console.log(`[build:exe] staged CBE runtime → ${dest}`);
+  }
+}
 
 if (!process.env.ELECTRON_MIRROR) {
   process.env.ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/";
@@ -34,6 +100,7 @@ if (!process.env.ELECTRON_BUILDER_BINARIES_MIRROR) {
 
 const staging = mkdtempSync(join(tmpdir(), "pixi-electron-"));
 console.log(`[build:exe] staging → ${staging}`);
+stageCbeRuntime();
 
 const cli = join(root, "node_modules", "electron-builder", "cli.js");
 const r = spawnSync(

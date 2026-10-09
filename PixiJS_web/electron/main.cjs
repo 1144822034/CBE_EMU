@@ -9,11 +9,12 @@
  * CommonJS on purpose: Electron packaged main + project `"type":"module"`
  * is more reliable as .cjs (avoids ESM parse surprises in asar).
  */
-const { app, BrowserWindow, net, protocol, shell, session } = require("electron");
+const { app, BrowserWindow, ipcMain, net, protocol, shell, session } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const distHot = require("./dist-hot.cjs");
+const cbeLaunch = require("./cbe-launch.cjs");
 
 const DIST_DIR = path.join(__dirname, "..", "dist");
 /** Dev `npm run electron` keeps using the local dist tree as-is. */
@@ -227,6 +228,7 @@ function createWindow() {
     backgroundColor: "#05070a",
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -283,6 +285,16 @@ app.whenReady().then(() => {
     } catch (e) {
       console.error("[electron] pix protocol", request.url, e);
       return new Response("Bad Request", { status: 400 });
+    }
+  });
+
+  ipcMain.handle("cbe:launch", async () => {
+    try {
+      return await cbeLaunch.launchCbe();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn("[electron] cbe launch failed", e);
+      return { ok: false, error: msg };
     }
   });
 

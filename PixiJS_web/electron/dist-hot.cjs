@@ -11,7 +11,8 @@ const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
 
-const BASE_URL = "http://106.54.59.92:8081";
+/** Host IP must match FIXED_LIVE_GATEWAY in src/net/Transport.ts (ws://HOST → http://HOST:8081). */
+const BASE_URL = "http://43.248.102.136:8081";
 const MANIFEST_NAME = "hot-manifest.json";
 const MANIFEST_MAX_BYTES = 12 * 1024 * 1024;
 const CONNECT_TIMEOUT_MS = 4000;

@@ -10,4 +10,8 @@
     <string name="hangup_keepalive_notification_text">正在挂机，点此返回游戏</string>
     <string name="online_keepalive_notification_title">江湖OL 游戏中</string>
     <string name="online_keepalive_notification_text">保持在线，点此返回游戏</string>
+    <string name="keepalive_channel_name">经典怀旧连接</string>
+    <string name="keepalive_channel_desc">锁屏或切到后台时保持 CBE 与服务器通信</string>
+    <string name="keepalive_notification_title">江湖OL 经典怀旧运行中</string>
+    <string name="keepalive_notification_text">已保持网络连接，点按返回经典怀旧</string>
 </resources>
