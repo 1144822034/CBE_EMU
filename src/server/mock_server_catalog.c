@@ -7196,6 +7196,7 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
  * 921 → 1/7/38 读描述；1/7/40 使用，result=0 附 bookinfo+等级经验结算字段。
  * 业务：level>49 记录；同一角色同时只能有一本未注满的记录本；注满可交易；
  * 使用者等级须在 [bookLevel-10, bookLevel-1]（如 50 级书→40-49 级）。
+ * 满级（70）无下一级 cost：容量回退为最后一档 69→70 经验。
  */
 static u32 vm_net_mock_build_cultivation_book_response(const u8 *request,
                                                        u32 requestLen,
@@ -7291,7 +7292,15 @@ static u32 vm_net_mock_build_cultivation_book_response(const u8 *request,
         }
         else
         {
+            /* capacity = 当前升级所需经验；满级无 L→L+1 表项时用末档. */
             capacity = vm_net_mock_role_level_up_cost(role->level);
+            if ((capacity == 0 || capacity == 0xffffffffu) &&
+                role->level >= (u32)VM_NET_MOCK_ROLE_MAX_LEVEL &&
+                (u32)VM_NET_MOCK_ROLE_MAX_LEVEL > 1u)
+            {
+                capacity = vm_net_mock_role_level_up_cost(
+                    (u32)VM_NET_MOCK_ROLE_MAX_LEVEL - 1u);
+            }
             if (capacity == 0 || capacity == 0xffffffffu)
             {
                 failUtf8 = "当前等级无法记录天书。";

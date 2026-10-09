@@ -16256,23 +16256,64 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
             u32 worldBossId = vm_mock_world_boss_configured_monster_id();
             /*
              * Manual world-boss fight must paint Boss catalog actor (not the
-             * nearby outdoor trash wire used for map collide). Force subtype-10
-             * enemy template from remapped monsterId.
+             * nearby outdoor trash wire used for map collide).
+             *
+             * Solo: force subtype-10 + catalog template.
+             * Team (≥2 same-scene ready seats): MUST keep subtype-5 scene
+             * start — team_begin_battle / peer 1/4/5 only arm on that path.
+             * Forcing subtype-10 here starved teammates (leader alone in
+             * Battle.cbm). Appearance still uses boss combat id + Pixi
+             * resolvePveEnemyActor catalog remap.
              */
             if (worldBossId != 0 && requestedEnemyId == worldBossId)
             {
-                useSceneMonsterStart = false;
-                battleStartSubtype = 10;
-                seedSceneMonsterMoveinfo = false;
-                prefillEnemyTemplate = true;
+                bool teamWillJoin = false;
+
                 moveinfoEnemyId = worldBossId;
                 sceneMonsterTargetSource = "world-boss-catalog";
-                printf("[info][network] mock_challenge_world_boss_form "
-                       "scene=%s wire=%u boss=%u pos=(%u,%u) "
-                       "action=subtype10-catalog-actor "
-                       "evidence=manual-world-boss-appearance\n",
-                       remapScene ? remapScene : "-", wireEnemyId, worldBossId,
-                       posx, posy);
+                if (activeSession != NULL &&
+                    activeSession->sceneVisibleReady &&
+                    !activeSession->sceneVisiblePending &&
+                    vm_net_mock_scene_name_is_safe(
+                        activeSession->sceneVisibleScene))
+                {
+                    vm_mock_service_team *wbTeam =
+                        vm_mock_service_team_find_for_client(
+                            activeSession->clientId);
+                    if (vm_mock_service_team_is_leader(
+                            wbTeam, activeSession->clientId))
+                    {
+                        u32 memberIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+                        u8 n = vm_mock_service_team_collect_battle_members(
+                            wbTeam, activeSession->sceneVisibleScene,
+                            memberIds);
+
+                        teamWillJoin = (n >= 2);
+                    }
+                }
+                if (!teamWillJoin)
+                {
+                    useSceneMonsterStart = false;
+                    battleStartSubtype = 10;
+                    seedSceneMonsterMoveinfo = false;
+                    prefillEnemyTemplate = true;
+                    printf("[info][network] mock_challenge_world_boss_form "
+                           "scene=%s wire=%u boss=%u pos=(%u,%u) "
+                           "action=subtype10-catalog-actor "
+                           "evidence=manual-world-boss-appearance\n",
+                           remapScene ? remapScene : "-", wireEnemyId,
+                           worldBossId, posx, posy);
+                }
+                else
+                {
+                    seedSceneMonsterMoveinfo = true;
+                    printf("[info][network] mock_challenge_world_boss_form "
+                           "scene=%s wire=%u boss=%u pos=(%u,%u) "
+                           "action=keep-scene-start-for-team "
+                           "evidence=team-begin-requires-subtype5\n",
+                           remapScene ? remapScene : "-", wireEnemyId,
+                           worldBossId, posx, posy);
+                }
             }
         }
         if (!forceNonSceneStart && wireEnemyId != 0 && requestedEnemyId == 0)
@@ -16371,10 +16412,18 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     battleEnemyCount = vm_net_mock_battle_roll_enemy_count(useSceneMonsterStart);
     if (playerOnRight && !useSceneMonsterStart)
         enemyWireId = requestedEnemyId;
-    prefillEnemyTemplate = !playerOnRight &&
-                           vm_net_mock_env_u8("CBE_BATTLE_PREFILL_ENEMY_TEMPLATE", 0) != 0 &&
-                           requestedEnemyId != 0 &&
-                           (enemyWireId != requestedEnemyId || requestedEnemyId != id);
+    /*
+     * Do not clobber an earlier world-boss solo prefill (subtype-10 catalog).
+     * Generic left-side env prefill only applies when not already armed.
+     */
+    if (!prefillEnemyTemplate)
+    {
+        prefillEnemyTemplate =
+            !playerOnRight &&
+            vm_net_mock_env_u8("CBE_BATTLE_PREFILL_ENEMY_TEMPLATE", 0) != 0 &&
+            requestedEnemyId != 0 &&
+            (enemyWireId != requestedEnemyId || requestedEnemyId != id);
+    }
     if (prefillEnemyTemplate)
         enemyWireId = requestedEnemyId;
     /* A late 5/5 here is parsed by the scene group handler before battle
