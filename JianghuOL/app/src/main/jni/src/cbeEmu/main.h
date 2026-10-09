@@ -80,9 +80,6 @@ int cbeAndroidConsumeNeedLoginTip(void);
 const char *cbeAndroidGetPreferredServerName(void);
 #endif
 
-int vm_host_skip_loading_overlay_paint(int x, int y, int w, int h);
-int vm_host_skip_loading_overlay_image(int x, int y, int w, int h);
-
 u32 last_gpt1_interrupt_time;
 u32 IRQ_MASK_SET_L_Data;
 u32 IRQ_MASK_SET_H_Data;

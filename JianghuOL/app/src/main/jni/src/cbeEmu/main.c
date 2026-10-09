@@ -58,13 +58,9 @@ static void __attribute__((constructor(101))) vm_win32_dpi_constructor(void)
 
 #include "main.h"
 #include "lcd.h"
-#if !defined(CBE_SERVER_ONLY) && \
-    (!defined(CBE_PLATFORM_NO_WINDOW) || defined(CBE_PLATFORM_ANDROID))
-#include "gameLauncher.h"
-#define CBE_HAS_GAME_LAUNCHER 1
-#endif
 #if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
     !defined(CBE_PLATFORM_NO_WINDOW)
+#include "gameLauncher.h"
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL_syswm.h"
 #endif
 static bool vm_file_try_download_named_resource(const char *normalizedPath);
@@ -324,15 +320,11 @@ static u32 g_screenRootExitPendingTick = 0;
 static volatile u32 g_hostQuitRequested = 0;
 static volatile u32 g_hostQuitCleanupStarted = 0;
 static volatile u32 g_vmThreadFinished = 0;
-#ifdef CBE_PLATFORM_ANDROID
-static volatile int g_cbeVmReadyForRun = 0;
-#endif
-#if defined(CBE_HAS_GAME_LAUNCHER)
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
 bool g_gameLauncherActive = false;
 GameLauncherState g_gameLauncherState;
-#if !defined(CBE_PLATFORM_ANDROID)
 static u8 g_forceLaunchCbe = 0;
-#endif
 
 static int vm_client_server_list_apply(const char *selectedName,
                                       const char *listPath,
@@ -340,7 +332,6 @@ static int vm_client_server_list_apply(const char *selectedName,
                                       int *appliedOut);
 static bool vm_cbe_load_and_start(const char *cbe_path_utf8);
 static void vm_lcd_apply_native_size_for_cbe_path(const char *cbePath);
-static void vm_game_launcher_start_selected(const char *path);
 
 static void vm_game_launcher_update(void)
 {
@@ -352,9 +343,7 @@ static void vm_game_launcher_update(void)
     if (surface)
         vm_game_launcher_render(&g_gameLauncherState, surface);
     g_gameLauncherState.frame_dirty = false;
-#ifndef CBE_PLATFORM_NO_WINDOW
     SDL_UpdateWindowSurface(window);
-#endif
 }
 #endif
 static u32 g_appMainEntry = 0;
@@ -429,9 +418,9 @@ static int vm_host_coolmall_try_truncate_mall_send(const u8 *req, u32 len);
 static int vm_host_should_block_hangup_uplink(void);
 static void vm_host_arm_hangup_intent_from_softkey(void);
 static int vm_host_bind_hangup_confirm_mmbattle_r9(void);
+#endif
 static void vm_hangup_candidate_fault_arm(u32 codeBase);
 static void vm_hangup_candidate_fault_disarm(void);
-#endif
 /* Used from net_fire before definition (client + server TU). */
 static void vm_host_coolmall_dismiss_after_shop_net(u32 respLen);
 
@@ -538,6 +527,22 @@ static u8 g_vm_pump_loading_now = 0;
 static void vm_autotest_note(const char *fmt, ...);
 void vm_FillRectWithImageTiled(u32 dstInfo, u32 srcInfo, int srcX, int srcY, int tileW, int tileH,
                                int dstX, int dstY, int fillW, int fillH);
+int vm_host_skip_loading_overlay_image(int x, int y, int w, int h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    return 0;
+}
+int vm_host_skip_loading_overlay_paint(int x, int y, int w, int h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    return 0;
+}
 static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
 static u8 g_lastStartupUpdateState = 0xff;
@@ -3837,6 +3842,10 @@ static void vm_host_pump_map_stone_dismiss_bar(void)
 
 static void vm_host_arm_shop_return_skip_bar(const char *reason)
 {
+    /*
+     * Same ResetDownloadState pair as map-stone.  mmShop pop rebuilds mmGame
+     * and DoLoading would paint the gold bar; resources are already local.
+     */
     g_vm_map_stone_dismiss_bar = 1;
     g_vm_map_stone_dismiss_bar_tick = 0;
     vm_host_clear_download_busy(reason ? reason : "mmshop-exit-skip-bar");
@@ -5952,11 +5961,9 @@ static void vm_lcd_update_with_input_overlay(void)
     uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, bytes);
 #ifndef CBE_PLATFORM_NO_WINDOW
     vm_input_draw_overlay();
-#endif
 #if defined(CBE_CLIENT_ONLY)
-    /* Android is NO_WINDOW but still presents Lcd_Cache_Buffer via UpdateLcd.
-     * Keep host hangup-skill rows on the same blit path as desktop. */
     vm_host_hangup_skill_menu_draw();
+#endif
 #endif
     UpdateLcd();
 }
@@ -6465,24 +6472,6 @@ const char *cbeAndroidGetPreferredServerName(void)
     return g_mockPreferredTitleServerUtf8;
 }
 #endif
-
-int vm_host_skip_loading_overlay_paint(int x, int y, int w, int h)
-{
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)h;
-    return 0;
-}
-
-int vm_host_skip_loading_overlay_image(int x, int y, int w, int h)
-{
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)h;
-    return 0;
-}
 
 static void vm_host_pump_wpay_cancel_keys(void)
 {
@@ -7206,17 +7195,6 @@ void keyEvent(int type, int key)
 {
     // printf("keyboard(%x,type=%d)\n", key, type);
     int skey = -1;
-#if defined(CBE_HAS_GAME_LAUNCHER)
-    if (g_gameLauncherActive && type == MR_KEY_PRESS)
-    {
-        const char *path = vm_game_launcher_handle_key(&g_gameLauncherState, key,
-                                                       true);
-        vm_game_launcher_update();
-        if (path != NULL)
-            vm_game_launcher_start_selected(path);
-        return;
-    }
-#endif
     // F5导出Cpu信息
     if (key == 0x4000003e && type == 4)
     {
@@ -7311,6 +7289,7 @@ void keyEvent(int type, int key)
          */
         if (isPress && key == 0x63)
             vm_host_arm_hangup_intent_from_softkey();
+        /* Map hangup start is host-acked; keep leftover 确定 off guest 28A4. */
         if (vm_client_hangup_suppress_guest_confirm() &&
             (skey == 14 || skey == 12 || skey == 13))
         {
@@ -7487,31 +7466,29 @@ void mouseEvent(int type, int x, int y)
     else if (y > maxY)
         y = maxY;
 
-#if defined(CBE_HAS_GAME_LAUNCHER)
-    if (g_gameLauncherActive)
-    {
-        int button = 0;
-        const char *path = NULL;
-        if (type == MR_MOUSE_DOWN)
-            button = 1;
-        else if (type == MR_MOUSE_UP)
-            button = 0;
-        else
-            return;
-        path = vm_game_launcher_handle_mouse(&g_gameLauncherState, x, y, button);
-        vm_game_launcher_update();
-        if (path != NULL)
-            vm_game_launcher_start_selected(path);
-        return;
-    }
-#endif
-
 #if defined(CBE_CLIENT_ONLY)
     if (vm_host_hangup_skill_menu_touch(type, x, y))
         return;
     if (type == MR_MOUSE_DOWN)
     {
         int inHangup = vm_host_touch_in_map_hangup_rect(x, y);
+        int maxYSoft;
+        int softRowH;
+        int onSoftRow;
+
+        softRowH = (maxY + 1) / 10;
+        if (softRowH < 28)
+            softRowH = 28;
+        maxYSoft = (maxY + 1) - softRowH;
+        onSoftRow = (y >= maxYSoft) ? 1 : 0;
+        if (vm_client_hangup_suppress_guest_confirm() && onSoftRow)
+        {
+            printf("[info][input] hangup_softrow_swallowed x=%d y=%d "
+                   "evidence=host-hangup-start-no-bind-r9\n",
+                   x, y);
+            g_vmHangupTouchSwallowed = 1;
+            return;
+        }
 
         g_lastMouseHangupArmed =
             (inHangup && !vm_host_bag_or_equip_ui_open()) ? 1 : 0;
@@ -10626,7 +10603,8 @@ static void vm_cbe_init_config(int argc, char *args[])
         {
             snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", args[i] + 6);
         }
-#if defined(CBE_HAS_GAME_LAUNCHER) && !defined(CBE_PLATFORM_ANDROID)
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
         if (strcmp(args[i], "--no-launcher") == 0)
             g_forceLaunchCbe = 1;
         if (strcmp(args[i], "--launcher") == 0)
@@ -10636,7 +10614,8 @@ static void vm_cbe_init_config(int argc, char *args[])
     printf("[info][cbe] selected=%s\n", g_cbeLoadPathUtf8);
 }
 
-#if defined(CBE_HAS_GAME_LAUNCHER)
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
 static bool vm_cbe_load_and_start(const char *cbe_path_utf8);
 
 static void vm_game_launcher_start_selected(const char *path)
@@ -10666,28 +10645,19 @@ static void vm_game_launcher_start_selected(const char *path)
              g_gameLauncherState.entries[g_gameLauncherState.selected_index]
                  .display_name);
     vm_game_launcher_render(&g_gameLauncherState, SDL_GetWindowSurface(window));
-#ifndef CBE_PLATFORM_NO_WINDOW
     SDL_UpdateWindowSurface(window);
-#endif
-    /*
-     * Keep g_gameLauncherActive until load finishes so Android cbeRun does not
-     * start an empty Unicorn image while ROM/BSS are still being mapped.
-     */
+    g_gameLauncherActive = false;
     if (!vm_cbe_load_and_start(path))
     {
         printf("[error][launcher] failed to load %s\n", path);
-#ifndef CBE_PLATFORM_ANDROID
         LcdReleasePresentBackend();
-#endif
         g_gameLauncherActive = true;
         g_gameLauncherState.loading = false;
         g_gameLauncherState.selected_server_name[0] = 0;
         g_gameLauncherState.frame_dirty = true;
-        vm_game_launcher_update();
     }
     else
     {
-        g_gameLauncherActive = false;
         vm_game_launcher_record_launch(path);
     }
 }
@@ -10700,13 +10670,13 @@ void loop()
     bool isLoop = true;
     while (isLoop)
     {
-#if defined(CBE_HAS_GAME_LAUNCHER)
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
         if (g_gameLauncherActive && !g_autotestEnabled)
         {
             vm_game_launcher_update();
             if (g_hostQuitRequested)
                 break;
-#ifndef CBE_PLATFORM_ANDROID
             while (SDL_PollEvent(&ev))
             {
                 if (ev.type == SDL_QUIT)
@@ -10746,7 +10716,6 @@ void loop()
                 }
                 }
             }
-#endif
             SDL_Delay(16);
             continue;
         }
@@ -10990,7 +10959,8 @@ static void vm_init_fixed_base_manager_directory(void)
            VM_NATIVE_MANAGER_DIRECTORY_ADDRESS);
 }
 
-#if defined(CBE_HAS_GAME_LAUNCHER)
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
 static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
 {
     uc_err err;
@@ -10998,9 +10968,6 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
 
     if (cbe_path_utf8 == NULL || cbe_path_utf8[0] == 0)
         return false;
-#ifdef CBE_PLATFORM_ANDROID
-    g_cbeVmReadyForRun = 0;
-#endif
     snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", cbe_path_utf8);
 
     /* Switch host present size before VM screen struct / first frames. */
@@ -11056,14 +11023,9 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
         InitVmMalloc();
         if (!g_mockServiceOnly)
         {
-#ifdef CBE_PLATFORM_ANDROID
-            /* LCD/font already initialized for Game Center. */
-            vm_lcd_update_with_input_overlay();
-#else
             InitLcd();
             vm_lcd_update_with_input_overlay();
             InitFontEngine();
-#endif
         }
 
         err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0,
@@ -11113,14 +11075,9 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
         uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
 
         changeTmp1 = Program_ROM_Address;
-#ifdef CBE_PLATFORM_ANDROID
-        g_cbeVmReadyForRun = 1;
-        printf("[info][cbe] VM loaded (android deferred start)\n");
-#else
         g_vmThreadFinished = 0;
         pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
         printf("[info][cbe] VM started\n");
-#endif
     }
     return true;
 }
@@ -13175,25 +13132,12 @@ int main(int argc, char *args[])
 
     InitVmEvent();
 
-#if defined(CBE_HAS_GAME_LAUNCHER)
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
     if (!g_mockServiceOnly)
     {
         InitLcd();
         InitFontEngine();
-#if defined(CBE_PLATFORM_ANDROID)
-        if (!g_autotestEnabled &&
-            vm_game_launcher_init(&g_gameLauncherState, LcdGetViewWidth(),
-                                  LcdGetViewHeight()))
-        {
-            g_gameLauncherActive = true;
-            g_cbeInitialized = 1;
-            vm_game_launcher_update();
-            printf("[info][launcher] game center initialized, %d games "
-                   "found (android)\n",
-                   g_gameLauncherState.count);
-            return 0;
-        }
-#else
         if (!g_forceLaunchCbe && !g_autotestEnabled)
         {
             if (vm_game_launcher_init(&g_gameLauncherState, LcdGetWindowWidth(),
@@ -13205,9 +13149,7 @@ int main(int argc, char *args[])
                        g_gameLauncherState.count);
             }
         }
-#endif
     }
-#if !defined(CBE_PLATFORM_ANDROID)
     if (g_gameLauncherActive)
     {
         printf("[info][launcher] showing launcher, deferring CBE load\n");
@@ -13216,7 +13158,6 @@ int main(int argc, char *args[])
         vm_net_mock_service_notify_disconnect("host-loop-exit");
         goto _launcher_done;
     }
-#endif
 #endif
 
 #ifdef CBE_HOST_UTF8_PATHS
@@ -13276,14 +13217,9 @@ int main(int argc, char *args[])
     InitVmMalloc();
     if (!g_mockServiceOnly)
     {
-#ifdef CBE_PLATFORM_ANDROID
-        /* Game Center path already called InitLcd/InitFontEngine. */
-        vm_lcd_update_with_input_overlay();
-#else
         InitLcd();
         vm_lcd_update_with_input_overlay();
         InitFontEngine();
-#endif
     }
 
     if (err)
@@ -13357,7 +13293,6 @@ int main(int argc, char *args[])
 
 #ifdef CBE_PLATFORM_ANDROID
         g_cbeInitialized = 1;
-        g_cbeVmReadyForRun = 1;
         printf("Unicorn Engine Initialized\n");
 #else
         // 启动emu线程
@@ -13382,16 +13317,6 @@ int cbeRun(void)
 {
     if (!g_cbeInitialized || g_cbeRunning)
         return -1;
-#if defined(CBE_HAS_GAME_LAUNCHER)
-    while (!g_hostQuitRequested)
-    {
-        if (g_cbeVmReadyForRun && MTK != NULL)
-            break;
-        SDL_Delay(50);
-    }
-#endif
-    if (MTK == NULL || !g_cbeVmReadyForRun || g_hostQuitRequested)
-        return -1;
     g_cbeRunning = 1;
     RunArmProgram((void *)(uintptr_t)Program_ROM_Address);
     g_cbeRunning = 0;
@@ -13411,10 +13336,6 @@ void cbeShutdown(void)
 {
     if (!g_cbeInitialized)
         return;
-#if defined(CBE_HAS_GAME_LAUNCHER)
-    g_gameLauncherActive = false;
-#endif
-    g_cbeVmReadyForRun = 0;
     vm_request_host_quit("android-destroy");
     EnqueueVMEvent(VM_EVENT_EXIT, 0, 0);
     g_vmInputSdlTextInputWanted = 0;

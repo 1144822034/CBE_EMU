@@ -65,7 +65,6 @@ void vm_host_aeabi_div0_divisor_one(uc_engine *uc, uint64_t address)
     }
 }
 
-void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 void handleLcdReg(uint64_t address, u32 data, uint64_t value);
 void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value);
