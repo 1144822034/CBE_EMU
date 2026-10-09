@@ -3,7 +3,6 @@ import {
   CBE,
   LCD_HEIGHT,
   LCD_WIDTH,
-  SOFTKEY_H,
   WORLD_BOTTOM_H,
   makePixelText,
   paintCbePanel,
@@ -15,6 +14,7 @@ import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import { replaceGraphics } from "../render/gpuResume";
+import { clearCbeFlowerCorners } from "./cbePanelCorners";
 
 /** Visible option rows per page (hangup skill list / long NPC menus). */
 const OPTION_PAGE_SIZE = 7;
@@ -31,12 +31,17 @@ export type MedicineBuyQtyState = {
 
 export class DialogPanel extends Container {
   private dim = new Graphics();
+  /** Outer frame + flower corners only — kept across cursor/qty/page ops. */
   private box = new Graphics();
+  /** Select bars / nested fills that change without resizing the panel. */
+  private content = new Graphics();
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
   private cursorIndex = 0;
   private dialog: NpcDialog | null = null;
   private medicineBuy: MedicineBuyQtyState | null = null;
+  /** Last painted chrome bounds; skip paintCbePanel when unchanged. */
+  private chromeKey = "";
   onPick: ((action: number, value: number, label: string) => void) | null = null;
   onClose: (() => void) | null = null;
   /** Fired when medicine qty confirm is cancelled (return to shop list). */
@@ -62,6 +67,7 @@ export class DialogPanel extends Container {
     this.dim.on("pointertap", (e) => e.stopPropagation());
     this.addChild(this.dim);
     this.addChild(this.box);
+    this.addChild(this.content);
   }
 
   private paintDim(): void {
@@ -74,6 +80,25 @@ export class DialogPanel extends Container {
     this.dim.eventMode = "static";
     this.dim.on("pointertap", (e) => e.stopPropagation());
     this.box = replaceGraphics(this.box);
+    this.content = replaceGraphics(this.content);
+    this.chromeKey = "";
+  }
+
+  /**
+   * Paint outer jade frame only when size/mode key changes.
+   * Cursor / qty / page flips reuse the existing chrome + flower sprites.
+   */
+  private ensureChrome(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    mode: string,
+  ): void {
+    const key = `${mode}:${x},${y},${w},${h}`;
+    if (key === this.chromeKey) return;
+    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.chromeKey = key;
   }
 
   hide(): void {
@@ -82,6 +107,10 @@ export class DialogPanel extends Container {
     this.dialog = null;
     this.medicineBuy = null;
     this.eventMode = "none";
+    this.chromeKey = "";
+    clearCbeFlowerCorners(this);
+    this.box.clear();
+    this.content.clear();
     for (const t of this.labels) t.destroy();
     this.labels = [];
   }
@@ -94,10 +123,13 @@ export class DialogPanel extends Container {
   show(dialog: NpcDialog, opts?: { keepCursor?: boolean }): void {
     const prevIndex = this.cursorIndex;
     const prevValue = this.dialog?.options[prevIndex]?.value;
+    const wasOpen = this.visible;
     this.medicineBuy = null;
     this.dialog = dialog;
     this.eventMode = "static";
-    this.remountChrome();
+    // Already-open refresh (NPC shop after 购买该装备, warehouse list, …):
+    // do not remount Graphics — ensureChrome keeps the frame when size matches.
+    if (!wasOpen) this.remountChrome();
     this.visible = true;
     if (opts?.keepCursor) {
       const n = dialog.options.length;
@@ -117,6 +149,7 @@ export class DialogPanel extends Container {
 
   /** Open qty confirm for NPC medicine purchase. */
   showMedicineBuyQty(state: MedicineBuyQtyState): void {
+    const wasOpen = this.visible;
     this.dialog = null;
     this.medicineBuy = {
       ...state,
@@ -125,7 +158,7 @@ export class DialogPanel extends Container {
     };
     this.cursorIndex = 0;
     this.eventMode = "static";
-    this.remountChrome();
+    if (!wasOpen) this.remountChrome();
     this.visible = true;
     void this.redraw();
   }
@@ -188,7 +221,6 @@ export class DialogPanel extends Container {
     this.onClose?.();
   }
 
-
   /** webglcontextrestored: remount paintCbePanel Graphics; redraw if open. */
   nudgeAfterGpuResume(): void {
     this.remountChrome();
@@ -199,7 +231,8 @@ export class DialogPanel extends Container {
     for (const t of this.labels) t.destroy();
     this.labels = [];
     clearPointerHits(this.rowHits);
-    this.box.clear();
+    // Keep outer chrome; only wipe highlight / nested fills.
+    this.content.clear();
 
     if (this.medicineBuy) {
       this.redrawMedicineBuy();
@@ -222,7 +255,7 @@ export class DialogPanel extends Container {
     const h = tall
       ? Math.max(280, hangRowTop - y - gap)
       : hNormal;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.ensureChrome(x, y, w, h, tall ? "dialog-tall" : "dialog");
 
     const opts = this.dialog.options;
     const pages = Math.max(1, Math.ceil(Math.max(opts.length, 1) / pageSize));
@@ -256,7 +289,9 @@ export class DialogPanel extends Container {
       const ry = optTop + i * rowH;
       const ty = ry + Math.floor((rowH - 14) / 2);
       if (hi) {
-        this.box.rect(x + 6, ry, w - 12, rowH - 1).fill({ color: CBE.select });
+        this.content
+          .rect(x + 6, ry, w - 12, rowH - 1)
+          .fill({ color: CBE.select });
       }
       const ink = hi ? CBE.ink : (opt.nameColor ?? CBE.inkMint);
       const t = makePixelText(opt.label || `选项${abs + 1}`, UC3_CELL, ink);
@@ -285,7 +320,7 @@ export class DialogPanel extends Container {
       attachPageNavButtons({
         host: this,
         hits: this.rowHits,
-        box: this.box,
+        box: this.content,
         x: x + 8,
         y: panelSafeFootY(y + h - 22, 14),
         w: w - 16,
@@ -317,7 +352,7 @@ export class DialogPanel extends Container {
     const hangRowTop = LCD_HEIGHT - WORLD_BOTTOM_H;
     const y = hangRowTop - h - 8;
     const w = LCD_WIDTH - 24;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
+    this.ensureChrome(x, y, w, h, "medicine");
 
     this.addDialogTitle("购买药品", y + 8);
 
@@ -337,11 +372,11 @@ export class DialogPanel extends Container {
     });
 
     const btnY = y + h - 40;
-    this.box
+    this.content
       .roundRect(x + 24, btnY, w - 48, 24, 3)
       .fill({ color: CBE.bgDeep })
       .stroke({ width: 1, color: CBE.borderBright });
-    this.box.rect(x + 24, btnY, w - 48, 24).fill({ color: CBE.select });
+    this.content.rect(x + 24, btnY, w - 48, 24).fill({ color: CBE.select });
     const buyLab = makePixelText("确认购买", UC3_CELL, CBE.inkMint);
     buyLab.position.set(x + w / 2 - 28, btnY + 5);
     this.addChild(buyLab);

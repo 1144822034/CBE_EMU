@@ -129,10 +129,15 @@ export class MenuScreen extends Container {
   private subParent: MenuNode | null = null;
   private scrollHost = new Container();
   private dim = new Graphics();
+  /** Fallback CBE panel frame when scroll GIF missing — kept across cursor moves. */
   private box = new Graphics();
+  /** White body + select highlight (redrawn each op; chrome stays). */
+  private content = new Graphics();
   private labels: BitmapLabel[] = [];
   private rowHits: Container[] = [];
   private redrawGen = 0;
+  /** Last scroll/fallback chrome size; skip parchment rebuild when unchanged. */
+  private chromeKey = "";
 
   onSelect: ((leaf: MenuLeaf, label: string) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -144,6 +149,7 @@ export class MenuScreen extends Container {
     this.scrollHost.eventMode = "none";
     this.addChild(this.scrollHost);
     this.addChild(this.box);
+    this.addChild(this.content);
     blockPanelPointerPassthrough(this);
     preloadMenuScrollTexture(() => this.redraw());
     preloadPageNavTextures(() => this.redraw());
@@ -158,6 +164,8 @@ export class MenuScreen extends Container {
     this.dim = replaceGraphics(this.dim);
     this.paintDim();
     this.box = replaceGraphics(this.box);
+    this.content = replaceGraphics(this.content);
+    this.chromeKey = "";
   }
 
   reset(): void {
@@ -292,8 +300,40 @@ export class MenuScreen extends Container {
     for (const t of this.labels) t.destroy();
     this.labels = [];
     clearPointerHits(this.rowHits);
-    this.scrollHost.removeChildren();
+    this.scrollHost.removeChildren().forEach((c) =>
+      c.destroy({ children: true }),
+    );
     this.box.clear();
+    this.content.clear();
+    this.chromeKey = "";
+  }
+
+  private ensureScrollChrome(
+    x: number,
+    y: number,
+    scrollW: number,
+  ): void {
+    const key = `${x},${y},${scrollW},${SCROLL_H}`;
+    if (key === this.chromeKey && this.scrollHost.children.length > 0) {
+      return;
+    }
+    this.scrollHost.removeChildren().forEach((c) =>
+      c.destroy({ children: true }),
+    );
+    this.box.clear();
+    preloadMenuScrollTexture();
+    if (
+      !addMenuScrollBackgroundSliced(
+        this.scrollHost,
+        x,
+        y,
+        SCROLL_H,
+        SCROLL_WHITE_W,
+      )
+    ) {
+      paintCbePanel(this, this.box, x, y, scrollW, SCROLL_H, CBE.bgPanel);
+    }
+    this.chromeKey = key;
   }
 
   private redraw(): void {
@@ -301,10 +341,7 @@ export class MenuScreen extends Container {
     for (const t of this.labels) t.destroy();
     this.labels = [];
     clearPointerHits(this.rowHits);
-    this.box.clear();
-    this.scrollHost.removeChildren().forEach((c) =>
-      c.destroy({ children: true }),
-    );
+    this.content.clear();
 
     const layout = menu2CenteredLayout(LCD_WIDTH, SCROLL_WHITE_W);
     const x = layout.scrollX;
@@ -318,31 +355,24 @@ export class MenuScreen extends Container {
     const pages = Math.max(1, Math.ceil(total / PAGE_ROWS));
     const page = Math.floor(start / PAGE_ROWS) + 1;
 
-    preloadMenuScrollTexture();
-    if (
-      !addMenuScrollBackgroundSliced(
-        this.scrollHost,
-        x,
-        y,
-        SCROLL_H,
-        SCROLL_WHITE_W,
-      )
-    ) {
-      paintCbePanel(this, this.box, x, y, SCROLL_W, SCROLL_H, CBE.bgPanel);
-    }
+    this.ensureScrollChrome(x, y, SCROLL_W);
 
     const bodyTop = y + MENU2_CAP_H;
     const bodyH = SCROLL_H - MENU2_CAP_H * 2;
     // Center the visible row block in the parchment body (not top-aligned).
     const usedH = visible.length * ROW_H;
     const top = bodyTop + Math.max(0, Math.floor((bodyH - usedH) / 2));
-    this.box.rect(content.x, bodyTop, content.w, bodyH).fill({ color: MENU2_WHITE_FILL });
+    this.content
+      .rect(content.x, bodyTop, content.w, bodyH)
+      .fill({ color: MENU2_WHITE_FILL });
     visible.forEach((label, vi) => {
       const abs = start + vi;
       const iy = top + vi * ROW_H;
       const hi = abs === this.menuCursor;
       if (hi) {
-        this.box.rect(content.x, iy, content.w, ROW_H - 1).fill({ color: SEL_FILL });
+        this.content
+          .rect(content.x, iy, content.w, ROW_H - 1)
+          .fill({ color: SEL_FILL });
       }
       void this.addCenteredLabel(
         label,
@@ -367,7 +397,7 @@ export class MenuScreen extends Container {
       attachPageNavButtons({
         host: this,
         hits: this.rowHits,
-        box: this.box,
+        box: this.content,
         x: navX,
         y: y + SCROLL_H + 6,
         w: navW,

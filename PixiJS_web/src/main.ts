@@ -4126,7 +4126,14 @@ async function main(): Promise<void> {
         augmentEquipSellDialog(d, session.bagItems),
         session.bagItems,
       );
-      dialog.show(shown);
+      // Shop / warehouse refresh while panel is open: keep cursor + skip chrome
+      // remount (NPC 购买该装备 returns the same tall list shell).
+      const keepCursor =
+        dialog.visible &&
+        !dialog.isMedicineBuyQty() &&
+        !!dialog.getDialog() &&
+        !!dialog.getDialog()?.tallList === !!shown.tallList;
+      dialog.show(shown, { keepCursor });
       showPhase("dialog");
       setChromeStatus(`对话 · ${shown.options.length} 选项`);
     },
@@ -8297,6 +8304,46 @@ async function main(): Promise<void> {
       if (!dialog.visible) showPhase("world");
     });
   };
+
+  /**
+   * Shop / warehouse / sell nested 26/1: keep DialogPanel chrome up while the
+   * exchange runs. Hiding first forced remount on every 购买该装备 / 买药确认.
+   * Leave / teleport / challenge still hide before the request.
+   */
+  const keepNpcDialogShell = (
+    action: number,
+    value: number,
+    label: string,
+  ): boolean => {
+    if (action !== 1) return false;
+    const v = value >>> 0;
+    if (v === 0 || /离开|关闭/.test(label)) return false;
+    const op = npcServiceOpcode(v);
+    if (
+      op === NpcServiceOpcode.BUY_ITEM ||
+      op === NpcServiceOpcode.BUY_WEAPON ||
+      op === NpcServiceOpcode.OPEN_WEAPON ||
+      op === NpcServiceOpcode.OPEN_ARMOR ||
+      op === NpcServiceOpcode.OPEN_MEDICINE ||
+      op === NpcServiceOpcode.OPEN_CATEGORY ||
+      op === NpcServiceOpcode.OPEN_SKILLS ||
+      op === NpcServiceOpcode.LEARN_SKILL ||
+      op === NpcServiceOpcode.OPEN_INSTANCE ||
+      op === NpcServiceOpcode.REPAIR_ALL
+    ) {
+      return true;
+    }
+    // Warehouse ee/ef/f0 · equip-sell f1/f2/f3
+    const hi = (v >>> 24) & 0xff;
+    return (
+      hi === 0xee ||
+      hi === 0xef ||
+      hi === 0xf0 ||
+      hi === 0xf1 ||
+      hi === 0xf2 ||
+      hi === 0xf3
+    );
+  };
   /** 存入/取回列表软键返回 → 仓库主界面，不退出对话. */
   dialog.onCancelRequest = () => {
     const d = dialog.getDialog();
@@ -8335,7 +8382,7 @@ async function main(): Promise<void> {
       const st = dialog.getMedicineBuyQty();
       if (!st) return;
       const wire = encodeNpcBuyItem(st.itemId, st.qty);
-      dialog.hide();
+      // Stay on shell — onNpcDialog refreshes the medicine list in place.
       void session.pickNpcOption(1, wire, label).then(() => {
         if (session.inBattle) {
           showPhase("battle");
@@ -9192,7 +9239,10 @@ async function main(): Promise<void> {
       (value >>> 24) === (WarehouseService.DEPOSIT_BASE >>> 24) && depositSeq > 0
         ? depositSeq
         : 0;
-    dialog.hide();
+    // Keep shop/warehouse chrome; hide only when leaving the dialog tree.
+    if (!keepNpcDialogShell(action, value, label)) {
+      dialog.hide();
+    }
     void session.pickNpcOption(action, value, label).then(() => {
       if (phase === "system" || phase === "enhance" || phase === "wash") {
         return;
@@ -9201,7 +9251,7 @@ async function main(): Promise<void> {
         showPhase("battle");
         return;
       }
-      // Nested service dialog may have re-opened the panel via onNpcDialog.
+      // Nested service dialog may have refreshed the panel via onNpcDialog.
       // Leave (action=1 value=0) only closes locally — stay on world.
       if (!dialog.visible) showPhase("world");
     });
