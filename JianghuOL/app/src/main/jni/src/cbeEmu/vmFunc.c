@@ -1,4 +1,5 @@
 #include "main.h"
+#include "lcd.h"
 #include "gifDecode.h"
 #define STBI_ONLY_PNG
 #define STBI_NO_STDIO
@@ -392,6 +393,67 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
     return sawWideChar;
 }
 
+/* Big-endian UCS-2 paths (封神演义V2 等 isBiggianProgram CBE)：字节序为 00 2e 00 2f ... */
+static int vm_path_looks_like_ucs2_be(const u8 *raw, size_t rawSize, u32 *ucs2LenOut)
+{
+    if (ucs2LenOut)
+        *ucs2LenOut = 0;
+    if (raw == NULL || rawSize < 4)
+        return 0;
+    if (vm_path_looks_like_ascii_c_string(raw, rawSize))
+        return 0;
+
+    u32 pos = 0;
+    u32 units = 0;
+    int sawWideChar = 0;
+    while (pos + 1 < rawSize)
+    {
+        u16 ch = (u16)((raw[pos] << 8) | raw[pos + 1]);
+        if (ch == 0)
+        {
+            if (units == 0)
+                return 0;
+            if (ucs2LenOut)
+                *ucs2LenOut = pos;
+            return 1;
+        }
+
+        if (ch >= 0xD800 && ch <= 0xDFFF)
+            return 0;
+
+        if (ch <= 0x7F)
+        {
+            if (!(ch == '/' || ch == '\\' || ch == '.' || ch == '_' || ch == '-' ||
+                  ch == '+' || ch == ' ' ||
+                  (ch >= '0' && ch <= '9') ||
+                  (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= 'a' && ch <= 'z')))
+                return 0;
+        }
+        else
+        {
+            if (!((ch >= 0x2E80 && ch <= 0x9FFF) || (ch >= 0xF900 && ch <= 0xFAFF)))
+                return 0;
+            sawWideChar = 1;
+        }
+
+        pos += 2;
+        ++units;
+    }
+
+    return sawWideChar;
+}
+
+static void vm_ucs2_be_to_le_inplace(u8 *raw, u32 byteLen)
+{
+    for (u32 i = 0; i + 1 < byteLen; i += 2)
+    {
+        u8 tmp = raw[i];
+        raw[i] = raw[i + 1];
+        raw[i + 1] = tmp;
+    }
+}
+
 static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 {
     u8 rawName[256];
@@ -404,9 +466,71 @@ static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 #endif
     if (outSize == 0)
         return;
+
+    /* DF_PictureLibrary / package names are often plain ASCII C strings
+     * ("loading.gif").  Halfword walk would pair "lo"→U+6F6C and garble
+     * the path before UCS-2 heuristics can reject it. */
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
+    if (vm_path_looks_like_ascii_c_string(rawName, sizeof(rawName)))
+    {
+        size_t i = 0;
+        while (i + 1 < outSize && rawName[i] != 0)
+        {
+            out[i] = (char)rawName[i];
+            i++;
+        }
+        out[i] = 0;
+        return;
+    }
+
+    /* Prefer guest-endian halfword walk: BE CBE titles (封神演义) and LE
+     * titles both store path characters via vm_set_var_short / strh. */
+    {
+        u16 hostLe[128];
+        u32 n = 0;
+        memset(hostLe, 0, sizeof(hostLe));
+        while (n + 1u < (u32)(sizeof(hostLe) / sizeof(hostLe[0])))
+        {
+            u16 ch = vm_get_var_short(namePtr + n * 2u);
+            if (ch == 0)
+                break;
+            hostLe[n++] = ch;
+        }
+        hostLe[n] = 0;
+        if (n > 0)
+        {
+            u32 byteLen = (n + 1u) * 2u;
+#ifdef CBE_PLATFORM_ANDROID
+            ucs2_to_gbk((u8 *)hostLe, byteLen, (u8 *)gbkPath, sizeof(gbkPath));
+            gbk_to_utf8((u8 *)gbkPath, (u8 *)out, outSize);
+#else
+            ucs2_to_gbk((u8 *)hostLe, byteLen, out, (u32)outSize);
+#endif
+            out[outSize - 1] = 0;
+            if (out[0] != 0)
+                return;
+        }
+    }
+
     u32 ucs2Len = 0;
-    if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
+    int asUcs2 = 0;
+    if (g_cbeInfo.isBiggianProgram &&
+        vm_path_looks_like_ucs2_be(rawName, sizeof(rawName), &ucs2Len))
+    {
+        vm_ucs2_be_to_le_inplace(rawName, ucs2Len);
+        asUcs2 = 1;
+    }
+    else if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
+    {
+        asUcs2 = 1;
+    }
+    else if (vm_path_looks_like_ucs2_be(rawName, sizeof(rawName), &ucs2Len))
+    {
+        vm_ucs2_be_to_le_inplace(rawName, ucs2Len);
+        asUcs2 = 1;
+    }
+
+    if (asUcs2)
     {
 #ifdef CBE_PLATFORM_ANDROID
         ucs2_to_gbk(rawName, ucs2Len, (u8 *)gbkPath, sizeof(gbkPath));
@@ -538,6 +662,23 @@ static int vm_file_is_bare_dsh_resource(const char *path)
     return ext != NULL && _stricmp(ext, ".dsh") == 0;
 }
 
+/* Title/UI leaves live under JHOnlineData/; guest opens bare names. */
+static int vm_file_is_bare_jhonline_leaf_resource(const char *path)
+{
+    const char *ext;
+    if (path == NULL || path[0] == 0 || vm_path_has_separator(path))
+        return 0;
+    ext = strrchr(path, '.');
+    if (ext == NULL)
+        return 0;
+    return _stricmp(ext, ".dsh") == 0 ||
+           _stricmp(ext, ".gif") == 0 ||
+           _stricmp(ext, ".map") == 0 ||
+           _stricmp(ext, ".sce") == 0 ||
+           _stricmp(ext, ".actor") == 0 ||
+           _stricmp(ext, ".cbm") == 0;
+}
+
 static int vm_file_is_bare_cbe_module(const char *path)
 {
     const char *ext;
@@ -655,6 +796,7 @@ static int vm_resource_host_file_exists(const char *path)
 static u32 vm_resource_cache_lookup_id(const char *name)
 {
     VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
+    char jhonlinePath[256];
     if (entry)
         return entry->id;
     if (vm_resource_host_file_exists(name))
@@ -663,6 +805,18 @@ static u32 vm_resource_cache_lookup_id(const char *name)
         if (entry)
         {
             snprintf(entry->path, sizeof(entry->path), "%s", name);
+            return entry->id;
+        }
+    }
+    if (vm_file_is_bare_jhonline_leaf_resource(name) &&
+        snprintf(jhonlinePath, sizeof(jhonlinePath), "JHOnlineData/%s", name) <
+            (int)sizeof(jhonlinePath) &&
+        vm_resource_host_file_exists(jhonlinePath))
+    {
+        entry = vm_resource_cache_note_name(name);
+        if (entry)
+        {
+            snprintf(entry->path, sizeof(entry->path), "%s", jhonlinePath);
             return entry->id;
         }
     }
@@ -738,10 +892,16 @@ static u32 vm_resource_cache_load_file(const char *path)
 static u32 vm_resource_cache_load_by_name(const char *name)
 {
     VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
+    char jhonlinePath[256];
     if (entry && entry->path[0])
         return vm_resource_cache_load_file(entry->path);
     if (name && vm_resource_host_file_exists(name))
         return vm_resource_cache_load_file(name);
+    if (name && vm_file_is_bare_jhonline_leaf_resource(name) &&
+        snprintf(jhonlinePath, sizeof(jhonlinePath), "JHOnlineData/%s", name) <
+            (int)sizeof(jhonlinePath) &&
+        vm_resource_host_file_exists(jhonlinePath))
+        return vm_resource_cache_load_file(jhonlinePath);
     return 0;
 }
 
@@ -889,7 +1049,9 @@ static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, con
 #endif
     if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
         return 0;
-    if (!vm_file_is_read_only_mode(mode) || !vm_file_is_bare_dsh_resource(normalizedName))
+    /* Also resolve bare title/UI leaves (.gif/.map/...) under JHOnlineData/. */
+    if (!vm_file_is_read_only_mode(mode) ||
+        !vm_file_is_bare_jhonline_leaf_resource(normalizedName))
         return 0;
     for (size_t i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
     {
@@ -964,6 +1126,81 @@ static void vm_file_ensure_parent_dirs(const char *path)
         vm_file_make_dir(tmp);
         tmp[i] = '/';
     }
+}
+
+/*
+ * 原罪天使 offline Congfig: title boot opens SinAngel_Resource/SinAngelCongfig.
+ * A present-but-invalid stub (size<=4) makes guest 6baa return 2 and skip the
+ * dead CoolBar download (state=0).  Missing file triggers HTTP; mock success
+ * with {1} then leaves the FSM in state 7 forever.  Resolve common cwd/bin
+ * layouts and seed the 1-byte stub when absent so cold launch matches the
+ * intentional offline skip path.
+ */
+static int vm_file_is_sinangel_congfig_path(const char *normalizedName)
+{
+    const char *base;
+    if (normalizedName == NULL || normalizedName[0] == 0)
+        return 0;
+    if (strstr(normalizedName, "SinAngel_Resource") == NULL)
+        return 0;
+    base = vm_path_basename(normalizedName);
+    return base != NULL && _stricmp(base, "SinAngelCongfig") == 0;
+}
+
+static int vm_file_try_resolve_sinangel_resource_path(const char *normalizedName, const char *mode,
+                                                     char *resolvedName, size_t resolvedSize)
+{
+    static const char *pathFormats[] = {
+        "%s",
+        "bin/%s",
+        "../bin/%s",
+    };
+    FILE *fp;
+    size_t i;
+    const u8 stub = 1;
+
+    if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
+        return 0;
+    if (!vm_file_is_read_only_mode(mode) || !vm_file_is_sinangel_congfig_path(normalizedName))
+        return 0;
+
+    for (i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
+    {
+        if (snprintf(resolvedName, resolvedSize, pathFormats[i], normalizedName) >=
+            (int)resolvedSize)
+        {
+            continue;
+        }
+        fp = fopen(resolvedName, "rb");
+        if (fp != NULL)
+        {
+            fclose(fp);
+            return 1;
+        }
+    }
+
+    /* Seed under cwd-relative SinAngel_Resource/ so the next open hits 6baa. */
+    if (snprintf(resolvedName, resolvedSize, "%s", normalizedName) >= (int)resolvedSize)
+        return 0;
+    vm_file_ensure_parent_dirs(resolvedName);
+    fp = fopen(resolvedName, "wb");
+    if (fp == NULL)
+    {
+        if (snprintf(resolvedName, resolvedSize, "bin/%s", normalizedName) >= (int)resolvedSize)
+            return 0;
+        vm_file_ensure_parent_dirs(resolvedName);
+        fp = fopen(resolvedName, "wb");
+    }
+    if (fp == NULL)
+        return 0;
+    if (fwrite(&stub, 1, 1, fp) != 1)
+    {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    printf("[info][resource] seeded offline SinAngelCongfig path=%s\n", resolvedName);
+    return 1;
 }
 
 static void vm_file_select_mode(int openMode, const char *modeHint, char *mode, size_t modeSize)
@@ -1051,6 +1288,12 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
             }
             FILE *f = fopen(normalizedName, openMode);
             if (f == NULL && vm_file_try_resolve_cbe_module_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
+            {
+                f = fopen(resolvedName, openMode);
+                if (f != NULL)
+                    snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
+            }
+            if (f == NULL && vm_file_try_resolve_sinangel_resource_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
             {
                 f = fopen(resolvedName, openMode);
                 if (f != NULL)
@@ -1221,7 +1464,9 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
     u32 pc = 0, lr = 0;
     uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL || size <= 0)
+    if (size <= 0)
+        return vm_set_call_result(0);
+    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
     {
         return vm_set_call_result(-1);
     }
@@ -1621,30 +1866,35 @@ int vm_DF_DataPackage_InitTxt(int a1, int a2)
 }
 u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
 {
-    u32 offset;
-    u16 ret = 0;
-    uc_mem_read(MTK, offsetPtr, &offset, 4);
+    /* DF record payload is little-endian; the cursor at offsetPtr is guest-endian. */
+    u32 offset = vm_get_var(offsetPtr);
+    u8 raw[2] = {0};
+    u16 ret;
 
-    uc_mem_read(MTK, bufPtr + offset, &ret, 2);
+    uc_mem_read(MTK, bufPtr + offset, raw, 2);
+    ret = (u16)(raw[0] | (raw[1] << 8));
     if ((lastAddress >= 0x0100d780 && lastAddress <= 0x0100d8c0) ||
         (lastAddress >= 0x0100db80 && lastAddress <= 0x0100de90))
     {
-        u8 raw[8] = {0};
-        uc_mem_read(MTK, bufPtr + offset, raw, sizeof(raw));
+        u8 probe[8] = {0};
+        uc_mem_read(MTK, bufPtr + offset, probe, sizeof(probe));
     }
     offset += 2;
-    uc_mem_write(MTK, offsetPtr, &offset, 4);
+    vm_set_var(offsetPtr, offset);
     return vm_set_call_result(ret);
 }
 
 u32 vm_DF_WriteShort(u32 bufPtr, u32 offsetPtr, u32 value)
 {
-    u32 offset, ret;
-    uc_mem_read(MTK, offsetPtr, &offset, 4);
+    /* DF record payload is little-endian; the cursor at offsetPtr is guest-endian. */
+    u32 offset = vm_get_var(offsetPtr);
+    u8 raw[2];
 
-    uc_mem_write(MTK, bufPtr + offset, &value, 2);
+    raw[0] = (u8)(value & 0xff);
+    raw[1] = (u8)((value >> 8) & 0xff);
+    uc_mem_write(MTK, bufPtr + offset, raw, 2);
     offset += 2;
-    uc_mem_write(MTK, offsetPtr, &offset, 4);
+    vm_set_var(offsetPtr, offset);
     return vm_set_call_result(offset);
 }
 // ok
@@ -2728,6 +2978,18 @@ u32 vm_DF_GetMemoryBlock(void)
 void vm_initMemoryBlock(p_g_memoryBlock, size)
 {
     int tmp1, tmp2, tmp3, tmp4;
+    /*
+     * Classic Jianghu CBE passes 0x14000 (81920).  InitTimerControl bag
+     * records need 324*physical; physical=255 → 82620, which overflows the
+     * stock pool and leaves a NULL item array (PC 0x01031EF4).  Bump only
+     * the historical phone-sized block so backpack-255 can allocate.
+     */
+    if ((u32)size == 0x14000u)
+    {
+        printf("[info][mem] initMemoryBlock grow 0x14000 -> 0x40000 "
+               "evidence=CBE-backpack-255-324xphysical\n");
+        size = 0x40000;
+    }
     // p_g_memoryBlock[0] = 新的内存块地址。全局块使用固定池；其它块需要独立
     // backing storage，避免多个 MemoryBlock 互相覆盖 actor/资源解析结果。
     tmp1 = (p_g_memoryBlock == VM_MemoryBlock_PTR_ADDRESS) ? VM_MF_MemoryBlock_POOL_ADDRESS : vm_malloc(size);
@@ -2853,6 +3115,22 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
             }
         }
     }
+    /* Package miss: bare title/UI leaves resolve via JHOnlineData/. */
+    if (namePtr)
+    {
+        char name[128];
+        u32 cacheId;
+        memset(name, 0, sizeof(name));
+        vm_read_path_string(namePtr, name, sizeof(name));
+        cacheId = vm_resource_cache_lookup_id(name);
+        printf("[forensic][pkg] GetFileID miss name='%s' cacheId=%08x\n",
+               name[0] ? name : "(empty)", cacheId);
+        if (cacheId != (u32)-1)
+        {
+            uc_reg_write(uc, UC_ARM_REG_R0, &cacheId);
+            return cacheId;
+        }
+    }
     result = -1;
     uc_reg_write(uc, UC_ARM_REG_R0, &result);
     return result;
@@ -2974,6 +3252,12 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
             }
         }
     }
+    if (fileId >= VM_RELEASED_RESOURCE_ID_BASE)
+    {
+        result = (int)vm_resource_cache_load_by_id(fileId);
+        if (result)
+            return vm_set_call_result(result);
+    }
     return vm_set_call_result(0);
 }
 
@@ -3045,6 +3329,8 @@ u32 vm_DF_GetResourceIDByFileName(int a1)
     {
         vm_read_path_string(a1, name, sizeof(name));
         result = (int)vm_resource_cache_lookup_id(name);
+        printf("[forensic][res] GetResourceID name='%s' result=%d\n",
+               name[0] ? name : "(empty)", result);
     }
     return vm_set_call_result((u32)result);
 }
@@ -3107,6 +3393,9 @@ int vm_DF_GetTResource(int a1)
     vm_set_var(VM_DreamFactoryResourceBuffer_ADDRESS, DreamFactoryResourceBuffer);
     return DreamFactoryResourceBuffer;
 }
+
+/* Declared in main.c (jni has the same hooks). */
+int vm_host_skip_loading_overlay_image(int x, int y, int w, int h);
 
 /*
  * Outdoor m_mount.gif fingerprint (80×112, tile0 origin RGB565 0xC52F).
@@ -3960,8 +4249,8 @@ static void vm_readStringUCS2ByRegLimited(uc_arm_reg reg, u16 *dst, size_t dstBy
     uc_reg_read(MTK, reg, &ptr);
     while (pos + 1 < maxChars)
     {
-        u16 tmp = 0;
-        if (uc_mem_read(MTK, ptr + (u32)(pos * sizeof(u16)), &tmp, sizeof(tmp)) != UC_ERR_OK || tmp == 0)
+        u16 tmp = vm_get_var_short(ptr + (u32)(pos * sizeof(u16)));
+        if (tmp == 0)
             break;
         dst[pos++] = tmp;
     }

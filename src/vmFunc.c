@@ -2978,6 +2978,18 @@ u32 vm_DF_GetMemoryBlock(void)
 void vm_initMemoryBlock(p_g_memoryBlock, size)
 {
     int tmp1, tmp2, tmp3, tmp4;
+    /*
+     * Classic Jianghu CBE passes 0x14000 (81920).  InitTimerControl bag
+     * records need 324*physical; physical=255 → 82620, which overflows the
+     * stock pool and leaves a NULL item array (PC 0x01031EF4).  Bump only
+     * the historical phone-sized block so backpack-255 can allocate.
+     */
+    if ((u32)size == 0x14000u)
+    {
+        printf("[info][mem] initMemoryBlock grow 0x14000 -> 0x40000 "
+               "evidence=CBE-backpack-255-324xphysical\n");
+        size = 0x40000;
+    }
     // p_g_memoryBlock[0] = 新的内存块地址。全局块使用固定池；其它块需要独立
     // backing storage，避免多个 MemoryBlock 互相覆盖 actor/资源解析结果。
     tmp1 = (p_g_memoryBlock == VM_MemoryBlock_PTR_ADDRESS) ? VM_MF_MemoryBlock_POOL_ADDRESS : vm_malloc(size);
