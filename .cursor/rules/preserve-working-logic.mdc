@@ -1,0 +1,22 @@
+---
+description: 改新功能时不得冲掉已验证可用的旧逻辑
+alwaysApply: true
+---
+
+# 改新功能勿冲掉已正常逻辑
+
+本仓库多次因「同步 / 大段替换 / 整文件覆盖」丢掉已上线可用路径（游戏中心、`JHOnlineData` 资源回退、`empty.sce` 占位、双线程 `cbeRun` 等待等）。
+
+## 强制
+
+1. **增量修改**：在已有正确分支上补丁；禁止为接新功能整段删掉、注释掉或 `#ifdef` 关掉已验证路径，除非有运行时证据证明该路径错误且用户同意。
+2. **同步源码**：`src/` 与 `JianghuOL/.../cbeEmu/` 对齐时做**定向 diff 合并**，禁止用一侧整文件覆盖另一侧而不核对 Android / 游戏中心 / 资源契约。
+3. **平台门控**：新增 `CBE_PLATFORM_ANDROID` / `CBE_CLIENT_ONLY` 条件时，先确认不会关掉桌面或手机已依赖的路径（尤其 `CBE_HAS_GAME_LAUNCHER`、`g_cbeVmReadyForRun`、`vm_jhonline_resolve_existing`）。
+4. **改前对照**：大改前用只读 `git diff` / `git show` 看将触及的已有逻辑；改后复测相邻旧路径，不只测新功能。
+5. **文档契约**：`docs/re/` 已写明的正确契约（包优先、dist-hot→JHOnlineData、游戏中心首屏等）视为基线，新改动不得默默回退。
+
+## 反面教材
+
+- 同步 `main.c` 后 Android 丢失游戏中心（`CBE_HAS_GAME_LAUNCHER` 被关掉）。
+- 文档中的 dist-hot / gifDecode 堆缓冲未落盘，标题资源回退失效。
+- 擅自 `git checkout` 整文件冲掉未提交的多开与技能学习接线。

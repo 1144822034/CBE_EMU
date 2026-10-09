@@ -97,3 +97,14 @@ GetFileID/GetFile 不再抢在包前面，且 type=1 剥到 offset 5。
 2026-10-05 23:58：勿复用他应用的 `/sdcard/JHOnline`。Java `canRead` 可能为真，
 但 Pixi uid 对 media_rw 树 `fopen` 失败 → 大厅/UI GIF 全空。固定
 `filesDir/JHOnline`，JHOnlineData 仍从 JianghuOL `cbe_jhonline/` 解压。
+
+## 续记：2026-10-09 独立 JianghuOL APK 仍弹 Cpu
+
+PC 正常、手机「获取版本信息」后弹「当前Cpu状态异常」：独立包仍用
+`Environment.getExternalStorageDirectory()/JHOnline`（ASSET_VERSION=3），
+旧树缺 `loading.gif` 或不刷新时又走 PictureLibrary 断言。
+
+修订：`JianghuOL/.../MainActivity` 改 `getFilesDir()/JHOnline`，
+`ASSET_VERSION=8`，必检 `JHOnlineData/loading.gif`；Pixi 内嵌 CBE 同步
+必检与版本号。重装/升级后应重新解压；logcat 不应再出现
+`GetFileID miss name='loading.gif'` / `DF_PictureLibrary.c:95`。

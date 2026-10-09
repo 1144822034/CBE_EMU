@@ -781,44 +781,156 @@ static void vm_resource_cache_note_path(const char *path)
         snprintf(entry->path, sizeof(entry->path), "%s", normalized);
 }
 
-static int vm_resource_host_file_exists(const char *path)
+/*
+ * Android cwd is filesDir/JHOnline.  Shared Pixi tree contract
+ * (docs/re/2026-10-05-android-cbe-cpu-dialog-picturelibrary.md):
+ *   1) ../dist-hot/files/JHOnlineData/<leaf>
+ *   2) JHOnlineData/<leaf>
+ * Bare .gif/.sce/... and already-prefixed JHOnlineData/ paths both use this.
+ */
+static int vm_jhonline_leaf_from_path(const char *path, char *leaf, size_t leafSize)
+{
+    if (path == NULL || leaf == NULL || leafSize == 0)
+        return 0;
+    if (strncmp(path, "JHOnlineData/", 13) == 0)
+    {
+        snprintf(leaf, leafSize, "%s", path + 13);
+        return leaf[0] != 0;
+    }
+    if (vm_file_is_bare_jhonline_leaf_resource(path))
+    {
+        snprintf(leaf, leafSize, "%s", path);
+        return 1;
+    }
+    return 0;
+}
+
+static int vm_jhonline_try_probe_path(const char *candidate, const char *mode,
+                                      char *resolved, size_t resolvedSize)
 {
     FILE *fp;
-    if (path == NULL || path[0] == 0)
+    if (candidate == NULL || candidate[0] == 0)
         return 0;
-    fp = fopen(path, "rb");
+    fp = fopen(candidate, (mode && mode[0]) ? mode : "rb");
     if (fp == NULL)
         return 0;
     fclose(fp);
+    if (resolved != NULL && resolvedSize > 0)
+        snprintf(resolved, resolvedSize, "%s", candidate);
     return 1;
+}
+
+static int vm_jhonline_resolve_existing(const char *nameOrPath, const char *mode,
+                                        char *resolved, size_t resolvedSize)
+{
+    char leaf[256];
+    char candidate[256];
+    const char *openMode = (mode && mode[0]) ? mode : "rb";
+
+    if (nameOrPath == NULL || nameOrPath[0] == 0 || resolved == NULL ||
+        resolvedSize == 0)
+        return 0;
+
+    if (vm_jhonline_leaf_from_path(nameOrPath, leaf, sizeof(leaf)))
+    {
+#ifdef CBE_PLATFORM_ANDROID
+        if (snprintf(candidate, sizeof(candidate),
+                     "../dist-hot/files/JHOnlineData/%s", leaf) <
+                (int)sizeof(candidate) &&
+            vm_jhonline_try_probe_path(candidate, openMode, resolved, resolvedSize))
+            return 1;
+#endif
+        if (snprintf(candidate, sizeof(candidate), "JHOnlineData/%s", leaf) <
+                (int)sizeof(candidate) &&
+            vm_jhonline_try_probe_path(candidate, openMode, resolved, resolvedSize))
+            return 1;
+        return 0;
+    }
+
+    if (vm_jhonline_try_probe_path(nameOrPath, openMode, resolved, resolvedSize))
+        return 1;
+#ifdef CBE_PLATFORM_ANDROID
+    if (strncmp(nameOrPath, "JHOnlineData/", 13) == 0 &&
+        snprintf(candidate, sizeof(candidate), "../dist-hot/files/%s",
+                 nameOrPath) < (int)sizeof(candidate) &&
+        vm_jhonline_try_probe_path(candidate, openMode, resolved, resolvedSize))
+        return 1;
+#endif
+    return 0;
+}
+
+static int vm_resource_host_file_exists(const char *path)
+{
+    char resolved[256];
+    if (path == NULL || path[0] == 0)
+        return 0;
+    if (vm_jhonline_resolve_existing(path, "rb", resolved, sizeof(resolved)))
+        return 1;
+    return vm_jhonline_try_probe_path(path, "rb", NULL, 0);
+}
+
+/* CBE title resource table lists empty.sce/empty.map next to UI GIFs
+ * (江湖OL.cbe ~0x5afec).  Guest GetStreamDataFormRes needs a non-null
+ * buffer; there is no on-disk file (PC also lacks it). */
+static int vm_resource_is_cbe_empty_placeholder(const char *name)
+{
+    const char *base;
+    if (name == NULL || name[0] == 0)
+        return 0;
+    base = vm_path_basename(name);
+    return _stricmp(base, "empty.sce") == 0 || _stricmp(base, "empty.map") == 0;
+}
+
+static u32 vm_resource_cache_make_empty_placeholder(const char *name)
+{
+    /* Host pseudo type 0xf1: raw payload copied by GetStreamDataFormRes. */
+    static const u8 kEmptySceBody[] = {
+        0x02, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x8b,
+        'S', 'C', 'E', '2', 0xf0, 0x00, 0x40, 0x01, 0x00, 0x00, 0x00, 0x06,
+        0x03, 0x81, 0x00
+    };
+    static const u8 kEmptyMapBody[] = {0x00, 0x00, 0x00, 0x00};
+    const u8 *body = kEmptySceBody;
+    u32 bodyLen = (u32)sizeof(kEmptySceBody);
+    u32 vmBuf;
+    u8 type = 0xf1;
+    const char *base = vm_path_basename(name);
+
+    if (base && _stricmp(base, "empty.map") == 0)
+    {
+        body = kEmptyMapBody;
+        bodyLen = (u32)sizeof(kEmptyMapBody);
+    }
+    vmBuf = vm_malloc(1u + bodyLen);
+    if (vmBuf == 0)
+        return 0;
+    uc_mem_write(MTK, vmBuf, &type, 1);
+    uc_mem_write(MTK, vmBuf + 1, (void *)body, bodyLen);
+    printf("[info][pkg] empty placeholder name='%s' buf=%08x len=%u\n",
+           name ? name : "?", vmBuf, 1u + bodyLen);
+    return vmBuf;
 }
 
 static u32 vm_resource_cache_lookup_id(const char *name)
 {
     VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
-    char jhonlinePath[256];
+    char resolved[256];
     if (entry)
         return entry->id;
-    if (vm_resource_host_file_exists(name))
+    if (vm_jhonline_resolve_existing(name, "rb", resolved, sizeof(resolved)))
     {
         entry = vm_resource_cache_note_name(name);
         if (entry)
         {
-            snprintf(entry->path, sizeof(entry->path), "%s", name);
+            snprintf(entry->path, sizeof(entry->path), "%s", resolved);
             return entry->id;
         }
     }
-    if (vm_file_is_bare_jhonline_leaf_resource(name) &&
-        snprintf(jhonlinePath, sizeof(jhonlinePath), "JHOnlineData/%s", name) <
-            (int)sizeof(jhonlinePath) &&
-        vm_resource_host_file_exists(jhonlinePath))
+    if (vm_resource_is_cbe_empty_placeholder(name))
     {
         entry = vm_resource_cache_note_name(name);
         if (entry)
-        {
-            snprintf(entry->path, sizeof(entry->path), "%s", jhonlinePath);
             return entry->id;
-        }
     }
     return (u32)-1;
 }
@@ -892,16 +1004,13 @@ static u32 vm_resource_cache_load_file(const char *path)
 static u32 vm_resource_cache_load_by_name(const char *name)
 {
     VmReleasedResource *entry = vm_resource_cache_find_by_name(name);
-    char jhonlinePath[256];
+    char resolved[256];
     if (entry && entry->path[0])
         return vm_resource_cache_load_file(entry->path);
-    if (name && vm_resource_host_file_exists(name))
-        return vm_resource_cache_load_file(name);
-    if (name && vm_file_is_bare_jhonline_leaf_resource(name) &&
-        snprintf(jhonlinePath, sizeof(jhonlinePath), "JHOnlineData/%s", name) <
-            (int)sizeof(jhonlinePath) &&
-        vm_resource_host_file_exists(jhonlinePath))
-        return vm_resource_cache_load_file(jhonlinePath);
+    if (name && vm_jhonline_resolve_existing(name, "rb", resolved, sizeof(resolved)))
+        return vm_resource_cache_load_file(resolved);
+    if (vm_resource_is_cbe_empty_placeholder(name))
+        return vm_resource_cache_make_empty_placeholder(name);
     return 0;
 }
 
@@ -1031,43 +1140,39 @@ static int vm_file_try_resolve_map_path(const char *normalizedName, const char *
 
 static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
 {
-#ifdef CBE_CLIENT_ONLY
-    /* The emulator owns only its local cache.  A cache miss must continue to
-     * vm_file_try_download_named_resource() and be supplied by WT18/7; reading
-     * web/fs here would make a co-located client silently consume service
-     * files and hide a broken resource-update contract. */
-    static const char *pathFormats[] = {
-        "JHOnlineData/%s"
-    };
-#else
-    /* The headless service owns its deployed resource catalog. */
-    static const char *pathFormats[] = {
-        "JHOnlineData/%s",
-        "../web/fs/JHOnlineData/%s",
-        "web/fs/JHOnlineData/%s"
-    };
-#endif
     if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
         return 0;
     /* Also resolve bare title/UI leaves (.gif/.map/...) under JHOnlineData/. */
     if (!vm_file_is_read_only_mode(mode) ||
         !vm_file_is_bare_jhonline_leaf_resource(normalizedName))
         return 0;
-    for (size_t i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
+#ifndef CBE_CLIENT_ONLY
+    /* Headless service also probes web/fs catalog mirrors. */
     {
-        FILE *fp;
-        if (snprintf(resolvedName, resolvedSize, pathFormats[i], normalizedName) >=
-            (int)resolvedSize)
+        static const char *pathFormats[] = {
+            "JHOnlineData/%s",
+            "../web/fs/JHOnlineData/%s",
+            "web/fs/JHOnlineData/%s"
+        };
+        size_t i;
+        for (i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
         {
-            continue;
+            FILE *fp;
+            if (snprintf(resolvedName, resolvedSize, pathFormats[i], normalizedName) >=
+                (int)resolvedSize)
+                continue;
+            fp = fopen(resolvedName, "rb");
+            if (fp == NULL)
+                continue;
+            fclose(fp);
+            return 1;
         }
-        fp = fopen(resolvedName, "rb");
-        if (fp == NULL)
-            continue;
-        fclose(fp);
-        return 1;
+        return 0;
     }
-    return 0;
+#else
+    /* Client / Android: dist-hot overlay then extracted JHOnlineData. */
+    return vm_jhonline_resolve_existing(normalizedName, mode, resolvedName, resolvedSize);
+#endif
 }
 
 static int vm_file_try_resolve_cbe_module_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
@@ -1286,7 +1391,16 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
                 snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", normalizedName);
                 return i;
             }
-            FILE *f = fopen(normalizedName, openMode);
+            FILE *f = NULL;
+            /* Prefixed JHOnlineData/ and bare leaves: dist-hot then tree. */
+            if (vm_jhonline_resolve_existing(normalizedName, openMode, resolvedName,
+                                             sizeof(resolvedName)))
+            {
+                snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
+                f = fopen(normalizedName, openMode);
+            }
+            if (f == NULL)
+                f = fopen(normalizedName, openMode);
             if (f == NULL && vm_file_try_resolve_cbe_module_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
             {
                 f = fopen(resolvedName, openMode);
@@ -3917,35 +4031,54 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
 }
 int vm_gifDecode(int gifBufferPtr, int resultPtr)
 {
-    char buffer[1024 * 256]; // 由于不知道图片大小，预先读取64kb
-    char ret[32];
+    /* Android emu thread stack is tight; keep the 256KB read buffer on heap. */
+#ifdef CBE_PLATFORM_ANDROID
+    enum { GIF_READ_CAP = 1024 * 256 };
+    char *buffer = (char *)SDL_malloc(GIF_READ_CAP);
+#else
+    char buffer_storage[1024 * 256];
+    char *buffer = buffer_storage;
+    enum { GIF_READ_CAP = (int)sizeof(buffer_storage) };
+#endif
     int mallocSize = 0;
     GifOutput p;
-    memset(&p, 0, sizeof(p));
-    uc_mem_read(MTK, gifBufferPtr, buffer, mySizeOf(buffer));
+    int ok;
+    int isMmountSand;
+    int vmPtr;
 
-    int ok = gifDecodeExt(buffer, &p, 1, &mallocSize);
+    memset(&p, 0, sizeof(p));
+#ifdef CBE_PLATFORM_ANDROID
+    if (buffer == NULL)
+        return vm_set_call_result(0);
+#endif
+    uc_mem_read(MTK, gifBufferPtr, buffer, (u32)GIF_READ_CAP);
+
+    ok = gifDecodeExt((u8 *)buffer, &p, 1, &mallocSize);
     if (!ok || p.pixels == NULL || p.width == 0 || p.height == 0 || mallocSize <= 0)
     {
-        u32 dictSize = ((u32)(u8)buffer[0] << 24) | ((u32)(u8)buffer[1] << 16) |
-                       ((u32)(u8)buffer[2] << 8) | (u32)(u8)buffer[3];
         u16 transparent = 0;
-        int vmPtr = vm_malloc(sizeof(transparent));
+        vmPtr = vm_malloc(sizeof(transparent));
         uc_mem_write(MTK, vmPtr, &transparent, sizeof(transparent));
         if (p.pixels)
             free_mem(p.pixels);
         vm_IMG_WriteResult(resultPtr, vmPtr, 1, 1, 1);
+#ifdef CBE_PLATFORM_ANDROID
+        SDL_free(buffer);
+#endif
         return vm_set_call_result(resultPtr);
     }
 
-    int isMmountSand = vm_pixels_look_like_mmount_sand(p.pixels, (int)p.width, (int)p.height);
-    int vmPtr = vm_malloc(mallocSize);
+    isMmountSand = vm_pixels_look_like_mmount_sand(p.pixels, (int)p.width, (int)p.height);
+    vmPtr = vm_malloc(mallocSize);
 
     uc_mem_write(MTK, vmPtr, p.pixels, mallocSize);
     free_mem(p.pixels);
     if (isMmountSand)
         vm_mmount_sand_register((u32)vmPtr);
     vm_IMG_WriteResult(resultPtr, vmPtr, (u16)p.width, (u16)p.height, 1);
+#ifdef CBE_PLATFORM_ANDROID
+    SDL_free(buffer);
+#endif
     return vm_set_call_result(resultPtr);
 }
 
@@ -4697,7 +4830,25 @@ u32 vm_GetStreamDataFormRes(u32 a1, u32 a2, u32 a3, u32 a4)
     u8 b5 = 0, b6 = 0, b7 = 0, b8 = 0;
     u32 dest = 0;
     uc_engine *uc = MTK;
-    u8 resType = vm_get_var_byte(a1);
+    u8 resType;
+
+    if (a1 == 0)
+    {
+        /* GetFile miss (e.g. empty name after empty.sce) still calls stream.
+         * Return a tiny zero blob so guest does not fault on R0=0. */
+        dest = vm_malloc(4);
+        if (dest)
+        {
+            u8 z[4] = {0, 0, 0, 0};
+            uc_mem_write(uc, dest, z, 4);
+        }
+        printf("[warn][resource] GetStreamDataFormRes null res -> empty buf=%08x "
+               "caller=%08x\n",
+               dest, lastAddress);
+        return vm_set_call_result(dest);
+    }
+
+    resType = vm_get_var_byte(a1);
 
     /*
      * The real firmware always treats normal resources as LZSS streams here.

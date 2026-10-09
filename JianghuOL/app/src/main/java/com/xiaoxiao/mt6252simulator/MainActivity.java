@@ -69,14 +69,19 @@ public class MainActivity extends Activity {
     private static final int PAD_KEY_DOWN = 15;
     private static final int PAD_KEY_LEFT = 16;
     private static final int PAD_KEY_RIGHT = 17;
-    private static final int ASSET_VERSION = 3;
+    /*
+     * Bump when packaged JHOnlineData/CBE layout changes.  v8: title GIFs must
+     * live under app filesDir (not a shared /sdcard/JHOnline from another app);
+     * missing loading.gif → DF_PictureLibrary assert →「当前Cpu状态异常」.
+     */
+    private static final int ASSET_VERSION = 8;
     private static final String[] REQUIRED_ASSET_ROOTS = {
             "font_gb.uc3", "CBE", "JHOnlineData", "servers.conf",
-            /* Host codeVersion override; JNI reads /sdcard/JHOnline/client_code_version.txt */
+            /* Host codeVersion override; JNI reads <runtimeRoot>/client_code_version.txt */
             "client_code_version.txt"
     };
     private static final String[] OPTIONAL_ASSET_ROOTS = {"net_mocks"};
-    /* On APK versionCode upgrade, force-refresh these trees under /sdcard/JHOnline. */
+    /* On APK versionCode upgrade, force-refresh these trees under the runtime root. */
     private static final String[] VERSION_UPGRADE_FORCE_ROOTS = {
             "JHOnlineData", "servers.conf", "client_code_version.txt"
     };
@@ -216,7 +221,7 @@ public class MainActivity extends Activity {
             if(!hasPermission){
                 AlertDialog.Builder builder = new AlertDialog.Builder(this);
                 builder.setTitle("需要储存权限");
-                builder.setMessage("需要允许管理所有文件，才能把资源解压到 /sdcard/JHOnline 并从该目录运行。");
+                builder.setMessage("需要允许管理所有文件，以便写入扩展资源与日志（游戏主体已使用应用私有目录）。");
                 builder.setPositiveButton("去授权", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialogInterface, int i) {
@@ -372,7 +377,13 @@ public class MainActivity extends Activity {
                 new View[] {confirm, btnAuto, manageAccount, cancel, btnChat, btnMap},
                 extraToolsDot);
 
-        sdPath = new File(Environment.getExternalStorageDirectory(), SD_ROOT_DIR_NAME).getAbsolutePath();
+        /*
+         * Prefer private filesDir over /sdcard/JHOnline.  Shared external trees
+         * from other packages may look readable but fopen fails for this uid,
+         * so title loading.gif miss → Cpu-dialog (docs/re/2026-10-05-android-
+         * cbe-cpu-dialog-picturelibrary.md).
+         */
+        sdPath = new File(getFilesDir(), SD_ROOT_DIR_NAME).getAbsolutePath();
         Log.i(TAG, "runtime root: " + sdPath);
         final MainActivity activity = this;
         screenView.setOnTouchListener((view, motionEvent) -> {
@@ -470,8 +481,8 @@ public class MainActivity extends Activity {
                 : "未知错误";
         new AlertDialog.Builder(this)
                 .setTitle("资源解压失败")
-                .setMessage("无法将游戏资源写入 /sdcard/JHOnline。\n"
-                        + "请确认已授予「所有文件访问」权限、磁盘空间充足，然后重试。\n\n"
+                .setMessage("无法将游戏资源写入应用私有目录。\n"
+                        + "请确认磁盘空间充足，然后重试。\n\n"
                         + "详情：" + detail)
                 .setPositiveButton("重试", new DialogInterface.OnClickListener() {
                     @Override
@@ -1005,6 +1016,7 @@ public class MainActivity extends Activity {
                 "font_gb.uc3",
                 "CBE/江湖OL.cbe",
                 "JHOnlineData/mmGameMstarWqvga.cbm",
+                "JHOnlineData/loading.gif",
                 "client_code_version.txt"
         };
         for (String path : required) {

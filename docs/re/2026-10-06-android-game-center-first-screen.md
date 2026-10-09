@@ -30,3 +30,14 @@ APK 内 `lib/arm64-v8a/libmtksim.so` = **662176** 字节（含游戏中心）。
 
 - 覆盖安装 v88 → wipe jni-hot → log `loaded apk jniLibs`
 - 经典怀旧首屏：「游戏中心」+「轻触选择游戏」
+
+## 2026-10-09 再丢失与恢复
+
+`main.c` 同步后再次丢掉 Android 游戏中心门控（`CBE_HAS_GAME_LAUNCHER` 对 Android 关闭、
+`cbeInit` 直接加载默认 CBE、`cbeRun` 不等待 `g_cbeVmReadyForRun`）。已按
+`tmp_jni_main_c_before_sync.c` 契约恢复：Android 也定义 `CBE_HAS_GAME_LAUNCHER`，
+`cbeInit` 早退进游戏中心，`load_and_start` / 直载路径置 `g_cbeVmReadyForRun`，
+`cbeRun` 等待就绪后再 `RunArmProgram`。
+
+覆盖安装 **v94**（`versionCode 94`）→ wipe jni-hot → log
+`game center initialized … (android)` + `loaded apk jniLibs`。
