@@ -90,6 +90,36 @@ export function blockPanelPointerPassthrough(
 }
 
 /**
+ * Full-LCD scrim under modal panels (背包 / 菜单 / 对话…).
+ * CBE chrome is already opaque olive — a heavy black wash made the world look
+ * "blackened". Default 0 keeps the map bright; hit blocking stays on the host
+ * via {@link blockPanelPointerPassthrough}. Nested confirms may pass a higher
+ * alpha via {@link paintPanelWorldDim}.
+ */
+export const PANEL_WORLD_DIM_ALPHA = 0;
+
+/** Paint / remount the shared world scrim (softkey band left clear by default). */
+export function paintPanelWorldDim(
+  g: Graphics,
+  opts?: { reserveBottom?: number; alpha?: number },
+): Graphics {
+  const foot = Math.max(0, opts?.reserveBottom ?? SOFTKEY_H);
+  const alpha =
+    opts?.alpha != null ? opts.alpha : PANEL_WORLD_DIM_ALPHA;
+  g.clear()
+    .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - foot)
+    .fill({ color: 0x000000, alpha });
+  return g;
+}
+
+/** One-shot constructor helper for panels that never remount the scrim. */
+export function makePanelWorldDim(
+  opts?: { reserveBottom?: number; alpha?: number },
+): Graphics {
+  return paintPanelWorldDim(new Graphics(), opts);
+}
+
+/**
  * In-world bands measured from CBE reference-shots/*-game.png (240×400):
  *   top 0–71 = location + olive status + uiexp/exp track
  *   map 72–341

@@ -8,7 +8,13 @@ import {
   Texture,
 } from "pixi.js";
 import { replaceGraphics } from "../render/gpuResume";
-import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
+import {
+  CBE,
+  LCD_HEIGHT,
+  LCD_WIDTH,
+  SOFTKEY_H,
+  paintPanelWorldDim,
+} from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { uiFontFamily } from "../resources/systemFont";
 import {
@@ -888,7 +894,7 @@ export class FruitPanel extends Container {
     const draft = (this.amountDraft || "").trim() || "0";
 
     this.amountOverlay.visible = true;
-    this.amountBox.rect(0, 0, LCD_WIDTH, GAME_H).fill({ color: 0x000000, alpha: 0.62 });
+    paintPanelWorldDim(this.amountBox);
 
     const panelX = 16;
     const panelY = 48;

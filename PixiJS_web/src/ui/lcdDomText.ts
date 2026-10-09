@@ -22,8 +22,9 @@ let stackRoot: Container | null = null;
 /** Fullscreen / modal branches that cover the map when visible. */
 const coverBranches = new Set<Container>();
 /**
- * Soft covers (NPC approach tip / world menu): hide map nameplates, keep status/HUD.
- * Full NPC DialogPanel stays a hard cover so status Songti sits under the dim.
+ * Soft covers (NPC approach tip / world menu / NPC dialog): hide map nameplates,
+ * keep status strip + WorldHud Songti (挂机 / 多开芯片). Hard covers still hide
+ * all non-cover DOM (bag / system / full-screen panels).
  */
 const softCoverBranches = new Set<Container>();
 /**
@@ -121,9 +122,8 @@ export function setLcdDomCoverBranches(nodes: readonly Container[]): void {
 }
 
 /**
- * NPC approach tip / world menu — occlude world nameplates, not HUD/status text.
- * Full dialog remains a hard cover (status below dialog dim).
- * Nodes should also be listed in {@link setLcdDomCoverBranches}.
+ * NPC approach tip / world menu / NPC dialog — occlude world nameplates only,
+ * not HUD/status Songti. Nodes must also be in {@link setLcdDomCoverBranches}.
  */
 export function setLcdDomSoftCoverBranches(nodes: readonly Container[]): void {
   softCoverBranches.clear();

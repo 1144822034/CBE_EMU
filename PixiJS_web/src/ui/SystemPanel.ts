@@ -7,6 +7,7 @@ import {
   SOFTKEY_H,
   paintCbePanel,
   paintCbeTitledChrome,
+  paintPanelWorldDim,
   cbePopupBounds,
   drawCbeTitlePill,
   blockPanelPointerPassthrough,
@@ -379,10 +380,7 @@ export class SystemPanel extends Container {
   }
 
   private paintDim(): void {
-    this.dim
-      .clear()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.35 });
+    paintPanelWorldDim(this.dim);
   }
 
   /**

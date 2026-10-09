@@ -2,7 +2,14 @@
  * Entertainment entry list (棋牌/音乐/视频) — Yinhe 时辰.lua URLs.
  */
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, blockPanelPointerPassthrough } from "./constants";
+import {
+  CBE,
+  LCD_HEIGHT,
+  LCD_WIDTH,
+  SOFTKEY_H,
+  makePanelWorldDim,
+  blockPanelPointerPassthrough,
+} from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { replaceGraphics } from "../render/gpuResume";
@@ -112,9 +119,7 @@ export class EntertainmentPanel extends Container {
     super();
     this.visible = false;
     this.eventMode = "none";
-    const dim = new Graphics()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.4 });
+    const dim = makePanelWorldDim();
     dim.eventMode = "static";
     dim.on("pointertap", (e) => e.stopPropagation());
     this.addChild(dim);

@@ -1326,6 +1326,9 @@ export class BattleScreen extends Container {
       this.mapSprite = null;
     }
     this.mapPixels = null;
+    this.mapLoadGen += 1;
+    this.battleMapFile = "";
+    this.battleMapWorld = "";
     this.mapHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.refreshAutoBannerVisibility();
   }

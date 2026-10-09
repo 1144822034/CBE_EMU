@@ -8,6 +8,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
+  makePanelWorldDim,
   blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, UI_WRAP_CHARS, wrapChars } from "./BitmapLabel";
@@ -65,11 +66,7 @@ export class TaskPanel extends Container {
     super();
     this.visible = false;
     blockPanelPointerPassthrough(this);
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-        .fill({ color: 0x000000, alpha: 0.35 }),
-    );
+    this.addChild(makePanelWorldDim());
     this.addChild(this.box);
   }
 

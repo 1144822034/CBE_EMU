@@ -7,6 +7,7 @@ import {
   WORLD_BOTTOM_H,
   makePixelText,
   paintCbePanel,
+  paintPanelWorldDim,
   blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel, UC3_CELL, wrapChars } from "./BitmapLabel";
@@ -53,7 +54,8 @@ export class DialogPanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    blockPanelPointerPassthrough(this);
+    // Leave hang soft-row + multi-open chips tappable (panel art ends above y342).
+    blockPanelPointerPassthrough(this, { reserveBottom: WORLD_BOTTOM_H });
     this.eventMode = "none";
     this.paintDim();
     this.dim.eventMode = "static";
@@ -63,10 +65,7 @@ export class DialogPanel extends Container {
   }
 
   private paintDim(): void {
-    this.dim
-      .clear()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.4 });
+    paintPanelWorldDim(this.dim, { reserveBottom: WORLD_BOTTOM_H });
   }
 
   private remountChrome(): void {

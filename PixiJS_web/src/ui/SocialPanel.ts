@@ -9,6 +9,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   drawCbeTitlePill,
+  makePanelWorldDim,
   cbePopupBounds,
   blockPanelPointerPassthrough,
 } from "./constants";
@@ -150,11 +151,7 @@ export class SocialPanel extends Container {
     super();
     this.visible = false;
     blockPanelPointerPassthrough(this);
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-        .fill({ color: 0x000000, alpha: 0.35 }),
-    );
+    this.addChild(makePanelWorldDim());
     this.addChild(this.box);
   }
 

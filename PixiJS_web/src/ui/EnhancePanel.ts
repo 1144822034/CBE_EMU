@@ -11,6 +11,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  makePanelWorldDim,
   cbePopupBounds,
   blockPanelPointerPassthrough,
 } from "./constants";
@@ -104,9 +105,7 @@ export class EnhancePanel extends Container {
     this.visible = false;
     // HUD 挂机热区在软键之上。面板不接点击时，点遮罩/面板会落到下层挂机按钮。
     blockPanelPointerPassthrough(this);
-    const dim = new Graphics()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.45 });
+    const dim = makePanelWorldDim();
     dim.eventMode = "static";
     dim.on("pointertap", (e) => e.stopPropagation());
     this.addChild(dim);

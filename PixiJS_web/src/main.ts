@@ -1098,9 +1098,10 @@ async function main(): Promise<void> {
     guildUi,
     worldMap,
   ]);
-  // Approach tip + world menu: keep status/HUD Songti; full NPC dialog stays hard cover.
-  setLcdDomSoftCoverBranches([approach, menu]);
-  // 修拍擂… + 比武计时：同一 DOM chrome 层（低于对话框）。
+  // Approach / menu / NPC dialog: hide map nameplates only; keep status + HUD Songti
+  // (挂机 / 多开芯片 / 修拍…). Dialog chrome sits above the hang soft-row.
+  setLcdDomSoftCoverBranches([approach, menu, dialog]);
+  // 修拍擂… + 比武计时：同一 DOM chrome 层（低于全屏硬封面）。
   setLcdDomChromeBranches([view.root, arenaHud]);
   // Explicit stack above map so menu/bag/battle cover world DOM text.
   menu.zIndex = 50;
@@ -3196,8 +3197,15 @@ async function main(): Promise<void> {
         );
         return;
       }
+      // Live fight on this screen: keep mmBattle over a same-map 30/1.
+      // Multi-open switch already resetForAccountSwitch()/hide() — battle
+      // Container is gone while `phase` is still "battle". Returning here
+      // leaves view.root+battle both hidden (full LCD black) until the
+      // async onBattle skills/bag IIFE, or forever if the next slot is
+      // not in a fight.
       if (
         (phase === "battle" || session.inBattle) &&
+        battle.visible &&
         view.showsSceneFile(loadedScene) &&
         session.hp > 0
       ) {
@@ -4999,6 +5007,12 @@ async function main(): Promise<void> {
         });
       } catch (e) {
         console.warn("[multi] resync scene", e);
+        showPhase("world");
+      }
+      // Switch hid BattleScreen but left phase==="battle". If enter-scene
+      // skipped showPhase("world") (old keep-battle), paint the map now so
+      // the skills/bag wait is not a black LCD.
+      if (phase === "battle" && !battle.visible) {
         showPhase("world");
       }
       // Poll + 2/7 so map peers match server after background / muted slot time.

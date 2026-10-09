@@ -10,6 +10,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintPanelWorldDim,
   cbePopupBounds,
   blockPanelPointerPassthrough,
 } from "./constants";
@@ -249,10 +250,7 @@ export class ChatPanel extends Container {
   }
 
   private paintShade(): void {
-    this.shade
-      .clear()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.4 });
+    paintPanelWorldDim(this.shade);
   }
 
   private wireInputHit(): void {

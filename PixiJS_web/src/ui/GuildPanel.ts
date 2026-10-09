@@ -10,6 +10,7 @@ import {
   SOFTKEY_H,
   paintCbePanel,
   paintCbeTitledChrome,
+  makePanelWorldDim,
   cbePopupBounds,
   drawCbeTitlePill,
   blockPanelPointerPassthrough,
@@ -91,11 +92,7 @@ export class GuildPanel extends Container {
     super();
     this.visible = false;
     blockPanelPointerPassthrough(this);
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-        .fill({ color: 0x000000, alpha: 0.35 }),
-    );
+    this.addChild(makePanelWorldDim());
     this.addChild(this.box);
   }
 

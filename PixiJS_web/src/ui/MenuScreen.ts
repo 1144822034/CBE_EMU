@@ -11,6 +11,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  paintPanelWorldDim,
   blockPanelPointerPassthrough,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
@@ -150,10 +151,7 @@ export class MenuScreen extends Container {
   }
 
   private paintDim(): void {
-    this.dim
-      .clear()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.35 });
+    paintPanelWorldDim(this.dim);
   }
 
   private remountChrome(): void {

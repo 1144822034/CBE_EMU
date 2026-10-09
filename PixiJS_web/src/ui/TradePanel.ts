@@ -15,6 +15,7 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   WORLD_BOTTOM_H,
+  makePanelWorldDim,
   paintCbeTitledChrome,
   blockPanelPointerPassthrough,
 } from "./constants";
@@ -138,11 +139,7 @@ export class TradePanel extends Container {
     this.visible = false;
     // Leave soft-row + chat free so WorldHud multi-open chips stay tappable.
     blockPanelPointerPassthrough(this, { reserveBottom: WORLD_BOTTOM_H });
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - WORLD_BOTTOM_H)
-        .fill({ color: 0x000000, alpha: 0.4 }),
-    );
+    this.addChild(makePanelWorldDim({ reserveBottom: WORLD_BOTTOM_H }));
     this.addChild(this.box);
     this.inputHit.eventMode = "static";
     this.inputHit.cursor = "text";

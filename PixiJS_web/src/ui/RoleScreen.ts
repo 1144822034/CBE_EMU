@@ -6,6 +6,7 @@ import {
   LCD_WIDTH,
   SOFTKEY_H,
   paintCbePanel,
+  makePanelWorldDim,
   preloadCbeFlowerCorners,
   drawLocBanner,
   makePixelText,
@@ -299,11 +300,8 @@ export class RoleScreen extends Container {
     const pw = LCD_WIDTH - 32;
     const ph = 150;
 
-    // Dim list behind so canvas bodies cannot peek through the modal.
-    const dim = new Graphics();
-    dim
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-      .fill({ color: 0x000000, alpha: 0.45 });
+    // Scrim behind confirm (alpha via PANEL_WORLD_DIM_ALPHA); panel fill is opaque.
+    const dim = makePanelWorldDim();
     dim.eventMode = "static";
     dim.on("pointertap", (e) => e.stopPropagation());
     this.confirmHost.addChild(dim);
