@@ -1585,6 +1585,21 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    /*
+     * HUD bag open headed by 12/1 (skills) + 7/42 + 6/* without 2/10.
+     * Must beat unimplemented tip「功能暂未实现(1/12/1)」and deliver 17/1 names.
+     */
+    hookedLen = vm_net_mock_build_cbe_bag_open_skill_combo_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_mock_note_backpack_open_cleared_deposit_resync(
+            "12/1+7/42->12/1+7/42+17/1");
+        vm_net_log_handled_packet("builtin-cbe-bag-open-skill-combo", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     if (vm_net_mock_is_pixi_panel_stats_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_pixi_panel_stats_response(out, outCap);

@@ -8682,6 +8682,15 @@ static void vm_mock_admin_handle_monster_global_action(
                 ? 1u
                 : 0u;
     }
+    if (!vm_mock_admin_form_u32(body, "boss_encounter_enemy_max", 3u,
+                                &cfg.bossEncounterEnemyMax) ||
+        cfg.bossEncounterEnemyMax < 1u || cfg.bossEncounterEnemyMax > 3u)
+    {
+        vm_mock_admin_redirect_monster_global(
+            client, "error",
+            "名字含 Boss 遇怪最多刷新数须为 1、2 或 3");
+        return;
+    }
     if (vm_net_mock_monster_global_config_admin_save(&cfg))
         vm_mock_admin_redirect_monster_global(client, "ok",
                                               "全服怪物百分比已保存并立即生效");

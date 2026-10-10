@@ -86,6 +86,18 @@ static bool vm_net_mock_backpack_item_id_uses_reservoir_count(u32 itemId)
     return itemId == 802 || itemId == 803;
 }
 
+/*
+ * 30/21 visible stack = 1; authoritative amount rides 7/11 (flask reservoir or
+ * mall-pass durability). Same CBE parser: HandleItemOperation 0x01033544.
+ * (role.c already has static is_durable_mall_pass — do not redefine here.)
+ */
+static bool vm_net_mock_backpack_item_id_uses_count711(u32 itemId)
+{
+    return vm_net_mock_backpack_item_id_uses_reservoir_count(itemId) ||
+           itemId == VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID ||
+           itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID;
+}
+
 static u8 vm_net_mock_item_common_extra_stack_byte(u32 itemId, u32 count);
 static u8 vm_net_mock_backpack_stack_byte(const vm_net_mock_backpack_item_state *item);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
@@ -114,8 +126,12 @@ static u32 vm_net_mock_backpack_grid_wire_count(const vm_net_mock_backpack_item_
      * path; worn-slot / 7/7 (mmGame:0xD04) paths carry durability separately.
      * Sending equip.dsh 耐久 max (e.g. 50) as grid count made one enhanced
      * piece fill the backpack after login.
+     *
+     * 802/803 reservoir and 834/839 mall-pass durability: visible stack 1;
+     * amount is seeded/updated via 7/11 (Pixi applyFlaskReservoirsToBag also
+     * covers durable passes).
      */
-    if (vm_net_mock_backpack_item_id_uses_reservoir_count(item->itemId))
+    if (vm_net_mock_backpack_item_id_uses_count711(item->itemId))
         return item->count == 0 ? 0 : 1;
     return item->count;
 }
@@ -2695,7 +2711,8 @@ static u8 vm_net_mock_item_common_extra_stack_byte(u32 itemId, u32 count)
         return 0;
     if (vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
         return 0;
-    if (vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
+    /* Flask reservoir / mall-pass durability: visible stack hint 1. */
+    if (vm_net_mock_backpack_item_id_uses_count711(itemId))
         return 1;
     return count > 255 ? 255 : (u8)count;
 }
@@ -6127,8 +6144,9 @@ static bool vm_net_mock_build_backpack_reservoir_count_info_blob(
     for (u32 i = 0; i < itemCount; ++i)
     {
         const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        /* 802/803 reservoir + 834/839 pass durability → 7/11. */
         if (item->count != 0 &&
-            vm_net_mock_backpack_item_id_uses_reservoir_count(item->itemId))
+            vm_net_mock_backpack_item_id_uses_count711(item->itemId))
         {
             ++rowCount;
         }
@@ -6141,7 +6159,7 @@ static bool vm_net_mock_build_backpack_reservoir_count_info_blob(
     {
         const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
         if (item->count == 0 ||
-            !vm_net_mock_backpack_item_id_uses_reservoir_count(item->itemId))
+            !vm_net_mock_backpack_item_id_uses_count711(item->itemId))
         {
             continue;
         }
@@ -11431,8 +11449,8 @@ static u32 vm_net_mock_build_pixi_bag_open_response(u8 *out, u32 outCap)
             return 0;
         objectCount = (u8)(objectCount + 1);
         /*
-         * 802/803：30/21 可见堆叠=1，储量走 7/11（与 login grid 同合同）。
-         * Pixi 打开背包若不带 7/11，拍卖/背包会把储量显示成 1。
+         * 802/803 储量 + 834/839 凭证耐久：30/21 可见堆叠=1，数量走 7/11
+         *（与 login grid 同合同）。缺 7/11 时 Pixi/CBE 都会显示成 1。
          */
         if (!vm_net_mock_append_backpack_reservoir_counts_object(
                 out, outCap, &pos, &appendedReservoirCounts))

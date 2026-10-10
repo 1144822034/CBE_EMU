@@ -23,10 +23,17 @@ static void vm_mock_admin_redirect_monster_global(vm_mock_service_socket client,
 static void vm_mock_admin_render_monster_global_card(vm_mock_admin_text *page)
 {
     const vm_net_mock_monster_global_config *cfg;
+    u32 bossMax = 3u;
 
     if (page == NULL)
         return;
     cfg = vm_net_mock_monster_global_config_get();
+    if (cfg != NULL)
+        bossMax = cfg->bossEncounterEnemyMax;
+    if (bossMax < 1u)
+        bossMax = 1u;
+    if (bossMax > 3u)
+        bossMax = 3u;
     vm_mock_admin_text_appendf(
         page,
         "<section class=\"card global-card\"><form method=\"post\" action=\"/action\">"
@@ -55,13 +62,25 @@ static void vm_mock_admin_render_monster_global_card(vm_mock_admin_text *page)
         "<span class=\"check\"><input type=\"checkbox\" name=\"hp_extra_x3_when_mult_ge6\" "
         "value=\"1\"%s>等级倍率≥6（Lv≥56）时 HP 再 ×3</span></label>"
         "<p class=\"hint\">仅 HP；MP/攻击/防御仍只乘档位倍率。首领 HP×5 与全服血量%% 在其后叠加。</p>"
+        "<label class=\"field\" style=\"margin-top:10px\"><span>名字含 Boss 遇怪最多刷新数</span>"
+        "<select name=\"boss_encounter_enemy_max\" required>"
+        "<option value=\"1\"%s>1（固定 1 只）</option>"
+        "<option value=\"2\"%s>2（随机 1–2）</option>"
+        "<option value=\"3\"%s>3（随机 1–3，默认）</option>"
+        "</select></label>"
+        "<p class=\"hint\">仅当显示名或资源名含 ASCII「Boss」（大小写不敏感）时生效；"
+        "普通怪仍按原 1–3。战斗心得固定只数也会被此上限截断。"
+        "列：<code>boss_encounter_enemy_max</code>。</p>"
         "<div class=\"actions\" style=\"justify-content:flex-start\">"
         "<button type=\"submit\">保存全服百分比</button></div></form></section>",
         cfg ? cfg->hpPercent : 100u, cfg ? cfg->attackPercent : 100u,
         cfg ? cfg->defensePercent : 100u, cfg ? cfg->dropRatePercent : 100u,
         cfg ? cfg->rewardExpPercent : 100u,
         cfg ? cfg->rewardMoneyPercent : 100u,
-        (cfg != NULL && cfg->hpExtraX3WhenMultGe6 != 0) ? " checked" : "");
+        (cfg != NULL && cfg->hpExtraX3WhenMultGe6 != 0) ? " checked" : "",
+        bossMax == 1u ? " selected" : "",
+        bossMax == 2u ? " selected" : "",
+        bossMax == 3u ? " selected" : "");
 }
 
 static const char *vm_mock_admin_monster_family_name(u32 family)

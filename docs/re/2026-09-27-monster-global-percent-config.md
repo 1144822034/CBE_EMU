@@ -18,8 +18,11 @@
 | reward_exp_percent | 100 | 0–1000 |
 | reward_money_percent | 100 | 0–1000 |
 | hp_extra_x3_when_mult_ge6 | 0 | 0 或 1 |
+| boss_encounter_enemy_max | 3 | 1–3 |
 
 `hp_extra_x3_when_mult_ge6`：等级档位倍率 ≥6（Lv≥56）时，在等级倍率之后、首领 HP×5 与全服血量% 之前，对 HP 再 ×3。默认关闭。迁移：`server/mysql/migrate_add_monster_hp_extra_x3.sql`。
+
+`boss_encounter_enemy_max`：显示名/资源名含 ASCII「Boss」时，遇怪克隆只数上限（1 / 1–2 / 1–3）。详见 `2026-10-10-boss-name-encounter-enemy-max.md`。
 
 迁移：`server/mysql/migrate_add_monster_global_config.sql`；服务首次读取也会建表。
 

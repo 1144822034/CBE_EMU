@@ -549,6 +549,7 @@ static bool vm_client_packet_be32_field(const u8 *packet, u32 packetLen,
 }
 
 static void vm_client_cbe_bag_defer_clear(void);
+static void vm_client_cbe_bag_overflow_clear(void);
 
 static void vm_client_note_title_role_select(const u8 *packet, u32 packetLen)
 {
@@ -571,8 +572,9 @@ static void vm_client_note_title_role_select(const u8 *packet, u32 packetLen)
         !vm_client_packet_be32_field(packet, packetLen, "actorid", &actorId) &&
         !vm_client_packet_be32_field(packet, packetLen, "actorId", &actorId))
         return;
-    /* Fresh item-manager lifecycle — drop any pending deferred 30/21. */
+    /* Fresh item-manager lifecycle — drop any pending deferred/overflow 30/21. */
     vm_client_cbe_bag_defer_clear();
+    vm_client_cbe_bag_overflow_clear();
     agent_dbg0b451a_note_active_role(actorId);
 }
 
@@ -1014,6 +1016,16 @@ static bool vm_client_decode_object_u32(const vm_client_response_object *object,
 static void vm_client_cbe_bag_defer_clear(void);
 static bool vm_client_cbe_bag_defer_strip_login_grid(u8 **packet, u32 *packetLen);
 static bool vm_client_cbe_bag_defer_flush(u32 connectId);
+static void vm_client_cbe_bag_overflow_clear(void);
+static bool vm_client_cbe_bag_overflow_flush(u32 connectId);
+static void vm_client_cbe_bag_overflow_pump(void);
+static bool vm_client_cbe_grid30_iteminfo_first_chunk(const u8 *info, u16 infoLen,
+                                                      u16 cap, u16 *firstLenOut,
+                                                      u16 *firstRowsOut);
+static bool vm_client_cbe_bag_overflow_arm(const u8 *resultEnc, u16 resultLen,
+                                           const u8 *fullInfo, u16 fullLen,
+                                           u16 primaryLen, u16 primaryRows);
+static void vm_client_arm_scene_poll_urgent(const char *reason);
 static u32 vm_client_deliver_wt_response(
     u8 *packet,
     u32 packetLen,
@@ -1919,6 +1931,7 @@ static bool vm_client_truncate_backpack17_iteminfo(const u8 *in, u16 inLen,
     u32 countValuePos = 0;
     u32 i;
     u16 keep = 0;
+    u8 pass;
 
     if (keptRows != NULL)
         *keptRows = 0;
@@ -1934,81 +1947,117 @@ static bool vm_client_truncate_backpack17_iteminfo(const u8 *in, u16 inLen,
      * mmGame:0x418C 按 bootstrap-compact 解析 17/1：itemId + i16 + i16 + attr0.
      * Live Pixi 行带强化词条/宝石 trailer；原样拷贝会在装备行后错位，
      * 传送石 800 等后续消耗品进不了背包列表。
+     *
+     * copy-safe cap (~1000B) keeps ~58/138 rows. Prefer 920/921 修炼天书 first
+     * so truncated lists still get DSH/host list names for cultivation books.
      */
     if (!vm_client_seq_write_row_count(out, outCap, &outPos, 0, 1))
         return false;
     countValuePos = outPos - 1u;
     if (countTagToU8Out != NULL)
         *countTagToU8Out = (tagSize != 1);
-    for (i = 0; i < count; ++i)
+    for (pass = 0; pass < 2u && keep < maxRows; ++pass)
     {
-        u32 itemId = 0;
-        u16 firstWire = 0;
-        u16 secondWire = 0;
-        u32 extraPos;
-
-        if (!vm_client_seq_read_tagged_u32(in, inLen, &pos, &itemId))
+        pos = 0;
+        if (!vm_client_seq_read_row_count(in, inLen, &pos, &count, &tagSize))
             return false;
-        extraPos = pos;
-        if (!vm_client_seq_read_tagged_i16(in, inLen, &pos, &firstWire))
+        for (i = 0; i < count && keep < maxRows; ++i)
         {
-            pos = extraPos;
-            if (!vm_client_seq_skip_common_extra(in, inLen, &pos))
-                return false;
-            firstWire = 0;
-            secondWire = 0;
-        }
-        else if (!vm_client_seq_read_tagged_i16(in, inLen, &pos, &secondWire))
-        {
-            return false;
-        }
-        else
-        {
-            u8 attrCount;
-            u32 a;
+            u32 itemId = 0;
+            u16 firstWire = 0;
+            u16 secondWire = 0;
+            u32 extraPos;
+            int isBook;
 
-            if (pos + 3u > inLen || in[pos] != 0 || in[pos + 1u] != 1)
+            if (!vm_client_seq_read_tagged_u32(in, inLen, &pos, &itemId))
                 return false;
-            attrCount = in[pos + 2u];
-            pos += 3u;
-            for (a = 0; a < attrCount; ++a)
+            extraPos = pos;
+            if (!vm_client_seq_read_tagged_i16(in, inLen, &pos, &firstWire))
             {
-                if (!vm_client_seq_skip_tagged(in, inLen, &pos) ||
-                    !vm_client_seq_skip_tagged(in, inLen, &pos) ||
-                    !vm_client_seq_skip_tagged(in, inLen, &pos) ||
-                    !vm_client_seq_skip_tagged(in, inLen, &pos))
+                pos = extraPos;
+                if (!vm_client_seq_skip_common_extra(in, inLen, &pos))
                     return false;
+                firstWire = 0;
+                secondWire = 0;
             }
-            if (pos + 3u <= inLen && in[pos] == 0 && in[pos + 1u] == 1 &&
-                in[pos + 2u] == 0x47)
+            else if (!vm_client_seq_read_tagged_i16(in, inLen, &pos, &secondWire))
             {
-                for (a = 0; a < 4u; ++a)
+                return false;
+            }
+            else
+            {
+                u8 attrCount;
+                u32 a;
+
+                if (pos + 3u > inLen || in[pos] != 0 || in[pos + 1u] != 1)
+                    return false;
+                attrCount = in[pos + 2u];
+                pos += 3u;
+                for (a = 0; a < attrCount; ++a)
                 {
-                    if (!vm_client_seq_skip_tagged(in, inLen, &pos))
+                    if (!vm_client_seq_skip_tagged(in, inLen, &pos) ||
+                        !vm_client_seq_skip_tagged(in, inLen, &pos) ||
+                        !vm_client_seq_skip_tagged(in, inLen, &pos) ||
+                        !vm_client_seq_skip_tagged(in, inLen, &pos))
                         return false;
                 }
+                if (pos + 3u <= inLen && in[pos] == 0 && in[pos + 1u] == 1 &&
+                    in[pos + 2u] == 0x47)
+                {
+                    for (a = 0; a < 4u; ++a)
+                    {
+                        if (!vm_client_seq_skip_tagged(in, inLen, &pos))
+                            return false;
+                    }
+                }
+                /* Compact extra: attr_count is following u8, not i16 high. */
+                secondWire = (u16)(secondWire & 0xffu);
             }
-            /* Compact extra: attr_count is the following u8, not i16 high byte. */
-            secondWire = (u16)(secondWire & 0xffu);
+            if (!vm_client_cbe_item_is_client_grid_item(itemId))
+                continue;
+            isBook = (itemId == 920u || itemId == 921u);
+            if (pass == 0 && !isBook)
+                continue;
+            if (pass == 1 && isBook)
+                continue;
+            /*
+             * Prefer a partial compact list over aborting the whole rewrite.
+             * A failed rewrite used to deliver the raw Pixi 17/1 and trip
+             * mmGame:0x418C's 1024-byte stream copy (UI「解包错误」, empty bag).
+             *
+             * 17/1 has no name field; mmGame:0x418C fills item+4 from local
+             * item.dsh. 921's 说明 is empty on many trees while 920's is not —
+             * guest often copies 说明 into the list name slot.  Alias 921→920
+             * in the *display* list only (30/21 manager rows keep real 921).
+             */
+            {
+                u32 emitId = itemId;
+                static u8 s_aliasLog;
+
+                if (itemId == 921u)
+                {
+                    emitId = 920u;
+                    if (s_aliasLog < 4u)
+                    {
+                        ++s_aliasLog;
+                        printf("[info][network] cbe_17_book_display_alias "
+                               "item=921->920 evidence=17/1-dsh-说明-via-920\n");
+                    }
+                }
+                if (!vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos,
+                                                       emitId) ||
+                    !vm_client_seq_put_compact_extra_vals(out, outCap, &outPos,
+                                                          firstWire,
+                                                          secondWire))
+                {
+                    if (truncatedOut != NULL)
+                        *truncatedOut = true;
+                    pass = 2;
+                    break;
+                }
+            }
+            ++keep;
         }
-        if (!vm_client_cbe_item_is_client_grid_item(itemId))
-            continue;
-        if (keep >= maxRows)
-            break;
-        /*
-         * Prefer a partial compact list over aborting the whole rewrite.
-         * A failed rewrite used to deliver the raw Pixi 17/1 and trip
-         * mmGame:0x418C's 1024-byte stream copy (UI「解包错误」, empty bag).
-         */
-        if (!vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, itemId) ||
-            !vm_client_seq_put_compact_extra_vals(out, outCap, &outPos,
-                                                  firstWire, secondWire))
-        {
-            if (truncatedOut != NULL)
-                *truncatedOut = true;
-            break;
-        }
-        ++keep;
     }
     out[countValuePos] = (u8)keep;
     *outLen = (u16)outPos;
@@ -2170,8 +2219,12 @@ static u32 vm_client_cbe_grid_wire_count(u32 itemId, u32 count)
 {
     if (count == 0)
         return 0;
-    /* 802/803 reservoir + equipment: visible stack is 1 (count is durability). */
-    if (itemId == 802 || itemId == 803)
+    /*
+     * Visible stack 1; amount is durability/reservoir via 7/11:
+     * 802/803 HP/MP reservoir, 834/839 mall-pass remaining opens.
+     * Equipment ids (>=1000) are instances.
+     */
+    if (itemId == 802 || itemId == 803 || itemId == 834 || itemId == 839)
         return 1;
     if (itemId >= 1000u)
         return 1;
@@ -2252,11 +2305,15 @@ enum
     VM_CLIENT_CBE_ITEMINFO17_STREAM_ROWS = 255,
     /*
      * Login 30/21 full-attr ~8748B stalls HandleItemGrid before same-packet
-     * 7/7 type=2 (+104). Keep full-attr rows under a tighter wire budget so
-     * 7/7 still runs; all-compact asserts at InGame.c:913.
-     * Mock group-type1 order: 30/21 → 7/7 type=2 → 7/11.
+     * 7/7 type=2 (+104). client_out 2026-10-10: 4096→3155/61 rows still
+     * showed「解包错误」+ empty equip; 2048 primary keeps equip but only
+     * ~33/139 bag rows. Primary chunk stays ≤2048; remaining full-attr rows
+     * go to overflow follow-up 30/21 (never all-compact / InGame.c:913).
+     * Mock order: 30/21 → 7/7 type=2 → 7/11.
      */
-    VM_CLIENT_CBE_GRID30_DELIVER_CAP = 4096,
+    VM_CLIENT_CBE_GRID30_DELIVER_CAP = 2048,
+    /* Overflow WT object budget (event_packet_parse_WT cap is 10). */
+    VM_CLIENT_CBE_GRID30_OVERFLOW_OBJ_CAP = 9,
     /*
      * Stream frame is patched to 8192, but copy callee may still min(len,1024).
      * Keep 17/1 under the classic 1024 until that callee is confirmed enlarged.
@@ -2339,17 +2396,21 @@ static bool vm_client_copy_common_extra_cbe(const u8 *in, u32 inLen, u32 *inPos,
 static bool vm_client_build_backpack30_grid_cbe(const u8 *in, u16 inLen, u8 *out,
                                                 u32 outCap, u16 *outLen,
                                                 u16 maxRows, u16 *keptRows,
-                                                u16 *droppedRowsOut)
+                                                u16 *droppedRowsOut,
+                                                u16 *extraFailSkipOut)
 {
     u32 inPos = 0;
     u32 outPos = 0;
     u16 kept = 0;
     u16 dropped = 0;
+    u16 extraFailSkip = 0;
 
     if (keptRows != NULL)
         *keptRows = 0;
     if (droppedRowsOut != NULL)
         *droppedRowsOut = 0;
+    if (extraFailSkipOut != NULL)
+        *extraFailSkipOut = 0;
     if (in == NULL || out == NULL || outLen == NULL || maxRows == 0)
         return false;
     if (inLen == 0)
@@ -2417,24 +2478,17 @@ static bool vm_client_build_backpack30_grid_cbe(const u8 *in, u16 inLen, u8 *out
                                              &outPos))
         {
             /*
-             * Full-attr copy failed (gem layout / size): skip live extra and
-             * emit compact-extra so the row still seeds HandleItemGrid.
+             * Full-attr copy failed (gem layout / size): drop the row.
+             * Emitting compact-extra (attr=0) hits InGame.c:913 / UI「解包错误」
+             * and aborts the same WT before 7/7 type=2 (+104) can fill 装备栏.
              */
             inPos = extraPos;
             outPos = outRowStart;
             if (!vm_client_seq_skip_common_extra(in, inLen, &inPos))
                 break;
-            if (!vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos,
-                                                   itemId) ||
-                !vm_client_seq_put_tagged_i16(out, outCap, &outPos, (u16)seq) ||
-                !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos,
-                                                   wireCount) ||
-                !vm_client_seq_put_compact_extra_vals(out, outCap, &outPos, 0,
-                                                      0))
-            {
-                outPos = outRowStart;
-                break;
-            }
+            ++dropped;
+            ++extraFailSkip;
+            continue;
         }
         ++kept;
     }
@@ -2443,6 +2497,8 @@ static bool vm_client_build_backpack30_grid_cbe(const u8 *in, u16 inLen, u8 *out
         *keptRows = kept;
     if (droppedRowsOut != NULL)
         *droppedRowsOut = dropped;
+    if (extraFailSkipOut != NULL)
+        *extraFailSkipOut = extraFailSkip;
     /* Success if we consumed input or produced rows; empty in is OK. */
     return kept > 0 || inLen == 0 || inPos > 0;
 }
@@ -2495,13 +2551,19 @@ static bool vm_client_build_77_iteminfo_cbe(const u8 *in, u16 inLen, u8 *out,
                 return false;
         }
         if (!vm_client_seq_read_tagged_u32(in, inLen, &inPos, &itemId) ||
-            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &count) ||
-            !vm_client_seq_put_tagged_i16(out, outCap, &outPos, (u16)seq) ||
-            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, itemId) ||
-            !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos, count) ||
-            !vm_client_copy_common_extra_cbe(in, inLen, &inPos, out, outCap,
-                                             &outPos))
+            !vm_client_seq_read_tagged_u32(in, inLen, &inPos, &count))
             return false;
+        {
+            u32 wireCount = vm_client_cbe_grid_wire_count(itemId, count);
+            if (!vm_client_seq_put_tagged_i16(out, outCap, &outPos, (u16)seq) ||
+                !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos,
+                                                   itemId) ||
+                !vm_client_seq_put_tagged_u32_be32(out, outCap, &outPos,
+                                                   wireCount) ||
+                !vm_client_copy_common_extra_cbe(in, inLen, &inPos, out, outCap,
+                                                 &outPos))
+                return false;
+        }
         /* Login wear seq = slotIndex+1 (1..8); bag deltas use backpack seq. */
         if (itemId < 1000u || seq < 1u || seq > 8u)
             wornShaped = false;
@@ -2627,7 +2689,8 @@ static bool vm_client_sanitize_backpack30_iteminfo(const u8 *in, u16 inLen,
         extraOutPos = outPos;
         memcpy(out + outPos, in + extraStart, extraLen);
         outPos += extraLen;
-        if (itemId == 802 || itemId == 803 || itemId >= 1000u)
+        if (itemId == 802 || itemId == 803 || itemId == 834 || itemId == 839 ||
+            itemId >= 1000u)
         {
             if (vm_client_cbe_patch_common_extra_stack1(out + extraOutPos,
                                                        extraLen))
@@ -2959,6 +3022,7 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
         const u8 *resultEnc = NULL;
         u16 resultLen = 0;
         u16 droppedRows = 0;
+        u16 extraFailSkip = 0;
         u8 emptyIteminfo[1];
         bool rebuilt = false;
 
@@ -2985,87 +3049,68 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
             built = vm_client_build_backpack30_grid_cbe(
                 iteminfo, iteminfoLen, newIteminfo, VM_CLIENT_CBE_GRID30_SCRATCH,
                 &newIteminfoLen, (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows,
-                &droppedRows);
+                &droppedRows, &extraFailSkip);
             if (built && keptRows > 0 &&
                 newIteminfoLen > (u16)VM_CLIENT_CBE_GRID30_DELIVER_CAP)
             {
                 u16 fullLen = newIteminfoLen;
                 u16 fullKept = keptRows;
-                u16 rowCap;
+                u16 firstLen = 0;
+                u16 firstRows = 0;
 
                 /*
-                 * All-compact under the size cap still hits InGame.c:913
-                 * (compact extra attr=0). Keep full-attr rows, fewer of them.
-                 * Scene 17/1 later refreshes names for the full bag.
+                 * Keep a ≤cap primary chunk in the login WT (7/7 type=2 needs
+                 * a short HandleItemGrid). Remaining full-attr rows go to an
+                 * overflow follow-up of complementary 30/21 objects — do not
+                 * drop them (client_out 2026-10-10: 2048 cap → 33/139 bag).
                  */
-                rowCap = (u16)(((u32)VM_CLIENT_CBE_GRID30_DELIVER_CAP *
-                                (u32)fullKept) /
-                               (u32)fullLen);
-                if (rowCap < 1u)
-                    rowCap = 1u;
-                if (rowCap >= fullKept)
-                    rowCap = (u16)(fullKept - 1u);
                 printf("[warn][network] cbe_30_oversized_full_attr len=%u "
-                       "cap=%u rows=%u trying=full-attr-row-cap "
-                       "target_rows=%u evidence=HandleItemGrid-8k-class+"
-                       "compact-assert\n",
-                       fullLen, (u32)VM_CLIENT_CBE_GRID30_DELIVER_CAP, fullKept,
-                       rowCap);
-                built = false;
-                while (rowCap >= 1u)
+                       "cap=%u rows=%u trying=full-attr-chunk+overflow "
+                       "evidence=HandleItemGrid-8k-class+bag-complete\n",
+                       fullLen, (u32)VM_CLIENT_CBE_GRID30_DELIVER_CAP, fullKept);
+                if (!vm_client_cbe_grid30_iteminfo_first_chunk(
+                        newIteminfo, fullLen,
+                        (u16)VM_CLIENT_CBE_GRID30_DELIVER_CAP, &firstLen,
+                        &firstRows) ||
+                    firstRows == 0 || firstLen == 0 || firstLen > fullLen)
                 {
+                    built = false;
                     keptRows = 0;
-                    droppedRows = 0;
                     newIteminfoLen = 0;
-                    if (vm_client_build_backpack30_grid_cbe(
-                            iteminfo, iteminfoLen, newIteminfo,
-                            VM_CLIENT_CBE_GRID30_SCRATCH, &newIteminfoLen,
-                            rowCap, &keptRows, &droppedRows) &&
-                        keptRows > 0 &&
-                        newIteminfoLen <=
-                            (u16)VM_CLIENT_CBE_GRID30_DELIVER_CAP)
-                    {
-                        built = true;
-                        mode = "full-attr-row-cap";
-                        break;
-                    }
-                    if (rowCap <= 1u)
-                        break;
-                    rowCap = (u16)(rowCap > 16u ? (rowCap - 16u) : (rowCap / 2u));
-                    if (rowCap < 1u)
-                        rowCap = 1u;
-                }
-                if (!built)
-                {
-                    keptRows = 0;
-                    droppedRows = 0;
-                    newIteminfoLen = 0;
-                    printf("[warn][network] cbe_30_row_cap_failed "
+                    printf("[warn][network] cbe_30_chunk_split_failed "
                            "full_len=%u full_rows=%u evidence=no-all-compact\n",
                            fullLen, fullKept);
                 }
-            }
-            if (!built || (keptRows == 0 && iteminfoLen > 0))
-            {
-                printf("[warn][network] cbe_30_cbe_build_failed gridnum=%u "
-                       "iteminfo_len=%u kept=%u trying=compact-extra\n",
-                       gridnumValue, iteminfoLen, keptRows);
-                keptRows = 0;
-                droppedRows = 0;
-                newIteminfoLen = 0;
-                built = vm_client_build_backpack30_grid_compact(
-                    iteminfo, iteminfoLen, newIteminfo,
-                    VM_CLIENT_CBE_GRID30_SCRATCH, &newIteminfoLen,
-                    (u16)VM_CLIENT_CBE_BACKPACK_SLOTS, &keptRows, &droppedRows);
-                if (built && keptRows > 0)
-                    mode = "compact-extra-fallback";
+                else
+                {
+                    if (firstLen < fullLen &&
+                        !vm_client_cbe_bag_overflow_arm(resultEnc, resultLen,
+                                                        newIteminfo, fullLen,
+                                                        firstLen, firstRows))
+                    {
+                        printf("[warn][network] cbe_30_overflow_arm_failed "
+                               "primary=%u/%u rest=%u evidence=drop-rest\n",
+                               firstRows, fullKept,
+                               (unsigned)(fullKept - firstRows));
+                    }
+                    newIteminfoLen = firstLen;
+                    keptRows = firstRows;
+                    mode = "full-attr-chunk+overflow";
+                    built = true;
+                }
             }
             /*
-             * Never deliver raw Pixi 30/21 (9960B →「解包错误」).  Empty CBE
-             * grid is safer than poison; 17/1 may still refresh names later.
+             * Never deliver raw Pixi 30/21 (9960B →「解包错误」) and never fall
+             * back to all-compact (client_out 2026-10-09 compact still unpack-
+             * errored). Empty CBE grid is safer; 17/1 may refresh names later.
              */
             if (!built || keptRows == 0)
             {
+                if (iteminfoLen > 0)
+                    printf("[warn][network] cbe_30_cbe_build_failed gridnum=%u "
+                           "iteminfo_len=%u kept=%u trying=empty "
+                           "evidence=no-compact-fallback\n",
+                           gridnumValue, iteminfoLen, keptRows);
                 free(newIteminfo);
                 if (!vm_client_encode_tagged_u16(newGridnum, sizeof(newGridnum),
                                                  &newGridnumLen, 0, 1))
@@ -3074,6 +3119,8 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
                 newIteminfoLen = 0;
                 newIteminfo = emptyIteminfo;
                 keptRows = 0;
+                droppedRows = 0;
+                extraFailSkip = 0;
                 mode = "empty-after-rewrite-fail";
                 if (iteminfoLen > 0)
                     printf("[warn][network] cbe_30_rewrite_empty gridnum=%u "
@@ -3116,10 +3163,11 @@ static bool vm_client_rewrite_cbe_backpack_object(const vm_client_response_objec
             if (changedOut != NULL)
                 *changedOut = true;
             printf("[info][network] cbe_backpack_clamp object=30/21 gridnum=%u "
-                   "rows_kept=%u dropped=%u iteminfo_len=%u->%u mode=%s "
+                   "rows_kept=%u dropped=%u extra_fail_skip=%u "
+                   "iteminfo_len=%u->%u mode=%s "
                    "evidence=InGame.c:913-HandleItemGrid\n",
-                   keptRows, keptRows, droppedRows, iteminfoLen, newIteminfoLen,
-                   mode);
+                   keptRows, keptRows, droppedRows, extraFailSkip, iteminfoLen,
+                   newIteminfoLen, mode);
             return true;
         }
     }
@@ -4948,11 +4996,374 @@ int vm_client_hangup_confirm_skill_and_start(u32 operate)
 }
 
 /*
+ * Overflow bag seed (2026-10-10): keep a small full-attr 30/21 in the login
+ * group-type1 WT (so 7/7 type=2 still runs), then deliver remaining rows as
+ * complementary 30/21 follow-ups — one object per event=7 (multi-30/21 in one
+ * WT showed bag count 139→141). Never resend the primary chunk.
+ */
+typedef struct
+{
+    u8 *packet;
+    u32 packetLen;
+    u16 rows;
+} vm_client_cbe_bag_overflow_chunk;
+
+typedef struct
+{
+    u8 armed;
+    u16 primaryRows;
+    u16 overflowRows;
+    u8 overflowObjects;
+    vm_client_cbe_bag_overflow_chunk chunks[9];
+} vm_client_cbe_bag_overflow_state;
+
+static vm_client_cbe_bag_overflow_state g_vmClientCbeBagOverflow;
+
+static void vm_client_cbe_bag_overflow_clear(void)
+{
+    u8 i;
+
+    for (i = 0; i < g_vmClientCbeBagOverflow.overflowObjects && i < 9; ++i)
+        free(g_vmClientCbeBagOverflow.chunks[i].packet);
+    memset(&g_vmClientCbeBagOverflow, 0, sizeof(g_vmClientCbeBagOverflow));
+}
+
+/* One CBE-rewritten 30/21 iteminfo row: itemId + seq + count + common extra. */
+static bool vm_client_cbe_grid30_skip_out_row(const u8 *buf, u16 len, u32 *pos)
+{
+    if (!vm_client_seq_skip_tagged(buf, len, pos) ||
+        !vm_client_seq_skip_tagged(buf, len, pos) ||
+        !vm_client_seq_skip_tagged(buf, len, pos) ||
+        !vm_client_seq_skip_common_extra(buf, len, pos))
+        return false;
+    return true;
+}
+
+static u16 vm_client_cbe_grid30_count_rows(const u8 *info, u16 infoLen)
+{
+    u32 pos = 0;
+    u16 rows = 0;
+
+    if (info == NULL || infoLen == 0)
+        return 0;
+    while (pos < infoLen)
+    {
+        if (!vm_client_cbe_grid30_skip_out_row(info, infoLen, &pos))
+            return 0;
+        rows += 1;
+    }
+    return rows;
+}
+
+static bool vm_client_cbe_grid30_iteminfo_first_chunk(const u8 *info, u16 infoLen,
+                                                      u16 cap, u16 *firstLenOut,
+                                                      u16 *firstRowsOut)
+{
+    u32 pos = 0;
+    u16 rows = 0;
+
+    if (firstLenOut != NULL)
+        *firstLenOut = 0;
+    if (firstRowsOut != NULL)
+        *firstRowsOut = 0;
+    if (info == NULL || cap == 0)
+        return false;
+    if (infoLen == 0)
+        return true;
+    while (pos < infoLen)
+    {
+        u32 rowStart = pos;
+
+        if (!vm_client_cbe_grid30_skip_out_row(info, infoLen, &pos))
+            return false;
+        if (pos > cap && rows > 0)
+        {
+            if (firstLenOut != NULL)
+                *firstLenOut = (u16)rowStart;
+            if (firstRowsOut != NULL)
+                *firstRowsOut = rows;
+            return true;
+        }
+        if (pos > cap && rows == 0)
+        {
+            /* Single row above cap: still deliver once so the bag is not empty. */
+            if (firstLenOut != NULL)
+                *firstLenOut = (u16)pos;
+            if (firstRowsOut != NULL)
+                *firstRowsOut = 1;
+            return true;
+        }
+        rows += 1;
+        if (firstLenOut != NULL)
+            *firstLenOut = (u16)pos;
+        if (firstRowsOut != NULL)
+            *firstRowsOut = rows;
+    }
+    return true;
+}
+
+static bool vm_client_cbe_append_3021_object(u8 *out, u32 outCap, u32 *pos,
+                                             const u8 *resultEnc, u16 resultLen,
+                                             const u8 *info, u16 infoLen,
+                                             u16 rows)
+{
+    u32 objectStart;
+    u8 gridEnc[4];
+    u16 gridEncLen = 0;
+
+    if (out == NULL || pos == NULL || resultEnc == NULL || info == NULL)
+        return false;
+    if (!vm_client_encode_tagged_u16(gridEnc, sizeof(gridEnc), &gridEncLen, rows,
+                                     1))
+        return false;
+    if (*pos + 6u > outCap)
+        return false;
+    objectStart = *pos;
+    out[(*pos)++] = 1;
+    out[(*pos)++] = 30;
+    out[(*pos)++] = 21;
+    out[(*pos)++] = 0;
+    out[(*pos)++] = 0;
+    out[(*pos)++] = 0;
+    if (!vm_client_put_object_field(out, outCap, pos, "result", resultEnc,
+                                     resultLen) ||
+        !vm_client_put_object_field(out, outCap, pos, "gridnum", gridEnc,
+                                     gridEncLen) ||
+        !vm_client_put_object_field(out, outCap, pos, "iteminfo", info,
+                                     infoLen))
+        return false;
+    out[objectStart + 4u] = (u8)((*pos - objectStart) >> 8);
+    out[objectStart + 5u] = (u8)(*pos - objectStart);
+    return true;
+}
+
+static bool vm_client_cbe_bag_overflow_arm(const u8 *resultEnc, u16 resultLen,
+                                           const u8 *fullInfo, u16 fullLen,
+                                           u16 primaryLen, u16 primaryRows)
+{
+    u8 objectCount = 0;
+    u16 overflowRows = 0;
+    u32 cursor = primaryLen;
+    u16 primaryWalk;
+
+    vm_client_cbe_bag_overflow_clear();
+    if (resultEnc == NULL || fullInfo == NULL || fullLen <= primaryLen ||
+        primaryLen == 0)
+        return false;
+    primaryWalk = vm_client_cbe_grid30_count_rows(fullInfo, primaryLen);
+    if (primaryWalk != primaryRows)
+    {
+        printf("[warn][network] cbe_30_primary_row_mismatch claim=%u walk=%u "
+               "len=%u evidence=abort-overflow\n",
+               primaryRows, primaryWalk, primaryLen);
+        return false;
+    }
+    while (cursor < fullLen &&
+           objectCount < (u8)VM_CLIENT_CBE_GRID30_OVERFLOW_OBJ_CAP)
+    {
+        u32 chunkStart = cursor;
+        u32 walk = cursor;
+        u16 chunkRows = 0;
+        u8 *out = NULL;
+        u32 outCap;
+        u32 pos = 5;
+        u16 infoLen;
+        u16 walkRows;
+
+        while (walk < fullLen)
+        {
+            u32 rowStart = walk;
+
+            if (!vm_client_cbe_grid30_skip_out_row(fullInfo, fullLen, &walk))
+            {
+                vm_client_cbe_bag_overflow_clear();
+                return false;
+            }
+            if ((walk - chunkStart) >
+                    (u32)VM_CLIENT_CBE_GRID30_DELIVER_CAP &&
+                chunkRows > 0)
+            {
+                walk = rowStart;
+                break;
+            }
+            chunkRows += 1;
+            if ((walk - chunkStart) >
+                    (u32)VM_CLIENT_CBE_GRID30_DELIVER_CAP &&
+                chunkRows == 1)
+                break;
+        }
+        if (chunkRows == 0 || walk <= chunkStart)
+            break;
+        infoLen = (u16)(walk - chunkStart);
+        walkRows = vm_client_cbe_grid30_count_rows(fullInfo + chunkStart, infoLen);
+        if (walkRows != chunkRows)
+        {
+            printf("[warn][network] cbe_30_overflow_row_mismatch claim=%u "
+                   "walk=%u len=%u evidence=abort-overflow\n",
+                   chunkRows, walkRows, infoLen);
+            vm_client_cbe_bag_overflow_clear();
+            return false;
+        }
+        outCap = (u32)infoLen + 128u;
+        out = (u8 *)malloc(outCap);
+        if (out == NULL)
+        {
+            vm_client_cbe_bag_overflow_clear();
+            return false;
+        }
+        out[0] = 'W';
+        out[1] = 'T';
+        out[2] = 0;
+        out[3] = 0;
+        out[4] = 0;
+        if (!vm_client_cbe_append_3021_object(out, outCap, &pos, resultEnc,
+                                               resultLen, fullInfo + chunkStart,
+                                               infoLen, chunkRows))
+        {
+            free(out);
+            vm_client_cbe_bag_overflow_clear();
+            return false;
+        }
+        vm_client_finish_wt_packet(out, pos, 1);
+        g_vmClientCbeBagOverflow.chunks[objectCount].packet = out;
+        g_vmClientCbeBagOverflow.chunks[objectCount].packetLen = pos;
+        g_vmClientCbeBagOverflow.chunks[objectCount].rows = chunkRows;
+        overflowRows = (u16)(overflowRows + chunkRows);
+        objectCount += 1;
+        cursor = walk;
+    }
+    if (objectCount == 0)
+        return false;
+    if (cursor < fullLen)
+        printf("[warn][network] cbe_30_overflow_truncated cursor=%u full=%u "
+               "objs=%u evidence=overflow-obj-cap-%u\n",
+               cursor, fullLen, objectCount,
+               (unsigned)VM_CLIENT_CBE_GRID30_OVERFLOW_OBJ_CAP);
+    g_vmClientCbeBagOverflow.armed = 1;
+    g_vmClientCbeBagOverflow.primaryRows = primaryRows;
+    g_vmClientCbeBagOverflow.overflowRows = overflowRows;
+    g_vmClientCbeBagOverflow.overflowObjects = objectCount;
+    /*
+     * Do not queue every overflow chunk in the same drain as the login
+     * primary: scheduler_dispatch_net_tasks fires all pending event=7 in one
+     * tick → multi-second HandleItemGrid stall (client_out deliver_ms≈8s)
+     * and blocks scene-poll (no 27/11 / chat).  Arm urgent poll so NPC/chat
+     * can land between one-chunk drips.
+     */
+    vm_client_arm_scene_poll_urgent("login-30-21-overflow");
+    printf("[info][network] cbe_30_overflow_arm primary_rows=%u "
+           "overflow_rows=%u objs=%u evidence=one-30-21-per-event7-drip\n",
+           primaryRows, overflowRows, objectCount);
+    return true;
+}
+
+/*
+ * Deliver at most one complementary 30/21 per call.  Remaining chunks stay
+ * armed for vm_client_cbe_bag_overflow_pump (after net dispatch, when idle).
+ */
+static bool vm_client_cbe_bag_overflow_flush(u32 connectId)
+{
+    vm_net_channel *channel;
+    vm_client_cbe_bag_overflow_chunk *chunk;
+    u32 events;
+    u8 i;
+    u8 left;
+
+    if (!g_vmClientCbeBagOverflow.armed ||
+        g_vmClientCbeBagOverflow.overflowObjects == 0)
+        return false;
+    channel = scheduler_find_net_channel(connectId);
+    if (channel == NULL || channel->callback == 0)
+    {
+        printf("[warn][network] cbe_30_overflow_flush_no_channel connect=%u "
+               "rows=%u\n",
+               connectId, (unsigned)g_vmClientCbeBagOverflow.overflowRows);
+        return false;
+    }
+    chunk = &g_vmClientCbeBagOverflow.chunks[0];
+    if (chunk->packet == NULL || chunk->packetLen < 5)
+    {
+        /* Drop empty head and keep pumping. */
+        for (i = 1; i < g_vmClientCbeBagOverflow.overflowObjects; ++i)
+            g_vmClientCbeBagOverflow.chunks[i - 1u] =
+                g_vmClientCbeBagOverflow.chunks[i];
+        g_vmClientCbeBagOverflow.overflowObjects -= 1u;
+        if (g_vmClientCbeBagOverflow.overflowObjects == 0)
+            vm_client_cbe_bag_overflow_clear();
+        return false;
+    }
+    events = vm_client_deliver_wt_response(
+        chunk->packet, chunk->packetLen, 7, channel->callback, channel->context,
+        connectId, false, false);
+    if (events == 0)
+    {
+        printf("[warn][network] cbe_30_overflow_flush_failed connect=%u "
+               "rows=%u len=%u evidence=drop-chunk-keep-rest\n",
+               connectId, (unsigned)chunk->rows, chunk->packetLen);
+        free(chunk->packet);
+        chunk->packet = NULL;
+        for (i = 1; i < g_vmClientCbeBagOverflow.overflowObjects; ++i)
+            g_vmClientCbeBagOverflow.chunks[i - 1u] =
+                g_vmClientCbeBagOverflow.chunks[i];
+        g_vmClientCbeBagOverflow.overflowObjects -= 1u;
+        if (g_vmClientCbeBagOverflow.overflowObjects == 0)
+            vm_client_cbe_bag_overflow_clear();
+        return false;
+    }
+    g_netDownLinkData += chunk->packetLen;
+    left = (u8)(g_vmClientCbeBagOverflow.overflowObjects - 1u);
+    printf("[info][network] cbe_30_overflow_deliver rows=%u len=%u connect=%u "
+           "left=%u evidence=one-chunk-per-idle-tick\n",
+           (unsigned)chunk->rows, chunk->packetLen, connectId, left);
+    free(chunk->packet);
+    chunk->packet = NULL;
+    for (i = 1; i < g_vmClientCbeBagOverflow.overflowObjects; ++i)
+        g_vmClientCbeBagOverflow.chunks[i - 1u] =
+            g_vmClientCbeBagOverflow.chunks[i];
+    g_vmClientCbeBagOverflow.overflowObjects = left;
+    if (g_vmClientCbeBagOverflow.overflowObjects == 0)
+    {
+        printf("[info][network] cbe_30_overflow_flush_done overflow_rows=%u "
+               "primary_rows=%u connect=%u evidence=drip-complete\n",
+               (unsigned)g_vmClientCbeBagOverflow.overflowRows,
+               (unsigned)g_vmClientCbeBagOverflow.primaryRows, connectId);
+        vm_client_cbe_bag_overflow_clear();
+    }
+    return true;
+}
+
+/* Queue one overflow chunk only when guest has no pending event=7. */
+static void vm_client_cbe_bag_overflow_pump(void)
+{
+    vm_net_channel *channel = NULL;
+    u32 i;
+
+    if (!g_vmClientCbeBagOverflow.armed ||
+        g_vmClientCbeBagOverflow.overflowObjects == 0)
+        return;
+    for (i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        if (g_netChannels[i].active && g_netChannels[i].callback != 0)
+        {
+            channel = &g_netChannels[i];
+            break;
+        }
+    }
+    if (channel == NULL || channel->callback == 0)
+        return;
+    if (scheduler_find_pending_net_event(7, channel->callback,
+                                          channel->context) != NULL)
+        return;
+    (void)vm_client_cbe_bag_overflow_flush(channel->connectId);
+}
+
+/*
  * Deferred login backpack seed: strip heavy 30/21 (+7/11) from the group-type1
  * WT, then flush once as a follow-up event=7 after that login delivery.
  * Do NOT strip 17/1 — scene startup keeps 7/42+17/1 together; orphan 17/1
  * (bag UI not open) caused「解包错误」and wedged the second login.
  * One 30/21 only (repeat duplicates stacks).
+ * Disabled in prepare_cbe_downlink; overflow chunking replaces this path.
  */
 typedef struct
 {
@@ -5219,6 +5630,62 @@ static bool vm_client_cbe_login_bag_order(u8 **packet, u32 *packetLen)
     return true;
 }
 
+/* Uplink 1/7/38 {seq}: remember seq so downlink bookdes can patch list name.
+ * Guest uplinks have no objectCount byte — objects start at offset 4
+ * (same as vm_client_log_uplink_objects). */
+static void vm_client_cbe_note_cultivation_book_uplink(const u8 *req, u32 len)
+{
+    u32 offset = 4;
+    vm_client_response_object object;
+    const u8 *seqEnc = NULL;
+    u16 seqEncLen = 0;
+    u32 seqVal = 0;
+
+    if (req == NULL || len < 11u || req[0] != 'W' || req[1] != 'T')
+        return;
+    while (offset + 6u <= len &&
+           vm_client_next_response_object(req, len, &offset, &object))
+    {
+        if (object.major != 1 || object.kind != 7 || object.subtype != 38)
+            continue;
+        if (!vm_client_response_object_field(&object, "seq", &seqEnc,
+                                             &seqEncLen) ||
+            !vm_client_decode_tagged_u32(seqEnc, seqEncLen, &seqVal) ||
+            seqVal == 0 || seqVal > 0xffffu)
+        {
+            continue;
+        }
+        vm_host_cbe_note_cultivation_book_read_seq((u16)seqVal);
+        return;
+    }
+}
+
+/* Downlink 7/38 bookdes → host patches bag item+4 short name (≤16 GBK). */
+static void vm_client_cbe_note_cultivation_book_downlink(const u8 *packet,
+                                                         u32 packetLen)
+{
+    u32 offset = 5;
+    vm_client_response_object object;
+    char bookDes[384];
+
+    if (packet == NULL || packetLen < 11u || packet[0] != 'W' ||
+        packet[1] != 'T')
+        return;
+    while (offset + 6u <= packetLen &&
+           vm_client_next_response_object(packet, packetLen, &offset, &object))
+    {
+        if (object.major != 1 || object.kind != 7 || object.subtype != 38)
+            continue;
+        bookDes[0] = 0;
+        if (!vm_client_response_object_string(&object, "bookdes", bookDes,
+                                              sizeof(bookDes)))
+            return;
+        vm_host_cbe_note_cultivation_bookdes((const u8 *)bookDes,
+                                             (u32)strlen(bookDes));
+        return;
+    }
+}
+
 static void vm_client_prepare_cbe_downlink(u8 **packet, u32 *packetLen)
 {
     u32 offset = 5;
@@ -5240,6 +5707,7 @@ static void vm_client_prepare_cbe_downlink(u8 **packet, u32 *packetLen)
     (void)vm_client_strip_cbe_unsupported_objects(packet, packetLen);
     (void)vm_client_cbe_clamp_backpack_packet(packet, packetLen);
     (void)vm_client_cbe_login_bag_order(packet, packetLen);
+    vm_client_cbe_note_cultivation_book_downlink(*packet, *packetLen);
     /*
      * Bag-defer disabled: peeling login 30/21 into a lone follow-up caused
      *「解包错误」and a hard stall on the second role login (client_out
@@ -5291,6 +5759,8 @@ static void vm_client_prepare_cbe_downlink(u8 **packet, u32 *packetLen)
             printf("[info][network] cbe_backpack_packet objects=%u has_17_1=%u "
                    "has_30_21=%u list=%s resp=%u\n",
                    n, bag17, bag30, list, *packetLen);
+        if (bag17 != 0)
+            vm_host_cbe_request_cultivation_book_list_name_refresh();
         if (has47 != 0)
             printf("[info][network] cbe_hangup_47_packet objects=%u list=%s "
                    "resp=%u evidence=settle-downlink\n",
@@ -7150,6 +7620,11 @@ static void vm_net_mock_async_drain_completions(void)
                 }
             }
         }
+        /*
+         * Overflow 30/21: do not flush here.  Same-tick primary+all-chunks
+         * stalled HandleItemGrid ~8s and blocked scene-poll.  Drip via
+         * vm_client_cbe_bag_overflow_pump after net dispatch when idle.
+         */
         if (completion->closeAfterData)
         {
             /* Exchange already closed the live sock; keep CBE disconnect event. */
@@ -7207,6 +7682,7 @@ static void vm_net_mock_async_reset(void)
     vm_client_live_session_close(&g_vmClientDataSession);
     vm_client_live_session_close(&g_vmClientPollSession);
     vm_client_cbe_bag_defer_clear();
+    vm_client_cbe_bag_overflow_clear();
 }
 
 static void vm_net_mock_async_shutdown(void)
@@ -8294,6 +8770,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
 #endif
 #if defined(CBE_CLIENT_ONLY)
     vm_client_log_uplink_objects(request, readLen);
+    vm_client_cbe_note_cultivation_book_uplink(request, readLen);
     vm_client_hangup_note_operate_uplink(request, readLen);
     if (vm_client_request_is_cbe_hangup_start(request, readLen))
     {

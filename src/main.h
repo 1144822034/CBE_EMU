@@ -44,6 +44,12 @@ void agent_dbg0b451a_on_timer_remain_write(u32 addr, u32 size, u32 value, u32 pc
 /* Title 1/1/6 role-select: bind dream HUD visit/remain to this roleId. */
 void agent_dbg0b451a_note_active_role(u32 roleId);
 void vm_host_dbg_note_open14_uplink(const u8 *req, u32 len);
+/* CBE 921 list name: note 7/38 seq, then patch from bookdes (≤16 GBK). */
+void vm_host_cbe_note_cultivation_book_read_seq(u16 seq);
+void vm_host_cbe_note_cultivation_bookdes(const u8 *gbk, u32 gbkLen);
+/* After downlink 17/1: refresh item+4 on next host pumps (mmGame in VM pool). */
+void vm_host_cbe_request_cultivation_book_list_name_refresh(void);
+void vm_host_cbe_pump_cultivation_book_list_name_refresh(void);
 extern u32 g_agent_timer_obj;
 void SaveCpuContext(u32 *);
 void RestoreCpuContext(u32 *stackPtr);

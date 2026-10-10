@@ -142,6 +142,10 @@ static void vm_mock_ladder_note_milestone_settled(void);
 static void vm_mock_tianxia_champ_invalidate(void);
 static void vm_mock_tianxia_on_champ_cosmetics_changed(u32 roleId);
 
+/* Defined in mock_server_scene_task.c; encounter clone roll (equipment_npc)
+ * caps Boss-named monsters via admin boss_encounter_enemy_max. */
+static bool vm_net_mock_monster_name_contains_boss(u32 enemyId);
+
 #include "mock_server_equipment_npc.c"
 #include "mock_server_cosmetics.c"
 #include "mock_server_recovered_helpers.inc"

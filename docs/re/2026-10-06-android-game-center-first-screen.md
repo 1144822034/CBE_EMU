@@ -41,3 +41,14 @@ APK 内 `lib/arm64-v8a/libmtksim.so` = **662176** 字节（含游戏中心）。
 
 覆盖安装 **v94**（`versionCode 94`）→ wipe jni-hot → log
 `game center initialized … (android)` + `loaded apk jniLibs`。
+
+## 2026-10-10 再丢失与恢复
+
+工作区把桌面门控
+`!defined(CBE_PLATFORM_ANDROID) && !defined(CBE_PLATFORM_NO_WINDOW)`
+同步进 `src/main.c` 与 JNI `cbeEmu/main.c`，再次关掉 Android 游戏中心，
+并丢掉 `g_cbeVmReadyForRun` / `cbeInit` 早退。已按 HEAD 已验证契约与
+`tmp_jni_main_c_before_sync.c` 定向恢复同一套门控，两边 `main.c` 保持一致。
+
+验证：重编 `libmtksim.so` 后覆盖安装 → wipe jni-hot → log
+`game center initialized … (android)` + `loaded apk jniLibs`。

@@ -128,10 +128,13 @@ enum
 static u8 vm_net_mock_battle_apply_leader_insight_enemy_count(
     u8 rolledCount,
     vm_mock_service_client_session *leaderSession,
-    bool useSceneMonsterStart)
+    bool useSceneMonsterStart,
+    u32 enemyId)
 {
     vm_net_mock_role_state *leaderRole = NULL;
     const char *forcedSpec = getenv("CBE_BATTLE_ENEMY_COUNT");
+    u8 fixed = 3;
+    bool isBossName;
 
     (void)useSceneMonsterStart;
     if (leaderSession == NULL)
@@ -142,13 +145,17 @@ static u8 vm_net_mock_battle_apply_leader_insight_enemy_count(
     if (leaderRole == NULL ||
         vm_net_mock_role_active_battle_exp_bonus_percent(leaderRole) == 0)
         return rolledCount;
-    if (rolledCount != 3)
+    isBossName = vm_net_mock_monster_name_contains_boss(enemyId);
+    if (isBossName)
+        fixed = (u8)vm_net_mock_battle_boss_encounter_enemy_max(enemyId);
+    if (rolledCount != fixed)
     {
-        printf("[info][network] mock_battle_enemy_count_fixed role=%u count=3 "
-               "reason=battle-insight-leader evidence=item.dsh:828\n",
-               leaderRole->roleId);
+        printf("[info][network] mock_battle_enemy_count_fixed role=%u count=%u "
+               "reason=battle-insight-leader%s enemy=%u evidence=item.dsh:828\n",
+               leaderRole->roleId, (u32)fixed,
+               isBossName ? "+boss-name-cap" : "", enemyId);
     }
-    return 3;
+    return fixed;
 }
 
 static u32 vm_net_mock_build_battle_scene_start_info_blob(u8 *out, u32 outCap,
@@ -15643,7 +15650,9 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     if (roleMp > roleMaxMp)
         roleMp = roleMaxMp;
 
-    battleEnemyCount = vm_net_mock_battle_roll_enemy_count(useSceneMonsterStart);
+    battleEnemyCount =
+        vm_net_mock_battle_roll_enemy_count(useSceneMonsterStart,
+                                            requestedEnemyId);
     if (useSceneMonsterStart)
     {
         if (activeSession != NULL &&
@@ -15658,7 +15667,8 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         if (activeTeam != NULL && teamBattleScene != NULL)
         {
             battleEnemyCount = vm_net_mock_battle_apply_leader_insight_enemy_count(
-                battleEnemyCount, activeSession, useSceneMonsterStart);
+                battleEnemyCount, activeSession, useSceneMonsterStart,
+                requestedEnemyId);
             battleInfoLen = vm_net_mock_build_team_battle_scene_start_info_blob(
                 battleInfo, sizeof(battleInfo),
                 sceneMonsterIndex,
@@ -15689,7 +15699,8 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
             if (vm_mock_service_team_is_leader(activeTeam, activeSession->clientId))
             {
                 battleEnemyCount = vm_net_mock_battle_apply_leader_insight_enemy_count(
-                    battleEnemyCount, activeSession, useSceneMonsterStart);
+                    battleEnemyCount, activeSession, useSceneMonsterStart,
+                    requestedEnemyId);
             }
         }
         battleInfoLen = vm_net_mock_build_battle_start_info_blob(
@@ -16409,7 +16420,9 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         roleHp = roleMaxHp;
     if (roleMp > roleMaxMp)
         roleMp = roleMaxMp;
-    battleEnemyCount = vm_net_mock_battle_roll_enemy_count(useSceneMonsterStart);
+    battleEnemyCount =
+        vm_net_mock_battle_roll_enemy_count(useSceneMonsterStart,
+                                            requestedEnemyId);
     if (playerOnRight && !useSceneMonsterStart)
         enemyWireId = requestedEnemyId;
     /*
@@ -16447,7 +16460,8 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         if (activeTeam != NULL && teamBattleScene != NULL)
         {
             battleEnemyCount = vm_net_mock_battle_apply_leader_insight_enemy_count(
-                battleEnemyCount, activeSession, useSceneMonsterStart);
+                battleEnemyCount, activeSession, useSceneMonsterStart,
+                requestedEnemyId);
             battleInfoLen = vm_net_mock_build_team_battle_scene_start_info_blob(
                 battleInfo, sizeof(battleInfo),
                 sceneMonsterIndex,
@@ -16486,7 +16500,8 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
             if (vm_mock_service_team_is_leader(activeTeam, activeSession->clientId))
             {
                 battleEnemyCount = vm_net_mock_battle_apply_leader_insight_enemy_count(
-                    battleEnemyCount, activeSession, useSceneMonsterStart);
+                    battleEnemyCount, activeSession, useSceneMonsterStart,
+                    requestedEnemyId);
             }
         }
         battleInfoLen = vm_net_mock_build_battle_start_info_blob(

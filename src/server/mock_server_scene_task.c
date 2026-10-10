@@ -2564,6 +2564,41 @@ static bool vm_net_mock_monster_battle_left_appearance(
             0);
 }
 
+static bool vm_net_mock_ascii_ci_contains_boss(const char *text)
+{
+    const unsigned char *p;
+
+    if (text == NULL || text[0] == 0)
+        return false;
+    for (p = (const unsigned char *)text; p[0] != 0; ++p)
+    {
+        if ((p[0] == 'B' || p[0] == 'b') &&
+            (p[1] == 'O' || p[1] == 'o') &&
+            (p[2] == 'S' || p[2] == 's') &&
+            (p[3] == 'S' || p[3] == 's'))
+            return true;
+    }
+    return false;
+}
+
+/* Display name or actor resource contains ASCII "Boss" (case-insensitive). */
+static bool vm_net_mock_monster_name_contains_boss(u32 enemyId)
+{
+    char name[64];
+    const char *actor = NULL;
+
+    if (enemyId == 0)
+        return false;
+    memset(name, 0, sizeof(name));
+    (void)vm_net_mock_monster_battle_left_appearance(
+        enemyId, name, sizeof(name), NULL, NULL, &actor);
+    if (vm_net_mock_ascii_ci_contains_boss(name))
+        return true;
+    if (vm_net_mock_ascii_ci_contains_boss(actor))
+        return true;
+    return false;
+}
+
 static u32 vm_net_mock_monster_admin_list(
     vm_net_mock_monster_admin_row *rows, u32 rowCap)
 {

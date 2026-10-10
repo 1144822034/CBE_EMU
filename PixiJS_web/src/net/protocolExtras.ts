@@ -4318,7 +4318,10 @@ export function maxFlaskBuyUnitsFromBag(
   return Math.floor((FLASK_MAX_RESERVOIR - cur) / FLASK_UNIT_RESERVOIR);
 }
 
-/** 商城仓库/出售凭证：bag.count = 剩余耐久（打开次数），非堆叠张数。 */
+/**
+ * 商城仓库/出售凭证：权威剩余耐久在 7/11；30/21 可见堆叠=1（与壶同合同）。
+ * bag.count 经 applyFlaskReservoirsToBag / 使用回包后为剩余打开次数。
+ */
 export function isDurableMallPassItemId(itemId: number): boolean {
   return itemId === 834 || itemId === 839;
 }
@@ -4647,8 +4650,8 @@ export function parseBagItems(packet: WtPacket): BagItem[] {
 }
 
 /**
- * 7/11 `info`: u8 n + repeat { i16 seq, u32 reservoir }.
- * 802/803 储量权威；30/21 可见堆叠恒为 1。
+ * 7/11 `info`: u8 n + repeat { i16 seq, u32 value }.
+ * 802/803 储量、834/839 凭证耐久权威；30/21 可见堆叠恒为 1。
  */
 export function parseFlaskReservoirUpdates(
   packet: WtPacket,
@@ -4673,14 +4676,19 @@ export function parseFlaskReservoirUpdates(
   return map;
 }
 
-/** Apply 7/11 reservoirs onto bag rows (by seq). count=0 marks empty flask. */
+/** Rows whose bag.count is filled from 7/11 (flask reservoir / mall-pass durability). */
+function bagUsesCount711(itemId: number): boolean {
+  return isReservoirFlaskItemId(itemId) || isDurableMallPassItemId(itemId);
+}
+
+/** Apply 7/11 values onto bag rows (by seq). count=0 marks empty flask/pass. */
 export function applyFlaskReservoirsToBag(
   bag: BagItem[],
   reservoirs: Map<number, number>,
 ): BagItem[] {
   if (!reservoirs.size) return bag;
   return bag.map((it) => {
-    if (!isReservoirFlaskItemId(it.itemId)) return it;
+    if (!bagUsesCount711(it.itemId)) return it;
     const v = reservoirs.get(it.seq);
     if (v == null) return it;
     return { ...it, count: v };
@@ -4688,17 +4696,17 @@ export function applyFlaskReservoirsToBag(
 }
 
 /**
- * 30/21 / 17/1 壶行 count 常为可见堆叠 1；若本包无 7/11，保留先前储量。
+ * 30/21 / 17/1 壶/凭证行 count 常为可见堆叠 1；若本包无 7/11，保留先前数量。
  */
 export function preserveFlaskReservoirAcrossBagRefresh(
   next: BagItem,
   prev: BagItem | undefined,
 ): BagItem {
   let row = next;
-  if (isReservoirFlaskItemId(next.itemId)) {
+  if (bagUsesCount711(next.itemId)) {
     if (next.count <= 1 &&
       prev &&
-      isReservoirFlaskItemId(prev.itemId) &&
+      bagUsesCount711(prev.itemId) &&
       prev.seq === next.seq &&
       prev.count > 1
     ) {
@@ -4771,8 +4779,8 @@ export function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): B
     const stackable =
       it.kind !== "equip" &&
       hit.kind !== "equip" &&
-      !isReservoirFlaskItemId(it.itemId) &&
-      !isReservoirFlaskItemId(hit.itemId);
+      !bagUsesCount711(it.itemId) &&
+      !bagUsesCount711(hit.itemId);
     const count = stackable
       ? Math.max(it.count >>> 0, hit.count >>> 0)
       : hit.count > 0
@@ -4841,8 +4849,8 @@ export function mergeBagItemUpdateDeltas(
       !!prev &&
       prev.kind !== "equip" &&
       u.kind !== "equip" &&
-      !isReservoirFlaskItemId(prev.itemId) &&
-      !isReservoirFlaskItemId(u.itemId) &&
+      !bagUsesCount711(prev.itemId) &&
+      !bagUsesCount711(u.itemId) &&
       prev.itemId === u.itemId;
     if (stackable) {
       map.set(u.seq, {

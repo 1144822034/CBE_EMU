@@ -3357,10 +3357,30 @@ static u32 vm_net_mock_battle_reward_rand(void)
     return g_vm_net_mock_battle_reward_rng;
 }
 
-static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart)
+static u32 vm_net_mock_battle_boss_encounter_enemy_max(u32 enemyId)
+{
+    const vm_net_mock_monster_global_config *cfg;
+    u32 bossMax = 3u;
+
+    if (!vm_net_mock_monster_name_contains_boss(enemyId))
+        return 3u;
+    cfg = vm_net_mock_monster_global_config_get();
+    if (cfg != NULL)
+        bossMax = cfg->bossEncounterEnemyMax;
+    if (bossMax < 1u)
+        bossMax = 1u;
+    if (bossMax > 3u)
+        bossMax = 3u;
+    return bossMax;
+}
+
+static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart,
+                                              u32 enemyId)
 {
     u32 minCount = 1;
     u32 maxCount = 3;
+    u32 bossMax = vm_net_mock_battle_boss_encounter_enemy_max(enemyId);
+    bool isBossName = vm_net_mock_monster_name_contains_boss(enemyId);
     const char *forcedSpec = getenv("CBE_BATTLE_ENEMY_COUNT");
     const vm_net_mock_role_state *role;
 
@@ -3378,18 +3398,22 @@ static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart)
      * Battle insight (item 828): while active, hangup/challenge encounters are
      * fixed at 3 — including non-scene subtype-10 hangup (Pixi/APK has no
      * emulator live-node, so most hangup starts take that path).  Env force
-     * above still wins for autotest.  Team starts re-check the leader role in
-     * challenge/hangup after the party gate (see battle.c).
+     * above still wins for autotest.  Boss-named monsters (display/actor
+     * contains ASCII "Boss") are capped by admin boss_encounter_enemy_max.
+     * Team starts re-check the leader role in challenge/hangup after the
+     * party gate (see battle.c).
      */
     role = vm_net_mock_active_role();
     if (role != NULL &&
         vm_net_mock_role_active_battle_exp_bonus_percent(role) != 0)
     {
-        printf("[info][network] mock_battle_enemy_count_fixed role=%u count=3 "
-               "reason=battle-insight%s evidence=item.dsh:828\n",
-               role->roleId,
-               useSceneMonsterStart ? "" : "+subtype10");
-        return 3;
+        u8 fixed = isBossName ? (u8)bossMax : 3u;
+        printf("[info][network] mock_battle_enemy_count_fixed role=%u count=%u "
+               "reason=battle-insight%s%s enemy=%u evidence=item.dsh:828\n",
+               role->roleId, (u32)fixed,
+               useSceneMonsterStart ? "" : "+subtype10",
+               isBossName ? "+boss-name-cap" : "", enemyId);
+        return fixed;
     }
 
     if (!useSceneMonsterStart)
@@ -3405,6 +3429,8 @@ static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart)
         minCount = 3;
     if (maxCount > 3)
         maxCount = 3;
+    if (isBossName && maxCount > bossMax)
+        maxCount = bossMax;
     if (minCount > maxCount)
     {
         u32 tmp = minCount;

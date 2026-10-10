@@ -378,6 +378,7 @@ static void vm_game_launcher_update(void)
 }
 #endif
 #ifdef CBE_PLATFORM_ANDROID
+/* Set only after ROM/BSS/managers are written; cbeRun must not race load. */
 static volatile int g_cbeVmReadyForRun = 0;
 #endif
 static u32 g_appMainEntry = 0;
@@ -762,6 +763,11 @@ static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
 static u32 vm_dl_current_sp_bf(void);
 static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
+#if defined(CBE_CLIENT_ONLY)
+static int vm_host_cbe_mmgame_sig_match(u32 codeBase);
+static void vm_host_cbe_mmgame_hooks_install(u32 codeBase);
+static void vm_host_cbe_mmgame_hooks_ensure(void);
+#endif
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
@@ -1965,6 +1971,10 @@ static void vm_dl_set_loaded_buffer(u16 appId, u32 buffer)
     if (idx < 0)
         return;
     g_vmDlLoadedApps[idx].buffer = buffer;
+#if defined(CBE_CLIENT_ONLY)
+    if (buffer != 0 && vm_host_cbe_mmgame_sig_match(buffer))
+        vm_host_cbe_mmgame_hooks_install(buffer);
+#endif
 }
 
 static void vm_dl_set_loaded_sp_bf(u16 appId, u32 spBf)
@@ -4421,6 +4431,651 @@ static int vm_host_attr_value_base_usable(u32 valueBase, u16 stride)
 
 /* Set at wear-apply epilogue: 5CAC combat halfwords look unequipped. */
 static int g_agent_wear_combat_bare = 0;
+
+/*
+ * Pixi bag keeps one row for the full server count; CBE TimerControl_ProcessItem
+ * (0x01032EB8) splits when item+244 (stackMax from item.dsh col10) is exceeded
+ * — many consumables use 99. Raise stackMax>1 to 255 after BuildTimerItemData /
+ * before ProcessItem merge so single-row stacks can exceed 99 without editing
+ * item.dsh. Keep 0/1 (808 normalize + flasks / non-stackables). Wire path already
+ * caps at 255 (vm_client_cbe_grid_wire_count).
+ *
+ * 834/839 mall passes: count is durability (via 7/11); force stackMax=1 so
+ * ProcessItem never merges two passes or expands durability into N rows.
+ */
+enum
+{
+    /* item+4..+19: inline GBK name before price at +20 (backpack_parser dump). */
+    VM_HOST_CBE_ITEM_NAME_OFF = 4u,
+    VM_HOST_CBE_ITEM_NAME_CAP = 16u,
+    VM_HOST_CBE_ITEM_SEQ_OFF = 276u,
+    VM_HOST_CBE_ITEM_STRIDE = 324u,
+    VM_HOST_CBE_CULTIVATION_BOOK_BLANK_ID = 920u,
+    VM_HOST_CBE_CULTIVATION_BOOK_ID = 921u
+};
+
+/* 7/38 seq noted for optional re-force after detail; list always uses 原名. */
+static u16 g_vm_host_cbe_book_read_seq = 0;
+static u8 g_vm_host_cbe_book_name_log_left = 8;
+/* Post-17/1: mmGame fill runs in VM pool (no global CODE hook); pump force. */
+static u8 g_vm_host_cbe_book_name_refresh_left = 0;
+#if defined(CBE_CLIENT_ONLY)
+/* mmGame relocates inside VM pool; fixed 0x0518* hooks often miss. */
+static u32 g_vm_host_cbe_mmgame_code_base = 0;
+static uc_hook g_vm_host_cbe_mmgame_hook_lookup = 0;
+static uc_hook g_vm_host_cbe_mmgame_hook_commit = 0;
+static u8 g_vm_host_cbe_mmgame_hook_log = 1;
+static u8 g_vm_host_cbe_mmgame_scan_armed = 0;
+/* After 17/1: scan VM pool for stride-324 book rows (r9+10680 often misses). */
+static u8 g_vm_host_cbe_book_pool_scan_left = 0;
+/* mmGameMstarWqvga.cbm Thumb at local +0x4498 / +0x4538. */
+static const u8 kVmHostCbeMmGameSig4498[8] = {
+    0x38, 0x6c, 0x31, 0x18, 0x09, 0x19, 0x28, 0x18
+};
+static const u8 kVmHostCbeMmGameSig4538[8] = {
+    0x00, 0x28, 0x29, 0xd0, 0x30, 0x6c, 0x31, 0x4f
+};
+#endif
+
+static void vm_host_cbe_raise_stackable_stack_max(u32 itemPtr)
+{
+    u32 itemId = 0;
+    u16 stackMax = 0;
+
+    if (itemPtr == 0 || MTK == NULL)
+        return;
+    if (uc_mem_read(MTK, itemPtr, &itemId, sizeof(itemId)) != UC_ERR_OK)
+        return;
+    if (uc_mem_read(MTK, itemPtr + 244u, &stackMax, sizeof(stackMax)) != UC_ERR_OK)
+        return;
+    if (itemId == 834u || itemId == 839u)
+    {
+        if (stackMax == 1u)
+            return;
+        stackMax = 1u;
+        (void)uc_mem_write(MTK, itemPtr + 244u, &stackMax, sizeof(stackMax));
+        return;
+    }
+    if (stackMax <= 1u || stackMax >= 255u)
+        return;
+    stackMax = 255u;
+    (void)uc_mem_write(MTK, itemPtr + 244u, &stackMax, sizeof(stackMax));
+}
+
+/* GBK 「修炼天书」— item.dsh 原名; fits 16-byte CBE name slot. */
+static const u8 kVmHostCbeCultivationBookBaseNameGbk[] = {
+    0xd0, 0xde, 0xc1, 0xb6, 0xcc, 0xec, 0xca, 0xe9
+};
+
+static void vm_host_cbe_write_item_name_gbk(u32 itemPtr, const u8 *gbk, u32 gbkLen)
+{
+    u8 name[VM_HOST_CBE_ITEM_NAME_CAP];
+    u32 copy;
+
+    if (itemPtr == 0 || MTK == NULL || gbk == NULL || gbkLen == 0)
+        return;
+    memset(name, 0, sizeof(name));
+    copy = gbkLen;
+    if (copy >= VM_HOST_CBE_ITEM_NAME_CAP)
+        copy = VM_HOST_CBE_ITEM_NAME_CAP - 1u;
+    memcpy(name, gbk, copy);
+    (void)uc_mem_write(MTK, itemPtr + VM_HOST_CBE_ITEM_NAME_OFF, name,
+                       sizeof(name));
+}
+
+#if defined(CBE_CLIENT_ONLY)
+static int vm_host_cbe_mmgame_sig_match(u32 codeBase)
+{
+    u8 a[8];
+    u8 b[8];
+
+    if (codeBase == 0 || MTK == NULL)
+        return 0;
+    if (codeBase < VM_Memory_Pool_ADDRESS ||
+        codeBase + 0x4580u >= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        return 0;
+    if (uc_mem_read(MTK, codeBase + 0x4498u, a, sizeof(a)) != UC_ERR_OK ||
+        uc_mem_read(MTK, codeBase + 0x4538u, b, sizeof(b)) != UC_ERR_OK)
+        return 0;
+    return memcmp(a, kVmHostCbeMmGameSig4498, sizeof(a)) == 0 &&
+           memcmp(b, kVmHostCbeMmGameSig4538, sizeof(b)) == 0;
+}
+
+static void vm_host_cbe_mmgame_hooks_uninstall(void)
+{
+    if (MTK == NULL)
+        return;
+    if (g_vm_host_cbe_mmgame_hook_lookup != 0)
+    {
+        (void)uc_hook_del(MTK, g_vm_host_cbe_mmgame_hook_lookup);
+        g_vm_host_cbe_mmgame_hook_lookup = 0;
+    }
+    if (g_vm_host_cbe_mmgame_hook_commit != 0)
+    {
+        (void)uc_hook_del(MTK, g_vm_host_cbe_mmgame_hook_commit);
+        g_vm_host_cbe_mmgame_hook_commit = 0;
+    }
+    g_vm_host_cbe_mmgame_code_base = 0;
+}
+
+static void vm_host_cbe_mmgame_hooks_install(u32 codeBase)
+{
+    uc_err err;
+
+    if (codeBase == 0 || MTK == NULL)
+        return;
+    if (g_vm_host_cbe_mmgame_code_base == codeBase &&
+        g_vm_host_cbe_mmgame_hook_lookup != 0 &&
+        g_vm_host_cbe_mmgame_hook_commit != 0)
+        return;
+    vm_host_cbe_mmgame_hooks_uninstall();
+    err = uc_hook_add(MTK, &g_vm_host_cbe_mmgame_hook_lookup, UC_HOOK_CODE,
+                      hookCodeCallBack, NULL, codeBase + 0x4498u,
+                      codeBase + 0x4498u);
+    if (err != UC_ERR_OK)
+    {
+        g_vm_host_cbe_mmgame_hook_lookup = 0;
+        return;
+    }
+    err = uc_hook_add(MTK, &g_vm_host_cbe_mmgame_hook_commit, UC_HOOK_CODE,
+                      hookCodeCallBack, NULL, codeBase + 0x4538u,
+                      codeBase + 0x4580u);
+    if (err != UC_ERR_OK)
+    {
+        (void)uc_hook_del(MTK, g_vm_host_cbe_mmgame_hook_lookup);
+        g_vm_host_cbe_mmgame_hook_lookup = 0;
+        g_vm_host_cbe_mmgame_hook_commit = 0;
+        return;
+    }
+    g_vm_host_cbe_mmgame_code_base = codeBase;
+    if (g_vm_host_cbe_mmgame_hook_log)
+    {
+        g_vm_host_cbe_mmgame_hook_log = 0;
+        printf("[info][host] cbe_mmgame_book_hooks base=%08x lookup=%08x "
+               "commit=%08x..%08x evidence=sig-4498/4538\n",
+               codeBase, codeBase + 0x4498u, codeBase + 0x4538u,
+               codeBase + 0x4580u);
+    }
+}
+
+static void vm_host_cbe_mmgame_hooks_ensure(void)
+{
+    u32 i;
+    u32 addr;
+
+    if (MTK == NULL)
+        return;
+    if (g_vm_host_cbe_mmgame_code_base != 0 &&
+        vm_host_cbe_mmgame_sig_match(g_vm_host_cbe_mmgame_code_base))
+    {
+        vm_host_cbe_mmgame_hooks_install(g_vm_host_cbe_mmgame_code_base);
+        return;
+    }
+    for (i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        u32 buf = g_vmDlLoadedApps[i].buffer;
+
+        if (buf != 0 && vm_host_cbe_mmgame_sig_match(buf))
+        {
+            vm_host_cbe_mmgame_hooks_install(buf);
+            return;
+        }
+    }
+    if (vm_host_cbe_mmgame_sig_match(0x05180000u))
+    {
+        vm_host_cbe_mmgame_hooks_install(0x05180000u);
+        return;
+    }
+    /* One-shot pool scan after 17/1 arm (mmGame base relocates). */
+    if (!g_vm_host_cbe_mmgame_scan_armed || RAM_MEMPOOL == NULL)
+        return;
+    g_vm_host_cbe_mmgame_scan_armed = 0;
+    for (addr = 0x4498u;
+         addr + (0x4580u - 0x4498u) < VM_MEMPOOL_TOTAL_SIZE;
+         addr += 2u)
+    {
+        if (memcmp(RAM_MEMPOOL + addr, kVmHostCbeMmGameSig4498, 8) != 0)
+            continue;
+        if (memcmp(RAM_MEMPOOL + addr - 0x4498u + 0x4538u,
+                   kVmHostCbeMmGameSig4538, 8) != 0)
+            continue;
+        vm_host_cbe_mmgame_hooks_install(VM_Memory_Pool_ADDRESS + addr -
+                                         0x4498u);
+        return;
+    }
+}
+
+static int vm_host_cbe_mmgame_pc_off(u32 pc, u32 localOff)
+{
+    if (pc == 0x05180000u + localOff)
+        return 1;
+    if (g_vm_host_cbe_mmgame_code_base != 0 &&
+        pc == g_vm_host_cbe_mmgame_code_base + localOff)
+        return 1;
+    return 0;
+}
+#endif /* CBE_CLIENT_ONLY */
+
+/*
+ * 920/921: always force item.dsh 原名「修炼天书」into item+4.
+ * Long Pixi-style titles / empty 说明 / live 17/1 miss leave the slot blank.
+ */
+static void vm_host_cbe_ensure_cultivation_book_name(u32 itemPtr)
+{
+    u32 itemId = 0;
+    u8 cur[sizeof(kVmHostCbeCultivationBookBaseNameGbk)];
+    u16 seq = 0;
+
+    if (itemPtr == 0 || MTK == NULL)
+        return;
+    if (uc_mem_read(MTK, itemPtr, &itemId, sizeof(itemId)) != UC_ERR_OK)
+        return;
+    if (itemId != VM_HOST_CBE_CULTIVATION_BOOK_BLANK_ID &&
+        itemId != VM_HOST_CBE_CULTIVATION_BOOK_ID)
+        return;
+    if (uc_mem_read(MTK, itemPtr + VM_HOST_CBE_ITEM_NAME_OFF, cur, sizeof(cur)) ==
+            UC_ERR_OK &&
+        memcmp(cur, kVmHostCbeCultivationBookBaseNameGbk, sizeof(cur)) == 0)
+    {
+        return;
+    }
+    if (uc_mem_read(MTK, itemPtr + VM_HOST_CBE_ITEM_SEQ_OFF, &seq, sizeof(seq)) !=
+        UC_ERR_OK)
+        seq = 0;
+    vm_host_cbe_write_item_name_gbk(itemPtr, kVmHostCbeCultivationBookBaseNameGbk,
+                                    sizeof(kVmHostCbeCultivationBookBaseNameGbk));
+    if (g_vm_host_cbe_book_name_log_left > 0)
+    {
+        --g_vm_host_cbe_book_name_log_left;
+        printf("[info][host] cbe_cultivation_book_list_name item=%u seq=%u "
+               "name=dsh-basename evidence=item+4-force-xiulian-tianshu\n",
+               itemId, seq);
+    }
+}
+
+static void vm_host_cbe_force_cultivation_book_names_in_span(u32 itemList,
+                                                             u16 itemCount)
+{
+    u16 i;
+
+    if (itemList == 0 || itemCount == 0 || MTK == NULL)
+        return;
+    if (itemCount > 255u)
+        itemCount = 255u;
+    for (i = 0; i < itemCount; ++i)
+        vm_host_cbe_ensure_cultivation_book_name(itemList +
+                                                 (u32)i * VM_HOST_CBE_ITEM_STRIDE);
+}
+
+static void vm_host_cbe_force_ui_list_cultivation_book_names(u32 screenR9)
+{
+    u32 itemBase = 0;
+    u32 itemCount = 0;
+    u16 itemCount16 = 0;
+    u16 i;
+    u16 books = 0;
+    u16 blank = 0;
+
+    if (screenR9 == 0 || MTK == NULL)
+        return;
+    /* mmGame:0x418C commit dumps *(r9+10680)+4 as list name_hex. */
+    if (uc_mem_read(MTK, screenR9 + 10680u, &itemBase, sizeof(itemBase)) !=
+            UC_ERR_OK ||
+        itemBase == 0)
+        return;
+    if (uc_mem_read(MTK, screenR9 + 10708u, &itemCount, sizeof(itemCount)) !=
+        UC_ERR_OK)
+        itemCount = 0;
+    if (uc_mem_read(MTK, screenR9 + 10708u, &itemCount16, sizeof(itemCount16)) ==
+            UC_ERR_OK &&
+        itemCount16 != 0 &&
+        (itemCount == 0 || itemCount > 255u || itemCount < (u32)itemCount16))
+        itemCount = itemCount16;
+    if (itemCount == 0)
+        return;
+    if (itemCount > 255u)
+        itemCount = 255u;
+    for (i = 0; i < (u16)itemCount; ++i)
+    {
+        u32 itemPtr = itemBase + (u32)i * VM_HOST_CBE_ITEM_STRIDE;
+        u32 itemId = 0;
+        u8 name0 = 0;
+
+        if (uc_mem_read(MTK, itemPtr, &itemId, sizeof(itemId)) != UC_ERR_OK)
+            continue;
+        if (itemId != VM_HOST_CBE_CULTIVATION_BOOK_BLANK_ID &&
+            itemId != VM_HOST_CBE_CULTIVATION_BOOK_ID)
+            continue;
+        ++books;
+        if (uc_mem_read(MTK, itemPtr + VM_HOST_CBE_ITEM_NAME_OFF, &name0, 1) ==
+                UC_ERR_OK &&
+            name0 == 0)
+            ++blank;
+    }
+    vm_host_cbe_force_cultivation_book_names_in_span(itemBase, (u16)itemCount);
+    if (books != 0 && g_vm_host_cbe_book_name_log_left > 0)
+    {
+        --g_vm_host_cbe_book_name_log_left;
+        printf("[info][host] cbe_cultivation_book_ui_list r9=%08x base=%08x "
+               "rows=%u books=%u blank_before=%u evidence=r9+10680\n",
+               screenR9, itemBase, itemCount, books, blank);
+    }
+}
+
+#if defined(CBE_CLIENT_ONLY)
+/*
+ * r9+10680 often empty during pump; walk VM pool for 324-byte item rows with
+ * id 920/921 and rewrite item+4.  RAM_MEMPOOL is the mapped guest pool.
+ */
+static void vm_host_cbe_scan_pool_cultivation_book_names(void)
+{
+    u32 off;
+    u16 seen = 0;
+    u16 patched = 0;
+    u16 blank = 0;
+
+    if (RAM_MEMPOOL == NULL)
+        return;
+    for (off = 0;
+         off + VM_HOST_CBE_ITEM_STRIDE <= VM_MEMPOOL_TOTAL_SIZE;
+         off += 4u)
+    {
+        u32 itemId;
+        u8 *row;
+        u8 name0;
+        u32 price;
+
+        memcpy(&itemId, RAM_MEMPOOL + off, sizeof(itemId));
+        if (itemId != VM_HOST_CBE_CULTIVATION_BOOK_BLANK_ID &&
+            itemId != VM_HOST_CBE_CULTIVATION_BOOK_ID)
+            continue;
+        row = RAM_MEMPOOL + off;
+        /*
+         * UI 17/1 rows may leave stackMax/seq unset.  Reject obvious code
+         * noise: price at +20 must look like a small integer field.
+         */
+        memcpy(&price, row + 20u, sizeof(price));
+        if (price > 100000000u)
+            continue;
+        ++seen;
+        name0 = row[VM_HOST_CBE_ITEM_NAME_OFF];
+        if (name0 == 0)
+            ++blank;
+        if (memcmp(row + VM_HOST_CBE_ITEM_NAME_OFF,
+                   kVmHostCbeCultivationBookBaseNameGbk,
+                   sizeof(kVmHostCbeCultivationBookBaseNameGbk)) == 0)
+            continue;
+        memset(row + VM_HOST_CBE_ITEM_NAME_OFF, 0, VM_HOST_CBE_ITEM_NAME_CAP);
+        memcpy(row + VM_HOST_CBE_ITEM_NAME_OFF, kVmHostCbeCultivationBookBaseNameGbk,
+               sizeof(kVmHostCbeCultivationBookBaseNameGbk));
+        ++patched;
+    }
+    if ((patched != 0 || blank != 0 || seen != 0) &&
+        g_vm_host_cbe_book_name_log_left > 0)
+    {
+        --g_vm_host_cbe_book_name_log_left;
+        printf("[info][host] cbe_cultivation_book_pool_scan seen=%u blank=%u "
+               "patched=%u evidence=mempool-stride324\n",
+               seen, blank, patched);
+    }
+}
+#endif
+
+static void vm_host_cbe_force_manager_cultivation_book_names(u32 manager)
+{
+    u16 itemCount = 0;
+    u16 itemCap = 0;
+    u32 itemList = 0;
+
+    if (manager == 0 || MTK == NULL)
+        return;
+    if (uc_mem_read(MTK, manager + 36u, &itemCount, sizeof(itemCount)) !=
+            UC_ERR_OK ||
+        uc_mem_read(MTK, manager + 40u, &itemCap, sizeof(itemCap)) !=
+            UC_ERR_OK ||
+        uc_mem_read(MTK, manager + 32u, &itemList, sizeof(itemList)) !=
+            UC_ERR_OK ||
+        itemList == 0 || itemCount == 0)
+        return;
+    if (itemCap > 0 && itemCount > itemCap)
+        itemCount = itemCap;
+    vm_host_cbe_force_cultivation_book_names_in_span(itemList, itemCount);
+}
+
+static void vm_host_cbe_force_all_cultivation_book_list_names(void)
+{
+    u32 gameItemManager = 0;
+    u32 armR9 = 0;
+    u32 i;
+
+    if (MTK == NULL)
+        return;
+    if (Global_R9 != 0)
+    {
+        vm_host_cbe_force_manager_cultivation_book_names(Global_R9 + 24640u);
+        /* mmGame bag UI rows may also hang off Global_R9+10324. */
+        if (uc_mem_read(MTK, Global_R9 + 10324u, &gameItemManager,
+                        sizeof(gameItemManager)) == UC_ERR_OK &&
+            gameItemManager != 0)
+            vm_host_cbe_force_manager_cultivation_book_names(gameItemManager);
+        vm_host_cbe_force_ui_list_cultivation_book_names(Global_R9);
+    }
+    /* Active mmGame screen R9 often differs from Global_R9 during bag UI. */
+    uc_reg_read(MTK, UC_ARM_REG_R9, &armR9);
+    if (armR9 != 0 && armR9 != Global_R9)
+        vm_host_cbe_force_ui_list_cultivation_book_names(armR9);
+    if (g_dlSpBf != 0 && g_dlSpBf != Global_R9 && g_dlSpBf != armR9)
+        vm_host_cbe_force_ui_list_cultivation_book_names(g_dlSpBf);
+    if (g_currentScreenModuleBase != 0 &&
+        g_currentScreenModuleBase != Global_R9 &&
+        g_currentScreenModuleBase != armR9 &&
+        g_currentScreenModuleBase != g_dlSpBf)
+        vm_host_cbe_force_ui_list_cultivation_book_names(
+            g_currentScreenModuleBase);
+    /* 17/1 list lives on mmGame module R9 (spBf), not always in ARM R9 now. */
+    for (i = 0; i < g_vmDlLoadedCount; ++i)
+    {
+        u32 spBf = g_vmDlLoadedApps[i].spBf;
+
+        if (spBf == 0 || spBf == Global_R9 || spBf == armR9 ||
+            spBf == g_dlSpBf || spBf == g_currentScreenModuleBase)
+            continue;
+        vm_host_cbe_force_ui_list_cultivation_book_names(spBf);
+    }
+}
+
+void vm_host_cbe_note_cultivation_book_read_seq(u16 seq)
+{
+    g_vm_host_cbe_book_read_seq = seq;
+}
+
+void vm_host_cbe_note_cultivation_bookdes(const u8 *gbk, u32 gbkLen)
+{
+    (void)gbk;
+    (void)gbkLen;
+    /* Detail ok via bookdes UI; list keeps DSH 原名 only. */
+    if (g_vm_host_cbe_book_read_seq != 0)
+        vm_host_cbe_force_all_cultivation_book_list_names();
+}
+
+void vm_host_cbe_request_cultivation_book_list_name_refresh(void)
+{
+    /*
+     * 17/1 → mmGame rebuilds a *separate* UI row array at moduleR9+10680.
+     * Manager ProcessItem names are not enough; keep pumping across commits.
+     */
+    g_vm_host_cbe_book_name_refresh_left = 48;
+    g_vm_host_cbe_book_name_log_left = 16;
+#if defined(CBE_CLIENT_ONLY)
+    g_vm_host_cbe_mmgame_scan_armed = 1;
+    g_vm_host_cbe_book_pool_scan_left = 6;
+    vm_host_cbe_mmgame_hooks_ensure();
+#endif
+}
+
+void vm_host_cbe_pump_cultivation_book_list_name_refresh(void)
+{
+    if (g_vm_host_cbe_book_name_refresh_left == 0)
+        return;
+    --g_vm_host_cbe_book_name_refresh_left;
+#if defined(CBE_CLIENT_ONLY)
+    vm_host_cbe_mmgame_hooks_ensure();
+    /* Pool scan is heavier; run on odd pumps while armed (after 17/1 settle). */
+    if (g_vm_host_cbe_book_pool_scan_left > 0 &&
+        (g_vm_host_cbe_book_name_refresh_left & 1u) == 0u)
+    {
+        --g_vm_host_cbe_book_pool_scan_left;
+        vm_host_cbe_scan_pool_cultivation_book_names();
+    }
+#endif
+    vm_host_cbe_force_all_cultivation_book_list_names();
+}
+
+static void vm_host_cbe_unlimit_bag_stack_pc(u32 pc)
+{
+    u32 itemPtr = 0;
+
+    if (pc == 0x010330CCu)
+    {
+        /* BuildTimerItemData: after DSH stackMax write + 0→1; r6 = item. */
+        uc_reg_read(MTK, UC_ARM_REG_R6, &itemPtr);
+        vm_host_cbe_raise_stackable_stack_max(itemPtr);
+        vm_host_cbe_ensure_cultivation_book_name(itemPtr);
+        return;
+    }
+    if (pc == 0x01032EB8u)
+    {
+        /* ProcessItem entry; r1 = incoming item. */
+        uc_reg_read(MTK, UC_ARM_REG_R1, &itemPtr);
+        vm_host_cbe_raise_stackable_stack_max(itemPtr);
+        vm_host_cbe_ensure_cultivation_book_name(itemPtr);
+        return;
+    }
+    if (pc == 0x01032F18u)
+    {
+        /* ProcessItem merge candidate; lr = existing item base. */
+        uc_reg_read(MTK, UC_ARM_REG_LR, &itemPtr);
+        vm_host_cbe_raise_stackable_stack_max(itemPtr);
+        vm_host_cbe_ensure_cultivation_book_name(itemPtr);
+        return;
+    }
+    /*
+     * mmGame 17/1 commit (+0x4538..+0x4580): DSH fill done for UI rows at
+     * r9+10680.  Match the whole hooked window — guest rarely lands exactly
+     * on +0x4538/+0x4550/+0x4574/+0x4580 after relocate.
+     */
+#if defined(CBE_CLIENT_ONLY)
+    if ((g_vm_host_cbe_mmgame_code_base != 0 &&
+         pc >= g_vm_host_cbe_mmgame_code_base + 0x4538u &&
+         pc <= g_vm_host_cbe_mmgame_code_base + 0x4580u) ||
+        (pc >= 0x05184538u && pc <= 0x05184580u))
+#else
+    if (pc >= 0x05184538u && pc <= 0x05184580u)
+#endif
+    {
+        u32 armR9 = 0;
+        static u32 s_commitForceInsn;
+        static u8 s_commitHitLog;
+
+        /* Throttle: window is many Thumb insns; every 4th is enough. */
+        if (((s_commitForceInsn++) & 3u) != 0u)
+            return;
+        g_vm_host_cbe_book_name_log_left = 8;
+        g_vm_host_cbe_book_name_refresh_left = 48;
+        uc_reg_read(MTK, UC_ARM_REG_R9, &armR9);
+        if (s_commitHitLog < 4u)
+        {
+            u32 itemBase = 0;
+            u32 itemCount = 0;
+
+            ++s_commitHitLog;
+            if (armR9 != 0)
+            {
+                (void)uc_mem_read(MTK, armR9 + 10680u, &itemBase,
+                                  sizeof(itemBase));
+                (void)uc_mem_read(MTK, armR9 + 10708u, &itemCount,
+                                  sizeof(itemCount));
+            }
+            printf("[info][host] cbe_cultivation_book_commit_pc pc=%08x "
+                   "r9=%08x base=%08x rows=%u evidence=mmgame-commit-window\n",
+                   pc, armR9, itemBase, itemCount);
+        }
+        vm_host_cbe_force_ui_list_cultivation_book_names(armR9);
+        vm_host_cbe_force_all_cultivation_book_list_names();
+#if defined(CBE_CLIENT_ONLY)
+        vm_host_cbe_scan_pool_cultivation_book_names();
+#endif
+        return;
+    }
+    /* After item.dsh lookup returns for a 17/1 row (r0=result). */
+#if defined(CBE_CLIENT_ONLY)
+    if (vm_host_cbe_mmgame_pc_off(pc, 0x4498u))
+#else
+    if (pc == 0x05184498u)
+#endif
+    {
+        u32 result = 0;
+        u32 state = 0;
+        u32 itemBase = 0;
+        u32 rowOffset = 0;
+        u32 itemId = 0;
+
+        uc_reg_read(MTK, UC_ARM_REG_R0, &result);
+        uc_reg_read(MTK, UC_ARM_REG_R6, &state);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &rowOffset);
+        if (state != 0)
+            uc_mem_read(MTK, state + 0x40u, &itemBase, sizeof(itemBase));
+        if (itemBase != 0)
+            uc_mem_read(MTK, itemBase + rowOffset, &itemId, sizeof(itemId));
+        if (itemId == VM_HOST_CBE_CULTIVATION_BOOK_BLANK_ID ||
+            itemId == VM_HOST_CBE_CULTIVATION_BOOK_ID)
+        {
+            /* Row being filled is at itemBase+rowOffset for id; name at +4. */
+            vm_host_cbe_ensure_cultivation_book_name(itemBase + rowOffset);
+            (void)result;
+        }
+        return;
+    }
+    /* Bag list paint: keep 920/921 原名; full scan throttled (per-row PC). */
+    if (pc == 0x010325B0u)
+    {
+        static u32 s_paintSweep = 0;
+        u32 r0 = 0;
+        u32 r1 = 0;
+        u32 r2 = 0;
+        u32 r3 = 0;
+        u32 r4 = 0;
+        u32 r5 = 0;
+        u32 r6 = 0;
+        u32 r7 = 0;
+        u32 armR9 = 0;
+        u32 cand[8];
+        u32 i;
+
+        if ((s_paintSweep++ & 15u) == 0u)
+            vm_host_cbe_force_all_cultivation_book_list_names();
+        uc_reg_read(MTK, UC_ARM_REG_R9, &armR9);
+        vm_host_cbe_force_ui_list_cultivation_book_names(armR9);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+        uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+        uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
+        uc_reg_read(MTK, UC_ARM_REG_R7, &r7);
+        cand[0] = r0;
+        cand[1] = r1;
+        cand[2] = r2;
+        cand[3] = r3;
+        cand[4] = r4;
+        cand[5] = r5;
+        cand[6] = r6;
+        cand[7] = r7;
+        for (i = 0; i < 8u; ++i)
+            vm_host_cbe_ensure_cultivation_book_name(cand[i]);
+    }
+}
 
 static void vm_host_realign_attr_panel_value_rows(void)
 {
@@ -7262,6 +7917,13 @@ static uc_err scheduler_tick(void)
     /* Flag may arrive with the shop-exit response just dispatched above. */
     vm_host_pump_mmshop_loading_clear_flag();
     vm_host_pump_map_stone_dismiss_bar();
+    /*
+     * After guest drained event=7: prefer next scene-poll (NPC/chat), else
+     * drip one login overflow 30/21 chunk.  Never queue all chunks at once.
+     */
+    vm_net_mock_poll_push_if_due();
+    vm_client_cbe_bag_overflow_pump();
+    vm_host_cbe_pump_cultivation_book_list_name_refresh();
 #endif
     vm_screen_root_exit_maybe_request();
     return UC_ERR_OK;
@@ -13478,6 +14140,7 @@ int cbeRun(void)
     if (!g_cbeInitialized || g_cbeRunning)
         return -1;
 #if defined(CBE_HAS_GAME_LAUNCHER)
+    /* Wait until ROM/BSS/managers are fully loaded — not merely uc_open. */
     while (!g_hostQuitRequested)
     {
         if (g_cbeVmReadyForRun && MTK != NULL)
@@ -20569,6 +21232,15 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     ADD_MANAGER_CODE_HOOK(VM_DL_RS_FUNC_LIST_ADDRESS, hook_vm_dl_rs_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_DL_IMAGE_FUNC_LIST_ADDRESS, hook_vm_dl_image_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_VIDEO_FUNC_LIST_ADDRESS, hook_vm_video_code_callback);
+#if defined(CBE_CLIENT_ONLY)
+    /*
+     * mmGame bag list lives in the VM pool; global CODE hook excludes that
+     * range (Android free-storm).  Narrow hooks for 17/1 DSH fill / commit /
+     * epilogue so 920/921 item+4 can be forced after empty 说明.
+     */
+    ADD_MANAGER_CODE_HOOK_RANGE(0x05184498u, 0x05184498u, hookCodeCallBack);
+    ADD_MANAGER_CODE_HOOK_RANGE(0x05184538u, 0x05184580u, hookCodeCallBack);
+#endif
 #undef ADD_MANAGER_CODE_HOOK
 #undef ADD_MANAGER_CODE_HOOK_RANGE
     return UC_ERR_OK;
@@ -20756,6 +21428,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (g_hangupCandidateFaultCodeBase != 0)
         vm_hangup_candidate_fault_trace_note_pc((u32)address & ~1u);
 #endif
+    vm_host_cbe_unlimit_bag_stack_pc((u32)address & ~1u);
     if (((u32)address & ~1u) == 0x01003CFCu)
     {
         u32 r9 = 0;

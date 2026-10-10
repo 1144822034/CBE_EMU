@@ -1558,6 +1558,62 @@ static u32 vm_net_mock_build_compact_scene_skill_default_response(const u8 *requ
     return pos;
 }
 
+/*
+ * CBE 开背包 HUD 组合包（client_out len=54）：
+ *   12/1 + 7/42 + 25/5×N + 6/1 + 6/13 + 6/14
+ * 无 2/10 Type=101（区别于场景 WT6/1 / task-subset）。
+ * 旧逻辑：backpack-open-combo 拒 12/1；scene followup 只认 len 39/49；
+ * compact 只认 len=19 → 落到 unimplemented「功能暂未实现(1/12/1)」，且无 17/1。
+ */
+static bool vm_net_mock_is_cbe_bag_open_skill_combo_request(const u8 *request,
+                                                            u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object first;
+
+    if (request == NULL || requestLen < 40 || request[0] != 'W' ||
+        request[1] != 'T')
+        return false;
+    if (!vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 6, 1) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 6, 13) ||
+        !vm_net_mock_request_contains_object(request, requestLen, 1, 6, 14))
+        return false;
+    /* Scene task-subset / resource followup carries 2/10 Type=101. */
+    if (vm_net_mock_request_contains_object(request, requestLen, 1, 2, 10))
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &first))
+        return false;
+    return first.major == 1 && first.kind == 0x0c && first.subtype == 1 &&
+           first.payloadLen == 0;
+}
+
+static u32 vm_net_mock_build_cbe_bag_open_skill_combo_response(const u8 *request,
+                                                               u32 requestLen,
+                                                               u8 *out,
+                                                               u32 outCap)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (outCap < pos ||
+        !vm_net_mock_is_cbe_bag_open_skill_combo_request(request, requestLen))
+        return 0;
+    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos,
+                                                     &objectCount))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_cbe_bag_open_skill_combo objects=%u resp=%u "
+           "response=12/1+7/42+17/1 evidence=mmGame:0x418C+runtime:wt12/1-len54\n",
+           objectCount, pos);
+    vm_autotest_note(
+        "mock_cbe_bag_open_skill_combo objects=%u response=12/1+7/42+17/1 "
+        "evidence=runtime:cbe-bag-open-12/1+7/42-no-2/10\n",
+        objectCount);
+    return pos;
+}
+
 static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *request, u32 requestLen,
                                                                  u8 *out, u32 outCap)
 {
