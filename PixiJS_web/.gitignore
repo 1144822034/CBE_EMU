@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-hot-changed/
+.hot-last-manifest.json
 gateway-release/
 electron-release/
 .DS_Store

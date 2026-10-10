@@ -21,8 +21,13 @@
 - `DialogPanel`：`ensureChrome`；光标/翻页/药品数量跳过 `paintCbePanel`
 - `DialogPanel.show` / `showMedicineBuyQty`：已打开时**不再** `remountChrome()`
 - `main.ts` `onNpcDialog`：面板已开且同 tallList 时 `keepCursor`
-- `main.ts` `keepNpcDialogShell`：**购买该装备 / 买药 / 仓库 / 出售** 等 nested 26/1
-  不再先 `dialog.hide()`（原先 hide→等回包→show 必闪边框；chrome 复用帮不上）
+- `main.ts` `keepNpcDialogShell`：**购买该装备 / 买药 / 仓库 / 出售 / action=4 接任务**
+  等 nested 交换不再先 `dialog.hide()`（原先 hide→等回包→show 必闪边框）
+- `main.ts` action=100 确认接取/提交：交换完成前不 hide，结束后再关（无二次闪）
+- `main.ts` 背包丢弃/提炼确认：`showBagOverlayConfirm` 叠在 SystemPanel 上（不
+  `showPhase("dialog")` / 不 `system.hide()`）；确认后只 `setBag`，禁止 `open("bag")` 重挂；
+  确认期间 dialog 保持 soft cover；`DialogPanel.setOverlaySongtiPlate` +
+  `setLcdDomHostOccludeRect` 用同色 DOM 板挡住确认框内的背包透字，框外背包字仍可见
 - `MenuScreen`：`ensureScrollChrome`；光标/翻页跳过卷轴贴图重建
 
 ## 未改（后续）

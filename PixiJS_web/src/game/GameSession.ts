@@ -5937,8 +5937,13 @@ export class GameSession {
     this.bagItems = this.bagItems.map((it) => {
       if (it.seq === parsed.sourceSeq && it.seq > 0) {
         changed = true;
-        const { enhanceAttrs: _drop, ...rest } = it;
-        return { ...rest, enhance: parsed.sourceLevel >>> 0 };
+        if (parsed.washTransferred) {
+          // washxfer=1: wash left with enhance; clear source attrs.
+          const { enhanceAttrs: _drop, ...rest } = it;
+          return { ...rest, enhance: parsed.sourceLevel >>> 0 };
+        }
+        // washxfer=0: keep source wash; only zero enhance level.
+        return { ...it, enhance: parsed.sourceLevel >>> 0 };
       }
       if (it.seq === parsed.destSeq && it.seq > 0) {
         changed = true;

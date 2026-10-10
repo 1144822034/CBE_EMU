@@ -204,8 +204,17 @@ function hotManifestPlugin(): Plugin {
     apply: "build",
     async closeBundle() {
       const dist = path.join(rootDir, "dist");
-      const count = await writeHotManifest(dist);
-      console.log(`[hot-manifest] ${count} files → dist/hot-manifest.json`);
+      const r = await writeHotManifest(dist);
+      console.log(`[hot-manifest] ${r.count} files → dist/hot-manifest.json`);
+      if (r.baseline) {
+        console.log(
+          `[hot-manifest] baseline saved; next build stages changes → dist-hot-changed/`,
+        );
+      } else {
+        console.log(
+          `[hot-manifest] ${r.changed} changed, ${r.removed} removed → dist-hot-changed/`,
+        );
+      }
       try {
         const jniCount = await writeJniHotManifest(dist);
         console.log(`[jni-hot] ${jniCount} files → dist/jni-hot/`);

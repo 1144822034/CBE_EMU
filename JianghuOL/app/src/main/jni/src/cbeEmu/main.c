@@ -287,6 +287,11 @@ static u32 g_screenRemovedWithoutNext = 0;
 static u32 g_screenResumeExisting = 0;
 static u32 g_screenEnterExistingNoCallback = 0;
 static u32 g_activeScreenRemovedThisFrame = 0;
+/* Armed on remove-newtop; counts vm_free until destroy-removed (role-enter forensics). */
+static u32 g_teardown_free_watch = 0;
+static u32 g_teardown_free_ok = 0;
+static u32 g_teardown_free_bad = 0;
+static u32 g_teardown_free_watch_tick = 0;
 static u32 g_activeScreenRemovedThis = 0;
 static u32 g_activeScreenRemovedModuleBase = 0;
 static u32 g_activeScreenRemovedDataPackage = 0;
@@ -400,6 +405,13 @@ static u8 g_lastMouseHangupArmed = 0;
  */
 static u8 g_vm_map_stone_dismiss_bar = 0;
 static u32 g_vm_map_stone_dismiss_bar_tick = 0;
+/*
+ * After mmShop pop, DF already rebuilt mmGame.  Stale servers may still ship
+ * outdoor kind-2 30/1 (and 27/12 map-stone reenter).  Suppress EnterSceneByMapName
+ * for a short window; empty-map kind-2 is delayed (≥8 ticks after loading clear).
+ */
+static u8 g_vm_shop_return_suppress_kind2 = 0;
+static u32 g_vm_shop_return_suppress_kind2_until_tick = 0;
 #endif
 enum { VM_HOST_KEYQ_MAX = 24 };
 static struct
@@ -737,6 +749,30 @@ static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
     return address >= begin && address < begin + size;
+}
+
+/*
+ * Downloaded CBM modules execute inside VM_Memory_Pool.  A global
+ * UC_HOOK_CODE / MEM_RW on 0..0xFFFFFFFF forces a host callback on every
+ * pool insn/access — Android role-select teardown ~4s; PC barely notices.
+ * Hook everything except the pool; manager stubs / ROM / PROGRAM_EXIT stay covered.
+ */
+static uc_err vm_hook_add_excluding_vm_pool(uc_engine *uc, uc_hook *hh, int type,
+                                           void *callback, void *user_data)
+{
+    uc_err err;
+    u32 poolBegin = VM_Memory_Pool_ADDRESS;
+    u32 poolEndExclusive = VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE;
+
+    if (poolBegin > 0)
+    {
+        err = uc_hook_add(uc, hh, type, callback, user_data, 0, poolBegin - 1u);
+        if (err != UC_ERR_OK)
+            return err;
+    }
+    if (poolEndExclusive == 0u)
+        return UC_ERR_OK;
+    return uc_hook_add(uc, hh, type, callback, user_data, poolEndExclusive, 0xFFFFFFFFu);
 }
 
 static bool vm_is_manager_func_stub_address(u32 address)
@@ -3860,10 +3896,26 @@ static void vm_host_arm_shop_return_skip_bar(const char *reason)
      */
     g_vm_map_stone_dismiss_bar = 1;
     g_vm_map_stone_dismiss_bar_tick = 0;
+    g_vm_shop_return_suppress_kind2 = 1;
+    g_vm_shop_return_suppress_kind2_until_tick = g_schedulerTick + 15u;
     vm_host_clear_download_busy(reason ? reason : "mmshop-exit-skip-bar");
     printf("[info][screen] shop_return_skip_bar_arm reason=%s "
-           "evidence=mmShop-pop-no-gold-bar\n",
-           reason ? reason : "-");
+           "suppress_kind2_until=%u evidence=mmShop-pop-no-gold-bar\n",
+           reason ? reason : "-",
+           g_vm_shop_return_suppress_kind2_until_tick);
+}
+
+static bool vm_host_shop_return_suppress_kind2_active(void)
+{
+    if (!g_vm_shop_return_suppress_kind2)
+        return false;
+    if (g_schedulerTick >= g_vm_shop_return_suppress_kind2_until_tick)
+    {
+        g_vm_shop_return_suppress_kind2 = 0;
+        g_vm_shop_return_suppress_kind2_until_tick = 0;
+        return false;
+    }
+    return true;
 }
 
 /*
@@ -11075,12 +11127,16 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
             InitFontEngine();
         }
 
-        err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0,
-                          0xFFFFFFFF);
+        err = vm_hook_add_excluding_vm_pool(MTK, &hookHandle, UC_HOOK_CODE,
+                                            hookCodeCallBack, 0);
         if (err == UC_ERR_OK)
             err = add_manager_code_hooks(MTK);
-        uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
-                    hookRamCallBack, 0, 0, 0xFFFFFFFF);
+        if (err == UC_ERR_OK)
+            err = vm_hook_add_excluding_vm_pool(MTK, &hookHandle,
+                                               UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                                               hookRamCallBack, 0);
+        printf("[info][cbe] hooks exclude_vm_pool begin=%08x size=%08x\n",
+               (u32)VM_Memory_Pool_ADDRESS, (u32)VM_MEMPOOL_TOTAL_SIZE);
         uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack,
                     2, 0, 0xFFFFFFFF);
         uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack,
@@ -12904,6 +12960,14 @@ void RunArmProgram(void *param)
                             vm_trace_screen_data_package_change("destroy-removed", removedThis + 0x18,
                                                                 oldDataPackage, removedDataPackage, vm_current_data_package());
                         }
+                        if (g_teardown_free_watch)
+                        {
+                            u32 elapsed = SDL_GetTicks() - g_teardown_free_watch_tick;
+                            printf("[info][screen] teardown_free_watch done ok=%u bad=%u elapsed_ms=%u "
+                                   "removed=%08x\n",
+                                   g_teardown_free_ok, g_teardown_free_bad, elapsed, removedThis);
+                            g_teardown_free_watch = 0;
+                        }
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &removedThis);
                         p = vm_emu_start(screenDestoryEntry, exitAddr);
@@ -13297,12 +13361,18 @@ int main(int argc, char *args[])
         return NULL;
     }
 
-    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xFFFFFFFF);
+    err = vm_hook_add_excluding_vm_pool(MTK, &hookHandle, UC_HOOK_CODE,
+                                        hookCodeCallBack, 0);
     if (err == UC_ERR_OK)
         err = add_manager_code_hooks(MTK);
     //    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xFFFFFFFF);
 
-    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hookRamCallBack, 0, 0, 0xFFFFFFFF);
+    if (err == UC_ERR_OK)
+        err = vm_hook_add_excluding_vm_pool(MTK, &hookHandle,
+                                           UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                                           hookRamCallBack, 0);
+    printf("[info][cbe] hooks exclude_vm_pool begin=%08x size=%08x\n",
+           (u32)VM_Memory_Pool_ADDRESS, (u32)VM_MEMPOOL_TOTAL_SIZE);
 
     err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
     err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
@@ -15079,6 +15149,26 @@ static bool hook_vm_memory_manager_func(u32 address)
     else if (idx == 14)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        /* Direct free(ptr). Role-enter bad chain often hits here with OOB ptr. */
+        if (tmp1 != 0 &&
+            (tmp1 < VM_MALLOC_POOL_ADDRESS ||
+             tmp1 >= VM_MALLOC_POOL_ADDRESS + VM_MemoryBlock_SIZE))
+        {
+            static u32 s_oob_free_logs;
+            if (s_oob_free_logs < 3u)
+            {
+                u32 lr = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0;
+                uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+                uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+                uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+                uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+                uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+                printf("[forensic][mem] MF_Free_oob n=%u ptr=%08x lr=%08x last=%08x "
+                       "r1=%08x r2=%08x r3=%08x r4=%08x\n",
+                       s_oob_free_logs + 1u, tmp1, lr, lastAddress, r1, r2, r3, r4);
+                s_oob_free_logs++;
+            }
+        }
         if (tmp1)
             vm_free(tmp1);
         tmp1 = 0;
@@ -17947,6 +18037,31 @@ static bool hook_vm_manager_screen_func(u32 address)
         if (tmp1 != 0 && tmp1 == vmAddedScreen && lastAddress == 0x01018150)
         {
             activeTarget = vm_active_scene_reenter_target();
+#if defined(CBE_CLIENT_ONLY)
+            /*
+             * mmShop DF already ScreenInit'd outdoor.  Stale kind-2 30/1 must
+             * not open a second DoLoading (client_out 2026-10-10 serial=9).
+             * Dream shop-return uses allow_dream_shop_return_reenter instead.
+             */
+            if (vm_host_shop_return_suppress_kind2_active() &&
+                (activeTarget == NULL ||
+                 !(activeTarget->scene[0] == '2' &&
+                   activeTarget->scene[1] == '9')))
+            {
+                acceptChange = false;
+                g_vm_scene_allow_one_map_stone_completion_reenter = false;
+                vm_host_clear_download_busy("shop-return-suppress-kind2");
+                printf("[info][screen] screen_mgr shop-return-suppress-kind2 "
+                       "caller=%08x serial=%u scene=%s pos=(%u,%u) "
+                       "evidence=mmShop-df-shell-owns-enter-no-second-30/1\n",
+                       lastAddress,
+                       g_vm_net_mock_last_scene_change_target_serial,
+                       activeTarget ? activeTarget->scene : "",
+                       activeTarget ? activeTarget->x : 0,
+                       activeTarget ? activeTarget->y : 0);
+            }
+            else
+#endif
             if (vm_net_mock_consume_update_completed_scene_reenter(activeTarget))
             {
                 acceptChange = true;
@@ -18264,6 +18379,14 @@ static bool hook_vm_manager_screen_func(u32 address)
             g_screenRemovedWithoutNext = 0;
             if (requestAppClose)
                 vm_screen_root_exit_arm_pending(tmp1, tmp3);
+            /* Do not uc_emu_stop here: guest post-Remove still drives scene enter
+             * (DoLoading). Stopping early freezes after ScreenResume (2026-10-10). */
+            g_teardown_free_watch = 1;
+            g_teardown_free_ok = 0;
+            g_teardown_free_bad = 0;
+            g_teardown_free_watch_tick = SDL_GetTicks();
+            printf("[info][screen] teardown_free_watch arm removed=%08x caller=%08x tick=%u\n",
+                   tmp1, lastAddress, g_teardown_free_watch_tick);
         }
         else if (tmp4 && removingCurrent)
         {
@@ -20364,11 +20487,15 @@ static void hook_vm_video_code_callback(uc_engine *uc, uint64_t address, uint32_
 static uc_err add_manager_code_hooks(uc_engine *uc)
 {
     uc_hook hook;
-    uc_err err;
-    err = uc_hook_add(uc, &hook, UC_HOOK_CODE, hook_vm_pool_code_callback, NULL,
-                      VM_Memory_Pool_ADDRESS, VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE - 1);
-    if (err != UC_ERR_OK)
-        return err;
+    uc_err err = UC_ERR_OK;
+    /*
+     * Do NOT UC_HOOK_CODE the whole VM pool (16MB).  Downloaded modules
+     * (role-select ~0x05025616) execute there; a per-insn callback that
+     * uc_reg_read(R9)+vm_dl_note_sp_bf turned Android title teardown into
+     * ~4s of silent unicorn (PC was fine).  g_dlSpBf is maintained at
+     * screen/dl boundaries instead (screen-push/add/remove-newtop/…).
+     */
+    (void)hook_vm_pool_code_callback;
 #define ADD_MANAGER_CODE_HOOK_RANGE(begin, end, cb)                       \
     do                                                                    \
     {                                                                     \
@@ -20519,9 +20646,89 @@ static void vm_hangup_candidate_fault_trace_note_pc(u32 pc)
     fclose(trace);
 }
 
+void vm_host_note_teardown_free(int ok)
+{
+    if (!g_teardown_free_watch)
+        return;
+    if (ok)
+        g_teardown_free_ok++;
+    else
+        g_teardown_free_bad++;
+}
+
+void vm_host_trace_invalid_free(u32 addr, unsigned n)
+{
+    u32 pc = 0, lr = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r9 = 0;
+    u32 slotWords[4] = {0, 0, 0, 0};
+
+    if (MTK == NULL)
+        return;
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r5);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    /* If R1 looks like a pointer into a word array being walked, sample nearby. */
+    if (r1 >= VM_Memory_Pool_ADDRESS &&
+        r1 + 16u <= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        (void)uc_mem_read(MTK, r1, slotWords, sizeof(slotWords));
+    else if (r4 >= VM_Memory_Pool_ADDRESS &&
+             r4 + 16u <= VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        (void)uc_mem_read(MTK, r4, slotWords, sizeof(slotWords));
+    printf("[forensic][vm_free] INVALID n=%u addr=%08x pc=%08x lr=%08x last=%08x "
+           "r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r9=%08x "
+           "near=%08x/%08x/%08x/%08x watch_ok=%u watch_bad=%u\n",
+           n, addr, pc, lr, lastAddress, r0, r1, r2, r3, r4, r5, r9,
+           slotWords[0], slotWords[1], slotWords[2], slotWords[3],
+           g_teardown_free_ok, g_teardown_free_bad);
+}
+
 void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
+
+    /*
+     * Role-enter title teardown: guest runs for seconds under this flag with no
+     * host free progress. Full hook body (autotest/agent PC notes) per insn is
+     * the Android amplifier — keep only r9/div0/stubs/exit/noop.
+     */
+    if (g_activeScreenRemovedThisFrame)
+    {
+        u32 pc = (u32)address & ~1u;
+        static u32 s_post_remove_insn;
+        static u32 s_post_remove_logs;
+
+        if ((++s_post_remove_insn & 0x3ffffu) == 0u && s_post_remove_logs < 24u)
+        {
+            printf("[info][screen] post_remove_pc pc=%08x samples=%u insn=%u\n",
+                   pc, s_post_remove_logs + 1u, s_post_remove_insn);
+            s_post_remove_logs++;
+        }
+        vm_restore_main_r9_for_rom_code((u32)address);
+        vm_host_aeabi_div0_divisor_one(uc, address);
+        if (vm_is_manager_func_stub_address((u32)address))
+        {
+            lastAddress = address;
+            return;
+        }
+        if (pc == PROGRAM_EXIT_ADDR)
+        {
+            normalize_program_exit_pc(g_currentEmuEntry);
+            uc_emu_stop(MTK);
+            return;
+        }
+        if (address == VM_LOG_NOOP_ADDRESS)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+            vm_bx(tmp1);
+        }
+        lastAddress = address;
+        return;
+    }
 
     vm_restore_main_r9_for_rom_code((u32)address);
     vm_host_aeabi_div0_divisor_one(uc, address);

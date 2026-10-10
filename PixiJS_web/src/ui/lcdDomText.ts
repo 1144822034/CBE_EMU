@@ -22,11 +22,28 @@ let stackRoot: Container | null = null;
 /** Fullscreen / modal branches that cover the map when visible. */
 const coverBranches = new Set<Container>();
 /**
- * Soft covers (NPC approach tip / world menu / NPC dialog): hide map nameplates,
- * keep status strip + WorldHud Songti (挂机 / 多开芯片). Hard covers still hide
+ * Soft covers (NPC approach tip / world menu / NPC dialog / trade): hide map
+ * nameplates, keep WorldHud Songti (挂机 / 多开芯片). Hard covers still hide
  * all non-cover DOM (bag / system / full-screen panels).
+ * Status-strip Songti (修/拍) stays for short dialog; hide it via
+ * {@link softCoverOccludeChrome} (tall warehouse) or
+ * {@link setLcdDomSoftCoverChromeOccludeBranches} (trade) without a DOM plate.
+ * Trade also hides WorldHud location-title Songti via
+ * {@link setLcdDomSoftCoverChromeOccludeHosts}.
  */
 const softCoverBranches = new Set<Container>();
+/** Tall soft-cover dialog: hide 修/拍 chrome Songti; keep 挂机/多开. */
+let softCoverOccludeChrome = false;
+/**
+ * Soft covers that always hide status-strip Songti while they are the top
+ * cover (trade). Independent of {@link softCoverOccludeChrome}.
+ */
+const softCoverChromeOccludeBranches = new Set<Container>();
+/**
+ * Extra label ancestors hidden with trade chrome-occlude (WorldHud location
+ * band). Not the whole HUD — hang / 多开 live on `hud.bottom`.
+ */
+const softCoverChromeOccludeHosts = new Set<Container>();
 /**
  * Map-corner chrome (修拍擂… + 比武计时): same DOM z band, under popups.
  * Direct shell.content children (view.root / arenaHud).
@@ -40,25 +57,40 @@ const chromeBranches = new Set<Container>();
  * canvas under #lcd-dom-text and would be covered by an opaque DOM plate.
  */
 const panelTipHosts = new Set<Container>();
+type DomOccludeRect = {
+  host: Container;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** RGB fill matching canvas panel (default CBE.bgPanelDark). */
+  fill: number;
+  /** When true (bag discard/extract confirm), also hide HUD Songti (挂机/多开). */
+  occludeHud: boolean;
+};
+
 /** Tip frame in host-local LCD px — solid DOM cover under tip Songti. */
-let tipOcclude:
-  | {
-      host: Container;
-      x: number;
-      y: number;
-      w: number;
-      h: number;
-      /** RGB fill matching canvas tip panel (default CBE.bgPanelDark). */
-      fill: number;
-    }
-  | null = null;
+let tipOcclude: DomOccludeRect | null = null;
 /** Opaque plate under tip Songti so behind text is covered, not display:none. */
 let tipCoverEl: HTMLDivElement | null = null;
+/**
+ * Soft-cover dialog over another popup (bag discard/extract confirm): DOM plate
+ * over the dialog chrome so lower popup Songti cannot bleed through the plate,
+ * while labels outside the plate stay visible.
+ */
+let hostOcclude: DomOccludeRect | null = null;
+let hostCoverEl: HTMLDivElement | null = null;
 /** Map nameplate host — labels under this go to #lcd-dom-world. */
 let worldTextRoot: Container | null = null;
 
 /** Matches {@link CBE.bgPanelDark} — avoid importing constants (cycle via BitmapLabel). */
 const TIP_COVER_FILL_DEFAULT = 0x2a4a42;
+/** Matches {@link CBE.bgPanel}. */
+const HOST_COVER_FILL_DEFAULT = 0x102520;
+/** Above normal popup Songti (~150k); below host-elevated labels + tip band. */
+const HOST_COVER_Z = 1_700_000;
+/** Labels under {@link hostOcclude}.host sit above the host plate. */
+const HOST_LABEL_Z = 1_750_000;
 /** Between popup labels (~150k) and tip Songti (1_900_000). */
 const TIP_COVER_Z = 1_800_000;
 
@@ -122,12 +154,47 @@ export function setLcdDomCoverBranches(nodes: readonly Container[]): void {
 }
 
 /**
- * NPC approach tip / world menu / NPC dialog — occlude world nameplates only,
- * not HUD/status Songti. Nodes must also be in {@link setLcdDomCoverBranches}.
+ * NPC approach tip / world menu / NPC dialog / trade — occlude world nameplates
+ * only, not HUD Songti. Nodes must also be in {@link setLcdDomCoverBranches}.
  */
 export function setLcdDomSoftCoverBranches(nodes: readonly Container[]): void {
   softCoverBranches.clear();
   for (const n of nodes) softCoverBranches.add(n);
+}
+
+/**
+ * Soft covers that hide 修/拍 chrome Songti while open (trade panel over the
+ * status strip). Does not hide HUD (挂机/多开). Warehouse tall lists still use
+ * {@link setLcdDomSoftCoverOccludeChrome}.
+ */
+export function setLcdDomSoftCoverChromeOccludeBranches(
+  nodes: readonly Container[],
+): void {
+  softCoverChromeOccludeBranches.clear();
+  for (const n of nodes) softCoverChromeOccludeBranches.add(n);
+  kickLcdDomSyncLoop();
+}
+
+/**
+ * Labels under these hosts hide with trade chrome-occlude (scene title bar).
+ * Pass `hud.top` so 挂机/多开 on `hud.bottom` stay visible.
+ */
+export function setLcdDomSoftCoverChromeOccludeHosts(
+  nodes: readonly Container[],
+): void {
+  softCoverChromeOccludeHosts.clear();
+  for (const n of nodes) softCoverChromeOccludeHosts.add(n);
+  kickLcdDomSyncLoop();
+}
+
+/**
+ * Tall soft-cover lists (仓库存入/取回): hide status-strip Songti while open.
+ * Prefer this over {@link setLcdDomHostOccludeRect} so canvas select bars stay
+ * visible. Does not hide HUD (挂机/多开).
+ */
+export function setLcdDomSoftCoverOccludeChrome(on: boolean): void {
+  softCoverOccludeChrome = on;
+  kickLcdDomSyncLoop();
 }
 
 /**
@@ -169,7 +236,7 @@ export function setLcdDomTipOccludeRect(
   h: number,
   fill: number = TIP_COVER_FILL_DEFAULT,
 ): void {
-  tipOcclude = { host, x, y, w, h, fill };
+  tipOcclude = { host, x, y, w, h, fill, occludeHud: false };
   syncLcdDomTipCover();
   kickLcdDomSyncLoop();
 }
@@ -179,11 +246,65 @@ export function clearLcdDomTipOccludeRect(): void {
   syncLcdDomTipCover();
 }
 
-function ensureTipCoverEl(): HTMLDivElement {
+/**
+ * Soft-cover popup chrome (host-local LCD). Opaque DOM plate above lower
+ * popup Songti; labels under `host` are elevated above the plate.
+ * Songti (cn) only — UC3 glyphs are on canvas under the dialog fill.
+ * @param opts.occludeHud hide 挂机/多开 Songti (default true for bag confirm).
+ */
+export function setLcdDomHostOccludeRect(
+  host: Container,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  fill: number = HOST_COVER_FILL_DEFAULT,
+  opts?: { occludeHud?: boolean },
+): void {
+  hostOcclude = {
+    host,
+    x,
+    y,
+    w,
+    h,
+    fill,
+    occludeHud: opts?.occludeHud !== false,
+  };
+  syncLcdDomHostCover();
+  kickLcdDomSyncLoop();
+}
+
+export function clearLcdDomHostOccludeRect(): void {
+  hostOcclude = null;
+  syncLcdDomHostCover();
+}
+
+function labelUnderHost(label: Container, host: Container): boolean {
+  let n: Container | null = label;
+  while (n) {
+    if (n === host) return true;
+    n = n.parent;
+  }
+  return false;
+}
+
+function labelUnderAnyHost(label: Container, hosts: Set<Container>): boolean {
+  if (!hosts.size) return false;
+  for (const host of hosts) {
+    if (labelUnderHost(label, host)) return true;
+  }
+  return false;
+}
+
+function ensureCoverEl(
+  existing: HTMLDivElement | null,
+  className: string,
+  z: number,
+): HTMLDivElement {
   const layer = ensureLcdDomTextLayer("ui");
-  if (tipCoverEl?.isConnected) return tipCoverEl;
+  if (existing?.isConnected) return existing;
   const el = document.createElement("div");
-  el.className = "lcd-dom-tip-cover";
+  el.className = className;
   el.style.position = "absolute";
   el.style.left = "0";
   el.style.top = "0";
@@ -191,30 +312,51 @@ function ensureTipCoverEl(): HTMLDivElement {
   el.style.padding = "0";
   el.style.pointerEvents = "none";
   el.style.display = "none";
-  el.style.zIndex = String(TIP_COVER_Z);
+  el.style.zIndex = String(z);
   el.style.borderRadius = "2px";
   layer.appendChild(el);
-  tipCoverEl = el;
   return el;
+}
+
+function syncCoverEl(
+  t: DomOccludeRect | null,
+  el: HTMLDivElement | null,
+  ensure: () => HTMLDivElement,
+  z: number,
+): void {
+  if (!t || !t.host.visible || !t.host.parent || t.w <= 0 || t.h <= 0) {
+    if (el) el.style.display = "none";
+    return;
+  }
+  const node = ensure();
+  const gp = t.host.getGlobalPosition();
+  const s = lcdDomCssScale();
+  node.style.display = "block";
+  node.style.left = `${(gp.x + t.x) * s}px`;
+  node.style.top = `${(gp.y + t.y) * s}px`;
+  node.style.width = `${t.w * s}px`;
+  node.style.height = `${t.h * s}px`;
+  node.style.backgroundColor = cssHexColor(t.fill);
+  node.style.zIndex = String(z);
+}
+
+function ensureTipCoverEl(): HTMLDivElement {
+  tipCoverEl = ensureCoverEl(tipCoverEl, "lcd-dom-tip-cover", TIP_COVER_Z);
+  return tipCoverEl;
+}
+
+function ensureHostCoverEl(): HTMLDivElement {
+  hostCoverEl = ensureCoverEl(hostCoverEl, "lcd-dom-host-cover", HOST_COVER_Z);
+  return hostCoverEl;
 }
 
 /** Keep tip cover aligned with the canvas toast frame (CSS px). */
 function syncLcdDomTipCover(): void {
-  const t = tipOcclude;
-  if (!t || !t.host.visible || !t.host.parent || t.w <= 0 || t.h <= 0) {
-    if (tipCoverEl) tipCoverEl.style.display = "none";
-    return;
-  }
-  const el = ensureTipCoverEl();
-  const gp = t.host.getGlobalPosition();
-  const s = lcdDomCssScale();
-  el.style.display = "block";
-  el.style.left = `${(gp.x + t.x) * s}px`;
-  el.style.top = `${(gp.y + t.y) * s}px`;
-  el.style.width = `${t.w * s}px`;
-  el.style.height = `${t.h * s}px`;
-  el.style.backgroundColor = cssHexColor(t.fill);
-  el.style.zIndex = String(TIP_COVER_Z);
+  syncCoverEl(tipOcclude, tipCoverEl, ensureTipCoverEl, TIP_COVER_Z);
+}
+
+function syncLcdDomHostCover(): void {
+  syncCoverEl(hostOcclude, hostCoverEl, ensureHostCoverEl, HOST_COVER_Z);
 }
 
 export function lcdDomIsChrome(label: Container): boolean {
@@ -252,10 +394,10 @@ export function unregisterLcdDomSync(fn: () => void): void {
 
 function kickLcdDomSyncLoop(): void {
   if (rafId) return;
-  if (!syncers.size && !tipOcclude) return;
+  if (!syncers.size && !tipOcclude && !hostOcclude) return;
   const tick = (): void => {
     rafId = 0;
-    if (!syncers.size && !tipOcclude) return;
+    if (!syncers.size && !tipOcclude && !hostOcclude) return;
     for (const fn of [...syncers]) {
       try {
         fn();
@@ -268,7 +410,14 @@ function kickLcdDomSyncLoop(): void {
     } catch {
       /* ignore tip cover sync errors */
     }
-    if (syncers.size || tipOcclude) rafId = requestAnimationFrame(tick);
+    try {
+      syncLcdDomHostCover();
+    } catch {
+      /* ignore host cover sync errors */
+    }
+    if (syncers.size || tipOcclude || hostOcclude) {
+      rafId = requestAnimationFrame(tick);
+    }
   };
   rafId = requestAnimationFrame(tick);
 }
@@ -311,7 +460,10 @@ export function lcdDomTopCover(): Container | null {
 /**
  * Hide DOM text that belongs to a lower branch while a popup cover is open.
  * Labels inside the cover itself stay visible (and get a high CSS z-index).
- * Soft covers (NPC approach tip / world menu) only hide world-tier nameplates.
+ * Soft covers (approach / menu / dialog / trade) only hide world-tier nameplates.
+ * Soft-cover + warehouse tall / trade chrome-occlude: hide status Songti
+ * without a DOM plate. Bag discard confirm uses host plate and occludeHud so
+ * 挂机/多开 cannot float over bag+confirm.
  * Center toasts do not hide overlapping Songti — {@link syncLcdDomTipCover}
  * paints an opaque plate so behind glyphs stay in place under the tip.
  */
@@ -323,8 +475,27 @@ export function lcdDomOccludedByPopup(label: Container): boolean {
   const cover = lcdDomTopCover();
   if (!cover) return false;
   if (cover === branch) return false;
+  // Bag overlay confirm plate: hide chrome (+ HUD when occludeHud).
+  if (hostOcclude && hostOcclude.host === cover) {
+    if (chromeBranches.has(branch)) return true;
+    if (hostOcclude.occludeHud && !coverBranches.has(branch)) return true;
+    return false;
+  }
   if (softCoverBranches.has(cover)) {
-    return lcdDomTierFor(label) === "world";
+    if (lcdDomTierFor(label) === "world") return true;
+    if (
+      chromeBranches.has(branch) &&
+      (softCoverOccludeChrome || softCoverChromeOccludeBranches.has(cover))
+    ) {
+      return true;
+    }
+    if (
+      softCoverChromeOccludeBranches.has(cover) &&
+      labelUnderAnyHost(label, softCoverChromeOccludeHosts)
+    ) {
+      return true;
+    }
+    return false;
   }
   return true;
 }
@@ -338,6 +509,10 @@ export function lcdDomOccludedByPopup(label: Container): boolean {
 export function lcdDomCssZIndex(label: Container): number {
   if (lcdDomIsPanelTip(label)) {
     return 1_900_000;
+  }
+  // Soft-cover dialog plate: elevate this host's Songti above the plate.
+  if (hostOcclude && labelUnderHost(label, hostOcclude.host)) {
+    return HOST_LABEL_Z;
   }
   const tier = lcdDomTierFor(label);
   const branch = lcdDomBranchRoot(label);

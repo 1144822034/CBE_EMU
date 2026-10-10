@@ -15,6 +15,12 @@ import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons, panelSafeFootY } from "./pageNav";
 import { replaceGraphics } from "../render/gpuResume";
 import { clearCbeFlowerCorners } from "./cbePanelCorners";
+import {
+  clearLcdDomHostOccludeRect,
+  setLcdDomHostOccludeRect,
+  setLcdDomSoftCoverOccludeChrome,
+} from "./lcdDomText";
+import { preferSystemFont } from "../resources/systemFont";
 
 /** Visible option rows per page (hangup skill list / long NPC menus). */
 const OPTION_PAGE_SIZE = 7;
@@ -42,6 +48,16 @@ export class DialogPanel extends Container {
   private medicineBuy: MedicineBuyQtyState | null = null;
   /** Last painted chrome bounds; skip paintCbePanel when unchanged. */
   private chromeKey = "";
+  /** Last chrome rect (for Songti occlude plate over bag). */
+  private chromeRect: { x: number; y: number; w: number; h: number } | null =
+    null;
+  /**
+   * Soft-cover confirm over SystemPanel (discard/extract): paint a DOM plate
+   * matching chrome so bag Songti cannot bleed through the panel.
+   * Tall warehouse lists use {@link setLcdDomSoftCoverOccludeChrome} instead
+   * (no plate — canvas select bars must stay visible).
+   */
+  private overlaySongtiPlate = false;
   onPick: ((action: number, value: number, label: string) => void) | null = null;
   onClose: (() => void) | null = null;
   /** Fired when medicine qty confirm is cancelled (return to shop list). */
@@ -96,9 +112,40 @@ export class DialogPanel extends Container {
     mode: string,
   ): void {
     const key = `${mode}:${x},${y},${w},${h}`;
-    if (key === this.chromeKey) return;
-    paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
-    this.chromeKey = key;
+    this.chromeRect = { x, y, w, h };
+    if (key !== this.chromeKey) {
+      paintCbePanel(this, this.box, x, y, w, h, CBE.bgPanel);
+      this.chromeKey = key;
+    }
+    this.syncOverlaySongtiPlate();
+  }
+
+  /**
+   * When true and Songti is on, cover dialog chrome with an opaque DOM plate
+   * so lower popup labels (bag) cannot show through. UC3 path needs no plate.
+   */
+  setOverlaySongtiPlate(on: boolean): void {
+    this.overlaySongtiPlate = on;
+    this.syncOverlaySongtiPlate();
+  }
+
+  private syncOverlaySongtiPlate(): void {
+    const tallOpen = this.visible && !!this.dialog?.tallList;
+    // Tall list: hide status Songti only — no DOM plate over select bars.
+    setLcdDomSoftCoverOccludeChrome(tallOpen);
+    if (
+      !this.overlaySongtiPlate ||
+      !this.visible ||
+      !this.chromeRect ||
+      !preferSystemFont()
+    ) {
+      clearLcdDomHostOccludeRect();
+      return;
+    }
+    const { x, y, w, h } = this.chromeRect;
+    setLcdDomHostOccludeRect(this, x, y, w, h, CBE.bgPanel, {
+      occludeHud: true,
+    });
   }
 
   hide(): void {
@@ -108,6 +155,10 @@ export class DialogPanel extends Container {
     this.medicineBuy = null;
     this.eventMode = "none";
     this.chromeKey = "";
+    this.chromeRect = null;
+    this.overlaySongtiPlate = false;
+    setLcdDomSoftCoverOccludeChrome(false);
+    clearLcdDomHostOccludeRect();
     clearCbeFlowerCorners(this);
     this.box.clear();
     this.content.clear();
@@ -256,6 +307,8 @@ export class DialogPanel extends Container {
       ? Math.max(280, hangRowTop - y - gap)
       : hNormal;
     this.ensureChrome(x, y, w, h, tall ? "dialog-tall" : "dialog");
+    // Flower corners remount above content — keep select bars on top of chrome.
+    this.addChild(this.content);
 
     const opts = this.dialog.options;
     const pages = Math.max(1, Math.ceil(Math.max(opts.length, 1) / pageSize));

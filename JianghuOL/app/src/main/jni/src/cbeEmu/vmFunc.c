@@ -1770,6 +1770,14 @@ LABEL_8:
     return (u8)v1;
 }
 
+/* LoadPackage only sets name/+10/flags; resource tables exist after a successful load (byte0==1). */
+static void vm_DF_DataPackage_clear_new_child(u32 slot_ptr)
+{
+    u32 packageSize = vm_df_package_struct_size();
+    if (slot_ptr && packageSize)
+        uc_mem_write(MTK, slot_ptr, emptyBuff, packageSize);
+}
+
 int vm_DF_DataPackage_ReleasePackage(int a1, int namePtr)
 {
     if (a1 == 0)
@@ -1796,17 +1804,39 @@ int vm_DF_DataPackage_ReleasePackage(int a1, int namePtr)
 
         vm_resource_cache_note_package(child);
 
-        u16 resCount = vm_get_var_short(child + 8);
-        u32 stringTable = vm_get_var(child + 12);
-        for (int j = 0; stringTable && j < resCount; j++)
-            vm_DF_Free(stringTable + 4 * j);
+        /*
+         * byte0==0: LoadPackage reserved the slot but load never completed.
+         * vm_malloc does not zero; walking +8/+12 as a string table turns heap
+         * garbage (often resCount≈0xFFFF) into ~65k INVALID vm_free — Android
+         * title teardown first-enter lag. Only the name at +4 was allocated.
+         */
+        if (vm_get_var_byte(child))
+        {
+            u16 resCount = vm_get_var_short(child + 8);
+            u32 stringTable = vm_get_var(child + 12);
+            if (resCount >= 0x8000u)
+                printf("[forensic][df] ReleasePackage huge resCount=%u pkg=%08x str=%08x\n",
+                       (unsigned)resCount, child, stringTable);
+            for (int j = 0; stringTable && j < resCount; j++)
+                vm_DF_Free(stringTable + 4 * j);
 
-        vm_DF_Free(child + 4);
-        vm_DF_Free(child + 12);
-        vm_DF_Free(child + 16);
-        vm_DF_Free(child + 20);
-        if (vm_uses_be_fixed_df_layout())
-            vm_DF_Free(child + 24);
+            vm_DF_Free(child + 4);
+            vm_DF_Free(child + 12);
+            vm_DF_Free(child + 16);
+            vm_DF_Free(child + 20);
+            if (vm_uses_be_fixed_df_layout())
+                vm_DF_Free(child + 24);
+        }
+        else
+        {
+            u16 resCount = vm_get_var_short(child + 8);
+            u32 stringTable = vm_get_var(child + 12);
+            if (resCount || stringTable)
+                printf("[forensic][df] ReleasePackage skip-unloaded pkg=%08x "
+                       "resCount=%u str=%08x\n",
+                       child, (unsigned)resCount, stringTable);
+            vm_DF_Free(child + 4);
+        }
         vm_DF_Free(slotAddr);
         vm_set_var(slotAddr, 0);
     }
@@ -1815,6 +1845,9 @@ int vm_DF_DataPackage_ReleasePackage(int a1, int namePtr)
     {
         u16 resCount = vm_get_var_short(a1 + 8);
         u32 stringTable = vm_get_var(a1 + 12);
+        if (resCount >= 0x8000u)
+            printf("[forensic][df] ReleasePackage root huge resCount=%u pkg=%08x str=%08x\n",
+                   (unsigned)resCount, a1, stringTable);
         for (int i = 0; stringTable && i < resCount; i++)
             vm_DF_Free(stringTable + 4 * i);
 
@@ -1875,6 +1908,8 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
             /* Firmware generations use either an 80-byte or 108-byte package. */
             vm_DF_Malloc_IN(slot_addr_vm, vm_df_package_struct_size());
             slot_ptr = vm_get_var(slot_addr_vm); /* newly allocated slot pointer */
+            /* vm_malloc reuses dirty blocks; match vm_initDFDataPackage zeroing. */
+            vm_DF_DataPackage_clear_new_child((u32)slot_ptr);
 
             /* length of src string in VM */
             int n = vm_strlen(srcPtr);
@@ -1901,6 +1936,7 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
         int new_slot_addr_vm = table_base + 4 * slot_count;
         vm_DF_Malloc_IN(new_slot_addr_vm, vm_df_package_struct_size());
         int slot_ptr = vm_get_var(new_slot_addr_vm);
+        vm_DF_DataPackage_clear_new_child((u32)slot_ptr);
 
         int n = vm_strlen(srcPtr);
 

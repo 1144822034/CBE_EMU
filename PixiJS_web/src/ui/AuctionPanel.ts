@@ -79,7 +79,6 @@ const TABS: { id: Tab; label: string; short: string }[] = [
 
 const BAG_PAGE_SIZE = 7;
 const BAG_TAB_BG = 0x375946;
-const BAG_SELECT = 0x20676e;
 
 function listingAsBagItem(r: AuctionListing): BagItem {
   const cat = lookupItemSync(r.itemId);
@@ -1301,7 +1300,7 @@ export class AuctionPanel extends Container {
       CBE.ink,
     );
     const rect = this.captchaInputRect();
-    this.box.rect(rect.x, rect.y, rect.w, rect.h).fill({ color: BAG_SELECT });
+    this.box.rect(rect.x, rect.y, rect.w, rect.h).fill({ color: CBE.select });
     const draft = this.buyoutCaptchaDraft || "_";
     this.addLabel(`输入 ${draft}`, rect.x + 6, rect.y + 4, EQUIP_DETAIL_YELLOW);
     this.rowHits.push(
@@ -1414,7 +1413,7 @@ export class AuctionPanel extends Container {
     acts.forEach((act, i) => {
       const hi = i === this.detailActionCursor;
       const by = actionTop + 4 + i * (btnH + 2);
-      if (hi) this.box.rect(x + 8, by, w - 16, btnH).fill({ color: BAG_SELECT });
+      if (hi) this.box.rect(x + 8, by, w - 16, btnH).fill({ color: CBE.select });
       this.addLabel(
         act.label,
         x + 14,
@@ -1499,7 +1498,7 @@ export class AuctionPanel extends Container {
       const lineCount = wrapChars(label).length;
       const effRowH = Math.max(baseRowH, lineCount * 14 + 2);
       if (listY + effRowH > listBottom) break;
-      if (hi) this.box.rect(x + 6, listY, w - 12, effRowH - 1).fill({ color: BAG_SELECT });
+      if (hi) this.box.rect(x + 6, listY, w - 12, effRowH - 1).fill({ color: CBE.select });
       this.addLabel(label, x + 10, listY + 1, hi ? CBE.menuHi : CBE.ink);
       const hitIdx = idx;
       this.rowHits.push(
@@ -1556,7 +1555,7 @@ export class AuctionPanel extends Container {
           const hi = idx === this.bagCursor;
           const ry = bodyTop + 20 + i * 16;
           if (hi) {
-            this.box.rect(x + 6, ry, w - 12, 15).fill({ color: BAG_SELECT });
+            this.box.rect(x + 6, ry, w - 12, 15).fill({ color: CBE.select });
           }
           const en = it.enhance ? `+${it.enhance}` : "";
           const qty = isReservoirFlaskItemId(it.itemId)
@@ -1672,7 +1671,7 @@ export class AuctionPanel extends Container {
       const hi = i === this.menuCursor;
       const lineCount = wrapChars(row.label).length;
       const effRowH = Math.max(16, lineCount * 14 + 2);
-      if (hi) this.box.rect(x + 6, menuY, w - 12, effRowH - 1).fill({ color: BAG_SELECT });
+      if (hi) this.box.rect(x + 6, menuY, w - 12, effRowH - 1).fill({ color: CBE.select });
       this.addLabel(row.label, x + 10, menuY + 1, hi ? CBE.menuHi : CBE.ink);
       const idx = i;
       this.rowHits.push(

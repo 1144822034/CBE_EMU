@@ -22,7 +22,7 @@ status: implemented
 - 表字段：`transfer_wash_enabled`、`cross_quality_stone_required`
 - 跨品需石=关：同部位即可跨品质，29/5|6 不检查/不消耗 855；人物面板下发 `crossQualityStoneRequired` 供 Pixi 列表筛选。
 - 开：源洗练随强化拷到目标并清源（原行为）。
-- 关：源洗练丢弃，目标保留原洗练。
+- 关：仅转强化等级；源与目标各自保留洗练（见 `2026-10-10-recast-wash-transfer-off-keep.md`）。
 - 29/6 成功响应附加 Pixi 字段 `washxfer`（0/1）供客户端本地镜像。
 
 ## 关键文件
@@ -36,5 +36,7 @@ status: implemented
 
 1. +1 装备重铸：不扣玄晶、不扣金。
 2. +N 装备重铸：扣 1 个 (N-1) 级玄晶；无玄晶 tip「玄晶不足」。
-3. 后台关「转移洗练」：重铸后源洗练空、目标洗练不变；开则源→目标。
+3. 后台关「转移洗练」：重铸后源/目标洗练均不变，仅强化等级转移；开则源→目标并清源。
 4. `make -j2` 通过。
+
+续修：`2026-10-10-recast-wash-transfer-off-keep.md`。

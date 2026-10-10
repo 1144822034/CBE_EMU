@@ -268,6 +268,8 @@ export function addCbeTitleSideFlowers(
 /**
  * Standard CBE panel chrome: fill + border + flowerStyle corners
  * (vector corners when the GIF is not loaded yet).
+ * Always clears `box` first — tall→short (仓库列表→主界面) must not leave
+ * the previous larger fill stacked under the new frame.
  */
 export function paintCbePanel(
   host: Container,
@@ -279,6 +281,7 @@ export function paintCbePanel(
   fill = CBE.bgPanel,
 ): void {
   clearCbeFlowerCorners(host);
+  box.clear();
   drawCbePanel(box, x, y, w, h, fill, false);
   if (!addCbeFlowerCorners(host, x, y, w, h, { scale: BODY_FLOWER_SCALE })) {
     drawCbePanelVectorCorners(box, x, y, w, h, 9);
@@ -301,6 +304,7 @@ export function paintCbeTitledChrome(
 ): CbeTitledChrome {
   const layout = layoutCbeTitledChrome(x, y, w, h, opts);
   clearCbeFlowerCorners(host);
+  box.clear();
   drawCbeTitlePill(
     box,
     layout.titleX + layout.titleW / 2,

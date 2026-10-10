@@ -150,6 +150,23 @@ export function weaponJobRestrictTip(category: number): string {
 }
 
 /**
+ * Player level must be >= equip.dsh 需求等级.
+ * Missing / non-equip catalog defers to the server.
+ */
+export function playerMeetsEquipLevel(playerLevel: number, itemId: number): boolean {
+  const cat = lookupItemSync(itemId);
+  if (!cat || cat.kind !== "equip") return true;
+  const need = cat.level | 0;
+  if (need <= 0) return true;
+  return (playerLevel | 0) >= need;
+}
+
+/** Tip when equipping gear above the player's level. */
+export function equipLevelRestrictTip(): string {
+  return "等级不够";
+}
+
+/**
  * equip.dsh 类别 → equipico.gif tile index (0..9).
  * Sheet is 160×16 = ten 16×16 icons aligned with categories 0–9.
  */

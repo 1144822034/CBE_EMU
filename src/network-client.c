@@ -58,6 +58,17 @@ enum
     /* Minimum wall time between scene-poll attempts (scheduler ticks are ~frame).
      * 2s balances sync freshness vs short-TCP load; server presence timeout ~30s. */
     VM_CLIENT_POLL_MIN_INTERVAL_MS = 2000,
+    /*
+     * After map-stone / region-teleport confirm, deferred 30/1 rides scene-poll
+     * but the server refuses same-tick delivery (~100ms).  Mirror PixiJS: wait
+     * 150ms then poll at 150ms until 30/1 lands (or the short window ends).
+     * Idle cadence stays at VM_CLIENT_POLL_MIN_INTERVAL_MS.
+     */
+    VM_CLIENT_POLL_URGENT_INTERVAL_MS = 150,
+    /* Server refuses deferred 30/1 on the confirm tick (~100ms). */
+    VM_CLIENT_POLL_URGENT_READY_DELAY_MS = 100,
+    VM_CLIENT_POLL_URGENT_WINDOW_MS = 2500,
+    VM_CLIENT_POLL_URGENT_MAX_POLLS = 12,
     VM_CLIENT_REQUEST_MAX = 512,
     VM_CLIENT_QUEUE_MAX = 64,
     VM_CLIENT_FOLLOWUP_MAX = 65536
@@ -91,6 +102,13 @@ static u32 g_vm_net_mock_last_scene_change_target_serial = 0;
  * through same-suppress so loading is not left half-open (丹霞山 2026-07-31).
  */
 static bool g_vm_scene_allow_one_map_stone_completion_reenter = false;
+/*
+ * Short post-confirm scene-poll boost (Pixi-style).  Cleared when deferred
+ * 30/1 observation arrives or the window / poll budget expires.
+ */
+static u32 g_vm_scene_poll_urgent_ready_at_ms = 0;
+static u32 g_vm_scene_poll_urgent_until_ms = 0;
+static u32 g_vm_scene_poll_urgent_remaining = 0;
 /*
  * Instance-enter into 29* loads mmGame via DF (not 01018150), so the
  * same-reenter guard is never armed.  2/3 completion still calls
@@ -261,9 +279,23 @@ static u32 vm_net_mock_apply_remote_observation(
             if (g_vm_net_mock_last_scene_change_target_serial == 0)
                 g_vm_net_mock_last_scene_change_target_serial = 1;
 
+            /*
+             * Outdoor shop-return DF shell already owns EnterScene.  Do not arm
+             * map-stone 27/12 reenter for a stale kind-2 30/1 in that window.
+             */
             g_vm_scene_allow_one_map_stone_completion_reenter =
-                observation->sceneSubtype == 1 && !isDream29;
-            if (observation->sceneSubtype == 1 && !isDream29)
+                observation->sceneSubtype == 1 && !isDream29 &&
+                !(g_vm_shop_return_suppress_kind2 &&
+                  g_schedulerTick < g_vm_shop_return_suppress_kind2_until_tick);
+            if (observation->sceneSubtype == 1)
+            {
+                /* Deferred enter landed — stop urgent poll burst. */
+                g_vm_scene_poll_urgent_ready_at_ms = 0;
+                g_vm_scene_poll_urgent_until_ms = 0;
+                g_vm_scene_poll_urgent_remaining = 0;
+            }
+            if (observation->sceneSubtype == 1 && !isDream29 &&
+                g_vm_scene_allow_one_map_stone_completion_reenter)
             {
                 g_vm_map_stone_dismiss_bar = 1;
                 g_vm_map_stone_dismiss_bar_tick = 0;
@@ -427,16 +459,13 @@ static u32 vm_alloc_host_string(const char *text)
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address,
                                        uint32_t size, void *user_data)
 {
-    u32 currentR9 = 0;
+    /* Intentionally unused: whole-pool UC_HOOK_CODE removed (see
+     * add_manager_code_hooks).  Kept so the symbol still resolves if an
+     * old path references it. */
+    (void)uc;
     (void)address;
     (void)size;
     (void)user_data;
-    uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
-    if (currentR9 >= VM_Memory_Pool_ADDRESS &&
-        currentR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
-    {
-        vm_dl_note_sp_bf(currentR9, "pool-exec");
-    }
 }
 
 static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
@@ -6762,6 +6791,80 @@ static bool vm_client_ensure_worker(void)
     return started;
 }
 
+static bool vm_client_request_contains_ascii(const u8 *request, u32 requestLen,
+                                             const char *needle)
+{
+    size_t needleLen;
+    u32 i;
+
+    if (request == NULL || needle == NULL || requestLen == 0)
+        return false;
+    needleLen = strlen(needle);
+    if (needleLen == 0 || requestLen < (u32)needleLen)
+        return false;
+    for (i = 0; i + (u32)needleLen <= requestLen; ++i)
+    {
+        if (memcmp(request + i, needle, needleLen) == 0)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * Map-stone / region-teleport confirm uplinks arm deferred 30/1 on the server.
+ * Lightweight wire heuristics only — do not import mock detectors.
+ */
+static bool vm_client_request_looks_like_teleport_confirm(const u8 *request,
+                                                         u32 requestLen)
+{
+    u8 kind;
+    u8 subtype;
+    bool hasExit;
+    bool hasMapIds;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' ||
+        request[1] != 'T')
+        return false;
+    /* Guest uplink: first object major/kind/subtype at [4]/[5]/[6]. */
+    kind = request[5];
+    subtype = request[6];
+    if (kind != 0x10)
+        return false;
+    if (subtype != 2 && subtype != 3 && subtype != 4)
+        return false;
+    hasExit = vm_client_request_contains_ascii(request, requestLen, "exitID") ||
+              vm_client_request_contains_ascii(request, requestLen, "exitid");
+    hasMapIds =
+        vm_client_request_contains_ascii(request, requestLen, "curid") &&
+        vm_client_request_contains_ascii(request, requestLen, "objid");
+    if (subtype == 4)
+        return hasMapIds;
+    if (subtype == 2)
+        return hasExit;
+    /*
+     * subtype 3 confirm is a short exit packet.  Post-enter follow-ups are
+     * longer (16/3+27/11+27/4+7/42, len≈59) and must not re-arm urgent poll.
+     */
+    return hasExit && requestLen < 40u;
+}
+
+static void vm_client_arm_scene_poll_urgent(const char *reason)
+{
+    u32 nowMs = SDL_GetTicks();
+
+    g_vm_scene_poll_urgent_ready_at_ms =
+        nowMs + (u32)VM_CLIENT_POLL_URGENT_READY_DELAY_MS;
+    g_vm_scene_poll_urgent_until_ms =
+        nowMs + (u32)VM_CLIENT_POLL_URGENT_WINDOW_MS;
+    g_vm_scene_poll_urgent_remaining = (u32)VM_CLIENT_POLL_URGENT_MAX_POLLS;
+    printf("[info][network] scene_poll_urgent_arm reason=%s ready_ms=%u "
+           "window_ms=%u max_polls=%u evidence=pixi-post-confirm-poll\n",
+           reason != NULL ? reason : "teleport-confirm",
+           (u32)VM_CLIENT_POLL_URGENT_READY_DELAY_MS,
+           (u32)VM_CLIENT_POLL_URGENT_WINDOW_MS,
+           (u32)VM_CLIENT_POLL_URGENT_MAX_POLLS);
+}
+
 static bool vm_client_enqueue(vm_client_job_kind kind, u32 connectId,
                               const u8 *request, u32 requestLen)
 {
@@ -6772,6 +6875,17 @@ static bool vm_client_enqueue(vm_client_job_kind kind, u32 connectId,
         return false;
     if (!vm_client_ensure_worker())
         return false;
+    if (kind == VM_CLIENT_JOB_DATA &&
+        vm_client_request_looks_like_teleport_confirm(request, requestLen))
+    {
+        u8 subtype = request[6];
+        if (subtype == 4)
+            vm_client_arm_scene_poll_urgent("map-confirm-16/4");
+        else if (subtype == 2)
+            vm_client_arm_scene_poll_urgent("teleport-16/2");
+        else
+            vm_client_arm_scene_poll_urgent("teleport-16/3");
+    }
     job = (vm_client_job *)calloc(1, sizeof(*job));
     if (job == NULL)
         return false;
@@ -8316,14 +8430,30 @@ static void vm_net_mock_poll_push_if_due(void)
     static u32 lastPollWallMs = 0;
     vm_net_channel *channel = NULL;
     u32 nowMs;
+    u32 minIntervalMs = (u32)VM_CLIENT_POLL_MIN_INTERVAL_MS;
+    bool urgentActive = false;
 
     if (g_mockServiceClientId == 0 || Global_R9 == 0)
         return;
     nowMs = SDL_GetTicks();
+    if (g_vm_scene_poll_urgent_until_ms != 0)
+    {
+        if (nowMs >= g_vm_scene_poll_urgent_until_ms ||
+            g_vm_scene_poll_urgent_remaining == 0)
+        {
+            g_vm_scene_poll_urgent_ready_at_ms = 0;
+            g_vm_scene_poll_urgent_until_ms = 0;
+            g_vm_scene_poll_urgent_remaining = 0;
+        }
+        else if (nowMs >= g_vm_scene_poll_urgent_ready_at_ms)
+        {
+            urgentActive = true;
+            minIntervalMs = (u32)VM_CLIENT_POLL_URGENT_INTERVAL_MS;
+        }
+    }
     if (lastPollTick != 0 && g_schedulerTick - lastPollTick < 1)
         return;
-    if (lastPollWallMs != 0 &&
-        nowMs - lastPollWallMs < VM_CLIENT_POLL_MIN_INTERVAL_MS)
+    if (lastPollWallMs != 0 && nowMs - lastPollWallMs < minIntervalMs)
         return;
     for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
     {
@@ -8340,6 +8470,8 @@ static void vm_net_mock_poll_push_if_due(void)
     {
         lastPollTick = g_schedulerTick;
         lastPollWallMs = nowMs;
+        if (urgentActive && g_vm_scene_poll_urgent_remaining > 0)
+            --g_vm_scene_poll_urgent_remaining;
     }
 }
 

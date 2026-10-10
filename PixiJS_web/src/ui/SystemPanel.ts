@@ -264,10 +264,15 @@ const MALL_TABS: MallTab[] = [
   },
 ];
 
-/** Visible action buttons on equip detail footer. */
+/** Visible action buttons on equip detail footer (rest via ▲▼). */
 const EQUIP_ACTION_VISIBLE = 4;
-/** Selection bar on bag list (sampled from CBE shot). */
-const BAG_SELECT = 0x20676e;
+/**
+ * Detail action strip bottom Y: 2 button-rows below softkey-safe edge, then
+ * up half a button. Pair with full-LCD hitArea in redraw().
+ */
+function detailActionSoftY(btnH: number, btnGap: number): number {
+  return LCD_HEIGHT - SOFTKEY_H + 2 * (btnH + btnGap) - Math.floor(btnH / 2);
+}
 const BAG_TAB_BG = 0x375946;
 /** CBE capacity `%d/%d个` color 0xFFDF00. */
 const BAG_CAP_INK = 0xffdf00;
@@ -1506,6 +1511,14 @@ export class SystemPanel extends Container {
       this.stopBrokenGlowAnim();
     }
 
+    // Bag/mall detail footers sit into the softkey band (+2 button rows);
+    // expand hitArea so those buttons still receive pointertap.
+    const detailFootInSoftkey =
+      (this.kind === "bag" || this.kind === "mall") && this.mode === "actions";
+    blockPanelPointerPassthrough(this, {
+      reserveBottom: detailFootInSoftkey ? 0 : SOFTKEY_H,
+    });
+
     if (this.kind === "status") {
       this.drawStatusPanel();
     } else if (this.kind === "bag") {
@@ -1955,7 +1968,7 @@ export class SystemPanel extends Container {
       const hi = i === localCursor;
       const col = qualityColor(lookupItemSync(it.itemId)?.quality ?? it.quality);
       if (hi) {
-        this.box.rect(listX, ry, listW, rowH - 1).fill({ color: BAG_SELECT });
+        this.box.rect(listX, ry, listW, rowH - 1).fill({ color: CBE.select });
       }
       const name = formatBagName(it);
       this.addAttrText(name, listX + 4, ty, hi ? CBE.ink : col);
@@ -2198,12 +2211,13 @@ export class SystemPanel extends Container {
       CBE.inkBody,
     );
 
-    const softY = y + h - PANEL_BOTTOM_PAD;
-    const acts = this.actionLabels;
+    // +2 button rows below softkey-safe edge (hitArea expanded in redraw).
     const btnH = 22;
     const btnGap = 4;
+    const softY = detailActionSoftY(btnH, btnGap);
+    const acts = this.actionLabels;
     const actionH = acts.length * (btnH + btnGap) + 12;
-    const actionTop = softY - actionH - 4;
+    const actionTop = softY - actionH;
 
     // Description well
     const descX = x + 10;
@@ -2330,12 +2344,13 @@ export class SystemPanel extends Container {
       .stroke({ width: 1, color: CBE.borderDim });
     this.addLabelCentered(g.name, LCD_WIDTH / 2, titleY + titleH / 2, CBE.inkBody);
 
-    const softY = y + h - PANEL_BOTTOM_PAD;
+    // +2 button rows below softkey-safe edge (hitArea expanded in redraw).
     const btnH = 22;
     const btnGap = 4;
+    const softY = detailActionSoftY(btnH, btnGap);
     // 数量行 + 购买按钮
     const actionH = (btnH + btnGap) * 2 + 16;
-    const actionTop = softY - actionH - 4;
+    const actionTop = softY - actionH;
 
     const descX = x + 10;
     const descY = titleY + titleH + 8;
@@ -2436,18 +2451,19 @@ export class SystemPanel extends Container {
       qColor,
     );
 
-    const softY = y + h - PANEL_BOTTOM_PAD;
+    // +2 button rows below softkey-safe edge; still 4 actions (▲▼ for rest).
     const btnH = 18;
     const btnGap = 2;
+    const softY = detailActionSoftY(btnH, btnGap);
     const actionPad = 4;
     // 一页 4 个操作；超出仍用右侧 ▲▼ 翻页
     const actionH =
       actionPad * 2 +
       EQUIP_ACTION_VISIBLE * btnH +
       (EQUIP_ACTION_VISIBLE - 1) * btnGap;
-    const actionTop = softY - actionH - 4;
+    const actionTop = softY - actionH;
     const bodyTop = titleY + titleH + 8;
-    const bodyBottom = actionTop - 4;
+    const bodyBottom = actionTop - 2;
     const rowH = UC3_CELL;
     const lines = buildEquipDetailLines(it, this.equipDetailOpts());
     const slot = it.equipSlot >= 0 ? it.equipSlot : lookupItemSync(it.itemId)?.equipSlot ?? -1;
@@ -2626,7 +2642,7 @@ export class SystemPanel extends Container {
   ): void {
     this.actionLabels.forEach((label, i) => {
       const hi = i === this.actionCursor;
-      if (hi) this.box.rect(x + 10, top + i * 20, w - 20, 18).fill({ color: BAG_SELECT });
+      if (hi) this.box.rect(x + 10, top + i * 20, w - 20, 18).fill({ color: CBE.select });
       this.addAttrText(label, x + 18, top + i * 20 + 2, hi ? CBE.ink : CBE.inkMint);
       const idx = i;
       this.rowHits.push(

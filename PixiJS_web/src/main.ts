@@ -164,6 +164,8 @@ import {
   setLcdDomChromeBranches,
   setLcdDomCoverBranches,
   setLcdDomSoftCoverBranches,
+  setLcdDomSoftCoverChromeOccludeBranches,
+  setLcdDomSoftCoverChromeOccludeHosts,
   setLcdDomStackRoot,
   setLcdDomWorldTextRoot,
 } from "./ui/lcdDomText";
@@ -222,8 +224,10 @@ import {
 } from "./net/protocolExtras";
 import { isMapHealSkill, loadSkillCatalog, lookupSkillSync } from "./resources/skill";
 import {
+  equipLevelRestrictTip,
   jobAllowsWeaponCategory,
   lookupItemSync,
+  playerMeetsEquipLevel,
   refreshCustomCatalogIfChanged,
   warmItemCatalogs,
   weaponJobRestrictTip,
@@ -1098,9 +1102,11 @@ async function main(): Promise<void> {
     guildUi,
     worldMap,
   ]);
-  // Approach / menu / NPC dialog: hide map nameplates only; keep status + HUD Songti
-  // (挂机 / 多开芯片 / 修拍…). Dialog chrome sits above the hang soft-row.
-  setLcdDomSoftCoverBranches([approach, menu, dialog]);
+  // Approach / menu / NPC dialog / trade: hide map nameplates only; keep HUD
+  // Songti (挂机 / 多开芯片). Trade also hides 修/拍 chrome (panel covers the strip).
+  setLcdDomSoftCoverBranches([approach, menu, dialog, tradeUi]);
+  setLcdDomSoftCoverChromeOccludeBranches([tradeUi]);
+  setLcdDomSoftCoverChromeOccludeHosts([hud.top]);
   // 修拍擂… + 比武计时：同一 DOM chrome 层（低于全屏硬封面）。
   setLcdDomChromeBranches([view.root, arenaHud]);
   // Explicit stack above map so menu/bag/battle cover world DOM text.
@@ -4138,6 +4144,7 @@ async function main(): Promise<void> {
       setChromeStatus(`对话 · ${shown.options.length} 选项`);
     },
     onTaskPrompt: (p) => {
+      // Same DialogPanel shell as the NPC list when possible — avoid hide→show flash.
       dialog.show({
         title: p.mode === "submit" ? "提交任务" : "接取任务",
         body: p.text,
@@ -5771,28 +5778,62 @@ async function main(): Promise<void> {
     showPhase("social");
   };
 
-  const returnFromDiscardConfirm = (): void => {
-    discardConfirmOpen = false;
-    pendingDiscard = null;
-    showPhase("system");
-    system.open("bag");
+  const DIALOG_Z_DEFAULT = 45;
+  const DIALOG_Z_OVER_SYSTEM = 58;
+
+  /** Discard / extract confirm over an open bag — do not showPhase(dialog). */
+  const bagOverlayConfirmActive = (): boolean =>
+    phase === "system" &&
+    dialog.visible &&
+    (discardConfirmOpen || extractConfirmOpen);
+
+  /**
+   * Stack confirm on top of SystemPanel without hide()/open("bag") remount.
+   * Keep dialog as soft LCD cover so bag Songti stays visible around the
+   * confirm; DialogPanel paints a DOM occlude plate over chrome so bag glyphs
+   * cannot bleed through the plate (硬封面会整页 display:none 背包字).
+   */
+  const showBagOverlayConfirm = (
+    spec: Parameters<typeof dialog.show>[0],
+    status: string,
+  ): void => {
+    dialog.zIndex = DIALOG_Z_OVER_SYSTEM;
+    dialog.setOverlaySongtiPlate(true);
+    dialog.show(spec);
+    system.visible = true;
+    shell.setSoftkeys({ left: "确定", right: "返回" });
+    setChromeStatus(status);
+  };
+
+  const hideBagOverlayConfirm = (): void => {
+    dialog.setOverlaySongtiPlate(false);
+    dialog.hide();
+    dialog.zIndex = DIALOG_Z_DEFAULT;
+  };
+
+  const resumeBagAfterOverlay = (): void => {
+    hideBagOverlayConfirm();
+    if (phase !== "system") showPhase("system");
+    else system.visible = true;
     system.setBag(session.bagItems);
     const cap =
       session.characterStats?.backpackCapacity ||
       Math.max(20, session.bagItems.length);
     system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+    shell.setSoftkeys({ left: "确定", right: "返回" });
+    setChromeStatus(`背包 ${session.bagItems.length} 件`);
+  };
+
+  const returnFromDiscardConfirm = (): void => {
+    discardConfirmOpen = false;
+    pendingDiscard = null;
+    resumeBagAfterOverlay();
   };
 
   const returnFromExtractConfirm = (): void => {
     extractConfirmOpen = false;
     pendingExtract = null;
-    showPhase("system");
-    system.open("bag");
-    system.setBag(session.bagItems);
-    const cap =
-      session.characterStats?.backpackCapacity ||
-      Math.max(20, session.bagItems.length);
-    system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+    resumeBagAfterOverlay();
   };
 
   const returnFromDreamBadgeCombine = (): void => {
@@ -7546,6 +7587,10 @@ async function main(): Promise<void> {
           showGameTip(weaponJobRestrictTip(bag.category));
           return;
         }
+        if (!playerMeetsEquipLevel(session.characterStats?.level ?? 0, bag.itemId)) {
+          showGameTip(equipLevelRestrictTip());
+          return;
+        }
         void session.equipItem(bag.itemId, bag.seq).then(() => void session.openBag());
         showGameTip(`装备 ${bag.name}`);
         return;
@@ -7608,16 +7653,17 @@ async function main(): Promise<void> {
         }
         pendingExtract = bag;
         extractConfirmOpen = true;
-        dialog.show({
-          title: "确认提炼",
-          body: `消耗1个玄晶提炼石，提炼「${bag.name}」+${bag.enhance} 投入的玄晶并销毁装备？\n提炼后装备无法找回。`,
-          options: [
-            { label: "确认提炼", action: 296, value: 0 },
-            { label: "取消", action: 297, value: 0 },
-          ],
-        });
-        showPhase("dialog");
-        setChromeStatus("确认提炼装备");
+        showBagOverlayConfirm(
+          {
+            title: "确认提炼",
+            body: `消耗1个玄晶提炼石，提炼「${bag.name}」+${bag.enhance} 投入的玄晶并销毁装备？\n提炼后装备无法找回。`,
+            options: [
+              { label: "确认提炼", action: 296, value: 0 },
+              { label: "取消", action: 297, value: 0 },
+            ],
+          },
+          "确认提炼装备",
+        );
         return;
       }
       if (action === "discard") {
@@ -7629,16 +7675,17 @@ async function main(): Promise<void> {
         discardConfirmOpen = true;
         const vis = Math.max(1, bagVisibleStackCount(bag));
         const qty = vis > 1 ? `×${vis}` : "";
-        dialog.show({
-          title: "确认丢弃",
-          body: `确定丢弃「${bag.name}」${qty}？\n丢弃后无法找回。`,
-          options: [
-            { label: "确认丢弃", action: 282, value: 0 },
-            { label: "取消", action: 283, value: 0 },
-          ],
-        });
-        showPhase("dialog");
-        setChromeStatus("确认丢弃物品");
+        showBagOverlayConfirm(
+          {
+            title: "确认丢弃",
+            body: `确定丢弃「${bag.name}」${qty}？\n丢弃后无法找回。`,
+            options: [
+              { label: "确认丢弃", action: 282, value: 0 },
+              { label: "取消", action: 283, value: 0 },
+            ],
+          },
+          "确认丢弃物品",
+        );
         return;
       }
       if (action === "auction") {
@@ -7684,6 +7731,10 @@ async function main(): Promise<void> {
           showGameTip(weaponJobRestrictTip(bag.category));
           return;
         }
+        if (!playerMeetsEquipLevel(session.characterStats?.level ?? 0, bag.itemId)) {
+          showGameTip(equipLevelRestrictTip());
+          return;
+        }
         void session.equipItem(bag.itemId, bag.seq).then(() => refreshEquip());
         showGameTip(`装备 ${bag.name}`);
         return;
@@ -7692,6 +7743,10 @@ async function main(): Promise<void> {
         const job = session.characterStats?.job ?? 0;
         if (!jobAllowsWeaponCategory(job, bag.category)) {
           showGameTip(weaponJobRestrictTip(bag.category));
+          return;
+        }
+        if (!playerMeetsEquipLevel(session.characterStats?.level ?? 0, bag.itemId)) {
+          showGameTip(equipLevelRestrictTip());
           return;
         }
         void session
@@ -8306,8 +8361,8 @@ async function main(): Promise<void> {
   };
 
   /**
-   * Shop / warehouse / sell nested 26/1: keep DialogPanel chrome up while the
-   * exchange runs. Hiding first forced remount on every 购买该装备 / 买药确认.
+   * Keep DialogPanel chrome up while a nested exchange runs.
+   * Hiding first forced remount on 查看属性 / 购买该装备 / 买药 / 接取任务.
    * Leave / teleport / challenge still hide before the request.
    */
   const keepNpcDialogShell = (
@@ -8315,6 +8370,8 @@ async function main(): Promise<void> {
     value: number,
     label: string,
   ): boolean => {
+    // action=4 → 6/10 task detail → onTaskPrompt confirm (接取/提交).
+    if (action === 4) return true;
     if (action !== 1) return false;
     const v = value >>> 0;
     if (v === 0 || /离开|关闭/.test(label)) return false;
@@ -8322,6 +8379,7 @@ async function main(): Promise<void> {
     if (
       op === NpcServiceOpcode.BUY_ITEM ||
       op === NpcServiceOpcode.BUY_WEAPON ||
+      op === NpcServiceOpcode.VIEW_ITEM ||
       op === NpcServiceOpcode.OPEN_WEAPON ||
       op === NpcServiceOpcode.OPEN_ARMOR ||
       op === NpcServiceOpcode.OPEN_MEDICINE ||
@@ -8333,7 +8391,7 @@ async function main(): Promise<void> {
     ) {
       return true;
     }
-    // Warehouse ee/ef/f0 · equip-sell f1/f2/f3
+    // Warehouse ee/ef/f0 · equip-sell f1/f2/f3 · coolmall view/buy f5…
     const hi = (v >>> 24) & 0xff;
     return (
       hi === 0xee ||
@@ -8341,7 +8399,8 @@ async function main(): Promise<void> {
       hi === 0xf0 ||
       hi === 0xf1 ||
       hi === 0xf2 ||
-      hi === 0xf3
+      hi === 0xf3 ||
+      hi === 0xf5
     );
   };
   /** 存入/取回列表软键返回 → 仓库主界面，不退出对话. */
@@ -8500,9 +8559,15 @@ async function main(): Promise<void> {
     }
     // Synthetic confirm options from task/challenge prompts.
     if (action === 100) {
-      dialog.hide();
+      // Keep confirm chrome while accept/submit exchanges; close after unless
+      // a nested dialog reopened the panel.
       void session.confirmTaskPrompt(true).then(() => {
-        if (!session.inBattle) showPhase("world");
+        if (session.inBattle) {
+          showPhase("battle");
+          return;
+        }
+        if (dialog.visible) dialog.hide();
+        showPhase("world");
       });
       return;
     }
@@ -8935,12 +9000,12 @@ async function main(): Promise<void> {
       return;
     }
     if (action === 282) {
-      dialog.hide();
       discardConfirmOpen = false;
       const bag = pendingDiscard;
       pendingDiscard = null;
+      hideBagOverlayConfirm();
       if (!bag) {
-        returnFromDiscardConfirm();
+        resumeBagAfterOverlay();
         return;
       }
       void (async () => {
@@ -8948,58 +9013,39 @@ async function main(): Promise<void> {
         try {
           await session.discardItem(bag.itemId, bag.seq, bag.count);
           await session.openBag();
-          system.setBag(session.bagItems);
-          const cap =
-            session.characterStats?.backpackCapacity ||
-            Math.max(20, session.bagItems.length);
-          system.setBagMeta(
-            session.characterStats?.money ?? session.gold,
-            cap,
-          );
           showGameTip(`已丢弃 ${bag.name}`);
         } catch (e) {
           console.warn("[bag] discard failed", e);
           showGameTip("丢弃失败，请重试");
         }
-        showPhase("system");
-        system.open("bag");
+        // Keep bag chrome — setBag only, never open("bag") remount.
+        resumeBagAfterOverlay();
       })();
       return;
     }
     if (action === 283) {
-      dialog.hide();
       returnFromDiscardConfirm();
       return;
     }
     if (action === 296 && extractConfirmOpen) {
-      dialog.hide();
       extractConfirmOpen = false;
       const bag = pendingExtract;
       pendingExtract = null;
+      hideBagOverlayConfirm();
       if (!bag) {
-        returnFromExtractConfirm();
+        resumeBagAfterOverlay();
         return;
       }
       void (async () => {
         showGameTip(`提炼 ${bag.name}…`);
         const fb = await session.extractEnhanceCrystals(bag.seq);
         await session.openBag();
-        system.setBag(session.bagItems);
-        const cap =
-          session.characterStats?.backpackCapacity ||
-          Math.max(20, session.bagItems.length);
-        system.setBagMeta(
-          session.characterStats?.money ?? session.gold,
-          cap,
-        );
         showGameTip(fb.message || (fb.ok ? "提炼成功" : "提炼失败"));
-        showPhase("system");
-        system.open("bag");
+        resumeBagAfterOverlay();
       })();
       return;
     }
     if (action === 297 && extractConfirmOpen) {
-      dialog.hide();
       returnFromExtractConfirm();
       return;
     }
@@ -9893,7 +9939,7 @@ async function main(): Promise<void> {
       applyBattleSoftkeys();
       return;
     }
-    if (phase === "dialog") {
+    if (phase === "dialog" || bagOverlayConfirmActive()) {
       if (which === "left") dialog.confirm();
       if (which === "right") dialog.cancel();
       return;
@@ -10048,7 +10094,7 @@ async function main(): Promise<void> {
       menu.confirm();
       return;
     }
-    if (phase === "dialog") {
+    if (phase === "dialog" || bagOverlayConfirmActive()) {
       dialog.confirm();
       return;
     }
@@ -10222,6 +10268,10 @@ async function main(): Promise<void> {
         dialog.adjustMedicineBuyQty(delta);
         return;
       }
+      if (bagOverlayConfirmActive()) {
+        dialog.move(delta);
+        return;
+      }
       if (phase === "system") {
         system.moveCategory(delta);
         return;
@@ -10265,7 +10315,7 @@ async function main(): Promise<void> {
     else if (phase === "role") roles.move(delta);
     else if (phase === "create-role") createRole.move(delta);
     else if (phase === "menu") menu.move(delta);
-    else if (phase === "dialog") dialog.move(delta);
+    else if (phase === "dialog" || bagOverlayConfirmActive()) dialog.move(delta);
     else if (phase === "system") system.move(delta);
     else if (phase === "enhance") enhanceUi.move(delta);
     else if (phase === "wash") washUi.move(delta);
@@ -10516,6 +10566,18 @@ async function main(): Promise<void> {
       return;
     }
     if (phase === "system") {
+      // Discard/extract confirm stays phase=system; keys must drive dialog.
+      if (bagOverlayConfirmActive()) {
+        if (k === "arrowup" || k === "w" || k === "arrowleft" || k === "a") {
+          dialog.move(-1);
+          e.preventDefault();
+        }
+        if (k === "arrowdown" || k === "s" || k === "arrowright" || k === "d") {
+          dialog.move(1);
+          e.preventDefault();
+        }
+        return;
+      }
       if (k === "arrowup" || k === "w") system.move(-1);
       if (k === "arrowdown" || k === "s") system.move(1);
       if (k === "arrowleft" || k === "a") system.moveCategory(-1);

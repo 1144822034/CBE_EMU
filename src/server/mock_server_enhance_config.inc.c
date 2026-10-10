@@ -45,7 +45,7 @@ typedef struct
 {
     u8 qualityScaleEnabled; /* valueMax × (Q+1)/5 when 1 */
     u8 firstSeedPercent;    /* first-obtain pool roll chance 0..100 */
-    u8 transferWashEnabled; /* 29/6 enhance transfer also moves wash attrs */
+    u8 transferWashEnabled; /* 29/6: 1=move wash with enhance; 0=keep both */
     u8 crossQualityStoneRequired; /* 29/5|6 cross-quality needs 跨品重铸石 */
     u8 transferCrystalEnabled; /* 29/6 consume (level-1) 玄晶 */
     u8 transferMoneyEnabled;   /* 29/6 consume legacy 48金65银 */

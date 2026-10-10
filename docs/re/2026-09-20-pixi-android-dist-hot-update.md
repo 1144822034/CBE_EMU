@@ -37,6 +37,8 @@
 
 先 `npm run build`（或 `npm run build:android`），再把 **整个** `PixiJS_web/dist` 发布到 `http://106.54.59.92:8081/`。只上传改过的文件也可以，但远端必须有和这次 dist 一致的 `hot-manifest.json`。
 
+增量目录：构建结束后对照 `PixiJS_web/.hot-last-manifest.json`，把内容哈希变化的文件拷到 `PixiJS_web/dist-hot-changed/`（始终含新的 `hot-manifest.json`，另有 `_changed.txt` / `_removed.txt`；若有删除则还有 `_removed.bat`）。首次构建只建基线、不拷全量；从第二次起可直接把该目录合并上传到热更根，再在服务器根目录运行 `_removed.bat` 清掉过期文件。删除基线文件可重新建基线。
+
 已装的新包下次冷启动会补差量。和包内完全一致时只请求清单，不下载文件。
 
 ## PC（Electron）独立实现

@@ -419,6 +419,8 @@ export const NpcServiceOpcode = {
   OPEN_INSTANCE: 0xea,
   ENTER_INSTANCE: 0xeb,
   CHALLENGE: 0xec,
+  /** NPC equip shop: list row → attribute detail (then BUY_ITEM). */
+  VIEW_ITEM: 0xed,
 } as const;
 
 export function npcServiceOpcode(value: number): number {
@@ -1581,7 +1583,7 @@ export type EnhanceTransferConfirmResult = {
   sourceLevel: number;
   destSeq: number;
   destLevel: number;
-  /** Server washxfer: true=源洗练随强化转到目标；false=源洗练丢弃. Missing → true. */
+  /** Server washxfer: true=源洗练随强化转到目标；false=两侧各自保留. Missing → true. */
   washTransferred: boolean;
 };
 

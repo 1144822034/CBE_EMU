@@ -23,3 +23,12 @@
 - `src/server/mock_server_core.c`：`VIEW_ITEM_BASE`、页容量 5
 - `src/server/mock_server_equipment_npc.c`：`npcShopBrowse*` 会话字段
 - `src/server/mock_server_scene_sync.c`：列表选中→详情→购买/返回
+
+## Pixi 列表→详情闪屏（2026-10-10）
+
+| 项 | 内容 |
+|----|------|
+| 触发 | NPC 装备店商品列表点「查看属性」进详情 / 购买页 |
+| 首个错误 | `keepNpcDialogShell` 未含 `VIEW_ITEM(0xed)` → `onPick` 先 `dialog.hide()` |
+| 症状 | 边框/花角 remount；若 `.then` 抢先还会 `showPhase("world")` 再闪回对话 |
+| 修复 | `NpcServiceOpcode.VIEW_ITEM` + `keepNpcDialogShell` 保留壳；酷宝商城 `0xf5` 一并保留 |

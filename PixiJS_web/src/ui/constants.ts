@@ -39,7 +39,8 @@ export const CBE = {
   borderDim: 0x487460,
   /** Outer frame hairline (ref panel edge). */
   borderOuter: 0x183418,
-  select: 0x522820,
+  /** Row / field highlight (bag list select bar). */
+  select: 0x20676e,
   ink: 0xffffff,
   inkMint: 0xd0e8d5,
   inkLabel: 0xd5dba5,

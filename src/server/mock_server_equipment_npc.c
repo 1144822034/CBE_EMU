@@ -1482,7 +1482,9 @@ static u8 vm_net_mock_equipment_enhance_transfer_wire_level(u8 sourceLevel)
 /*
  * Apply wash side-effects for a successful 29/6 transfer.
  * transferWash=1: copy source→dest then clear source (legacy).
- * transferWash=0: discard source wash; leave dest wash untouched.
+ * transferWash=0: leave both washes untouched (enhance level only).
+ *   Clearing source wash made +0 fall back to default milestones and looked
+ *   like the original piece's affixes were re-rolled.
  */
 static void vm_net_mock_equipment_enhance_transfer_apply_wash(
     vm_net_mock_role_state *role,
@@ -1496,29 +1498,23 @@ static void vm_net_mock_equipment_enhance_transfer_apply_wash(
     if (role == NULL || source == NULL || dest == NULL)
         return;
 
-    if (transferWash)
+    if (!transferWash)
+        return;
+
+    vm_net_mock_enhance_wash_copy(&dest->enhanceWash, &source->enhanceWash);
+    vm_net_mock_enhance_wash_clear(&source->enhanceWash);
+    (void)vm_net_mock_enhance_wash_record_delete(
+        role->roleId, sourceInstanceId, source->seq);
+    if (!vm_net_mock_enhance_wash_is_empty(&dest->enhanceWash))
     {
-        vm_net_mock_enhance_wash_copy(&dest->enhanceWash, &source->enhanceWash);
-        vm_net_mock_enhance_wash_clear(&source->enhanceWash);
-        (void)vm_net_mock_enhance_wash_record_delete(
-            role->roleId, sourceInstanceId, source->seq);
-        if (!vm_net_mock_enhance_wash_is_empty(&dest->enhanceWash))
-        {
-            (void)vm_net_mock_enhance_wash_record_upsert(
-                role->roleId, destInstanceId, dest->seq, dest->itemId,
-                destLevelAfter, &dest->enhanceWash, 0);
-        }
-        else
-        {
-            (void)vm_net_mock_enhance_wash_record_delete(
-                role->roleId, destInstanceId, dest->seq);
-        }
+        (void)vm_net_mock_enhance_wash_record_upsert(
+            role->roleId, destInstanceId, dest->seq, dest->itemId,
+            destLevelAfter, &dest->enhanceWash, 0);
     }
     else
     {
-        vm_net_mock_enhance_wash_clear(&source->enhanceWash);
         (void)vm_net_mock_enhance_wash_record_delete(
-            role->roleId, sourceInstanceId, source->seq);
+            role->roleId, destInstanceId, dest->seq);
     }
 }
 
@@ -1846,7 +1842,7 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
                                          parsed.destSeq) ||
             !vm_net_mock_put_object_u8(out, outCap, &pos, "curleveld",
                                        destLevelAfter) ||
-            /* Pixi-only: 1=wash moved with enhance, 0=source wash discarded. */
+            /* Pixi-only: 1=wash moved with enhance, 0=each seat keeps own wash. */
             !vm_net_mock_put_object_u8(out, outCap, &pos, "washxfer",
                                        transferWash ? 1u : 0u))
         {
@@ -13089,6 +13085,24 @@ static void vm_mock_service_session_arm_shop_return_kind2_reenter(
     }
 
     npcCount = vm_net_mock_scene_room_npc_seed_count(targetScene);
+    /*
+     * NPC maps restore type-21 via 27/11 + poll 30/2.  Arming deferred kind-2
+     * 30/1 here is a second EnterScene after mmShop DF rebuild (临安府_10
+     * client_out 2026-10-10: remote_scene_target_apply subtype=1 then
+     * same-reenter-allowed-once).  Deliver-time cancel is not enough when a
+     * stale remote still ships 30/1 on 27/4 — never arm for npcnum>0.
+     */
+    if (npcCount > 0u)
+    {
+        printf("[info][mock-service] shop_return_kind2_reenter_skip client=%08x "
+               "scene=%s reason=npc-map-no-kind2-arm npcnum=%u via=%s "
+               "evidence=outdoor-warm-single-load\n",
+               session->clientId,
+               targetScene,
+               (u32)npcCount,
+               reason ? reason : "-");
+        return;
+    }
 
     role = vm_mock_service_trade_role_for_session(session, NULL);
     if (role != NULL && role->x != 0 && role->y != 0)

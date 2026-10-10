@@ -589,10 +589,10 @@ export class TradePanel extends Container {
         return;
       }
       if (it && it.kind !== "equip" && it.count > 1) {
-        const max = it.count;
-        this.pickDetailQty = Math.max(
-          1,
-          Math.min(max, this.pickDetailQty + delta),
+        this.pickDetailQty = this.wrapStackQty(
+          this.pickDetailQty,
+          it.count,
+          delta,
         );
         this.redraw();
       }
@@ -641,13 +641,19 @@ export class TradePanel extends Container {
     this.pickQty = 1;
   }
 
+  /** 可堆叠：1 再按 ← 绕到全部数量（与商城购买一致）。 */
+  private wrapStackQty(current: number, max: number, delta: number): number {
+    if (max <= 1) return 1;
+    if (delta < 0 && current <= 1) return max;
+    return Math.max(1, Math.min(max, current + delta));
+  }
+
   private adjustPickQty(delta: number): void {
     const row = this.configRowAt(this.listCursor);
     if (!row || row.kind !== "bag") return;
     const it = this.bag[row.index];
     if (!it || it.kind === "equip" || it.count <= 1) return;
-    const max = it.count;
-    this.pickQty = Math.max(1, Math.min(max, this.pickQty + delta));
+    this.pickQty = this.wrapStackQty(this.pickQty, it.count, delta);
     this.redraw();
   }
 

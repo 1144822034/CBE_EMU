@@ -67,7 +67,6 @@ const TABS: { id: Tab; label: string }[] = [
 
 const ROW_H = 16;
 const PAGE = 7;
-const BAG_SELECT = 0x20676e;
 /** 上架最低酷币价（与服端 VM_MOCK_ZANGBAO_MIN_PRICE 一致）。 */
 const MIN_PRICE_KCOIN = 10;
 /** 提现最低酷币（与服端 VM_MOCK_KCOIN_WITHDRAW_MIN 一致，且须为 10 的倍数）。 */
@@ -1218,7 +1217,7 @@ export class ZangbaoPanel extends Container {
         absIdx === this.sealListCursor &&
         this.sealListCursor < listCount;
       if (selected) {
-        this.bg.rect(x + 6, ly - 1, w - 12, rowH).fill({ color: BAG_SELECT });
+        this.bg.rect(x + 6, ly - 1, w - 12, rowH).fill({ color: CBE.select });
       }
       const paintColor =
         selected && line.kind === "text"
@@ -1259,7 +1258,7 @@ export class ZangbaoPanel extends Container {
           i === this.detailActionCursor &&
           (!listSelectMode || this.sealListCursor >= listLen);
         const by = actionTop + 4 + i * (btnH + 2);
-        if (hi) this.bg.rect(x + 8, by, w - 16, btnH).fill({ color: BAG_SELECT });
+        if (hi) this.bg.rect(x + 8, by, w - 16, btnH).fill({ color: CBE.select });
         this.addLabel(
           act.label,
           x + 14,
