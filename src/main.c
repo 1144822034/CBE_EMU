@@ -178,6 +178,23 @@ static void vm_clear_key_down_state(void)
     g_curKeyDownState = 0;
 }
 
+/*
+ * Drop edge + hold masks.  NPC dialog 确定/离开 often tears the screen down on
+ * the softkey/OK *press*; the matching RELEASE may land on a different top
+ * screen or after a remove-without-next wait that does not dequeue input.
+ * Stale GAME_isKeyHold bits then make direction keys look dead until 返回
+ * perturbs guest UI state.  Clear on every screenStructChange.
+ */
+static void vm_clear_all_key_state(const char *reason)
+{
+    if (g_curKeyDownState == 0 && g_curKeyState == 0)
+        return;
+    printf("[info][input] clear_all_key_state down=%08x hold=%08x reason=%s\n",
+           g_curKeyDownState, g_curKeyState, reason ? reason : "-");
+    g_curKeyDownState = 0;
+    g_curKeyState = 0;
+}
+
 static void vm_note_key_state_event(int key, int isPress)
 {
     u32 mask = vm_key_mask_from_code(key);
@@ -10799,15 +10816,18 @@ void loop()
 #if defined(CBE_CLIENT_ONLY)
                 if (vm_host_hangup_skill_menu_active())
                 {
-                    if (isKeyDown == SDLK_UNKNOWN)
-                    {
-                        isKeyDown = ev.key.keysym.sym;
+                    /* Allow multi-key; ignore SDL key-repeat only. */
+                    if (!ev.key.repeat)
                         keyEvent(MR_KEY_PRESS, ev.key.keysym.sym);
-                    }
                     break;
                 }
 #endif
-                if (isKeyDown == SDLK_UNKNOWN)
+                /*
+                 * Former single-slot isKeyDown dropped overlapping KEYDOWN/UP
+                 * (dialog OK while a direction was tracked, etc.), leaving
+                 * GAME_isKeyHold sticky.  Forward every non-repeat press.
+                 */
+                if (!ev.key.repeat)
                 {
                     isKeyDown = ev.key.keysym.sym;
                     keyEvent(MR_KEY_PRESS, ev.key.keysym.sym);
@@ -10817,10 +10837,8 @@ void loop()
                 if (g_vmInputOpen)
                     break;
                 if (isKeyDown == ev.key.keysym.sym)
-                {
                     isKeyDown = SDLK_UNKNOWN;
-                    keyEvent(MR_KEY_RELEASE, ev.key.keysym.sym);
-                }
+                keyEvent(MR_KEY_RELEASE, ev.key.keysym.sym);
                 break;
             case SDL_MOUSEMOTION:
                 if (g_vmInputOpen)
@@ -12434,6 +12452,8 @@ void RunArmProgram(void *param)
                 continue;
             if (screenStructChange == 1)
             {
+                /* Dialog 确定/离开 tears down on press; drop sticky hold masks. */
+                vm_clear_all_key_state("screenStructChange");
                 screenFuncPtr = vm_get_var(VM_SCREEN_nextSubTScreen_ADDRESS); // 得到screen函数表地址的指针
                 if (screenFuncPtr == 0)
                 {

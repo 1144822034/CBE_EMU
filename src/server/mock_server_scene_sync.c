@@ -4702,7 +4702,10 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
      * Daily/prereq gates may hide accept+challenge while teleport is also
      * unavailable (misconfig / empty instanceScene).  option-count=0 leaves
      * ParseNPCDialogData with nothing to tap — client looks「画面卡住」after
-     * talking to exit guide 31000.  Offer an explicit leave action=1 value=0.
+     * talking to exit guide 31000.  Offer an explicit leave with action=0
+     * (local ResetDownloadState close).  action=1 value=0 still uplinks
+     * 26/1 and only gets busy-ack 26/0 — dialog mode stays, D-pad dead until
+     * 返回 (client_out 2026-10-10).
      */
     if (serviceOptionCount + optionCount +
             (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption
@@ -4718,7 +4721,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         serviceOptionValues[serviceOptionCount] = 0;
         serviceOptionCount += 1;
         printf("[info][network] mock_npc_dialog_empty_options_leave "
-               "actor=%u evidence=gated-options-zero-add-leave\n",
+               "actor=%u evidence=gated-options-zero-add-leave-action0\n",
                actorId);
     }
 
@@ -4785,10 +4788,20 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     {
         for (u8 serviceIndex = 0; serviceIndex < serviceOptionCount; ++serviceIndex)
         {
+            /*
+             * value=0 dismiss/leave: action=0 closes the page locally
+             * (task_hall ResetDownloadState).  action=1 sends 26/1 type=2
+             * id=0 → server 26/0 busy-ack only; dialog chrome keeps eating
+             * direction keys until 返回.
+             */
+            u8 serviceAction =
+                serviceOptionValues[serviceIndex] == 0 ? 0u : 1u;
+
             if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
                 !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
                                             serviceOptionNames[serviceIndex]) ||
-                !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
+                !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen,
+                                        serviceAction) ||
                 !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
                                          serviceOptionValues[serviceIndex]) ||
                 !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
@@ -10850,11 +10863,17 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     }
     for (u32 i = 0; i < optionCount; ++i)
     {
+        u8 optAction = 1u;
+
+        if (i == instanceChallengeOptionIndex)
+            optAction = 13u;
+        else if (optionValues[i] == 0)
+            /* Tip/确定/离开 dismiss: local close, do not uplink 26/1. */
+            optAction = 0u;
         if (!vm_net_mock_append_npc_service_dialog_option(
                 dialog, sizeof(dialog), &dialogLen,
-                optionNames[i],
-                i == instanceChallengeOptionIndex ? 13u : 1u,
-                optionValues[i], optionDescriptions[i]))
+                optionNames[i], optAction, optionValues[i],
+                optionDescriptions[i]))
         {
             return 0;
         }

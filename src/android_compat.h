@@ -44,7 +44,12 @@ typedef struct SDL_Surface
 typedef struct SDL_Event
 {
     int type;
-    struct { struct { SDL_Keycode sym; } keysym; } key;
+    /* Match SDL2 SDL_KeyboardEvent enough for client loop + headless compile. */
+    struct
+    {
+        struct { SDL_Keycode sym; } keysym;
+        uint8_t repeat;
+    } key;
     struct { int x; int y; } motion;
     struct { int x; int y; int button; } button;
     struct { int y; } wheel;
